@@ -1,3 +1,4 @@
+#include <stddef.h>
 #pragma once
 
 #define PACKING_HASH_ALG EVP_sha256()

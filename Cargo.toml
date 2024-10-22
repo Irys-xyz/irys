@@ -15,6 +15,7 @@ edition = "2021"
 rust-version = "1.82"
 
 [workspace.dependencies]
+actix = "0.13.5"
 alloy-consensus = { path = "./ext/alloy/crates/consensus", default-features = false }
 alloy-eips = { path = "./ext/alloy/crates/eips", default-features = false }
 alloy-genesis = { path = "./ext/alloy/crates/genesis", default-features = false }
@@ -30,13 +31,12 @@ derive_more = { version = "1", features = ["full"] }
 futures = "0.3"
 irys-primitives = { path = "./crates/primitives" }
 modular-bitfield = "0.11.2"
+openssl = { version = "0.10.57", features = ["vendored"] }
 proptest-derive = "0.5"
 serde = { version = "1.0", default-features = false }
 serde_json = "1.0.94"
 test-fuzz = "6"
 thiserror = "1.0"
-openssl = { version = "0.10.57", features = ["vendored"] }
-actix = "0.13.5"
 
 [patch.crates-io]
 revm = { path = "./ext/revm/crates/revm" }

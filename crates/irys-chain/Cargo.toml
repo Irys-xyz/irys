@@ -12,11 +12,14 @@ reth-db = { path = "../../ext/reth/crates/storage/db" }
 sha2 = "0.10.8"
 tokio = { version = "1.40.0", features = ["rt"] }
 # reth-node-bridge = { path = "../reth-node-bridge" }
+assert_matches = "1.5.0"
 clap = "4.5.20"
 color-eyre = "0.6.2"
 eyre = "0.6.8"
+irys-c = { path = "../c" }
 irys-types = { path = "../irys-types" }
 rand = "0.8.5"
+rand_chacha = "0.3.1"
 reth = { path = "../../ext/reth/bin/reth" }
 reth-db-api = { path = "../../ext/reth/crates/storage/db-api" }
 reth-db-models = { path = "../../ext/reth/crates/storage/db-models" }
@@ -25,16 +28,14 @@ reth-primitives = { path = "../../ext/reth/crates/primitives" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.107"
 tempfile = "3.10"
-assert_matches = "1.5.0"
-rand_chacha = "0.3.1"
 
 
+actix.workspace = true
+alloy-rlp.workspace = true
+alloy-serde.workspace = true
 arbitrary = { workspace = true, features = [
 	"derive",
 ] } # arbitrary.workspace = truebytes.workspace = true
+bytes.workspace = true
 modular-bitfield.workspace = true
 test-fuzz.workspace = true
-alloy-rlp.workspace = true
-alloy-serde.workspace = true
-bytes.workspace = true
-actix.workspace = true

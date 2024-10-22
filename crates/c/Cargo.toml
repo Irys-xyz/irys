@@ -1,10 +1,25 @@
 [package]
-name = "c"
-version = "0.1.0"
+build = "build/main.rs"
 edition.workspace = true
+name = "irys-c"
 rust-version.workspace = true
+version = "0.1.0"
 
 [dependencies]
+# cxx = "1.0"
+libc = "0.2.0"
+
+[build-dependencies]
+bindgen = "0.70.1"
+cc = "1.0"
+openssl-src = "300.3.2"
+pkg-config = "0.3.31"
+vcpkg = "0.2.8"
+
 
 [lints]
 workspace = true
+
+[features]
+hip = []
+nvidia = []

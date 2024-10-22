@@ -1,3 +1,3 @@
 fn main() {
-    println!("Hello, world!");
+    irys_c::capacity::capacity_single();
 }
