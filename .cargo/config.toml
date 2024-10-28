@@ -1,2 +1,20 @@
 [build]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = [
+    "-C",
+    "target-cpu=native",
+    "-C",
+    "prefer-dynamic",
+    # "-Clink-arg=-fuse-ld=lld",
+]
+
+
+# [unstable]
+# profile-rustflags = true
+
+
+[profile.release]
+# rustflags = ["-C", "target-cpu=native"]
+
+
+[profile.dev]
+# rustflags = ["-C", "target-cpu=native", "-C", "prefer-dynamic"]
