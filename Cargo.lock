@@ -5275,6 +5275,7 @@ dependencies = [
  "rand",
  "serde",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

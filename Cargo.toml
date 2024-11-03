@@ -102,6 +102,12 @@ test-fuzz = "6"
 thiserror = "1.0"
 tokio = { version = "1.40.0", features = ["rt"] }
 tracing = "0.1.0"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "env-filter",
+    "fmt",
+    "json",
+] }
+
 tempfile = "3.10"
 jsonrpsee = "0.24"
 jsonrpsee-core = "0.24"

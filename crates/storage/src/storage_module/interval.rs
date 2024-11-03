@@ -4,12 +4,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use nodit::interval::{ie, ii};
 use nodit::{Interval, NoditMap};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 pub enum PackingState {
     Unpacked,
     Packed,
     Data,
-    WriteLocked(WriteLock),
+    WriteLocked,
 }
 
 #[derive(Debug, Clone)]

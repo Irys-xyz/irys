@@ -11,5 +11,6 @@ serde.workspace = true
 irys-types.workspace = true
 rand.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 [lints]
 workspace = true
