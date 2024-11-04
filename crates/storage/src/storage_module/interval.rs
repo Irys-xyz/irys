@@ -3,8 +3,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nodit::interval::{ie, ii};
 use nodit::{Interval, NoditMap};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, Serialize, Deserialize)]
 pub enum PackingState {
     Unpacked,
     Packed,
@@ -43,14 +44,14 @@ impl WriteLock {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IntervalState {
     // common fields:
     pub state: PackingState,
 }
 
 // wrapper struct so we can "contain" the custom Eq impl that works off the state enum
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IntervalStateWrapped {
     pub inner: IntervalState,
 }

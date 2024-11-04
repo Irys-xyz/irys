@@ -5269,11 +5269,16 @@ dependencies = [
 name = "irys-storage"
 version = "0.1.0"
 dependencies = [
+ "actix",
+ "actix-rt",
+ "bytes",
  "eyre",
+ "futures",
  "irys-types",
  "nodit",
  "rand",
  "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]
@@ -6263,6 +6268,7 @@ checksum = "f74369f80df24efd2266602fdcd8fcd56a17c2e2c94ab48d2f7a15eaa137bf49"
 dependencies = [
  "btree_monstrousity",
  "itertools 0.13.0",
+ "serde",
  "smallvec",
 ]
 
