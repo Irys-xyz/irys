@@ -3,7 +3,9 @@ use alloy_primitives::{bytes, Parity, U256 as RethU256};
 use alloy_rlp::{Decodable, Encodable, Error as RlpError, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
+use bytes::Buf;
 use eyre::Error;
+use rand::RngCore;
 use reth_codecs::Compact;
 use reth_db_api::table::{Decode, Encode};
 use reth_db_api::DatabaseError;
@@ -22,6 +24,47 @@ use uint::construct_uint;
 construct_uint! {
     /// 256-bit unsigned integer.
     pub struct U256(4);
+}
+
+// Manually implement Arbitrary for U256
+impl<'a> Arbitrary<'a> for U256 {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let mut rng = rand::thread_rng();
+        let mut bytes = [0u8; 32]; // 32 bytes for 256 bits
+        rng.fill_bytes(&mut bytes);
+
+        Ok(U256::from_big_endian(&bytes))
+    }
+}
+
+// Manually implement Compact for U256
+impl Compact for U256 {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        // Create a temporary byte array for the big-endian representation of `self`
+        let mut bytes = [0u8; 32];
+        self.to_big_endian(&mut bytes);
+
+        // Write the bytes to the buffer
+        buf.put_slice(&bytes);
+
+        // Return the number of bytes written (32 bytes for a U256)
+        bytes.len()
+    }
+
+    #[inline]
+    fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
+        if len == 0 {
+            return (U256::zero(), buf);
+        }
+
+        let mut slice = [0; 32];
+        slice[(32 - len)..].copy_from_slice(&buf[..len]);
+        buf.advance(len);
+        (Self::from_big_endian(&slice), buf)
+    }
 }
 
 //==============================================================================
@@ -283,6 +326,12 @@ impl H256 {
     pub fn to_vec(self) -> Vec<u8> {
         self.0.to_vec()
     }
+
+    /// Gets u32 from first 4 bytes
+    pub fn to_u32(&self) -> u32 {
+        let bytes = self.as_bytes();
+        u32::from_be_bytes(bytes[0..4].try_into().unwrap())
+    }
 }
 
 // Implement Serialize for H256
@@ -500,5 +549,48 @@ impl<'de> Deserialize<'de> for H256List {
     {
         // Deserialize a Vec<Base64> and then wrap it in Base64Array
         Vec::<H256>::deserialize(deserializer).map(H256List)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::{BufMut, BytesMut};
+
+    #[test]
+    fn test_u256_to_compact() {
+        // Create a U256 value to test
+        let original_value = U256::from(123456789u64);
+
+        // Create a buffer to write the compact representation into
+        let mut buf = BytesMut::with_capacity(32);
+
+        // Call the to_compact method
+        let bytes_written = original_value.to_compact(&mut buf);
+
+        // Ensure that the number of bytes written is 32 (for U256)
+        assert_eq!(bytes_written, 32);
+
+        // Check that the buffer now contains the correct big-endian representation
+        let expected_bytes = {
+            let mut temp = [0u8; 32];
+            original_value.to_big_endian(&mut temp);
+            temp
+        };
+        assert_eq!(&buf[..], &expected_bytes[..]);
+    }
+
+    #[test]
+    fn test_u256_from_compact() {
+        // Create a U256 value and convert it to compact bytes
+        let original_value = U256::from(123456789u64);
+        let mut buf = BytesMut::with_capacity(32);
+        original_value.to_compact(&mut buf);
+
+        // Call from_compact to convert the bytes back to U256
+        let (decoded_value, _) = U256::from_compact(&buf[..], buf.len());
+
+        // Check that the decoded value matches the original value
+        assert_eq!(decoded_value, original_value);
     }
 }

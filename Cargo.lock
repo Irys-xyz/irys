@@ -260,11 +260,13 @@ version = "0.1.0"
 dependencies = [
  "actix",
  "assert_matches",
+ "color-eyre",
  "database",
  "eyre",
  "irys-primitives",
  "irys-storage",
  "irys-types",
+ "openssl",
  "packing",
  "rand",
  "rand_chacha",

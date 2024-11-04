@@ -2,6 +2,7 @@
 //! database methods for reading and writing from the database as well as some
 //! database value types.
 pub mod config;
+pub mod data_ledger;
 pub mod database;
 
 /// When data is unconfirmed it is stored in db_cache tables. Once the data

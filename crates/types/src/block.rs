@@ -3,7 +3,7 @@
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
 
-use alloy_primitives::U256;
+use crate::U256;
 use std::{fmt, str::FromStr};
 
 use crate::{
