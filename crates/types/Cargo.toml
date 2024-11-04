@@ -33,7 +33,7 @@ alloy-serde.workspace = true
 arbitrary.workspace = true
 reth-primitives.workspace = true
 test-fuzz.workspace = true
-
+nodit.workspace = true
 bytes.workspace = true
 modular-bitfield.workspace = true
 alloy-rlp.workspace = true

@@ -7,7 +7,10 @@ use std::{
     time::Duration,
 };
 
-use irys_types::{CHUNK_SIZE, NUM_CHUNKS_IN_RECALL_RANGE};
+use irys_types::{
+    IntervalState, IntervalStateWrapped, ChunkState, StorageModuleConfig, CHUNK_SIZE,
+    NUM_CHUNKS_IN_RECALL_RANGE,
+};
 use nodit::{
     interval::{ie, ii},
     InclusiveInterval, Interval, NoditMap, PointType,
@@ -17,9 +20,12 @@ use serde::{Deserialize, Serialize, Serializer};
 use tracing::{debug, error, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use super::interval::{IntervalState, IntervalStateWrapped, PackingState};
 use crate::{interval::WriteLock, provider::generate_chunk_test_data};
 use eyre::eyre;
+
+/// SM directory relative paths for data and metadata/state
+const SM_STATE_FILE: &str = "state";
+const SM_DATA_FILE: &str = "data";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Struct representing all the state of a storage module
@@ -32,17 +38,6 @@ pub struct StorageModule {
     /// capacity (in chunks) allocated to this storage module
     pub capacity: u32,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-
-pub struct StorageModuleConfig {
-    pub directory_path: PathBuf,
-    pub size_bytes: u64,
-}
-
-/// SM directory relative paths for data and metadata/state
-const SM_STATE_FILE: &str = "state";
-const SM_DATA_FILE: &str = "data";
 
 impl StorageModule {
     /// Saves the current storage module state to disk
@@ -82,7 +77,7 @@ impl StorageModule {
         map.insert_strict(
             ie(0, capacity_chunks),
             IntervalStateWrapped::new(IntervalState {
-                state: PackingState::Unpacked,
+                state: ChunkState::Unpacked,
             }),
         )
         .unwrap();
@@ -116,7 +111,7 @@ impl StorageModule {
     pub fn read_chunks(
         &self,
         interval: Interval<u32>,
-        expected_state: Option<PackingState>,
+        expected_state: Option<ChunkState>,
     ) -> eyre::Result<Vec<[u8; CHUNK_SIZE as usize]>> {
         if interval.end() > self.capacity {
             return Err(eyre!("Read goes beyond SM capacity!"));
@@ -167,7 +162,7 @@ impl StorageModule {
         &mut self,
         chunks: Vec<[u8; CHUNK_SIZE as usize]>,
         interval: Interval<u32>,
-        expected_state: PackingState,
+        expected_state: ChunkState,
         new_state: IntervalState,
     ) -> eyre::Result<()> {
         if interval.end() > self.capacity {

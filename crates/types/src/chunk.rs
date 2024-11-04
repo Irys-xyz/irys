@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Base64, H256};
+use crate::{Base64, CHUNK_SIZE, H256};
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
 pub struct Chunk {
@@ -22,3 +22,5 @@ pub struct Chunk {
     /// the highest (last) byte in the chunk not the first.
     pub offset: usize,
 }
+
+pub type ChunkBin = [u8; CHUNK_SIZE as usize];

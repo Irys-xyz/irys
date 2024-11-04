@@ -52,6 +52,8 @@ irys-c = { path = "./crates/c" }
 irys-primitives = { path = "./crates/primitives" }
 irys-reth-node-bridge = { path = "./crates/reth-node-bridge" }
 irys-types = { path = "./crates/types" }
+irys-storage = { path = "./crates/storage" }
+nodit = { version = "0.9.2", features = ["serde"] }
 modular-bitfield = "0.11.2"
 openssl = { version = "0.10.57", features = ["vendored"] }
 proptest-derive = "0.5"

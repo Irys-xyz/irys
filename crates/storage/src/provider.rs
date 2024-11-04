@@ -1,5 +1,7 @@
 use eyre::eyre;
-use irys_types::CHUNK_SIZE;
+use irys_types::{
+    ChunkState, IntervalState, StorageModuleConfig, StorageProviderConfig, CHUNK_SIZE,
+};
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -11,23 +13,13 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use crate::{
-    interval::{IntervalState, PackingState},
-    state::{StorageModule, StorageModuleConfig},
-};
+use crate::state::StorageModule;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 /// Storage provider - a wrapper struct around many storage modules
 pub struct StorageProvider {
     /// map of intervals to backing storage modules
     pub sm_map: NoditMap<u32, Interval<u32>, StorageModule>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Storage provider config
-pub struct StorageProviderConfig {
-    /// vec of intervals to storage module configurations
-    pub sm_paths_offsets: Vec<(Interval<u32>, StorageModuleConfig)>,
 }
 
 impl StorageProvider {
@@ -47,7 +39,7 @@ impl StorageProvider {
     pub fn read_chunks(
         &mut self,
         interval: Interval<u32>,
-        expected_state: Option<PackingState>,
+        expected_state: Option<ChunkState>,
     ) -> eyre::Result<Vec<[u8; CHUNK_SIZE as usize]>> {
         // figure out what SMs we need
         let read_interval = interval; /* ie(start, end); */
@@ -82,7 +74,7 @@ impl StorageProvider {
         &mut self,
         chunks: Vec<[u8; CHUNK_SIZE as usize]>,
         interval: Interval<u32>,
-        expected_state: PackingState,
+        expected_state: ChunkState,
         new_state: IntervalState,
     ) -> eyre::Result<()> {
         let sm_iter = self.sm_map.overlapping_mut(interval);
@@ -142,7 +134,7 @@ fn basic_storage_provider_test() -> eyre::Result<()> {
     let _ = remove_dir_all("/tmp/sm/");
     let mut storage_provider = StorageProvider::from_config(config)?;
 
-    let chunks = storage_provider.read_chunks(ii(0, 10), Some(PackingState::Unpacked))?;
+    let chunks = storage_provider.read_chunks(ii(0, 10), Some(ChunkState::Unpacked))?;
 
     let chunks_to_write = vec![
         [69; CHUNK_SIZE as usize],
@@ -153,9 +145,9 @@ fn basic_storage_provider_test() -> eyre::Result<()> {
     storage_provider.write_chunks(
         chunks_to_write.clone(),
         ii(3, 5),
-        PackingState::Unpacked,
+        ChunkState::Unpacked,
         IntervalState {
-            state: PackingState::Packed,
+            state: ChunkState::Packed,
         },
     )?;
 
