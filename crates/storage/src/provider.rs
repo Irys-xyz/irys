@@ -36,15 +36,12 @@ impl StorageProvider {
     /// read a range of chunks using their partition-relative offsets
     pub fn read_chunks(
         &mut self,
-        interval: Interval<u32>,
+        read_interval: Interval<u32>,
         expected_state: Option<ChunkState>,
     ) -> eyre::Result<Vec<[u8; CHUNK_SIZE as usize]>> {
         // figure out what SMs we need
-        let read_interval = interval; /* ie(start, end); */
-        // intervals are interally represented as inclusive-inclusive
         let sm_iter = self.sm_map.overlapping(read_interval);
         // TODO: read in parallel, probably use streams?
-        // also use a read-handle pool (removes opening delay), with a dedicated read handle for mining w/ a higher prio
         let mut result: Vec<[u8; CHUNK_SIZE as usize]> =
             Vec::with_capacity(read_interval.width() as usize);
         for (sm_interval, sm) in sm_iter {
@@ -71,29 +68,29 @@ impl StorageProvider {
     pub fn write_chunks(
         &mut self,
         chunks: Vec<[u8; CHUNK_SIZE as usize]>,
-        interval: Interval<u32>,
+        write_interval: Interval<u32>,
         expected_state: ChunkState,
         new_state: IntervalState,
     ) -> eyre::Result<()> {
-        let sm_iter = self.sm_map.overlapping_mut(interval);
+        let sm_iter = self.sm_map.overlapping_mut(write_interval);
 
-        if chunks.len() < (interval.width() + 1) as usize {
+        if chunks.len() < (write_interval.width() + 1) as usize {
             return Err(eyre!("Chunks vec is too small for interval"));
         }
 
         for (sm_interval, sm) in sm_iter {
             let sm_offset = sm_interval.start();
-            // start writing from either the interval start (always 0) or the read interval start, depending on which is greater
-            let clamped_start = sm_interval.start().max(interval.start());
+            // start writing from either the sm_interval start (always 0) or the write interval start, depending on which is greater
+            let clamped_start = sm_interval.start().max(write_interval.start());
             let sm_relative_start_offset = clamped_start - sm_offset;
 
-            // finish writing at the end of the SM, or the read interval end, whichever is lesser
-            let clamped_end = sm_interval.end().min(interval.end());
+            // finish writing at the end of the SM, or the write interval end, whichever is lesser
+            let clamped_end = sm_interval.end().min(write_interval.end());
             let sm_relative_end_offset: u32 = clamped_end - sm_offset;
 
             // figure out what chunks indexes we need
-            let cls = clamped_start - interval.start();
-            let cle = clamped_end - interval.start();
+            let cls = clamped_start - write_interval.start();
+            let cle = clamped_end - write_interval.start();
 
             sm.write_chunks(
                 chunks[cls as usize..=cle as usize].to_vec(),
