@@ -3,14 +3,11 @@ use irys_types::{
     ChunkState, IntervalState, StorageModuleConfig, StorageProviderConfig, CHUNK_SIZE,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap};
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{remove_dir_all, File},
-    io::{Read, Seek, SeekFrom, Write as _},
-    os::unix::fs::FileExt,
+    io::Write as _,
     path::PathBuf,
-    sync::{Arc, RwLock},
 };
 
 use crate::state::StorageModule;
@@ -22,6 +19,7 @@ pub struct StorageProvider {
     pub sm_map: NoditMap<u32, Interval<u32>, StorageModule>,
 }
 
+/// A storage provider provides a high level read/write interface over a backing set of storage modules, routing read and write requests to the correct SM
 impl StorageProvider {
     /// Initializes a storage provider from a config
     pub fn from_config(config: StorageProviderConfig) -> eyre::Result<Self> {
@@ -35,7 +33,7 @@ impl StorageProvider {
         return Ok(Self { sm_map: map });
     }
 
-    /// read a range of chunks using their partition-relative offsets - **start is inclusive, end is exclusive**, so (0, 1) will read just chunk 0, and (3, 5) will read chunks 3 and 4
+    /// read a range of chunks using their partition-relative offsets
     pub fn read_chunks(
         &mut self,
         interval: Interval<u32>,
@@ -107,8 +105,6 @@ impl StorageProvider {
 
         Ok(())
     }
-
-    // pub fn new()
 }
 
 #[test]
@@ -147,7 +143,7 @@ fn basic_storage_provider_test() -> eyre::Result<()> {
         ii(3, 5),
         ChunkState::Unpacked,
         IntervalState {
-            state: ChunkState::Packed,
+            chunk_state: ChunkState::Packed,
         },
     )?;
 

@@ -3,7 +3,10 @@ use irys_types::{
     chunk::Chunk, hash_sha256, validate_path, IrysTransactionHeader, CHUNK_SIZE, H256,
 };
 use reth_db::DatabaseEnv;
-use std::{collections::{BTreeMap, HashMap}, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]

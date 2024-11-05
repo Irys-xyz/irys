@@ -1,3 +1,1 @@
-pub struct AppState {
-    
-}
+pub struct AppState {}

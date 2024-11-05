@@ -2,13 +2,10 @@ use std::{
     fs::{create_dir_all, read_to_string, File, OpenOptions},
     io::{Read, Seek as _, SeekFrom, Write},
     path::PathBuf,
-    sync::{Arc, RwLock, RwLockWriteGuard},
-    thread::sleep,
-    time::Duration,
 };
 
 use irys_types::{
-    IntervalState, IntervalStateWrapped, ChunkState, StorageModuleConfig, CHUNK_SIZE,
+    ChunkState, IntervalState, IntervalStateWrapped, StorageModuleConfig, CHUNK_SIZE,
     NUM_CHUNKS_IN_RECALL_RANGE,
 };
 use nodit::{
@@ -20,7 +17,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use tracing::{debug, error, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use crate::{interval::WriteLock, provider::generate_chunk_test_data};
+use crate::provider::generate_chunk_test_data;
 use eyre::eyre;
 
 /// SM directory relative paths for data and metadata/state
@@ -39,6 +36,8 @@ pub struct StorageModule {
     pub capacity: u32,
 }
 
+/// Storage modules act as our counterpart to a discrete storage device, one or more of which are used in sequence to build enough storage for a partition
+/// Storage modules work off a single large binary file, aligned to CHUNK_SIZE, and work off chunk offsets instead of bytes
 impl StorageModule {
     /// Saves the current storage module state to disk
     pub fn save_to_disk(&self) -> eyre::Result<()> {
@@ -77,7 +76,7 @@ impl StorageModule {
         map.insert_strict(
             ie(0, capacity_chunks),
             IntervalStateWrapped::new(IntervalState {
-                state: ChunkState::Unpacked,
+                chunk_state: ChunkState::Unpacked,
             }),
         )
         .unwrap();
@@ -102,7 +101,7 @@ impl StorageModule {
         return Ok(sm);
     }
 
-    /// Acquire a File handle for the SM's path
+    /// Acquire a read only File handle for the SM's path
     pub fn get_handle(&self) -> Result<File, std::io::Error> {
         File::open(&self.path.join(SM_DATA_FILE))
     }
@@ -131,7 +130,7 @@ impl StorageModule {
 
         for (segment_interval, segment_state) in overlap_iter {
             if expected_state.is_some()
-                && std::mem::discriminant(&segment_state.state)
+                && std::mem::discriminant(&segment_state.chunk_state)
                     != std::mem::discriminant(&expected_state.unwrap())
             {
                 return Err(eyre::Report::msg(format!(
@@ -193,12 +192,12 @@ impl StorageModule {
         }
 
         for (segment_interval, segment_state) in overlap_iter {
-            if std::mem::discriminant(&segment_state.state)
+            if std::mem::discriminant(&segment_state.chunk_state)
                 != std::mem::discriminant(&expected_state)
             {
                 return Err(eyre::Report::msg(format!(
                     "Segment {:?} is of unexpected state {:?}",
-                    segment_interval, segment_state.state
+                    segment_interval, segment_state.chunk_state
                 )));
             }
 
@@ -218,6 +217,8 @@ impl StorageModule {
             .interval_map
             .insert_overwrite(interval, IntervalStateWrapped::new(new_state));
 
+        // self.interval_map.insert_merge_touching_or_overlapping(interval, value)
+
         self.save_to_disk()?;
         Ok(())
     }
@@ -236,86 +237,79 @@ impl StorageModule {
 //     );
 // }
 
-#[test]
-fn test_sm_rw() -> eyre::Result<()> {
-    FmtSubscriber::builder().compact().init();
-
-    let chunks: u8 = 20;
-    generate_chunk_test_data("/tmp/sample".into(), chunks, 0)?;
-
-    // let sm1_interval_map = NoditMap::from_slice_strict([(
-    //     ie(0, chunks as u32),
-    //     IntervalStateWrapped::new(IntervalState {
-    //         state: PackingState::Data,
-    //     }),
-    // )])
-    // .unwrap();
-
-    // let sm1 = Arc::new(StorageModule::new(
-    //     "/tmp/sample".into(),
-    //     100 * CHUNK_SIZE,
-    //     1,
-    // ));
-
-    // let read1 = sm1.read_chunks(ii(0, 5), Some(PackingState::Unpacked))?;
-
-    // let sm2 = sm1.clone();
-
-    // std::thread::spawn(move || {
-    //     sm2.write_chunks(
-    //         vec![[69; CHUNK_SIZE as usize], [70; CHUNK_SIZE as usize]],
-    //         ii(4, 5),
-    //         PackingState::Unpacked,
-    //         IntervalState {
-    //             state: PackingState::Packed,
-    //         },
-    //     )
-    //     .unwrap();
-    // });
-
-    // sleep(Duration::from_millis(1000));
-
-    // let read2 = sm1.read_chunks(ii(0, 5), None)?;
-    // dbg!(&read2, &read1);
-    // let mut sp = StorageProvider {
-    //     sm_map: NoditMap::from_slice_strict([(
-    //         ie(0, chunks as u32),
-    //         StorageModule {
-    //             path: "/tmp/sample".into(),
-    //             interval_map: RwLock::new(sm1_interval_map),
-    //             capacity: chunks as u32,
-    //         },
-    //     )])
-    //     .unwrap(),
-    // };
-
-    // let sm = StorageModule {
-    //     path: "/tmp/sample".into(),
-    //     interval_map: RwLock::new(sm1_interval_map),
-    //     capacity: chunks as u32,
-    // };
-
-    // let interval = ii(1, 1);
-
-    // let chunks = sm.read_chunks(interval)?;
-
-    // sm.write_chunks(
-    //     vec![[69; CHUNK_SIZE as usize]],
-    //     interval,
-    //     IntervalStateWrapped::new(IntervalState {
-    //         state: PackingState::Packed,
-    //     }),
-    // )?;
-
-    // let chunks2 = sm.read_chunks(interval)?;
-
-    Ok(())
-}
-
+// TODO @JesseTheRobot re-enable tests
 // #[test]
-// fn vec_test() {
-//     let chunks_per_recall_range = NUM_CHUNKS_IN_RECALL_RANGE;
-//     let chunks  = 100;
-//     let intervals =
-//     let mut intervals = vec![];
+// fn test_sm_rw() -> eyre::Result<()> {
+//     FmtSubscriber::builder().compact().init();
+
+//     let chunks: u8 = 20;
+//     generate_chunk_test_data("/tmp/sample".into(), chunks, 0)?;
+
+//     // let sm1_interval_map = NoditMap::from_slice_strict([(
+//     //     ie(0, chunks as u32),
+//     //     IntervalStateWrapped::new(IntervalState {
+//     //         state: PackingState::Data,
+//     //     }),
+//     // )])
+//     // .unwrap();
+
+//     // let sm1 = Arc::new(StorageModule::new(
+//     //     "/tmp/sample".into(),
+//     //     100 * CHUNK_SIZE,
+//     //     1,
+//     // ));
+
+//     // let read1 = sm1.read_chunks(ii(0, 5), Some(PackingState::Unpacked))?;
+
+//     // let sm2 = sm1.clone();
+
+//     // std::thread::spawn(move || {
+//     //     sm2.write_chunks(
+//     //         vec![[69; CHUNK_SIZE as usize], [70; CHUNK_SIZE as usize]],
+//     //         ii(4, 5),
+//     //         PackingState::Unpacked,
+//     //         IntervalState {
+//     //             state: PackingState::Packed,
+//     //         },
+//     //     )
+//     //     .unwrap();
+//     // });
+
+//     // sleep(Duration::from_millis(1000));
+
+//     // let read2 = sm1.read_chunks(ii(0, 5), None)?;
+//     // dbg!(&read2, &read1);
+//     // let mut sp = StorageProvider {
+//     //     sm_map: NoditMap::from_slice_strict([(
+//     //         ie(0, chunks as u32),
+//     //         StorageModule {
+//     //             path: "/tmp/sample".into(),
+//     //             interval_map: RwLock::new(sm1_interval_map),
+//     //             capacity: chunks as u32,
+//     //         },
+//     //     )])
+//     //     .unwrap(),
+//     // };
+
+//     // let sm = StorageModule {
+//     //     path: "/tmp/sample".into(),
+//     //     interval_map: RwLock::new(sm1_interval_map),
+//     //     capacity: chunks as u32,
+//     // };
+
+//     // let interval = ii(1, 1);
+
+//     // let chunks = sm.read_chunks(interval)?;
+
+//     // sm.write_chunks(
+//     //     vec![[69; CHUNK_SIZE as usize]],
+//     //     interval,
+//     //     IntervalStateWrapped::new(IntervalState {
+//     //         state: PackingState::Packed,
+//     //     }),
+//     // )?;
+
+//     // let chunks2 = sm.read_chunks(interval)?;
+
+//     Ok(())
 // }

@@ -1,19 +1,23 @@
 use std::{
-    collections::VecDeque, fs, io::{Seek, Write}, os::unix::fs::FileExt, sync::{Arc, RwLock}
+    collections::VecDeque,
+    fs,
+    io::{Seek, Write},
+    os::unix::fs::FileExt,
+    sync::{Arc, RwLock},
 };
 
 use actix::{Actor, Context, Handler, Message};
 use irys_primitives::IrysTxId;
 use irys_types::{Address, U256};
-use packing::{capacity_pack_range_with_data};
+use packing::capacity_pack_range_with_data;
 use tokio::runtime::Handle;
 
 #[derive(Message, Clone)]
 #[rtype("()")]
-struct PackingRequestRange { 
+struct PackingRequestRange {
     pub partition_id: IrysTxId,
-    pub start_index: U256, 
-    pub end_index: U256
+    pub start_index: U256,
+    pub end_index: U256,
 }
 
 type AtomicChunkRange = Arc<RwLock<VecDeque<PackingRequestRange>>>;
@@ -37,7 +41,10 @@ impl PackingActor {
         // Loop which runs all jobs every 1 second (defined in CHUNK_POLL_TIME_MS)
         loop {
             if let Some(next_range) = chunks.read().unwrap().front() {
-                let PartitionInfo { filename, mining_addr } = get_partition_info(next_range.partition_id);
+                let PartitionInfo {
+                    filename,
+                    mining_addr,
+                } = get_partition_info(next_range.partition_id);
 
                 let f = fs::File::open(filename.clone()).unwrap();
 
@@ -47,7 +54,13 @@ impl PackingActor {
                 };
 
                 // TODO: Pack range
-                let range = match capacity_pack_range_with_data(data_in_range, mining_addr, next_range.start_index.as_u64(), next_range.partition_id, None) {
+                let range = match capacity_pack_range_with_data(
+                    data_in_range,
+                    mining_addr,
+                    next_range.start_index.as_u64(),
+                    next_range.partition_id,
+                    None,
+                ) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
@@ -66,13 +79,13 @@ impl PackingActor {
 
 struct PartitionInfo {
     mining_addr: Address,
-    filename: String
+    filename: String,
 }
 
 fn get_partition_info(id: IrysTxId) -> PartitionInfo {
     PartitionInfo {
         mining_addr: Address::random(),
-        filename: "".to_string()
+        filename: "".to_string(),
     }
 }
 

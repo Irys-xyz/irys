@@ -23,7 +23,7 @@ pub struct StorageModuleConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IntervalState {
     // common fields:
-    pub state: ChunkState,
+    pub chunk_state: ChunkState,
 }
 
 // wrapper struct so we can "contain" the custom Eq impl that works off the state enum
@@ -55,7 +55,8 @@ impl IntervalStateWrapped {
 impl PartialEq for IntervalStateWrapped {
     fn eq(&self, other: &Self) -> bool {
         // compare the state enum variant, not inner state
-        std::mem::discriminant(&self.inner.state) == std::mem::discriminant(&other.inner.state)
+        std::mem::discriminant(&self.inner.chunk_state)
+            == std::mem::discriminant(&other.inner.chunk_state)
     }
 }
 
@@ -66,5 +67,4 @@ pub enum ChunkState {
     Unpacked,
     Packed,
     Data,
-    // WriteLocked,
 }

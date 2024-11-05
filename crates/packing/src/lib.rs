@@ -1,9 +1,8 @@
+use irys_c::capacity::compute_entropy_chunk;
 use irys_primitives::IrysTxId;
 use irys_types::{Address, CHUNK_SIZE};
-use irys_c::capacity::compute_entropy_chunk;
 
 pub const PACKING_SHA_1_5_S: u32 = 22_500_000;
-
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
 /// defaults to [`PACKING_SHA_1_5_S`]`
@@ -44,7 +43,7 @@ pub fn capacity_pack_range(
 enum PackingType {
     CPU,
     CUDA,
-    AMD
+    AMD,
 }
 
 const PACKING_TYPE: PackingType = PackingType::CPU;
@@ -55,20 +54,17 @@ pub fn capacity_pack_range_with_data(
     chunk_offset: std::ffi::c_ulong,
     partition_hash: IrysTxId,
     iterations: Option<u32>,
-)-> eyre::Result<Vec<u8>> {
+) -> eyre::Result<Vec<u8>> {
     match PACKING_TYPE {
         PackingType::CPU => {
-            
-            capacity_pack_range(mining_address, chunk_offset, partition_hash, iterations)
-                .map(|r| {
-                    data.iter_mut()
-                        .zip(r.iter())
-                        .for_each(|(x1, x2)| *x1 ^= *x2);
+            capacity_pack_range(mining_address, chunk_offset, partition_hash, iterations).map(|r| {
+                data.iter_mut()
+                    .zip(r.iter())
+                    .for_each(|(x1, x2)| *x1 ^= *x2);
 
-            data
-        })
-        },
-        _ => unimplemented!()
+                data
+            })
+        }
+        _ => unimplemented!(),
     }
-    
 }
