@@ -1,6 +1,6 @@
 use eyre::eyre;
 use irys_types::{
-    ChunkState, IntervalState, StorageModuleConfig, StorageProviderConfig, CHUNK_SIZE,
+    ChunkState, IntervalState, PartitionStorageProviderConfig, StorageModuleConfig, CHUNK_SIZE,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap};
 use serde::{Deserialize, Serialize};
@@ -14,15 +14,15 @@ use crate::state::StorageModule;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 /// Storage provider - a wrapper struct around many storage modules
-pub struct StorageProvider {
+pub struct PartitionStorageProvider {
     /// map of intervals to backing storage modules
     pub sm_map: NoditMap<u32, Interval<u32>, StorageModule>,
 }
 
 /// A storage provider provides a high level read/write interface over a backing set of storage modules, routing read and write requests to the correct SM
-impl StorageProvider {
+impl PartitionStorageProvider {
     /// Initializes a storage provider from a config
-    pub fn from_config(config: StorageProviderConfig) -> eyre::Result<Self> {
+    pub fn from_config(config: PartitionStorageProviderConfig) -> eyre::Result<Self> {
         let mut map = NoditMap::new();
         for (i, cfg) in config.sm_paths_offsets {
             map.insert_strict(i, StorageModule::new_or_load_from_disk(cfg.clone())?)
@@ -106,7 +106,7 @@ impl StorageProvider {
 
 #[test]
 fn basic_storage_provider_test() -> eyre::Result<()> {
-    let config = StorageProviderConfig {
+    let config = PartitionStorageProviderConfig {
         sm_paths_offsets: vec![
             (
                 ii(0, 3),
@@ -125,7 +125,7 @@ fn basic_storage_provider_test() -> eyre::Result<()> {
         ],
     };
     let _ = remove_dir_all("/tmp/sm/");
-    let mut storage_provider = StorageProvider::from_config(config)?;
+    let mut storage_provider = PartitionStorageProvider::from_config(config)?;
 
     let chunks = storage_provider.read_chunks(ii(0, 10), Some(ChunkState::Unpacked))?;
 

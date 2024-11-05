@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize, Serializer};
 use tracing::{debug, error, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use crate::provider::generate_chunk_test_data;
 use eyre::eyre;
 
 /// SM directory relative paths for data and metadata/state

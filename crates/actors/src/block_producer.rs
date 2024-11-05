@@ -4,7 +4,6 @@ use std::{
 };
 
 use actix::{Actor, Addr, Context, Handler, ResponseFuture};
-use irys_storage::provider::StorageProvider;
 use irys_types::{block_production::SolutionContext, IrysBlockHeader};
 use reth_db::DatabaseEnv;
 

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Storage provider config
-pub struct StorageProviderConfig {
+pub struct PartitionStorageProviderConfig {
     /// vec of intervals to storage module configurations
     pub sm_paths_offsets: Vec<(Interval<u32>, StorageModuleConfig)>,
 }

@@ -1,21 +1,22 @@
 use std::{ops::Index, sync::mpsc::Receiver};
 
 use actix::{Actor, Addr, Context, Handler, Message};
-use irys_storage::{ii, provider::StorageProvider};
+use irys_storage::{ii, partition_provider::PartitionStorageProvider};
 use irys_types::{
     block_production::{Partition, SolutionContext},
-    StorageModuleConfig, StorageProviderConfig, CHUNK_SIZE, H256, NUM_CHUNKS_IN_RECALL_RANGE,
-    NUM_OF_CHUNKS_IN_PARTITION, NUM_RECALL_RANGES_IN_PARTITION, U256,
+    PartitionStorageProviderConfig, StorageModuleConfig, CHUNK_SIZE, H256,
+    NUM_CHUNKS_IN_RECALL_RANGE, NUM_OF_CHUNKS_IN_PARTITION, NUM_RECALL_RANGES_IN_PARTITION, U256,
 };
 use rand::{seq::SliceRandom, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use sha2::{Digest, Sha256};
 
-pub fn get_partitions_and_storage_providers() -> eyre::Result<Vec<(Partition, StorageProvider)>> {
+pub fn get_partitions_and_storage_providers(
+) -> eyre::Result<Vec<(Partition, PartitionStorageProvider)>> {
     Ok(vec![
         (
             Partition::default(),
-            StorageProvider::from_config(StorageProviderConfig {
+            PartitionStorageProvider::from_config(PartitionStorageProviderConfig {
                 sm_paths_offsets: vec![
                     (
                         ii(0, 3),
@@ -36,7 +37,7 @@ pub fn get_partitions_and_storage_providers() -> eyre::Result<Vec<(Partition, St
         ),
         (
             Partition::default(),
-            StorageProvider::from_config(StorageProviderConfig {
+            PartitionStorageProvider::from_config(PartitionStorageProviderConfig {
                 sm_paths_offsets: vec![
                     (
                         ii(0, 5),

@@ -9,6 +9,7 @@ use actors::{
     mempool::{self, MempoolActor},
     mining::PartitionMiningActor,
     packing::PackingActor,
+    storage_provider::StorageProvider,
     ActorAddresses,
 };
 use clap::Parser;
@@ -18,7 +19,7 @@ use irys_reth_node_bridge::{
     node::{RethNode, RethNodeAddOns, RethNodeHandle},
     IrysChainSpecBuilder,
 };
-use irys_types::{app_state::AppState, H256};
+use irys_types::{app_state::AppState, block_production::PartitionId, H256};
 use partitions::{get_partitions_and_storage_providers, mine_partition};
 use reth::{
     builder::{FullNode, NodeHandle},
@@ -77,19 +78,20 @@ fn main() -> eyre::Result<()> {
             let mut part_actors = Vec::new();
             let mut chunk_storage_actors = Vec::new();
 
-            let mut chunk_storage_index = HashMap::<u64, Addr<ChunkStorageActor>>::new();
+            let mut partition_storage_providers =
+                HashMap::<PartitionId, Addr<ChunkStorageActor>>::new();
             for (part, storage_provider) in get_partitions_and_storage_providers().unwrap() {
                 let partition_chunk_storage_actor = ChunkStorageActor::new(storage_provider);
                 let addr = partition_chunk_storage_actor.start();
                 chunk_storage_actors.push(addr.clone());
-                chunk_storage_index.insert(part.id, addr.clone());
+                partition_storage_providers.insert(part.id, addr.clone());
 
                 let partition_mining_actor =
                     PartitionMiningActor::new(part, block_producer_addr.clone(), addr);
                 part_actors.push(partition_mining_actor.start());
             }
 
-            let chunk_storage_index = Arc::new(chunk_storage_index);
+            let storage_provider = Arc::new(StorageProvider::new(partition_storage_providers));
 
             let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 

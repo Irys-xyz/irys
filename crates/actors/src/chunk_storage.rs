@@ -1,15 +1,16 @@
 use std::sync::Arc;
 
 use actix::{Actor, Context, Handler, Message};
-use irys_storage::provider::StorageProvider;
+use irys_storage::partition_provider::PartitionStorageProvider;
 use irys_types::{ChunkBin, ChunkState, Interval, IntervalState};
 
+#[derive(Debug, Clone)]
 pub struct ChunkStorageActor {
-    storage_provider: StorageProvider,
+    storage_provider: PartitionStorageProvider,
 }
 
 impl ChunkStorageActor {
-    pub fn new(storage_provider: StorageProvider) -> Self {
+    pub fn new(storage_provider: PartitionStorageProvider) -> Self {
         Self { storage_provider }
     }
 }
@@ -18,12 +19,12 @@ impl Actor for ChunkStorageActor {
     type Context = Context<Self>;
 }
 
-#[derive(Message)]
+#[derive(Message, Debug, Clone)]
 #[rtype(result = "eyre::Result<Arc<Vec<ChunkBin>>>")]
-struct ReadChunks {
-    interval: Interval<u32>,
+pub struct ReadChunks {
+    pub interval: Interval<u32>,
     // optional state requirement for a read
-    expected_state: Option<ChunkState>,
+    pub expected_state: Option<ChunkState>,
 }
 
 impl Handler<ReadChunks> for ChunkStorageActor {
@@ -37,14 +38,14 @@ impl Handler<ReadChunks> for ChunkStorageActor {
     }
 }
 
-#[derive(Message)]
+#[derive(Message, Debug, Clone)]
 #[rtype(result = "eyre::Result<()>")]
-struct WriteChunks {
-    interval: Interval<u32>,
+pub struct WriteChunks {
+    pub interval: Interval<u32>,
     // not Arc as the actor blocks while copying and then writing the chunks anyway
-    chunks: Vec<ChunkBin>,
-    expected_state: ChunkState,
-    new_state: IntervalState,
+    pub chunks: Vec<ChunkBin>,
+    pub expected_state: ChunkState,
+    pub new_state: IntervalState,
 }
 
 impl Handler<WriteChunks> for ChunkStorageActor {

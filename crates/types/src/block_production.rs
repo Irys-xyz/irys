@@ -11,9 +11,11 @@ pub struct SolutionContext {
 }
 
 pub struct Partition {
-    pub id: u64,
+    pub id: PartitionId,
     pub mining_addr: H256,
 }
+
+pub type PartitionId = u64;
 
 impl Default for Partition {
     fn default() -> Self {
