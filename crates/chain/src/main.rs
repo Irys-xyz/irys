@@ -29,6 +29,7 @@ use reth::{
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c, AsyncCliRunner};
 use reth_db::database;
 use std::{
+    collections::HashMap,
     fs::canonicalize,
     path::{absolute, PathBuf},
     str::FromStr,
@@ -76,15 +77,19 @@ fn main() -> eyre::Result<()> {
             let mut part_actors = Vec::new();
             let mut chunk_storage_actors = Vec::new();
 
+            let mut chunk_storage_index = HashMap::<u64, Addr<ChunkStorageActor>>::new();
             for (part, storage_provider) in get_partitions_and_storage_providers().unwrap() {
                 let partition_chunk_storage_actor = ChunkStorageActor::new(storage_provider);
                 let addr = partition_chunk_storage_actor.start();
                 chunk_storage_actors.push(addr.clone());
+                chunk_storage_index.insert(part.id, addr.clone());
 
                 let partition_mining_actor =
                     PartitionMiningActor::new(part, block_producer_addr.clone(), addr);
                 part_actors.push(partition_mining_actor.start());
             }
+
+            let chunk_storage_index = Arc::new(chunk_storage_index);
 
             let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
