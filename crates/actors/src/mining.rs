@@ -1,28 +1,30 @@
-use std::sync::Arc;
-
 use actix::{Actor, Addr, Context, Handler, Message};
-use irys_storage::partition::Partition;
 use irys_types::{
-    block_production::SolutionContext, ChunkBin, ChunkState, Interval, IntervalState, CHUNK_SIZE,
-    H256, NUM_CHUNKS_IN_RECALL_RANGE, NUM_OF_CHUNKS_IN_PARTITION, NUM_RECALL_RANGES_IN_PARTITION,
-    U256,
+    block_production::{Partition, SolutionContext},
+    CHUNK_SIZE, H256, NUM_CHUNKS_IN_RECALL_RANGE, NUM_RECALL_RANGES_IN_PARTITION, U256,
 };
 use rand::{seq::SliceRandom, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use sha2::{Digest, Sha256};
 
-use crate::block_producer::BlockProducerActor;
+use crate::{block_producer::BlockProducerActor, chunk_storage::ChunkStorageActor};
 
 pub struct PartitionMiningActor {
     partition: Partition,
     block_producer_actor: Addr<BlockProducerActor>,
+    chunk_storage_addr: Addr<ChunkStorageActor>,
 }
 
 impl PartitionMiningActor {
-    pub fn new(partition: Partition, block_producer_addr: Addr<BlockProducerActor>) -> Self {
+    pub fn new(
+        partition: Partition,
+        block_producer_addr: Addr<BlockProducerActor>,
+        chunk_storage_addr: Addr<ChunkStorageActor>,
+    ) -> Self {
         Self {
             partition,
             block_producer_actor: block_producer_addr,
+            chunk_storage_addr,
         }
     }
 }
@@ -116,56 +118,4 @@ fn get_latest_difficulty() -> U256 {
 
 fn hash_to_number(hash: &[u8]) -> U256 {
     U256::from_little_endian(hash)
-}
-
-struct ReadChunks {
-    interval: Interval<u32>,
-    // optional state requirement for a read
-    expected_state: Option<ChunkState>,
-}
-
-impl Message for ReadChunks {
-    // arc so the thread data transfer doesn't block the actor
-    type Result = eyre::Result<Arc<Vec<ChunkBin>>>;
-}
-
-impl Handler<ReadChunks> for PartitionMiningActor {
-    type Result = eyre::Result<Arc<Vec<ChunkBin>>>;
-
-    fn handle(&mut self, read_req: ReadChunks, _ctx: &mut Context<Self>) -> Self::Result {
-        Ok(Arc::new(
-            self.partition
-                .storage_provider
-                .read_chunks(read_req.interval, read_req.expected_state)?,
-        ))
-    }
-}
-
-struct WriteChunks {
-    interval: Interval<u32>,
-    chunks: Vec<ChunkBin>,
-    expected_state: ChunkState,
-    new_state: IntervalState,
-}
-
-impl Message for WriteChunks {
-    // arc so the thread data transfer doesn't block the actor
-    type Result = eyre::Result<()>;
-}
-
-impl Handler<WriteChunks> for PartitionMiningActor {
-    type Result = eyre::Result<()>;
-
-    fn handle(&mut self, write_req: WriteChunks, _ctx: &mut Context<Self>) -> Self::Result {
-        let WriteChunks {
-            interval,
-            chunks,
-            expected_state,
-            new_state,
-        } = write_req;
-
-        self.partition
-            .storage_provider
-            .write_chunks(chunks, interval, expected_state, new_state)
-    }
 }

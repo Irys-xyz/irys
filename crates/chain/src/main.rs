@@ -5,6 +5,7 @@ use ::database::{config::get_data_dir, open_or_create_db};
 use actix::{Actor, Addr, Arbiter, System};
 use actors::{
     block_producer::BlockProducerActor,
+    chunk_storage::ChunkStorageActor,
     mempool::{self, MempoolActor},
     mining::PartitionMiningActor,
     packing::PackingActor,
@@ -18,7 +19,7 @@ use irys_reth_node_bridge::{
     IrysChainSpecBuilder,
 };
 use irys_types::{app_state::AppState, H256};
-use partitions::{get_partitions, mine_partition};
+use partitions::{get_partitions_and_storage_providers, mine_partition};
 use reth::{
     builder::{FullNode, NodeHandle},
     chainspec::ChainSpec,
@@ -73,10 +74,15 @@ fn main() -> eyre::Result<()> {
             let block_producer_addr = block_producer_actor.start();
 
             let mut part_actors = Vec::new();
+            let mut chunk_storage_actors = Vec::new();
 
-            for part in get_partitions() {
+            for (part, storage_provider) in get_partitions_and_storage_providers().unwrap() {
+                let partition_chunk_storage_actor = ChunkStorageActor::new(storage_provider);
+                let addr = partition_chunk_storage_actor.start();
+                chunk_storage_actors.push(addr.clone());
+
                 let partition_mining_actor =
-                    PartitionMiningActor::new(part, block_producer_addr.clone());
+                    PartitionMiningActor::new(part, block_producer_addr.clone(), addr);
                 part_actors.push(partition_mining_actor.start());
             }
 

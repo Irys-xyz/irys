@@ -7,3 +7,4 @@ pub mod vdf;
 
 mod addresses;
 pub use addresses::*;
+pub mod chunk_storage;

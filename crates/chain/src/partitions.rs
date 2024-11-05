@@ -1,43 +1,61 @@
 use std::{ops::Index, sync::mpsc::Receiver};
 
 use actix::{Actor, Addr, Context, Handler, Message};
-use irys_storage::{ii, partition::Partition, provider::StorageProvider};
+use irys_storage::{ii, provider::StorageProvider};
 use irys_types::{
-    block_production::SolutionContext, StorageModuleConfig, StorageProviderConfig, CHUNK_SIZE,
-    H256, NUM_CHUNKS_IN_RECALL_RANGE, NUM_OF_CHUNKS_IN_PARTITION, NUM_RECALL_RANGES_IN_PARTITION,
-    U256,
+    block_production::{Partition, SolutionContext},
+    StorageModuleConfig, StorageProviderConfig, CHUNK_SIZE, H256, NUM_CHUNKS_IN_RECALL_RANGE,
+    NUM_OF_CHUNKS_IN_PARTITION, NUM_RECALL_RANGES_IN_PARTITION, U256,
 };
 use rand::{seq::SliceRandom, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use sha2::{Digest, Sha256};
 
-pub fn get_partitions() -> Vec<Partition> {
-    vec![Partition::default(), Partition::default()]
-}
-
-pub fn get_partitions_with_sms() -> eyre::Result<Vec<Partition>> {
-    Ok(vec![Partition {
-        id: 0,
-        mining_addr: H256::random(),
-        storage_provider: StorageProvider::from_config(StorageProviderConfig {
-            sm_paths_offsets: vec![
-                (
-                    ii(0, 3),
-                    StorageModuleConfig {
-                        directory_path: "/tmp/sm/sm1".into(),
-                        size_bytes: 10 * CHUNK_SIZE,
-                    },
-                ),
-                (
-                    ii(4, 10),
-                    StorageModuleConfig {
-                        directory_path: "/tmp/sm/sm2".into(),
-                        size_bytes: 10 * CHUNK_SIZE,
-                    },
-                ),
-            ],
-        })?,
-    }])
+pub fn get_partitions_and_storage_providers() -> eyre::Result<Vec<(Partition, StorageProvider)>> {
+    Ok(vec![
+        (
+            Partition::default(),
+            StorageProvider::from_config(StorageProviderConfig {
+                sm_paths_offsets: vec![
+                    (
+                        ii(0, 3),
+                        StorageModuleConfig {
+                            directory_path: "/tmp/sm/sm1".into(),
+                            size_bytes: 10 * CHUNK_SIZE,
+                        },
+                    ),
+                    (
+                        ii(4, 10),
+                        StorageModuleConfig {
+                            directory_path: "/tmp/sm/sm2".into(),
+                            size_bytes: 10 * CHUNK_SIZE,
+                        },
+                    ),
+                ],
+            })?,
+        ),
+        (
+            Partition::default(),
+            StorageProvider::from_config(StorageProviderConfig {
+                sm_paths_offsets: vec![
+                    (
+                        ii(0, 5),
+                        StorageModuleConfig {
+                            directory_path: "/tmp/sm/sm3".into(),
+                            size_bytes: 10 * CHUNK_SIZE,
+                        },
+                    ),
+                    (
+                        ii(6, 10),
+                        StorageModuleConfig {
+                            directory_path: "/tmp/sm/sm4".into(),
+                            size_bytes: 10 * CHUNK_SIZE,
+                        },
+                    ),
+                ],
+            })?,
+        ),
+    ])
 }
 
 pub fn mine_partition(partition: Partition, seed_receiver_channel: Receiver<H256>) {
