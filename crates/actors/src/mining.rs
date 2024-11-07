@@ -56,7 +56,7 @@ impl Handler<Seed> for PartitionMiningActor {
         let difficuly = get_latest_difficulty();
         match mine_partition_with_seed(
             &self.partition,
-            self.part_storage_provider.clone(),
+            &self.part_storage_provider,
             seed.into_inner(),
             difficuly,
         ) {
@@ -70,7 +70,7 @@ impl Handler<Seed> for PartitionMiningActor {
 
 fn mine_partition_with_seed(
     partition: &Partition,
-    storage_provider: PartitionStorageProvider,
+    storage_provider: &PartitionStorageProvider,
     seed: H256,
     difficulty: U256,
 ) -> Option<SolutionContext> {
