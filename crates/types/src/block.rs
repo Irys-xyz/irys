@@ -35,6 +35,9 @@ pub struct IrysBlockHeader {
     /// The solution hash of the previous block in the chain.
     pub previous_solution_hash: H256,
 
+    /// The solution hash of the last epoch block
+    pub last_epoch_hash: H256,
+
     /// `SHA-256` hash of the PoA chunk (unencoded) bytes.
     pub chunk_hash: H256,
 
@@ -81,6 +84,7 @@ impl IrysBlockHeader {
             last_retarget: 1622543200,
             solution_hash: H256::zero(),
             previous_solution_hash: H256::zero(),
+            last_epoch_hash: H256::random(),
             chunk_hash: H256::zero(),
             height: 42,
             block_hash: H256::zero(),
@@ -97,12 +101,22 @@ impl IrysBlockHeader {
                 reth_signature: Signature::test_signature(),
             },
             timestamp: 1622543200,
-            ledgers: vec![TransactionLedger {
-                tx_root: H256::zero(),
-                txids,
-                ledger_size: U256::from(100),
-                expires: Some(1622543200),
-            }],
+            ledgers: vec![
+                // Permanent Publish Ledger
+                TransactionLedger {
+                    tx_root: H256::zero(),
+                    txids,
+                    ledger_size: U256::from(0),
+                    expires: None,
+                },
+                // Term Submit Ledger
+                TransactionLedger {
+                    tx_root: H256::zero(),
+                    txids: H256List::new(),
+                    ledger_size: U256::from(0),
+                    expires: Some(1622543200),
+                },
+            ],
             evm_block_hash: None,
         }
     }
@@ -186,6 +200,7 @@ mod tests {
             last_retarget: 1622543200,
             solution_hash: H256::zero(),
             previous_solution_hash: H256::zero(),
+            last_epoch_hash: H256::random(),
             chunk_hash: H256::zero(),
             height: 42,
             block_hash: H256::zero(),

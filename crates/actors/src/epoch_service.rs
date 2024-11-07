@@ -1,4 +1,4 @@
-use actix::{Actor, Context};
+use actix::{Actor, Context, Handler, Message};
 use color_eyre::eyre::eyre;
 use database::data_ledger::*;
 use eyre::{Error, Result};
@@ -12,8 +12,8 @@ use std::collections::HashMap;
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug)]
 pub struct EpochServiceActor {
-    /// The previous epoch hash is used in the current epochs tasks as a reliable source of random
-    pub previous_epoch_hash: H256,
+    /// The previous epoch hash is used in the current epochs tasks as a reliable source of randomness
+    pub last_epoch_hash: H256,
     /// Encapsulates a list of data ledgers currently managed by the protocol
     pub ledgers: Ledgers,
     /// Data partition assignments mapped by partition hash
@@ -26,8 +26,42 @@ pub struct EpochServiceActor {
     pub miner_address: Address,
 }
 
-/// Temporary struct tracking partition assignments to miners - will be moved to database
+impl Actor for EpochServiceActor {
+    type Context = Context<Self>;
+}
+
+/// Sent when a new epoch block is reached (and at genesis)
+#[derive(Message, Debug)]
+#[rtype(result = "Result<(),EpochServiceError>")]
+pub struct NewEpochMessage(pub IrysBlockHeader);
+
+impl NewEpochMessage {
+    fn into_inner(self) -> IrysBlockHeader {
+        self.0
+    }
+}
+
+/// Reasons why the epoch service actors epoch tasks might fail
 #[derive(Debug)]
+pub enum EpochServiceError {
+    /// Catchall error until more detailed errors are added
+    InternalError,
+    NotAnEpochBlock,
+}
+
+impl Handler<NewEpochMessage> for EpochServiceActor {
+    type Result = Result<(), EpochServiceError>;
+    fn handle(&mut self, msg: NewEpochMessage, ctx: &mut Self::Context) -> Self::Result {
+        let new_epoch_block = msg.0;
+
+        self.perform_epoch_tasks(new_epoch_block)?;
+
+        Ok(())
+    }
+}
+
+/// Temporary struct tracking partition assignments to miners - will be moved to database
+#[derive(Debug, PartialEq)]
 pub struct PartitionAssignment {
     /// Hash of the partition
     pub partition_hash: H256,
@@ -39,15 +73,11 @@ pub struct PartitionAssignment {
     pub slot_index: Option<usize>,
 }
 
-impl Actor for EpochServiceActor {
-    type Context = Context<Self>;
-}
-
 impl EpochServiceActor {
     /// Create a new instance of the epoch service actor
-    pub fn new(last_epoch_hash: H256, miner_address: Address) -> Self {
+    pub fn new(miner_address: Address) -> Self {
         Self {
-            previous_epoch_hash: last_epoch_hash,
+            last_epoch_hash: H256::zero(),
             ledgers: Ledgers::new(),
             data_partitions: HashMap::new(),
             capacity_partitions: HashMap::new(),
@@ -57,10 +87,13 @@ impl EpochServiceActor {
     }
 
     /// Main worker function
-    pub fn perform_epoch_tasks(&mut self, new_epoch_block: IrysBlockHeader) -> Result<()> {
+    pub fn perform_epoch_tasks(
+        &mut self,
+        new_epoch_block: IrysBlockHeader,
+    ) -> Result<(), EpochServiceError> {
         // Validate this is an epoch block height
         if new_epoch_block.height % NUM_BLOCKS_IN_EPOCH != 0 {
-            return Err(eyre!("This is not an epoch block"));
+            return Err(EpochServiceError::NotAnEpochBlock);
         }
 
         self.try_genesis_init(&new_epoch_block);
@@ -82,7 +115,10 @@ impl EpochServiceActor {
     /// Initialize genesis state by generating initial capacity partition hashes
     /// if none exist
     fn try_genesis_init(&mut self, new_epoch_block: &IrysBlockHeader) {
-        if self.all_active_partitions.is_empty() && new_epoch_block.height == 1 {
+        if self.all_active_partitions.is_empty() && new_epoch_block.height == 0 {
+            // Store the genesis epoch hash
+            self.last_epoch_hash = new_epoch_block.last_epoch_hash;
+
             // Allocate 1 slot to each ledger and calculate the number of partitions
             let mut num_data_partitions = 0;
             for ledger_num in Ledger::iter() {
@@ -146,7 +182,7 @@ impl EpochServiceActor {
         capacity_partitions.sort_unstable();
 
         // Use the previous epoch hash as a seed/entropy to the prng
-        let seed = self.previous_epoch_hash.to_u32();
+        let seed = self.last_epoch_hash.to_u32();
         let mut rng = SimpleRNG::new(seed);
 
         // Loop though all of the ledgers processing their slot needs
@@ -192,22 +228,13 @@ impl EpochServiceActor {
 
     /// Computes active capacity partitions available for pledges based on
     /// data partitions and scaling factor
-    fn get_num_capacity_partitions(num_data_partitions: u64, capacity_scalar: u64) -> u64 {
-        // Convert total_data_partitions to f64 for the logarithmic and multiplication operations
-        let data_partitions_f64 = num_data_partitions as f64;
-        let capacity_scalar_f64 = capacity_scalar as f64;
+    fn get_num_capacity_partitions(data_partition_count: u64, scalar: u64) -> u64 {
+        let min_count = NUM_PARTITIONS_PER_SLOT * 2;
+        let base_count = std::cmp::max(data_partition_count, min_count);
 
-        // Submit and Publish ledgers both need at least one ledger index worth of data partitions
-        let minimum_partition_count = (NUM_PARTITIONS_PER_SLOT * 2) as f64;
+        let result = truncate_to_3_decimals((base_count as f64).log10()).ceil() * scalar as f64;
 
-        // Project capacity partitions based on data partitions in use
-        // Truncate the result of the log10() to minimize precision issues
-        // across platforms and architectures
-        let num_capacity_partitions =
-            truncate_to_3_decimals((data_partitions_f64 + minimum_partition_count).log10()).ceil()
-                * capacity_scalar_f64;
-
-        num_capacity_partitions.ceil() as u64
+        result.ceil() as u64
     }
 
     /// Adds new capacity partitions to the protocols pool of partitions. This
@@ -216,7 +243,7 @@ impl EpochServiceActor {
     fn add_capacity_partitions(&mut self, parts_to_add: u64) {
         let mut prev_partition_hash = *match self.all_active_partitions.last() {
             Some(last_hash) => last_hash,
-            None => &self.previous_epoch_hash,
+            None => &self.last_epoch_hash,
         };
 
         // Compute the partition hashes for all of the added partitions
@@ -343,5 +370,115 @@ impl SimpleRNG {
     /// Generates random number between 0 and max (exclusive)
     pub fn next_range(&mut self, max: u32) -> u32 {
         self.next() % max
+    }
+}
+
+//==============================================================================
+// Tests
+//------------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // use assert_matches::assert_matches;
+
+    #[actix::test]
+    async fn genesis_test() {
+        // Initialize genesis block at height 0
+        let mut genesis_block = IrysBlockHeader::new();
+        genesis_block.height = 0;
+
+        // Create epoch service with random miner address
+        let miner_address = Address::random();
+        let mut epoch_service = EpochServiceActor::new(miner_address);
+
+        // Process genesis message directly instead of through actor system
+        // This allows us to inspect the actor's state after processing
+        let _ = epoch_service.handle(NewEpochMessage(genesis_block), &mut Context::new());
+
+        // Verify the correct number of genesis partitions have been activated
+        assert_eq!(epoch_service.all_active_partitions.len(), 102);
+
+        // Verify the correct number of ledgers have been added
+        let expected_ledger_count = Ledger::ALL.len();
+        assert_eq!(epoch_service.ledgers.len(), expected_ledger_count);
+
+        // Verify each ledger has one slot and the correct number of partitions
+        let pub_slots = epoch_service.ledgers.get_slots(Ledger::Publish);
+        let sub_slots = epoch_service.ledgers.get_slots(Ledger::Submit);
+
+        assert_eq!(pub_slots.len(), 1);
+        assert_eq!(sub_slots.len(), 1);
+
+        assert_eq!(
+            pub_slots[0].partitions.len() as u64,
+            NUM_PARTITIONS_PER_SLOT
+        );
+        assert_eq!(
+            sub_slots[0].partitions.len() as u64,
+            NUM_PARTITIONS_PER_SLOT
+        );
+
+        let pub_ledger_num = Ledger::Publish as u64;
+        let sub_ledger_num = Ledger::Submit as u64;
+
+        // Verify data partition assignments match _PUBLISH_ ledger slots
+        for (slot_idx, slot) in pub_slots.iter().enumerate() {
+            for &partition_hash in &slot.partitions {
+                let assignment = epoch_service
+                    .data_partitions
+                    .get(&partition_hash)
+                    .expect("partition should be assigned");
+
+                assert_eq!(
+                    assignment,
+                    &PartitionAssignment {
+                        partition_hash,
+                        ledger_num: Some(pub_ledger_num),
+                        slot_index: Some(slot_idx),
+                        miner_address,
+                    }
+                );
+            }
+        }
+
+        // Verify data partition assignments match _SUBMIT_ledger slots
+        for (slot_idx, slot) in sub_slots.iter().enumerate() {
+            for &partition_hash in &slot.partitions {
+                let assignment = epoch_service
+                    .data_partitions
+                    .get(&partition_hash)
+                    .expect("partition should be assigned");
+
+                assert_eq!(
+                    assignment,
+                    &PartitionAssignment {
+                        partition_hash,
+                        ledger_num: Some(sub_ledger_num),
+                        slot_index: Some(slot_idx),
+                        miner_address,
+                    }
+                );
+            }
+        }
+
+        // Validate that all the capacity partitions are assigned to the
+        // bootstrap miner but not assigned to any ledger
+        for pair in &epoch_service.capacity_partitions {
+            let partition_hash = pair.0;
+            let ass = pair.1;
+            assert_eq!(
+                ass,
+                &PartitionAssignment {
+                    partition_hash: *partition_hash,
+                    ledger_num: None,
+                    slot_index: None,
+                    miner_address
+                }
+            )
+        }
+
+        // Debug output for verification
+        println!("Data Partitions: {:#?}", epoch_service.capacity_partitions);
+        println!("Ledger State: {:#?}", epoch_service.ledgers);
     }
 }

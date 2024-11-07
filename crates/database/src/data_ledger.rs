@@ -51,9 +51,21 @@ impl TermLedger {
             epoch_length,
         }
     }
+
+    /// Returns a slice of the ledgers slots
+    pub fn get_slots(&self) -> &Vec<LedgerSlot> {
+        &self.slots
+    }
+
     /// Returns indices of newly expired slots
     pub fn expire_old_slots(&mut self, epoch_height: u64) -> Vec<usize> {
         let mut expired_indices = Vec::new();
+
+        // Make sure enough blocks have transpired before calculating expiry height
+        if epoch_height < self.epoch_length * NUM_BLOCKS_IN_EPOCH {
+            return expired_indices;
+        }
+
         let expiry_height = epoch_height - self.epoch_length * NUM_BLOCKS_IN_EPOCH;
 
         // Collect indices of slots to expire
@@ -85,6 +97,8 @@ pub trait LedgerCore {
 
     /// Get the slot needs for the ledger, returning a vector of (slot index, number of partitions needed)
     fn get_slot_needs(&self) -> Vec<(usize, usize)>;
+
+    fn get_slots(&self) -> &Vec<LedgerSlot>;
 }
 
 impl LedgerCore for PermanentLedger {
@@ -119,6 +133,11 @@ impl LedgerCore for PermanentLedger {
                 }
             })
             .collect()
+    }
+
+    /// Returns a slice of the ledgers slots
+    fn get_slots(&self) -> &Vec<LedgerSlot> {
+        &self.slots
     }
 }
 
@@ -156,12 +175,19 @@ impl LedgerCore for TermLedger {
             })
             .collect()
     }
+
+    /// Returns a slice of the ledgers slots
+    fn get_slots(&self) -> &Vec<LedgerSlot> {
+        &self.slots
+    }
 }
 
 /// Names for each of the ledgers as well as their ledger_num discriminant
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ledger {
+    /// The permanent publish ledger
     Publish = 0,
+    /// An expiring term ledger used for submitting to the publish ledger
     Submit = 1,
     // Add more term ledgers as they exist
 }
@@ -195,6 +221,11 @@ impl Ledgers {
         }
     }
 
+    /// The number of ledgers being managed
+    pub fn len(&self) -> usize {
+        1 + self.term.len()
+    }
+
     /// Get all of the partition hashes that have expired out of term ledgers
     pub fn get_expired_partition_hashes(&mut self, epoch_height: u64) -> Vec<H256> {
         let mut expired_hashes: Vec<H256> = Vec::new();
@@ -208,6 +239,13 @@ impl Ledgers {
         }
 
         expired_hashes
+    }
+
+    pub fn get_slots(&self, ledger: Ledger) -> &Vec<LedgerSlot> {
+        match ledger {
+            Ledger::Publish => self.perm.get_slots(),
+            Ledger::Submit => self.term[0].get_slots(),
+        }
     }
 
     /// Get the slot needs for a given ledger.
