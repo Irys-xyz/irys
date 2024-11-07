@@ -10,6 +10,7 @@ members = [
     "crates/packing",
     "crates/database",
     "crates/storage",
+    "crates/testing-utils",
 ]
 resolver = "2"
 rust-version = "1.82"
@@ -35,7 +36,9 @@ rand = "0.8.5"
 
 alloy-rlp = "0.3.4"
 alloy-rpc-types = { path = "./ext/alloy/crates/rpc-types" }
-alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine" }
+alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine", features = [
+    "serde",
+] }
 reth-e2e-test-utils = { path = "./ext/reth/crates/e2e-test-utils" }
 alloy-serde = { path = "./ext/alloy/crates/serde", default-features = false }
 alloy-signer-local = { path = "./ext/alloy/crates/signer-local" }
@@ -115,6 +118,7 @@ jsonrpsee = "0.24"
 jsonrpsee-core = "0.24"
 jsonrpsee-http-client = "0.24"
 jsonrpsee-types = "0.24"
+futures-util = "0.3.30"
 
 
 [patch.crates-io]

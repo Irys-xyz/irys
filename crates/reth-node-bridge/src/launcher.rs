@@ -441,7 +441,7 @@ where
 
         let handle = NodeHandle {
             node_exit_future: NodeExitFuture::new(
-                async { rx.await? },
+                // async { rx.await? },
                 reload_rx,
                 full_node.config.debug.terminate,
             ),

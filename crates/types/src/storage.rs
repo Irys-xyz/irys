@@ -6,6 +6,8 @@ use std::{
 use nodit::{Interval, NoditMap};
 use serde::{Deserialize, Serialize};
 
+use crate::CHUNK_SIZE;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Storage provider config
 pub struct PartitionStorageProviderConfig {
@@ -18,6 +20,17 @@ pub struct PartitionStorageProviderConfig {
 pub struct StorageModuleConfig {
     pub directory_path: PathBuf,
     pub size_bytes: u64,
+    // pub chunks_per_lock_segment: u32,
+}
+
+impl Default for StorageModuleConfig {
+    fn default() -> Self {
+        Self {
+            directory_path: "/tmp".into(),
+            size_bytes: 100 * CHUNK_SIZE,
+            // chunks_per_lock_segment: 800, // 200MB
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

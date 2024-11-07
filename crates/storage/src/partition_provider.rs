@@ -8,6 +8,7 @@ use std::{
     fs::{remove_dir_all, File},
     io::Write as _,
     path::PathBuf,
+    sync::Arc,
 };
 
 use crate::state::StorageModule;
@@ -16,7 +17,7 @@ use crate::state::StorageModule;
 /// Storage provider - a wrapper struct around many storage modules
 pub struct PartitionStorageProvider {
     /// map of intervals to backing storage modules
-    pub sm_map: NoditMap<u32, Interval<u32>, StorageModule>,
+    pub sm_map: NoditMap<u32, Interval<u32>, Arc<StorageModule>>,
 }
 
 /// A storage provider provides a high level read/write interface over a backing set of storage modules, routing read and write requests to the correct SM
@@ -25,8 +26,11 @@ impl PartitionStorageProvider {
     pub fn from_config(config: PartitionStorageProviderConfig) -> eyre::Result<Self> {
         let mut map = NoditMap::new();
         for (i, cfg) in config.sm_paths_offsets {
-            map.insert_strict(i, StorageModule::new_or_load_from_disk(cfg.clone())?)
-                .unwrap();
+            map.insert_strict(
+                i,
+                Arc::new(StorageModule::new_or_load_from_disk(cfg.clone())?),
+            )
+            .unwrap();
         }
         // TODO @JesseTheRobot assert there are no gaps, assert the SM's combine to provide enough storage for the partition
 
@@ -35,7 +39,7 @@ impl PartitionStorageProvider {
 
     /// read a range of chunks using their partition-relative offsets
     pub fn read_chunks(
-        &mut self,
+        &self,
         read_interval: Interval<u32>,
         expected_state: Option<ChunkState>,
     ) -> eyre::Result<Vec<[u8; CHUNK_SIZE as usize]>> {
@@ -66,13 +70,13 @@ impl PartitionStorageProvider {
 
     /// write a vec of chunks to a partition-relative interval
     pub fn write_chunks(
-        &mut self,
+        &self,
         chunks: Vec<[u8; CHUNK_SIZE as usize]>,
         write_interval: Interval<u32>,
         expected_state: ChunkState,
         new_state: IntervalState,
     ) -> eyre::Result<()> {
-        let sm_iter = self.sm_map.overlapping_mut(write_interval);
+        let sm_iter = self.sm_map.overlapping(write_interval);
 
         if chunks.len() < (write_interval.width() + 1) as usize {
             return Err(eyre!("Chunks vec is too small for interval"));

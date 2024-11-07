@@ -57,8 +57,8 @@ macro_rules! vec_of_strings {
     ($($x:expr),*) => (vec![$($x.to_string()),*]);
 }
 
-#[global_allocator]
-static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
+// #[global_allocator]
+// static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
 pub type RethNode = NodeAdapter<
     FullNodeTypesAdapter<

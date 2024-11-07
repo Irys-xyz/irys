@@ -2,10 +2,11 @@ use std::{
     fs::{create_dir_all, read_to_string, File, OpenOptions},
     io::{Read, Seek as _, SeekFrom, Write},
     path::PathBuf,
+    sync::RwLock,
 };
 
 use irys_types::{
-    ChunkState, IntervalState, IntervalStateWrapped, StorageModuleConfig, CHUNK_SIZE,
+    ChunkBin, ChunkState, IntervalState, IntervalStateWrapped, StorageModuleConfig, CHUNK_SIZE,
     NUM_CHUNKS_IN_RECALL_RANGE,
 };
 use nodit::{
@@ -23,16 +24,21 @@ use eyre::eyre;
 const SM_STATE_FILE: &str = "state";
 const SM_DATA_FILE: &str = "data";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 /// Struct representing all the state of a storage module
 pub struct StorageModule {
     /// Path of the SM's storage file
     #[serde(skip)]
     pub path: PathBuf,
     /// Non-overlapping interval map representing the states of different segments of the SM
-    pub interval_map: NoditMap<u32, Interval<u32>, IntervalStateWrapped>,
+    pub interval_map: RwLock<NoditMap<u32, Interval<u32>, IntervalStateWrapped>>,
     /// capacity (in chunks) allocated to this storage module
     pub capacity: u32,
+    /// TODO @JesseTheRobot - implement segment locking
+    /// Map of fixed width (200MIB) segments to their corresponding rwlock
+    // pub lock_map: NoditMap<u32, Interval<u32>, RwLock<()>>,
+    /// Saved last configuration
+    pub config: StorageModuleConfig,
 }
 
 /// Storage modules act as our counterpart to a discrete storage device, one or more of which are used in sequence to build enough storage for a partition
@@ -47,6 +53,8 @@ impl StorageModule {
 
     /// creates a new storage module by loading state from disk
     pub fn load_from_disk(path: PathBuf) -> eyre::Result<Self> {
+        // TODO @JesseTheRobot - validate provided config against stored config
+        // perform any operations like resizing etc
         let s = read_to_string(path.join(SM_STATE_FILE))?;
         let state: Self = serde_json::from_str(s.as_str())?;
         Ok(state)
@@ -54,21 +62,27 @@ impl StorageModule {
 
     /// creates a new storage module if it can't load it from disk
     pub fn new_or_load_from_disk(config: StorageModuleConfig) -> eyre::Result<Self> {
-        let StorageModuleConfig {
-            directory_path: path,
-            size_bytes,
-        } = config;
-        if path.join(SM_STATE_FILE).exists() {
+        // let StorageModuleConfig {
+        //     directory_path: path,
+        //     size_bytes,
+        //     chunks_per_lock_segment: chunks_per_lock,
+        // } = config;
+        if config.directory_path.join(SM_STATE_FILE).exists() {
             // TODO: resize the SM based on the provided size
-            return StorageModule::load_from_disk(path);
+            return StorageModule::load_from_disk(config.directory_path);
         }
-        StorageModule::create_new(path, size_bytes)
+        StorageModule::create_new(config)
     }
 
     /// Create a *new SM* instance at the specified path with the specified capacity (in bytes)
     /// the file will be 0-allocated if it doesn't exist
-    pub fn create_new(directory_path: PathBuf, capacity_bytes: u64) -> eyre::Result<Self> {
-        let capacity_chunks = (capacity_bytes / CHUNK_SIZE) as u32;
+    pub fn create_new(config: StorageModuleConfig) -> eyre::Result<Self> {
+        let StorageModuleConfig {
+            directory_path,
+            size_bytes,
+            // chunks_per_lock_segment,
+        } = config.clone();
+        let capacity_chunks = (size_bytes / CHUNK_SIZE) as u32;
 
         let mut map = NoditMap::new();
 
@@ -90,12 +104,17 @@ impl StorageModule {
                 .unwrap();
             file.write_all(&[0]).unwrap();
         }
+        // create the lock tree, one interval for every N MB
+        // let lock_map: NoditMap<u32, Interval<u32>, RwLock<()>> = NoditMap::new();
 
         let sm = StorageModule {
             path: directory_path,
-            interval_map: map,
+            interval_map: RwLock::new(map),
             capacity: capacity_chunks,
+            config,
+            // lock_map,
         };
+
         sm.save_to_disk()?;
         return Ok(sm);
     }
@@ -110,7 +129,7 @@ impl StorageModule {
         &self,
         interval: Interval<u32>,
         expected_state: Option<ChunkState>,
-    ) -> eyre::Result<Vec<[u8; CHUNK_SIZE as usize]>> {
+    ) -> eyre::Result<Vec<ChunkBin>> {
         if interval.end() > self.capacity {
             return Err(eyre!("Read goes beyond SM capacity!"));
         }
@@ -123,7 +142,8 @@ impl StorageModule {
         if interval.start() > 0 {
             handle.seek(SeekFrom::Start(interval.start() as u64 * CHUNK_SIZE))?;
         }
-        let overlap_iter = self.interval_map.overlapping(interval);
+        let map = self.interval_map.read().unwrap();
+        let overlap_iter = map.overlapping(interval);
 
         let mut result = Vec::with_capacity(chunks_to_read.try_into()?);
 
@@ -157,7 +177,7 @@ impl StorageModule {
 
     /// Writes some chunks to an interval, and tags the written interval with new state
     pub fn write_chunks(
-        &mut self,
+        &self,
         chunks: Vec<[u8; CHUNK_SIZE as usize]>,
         interval: Interval<u32>,
         expected_state: ChunkState,
@@ -168,8 +188,8 @@ impl StorageModule {
                 "Storage module is too small for write interval",
             ));
         }
-
-        let overlap_iter = self.interval_map.overlapping(interval);
+        let mut map = self.interval_map.write().unwrap();
+        let overlap_iter = map.overlapping(interval);
 
         let chunks_to_write = interval.width() + 1;
 
@@ -216,9 +236,8 @@ impl StorageModule {
         //     .interval_map
         //     .insert_overwrite(interval, IntervalStateWrapped::new(new_state));
 
-        let _cut = self.interval_map.cut(interval);
-        let _ = self
-            .interval_map
+        let _cut = map.cut(interval);
+        let _ = map
             .insert_merge_touching_if_values_equal(interval, IntervalStateWrapped::new(new_state))
             .unwrap();
 
@@ -226,6 +245,15 @@ impl StorageModule {
         Ok(())
     }
 }
+
+// #[test]
+// fn a() -> eyre::Result<()> {
+//     let lckmap: RwLock<NoditMap<u32, Interval<u32>, RwLock<()>>> = RwLock::new(NoditMap::new());
+
+//     let m = lckmap.read()?.insert
+
+//     Ok(())
+// }
 
 // /// Resets an interval to `PackingState::Unpacked`
 // pub fn reset_range(

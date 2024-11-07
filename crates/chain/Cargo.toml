@@ -48,4 +48,7 @@ irys-api-server.workspace = true
 modular-bitfield.workspace = true
 reth-cli-runner.workspace = true
 test-fuzz.workspace = true
+futures-util.workspace = true
+futures.workspace = true
+reth-tracing.workspace = true
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }

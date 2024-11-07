@@ -9,6 +9,8 @@ use std::{fmt, str::FromStr};
 use crate::{
     option_u64_stringify, Arbitrary, Base64, Compact, H256List, IrysSignature, Signature, H256,
 };
+use alloy_primitives::{Address, B256};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
@@ -48,7 +50,7 @@ pub struct IrysBlockHeader {
 
     /// Address of the miner claiming the block reward, also used in validation
     /// of the poa chunks as the packing key.
-    pub reward_address: H256,
+    pub reward_address: Address,
 
     /// {KeyType, PubKey} - the public key the block was signed with. The only
     // supported KeyType is currently {rsa, 65537}.
@@ -64,6 +66,8 @@ pub struct IrysBlockHeader {
     /// Maintains the block->tx_root->data_root relationship for each block
     /// and ledger.
     pub ledgers: Vec<TransactionLedger>,
+
+    pub evm_block_hash: Option<B256>,
 }
 
 impl IrysBlockHeader {
@@ -87,7 +91,7 @@ impl IrysBlockHeader {
                 data_path: Base64::from_str("").unwrap(),
                 chunk: Base64::from_str("").unwrap(),
             },
-            reward_address: H256::zero(),
+            reward_address: Address::ZERO,
             reward_key: Base64::from_str("").unwrap(),
             signature: IrysSignature {
                 reth_signature: Signature::test_signature(),
@@ -99,6 +103,7 @@ impl IrysBlockHeader {
                 ledger_size: U256::from(100),
                 expires: Some(1622543200),
             }],
+            evm_block_hash: None,
         }
     }
 }
@@ -168,6 +173,7 @@ mod tests {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use serde_json;
     use std::str::FromStr;
+    use zerocopy::IntoBytes;
 
     #[test]
     fn test_irys_block_header_serialization() {
@@ -190,7 +196,7 @@ mod tests {
                 data_path: Base64::from_str("").unwrap(),
                 chunk: Base64::from_str("").unwrap(),
             },
-            reward_address: H256::zero(),
+            reward_address: Address::ZERO,
             reward_key: Base64::from_str("").unwrap(),
             signature: IrysSignature {
                 reth_signature: Signature::test_signature(),
@@ -202,6 +208,7 @@ mod tests {
                 ledger_size: U256::from(100),
                 expires: Some(1622543200),
             }],
+            evm_block_hash: Some(B256::ZERO),
         };
 
         // Use a specific seed

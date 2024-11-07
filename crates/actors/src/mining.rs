@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use actix::{Actor, Addr, Context, Handler, Message};
+use irys_storage::{ie, partition_provider::PartitionStorageProvider};
 use irys_types::{
     block_production::{Partition, SolutionContext},
     CHUNK_SIZE, H256, NUM_CHUNKS_IN_RECALL_RANGE, NUM_RECALL_RANGES_IN_PARTITION, U256,
@@ -7,24 +10,27 @@ use rand::{seq::SliceRandom, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use sha2::{Digest, Sha256};
 
-use crate::{block_producer::BlockProducerActor, chunk_storage::ChunkStorageActor};
+use crate::{
+    block_producer::BlockProducerActor, chunk_storage::ChunkStorageActor,
+    storage_provider::StorageProvider,
+};
 
 pub struct PartitionMiningActor {
     partition: Partition,
     block_producer_actor: Addr<BlockProducerActor>,
-    chunk_storage_addr: Addr<ChunkStorageActor>,
+    part_storage_provider: PartitionStorageProvider,
 }
 
 impl PartitionMiningActor {
     pub fn new(
         partition: Partition,
         block_producer_addr: Addr<BlockProducerActor>,
-        chunk_storage_addr: Addr<ChunkStorageActor>,
+        storage_provider: PartitionStorageProvider,
     ) -> Self {
         Self {
             partition,
             block_producer_actor: block_producer_addr,
-            chunk_storage_addr,
+            part_storage_provider: storage_provider,
         }
     }
 }
@@ -48,7 +54,12 @@ impl Handler<Seed> for PartitionMiningActor {
 
     fn handle(&mut self, seed: Seed, _ctx: &mut Context<Self>) -> Self::Result {
         let difficuly = get_latest_difficulty();
-        match mine_partition_with_seed(&self.partition, seed.into_inner(), difficuly) {
+        match mine_partition_with_seed(
+            &self.partition,
+            self.part_storage_provider.clone(),
+            seed.into_inner(),
+            difficuly,
+        ) {
             Some(s) => {
                 let _ = self.block_producer_actor.send(s);
             }
@@ -59,6 +70,7 @@ impl Handler<Seed> for PartitionMiningActor {
 
 fn mine_partition_with_seed(
     partition: &Partition,
+    storage_provider: PartitionStorageProvider,
     seed: H256,
     difficulty: U256,
 ) -> Option<SolutionContext> {
@@ -75,12 +87,15 @@ fn mine_partition_with_seed(
     let mut chunks_buffer: Vec<[u8; CHUNK_SIZE as usize]> =
         Vec::with_capacity((NUM_CHUNKS_IN_RECALL_RANGE * CHUNK_SIZE) as usize);
 
-    // TODO: read chunks. For now creates random
-    for _ in 0..NUM_CHUNKS_IN_RECALL_RANGE {
-        let mut data = [0u8; CHUNK_SIZE as usize];
-        rand::thread_rng().fill_bytes(&mut data);
-        chunks_buffer.push(data);
-    }
+    // // TODO: read chunks. For now creates random
+    // for _ in 0..NUM_CHUNKS_IN_RECALL_RANGE {
+    //     let mut data = [0u8; CHUNK_SIZE as usize];
+    //     rand::thread_rng().fill_bytes(&mut data);
+    //     chunks_buffer.push(data);
+    // }
+
+    // haven't tested this, but it looks correct :p
+    let chunks = storage_provider.read_chunks(ie(0, NUM_CHUNKS_IN_RECALL_RANGE as u32), None);
 
     let mut hasher = Sha256::new();
     for i in 0..NUM_CHUNKS_IN_RECALL_RANGE {

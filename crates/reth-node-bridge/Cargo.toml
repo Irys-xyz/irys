@@ -86,7 +86,7 @@ revm.workspace = true
 bs58 = "0.5.1"
 clap = "4.5.4"
 eyre = "0.6.12"
-futures-util = "0.3.30"
+futures-util.workspace = true
 # jsonrpsee = { version = "0.22", features = ["client", "macros", "server"] }
 jsonrpsee = { version = "0.24", features = ["client", "macros", "server"] }
 jsonrpsee-core = "0.24"
