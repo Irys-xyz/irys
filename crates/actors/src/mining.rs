@@ -94,7 +94,7 @@ fn mine_partition_with_seed(
     //     chunks_buffer.push(data);
     // }
 
-    // haven't tested this, but it looks correct :p
+    // haven't tested this, but it looks correct
     let chunks = storage_provider.read_chunks(ie(0, NUM_CHUNKS_IN_RECALL_RANGE as u32), None);
 
     let mut hasher = Sha256::new();

@@ -10,6 +10,8 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+use tracing::error;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::state::StorageModule;
 
@@ -110,6 +112,8 @@ impl PartitionStorageProvider {
 
 #[test]
 fn basic_storage_provider_test() -> eyre::Result<()> {
+    tracing_subscriber::FmtSubscriber::new().init();
+
     let config = PartitionStorageProviderConfig {
         sm_paths_offsets: vec![
             (
@@ -148,6 +152,7 @@ fn basic_storage_provider_test() -> eyre::Result<()> {
         },
     )?;
 
+    error!("after write!");
     let after_write = storage_provider.read_chunks(ii(0, 10), None)?;
 
     let empty_chunk = [0; CHUNK_SIZE as usize];

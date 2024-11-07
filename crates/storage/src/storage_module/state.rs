@@ -142,7 +142,10 @@ impl StorageModule {
         if interval.start() > 0 {
             handle.seek(SeekFrom::Start(interval.start() as u64 * CHUNK_SIZE))?;
         }
+
+        error!("getting read lock {:?}", &interval);
         let map = self.interval_map.read().unwrap();
+        error!("got read lock {:?}", &interval);
         let overlap_iter = map.overlapping(interval);
 
         let mut result = Vec::with_capacity(chunks_to_read.try_into()?);
@@ -188,7 +191,10 @@ impl StorageModule {
                 "Storage module is too small for write interval",
             ));
         }
+        error!("getting write lock {:?}", &interval);
         let mut map = self.interval_map.write().unwrap();
+        error!("got write lock {:?}", &interval);
+
         let overlap_iter = map.overlapping(interval);
 
         let chunks_to_write = interval.width() + 1;
@@ -202,7 +208,6 @@ impl StorageModule {
 
         let mut handle = OpenOptions::new()
             .write(true)
-            .create(true)
             .open(&self.path.join(SM_DATA_FILE))?;
 
         // move the handle to the requested start
@@ -223,7 +228,7 @@ impl StorageModule {
             while chunks_written < chunks_to_write {
                 // TODO @JesseTheRobot use vectored read and write
                 let written_bytes = handle.write(chunks.get(chunks_written as usize).unwrap())?;
-                debug!(
+                error!(
                     "written bytes {:?} to {:?} (pos: {:?})",
                     &written_bytes,
                     &interval,
@@ -240,7 +245,7 @@ impl StorageModule {
         let _ = map
             .insert_merge_touching_if_values_equal(interval, IntervalStateWrapped::new(new_state))
             .unwrap();
-
+        drop(map); // have to drop before saving, otherwise we deadlock
         self.save_to_disk()?;
         Ok(())
     }
