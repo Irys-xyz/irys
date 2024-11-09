@@ -1,7 +1,7 @@
 use irys_types::IrysBlockHeader;
 use reth_chainspec::ChainSpecBuilder;
 
-use super::IRYS_MAINNET;
+use super::chain::IRYS_MAINNET;
 
 /// A helper to build custom chain specs
 #[derive(Debug, Default, Clone)]

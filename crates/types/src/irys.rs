@@ -4,29 +4,37 @@ use crate::{
 };
 use alloy_core::primitives::keccak256;
 
+use alloy_signer::utils::secret_key_to_address;
 use eyre::Result;
 use k256::ecdsa::SigningKey;
 use rand::rngs::OsRng;
 
-pub struct Irys {
+#[derive(Debug, Clone)]
+
+pub struct IrysSigner {
     pub signer: SigningKey,
     pub chain_id: u64,
 }
 
 /// Encapsulates an Irys API for doing client type things, making transactions,
 /// signing them, posting them etc.
-impl Irys {
+impl IrysSigner {
     pub fn random_signer() -> Self {
-        Irys {
+        IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
             chain_id: IRYS_CHAIN_ID,
         }
     }
 
+    /// Returns the address associated with the signer's signing key
+    pub fn address(&self) -> Address {
+        secret_key_to_address(&self.signer)
+    }
+
     /// Creates a transaction from a data buffer, optional anchor hash for the
     /// transaction is supported. The txid will not be set until the transaction
     /// is signed with [sign_transaction]
-    pub async fn create_transaction(
+    pub fn create_transaction(
         &self,
         data: Vec<u8>,
         anchor: Option<H256>, //TODO!: more parameters as they are implemented
@@ -103,7 +111,7 @@ mod tests {
     use rand::Rng;
     use reth_primitives::recover_signer_unchecked;
 
-    use super::Irys;
+    use super::IrysSigner;
 
     #[tokio::test]
     async fn create_and_sign_transaction() {
@@ -113,7 +121,7 @@ mod tests {
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Create a new Irys API instance
-        let irys = Irys::random_signer();
+        let irys = IrysSigner::random_signer();
 
         // Create a transaction from the random bytes
         let mut tx = irys

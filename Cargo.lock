@@ -5184,8 +5184,15 @@ name = "irys-config"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "irys-primitives",
  "irys-storage",
  "irys-types",
+ "once_cell",
+ "reth-chainspec",
+ "reth-cli",
+ "reth-primitives",
+ "serde",
+ "tracing",
 ]
 
 [[package]]
@@ -5321,6 +5328,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-rpc-types-engine",
  "alloy-serde",
+ "alloy-signer",
  "arbitrary",
  "assert_matches",
  "base58",

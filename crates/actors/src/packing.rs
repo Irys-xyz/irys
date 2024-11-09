@@ -9,7 +9,7 @@ use std::{
 use actix::{Actor, Context, Handler, Message};
 use irys_primitives::IrysTxId;
 use irys_storage::StorageProvider;
-use irys_types::{irys::Irys, Address, ChunkState, Interval, IntervalState, U256};
+use irys_types::{irys::IrysSigner, Address, ChunkState, Interval, IntervalState, U256};
 use packing::capacity_pack_range_with_data;
 use tokio::runtime::Handle;
 
@@ -90,7 +90,11 @@ impl PackingActor {
 }
 
 fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
-    assert!(input.len() % N != 0, "Input vector must have a length of {}", N);
+    assert!(
+        input.len() % N != 0,
+        "Input vector must have a length of {}",
+        N
+    );
     let length = input.len() / N;
 
     unsafe {

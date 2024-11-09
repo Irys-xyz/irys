@@ -1,7 +1,7 @@
 use alloy_rpc_types::BlockId;
 use alloy_signer_local::LocalWallet;
 use foldhash::fast::RandomState;
-use irys_primitives::{Address, Genesis};
+use irys_primitives::{Address, Genesis, ShadowReceipt};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use jsonrpsee_core::async_trait;
 use jsonrpsee_types::ErrorObjectOwned;
@@ -9,7 +9,7 @@ use jsonrpsee_types::ErrorObjectOwned;
 use reth::network::{NetworkHandle, PeersHandleProvider};
 
 use reth::payload::database::CachedReads;
-use reth::primitives::{Account, ShadowReceipt};
+use reth::primitives::Account;
 use reth::revm::database::StateProviderDatabase;
 use reth::revm::state_change::simulate_apply_shadow_thin;
 use reth::transaction_pool::{PeerId, TransactionPool};

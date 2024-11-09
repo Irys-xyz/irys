@@ -43,7 +43,7 @@ async fn post_tx_and_chunks_golden_path() {
         block_producer::BlockProducerActor, mempool::MempoolActor, packing::PackingActor,
     };
     use awc::http::StatusCode;
-    use irys_types::{chunk, hash_sha256, irys::Irys, Base64, Chunk, H256, MAX_CHUNK_SIZE};
+    use irys_types::{chunk, hash_sha256, irys::IrysSigner, Base64, Chunk, H256, MAX_CHUNK_SIZE};
     use tokio::runtime::Handle;
 
     use rand::Rng;
@@ -84,7 +84,7 @@ async fn post_tx_and_chunks_golden_path() {
     rand::thread_rng().fill(&mut data_bytes[..]);
 
     // Create a new Irys API instance & a signed transaction
-    let irys = Irys::random_signer();
+    let irys = IrysSigner::random_signer();
     let tx = irys
         .create_transaction(data_bytes.clone(), None)
         .await

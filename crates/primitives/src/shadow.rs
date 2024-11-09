@@ -2,6 +2,7 @@
 use alloy_primitives::bytes;
 use bytes::Buf;
 use reth_codecs::Compact;
+use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
@@ -472,3 +473,34 @@ impl From<Vec<ShadowTx>> for Shadows {
 //         ()
 //     }
 // }
+
+// #[cfg_attr(feature = "zstd-codec", main_codec(no_arbitrary, zstd))]
+// #[cfg_attr(not(feature = "zstd-codec"), main_codec(no_arbitrary))]
+// #[add_arbitrary_tests]
+// #[derive(Clone, Debug, PartialEq, Eq, Default, RlpEncodable, RlpDecodable)]
+// #[rlp(trailing)]
+// pub struct ShadowReceipt {
+//     pub tx_type: ShadowTxType,
+//     pub success: bool,
+// }
+
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+// #[rlp(trailing)]
+pub struct ShadowReceipt {
+    pub tx_id: IrysTxId,
+    pub tx_type: ShadowTxType,
+    pub result: ShadowResult,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ShadowResult {
+    #[default]
+    Success,
+    OutOfFunds,
+    OverflowPayment,
+    Failure,
+    AlreadyStaked,
+    NoPledges,
+    NoMatchingPledge,
+    AlreadyPledged,
+}

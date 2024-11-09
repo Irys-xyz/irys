@@ -1,25 +1,20 @@
-use crate::partitions::mine_partition;
-use ::database::{config::get_data_dir, open_or_create_db, tables::Tables};
-use actix::{Actor, Addr, Arbiter, System};
+use ::database::tables::Tables;
+use actix::Actor;
 use actors::{
     block_producer::BlockProducerActor,
-    chunk_storage::ChunkStorageActor,
     mempool::{self, MempoolActor},
     mining::PartitionMiningActor,
     packing::PackingActor,
     ActorAddresses,
 };
-use clap::Parser;
 use irys_api_server::run_server;
 use irys_config::IrysNodeConfig;
-pub use irys_reth_node_bridge::{
-    chainspec,
-    node::{RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider},
-    IrysChainSpecBuilder,
+pub use irys_reth_node_bridge::node::{
+    RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 use irys_storage::{partition_provider::PartitionStorageProvider, StorageProvider};
 use irys_types::{
-    app_state::{AppState, DatabaseProvider},
+    app_state::DatabaseProvider,
     block_production::{Partition, PartitionId},
     H256,
 };
@@ -62,6 +57,7 @@ pub struct IrysNodeCtx {
     pub storage_provider: StorageProvider,
     pub actor_addresses: ActorAddresses,
     pub db: DatabaseProvider,
+    pub config: IrysNodeConfig,
 }
 
 pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
@@ -70,72 +66,80 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
     let (irys_node_handle_sender, irys_node_handle_receiver) = oneshot::channel::<IrysNodeCtx>();
     // Spawn thread and runtime for actors
     let node_config_copy = node_config.clone();
-    std::thread::spawn(move || {
-        let rt = actix_rt::Runtime::new().unwrap();
-        let node_config = node_config_copy;
-        rt.block_on(async move {
-            // the RethNodeHandle doesn't *need* to be Arc, but it will reduce the copy cost
-            let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
-            let db = DatabaseProvider(reth_node.provider.database.db.clone());
+    std::thread::Builder::new()
+        .name("actor-main-thread".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let rt = actix_rt::Runtime::new().unwrap();
+            let node_config = node_config_copy;
+            rt.block_on(async move {
+                // the RethNodeHandle doesn't *need* to be Arc, but it will reduce the copy cost
+                let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
+                let db = DatabaseProvider(reth_node.provider.database.db.clone());
 
-            let mempool_actor = MempoolActor::new(db.clone());
-            let mempool_actor_addr = mempool_actor.start();
+                let mempool_actor = MempoolActor::new(db.clone());
+                let mempool_actor_addr = mempool_actor.start();
 
-            let mut part_actors = Vec::new();
+                let mut part_actors = Vec::new();
 
-            let block_producer_actor =
-                BlockProducerActor::new(db.clone(), mempool_actor_addr.clone(), reth_node.clone());
-            let block_producer_addr = block_producer_actor.start();
-
-            let mut partition_storage_providers =
-                HashMap::<PartitionId, PartitionStorageProvider>::new();
-
-            for (part, storage_provider) in node_config.sm_partition_config {
-                partition_storage_providers.insert(part.id, storage_provider.clone());
-
-                let partition_mining_actor = PartitionMiningActor::new(
-                    part,
+                let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
-                    block_producer_addr.clone(),
-                    storage_provider,
+                    mempool_actor_addr.clone(),
+                    reth_node.clone(),
                 );
-                part_actors.push(partition_mining_actor.start());
-            }
+                let block_producer_addr = block_producer_actor.start();
 
-            let storage_provider = StorageProvider::new(Some(partition_storage_providers));
+                let mut partition_storage_providers =
+                    HashMap::<PartitionId, PartitionStorageProvider>::new();
 
-            let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
+                for (part, storage_provider_config) in node_config.sm_partition_config.clone() {
+                    let storage_provider =
+                        PartitionStorageProvider::from_config(storage_provider_config).unwrap();
+                    partition_storage_providers.insert(part.id, storage_provider.clone());
 
-            let part_actors_clone = part_actors.clone();
-            std::thread::spawn(move || run_vdf(H256::random(), new_seed_rx, part_actors));
+                    let partition_mining_actor = PartitionMiningActor::new(
+                        part,
+                        db.clone(),
+                        block_producer_addr.clone(),
+                        storage_provider,
+                    );
+                    part_actors.push(partition_mining_actor.start());
+                }
 
-            let packing_actor_addr =
-                PackingActor::new(Handle::current(), storage_provider.clone()).start();
+                let storage_provider = StorageProvider::new(Some(partition_storage_providers));
 
-            let actor_addresses = ActorAddresses {
-                partitions: part_actors_clone,
-                block_producer: block_producer_addr,
-                packing: packing_actor_addr,
-                mempool: mempool_actor_addr,
-            };
+                let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
-            let _ = irys_node_handle_sender.send(IrysNodeCtx {
-                storage_provider,
-                actor_addresses: actor_addresses.clone(),
-                reth_handle: reth_node,
-                db: db.clone(),
+                let part_actors_clone = part_actors.clone();
+                std::thread::spawn(move || run_vdf(H256::random(), new_seed_rx, part_actors));
+
+                let packing_actor_addr =
+                    PackingActor::new(Handle::current(), storage_provider.clone()).start();
+
+                let actor_addresses = ActorAddresses {
+                    partitions: part_actors_clone,
+                    block_producer: block_producer_addr,
+                    packing: packing_actor_addr,
+                    mempool: mempool_actor_addr,
+                };
+
+                let _ = irys_node_handle_sender.send(IrysNodeCtx {
+                    storage_provider,
+                    actor_addresses: actor_addresses.clone(),
+                    reth_handle: reth_node,
+                    db: db.clone(),
+                    config: node_config,
+                });
+
+                run_server(actor_addresses).await;
             });
+        })?;
 
-            run_server(actor_addresses).await;
-        });
-    });
-
-    let builder = IrysChainSpecBuilder::mainnet();
-    let reth_chainspec = builder.reth_builder.build();
+    let reth_chainspec = node_config.chainspec_builder.reth_builder.clone().build();
     let node_config_copy = node_config.clone();
     // run reth in it's own thread w/ it's own tokio runtime
     // this is done as reth exhibits strange behaviour (notably channel dropping) when not in it's own context/when the exit future isn't been awaited
-    std::thread::Builder::new()
+    std::thread::Builder::new().name("reth-thread".to_string())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
             let node_config= node_config_copy;

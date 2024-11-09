@@ -4,31 +4,44 @@ use std::{
     str::FromStr as _,
 };
 
+use chain::chainspec::IrysChainSpecBuilder;
 use irys_storage::{ii, partition_provider::PartitionStorageProvider};
 use irys_types::{
-    block_production::Partition, PartitionStorageProviderConfig, StorageModuleConfig, CHUNK_SIZE,
+    block_production::Partition, irys::IrysSigner, PartitionStorageProviderConfig,
+    StorageModuleConfig, CHUNK_SIZE,
 };
 
+pub mod chain;
+
 // TODO: convert this into a set of clap args
+
 #[derive(Debug, Clone)]
+/// Top level configuration struct for the node
 pub struct IrysNodeConfig {
+    /// Signer instance used for mining
+    pub mining_signer: IrysSigner,
     /// Node ID/instance number: used for testing
-    pub node_id: u32,
+    pub instance_number: u32,
     /// configuration of partitions and their associated storage providers
     /// TODO: rework
-    pub sm_partition_config: Vec<(Partition, PartitionStorageProvider)>,
+    pub sm_partition_config: Vec<(Partition, PartitionStorageProviderConfig)>,
     /// base data directory, i.e `./.tmp`
     /// should not be used directly, instead use the appropriate methods, i.e `instance_directory`
     pub base_directory: PathBuf,
+    /// ChainSpec builder - used to generate ChainSpec, which defines most of the chain-related parameters
+    pub chainspec_builder: IrysChainSpecBuilder,
 }
 
+/// "sane" default configuration
 impl Default for IrysNodeConfig {
     fn default() -> Self {
-        let base_dir = absolute(PathBuf::from_str("./.tmp").unwrap()).unwrap();
+        let base_dir = absolute(PathBuf::from_str("../../.tmp").unwrap()).unwrap();
         Self {
-            node_id: 0,
+            chainspec_builder: IrysChainSpecBuilder::mainnet(),
+            mining_signer: IrysSigner::random_signer(),
+            instance_number: 0,
             sm_partition_config: get_default_partitions_and_storage_providers(
-                base_dir.join("storage_modules"),
+                base_dir.join("0/storage_modules"),
             )
             .unwrap(),
             base_directory: base_dir,
@@ -36,65 +49,119 @@ impl Default for IrysNodeConfig {
     }
 }
 impl IrysNodeConfig {
+    /// get the instance-specific directory path
     pub fn instance_directory(&self) -> PathBuf {
-        self.base_directory.join(self.node_id.to_string())
+        self.base_directory.join(self.instance_number.to_string())
     }
+    /// get the instance-specific storage module directory path
     pub fn storage_module_dir(&self) -> PathBuf {
         self.instance_directory().join("storage_modules")
     }
+    /// get the instance-specific reth data directory path
     pub fn reth_data_dir(&self) -> PathBuf {
         self.instance_directory().join("reth")
     }
+    /// get the instance-specific reth log directory path
     pub fn reth_log_dir(&self) -> PathBuf {
         self.reth_data_dir().join("logs")
     }
 }
-
+/// get a set of preconfigured partitions and storage modules
 pub fn get_default_partitions_and_storage_providers(
     storage_module_dir: PathBuf,
-) -> eyre::Result<Vec<(Partition, PartitionStorageProvider)>> {
+) -> eyre::Result<Vec<(Partition, PartitionStorageProviderConfig)>> {
     Ok(vec![
         (
             Partition::default(),
-            PartitionStorageProvider::from_config(PartitionStorageProviderConfig {
+            PartitionStorageProviderConfig {
                 sm_paths_offsets: vec![
                     (
                         ii(0, 3),
                         StorageModuleConfig {
-                            directory_path: storage_module_dir.join("/p1/sm1"),
+                            directory_path: storage_module_dir.join("p1/sm1"),
                             size_bytes: 10 * CHUNK_SIZE,
                         },
                     ),
                     (
                         ii(4, 10),
                         StorageModuleConfig {
-                            directory_path: storage_module_dir.join("/p1/sm2"),
+                            directory_path: storage_module_dir.join("p1/sm2"),
                             size_bytes: 10 * CHUNK_SIZE,
                         },
                     ),
                 ],
-            })?,
+            },
         ),
         (
             Partition::default(),
-            PartitionStorageProvider::from_config(PartitionStorageProviderConfig {
+            PartitionStorageProviderConfig {
                 sm_paths_offsets: vec![
                     (
                         ii(0, 5),
                         StorageModuleConfig {
-                            directory_path: storage_module_dir.join("/p2/sm1"),
+                            directory_path: storage_module_dir.join("p2/sm1"),
                             size_bytes: 10 * CHUNK_SIZE,
                         },
                     ),
                     (
                         ii(6, 10),
                         StorageModuleConfig {
-                            directory_path: storage_module_dir.join("/p2/sm2"),
+                            directory_path: storage_module_dir.join("p2/sm2"),
                             size_bytes: 10 * CHUNK_SIZE,
                         },
                     ),
                 ],
-            })?,
+            },
         ),
     ])
 }
+
+// pub struct IrysConfigBuilder {
+//     /// Signer instance used for mining
+//     pub mining_signer: Option<IrysSigner>,
+//     /// Node ID/instance number: used for testing
+//     pub instance_number: u32,
+//     /// configuration of partitions and their associated storage providers
+//     /// TODO: rework
+//     pub sm_partition_config: Option<Vec<(Partition, PartitionStorageProviderConfig)>>,
+//     /// base data directory, i.e `./.tmp`
+//     /// should not be used directly, instead use the appropriate methods, i.e `instance_directory`
+//     pub base_directory: PathBuf,
+//     /// ChainSpec builder - used to generate ChainSpec, which defines most of the chain-related parameters
+//     pub chainspec_builder: IrysChainSpecBuilder,
+// }
+
+// impl Default for IrysConfigBuilder {
+//     fn default() -> Self {
+//         Self {
+//             ..Default::default()
+//         }
+//     }
+// }
+
+// impl IrysConfigBuilder {
+//     pub fn new() -> Self {
+//         return IrysConfigBuilder::default();
+//     }
+//     pub fn instance_number(mut self, number: u32) -> Self {
+//         self.instance_number = number;
+//         self
+//     }
+//     pub fn base_directory(mut self, path: PathBuf) -> Self {
+//         self.base_directory = path;
+//         self
+//     }
+//     pub fn base_directory(mut self, path: PathBuf) -> Self {
+//         self.base_directory = path;
+//         self
+//     }
+//     pub fn add_partition_and_sm(mut self, partition: Partition, storage_module: )
+//     pub fn mainnet() -> Self {
+//         return IrysConfigBuilder::new()
+//             .base_directory(absolute(PathBuf::from_str("../../.irys").unwrap()).unwrap());
+//     }
+
+//     pub fn build(self) -> IrysNodeConfig {
+//         return self.config;
+//     }
+// }

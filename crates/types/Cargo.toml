@@ -28,6 +28,7 @@ openssl.workspace = true
 
 reth-db.workspace = true
 alloy-core.workspace = true
+alloy-signer.workspace = true
 alloy-genesis.workspace = true
 alloy-primitives.workspace = true
 alloy-serde.workspace = true

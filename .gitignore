@@ -3,3 +3,4 @@
 **/.DS_Store
 ./database
 ./crates/chain/database
+.tmp

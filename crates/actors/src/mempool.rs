@@ -5,7 +5,9 @@ use irys_types::{
 };
 use reth_db::DatabaseEnv;
 use std::{
-    collections::{BTreeMap, HashMap}, ops::Rem, sync::Arc
+    collections::{BTreeMap, HashMap},
+    ops::Rem,
+    sync::Arc,
 };
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
@@ -182,7 +184,11 @@ impl Handler<GetBestMempoolTxs> for MempoolActor {
     type Result = Vec<IrysTransactionHeader>;
 
     fn handle(&mut self, msg: GetBestMempoolTxs, ctx: &mut Self::Context) -> Self::Result {
-        self.valid_tx.iter().take(10).map(|(_, header)| header.clone()).collect()
+        self.valid_tx
+            .iter()
+            .take(10)
+            .map(|(_, header)| header.clone())
+            .collect()
     }
 }
 
@@ -197,7 +203,7 @@ impl Handler<RemoveConfirmedTxs> for MempoolActor {
     fn handle(&mut self, msg: RemoveConfirmedTxs, ctx: &mut Self::Context) -> Self::Result {
         for tx_id in msg.0 {
             self.valid_tx.remove(&tx_id);
-        };
+        }
     }
 }
 
@@ -208,7 +214,7 @@ impl Handler<RemoveConfirmedTxs> for MempoolActor {
 mod tests {
     use assert_matches::assert_matches;
     use database::{config::get_data_dir, open_or_create_db};
-    use irys_types::{irys::Irys, Base64, MAX_CHUNK_SIZE};
+    use irys_types::{irys::IrysSigner, Base64, MAX_CHUNK_SIZE};
     use rand::Rng;
 
     use super::*;
@@ -233,7 +239,7 @@ mod tests {
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Create a new Irys API instance & a signed transaction
-        let irys = Irys::random_signer();
+        let irys = IrysSigner::random_signer();
         let tx = irys
             .create_transaction(data_bytes.clone(), None)
             .await
@@ -246,7 +252,7 @@ mod tests {
         // Wrap the transaction in a TxIngressMessage
         let data_root = tx.header.data_root;
         let data_size = tx.header.data_size;
-        let tx_ingress_msg = TxIngressMessage { 0: tx.header };
+        let tx_ingress_msg = TxIngressMessage(tx.header);
 
         // Post the TxIngressMessage to the handle method on the mempool actor
         let result = addr.send(tx_ingress_msg).await.unwrap();

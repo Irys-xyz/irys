@@ -45,7 +45,6 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::{
-    chainspec::IrysChainSpecParser,
     launcher::CustomEngineNodeLauncher,
     rpc::{AccountStateExt, AccountStateExtApiServer},
 };
@@ -102,6 +101,12 @@ impl Deref for RethNodeProvider {
     }
 }
 
+impl Into<RethNodeHandle> for RethNodeProvider {
+    fn into(self) -> RethNodeHandle {
+        self.0.as_ref().clone()
+    }
+}
+
 pub async fn run_node<T: HasName + HasTableType>(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
@@ -148,7 +153,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     };
 
     args.insert(0, bp.to_string());
-    dbg!(format!("discarding os args: {:?}", os_args));
+    info!("discarding os args: {:?}", os_args);
     // args.append(&mut os_args);
     // // dbg!(&args);
     info!("Running with args: {:#?}", &args);
