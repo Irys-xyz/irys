@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::remove_dir_all};
+use std::{collections::HashMap, fs::remove_dir_all, time::Duration};
 
 use actors::mempool::TxIngressMessage;
 use alloy_core::primitives::U256;
@@ -12,6 +12,8 @@ use reth_primitives::{
     irys_primitives::{IrysTxId, ShadowResult},
     GenesisAccount,
 };
+use tokio::time::sleep;
+use tracing::info;
 
 #[tokio::test]
 async fn test_blockprod() -> eyre::Result<()> {
@@ -106,6 +108,49 @@ async fn test_blockprod() -> eyre::Result<()> {
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn mine_ten_blocks() -> eyre::Result<()> {
+    let mut config = IrysNodeConfig::default();
+    remove_dir_all(&config.base_directory)?;
+
+    let node = start_for_testing(config).await?;
+
+    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+
+    for i in 1..10 {
+        info!("mining block {}", i);
+
+        let (block, reth_exec_env) = node
+            .actor_addresses
+            .block_producer
+            .send(SolutionContext {
+                partition_id: 0,
+                chunk_index: 0,
+                mining_address: node.config.mining_signer.address(),
+            })
+            .await?
+            .unwrap();
+
+        //check reth for built block
+        let reth_block = reth_context
+            .inner
+            .provider
+            .block_by_hash(block.evm_block_hash)?
+            .unwrap();
+        assert_eq!(i, reth_block.header.number as u32);
+        // height is hardcoded at 42 right now
+        // assert_eq!(reth_block.number, block.height);
+
+        // check irys DB for built block
+        let db_irys_block = database::block_by_hash(&node.db, block.block_hash)?.unwrap();
+
+        assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
+
+        sleep(Duration::from_secs(1)).await;
+    }
     Ok(())
 }
 
