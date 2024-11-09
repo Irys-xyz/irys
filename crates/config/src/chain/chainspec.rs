@@ -1,4 +1,5 @@
-use irys_types::IrysBlockHeader;
+use irys_primitives::GenesisAccount;
+use irys_types::{Address, IrysBlockHeader};
 use reth_chainspec::ChainSpecBuilder;
 
 use super::chain::IRYS_MAINNET;
@@ -27,6 +28,22 @@ impl IrysChainSpecBuilder {
         Self {
             ..Default::default()
         }
+    }
+
+    /// extend the genesis accounts
+    pub fn extend_accounts(
+        &mut self,
+        accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
+    ) -> &mut Self {
+        let new_genesis = self
+            .reth_builder
+            .genesis
+            .as_ref()
+            .unwrap()
+            .clone()
+            .extend_accounts(accounts);
+        self.reth_builder = self.reth_builder.clone().genesis(new_genesis);
+        self
     }
 }
 

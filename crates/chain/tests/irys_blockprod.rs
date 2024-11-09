@@ -23,8 +23,7 @@ async fn test_blockprod() -> eyre::Result<()> {
     let account2 = IrysSigner::random_signer();
     let account3 = IrysSigner::random_signer();
 
-    // TODO @JesseTheRobot this API sucks, fix it
-    let m_genesis = IRYS_MAINNET.genesis.clone().extend_accounts(vec![
+    config.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -47,9 +46,6 @@ async fn test_blockprod() -> eyre::Result<()> {
             },
         ),
     ]);
-
-    config.chainspec_builder.reth_builder =
-        config.chainspec_builder.reth_builder.genesis(m_genesis);
 
     let node = start_for_testing(config).await?;
 

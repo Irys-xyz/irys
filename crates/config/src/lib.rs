@@ -5,9 +5,10 @@ use std::{
 };
 
 use chain::chainspec::IrysChainSpecBuilder;
+use irys_primitives::GenesisAccount;
 use irys_storage::{ii, partition_provider::PartitionStorageProvider};
 use irys_types::{
-    block_production::Partition, irys::IrysSigner, PartitionStorageProviderConfig,
+    block_production::Partition, irys::IrysSigner, Address, PartitionStorageProviderConfig,
     StorageModuleConfig, CHUNK_SIZE,
 };
 
@@ -65,6 +66,15 @@ impl IrysNodeConfig {
     pub fn reth_log_dir(&self) -> PathBuf {
         self.reth_data_dir().join("logs")
     }
+    /// Extend the configured genesis accounts
+    /// These accounts are used as the genesis state for the chain
+    pub fn extend_genesis_accounts(
+        &mut self,
+        accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
+    ) -> &mut Self {
+        self.chainspec_builder.extend_accounts(accounts);
+        self
+    }
 }
 /// get a set of preconfigured partitions and storage modules
 pub fn get_default_partitions_and_storage_providers(
@@ -118,12 +128,12 @@ pub fn get_default_partitions_and_storage_providers(
 
 // pub struct IrysConfigBuilder {
 //     /// Signer instance used for mining
-//     pub mining_signer: Option<IrysSigner>,
+//     pub mining_signer: IrysSigner,
 //     /// Node ID/instance number: used for testing
 //     pub instance_number: u32,
 //     /// configuration of partitions and their associated storage providers
 //     /// TODO: rework
-//     pub sm_partition_config: Option<Vec<(Partition, PartitionStorageProviderConfig)>>,
+//     pub sm_partition_config_builder: Box<dyn Fn(PathBuf) -> Vec<(Partition, PartitionStorageProviderConfig)>>,
 //     /// base data directory, i.e `./.tmp`
 //     /// should not be used directly, instead use the appropriate methods, i.e `instance_directory`
 //     pub base_directory: PathBuf,
@@ -134,7 +144,11 @@ pub fn get_default_partitions_and_storage_providers(
 // impl Default for IrysConfigBuilder {
 //     fn default() -> Self {
 //         Self {
-//             ..Default::default()
+//             instance_number: 0,
+//             base_directory:absolute(PathBuf::from_str("../../.tmp").unwrap()).unwrap(),
+//             chainspec_builder: IrysChainSpecBuilder::mainnet(),
+//             mining_signer: IrysSigner::random_signer(),
+//             sm_partition_config_builder: Box::new(|_: PathBuf| { Vec::new()})
 //         }
 //     }
 // }
@@ -151,17 +165,18 @@ pub fn get_default_partitions_and_storage_providers(
 //         self.base_directory = path;
 //         self
 //     }
-//     pub fn base_directory(mut self, path: PathBuf) -> Self {
-//         self.base_directory = path;
-//         self
-//     }
-//     pub fn add_partition_and_sm(mut self, partition: Partition, storage_module: )
+//     // pub fn base_directory(mut self, path: PathBuf) -> Self {
+//     //     self.base_directory = path;
+//     //     self
+//     // }
+//     // pub fn add_partition_and_sm(mut self, partition: Partition, storage_module: )
 //     pub fn mainnet() -> Self {
 //         return IrysConfigBuilder::new()
 //             .base_directory(absolute(PathBuf::from_str("../../.irys").unwrap()).unwrap());
 //     }
 
-//     pub fn build(self) -> IrysNodeConfig {
+//     pub fn build(mut self) -> IrysNodeConfig {
+//         let sm_partition_config = self.sm_partition_config_builder
 //         return self.config;
 //     }
 // }
