@@ -7,10 +7,8 @@ use irys_storage::{ie, partition_provider::PartitionStorageProvider};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::{
     block_production::{Partition, SolutionContext},
-    CHUNK_SIZE, H256, NUM_CHUNKS_IN_RECALL_RANGE, NUM_RECALL_RANGES_IN_PARTITION, U256,
+    Ranges, CHUNK_SIZE, H256, NUM_CHUNKS_IN_RECALL_RANGE, NUM_RECALL_RANGES_IN_PARTITION, U256,
 };
-use rand::{seq::SliceRandom, RngCore, SeedableRng};
-use rand_chacha::ChaCha20Rng;
 use sha2::{Digest, Sha256};
 
 pub struct PartitionMiningActor {
@@ -18,6 +16,7 @@ pub struct PartitionMiningActor {
     database_provider: DatabaseProvider,
     block_producer_actor: Addr<BlockProducerActor>,
     part_storage_provider: PartitionStorageProvider,
+    ranges: Ranges,
 }
 
 impl PartitionMiningActor {
@@ -32,6 +31,7 @@ impl PartitionMiningActor {
             database_provider,
             block_producer_actor: block_producer_addr,
             part_storage_provider: storage_provider,
+            ranges: Ranges::new(),
         }
     }
 
@@ -40,22 +40,19 @@ impl PartitionMiningActor {
         seed: H256,
         difficulty: U256,
     ) -> Option<SolutionContext> {
-        // TODO: add a partition_state that keeps track of efficient sampling
-        let mut rng = ChaCha20Rng::from_seed(seed.into());
-
-        // For now, Pick a random recall range in the partition
-        let recall_range_index = rng.next_u64() % NUM_RECALL_RANGES_IN_PARTITION;
+        // efficient sampling
+        let recall_range_index = self.ranges.next_recall_range(seed);
 
         // Starting chunk index within partition
-        let start_chunk_index = (recall_range_index * NUM_CHUNKS_IN_RECALL_RANGE) as usize;
+        let start_chunk_index = recall_range_index * NUM_CHUNKS_IN_RECALL_RANGE as u32;
 
         // haven't tested this, but it looks correct
         let chunks = self
             .part_storage_provider
             .read_chunks(
                 ie(
-                    start_chunk_index as u32,
-                    start_chunk_index as u32 + NUM_CHUNKS_IN_RECALL_RANGE as u32,
+                    start_chunk_index,
+                    start_chunk_index + NUM_CHUNKS_IN_RECALL_RANGE as u32,
                 ),
                 None,
             )
@@ -73,7 +70,7 @@ impl PartitionMiningActor {
                 dbg!("SOLUTION FOUND!!!!!!!!!");
                 let solution = SolutionContext {
                     partition_id: self.partition.id,
-                    chunk_index: (start_chunk_index + index) as u32,
+                    chunk_index: start_chunk_index + index as u32,
                     mining_address: self.partition.mining_address,
                 };
                 // TODO: Send info to block builder code

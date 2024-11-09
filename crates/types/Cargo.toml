@@ -11,6 +11,7 @@ color-eyre = "0.6.2"
 eyre = "0.6.8"
 fixed-hash = "0.8.0"
 rand = "0.8.5"
+rand_chacha = "0.3.1"
 reth-codecs = { path = "../../ext/reth/crates/storage/codecs" }
 reth-db-api = { path = "../../ext/reth/crates/storage/db-api" }
 serde = { version = "1.0", features = ["derive"] }

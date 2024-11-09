@@ -223,7 +223,7 @@ mod tests {
                 ledger_size: U256::from(100),
                 expires: Some(1622543200),
             }],
-            evm_block_hash: Some(B256::ZERO),
+            evm_block_hash: B256::ZERO,
         };
 
         // Use a specific seed
