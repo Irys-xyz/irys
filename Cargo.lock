@@ -2807,6 +2807,7 @@ dependencies = [
  "arbitrary",
  "assert_matches",
  "bytes",
+ "color-eyre",
  "eyre",
  "irys-types",
  "modular-bitfield",

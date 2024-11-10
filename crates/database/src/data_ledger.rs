@@ -192,6 +192,12 @@ pub enum Ledger {
     // Add more term ledgers as they exist
 }
 
+impl Default for Ledger {
+    fn default() -> Self {
+        Ledger::Publish
+    }
+}
+
 impl Ledger {
     /// An array of all the Ledger numbers in order
     pub const ALL: [Ledger; 2] = [Ledger::Publish, Ledger::Submit];

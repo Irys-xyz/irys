@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+color-eyre = "0.6.2"
 assert_matches.workspace = true
 reth.workspace = true
 tokio.workspace = true

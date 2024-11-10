@@ -18,7 +18,9 @@ use tracing::info;
 #[tokio::test]
 async fn test_blockprod() -> eyre::Result<()> {
     let mut config = IrysNodeConfig::default();
-    remove_dir_all(&config.base_directory)?;
+    if config.base_directory.exists() {
+        remove_dir_all(&config.base_directory)?;
+    }
     let account1 = IrysSigner::random_signer();
     let account2 = IrysSigner::random_signer();
     let account3 = IrysSigner::random_signer();
@@ -110,8 +112,9 @@ async fn test_blockprod() -> eyre::Result<()> {
 #[tokio::test]
 async fn mine_ten_blocks() -> eyre::Result<()> {
     let mut config = IrysNodeConfig::default();
-    remove_dir_all(&config.base_directory)?;
-
+    if config.base_directory.exists() {
+        remove_dir_all(&config.base_directory)?;
+    }
     let node = start_for_testing(config).await?;
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
@@ -153,8 +156,9 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
 #[tokio::test]
 async fn test_basic_blockprod() -> eyre::Result<()> {
     let config = IrysNodeConfig::default();
-    remove_dir_all(&config.base_directory)?;
-
+    if config.base_directory.exists() {
+        remove_dir_all(&config.base_directory)?;
+    }
     let node = start_for_testing(config).await?;
 
     let (block, _) = node
