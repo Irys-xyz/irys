@@ -30,6 +30,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
         },
         ..Default::default()
     };
+
     assert_eq!(
         config.mining_signer.address(),
         Address::from_slice(expected_addr.as_slice())
@@ -74,7 +75,6 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
     }
 
     let node = start_for_testing(config).await?;
-    info!("{}", account1.address());
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
 
@@ -86,7 +86,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
     let txs = reth_context.inner.pool.pending_transactions();
 
     info!(
-        "txs: {:?}",
+        "received pending txs: {:?}",
         txs.iter()
             .map(|tx| tx.hash().clone())
             .collect::<Vec<TxHash>>()
@@ -110,9 +110,6 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
             .provider
             .block_by_hash(block.evm_block_hash)?
             .unwrap();
-
-        // height is hardcoded at 42 right now
-        // assert_eq!(reth_block.number, block.height);
 
         // check irys DB for built block
         let db_irys_block = database::block_by_hash(&node.db, block.block_hash)?.unwrap();
