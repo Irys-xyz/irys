@@ -55,7 +55,10 @@ futures-util.workspace = true
 futures.workspace = true
 reth-tracing.workspace = true
 hex.workspace = true
-k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+k256 = { version = "0.13", default-features = false, features = [
+	"ecdsa",
+	"serde",
+] }
 alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true

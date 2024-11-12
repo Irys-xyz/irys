@@ -1,6 +1,8 @@
+use alloy_primitives::Address;
 use alloy_signer::Signature;
 use k256::ecdsa::VerifyingKey;
 use rand::Rng;
+use reth_primitives::recover_signer_unchecked;
 use serde::{Deserialize, Serialize};
 
 use crate::{generate_leaves, hash_sha256, irys::IrysSigner, MAX_CHUNK_SIZE};
@@ -8,8 +10,9 @@ use crate::{generate_leaves, hash_sha256, irys::IrysSigner, MAX_CHUNK_SIZE};
 use crate::{Node, H256};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngressProof {
-    tx_id: H256, // IrysTxId
-    // owner: VerifyingKey, we can recover this from the signature
+    tx_id: H256,         // IrysTxId
+    owner: VerifyingKey, // it might be worth using the address & recovering the pub key, saves us some bytes.
+    // owner: [u8; 20],
     signature: Signature,
     tx_offset: u128,
     data_root: H256,
@@ -17,11 +20,8 @@ pub struct IngressProof {
     proof: H256,
 }
 
-pub fn ingress_proof_from_leaves(
-    signer: IrysSigner,
-    leaves: Vec<Node>,
-) -> eyre::Result<IngressProof> {
-    let interleave_value = signer.address();
+pub fn ingress_proof_from_leaves(leaves: Vec<Node>, address: Address) -> eyre::Result<[u8; 32]> {
+    let interleave_value = address;
     let interleave_hash = hash_sha256(&interleave_value.0 .0)?;
 
     // interleave the interleave hash with the leaves
@@ -33,18 +33,35 @@ pub fn ingress_proof_from_leaves(
     }
 
     let interleaved_hash = hash_sha256(interleaved.concat().as_slice())?;
+    Ok(interleaved_hash)
+}
 
+pub fn generate_full_ingress_proof(
+    signer: IrysSigner,
+    leaves: Vec<Node>,
+) -> eyre::Result<IngressProof> {
+    let proof = ingress_proof_from_leaves(leaves, signer.address())?;
     Ok(IngressProof {
         tx_id: H256::random(),
-        signature: signer
-            .signer
-            .sign_prehash_recoverable(&interleaved_hash)?
-            .into(),
+        owner: *signer.signer.verifying_key(),
+        signature: signer.signer.sign_prehash_recoverable(&proof)?.into(),
         tx_offset: 0,
         data_root: H256::random(),
         data_size: 0,
-        proof: H256::from(interleaved_hash),
+        proof: H256::from(proof),
     })
+}
+
+pub fn verify_ingress_proof(proof: IngressProof, leaves: Vec<Node>) -> eyre::Result<bool> {
+    let prehash = proof.proof.0;
+    let sig = proof.signature.as_bytes();
+
+    let recovered_address = recover_signer_unchecked(&sig, &prehash)?;
+
+    // re-compute the proof
+    let recomputed = ingress_proof_from_leaves(leaves, recovered_address)?;
+    // make sure they match
+    Ok(recomputed == prehash)
 }
 
 mod tests {
