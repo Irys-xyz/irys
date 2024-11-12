@@ -10,7 +10,7 @@ use routes::{block, chunks, index, price, proxy::proxy, tx};
 
 #[derive(Clone)]
 pub struct ApiState {
-    //pub actors: ActorAddresses,
+    pub actors: ActorAddresses,
     pub db: DatabaseProvider,
 }
 
