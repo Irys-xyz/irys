@@ -7,6 +7,7 @@ pub mod block;
 pub mod block_production;
 pub mod chunk;
 pub mod consensus;
+pub mod ingress;
 pub mod irys;
 mod merkle;
 pub mod serialization;
