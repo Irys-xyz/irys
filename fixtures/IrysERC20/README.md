@@ -1,0 +1,2 @@
+This is a small ERC20 Foundry project used to generate IrysERC20.json, which is used in some chain tests.
+to update the testing artefact, install foundry, install the gitmodules, run `forge compile`, then `cp out/IrysERC20.sol/IrysERC20.json IrysERC20.json`

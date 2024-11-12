@@ -1,18 +1,14 @@
 use std::{collections::HashMap, fs::remove_dir_all, time::Duration};
 
 use actors::mempool::TxIngressMessage;
-use alloy_consensus::{Signed, TxEnvelope, TxLegacy};
+use alloy_consensus::TxEnvelope;
 use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::eip2718::Encodable2718;
-use alloy_rlp::Encodable;
-use alloy_signer_local::{LocalSigner, PrivateKeySigner};
+use alloy_signer_local::LocalSigner;
 use chain::chain::start_for_testing;
 use eyre::eyre;
-use irys_config::{chain::chain::IRYS_MAINNET, IrysNodeConfig};
-use irys_reth_node_bridge::adapter::{
-    node::RethNodeContext,
-    transaction::{tx, TransactionTestContext},
-};
+use irys_config::IrysNodeConfig;
+use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
 use irys_types::{
     block_production::SolutionContext, irys::IrysSigner, Address, IrysTransaction, IRYS_CHAIN_ID,
 };
@@ -249,7 +245,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             ..Default::default()
         };
         let tx_env = TransactionTestContext::sign_tx(es, evm_tx_req).await;
-
         let signed_tx: Bytes = tx_env.encoded_2718().into();
         // let signed_tx = TransactionTestContext::transfer_tx_bytes(IRYS_CHAIN_ID, es).await;
         match i {

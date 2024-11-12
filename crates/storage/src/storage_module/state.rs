@@ -57,12 +57,11 @@ impl StorageModule {
         // perform any operations like resizing etc
         let s = read_to_string(path.join(SM_STATE_FILE))?;
         let state: StorageModule = serde_json::from_str(s.as_str())?;
-        dbg!(&state);
         Ok(StorageModule {
             path,
             interval_map: state.interval_map,
             capacity: state.capacity,
-            config: state.config
+            config: state.config,
         })
     }
 

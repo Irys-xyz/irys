@@ -54,8 +54,12 @@ test-fuzz.workspace = true
 futures-util.workspace = true
 futures.workspace = true
 reth-tracing.workspace = true
+hex.workspace = true
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
-
+alloy-sol-macro = { workspace = true, features = ["json"] }
+alloy-sol-types.workspace = true
+alloy-contract.workspace = true
+alloy-provider.workspace = true
 [[bin]]
 name = "irys"
 path = "src/main.rs"

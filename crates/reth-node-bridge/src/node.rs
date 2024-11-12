@@ -116,41 +116,34 @@ pub async fn run_node<T: HasName + HasTableType>(
     let mut os_args: Vec<String> = std::env::args().collect();
     let bp = os_args.remove(0);
 
-    let mut args = match true /* <- true if running manually :) */ {
-        true => vec_of_strings![
-            "node",
-            "-vvvvv",
-            "--instance",
-            "1",
-            "--disable-discovery",
-            "--http",
-            "--http.api",
-            "debug,rpc,reth,eth",
-            "--datadir",
-            format!("{}", irys_config.reth_data_dir().to_str().unwrap()),
-            "--log.file.directory",
-            format!("{}", irys_config.reth_log_dir().to_str().unwrap()),
-            "--log.file.format",
-            "json",
-            "--log.stdout.format",
-            "json",
-            "--log.stdout.filter",
-            "info",
-            "--log.file.filter",
-            "trace"
-            // TODO @JesseTheRobot - make sure this lines up with the path dev_genesis.json is written to
+    let mut args = vec_of_strings![
+        "node",
+        "-vvvvv",
+        "--instance",
+        format!("{}", irys_config.instance_number),
+        "--disable-discovery",
+        "--http",
+        "--http.api",
+        "debug,rpc,reth,eth",
+        "--http.addr",
+        "0.0.0.0",
+        "--datadir",
+        format!("{}", irys_config.reth_data_dir().to_str().unwrap()),
+        "--log.file.directory",
+        format!("{}", irys_config.reth_log_dir().to_str().unwrap()),
+        "--log.file.format",
+        "json",
+        "--log.stdout.format",
+        "terminal",
+        "--log.stdout.filter",
+        "debug",
+        "--log.file.filter",
+        "trace",
+        "--http.corsdomain",
+        "*" // TODO @JesseTheRobot - make sure this lines up with the path dev_genesis.json is written to
             // "--chain",
             // ".reth/dev_genesis.json"
-        ],
-        false => vec_of_strings![
-            "node",
-            "-vvvvvv",
-            "--disable-discovery",
-            "--http",
-            "--http.api",
-            "debug,rpc,reth,eth"
-        ],
-    };
+    ];
 
     args.insert(0, bp.to_string());
     info!("discarding os args: {:?}", os_args);
@@ -158,7 +151,6 @@ pub async fn run_node<T: HasName + HasTableType>(
     // // dbg!(&args);
     info!("Running with args: {:#?}", &args);
 
-    // // loop is flawed, retains too much global set-once state
     let cli = Cli::<EthereumChainSpecParser, EngineArgs>::parse_from(args.clone());
     let _guard = cli.logs.init_tracing()?;
 

@@ -40,7 +40,7 @@ impl Default for IrysNodeConfig {
         Self {
             chainspec_builder: IrysChainSpecBuilder::mainnet(),
             mining_signer: IrysSigner::random_signer(),
-            instance_number: 0,
+            instance_number: 1,
             sm_partition_config: get_default_partitions_and_storage_providers(
                 base_dir.join("0/storage_modules"),
             )
