@@ -12,7 +12,7 @@ use irys_actors::{
     packing::PackingActor,
     ActorAddresses,
 };
-use irys_api_server::run_server;
+use irys_api_server::{run_server, ApiState};
 use irys_config::IrysNodeConfig;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
@@ -204,7 +204,11 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     config: arc_config.clone(),
                 });
 
-                run_server(actor_addresses).await;
+                run_server(ApiState {
+                    actors: actor_addresses,
+                    db,
+                })
+                .await;
             });
         })?;
 

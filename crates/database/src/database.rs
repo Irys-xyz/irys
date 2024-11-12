@@ -69,12 +69,15 @@ pub fn insert_block(db: &DatabaseEnv, block: &IrysBlockHeader) -> Result<(), Dat
 
 pub fn block_by_hash(
     db: &DatabaseEnv,
-    block_hash: H256,
+    block_hash: &H256,
 ) -> Result<Option<IrysBlockHeader>, DatabaseError> {
     let key = block_hash;
 
-    let result = db.view(|tx| tx.get::<IrysBlockHeaders>(key).expect(ERROR_GET))?;
-    Ok(Some(IrysBlockHeader::from(result.unwrap())))
+    let result = db.view(|tx| tx.get::<IrysBlockHeaders>(*key).expect(ERROR_GET))?;
+    match result {
+        None => Ok(None),
+        Some(txh) => Ok(Some(IrysBlockHeader::from(txh))),
+    }
 }
 
 pub fn insert_tx(db: &DatabaseEnv, tx: &IrysTransactionHeader) -> Result<(), DatabaseError> {
@@ -93,7 +96,10 @@ pub fn tx_by_txid(
 ) -> Result<Option<IrysTransactionHeader>, DatabaseError> {
     let key = txid;
     let result = db.view(|tx| tx.get::<IrysTxHeaders>(*key).expect(ERROR_GET))?;
-    Ok(Some(IrysTransactionHeader::from(result.unwrap())))
+    match result {
+        None => Ok(None),
+        Some(txh) => Ok(Some(IrysTransactionHeader::from(txh))),
+    }
 }
 
 /// Takes an IrysTransactionHeader and caches its data_root and tx.id in a

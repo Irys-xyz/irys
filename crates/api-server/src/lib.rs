@@ -1,11 +1,20 @@
+mod error;
 mod routes;
 
 use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
-use irys_actors::ActorAddresses;
-use routes::{chunks, index, price, proxy::proxy, tx};
 
-pub async fn run_server(app_state: ActorAddresses) {
+use irys_actors::ActorAddresses;
+use irys_types::app_state::DatabaseProvider;
+use routes::{block, chunks, index, price, proxy::proxy, tx};
+
+#[derive(Clone)]
+pub struct ApiState {
+    //pub actors: ActorAddresses,
+    pub db: DatabaseProvider,
+}
+
+pub async fn run_server(app_state: ApiState) {
     HttpServer::new(move || {
         let awc_client = awc::Client::new();
 
@@ -15,7 +24,9 @@ pub async fn run_server(app_state: ActorAddresses) {
             .service(
                 web::scope("v1")
                     .route("/info", web::get().to(index::info_route))
+                    .route("/block/{block_hash}", web::get().to(block::get_block))
                     .route("/chunk", web::post().to(chunks::post_chunk))
+                    .route("/tx/{tx_id}", web::get().to(tx::get_tx))
                     .route("/tx", web::post().to(tx::post_tx))
                     .route("/price/{size}", web::get().to(price::get_price)),
             )
