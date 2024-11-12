@@ -1,5 +1,6 @@
 mod routes;
 
+use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
 use actors::ActorAddresses;
 use routes::{chunks, index, price, proxy::proxy, tx};
@@ -18,10 +19,10 @@ pub async fn run_server(app_state: ActorAddresses) {
                     .route("/tx", web::post().to(tx::post_tx))
                     .route("/price/{size}", web::get().to(price::get_price)),
             )
-            .route("/", web::post().to(proxy))
-            .route("/", web::get().to(proxy))
+            .route("/", web::to(proxy))
+            .wrap(Cors::permissive())
     })
-    .bind(("127.0.0.1", 8080))
+    .bind(("0.0.0.0", 8080))
     .unwrap()
     .run()
     .await

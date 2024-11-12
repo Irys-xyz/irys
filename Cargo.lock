@@ -45,6 +45,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "actix-cors"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9e772b3bcafe335042b5db010ab7c09013dad6eac4915c91d8d50902769f331"
+dependencies = [
+ "actix-utils",
+ "actix-web",
+ "derive_more 0.99.18",
+ "futures-util",
+ "log",
+ "once_cell",
+ "smallvec",
+]
+
+[[package]]
 name = "actix-http"
 version = "3.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -419,6 +434,24 @@ dependencies = [
  "derive_more 1.0.0",
  "serde",
  "serde_with",
+]
+
+[[package]]
+name = "alloy-contract"
+version = "0.4.2"
+dependencies = [
+ "alloy-dyn-abi",
+ "alloy-json-abi",
+ "alloy-network",
+ "alloy-network-primitives",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types-eth",
+ "alloy-sol-types",
+ "alloy-transport",
+ "futures",
+ "futures-util",
+ "thiserror",
 ]
 
 [[package]]
@@ -853,6 +886,7 @@ dependencies = [
 name = "alloy-sol-macro-expander"
 version = "0.8.7"
 dependencies = [
+ "alloy-json-abi",
  "alloy-sol-macro-input",
  "const-hex",
  "heck",
@@ -869,11 +903,13 @@ dependencies = [
 name = "alloy-sol-macro-input"
 version = "0.8.7"
 dependencies = [
+ "alloy-json-abi",
  "const-hex",
  "dunce",
  "heck",
  "proc-macro2",
  "quote",
+ "serde_json",
  "syn 2.0.80",
  "syn-solidity",
 ]
@@ -2116,12 +2152,16 @@ dependencies = [
  "actix-rt",
  "actors",
  "alloy-consensus",
+ "alloy-contract",
  "alloy-core",
  "alloy-eips",
  "alloy-network",
+ "alloy-provider",
  "alloy-rlp",
  "alloy-serde",
  "alloy-signer-local",
+ "alloy-sol-macro",
+ "alloy-sol-types",
  "arbitrary",
  "assert_matches",
  "bytes",
@@ -2131,6 +2171,7 @@ dependencies = [
  "eyre",
  "futures",
  "futures-util",
+ "hex",
  "irys-api-server",
  "irys-c",
  "irys-config",
@@ -5169,6 +5210,7 @@ name = "irys-api-server"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "actix-cors",
  "actix-proxy",
  "actix-web",
  "actors",
@@ -5180,6 +5222,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -12587,10 +12630,6 @@ dependencies = [
 
 [[patch.unused]]
 name = "alloy"
-version = "0.4.2"
-
-[[patch.unused]]
-name = "alloy-contract"
 version = "0.4.2"
 
 [[patch.unused]]

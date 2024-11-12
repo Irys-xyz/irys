@@ -34,7 +34,7 @@ alloy-primitives = { path = "./ext/alloy-core/crates/primitives", features = [
     "arbitrary",
 ] }
 rand = "0.8.5"
-
+hex = "0.4"
 alloy-rlp = "0.3.4"
 alloy-rpc-types = { path = "./ext/alloy/crates/rpc-types" }
 alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine", features = [
@@ -43,6 +43,13 @@ alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine", feature
 reth-e2e-test-utils = { path = "./ext/reth/crates/e2e-test-utils" }
 alloy-serde = { path = "./ext/alloy/crates/serde", default-features = false }
 alloy-signer-local = { path = "./ext/alloy/crates/signer-local" }
+alloy-sol-macro = { path = "./ext/alloy-core/crates/sol-macro", features = [
+    "json",
+] }
+alloy-sol-types = { path = "./ext/alloy-core/crates/sol-types" }
+alloy-contract = { path = "./ext/alloy/crates/contract" }
+alloy-provider = { path = "./ext/alloy/crates/provider" }
+
 arbitrary = { version = "1.3", features = ["derive"] }
 once_cell = "1.19.0"
 assert_matches = "1.5.0"

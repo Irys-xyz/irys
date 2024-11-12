@@ -12,8 +12,9 @@ serde_json = { workspace = true, features = ["std", "raw_value"] }
 irys-types.workspace = true
 serde.workspace = true
 actors.workspace = true
-
 database = { path = "../database" }
 actix.workspace = true
 rand = "0.8.5"
 tokio.workspace = true
+actix-cors = "0.7.0"
+tracing.workspace = true
