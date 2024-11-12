@@ -7,12 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{generate_leaves, hash_sha256, irys::IrysSigner, MAX_CHUNK_SIZE};
 
-use crate::{Node, H256};
+use crate::{Node, H256, IRYS_CHAIN_ID};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngressProof {
-    tx_id: H256,         // IrysTxId
-    owner: VerifyingKey, // it might be worth using the address & recovering the pub key, saves us some bytes.
-    // owner: [u8; 20],
+    tx_id: H256,     // IrysTxId
+    owner: [u8; 20], // address
     signature: Signature,
     tx_offset: u128,
     data_root: H256,
@@ -41,10 +40,12 @@ pub fn generate_full_ingress_proof(
     leaves: Vec<Node>,
 ) -> eyre::Result<IngressProof> {
     let proof = ingress_proof_from_leaves(leaves, signer.address())?;
+    let mut signature: Signature = signer.signer.sign_prehash_recoverable(&proof)?.into();
+    signature = signature.with_chain_id(IRYS_CHAIN_ID); // TODO: we should figure out if we can remove this requirement for signatures
     Ok(IngressProof {
         tx_id: H256::random(),
-        owner: *signer.signer.verifying_key(),
-        signature: signer.signer.sign_prehash_recoverable(&proof)?.into(),
+        owner: signer.address().0 .0,
+        signature,
         tx_offset: 0,
         data_root: H256::random(),
         data_size: 0,
@@ -57,7 +58,9 @@ pub fn verify_ingress_proof(proof: IngressProof, leaves: Vec<Node>) -> eyre::Res
     let sig = proof.signature.as_bytes();
 
     let recovered_address = recover_signer_unchecked(&sig, &prehash)?;
-
+    if recovered_address != proof.owner {
+        return Ok(false);
+    }
     // re-compute the proof
     let recomputed = ingress_proof_from_leaves(leaves, recovered_address)?;
     // make sure they match
@@ -67,7 +70,12 @@ pub fn verify_ingress_proof(proof: IngressProof, leaves: Vec<Node>) -> eyre::Res
 mod tests {
     use rand::Rng;
 
-    use crate::{generate_leaves, hash_sha256, irys::IrysSigner, MAX_CHUNK_SIZE};
+    use crate::{
+        generate_leaves, hash_sha256, ingress::verify_ingress_proof, irys::IrysSigner,
+        MAX_CHUNK_SIZE,
+    };
+
+    use super::generate_full_ingress_proof;
 
     #[test]
     fn interleave_test() -> eyre::Result<()> {
@@ -88,6 +96,23 @@ mod tests {
         }
 
         let interleaved_hash = hash_sha256(interleaved.concat().as_slice())?;
+        Ok(())
+    }
+
+    #[test]
+    fn basic() -> eyre::Result<()> {
+        let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
+        let mut data_bytes = vec![0u8; data_size];
+        rand::thread_rng().fill(&mut data_bytes[..]);
+        let signer = IrysSigner::random_signer();
+        let leaves = generate_leaves(data_bytes.clone())?;
+        let proof = generate_full_ingress_proof(signer.clone(), leaves.clone())?;
+
+        assert!(verify_ingress_proof(proof.clone(), leaves.clone())?);
+        let mut reversed = leaves.clone();
+        reversed.reverse();
+        assert!(!verify_ingress_proof(proof, reversed)?);
+
         Ok(())
     }
 }
