@@ -308,6 +308,35 @@ pub fn generate_leaves(data: Vec<u8>) -> Result<Vec<Node>, Error> {
     Ok(leaves)
 }
 
+/// Generates data chunks from which the calculation of root id starts, including some arbitrary data to "interleave" into the leaf data hash
+pub fn generate_interleaved_leaves(data: Vec<u8>, interleave: &[u8]) -> Result<Vec<Node>, Error> {
+    let mut data_chunks: Vec<&[u8]> = data.chunks(MAX_CHUNK_SIZE).collect();
+
+    if data_chunks.last().unwrap().len() == MAX_CHUNK_SIZE {
+        data_chunks.push(&[]);
+    }
+
+    let mut leaves = Vec::<Node>::new();
+    let mut min_byte_range = 0;
+    for chunk in data_chunks.into_iter() {
+        let data_hash = hash_interleaved_sha256(chunk, interleave)?;
+        let max_byte_range = min_byte_range + &chunk.len();
+        let offset = max_byte_range.to_note_vec();
+        let id = hash_all_sha256(vec![&data_hash, &offset])?;
+
+        leaves.push(Node {
+            id,
+            data_hash: Some(data_hash),
+            min_byte_range,
+            max_byte_range,
+            left_child: None,
+            right_child: None,
+        });
+        min_byte_range = min_byte_range + &chunk.len();
+    }
+    Ok(leaves)
+}
+
 /// Hashes together a single branch node from a pair of child nodes.
 pub fn hash_branch(left: Node, right: Node) -> Result<Node, Error> {
     let max_byte_range = left.max_byte_range.to_note_vec();
@@ -393,6 +422,14 @@ pub fn resolve_proofs(node: Node, proof: Option<Proof>) -> Result<Vec<Proof>, Er
 pub fn hash_sha256(message: &[u8]) -> Result<[u8; 32], Error> {
     let mut hasher = sha::Sha256::new();
     hasher.update(message);
+    let result = hasher.finish();
+    Ok(result)
+}
+
+pub fn hash_interleaved_sha256(message: &[u8], interleave: &[u8]) -> Result<[u8; 32], Error> {
+    let mut hasher = sha::Sha256::new();
+    hasher.update(message);
+    hasher.update(interleave);
     let result = hasher.finish();
     Ok(result)
 }
