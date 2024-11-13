@@ -2,16 +2,15 @@
 //!
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
-
-use crate::U256;
 use std::{fmt, str::FromStr};
 
 use crate::{
-    option_u64_stringify, u128_stringify, Arbitrary, Base64, Compact, H256List, IrysSignature,
-    Signature, H256,
+    generate_data_root, generate_leaves_from_chunks, option_u64_stringify, u128_stringify,
+    Arbitrary, Base64, Compact, H256List, IrysSignature, IrysTransactionHeader, Signature, H256,
+    U256,
 };
-use alloy_primitives::{Address, B256};
 
+use alloy_primitives::{Address, B256};
 use serde::{Deserialize, Serialize};
 
 pub type BlockHash = H256;
@@ -143,6 +142,20 @@ pub struct TransactionLedger {
     #[serde(default, with = "u128_stringify")]
     pub ledger_size: u128,
     pub expires: Option<u64>,
+}
+
+impl TransactionLedger {
+    /// Initializes the tx_root. The TX Root is composed of taking the data_roots of each of the storage transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
+    pub fn merklize_tx_root(data_txs: &Vec<IrysTransactionHeader>) -> H256 {
+        let mut txs_data_roots = data_txs
+            .iter()
+            .map(|h| h.data_root.0.as_ref())
+            .collect::<Vec<&[u8]>>();
+        txs_data_roots.push(&[]); // TODO: check this ? mimics merkle::generate_leaves's push as last chunk has max. capacity 32
+        let chunks = generate_leaves_from_chunks(&txs_data_roots).unwrap();
+        let root = generate_data_root(chunks.clone()).unwrap();
+        H256(root.id)
+    }
 }
 
 /// Stores the `nonce_limiter_info` in the [`ArweaveBlockHeader`]

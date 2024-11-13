@@ -288,6 +288,11 @@ pub fn generate_leaves(data: Vec<u8>) -> Result<Vec<Node>, Error> {
         data_chunks.push(&[]);
     }
 
+    generate_leaves_from_chunks(&data_chunks)
+}
+
+/// Generates merkle leaves from chunks
+pub fn generate_leaves_from_chunks(data_chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
     for chunk in data_chunks.into_iter() {
