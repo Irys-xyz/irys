@@ -13,6 +13,7 @@ use crate::db_cache::{CachedChunk, CachedDataRoot};
 
 /// Adds wrapper structs for some primitive types so they can use `StructFlags` from Compact, when
 /// used as pure table values.
+#[macro_export]
 macro_rules! add_wrapper_struct {
 	($(($name:tt, $wrapper:tt)),+) => {
 			$(
@@ -46,6 +47,7 @@ macro_rules! add_wrapper_struct {
 	};
 }
 
+#[macro_export]
 macro_rules! impl_compression_for_compact {
 	($($name:tt),+) => {
 			$(
