@@ -64,7 +64,7 @@ fn db_subkey_test() -> eyre::Result<()> {
         .into_path();
 
     let db = open_or_create_db(tmpdir)?.with_metrics_and_tables(Tables::ALL);
-    let tx = db.tx_mut()?;
+    let write_tx = db.tx_mut()?;
     // write two chunks to the same key
     let chunk = CachedChunk2 {
         key: B256::repeat_byte(1),
@@ -75,8 +75,8 @@ fn db_subkey_test() -> eyre::Result<()> {
     };
     let key = B256::random();
     // complete duplicates are deduplicated, it means we don't need to check before inserting data that might already exist
-    tx.put::<CachedChunks2>(key, chunk.clone())?;
-    tx.put::<CachedChunks2>(key, chunk.clone())?;
+    write_tx.put::<CachedChunks2>(key, chunk.clone())?;
+    write_tx.put::<CachedChunks2>(key, chunk.clone())?;
 
     let chunk2 = CachedChunk2 {
         key: B256::repeat_byte(2),
@@ -85,7 +85,7 @@ fn db_subkey_test() -> eyre::Result<()> {
             data_path: Base64::default(),
         },
     };
-    tx.put::<CachedChunks2>(key, chunk2.clone())?;
+    write_tx.put::<CachedChunks2>(key, chunk2.clone())?;
 
     // important to note that we can have multiple unique values under the same subkey
     let chunk3 = CachedChunk2 {
@@ -95,29 +95,26 @@ fn db_subkey_test() -> eyre::Result<()> {
             data_path: Base64::from_utf8_str("hello, world!")?,
         },
     };
-    tx.put::<CachedChunks2>(key, chunk3.clone())?;
-    tx.commit()?;
+    write_tx.put::<CachedChunks2>(key, chunk3.clone())?;
+    write_tx.commit()?;
 
     // create a read cursor and walk the table, starting from a `None` subkey (so the entire subkey range)
-    let mut c = db.tx()?.cursor_dup_read::<CachedChunks2>()?;
-    let res = c
+    let mut dup_read_cursor = db.tx()?.cursor_dup_read::<CachedChunks2>()?;
+    let walk = dup_read_cursor
         .walk_dup(Some(key), None)?
         .collect::<Result<Vec<_>, DatabaseError>>()?;
 
     // we should get all subkey'd chunks
     // note how the "smaller" subkey (repeat_byte(1)) is before the larger subkeys (repeat_byte(2))
     assert_eq!(
-        res,
+        walk,
         vec![(key, chunk.clone()), (key, chunk2), (key, chunk3)]
     );
 
     // index to a specific subkey value
-    let r = db
-        .tx()?
-        .cursor_dup_read::<CachedChunks2>()?
-        .seek_by_key_subkey(key, chunk.key)?;
+    let seek_exact = dup_read_cursor.seek_by_key_subkey(key, chunk.key)?;
 
-    assert_eq!(r, Some(chunk));
+    assert_eq!(seek_exact, Some(chunk));
 
     Ok(())
 }
