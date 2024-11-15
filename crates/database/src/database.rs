@@ -1,9 +1,20 @@
 use std::path::Path;
 
-use crate::db_cache::{CachedChunk, CachedDataRoot};
-use crate::tables::{CachedChunks, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders, Tables};
-use irys_types::{hash_sha256, Chunk, IrysBlockHeader, IrysTransactionHeader, H256};
+use crate::db_cache::{
+    chunk_offset_to_index, CachedChunk, CachedChunkIndexEntry, CachedChunkIndexEntryMeta,
+    CachedDataRoot,
+};
+use crate::tables::{
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders, Tables,
+};
+use irys_types::{
+    hash_sha256, Chunk, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
+    TxRelativeChunkIndex, TxRelativeChunkOffset, H256,
+};
 use reth::prometheus_exporter::install_prometheus_recorder;
+use reth_db::cursor::{DbDupCursorRO, DupWalker};
+use reth_db::mdbx::tx::Tx;
+use reth_db::mdbx::RO;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::{
@@ -12,6 +23,7 @@ use reth_db::{
     ClientVersion, Database, DatabaseEnv, DatabaseError,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::debug;
 
 const ERROR_GET: &str = "Not able to get value from table.";
 const ERROR_PUT: &str = "Not able to insert value into table.";
@@ -112,24 +124,85 @@ pub fn cache_data_root(
 /// Retrieves a CashedDataRoot struct using a data_root as key.
 pub fn cached_data_root_by_data_root(
     db: &DatabaseEnv,
-    data_root: H256,
+    data_root: DataRoot,
 ) -> Result<Option<CachedDataRoot>, DatabaseError> {
     let key = data_root;
     let result = db.view(|tx| tx.get::<CachedDataRoots>(key).expect(ERROR_GET))?;
     Ok(result)
 }
 
-/// Caches a chunk and returns the key it was cached under. The key is sha256
-/// hash of the data_path.
-pub fn cache_chunk(db: &DatabaseEnv, chunk: Chunk) -> Result<Option<H256>, DatabaseError> {
-    let key: H256 = hash_sha256(&chunk.data_path.0).unwrap().into();
-    let value = CachedChunk {
-        chunk: Some(chunk.bytes),
-        data_path: chunk.data_path,
+/// Caches a chunk
+pub fn cache_chunk(db: &DatabaseEnv, chunk: Chunk) -> eyre::Result<()> {
+    let chunk_index = chunk_offset_to_index(chunk.offset)?;
+    let chunk_hash: ChunkPathHash = hash_sha256(&chunk.data_path.0).unwrap().into();
+    let value = CachedChunkIndexEntry {
+        index: chunk_index,
+        meta: CachedChunkIndexEntryMeta { chunk_hash },
     };
 
-    let result = db.update(|tx| tx.put::<CachedChunks>(key, value).expect(ERROR_PUT))?;
-    Ok(Some(key))
+    debug!(
+        "Caching chunk {} ({}) of {}",
+        &chunk_index, &chunk_hash, &chunk.data_root
+    );
+    db.update(|tx: &Tx<reth_db::mdbx::RW>| {
+        tx.put::<CachedChunksIndex>(chunk.data_root, value)
+            .expect(ERROR_PUT);
+        tx.put::<CachedChunks>(chunk_hash, chunk.into())
+            .expect(ERROR_PUT);
+    })?;
+    Ok(())
+}
+
+/// Retrieves a cached chunk from the cache using its parent data root and offset
+pub fn cached_chunk_meta_by_offset(
+    db: &DatabaseEnv,
+    data_root: DataRoot,
+    chunk_offset: TxRelativeChunkOffset,
+) -> eyre::Result<Option<CachedChunkIndexEntryMeta>> {
+    let chunk_index = chunk_offset_to_index(chunk_offset)?;
+    let tx = db.tx()?;
+    let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+    let result = if let Some(result) = cursor.seek_by_key_subkey(data_root, chunk_index)? {
+        if result.index == chunk_index {
+            Ok(Some(result.meta))
+        } else {
+            Ok(None)
+        }
+    } else {
+        Ok(None)
+    };
+    tx.commit()?;
+    return result;
+}
+/// Retrieves a cached chunk from the cache using its parent data root and offset
+pub fn cached_chunk_by_offset(
+    db: &DatabaseEnv,
+    data_root: DataRoot,
+    chunk_offset: TxRelativeChunkOffset,
+) -> eyre::Result<Option<(CachedChunkIndexEntryMeta, CachedChunk)>> {
+    let chunk_index = chunk_offset_to_index(chunk_offset)?;
+    let tx = db.tx()?;
+
+    let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+
+    let result = if let Some(index_entry) = cursor
+        .seek_by_key_subkey(data_root, chunk_index)?
+        .filter(|e| e.index == chunk_index)
+    {
+        let meta: CachedChunkIndexEntryMeta = index_entry.into();
+        // expect that the cached chunk always has an entry if the index entry exists
+        Ok(Some((
+            meta.clone(),
+            tx.get::<CachedChunks>(meta.chunk_hash)?
+                .expect("Chunk has an index entry but no data entry"),
+        )))
+    } else {
+        Ok(None)
+    };
+    tx.commit()?;
+    // dbg!(&walk);
+
+    return result;
 }
 
 /// Retrieves a cached chunk from the cache using its chunk_key (the sha256

@@ -1,4 +1,7 @@
-use irys_types::{IrysBlockHeader, IrysTransactionHeader, H256};
+use irys_types::{
+    ChunkPathHash, DataRoot, DataRootHash, IrysBlockHeader, IrysTransactionHeader,
+    TxRelativeChunkIndex, H256,
+};
 use reth_codecs::Compact;
 use reth_db::{
     table::{DupSort, Table},
@@ -9,7 +12,7 @@ use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::db_cache::{CachedChunk, CachedDataRoot};
+use crate::db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot};
 
 /// Adds wrapper structs for some primitive types so they can use `StructFlags` from Compact, when
 /// used as pure table values.
@@ -76,6 +79,7 @@ impl_compression_for_compact!(
     CompactIrysBlockHeader,
     CompactTxHeader,
     CachedDataRoot,
+    CachedChunkIndexEntry,
     CachedChunk
 );
 
@@ -85,7 +89,10 @@ tables! {
 
     table IrysTxHeaders<Key = H256, Value = CompactTxHeader>;
 
-    table CachedDataRoots<Key = H256, Value = CachedDataRoot>;
+    table CachedDataRoots<Key = DataRoot, Value = CachedDataRoot>;
 
-    table CachedChunks<Key = H256, Value = CachedChunk>;
+    /// Index mapping a data root to a set of orderded-by-index index entries, which contain the chunk path hash ('chunk id')
+    table CachedChunksIndex<Key = DataRoot, Value = CachedChunkIndexEntry, SubKey = TxRelativeChunkIndex>;
+    /// Table mapping a chunk path hash to a cached chunk (with data)
+    table CachedChunks<Key =ChunkPathHash , Value = CachedChunk>;
 }

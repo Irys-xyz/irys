@@ -519,8 +519,7 @@ mod tests {
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new();
         new_epoch_block.height = NUM_BLOCKS_IN_EPOCH;
-        new_epoch_block.ledgers[Ledger::Submit as usize].ledger_size =
-            U256::from(PARTITION_SIZE / 2);
+        new_epoch_block.ledgers[Ledger::Submit as usize].ledger_size = (PARTITION_SIZE / 2) as u128;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block), &mut ctx);
 
@@ -535,9 +534,9 @@ mod tests {
         let mut new_epoch_block = IrysBlockHeader::new();
         new_epoch_block.height = NUM_BLOCKS_IN_EPOCH * 2;
         new_epoch_block.ledgers[Ledger::Submit as usize].ledger_size =
-            U256::from((PARTITION_SIZE as f64 * 2.5) as u64);
+            (PARTITION_SIZE as f64 * 2.5) as u128;
         new_epoch_block.ledgers[Ledger::Publish as usize].ledger_size =
-            U256::from((PARTITION_SIZE as f64 * 0.75) as u64);
+            (PARTITION_SIZE as f64 * 0.75) as u128;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block), &mut ctx);
 

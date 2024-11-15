@@ -7,7 +7,7 @@ pub struct Chunk {
     /// The root hash for this chunk which should map to the root_hash in the
     /// transaction header. Having this present makes it easier to do cached
     /// chunk lookups by data_root on the ingress node.
-    pub data_root: H256,
+    pub data_root: DataRoot,
     /// Total size of the data this chunk belongs to. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
@@ -20,7 +20,23 @@ pub struct Chunk {
     pub bytes: Base64,
     /// Offset of the chunk in the transactions data. Offsets are measured from
     /// the highest (last) byte in the chunk not the first.
-    pub offset: usize,
+    pub offset: TxRelativeChunkOffset,
 }
 
+/// a Chunk's tx relative offset
+/// due to legacy weirdness, the offset is of the end of the chunk, not the start
+/// i.e for the first chunk, the offset is 262144 instead of 0
+pub type TxRelativeChunkOffset = u64;
+
 pub type ChunkBin = [u8; CHUNK_SIZE as usize];
+
+/// sha256(data_root)
+pub type DataRootHash = H256;
+
+/// sha256(chunk_path)
+pub type ChunkPathHash = H256;
+
+pub type DataRoot = H256;
+
+/// The 0-indexed index of the chunk relative to the first chunk of the tx's data tree
+pub type TxRelativeChunkIndex = u32;

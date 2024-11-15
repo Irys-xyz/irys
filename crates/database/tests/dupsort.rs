@@ -8,7 +8,7 @@ use reth_db::{tables, Database};
 use reth_db::{HasName, HasTableType, TableType, TableViewer};
 use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{fmt, u128};
 
 use database::{impl_compression_for_compact, open_or_create_db};
 use reth_db::cursor::DbDupCursorRO;
@@ -19,12 +19,12 @@ use database::db_cache::CachedChunk;
 impl_compression_for_compact!(CachedChunk2);
 
 tables! {
-    table CachedChunks2<Key = B256, Value = CachedChunk2, SubKey = B256>;
+    table CachedChunks2<Key = B256, Value = CachedChunk2, SubKey = u128>;
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary)]
 pub struct CachedChunk2 {
-    pub key: B256,
+    pub key: u128,
     pub chunk: CachedChunk,
 }
 
@@ -32,19 +32,20 @@ pub struct CachedChunk2 {
 // and compress second part of the value. If we have compression
 // over whole value (Even SubKey) that would mess up fetching of values with seek_by_key_subkey
 // as the subkey ordering is byte ordering over the entire stored value, so the key 1.) has to be the first element that's encoded and 2.) cannot be compressed
+
 impl Compact for CachedChunk2 {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
     {
         // for now put full bytes and later compress it.
-        buf.put_slice(&self.key[..]);
-        self.chunk.to_compact(buf) + 32
+        buf.put_slice(&self.key.to_le_bytes());
+        self.chunk.to_compact(buf) + 16
     }
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let key = B256::from_slice(&buf[..32]);
-        let (value, out) = CachedChunk::from_compact(&buf[32..], len - 32);
+        let key = u128::from_le_bytes(buf[..16].try_into().unwrap());
+        let (value, out) = CachedChunk::from_compact(&buf[16..], len - 16);
         (Self { key, chunk: value }, out)
     }
 }
@@ -67,7 +68,7 @@ fn db_subkey_test() -> eyre::Result<()> {
     let write_tx = db.tx_mut()?;
     // write two chunks to the same key
     let chunk = CachedChunk2 {
-        key: B256::repeat_byte(1),
+        key: u128::MIN,
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::default(),
@@ -79,7 +80,7 @@ fn db_subkey_test() -> eyre::Result<()> {
     write_tx.put::<CachedChunks2>(key, chunk.clone())?;
 
     let chunk2 = CachedChunk2 {
-        key: B256::repeat_byte(2),
+        key: u128::MAX,
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::default(),
@@ -89,7 +90,7 @@ fn db_subkey_test() -> eyre::Result<()> {
 
     // important to note that we can have multiple unique values under the same subkey
     let chunk3 = CachedChunk2 {
-        key: B256::repeat_byte(2),
+        key: u128::MAX,
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::from_utf8_str("hello, world!")?,
@@ -115,6 +116,23 @@ fn db_subkey_test() -> eyre::Result<()> {
     let seek_exact = dup_read_cursor.seek_by_key_subkey(key, chunk.key)?;
 
     assert_eq!(seek_exact, Some(chunk));
+
+    let n = dup_read_cursor.dup_cursor_count()?;
+    dbg!(n);
+    // let v1 = dup_read_cursor.first_dup()?;
+    // dup_read_cursor.inner.cursor.
+
+    // delete the key, which also deletes all the associated values
+    let w_tx = db.tx_mut()?;
+    w_tx.delete::<CachedChunks2>(key, None)?;
+    w_tx.commit()?;
+
+    let mut dup_read_cursor = db.tx()?.cursor_dup_read::<CachedChunks2>()?;
+    let walk = dup_read_cursor
+        .walk_dup(Some(key), None)?
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+    assert!(walk.len() == 0);
 
     Ok(())
 }
