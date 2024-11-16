@@ -46,7 +46,7 @@ pub struct CachedChunkIndexEntry {
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
 /// structure containing any chunk cache index metadata, like chunk_hash for chunk data lookups
 pub struct CachedChunkIndexEntryMeta {
-    pub chunk_hash: ChunkPathHash,
+    pub chunk_path_hash: ChunkPathHash,
 }
 
 impl From<CachedChunkIndexEntry> for CachedChunkIndexEntryMeta {

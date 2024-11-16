@@ -1,23 +1,37 @@
 use actix::{Actor, Context, Handler, Message};
 use database::db_cache::chunk_offset_to_index;
+use database::tables::CachedChunks;
 use database::tables::CachedChunksIndex;
+use eyre::eyre;
+use irys_types::ingress::generate_ingress_proof_tree;
+use irys_types::irys::IrysSigner;
+use irys_types::Address;
+use irys_types::ChunkBin;
 use irys_types::{
     app_state::DatabaseProvider, chunk::Chunk, hash_sha256, validate_path, IrysTransactionHeader,
     CHUNK_SIZE, H256,
 };
+use reth::tasks::TaskExecutor;
 use reth::tasks::TaskManager;
 use reth_db::cursor::DbCursorRO;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
 use reth_db::Database;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::sync::Arc;
+use tracing::info;
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]
 pub struct MempoolActor {
     db: DatabaseProvider,
     /// Temporary mempool stubs - will replace with proper data models - dmac
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
-    // task_manager: TaskManager,
+    /// task_exec is used to spawn background jobs on reth's MT tokio runtime
+    /// instead of the actor executor runtime, while also providing some QoL
+    task_exec: TaskExecutor,
+    /// The miner's signer instance, used to sign ingress proofs
+    signer: IrysSigner,
     invalid_tx: Vec<H256>,
 }
 
@@ -28,12 +42,13 @@ impl Actor for MempoolActor {
 impl MempoolActor {
     /// Create a new instance of the mempool actor passing in a reference
     /// counted reference to a DatabaseEnv
-    pub fn new(db: DatabaseProvider /* task_manager: TaskManager */) -> Self {
+    pub fn new(db: DatabaseProvider, task_exec: TaskExecutor, signer: IrysSigner) -> Self {
         Self {
             db,
             valid_tx: BTreeMap::new(),
             invalid_tx: Vec::new(),
-            // task_manager,
+            signer,
+            task_exec,
         }
     }
 }
@@ -196,6 +211,12 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
                 // we *should* have all the chunks
                 // dispatch a ingress proof task
                 dbg!("we have all the chunks!");
+                self.task_exec.spawn_blocking(generate_ingress_proof(
+                    self.db.clone(),
+                    root_hash.into(),
+                    cached_data_root.data_size,
+                    self.signer.clone(),
+                ));
             }
 
             Ok(())
@@ -237,17 +258,92 @@ impl Handler<RemoveConfirmedTxs> for MempoolActor {
     }
 }
 
+// outer wrapper so we can use `?` inside the function
+// there's almost certainly a better way to do this
+// also remove this unused async, but all the spawn methods expect a future...
+pub async fn generate_ingress_proof(
+    db: DatabaseProvider,
+    root_hash: H256,
+    size: u64,
+    signer: IrysSigner,
+) -> () {
+    generate_ingress_proof_inner(db, root_hash, size, signer).unwrap()
+}
+
+pub fn generate_ingress_proof_inner(
+    db: DatabaseProvider,
+    root_hash: H256,
+    size: u64,
+    signer: IrysSigner,
+) -> eyre::Result<()> {
+    // load the chunks from the DB
+    // TODO: for now we assume the chunks all all in the DB chunk cache
+    // in future, we'll need access to whatever unified storage provider API we have to get chunks
+    // regardless of actual location
+    // TODO: allow for "streaming" the tree chunks, instead of having to read them all into memory
+    let ro_tx = db.tx()?;
+    let mut dup_cursor = ro_tx.cursor_dup_read::<CachedChunksIndex>()?;
+    // start from first duplicate entry for this root_hash
+    let dup_walker = dup_cursor.walk_dup(Some(root_hash), None)?;
+    // we need to validate that the index is valid
+    // we do this by constructing a set over the chunk hashes, checking if we've seen this hash before
+    // if we have, we *must* error
+    let mut set = HashSet::<H256>::new();
+    let expected_chunk_count = chunk_offset_to_index(size).unwrap() + 1;
+    let mut data: Vec<u8> =
+        Vec::with_capacity((expected_chunk_count * CHUNK_SIZE as u32).try_into()?);
+    for entry in dup_walker {
+        let (root_hash2, index_entry) = entry?;
+        // make sure we haven't traversed into the wrong key
+        assert_eq!(root_hash, root_hash2);
+
+        let chunk_hash = index_entry.meta.chunk_path_hash;
+        if set.contains(&chunk_hash) {
+            return Err(eyre!(
+                "Chunk with hash {} has been found twice for index entry {} of data_root {}",
+                &chunk_hash,
+                &index_entry.index,
+                &root_hash
+            ));
+        }
+        set.insert(chunk_hash);
+
+        let chunk = ro_tx
+            .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
+            .expect(
+                &format!(
+                    "unable to get chunk {} for data root {} from DB",
+                    chunk_hash, root_hash
+                )
+                .as_str(),
+            );
+        // TODO validate chunk length
+        let chunk_bin = chunk.chunk.unwrap().0;
+        data.extend(chunk_bin);
+    }
+    // generate the ingress proof hash
+    let proof = irys_types::ingress::generate_ingress_proof(signer, data)?;
+    // TODO: do something with it!
+    info!(
+        "generated ingress proof {} for data root {}",
+        &proof.proof, &root_hash
+    );
+    ro_tx.commit()?;
+    Ok(())
+}
+
 //==============================================================================
 // Tests
 //------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use assert_matches::assert_matches;
     use database::{config::get_data_dir, open_or_create_db, tables::Tables};
     use irys_types::{irys::IrysSigner, Base64, MAX_CHUNK_SIZE};
     use rand::Rng;
+    use tokio::time::sleep;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
     use super::*;
@@ -272,7 +368,13 @@ mod tests {
         let arc_db2 = DatabaseProvider(Arc::clone(&arc_db1));
 
         // Create an instance of the mempool actor
-        let mempool = MempoolActor::new(arc_db1);
+        let task_manager = TaskManager::current();
+
+        let mempool = MempoolActor::new(
+            arc_db1,
+            task_manager.executor(),
+            IrysSigner::random_signer(),
+        );
         let addr: Addr<MempoolActor> = mempool.start();
 
         // Create 2.5 chunks worth of data *  fill the data with random bytes
@@ -332,7 +434,7 @@ mod tests {
             let (meta, chunk) = database::cached_chunk_by_offset(&arc_db2, data_root, offset)
                 .unwrap()
                 .unwrap();
-            assert_eq!(meta.chunk_hash, key);
+            assert_eq!(meta.chunk_path_hash, key);
             assert_eq!(chunk.data_path, data_path);
             assert_eq!(chunk.chunk, Some(chunk_bytes));
 
@@ -345,5 +447,7 @@ mod tests {
         // Attempt to post the chunk
 
         // Verify there chunk is not accepted
+
+        task_manager.graceful_shutdown_with_timeout(Duration::from_secs(5));
     }
 }

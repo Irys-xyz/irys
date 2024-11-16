@@ -10,13 +10,13 @@ use crate::{generate_leaves, hash_sha256, irys::IrysSigner, MAX_CHUNK_SIZE};
 use crate::{generate_data_root, generate_interleaved_leaves, Node, H256, IRYS_CHAIN_ID};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngressProof {
-    tx_id: H256,     // IrysTxId
-    owner: [u8; 20], // address
-    signature: Signature,
-    block_relative_tx_offset: u128,
-    data_root: H256,
-    data_size: u128,
-    proof: H256,
+    pub tx_id: H256,     // IrysTxId
+    pub owner: [u8; 20], // address
+    pub signature: Signature,
+    pub block_relative_tx_offset: u128,
+    pub data_root: H256,
+    pub data_size: u128,
+    pub proof: H256,
 }
 
 pub fn generate_ingress_proof_tree(data: Vec<u8>, address: Address) -> eyre::Result<Node> {

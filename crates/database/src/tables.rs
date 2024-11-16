@@ -1,6 +1,6 @@
 use irys_types::{
-    ChunkPathHash, DataRoot, DataRootHash, IrysBlockHeader, IrysTransactionHeader,
-    TxRelativeChunkIndex, H256,
+    ingress::IngressProof, ChunkPathHash, DataRoot, DataRootHash, IrysBlockHeader,
+    IrysTransactionHeader, TxRelativeChunkIndex, H256,
 };
 use reth_codecs::Compact;
 use reth_db::{
@@ -95,4 +95,6 @@ tables! {
     table CachedChunksIndex<Key = DataRoot, Value = CachedChunkIndexEntry, SubKey = TxRelativeChunkIndex>;
     /// Table mapping a chunk path hash to a cached chunk (with data)
     table CachedChunks<Key =ChunkPathHash , Value = CachedChunk>;
+
+    // table IngressProofs<Key = DataRoot, Value = IngressProof>;
 }

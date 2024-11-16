@@ -137,7 +137,9 @@ pub fn cache_chunk(db: &DatabaseEnv, chunk: Chunk) -> eyre::Result<()> {
     let chunk_hash: ChunkPathHash = hash_sha256(&chunk.data_path.0).unwrap().into();
     let value = CachedChunkIndexEntry {
         index: chunk_index,
-        meta: CachedChunkIndexEntryMeta { chunk_hash },
+        meta: CachedChunkIndexEntryMeta {
+            chunk_path_hash: chunk_hash,
+        },
     };
 
     debug!(
@@ -193,7 +195,7 @@ pub fn cached_chunk_by_offset(
         // expect that the cached chunk always has an entry if the index entry exists
         Ok(Some((
             meta.clone(),
-            tx.get::<CachedChunks>(meta.chunk_hash)?
+            tx.get::<CachedChunks>(meta.chunk_path_hash)?
                 .expect("Chunk has an index entry but no data entry"),
         )))
     } else {
