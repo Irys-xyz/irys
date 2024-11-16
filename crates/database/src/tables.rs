@@ -96,5 +96,5 @@ tables! {
     /// Table mapping a chunk path hash to a cached chunk (with data)
     table CachedChunks<Key =ChunkPathHash , Value = CachedChunk>;
 
-    // table IngressProofs<Key = DataRoot, Value = IngressProof>;
+    table IngressProofs<Key = DataRoot, Value = IngressProof>;
 }

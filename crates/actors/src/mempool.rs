@@ -2,11 +2,13 @@ use actix::{Actor, Context, Handler, Message};
 use database::db_cache::chunk_offset_to_index;
 use database::tables::CachedChunks;
 use database::tables::CachedChunksIndex;
+use database::tables::IngressProofs;
 use eyre::eyre;
 use irys_types::ingress::generate_ingress_proof_tree;
 use irys_types::irys::IrysSigner;
 use irys_types::Address;
 use irys_types::ChunkBin;
+use irys_types::DataRoot;
 use irys_types::{
     app_state::DatabaseProvider, chunk::Chunk, hash_sha256, validate_path, IrysTransactionHeader,
     CHUNK_SIZE, H256,
@@ -16,6 +18,7 @@ use reth::tasks::TaskManager;
 use reth_db::cursor::DbCursorRO;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
+use reth_db::transaction::DbTxMut;
 use reth_db::Database;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -260,16 +263,16 @@ impl Handler<RemoveConfirmedTxs> for MempoolActor {
 // also remove this unused async, but all the spawn methods expect a future...
 pub async fn generate_ingress_proof(
     db: DatabaseProvider,
-    root_hash: H256,
+    data_root: DataRoot,
     size: u64,
     signer: IrysSigner,
 ) -> () {
-    generate_ingress_proof_inner(db, root_hash, size, signer).unwrap()
+    generate_ingress_proof_inner(db, data_root, size, signer).unwrap()
 }
 
 pub fn generate_ingress_proof_inner(
     db: DatabaseProvider,
-    root_hash: H256,
+    data_root: DataRoot,
     size: u64,
     signer: IrysSigner,
 ) -> eyre::Result<()> {
@@ -281,7 +284,7 @@ pub fn generate_ingress_proof_inner(
     let ro_tx = db.tx()?;
     let mut dup_cursor = ro_tx.cursor_dup_read::<CachedChunksIndex>()?;
     // start from first duplicate entry for this root_hash
-    let dup_walker = dup_cursor.walk_dup(Some(root_hash), None)?;
+    let dup_walker = dup_cursor.walk_dup(Some(data_root), None)?;
     // we need to validate that the index is valid
     // we do this by constructing a set over the chunk hashes, checking if we've seen this hash before
     // if we have, we *must* error
@@ -292,7 +295,7 @@ pub fn generate_ingress_proof_inner(
     for entry in dup_walker {
         let (root_hash2, index_entry) = entry?;
         // make sure we haven't traversed into the wrong key
-        assert_eq!(root_hash, root_hash2);
+        assert_eq!(data_root, root_hash2);
 
         let chunk_hash = index_entry.meta.chunk_path_hash;
         if set.contains(&chunk_hash) {
@@ -300,7 +303,7 @@ pub fn generate_ingress_proof_inner(
                 "Chunk with hash {} has been found twice for index entry {} of data_root {}",
                 &chunk_hash,
                 &index_entry.index,
-                &root_hash
+                &data_root
             ));
         }
         set.insert(chunk_hash);
@@ -310,7 +313,7 @@ pub fn generate_ingress_proof_inner(
             .expect(
                 &format!(
                     "unable to get chunk {} for data root {} from DB",
-                    chunk_hash, root_hash
+                    chunk_hash, data_root
                 )
                 .as_str(),
             );
@@ -321,12 +324,17 @@ pub fn generate_ingress_proof_inner(
     assert_eq!(data.len() as u64, size);
     // generate the ingress proof hash
     let proof = irys_types::ingress::generate_ingress_proof(signer, data)?;
-    // TODO: do something with it!
     info!(
         "generated ingress proof {} for data root {}",
-        &proof.proof, &root_hash
+        &proof.proof, &data_root
     );
+
     ro_tx.commit()?;
+
+    let rw_tx = db.tx_mut()?;
+    rw_tx.put::<IngressProofs>(data_root, proof)?;
+    rw_tx.commit()?;
+
     Ok(())
 }
 
@@ -349,7 +357,7 @@ mod tests {
     use actix::prelude::*;
 
     #[actix::test]
-    async fn post_transaction_and_chunks() {
+    async fn post_transaction_and_chunks() -> eyre::Result<()> {
         // tracing-subscriber is so the tracing log macros (i.e info!) work
         tracing_subscriber::FmtSubscriber::new().init();
 
@@ -447,5 +455,17 @@ mod tests {
         // Verify there chunk is not accepted
 
         task_manager.graceful_shutdown_with_timeout(Duration::from_secs(5));
+        // check the ingress proof is in the DB
+
+        let _ingress_proof = loop {
+            // don't reuse the tx! it has read isolation (won't see anything commited after it's creation)
+            let ro_tx = &arc_db2.tx()?;
+            match ro_tx.get::<IngressProofs>(data_root)? {
+                Some(ip) => break ip,
+                None => sleep(Duration::from_millis(100)).await,
+            }
+        };
+
+        Ok(())
     }
 }
