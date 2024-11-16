@@ -1,19 +1,17 @@
-use std::{ops::Index, sync::mpsc::Receiver};
+use std::sync::mpsc::Receiver;
 
-use actix::{Actor, Addr, Context, Handler, Message};
-use irys_storage::{ii, partition_provider::PartitionStorageProvider};
 use irys_types::{
     block_production::{Partition, SolutionContext},
-    ChunkBin, PartitionStorageProviderConfig, StorageModuleConfig, CHUNK_SIZE, H256,
-    NUM_CHUNKS_IN_RECALL_RANGE, NUM_OF_CHUNKS_IN_PARTITION, NUM_RECALL_RANGES_IN_PARTITION, U256,
+    ChunkBin, CHUNK_SIZE, H256,
+    NUM_CHUNKS_IN_RECALL_RANGE, NUM_RECALL_RANGES_IN_PARTITION, U256,
 };
-use rand::{seq::SliceRandom, RngCore, SeedableRng};
+use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use sha2::{Digest, Sha256};
 
 pub fn mine_partition(partition: Partition, seed_receiver_channel: Receiver<H256>) {
     // Random difficulty
-    let mut difficulty = U256::from_little_endian(H256::random().as_bytes());
+    let difficulty = U256::from_little_endian(H256::random().as_bytes());
     dbg!("Difficulty at start is {}", difficulty);
     loop {
         let mining_hash = match seed_receiver_channel.recv() {
@@ -56,7 +54,7 @@ pub fn mine_partition(partition: Partition, seed_receiver_channel: Receiver<H256
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
 
             let solution_number = hash_to_number(&hash);
-            if solution_number >= U256::from(difficulty) {
+            if solution_number >= difficulty {
                 dbg!("SOLUTION FOUND!!!!!!!!!");
                 let solution = SolutionContext {
                     partition_id: partition.id,

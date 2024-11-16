@@ -177,7 +177,10 @@ pub fn generate_chunk_test_data(path: PathBuf, chunks: u8, offset: u8) -> eyre::
         // rng.fill_bytes(&mut chunk);
         // handle.write(&chunk)?;
 
-        handle.write([offset + chunks_done as u8; CHUNK_SIZE as usize].as_ref())?;
+        assert_eq!(
+            handle.write([offset + chunks_done as u8; CHUNK_SIZE as usize].as_ref())?,
+            CHUNK_SIZE as usize
+        );
 
         chunks_done = chunks_done + 1;
     }

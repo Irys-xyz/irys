@@ -167,7 +167,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
         })?;
 
     // wait for the full handle to be send over by the actix thread
-    return Ok(irys_node_handle_receiver.await?);
+    Ok(irys_node_handle_receiver.await?)
 }
 
 async fn start_reth_node<T: HasName + HasTableType>(
