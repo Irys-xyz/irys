@@ -1,23 +1,18 @@
-use std::io::Read;
-
 use alloy_primitives::{Address, Parity, U256};
 use alloy_signer::Signature;
-use bytes::Buf;
-use k256::ecdsa::VerifyingKey;
-use rand::Rng;
 use reth_codecs::Compact;
 use reth_db::DatabaseError;
 use reth_db_api::table::{Compress, Decompress};
 use reth_primitives::recover_signer_unchecked;
 use serde::{Deserialize, Serialize};
 
-use crate::{generate_leaves, hash_sha256, irys::IrysSigner, MAX_CHUNK_SIZE};
+use crate::irys::IrysSigner;
 
 use crate::{generate_data_root, generate_interleaved_leaves, Node, H256, IRYS_CHAIN_ID};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Compact)]
 pub struct IngressProof {
-    pub tx_id: H256,    // IrysTxId
-    pub owner: Address, // address
+    pub tx_id: H256,
+    pub owner: Address,
     pub signature: Signature,
     pub block_relative_tx_offset: u128,
     pub data_root: H256,
@@ -25,30 +20,18 @@ pub struct IngressProof {
     pub proof: H256,
 }
 
-// TODO: either a.) move tables into type or b.) somehow move the ingress proof type into database without causing a circular dep
-// for speed I just copied the macro here
-macro_rules! impl_compression_for_compact {
-	($($name:tt),+) => {
-			$(
-					impl Compress for $name {
-							type Compressed = Vec<u8>;
-
-							fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(self, buf: &mut B) {
-									let _ = Compact::to_compact(&self, buf);
-							}
-					}
-
-					impl Decompress for $name {
-							fn decompress(value: &[u8]) -> Result<$name, DatabaseError> {
-									let (obj, _) = Compact::from_compact(value, value.len());
-									Ok(obj)
-							}
-					}
-			)+
-	};
+impl Compress for IngressProof {
+    type Compressed = Vec<u8>;
+    fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(self, buf: &mut B) {
+        let _ = Compact::to_compact(&self, buf);
+    }
 }
-
-impl_compression_for_compact!(IngressProof);
+impl Decompress for IngressProof {
+    fn decompress(value: &[u8]) -> Result<IngressProof, DatabaseError> {
+        let (obj, _) = Compact::from_compact(value, value.len());
+        Ok(obj)
+    }
+}
 
 impl Default for IngressProof {
     fn default() -> Self {
@@ -63,48 +46,6 @@ impl Default for IngressProof {
         }
     }
 }
-
-// const OWNER_LENGTH: usize = 20;
-
-// impl Compact for IngressProof {
-//     fn to_compact<B>(&self, buf: &mut B) -> usize
-//     where
-//         B: bytes::BufMut + AsMut<[u8]>,
-//     {
-//         let mut len = 0;
-//         len += self.tx_id.to_compact(buf);
-//         // buf.put(self.owner.as_slice());
-//         // len += 20;
-//         len += self.owner.to_compact(buf);
-//         len += self.signature.to_compact(buf);
-//         len += self.block_relative_tx_offset.to_compact(buf);
-//         len += self.data_root.to_compact(buf);
-//         len += self.data_size.to_compact(buf);
-//         len += self.proof.to_compact(buf);
-//         len
-//     }
-
-//     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-//         // todo!()
-//             let (tx_id, buf)= H256::from_compact(buf, H256::len_bytes());
-//             let mut owner = [0; OWNER_LENGTH];
-//             buf.read_exact(&mut owner);
-//             // buf.advance(cnt);
-//             let (signature)
-
-//         Self {
-//             tx_id = H256::from_compact(buf, H256::len_bytes()),
-//             owner: todo!(),
-//             signature: todo!(),
-//             block_relative_tx_offset: todo!(),
-//             data_root: todo!(),
-//             data_size: todo!(),
-//             proof: todo!(),
-
-//         }
-
-//     }
-// }
 
 pub fn generate_ingress_proof_tree(data: Vec<u8>, address: Address) -> eyre::Result<Node> {
     let chunks = generate_interleaved_leaves(data.clone(), address.as_slice())?;
