@@ -210,7 +210,6 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
             if chunk_count == expected_chunk_count {
                 // we *should* have all the chunks
                 // dispatch a ingress proof task
-                dbg!("we have all the chunks!");
                 self.task_exec.spawn_blocking(generate_ingress_proof(
                     self.db.clone(),
                     root_hash.into(),

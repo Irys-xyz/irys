@@ -202,7 +202,6 @@ pub fn cached_chunk_by_offset(
         Ok(None)
     };
     tx.commit()?;
-    // dbg!(&walk);
 
     return result;
 }

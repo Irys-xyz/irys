@@ -2,6 +2,7 @@ use arbitrary::Arbitrary;
 use irys_types::Base64;
 use reth::revm::primitives::B256;
 use reth_codecs::Compact;
+use reth_db::cursor::DbCursorRO;
 use reth_db::transaction::DbTxMut;
 use reth_db::{table::DupSort, DatabaseError};
 use reth_db::{tables, Database};
@@ -33,19 +34,21 @@ pub struct CachedChunk2 {
 // over whole value (Even SubKey) that would mess up fetching of values with seek_by_key_subkey
 // as the subkey ordering is byte ordering over the entire stored value, so the key 1.) has to be the first element that's encoded and 2.) cannot be compressed
 
+const KEY_BYTES: usize = std::mem::size_of::<u128>();
+
 impl Compact for CachedChunk2 {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
     {
         // for now put full bytes and later compress it.
-        buf.put_slice(&self.key.to_le_bytes());
-        self.chunk.to_compact(buf) + 16
+        buf.put_slice(&self.key.to_be_bytes());
+        self.chunk.to_compact(buf) + KEY_BYTES
     }
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let key = u128::from_le_bytes(buf[..16].try_into().unwrap());
-        let (value, out) = CachedChunk::from_compact(&buf[16..], len - 16);
+        let key = u128::from_be_bytes(buf[..KEY_BYTES].try_into().unwrap());
+        let (value, out) = CachedChunk::from_compact(&buf[KEY_BYTES..], len - KEY_BYTES);
         (Self { key, chunk: value }, out)
     }
 }
@@ -117,8 +120,11 @@ fn db_subkey_test() -> eyre::Result<()> {
 
     assert_eq!(seek_exact, Some(chunk));
 
-    let n = dup_read_cursor.dup_cursor_count()?;
-    dbg!(n);
+    // if the cursor isn't "on" the correct key, you need to seek to it:
+    // cursor.seek_exact(root_hash.into()).unwrap();
+    // we don't have to here as the cursor is already in the range of the key due to the above seek_by_key_subkey
+    let n = dup_read_cursor.dup_cursor_count()?.unwrap();
+    assert_eq!(n, 3);
     // let v1 = dup_read_cursor.first_dup()?;
     // dup_read_cursor.inner.cursor.
 
@@ -127,12 +133,22 @@ fn db_subkey_test() -> eyre::Result<()> {
     w_tx.delete::<CachedChunks2>(key, None)?;
     w_tx.commit()?;
 
+    // new cursor - MDBX has isolation, so a new cursor is required to "see" the changes
     let mut dup_read_cursor = db.tx()?.cursor_dup_read::<CachedChunks2>()?;
+
+    let r = dup_read_cursor.seek_exact(key).unwrap();
+    dbg!(r);
+    // below won't work, dup_cursor_count requires the key to exist, which it no longer does.
+
+    // TODO: revamp dup_cursor_count so that it does the seek for you & None checks to short circuit to 0
+    // let n2 = dup_read_cursor.dup_cursor_count()?.unwrap();
+    // assert_eq!(n2, 0);
+
     let walk = dup_read_cursor
         .walk_dup(Some(key), None)?
         .collect::<Result<Vec<_>, DatabaseError>>()?;
 
-    assert!(walk.len() == 0);
+    assert_eq!(walk.len(), 0);
 
     Ok(())
 }
