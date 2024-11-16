@@ -29,10 +29,11 @@ pub struct CachedChunk2 {
     pub chunk: CachedChunk,
 }
 
-// NOTE: Removing reth_codec and manually encode subkey
-// and compress second part of the value. If we have compression
-// over whole value (Even SubKey) that would mess up fetching of values with seek_by_key_subkey
-// as the subkey ordering is byte ordering over the entire stored value, so the key 1.) has to be the first element that's encoded and 2.) cannot be compressed
+// NOTE: Removing reth_codec and manually encode subkey and compress second part of the value.
+// If we have compression over whole value (Even SubKey) that would mess up fetching of values
+// as the subkey ordering is byte ordering over the entire stored value.
+// So the key 1.) has to be the first element that's encoded and 2.) cannot be compressed,
+// and 3.) needs to be 'big endian' encoded (or a coding that works with the sorting)
 
 const KEY_BYTES: usize = std::mem::size_of::<u128>();
 
@@ -54,9 +55,10 @@ impl Compact for CachedChunk2 {
 }
 
 /// DupSort works by allowing multiple unique values to be associated with a key,
-/// with each value being sorted *by the encoded bytes of the value*, 0 being first, 255 being last.
-/// this is why it's important the subkey is the first element that is encoded when serializing the value, as it defines the sort order for that encoded value
-/// completely identical values (subkey + data) **are** deduplicated, but partially indentical (same subkey + different data) are **NOT**, see chunk3
+/// with each duplicate value being sorted *by the encoded bytes of the value*;
+/// Under BE encoding, subkey 0 would come before subkey 255.
+/// This is why it's important the subkey is the first element that is encoded when serializing the value, as it defines the sort order for that encoded value.
+/// Completely identical values (subkey + data) **are** deduplicated, but partially indentical (same subkey + different data) are **NOT**, see chunk3.
 #[test]
 fn db_subkey_test() -> eyre::Result<()> {
     let builder = tempfile::Builder::new()
@@ -124,16 +126,16 @@ fn db_subkey_test() -> eyre::Result<()> {
     let n = dup_read_cursor.dup_count(key)?.unwrap();
     assert_eq!(n, 3);
 
-    // delete the key, which also deletes all the associated values
+    // delete the key, which also deletes all the associated duplicate values
     let w_tx = db.tx_mut()?;
     w_tx.delete::<CachedChunks2>(key, None)?;
     w_tx.commit()?;
 
-    // new cursor - MDBX has isolation, so a new cursor is required to "see" the changes
+    // new cursor - MDBX has isolation, so a new tx is required to "see" the changes
     let mut dup_read_cursor = db.tx()?.cursor_dup_read::<CachedChunks2>()?;
 
     let r = dup_read_cursor.seek_exact(key).unwrap();
-    dbg!(r);
+    assert_eq!(r, None);
 
     let n2 = dup_read_cursor.dup_count(key)?;
     assert_eq!(n2, None);
