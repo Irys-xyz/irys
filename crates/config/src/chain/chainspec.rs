@@ -14,13 +14,15 @@ pub struct IrysChainSpecBuilder {
 impl IrysChainSpecBuilder {
     /// Construct a new builder from the mainnet chain spec.
     pub fn mainnet() -> Self {
+        let mut genesis = IrysBlockHeader::new();
+        genesis.height = 0;
         Self {
             reth_builder: ChainSpecBuilder {
                 chain: Some(IRYS_MAINNET.chain),
                 genesis: Some(IRYS_MAINNET.genesis.clone()),
                 hardforks: IRYS_MAINNET.hardforks.clone(),
             },
-            genesis: IrysBlockHeader::new(),
+            genesis,
         }
     }
 

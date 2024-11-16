@@ -29,37 +29,39 @@ impl BlockIndexActor {
         irys_block_header: &Arc<IrysBlockHeader>,
         data_txs: &Arc<Vec<IrysTransactionHeader>>,
     ) {
-        // Calculate storage requirements for new transactions
-        let mut total_chunks = 0;
-        for data_tx in data_txs.iter() {
-            // Convert data size to required number of 256KB chunks, rounding up
-            let num_chunks = (data_tx.data_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
-            total_chunks += num_chunks;
-        }
+        // Calculate total bytes needed, rounding each tx up to nearest chunk size
+        // Example: data_size 300KB with 256KB chunks:
+        // (300KB + 256KB - 1) / 256KB = 2 chunks -> 2 * 256KB = 512KB total
+        let bytes_added = data_txs
+            .iter()
+            .map(|tx| ((tx.data_size + CHUNK_SIZE - 1) / CHUNK_SIZE) * CHUNK_SIZE)
+            .sum::<u64>();
 
-        // Calculate total bytes needed in submit ledger
-        let bytes_added = total_chunks * CHUNK_SIZE;
-        // Get read lock once and keep it for multiple operations
         let mut index = self.block_index.write().unwrap();
-        // MAGIC: block index includes the genesis block (0th block, would make index size 1, so we minus 1)
-        let last_height = (index.num_blocks() - 1) as usize;
 
-        // Use same lock to get previous block
-        let prev_block = index.get_item(last_height).unwrap();
-        let submit_ledger_size = prev_block.ledgers[Ledger::Submit as usize].ledger_size;
-        let new_submit_ledger_size = submit_ledger_size + u128::from(bytes_added);
-        // Create a new BlockIndexItem
+        // Get previous ledger sizes or default to 0 for genesis
+        let (publish_size, submit_size) =
+            if index.num_blocks() == 0 && irys_block_header.height == 0 {
+                (0, bytes_added as u128)
+            } else {
+                let prev_block = index.get_item(0).unwrap();
+                (
+                    prev_block.ledgers[Ledger::Publish as usize].ledger_size,
+                    prev_block.ledgers[Ledger::Submit as usize].ledger_size + bytes_added as u128,
+                )
+            };
+
         let block_index_item = BlockIndexItem {
             block_hash: irys_block_header.block_hash,
             num_ledgers: 2,
             ledgers: vec![
                 LedgerIndexItem {
-                    ledger_size: prev_block.ledgers[0].ledger_size,
-                    tx_root: H256::zero(), // Until we actually compute tx_roots
+                    ledger_size: publish_size,
+                    tx_root: H256::zero(),
                 },
                 LedgerIndexItem {
-                    ledger_size: new_submit_ledger_size,
-                    tx_root: H256::zero(), // Until we actually compute tx_roots
+                    ledger_size: submit_size,
+                    tx_root: H256::zero(),
                 },
             ],
         };

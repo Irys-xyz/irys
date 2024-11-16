@@ -87,7 +87,7 @@ impl Handler<SolutionContext> for BlockProducerActor {
                     previous_solution_hash: H256::zero(),
                     last_epoch_hash: H256::random(),
                     chunk_hash: H256::zero(),
-                    height: bh + 1,
+                    height: bh,
                     block_hash: H256::zero(),
                     previous_block_hash: H256::zero(),
                     previous_cumulative_diff: U256::from(4000),

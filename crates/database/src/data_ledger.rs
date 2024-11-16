@@ -2,7 +2,7 @@ use irys_types::{H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT, SUBMIT_LEDG
 use std::ops::{Index, IndexMut};
 
 /// A slot in a data ledger containing one or more partition hashes
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LedgerSlot {
     /// Assigned partition hashes
     pub partitions: Vec<H256>,
@@ -12,7 +12,7 @@ pub struct LedgerSlot {
     pub last_height: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 /// Permanent ledger that persists across epochs
 pub struct PermanentLedger {
     /// Sequential ledger slots containing partition assignments
@@ -21,7 +21,7 @@ pub struct PermanentLedger {
     pub ledger_num: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 /// Temporary ledger that exists for a fixed number of epochs
 pub struct TermLedger {
     /// Sequential ledger slots containing partition assignments  
@@ -209,7 +209,7 @@ impl Ledger {
 }
 
 /// Provides a way to enforce accessing ledgers by their [Ledger] enum.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Ledgers {
     perm: PermanentLedger,
     term: Vec<TermLedger>,

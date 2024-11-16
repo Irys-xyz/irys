@@ -7,15 +7,15 @@
 		{
 			"type": "lldb",
 			"request": "launch",
-			"name": "Debug executable 'irys-chain'",
+			"name": "Debug executable 'chain'",
 			"cargo": {
 				"args": [
 					"build",
-					"--bin=irys-chain",
-					"--package=irys-chain"
+					"--bin=irys",
+					"--package=chain"
 				],
 				"filter": {
-					"name": "irys-chain",
+					"name": "irys",
 					"kind": "bin"
 				}
 			},
@@ -25,16 +25,16 @@
 		{
 			"type": "lldb",
 			"request": "launch",
-			"name": "Debug unit tests in executable 'irys-chain'",
+			"name": "Debug unit tests in executable 'chain'",
 			"cargo": {
 				"args": [
 					"test",
 					"--no-run",
-					"--bin=irys-chain",
-					"--package=irys-chain"
+					"--bin=irys",
+					"--package=chain"
 				],
 				"filter": {
-					"name": "irys-chain",
+					"name": "chain",
 					"kind": "bin"
 				}
 			},

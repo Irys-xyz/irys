@@ -1,8 +1,13 @@
 use ::database::{tables::Tables, BlockIndex, Initialized};
 use actix::Actor;
 use actors::{
-    block_index::BlockIndexActor, block_producer::BlockProducerActor, mempool::MempoolActor,
-    mining::PartitionMiningActor, packing::PackingActor, ActorAddresses,
+    block_index::BlockIndexActor,
+    block_producer::{BlockConfirmedMessage, BlockProducerActor},
+    epoch_service::{EpochServiceActor, EpochServiceConfig, GetLedgersMessage, NewEpochMessage},
+    mempool::MempoolActor,
+    mining::PartitionMiningActor,
+    packing::PackingActor,
+    ActorAddresses,
 };
 use irys_api_server::run_server;
 use irys_config::IrysNodeConfig;
@@ -49,11 +54,12 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
         oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
     let (irys_node_handle_sender, irys_node_handle_receiver) = oneshot::channel::<IrysNodeCtx>();
     let irys_genesis = node_config.chainspec_builder.genesis();
+    let arc_genesis = Arc::new(irys_genesis);
     let arc_config = Arc::new(node_config);
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
         BlockIndex::default()
             .reset(&arc_config.clone())?
-            .init(irys_genesis, arc_config.clone())
+            .init(arc_config.clone())
             .await
             .unwrap(),
     ));
@@ -87,8 +93,35 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 );
                 let mempool_actor_addr = mempool_actor.start();
 
+                // Initialize the epoch_service actor to handle partition ledger assignments
+                let config = EpochServiceConfig::default();
+                let miner_address = node_config.mining_signer.address();
+                let epoch_service = EpochServiceActor::new(miner_address, Some(config));
+                let epoch_service_actor_addr = epoch_service.start();
+
+                // Initialize the block index actor and tell it about the genesis block
                 let block_index_actor = BlockIndexActor::new(block_index);
                 let block_index_actor_addr = block_index_actor.start();
+                let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
+                match block_index_actor_addr.send(msg).await {
+                    Ok(_) => println!("Genesis block indexed"),
+                    Err(_) => panic!("Failed to index genesis block"),
+                }
+
+                // Tell the epoch service to initialize the ledgers
+                let msg = NewEpochMessage(arc_genesis.clone());
+                match epoch_service_actor_addr.send(msg).await {
+                    Ok(_) => println!("Genesis Epoch tasks complete."),
+                    Err(_) => panic!("Failed to perform genesis epoch tasks"),
+                }
+
+                // DMEO: How you read partition assignments
+                let ledgers = epoch_service_actor_addr
+                    .send(GetLedgersMessage)
+                    .await
+                    .unwrap()
+                    .unwrap(); // I don't like this double unwrap but I haven't figured out how to avoid it.
+                println!("{:?}", ledgers.read());
 
                 let mut part_actors = Vec::new();
 
@@ -135,6 +168,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     packing: packing_actor_addr,
                     mempool: mempool_actor_addr,
                     block_index: block_index_actor_addr,
+                    epoch_service: epoch_service_actor_addr,
                 };
 
                 let _ = irys_node_handle_sender.send(IrysNodeCtx {
