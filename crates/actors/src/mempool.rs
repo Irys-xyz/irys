@@ -211,12 +211,18 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
             if chunk_count == expected_chunk_count {
                 // we *should* have all the chunks
                 // dispatch a ingress proof task
-                self.task_exec.spawn_blocking(generate_ingress_proof(
-                    self.db.clone(),
-                    root_hash.into(),
-                    cached_data_root.data_size,
-                    self.signer.clone(),
-                ));
+                let db1 = self.db.clone();
+                let signer1 = self.signer.clone();
+                self.task_exec.spawn_blocking(async move {
+                    generate_ingress_proof(
+                        db1,
+                        root_hash.into(),
+                        cached_data_root.data_size,
+                        signer1,
+                    )
+                    // TODO: handle results instead of unwrapping
+                    .unwrap();
+                });
             }
 
             Ok(())
@@ -258,19 +264,7 @@ impl Handler<RemoveConfirmedTxs> for MempoolActor {
     }
 }
 
-// outer wrapper so we can use `?` inside the function
-// there's almost certainly a better way to do this
-// also remove this unused async, but all the spawn methods expect a future...
-pub async fn generate_ingress_proof(
-    db: DatabaseProvider,
-    data_root: DataRoot,
-    size: u64,
-    signer: IrysSigner,
-) -> () {
-    generate_ingress_proof_inner(db, data_root, size, signer).unwrap()
-}
-
-pub fn generate_ingress_proof_inner(
+pub fn generate_ingress_proof(
     db: DatabaseProvider,
     data_root: DataRoot,
     size: u64,
