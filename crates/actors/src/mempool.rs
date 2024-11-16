@@ -138,6 +138,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
     type Result = Result<(), ChunkIngressError>;
 
     fn handle(&mut self, chunk_msg: ChunkIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
+        // TODO: maintain a shared read transaction so we have read isolation
         let chunk = chunk_msg.0;
         // Check to see if we have a cached data_root for this chunk
         let result = database::cached_data_root_by_data_root(&self.db, chunk.data_root);
@@ -196,13 +197,10 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
                 .cursor_dup_read::<CachedChunksIndex>()
                 .unwrap();
 
-            // seek to the root key
-            cursor.seek_exact(root_hash.into()).unwrap();
-
             // get the number of dupsort values (aka the number of chunks)
             // this ASSUMES that the index isn't corrupt (no double values etc)
             // the ingress proof generation task does a more thorough check
-            let chunk_count = cursor.dup_cursor_count().unwrap().unwrap();
+            let chunk_count = cursor.dup_count(root_hash.into()).unwrap().unwrap();
             // data size is the offset of the last chunk
             // add one as index is 0-indexed
             let expected_chunk_count =
@@ -320,6 +318,7 @@ pub fn generate_ingress_proof_inner(
         let chunk_bin = chunk.chunk.unwrap().0;
         data.extend(chunk_bin);
     }
+    assert_eq!(data.len() as u64, size);
     // generate the ingress proof hash
     let proof = irys_types::ingress::generate_ingress_proof(signer, data)?;
     // TODO: do something with it!

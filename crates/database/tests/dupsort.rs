@@ -120,13 +120,9 @@ fn db_subkey_test() -> eyre::Result<()> {
 
     assert_eq!(seek_exact, Some(chunk));
 
-    // if the cursor isn't "on" the correct key, you need to seek to it:
-    // cursor.seek_exact(root_hash.into()).unwrap();
-    // we don't have to here as the cursor is already in the range of the key due to the above seek_by_key_subkey
-    let n = dup_read_cursor.dup_cursor_count()?.unwrap();
+    // check the number of dupsort values associated with this key
+    let n = dup_read_cursor.dup_count(key)?.unwrap();
     assert_eq!(n, 3);
-    // let v1 = dup_read_cursor.first_dup()?;
-    // dup_read_cursor.inner.cursor.
 
     // delete the key, which also deletes all the associated values
     let w_tx = db.tx_mut()?;
@@ -138,11 +134,9 @@ fn db_subkey_test() -> eyre::Result<()> {
 
     let r = dup_read_cursor.seek_exact(key).unwrap();
     dbg!(r);
-    // below won't work, dup_cursor_count requires the key to exist, which it no longer does.
 
-    // TODO: revamp dup_cursor_count so that it does the seek for you & None checks to short circuit to 0
-    // let n2 = dup_read_cursor.dup_cursor_count()?.unwrap();
-    // assert_eq!(n2, 0);
+    let n2 = dup_read_cursor.dup_count(key)?;
+    assert_eq!(n2, None);
 
     let walk = dup_read_cursor
         .walk_dup(Some(key), None)?
