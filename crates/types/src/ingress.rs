@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::irys::IrysSigner;
 
 use crate::{
-    generate_data_root, generate_interleaved_leaves, DataChunks, DataRoot, Node, H256,
-    IRYS_CHAIN_ID,
+    generate_data_root, generate_ingress_leaves, DataChunks, DataRoot, Node, H256, IRYS_CHAIN_ID,
 };
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Compact)]
 pub struct IngressProof {
@@ -43,7 +42,7 @@ impl Default for IngressProof {
 }
 
 pub fn generate_ingress_proof_tree(chunks: DataChunks, address: Address) -> eyre::Result<Node> {
-    let chunks = generate_interleaved_leaves(chunks.clone(), address)?;
+    let chunks = generate_ingress_leaves(chunks.clone(), address)?;
     let root = generate_data_root(chunks.clone())?;
     Ok(root)
 }
