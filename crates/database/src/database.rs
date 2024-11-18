@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::db_cache::{
-    chunk_offset_to_index, CachedChunk, CachedChunkIndexEntry, CachedChunkIndexEntryMeta,
+    chunk_offset_to_index, CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata,
     CachedDataRoot,
 };
 use crate::tables::{
@@ -23,7 +23,7 @@ use reth_db::{
     ClientVersion, Database, DatabaseEnv, DatabaseError,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::debug;
+use tracing::{debug, warn};
 
 const ERROR_GET: &str = "Not able to get value from table.";
 const ERROR_PUT: &str = "Not able to insert value into table.";
@@ -131,28 +131,34 @@ pub fn cached_data_root_by_data_root(
     Ok(result)
 }
 
-/// Caches a chunk
-pub fn cache_chunk(db: &DatabaseEnv, chunk: Chunk) -> eyre::Result<()> {
+type IsDuplicate = bool;
+/// Caches a chunk - returns `true` if the chunk was a duplicate and was not inserted
+pub fn cache_chunk(db: &DatabaseEnv, chunk: Chunk) -> eyre::Result<IsDuplicate> {
     let chunk_index = chunk_offset_to_index(chunk.offset)?;
-    let chunk_hash: ChunkPathHash = hash_sha256(&chunk.data_path.0).unwrap().into();
+    let chunk_path_hash: ChunkPathHash = hash_sha256(&chunk.data_path.0).unwrap().into();
+    if cached_chunk_by_chunk_key(db, chunk_path_hash)?.is_some() {
+        warn!(
+            "Chunk {} of {} is already cached, skipping..",
+            &chunk_path_hash, &chunk.data_root
+        );
+        return Ok(true);
+    }
     let value = CachedChunkIndexEntry {
         index: chunk_index,
-        meta: CachedChunkIndexEntryMeta {
-            chunk_path_hash: chunk_hash,
-        },
+        meta: CachedChunkIndexMetadata { chunk_path_hash },
     };
 
     debug!(
         "Caching chunk {} ({}) of {}",
-        &chunk_index, &chunk_hash, &chunk.data_root
+        &chunk_index, &chunk_path_hash, &chunk.data_root
     );
     db.update(|tx: &Tx<reth_db::mdbx::RW>| {
         tx.put::<CachedChunksIndex>(chunk.data_root, value)
             .expect(ERROR_PUT);
-        tx.put::<CachedChunks>(chunk_hash, chunk.into())
+        tx.put::<CachedChunks>(chunk_path_hash, chunk.into())
             .expect(ERROR_PUT);
     })?;
-    Ok(())
+    Ok(false)
 }
 
 /// Retrieves a cached chunk from the cache using its parent data root and offset
@@ -160,7 +166,7 @@ pub fn cached_chunk_meta_by_offset(
     db: &DatabaseEnv,
     data_root: DataRoot,
     chunk_offset: TxRelativeChunkOffset,
-) -> eyre::Result<Option<CachedChunkIndexEntryMeta>> {
+) -> eyre::Result<Option<CachedChunkIndexMetadata>> {
     let chunk_index = chunk_offset_to_index(chunk_offset)?;
     let tx = db.tx()?;
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
@@ -181,7 +187,7 @@ pub fn cached_chunk_by_offset(
     db: &DatabaseEnv,
     data_root: DataRoot,
     chunk_offset: TxRelativeChunkOffset,
-) -> eyre::Result<Option<(CachedChunkIndexEntryMeta, CachedChunk)>> {
+) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
     let chunk_index = chunk_offset_to_index(chunk_offset)?;
     let tx = db.tx()?;
 
@@ -191,7 +197,7 @@ pub fn cached_chunk_by_offset(
         .seek_by_key_subkey(data_root, chunk_index)?
         .filter(|e| e.index == chunk_index)
     {
-        let meta: CachedChunkIndexEntryMeta = index_entry.into();
+        let meta: CachedChunkIndexMetadata = index_entry.into();
         // expect that the cached chunk always has an entry if the index entry exists
         Ok(Some((
             meta.clone(),

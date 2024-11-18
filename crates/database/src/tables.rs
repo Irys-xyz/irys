@@ -1,6 +1,6 @@
 use irys_types::{
-    ingress::IngressProof, ChunkPathHash, DataRoot, DataRootHash, IrysBlockHeader,
-    IrysTransactionHeader, TxRelativeChunkIndex, H256,
+    ingress::IngressProof, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
+    TxRelativeChunkIndex, H256,
 };
 use reth_codecs::Compact;
 use reth_db::{

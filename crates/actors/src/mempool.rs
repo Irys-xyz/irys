@@ -1,18 +1,16 @@
 use actix::{Actor, Context, Handler, Message};
-use database::db_cache::chunk_offset_to_index;
-use database::tables::CachedChunks;
-use database::tables::CachedChunksIndex;
-use database::tables::IngressProofs;
+use database::db_cache::{chunk_offset_to_index, CachedChunk};
+use database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use eyre::eyre;
 use irys_types::ingress::generate_ingress_proof_tree;
 use irys_types::irys::IrysSigner;
-use irys_types::Address;
 use irys_types::ChunkBin;
 use irys_types::DataRoot;
 use irys_types::{
     app_state::DatabaseProvider, chunk::Chunk, hash_sha256, validate_path, IrysTransactionHeader,
     CHUNK_SIZE, H256,
 };
+use irys_types::{Address, DataChunks};
 use reth::tasks::TaskExecutor;
 use reth::tasks::TaskManager;
 use reth_db::cursor::DbCursorRO;
@@ -44,7 +42,7 @@ impl Actor for MempoolActor {
 
 impl MempoolActor {
     /// Create a new instance of the mempool actor passing in a reference
-    /// counted reference to a DatabaseEnv
+    /// counted reference to a DatabaseEnv, a copy of reth's task executor and the miner's signer
     pub fn new(db: DatabaseProvider, task_exec: TaskExecutor, signer: IrysSigner) -> Self {
         Self {
             db,
@@ -189,21 +187,28 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         // Check that the leaf hash on the data_path matches the chunk_hash
         if path_result.leaf_hash == hash_sha256(&chunk.bytes.0).unwrap() {
             // TODO: fix all these unwraps!
-            // Finally write the chunk to CachedChunks
+            // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
             database::cache_chunk(&self.db, chunk).unwrap();
 
+            let tx = self.db.tx().unwrap();
+            let root_hash: H256 = root_hash.into();
+
+            // check if we have generated an ingress proof for this tx already
+            if tx.get::<IngressProofs>(root_hash).unwrap().is_some() {
+                info!(
+                    "We've already generated an ingress proof for data root {}",
+                    &root_hash
+                );
+                return Ok(());
+            };
+
             // check if we have all the chunks for this tx
-            let mut cursor = self
-                .db
-                .tx()
-                .unwrap()
-                .cursor_dup_read::<CachedChunksIndex>()
-                .unwrap();
+            let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>().unwrap();
 
             // get the number of dupsort values (aka the number of chunks)
             // this ASSUMES that the index isn't corrupt (no double values etc)
             // the ingress proof generation task does a more thorough check
-            let chunk_count = cursor.dup_count(root_hash.into()).unwrap().unwrap();
+            let chunk_count = cursor.dup_count(root_hash).unwrap().unwrap();
             // data size is the offset of the last chunk
             // add one as index is 0-indexed
             let expected_chunk_count =
@@ -214,14 +219,9 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
                 let db1 = self.db.clone();
                 let signer1 = self.signer.clone();
                 self.task_exec.spawn_blocking(async move {
-                    generate_ingress_proof(
-                        db1,
-                        root_hash.into(),
-                        cached_data_root.data_size,
-                        signer1,
-                    )
-                    // TODO: handle results instead of unwrapping
-                    .unwrap();
+                    generate_ingress_proof(db1, root_hash, cached_data_root.data_size, signer1)
+                        // TODO: handle results instead of unwrapping
+                        .unwrap();
                 });
             }
 
@@ -284,40 +284,43 @@ pub fn generate_ingress_proof(
     // if we have, we *must* error
     let mut set = HashSet::<H256>::new();
     let expected_chunk_count = chunk_offset_to_index(size).unwrap() + 1;
-    let mut data: Vec<u8> =
-        Vec::with_capacity((expected_chunk_count * CHUNK_SIZE as u32).try_into()?);
+    let mut data: DataChunks = Vec::with_capacity(expected_chunk_count as usize);
+    let mut data_size: u64 = 0;
     for entry in dup_walker {
         let (root_hash2, index_entry) = entry?;
         // make sure we haven't traversed into the wrong key
         assert_eq!(data_root, root_hash2);
 
-        let chunk_hash = index_entry.meta.chunk_path_hash;
-        if set.contains(&chunk_hash) {
+        let chunk_path_hash = index_entry.meta.chunk_path_hash;
+        if set.contains(&chunk_path_hash) {
             return Err(eyre!(
                 "Chunk with hash {} has been found twice for index entry {} of data_root {}",
-                &chunk_hash,
+                &chunk_path_hash,
                 &index_entry.index,
                 &data_root
             ));
         }
-        set.insert(chunk_hash);
+        set.insert(chunk_path_hash);
 
         let chunk = ro_tx
             .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
             .expect(
                 &format!(
                     "unable to get chunk {} for data root {} from DB",
-                    chunk_hash, data_root
+                    chunk_path_hash, data_root
                 )
                 .as_str(),
             );
         // TODO validate chunk length
         let chunk_bin = chunk.chunk.unwrap().0;
-        data.extend(chunk_bin);
+        data_size += chunk_bin.len() as u64;
+        data.push(chunk_bin);
     }
-    assert_eq!(data.len() as u64, size);
+    assert_eq!(data.len() as u32, expected_chunk_count);
+    assert_eq!(data_size, size);
+
     // generate the ingress proof hash
-    let proof = irys_types::ingress::generate_ingress_proof(signer, data)?;
+    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, data)?;
     info!(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root
@@ -343,7 +346,7 @@ mod tests {
     use database::{config::get_data_dir, open_or_create_db, tables::Tables};
     use irys_types::{irys::IrysSigner, Base64, MAX_CHUNK_SIZE};
     use rand::Rng;
-    use tokio::time::sleep;
+    use tokio::time::{sleep, timeout};
     use tracing_subscriber::util::SubscriberInitExt as _;
 
     use super::*;
@@ -450,15 +453,18 @@ mod tests {
 
         task_manager.graceful_shutdown_with_timeout(Duration::from_secs(5));
         // check the ingress proof is in the DB
-
-        let _ingress_proof = loop {
-            // don't reuse the tx! it has read isolation (won't see anything commited after it's creation)
-            let ro_tx = &arc_db2.tx()?;
-            match ro_tx.get::<IngressProofs>(data_root)? {
-                Some(ip) => break ip,
-                None => sleep(Duration::from_millis(100)).await,
+        let timed_get = timeout(Duration::from_secs(5), async {
+            loop {
+                // don't reuse the tx! it has read isolation (won't see anything commited after it's creation)
+                let ro_tx = &arc_db2.tx().unwrap();
+                match ro_tx.get::<IngressProofs>(data_root).unwrap() {
+                    Some(ip) => break ip,
+                    None => sleep(Duration::from_millis(100)).await,
+                }
             }
-        };
+        })
+        .await?;
+        assert_eq!(&timed_get.data_root, &data_root);
 
         Ok(())
     }

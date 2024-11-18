@@ -2,8 +2,7 @@ use std::sync::mpsc::Receiver;
 
 use irys_types::{
     block_production::{Partition, SolutionContext},
-    ChunkBin, CHUNK_SIZE, H256,
-    NUM_CHUNKS_IN_RECALL_RANGE, NUM_RECALL_RANGES_IN_PARTITION, U256,
+    ChunkBin, CHUNK_SIZE, H256, NUM_CHUNKS_IN_RECALL_RANGE, NUM_RECALL_RANGES_IN_PARTITION, U256,
 };
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;

@@ -1,11 +1,12 @@
 //! Validates merkle tree proofs for Irys transaction data and proof chunks
+use alloy_primitives::Address;
 use borsh::BorshDeserialize;
 use borsh_derive::BorshDeserialize;
 use color_eyre::eyre::eyre;
 use eyre::Error;
 use openssl::sha;
 
-use crate::{chunk::Chunk, Base64};
+use crate::{chunk::Chunk, Base64, DataChunks};
 
 /// Single struct used for original data chunks (Leaves) and branch nodes (hashes of pairs of child nodes).
 #[derive(Debug, PartialEq, Clone)]
@@ -309,17 +310,18 @@ pub fn generate_leaves(data: Vec<u8>) -> Result<Vec<Node>, Error> {
 }
 
 /// Generates data chunks from which the calculation of root id starts, including some arbitrary data to "interleave" into the leaf data hash
-pub fn generate_interleaved_leaves(data: Vec<u8>, interleave: &[u8]) -> Result<Vec<Node>, Error> {
-    let mut data_chunks: Vec<&[u8]> = data.chunks(MAX_CHUNK_SIZE).collect();
-
+pub fn generate_interleaved_leaves(
+    mut data_chunks: DataChunks,
+    interleave: Address,
+) -> Result<Vec<Node>, Error> {
     if data_chunks.last().unwrap().len() == MAX_CHUNK_SIZE {
-        data_chunks.push(&[]);
+        data_chunks.push(vec![]);
     }
 
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
     for chunk in data_chunks.into_iter() {
-        let data_hash = hash_interleaved_sha256(chunk, interleave)?;
+        let data_hash = hash_interleaved_sha256(chunk.as_slice(), interleave)?;
         let max_byte_range = min_byte_range + &chunk.len();
         let offset = max_byte_range.to_note_vec();
         let id = hash_all_sha256(vec![&data_hash, &offset])?;
@@ -426,10 +428,10 @@ pub fn hash_sha256(message: &[u8]) -> Result<[u8; 32], Error> {
     Ok(result)
 }
 
-pub fn hash_interleaved_sha256(message: &[u8], interleave: &[u8]) -> Result<[u8; 32], Error> {
+pub fn hash_interleaved_sha256(message: &[u8], interleave: Address) -> Result<[u8; 32], Error> {
     let mut hasher = sha::Sha256::new();
     hasher.update(message);
-    hasher.update(interleave);
+    hasher.update(interleave.as_slice());
     let result = hasher.finish();
     Ok(result)
 }

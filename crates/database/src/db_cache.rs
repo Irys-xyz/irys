@@ -40,16 +40,16 @@ impl From<Chunk> for CachedChunk {
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary)]
 pub struct CachedChunkIndexEntry {
     pub index: TxRelativeChunkIndex, // subkey
-    pub meta: CachedChunkIndexEntryMeta,
+    pub meta: CachedChunkIndexMetadata,
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
-/// structure containing any chunk cache index metadata, like chunk_hash for chunk data lookups
-pub struct CachedChunkIndexEntryMeta {
+/// structure containing any chunk cache index metadata, like the chunk_path_hash for chunk data lookups
+pub struct CachedChunkIndexMetadata {
     pub chunk_path_hash: ChunkPathHash,
 }
 
-impl From<CachedChunkIndexEntry> for CachedChunkIndexEntryMeta {
+impl From<CachedChunkIndexEntry> for CachedChunkIndexMetadata {
     fn from(value: CachedChunkIndexEntry) -> Self {
         value.meta
     }
@@ -81,7 +81,7 @@ impl Compact for CachedChunkIndexEntry {
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
         let index = TxRelativeChunkIndex::from_be_bytes(buf[..KEY_BYTES].try_into().unwrap());
         let (meta, out) =
-            CachedChunkIndexEntryMeta::from_compact(&buf[KEY_BYTES..], len - KEY_BYTES);
+            CachedChunkIndexMetadata::from_compact(&buf[KEY_BYTES..], len - KEY_BYTES);
         (Self { index, meta }, out)
     }
 }

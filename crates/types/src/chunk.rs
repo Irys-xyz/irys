@@ -28,15 +28,16 @@ pub struct Chunk {
 /// i.e for the first chunk, the offset is 262144 instead of 0
 pub type TxRelativeChunkOffset = u64;
 
+/// a fully padded chunk binary - note: only use this type in cases where smaller/end chunks *should* be padded to fill out the chunk
 pub type ChunkBin = [u8; CHUNK_SIZE as usize];
-
-/// sha256(data_root)
-pub type DataRootHash = H256;
 
 /// sha256(chunk_path)
 pub type ChunkPathHash = H256;
 
+// the root node ID for the merkle tree containing all the transaction's chunks
 pub type DataRoot = H256;
 
 /// The 0-indexed index of the chunk relative to the first chunk of the tx's data tree
 pub type TxRelativeChunkIndex = u32;
+
+pub type DataChunks = Vec<Vec<u8>>;

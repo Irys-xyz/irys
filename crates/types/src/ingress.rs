@@ -8,15 +8,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::irys::IrysSigner;
 
-use crate::{generate_data_root, generate_interleaved_leaves, Node, H256, IRYS_CHAIN_ID};
+use crate::{
+    generate_data_root, generate_interleaved_leaves, DataChunks, DataRoot, Node, H256,
+    IRYS_CHAIN_ID,
+};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Compact)]
 pub struct IngressProof {
-    pub tx_id: H256,
-    pub owner: Address,
     pub signature: Signature,
-    pub block_relative_tx_offset: u128,
     pub data_root: H256,
-    pub data_size: u128,
     pub proof: H256,
 }
 
@@ -36,49 +35,43 @@ impl Decompress for IngressProof {
 impl Default for IngressProof {
     fn default() -> Self {
         Self {
-            tx_id: Default::default(),
-            owner: Default::default(),
             signature: Signature::new(U256::ZERO, U256::ZERO, Parity::Parity(false)),
-            block_relative_tx_offset: Default::default(),
             data_root: Default::default(),
-            data_size: Default::default(),
             proof: Default::default(),
         }
     }
 }
 
-pub fn generate_ingress_proof_tree(data: Vec<u8>, address: Address) -> eyre::Result<Node> {
-    let chunks = generate_interleaved_leaves(data.clone(), address.as_slice())?;
+pub fn generate_ingress_proof_tree(chunks: DataChunks, address: Address) -> eyre::Result<Node> {
+    let chunks = generate_interleaved_leaves(chunks.clone(), address)?;
     let root = generate_data_root(chunks.clone())?;
     Ok(root)
 }
 
-pub fn generate_ingress_proof(signer: IrysSigner, data: Vec<u8>) -> eyre::Result<IngressProof> {
-    let root = generate_ingress_proof_tree(data, signer.address())?;
+pub fn generate_ingress_proof(
+    signer: IrysSigner,
+    data_root: DataRoot,
+    chunks: DataChunks,
+) -> eyre::Result<IngressProof> {
+    let root = generate_ingress_proof_tree(chunks, signer.address())?;
     let proof: [u8; 32] = root.id.clone();
     let mut signature: Signature = signer.signer.sign_prehash_recoverable(&proof)?.into();
     signature = signature.with_chain_id(IRYS_CHAIN_ID);
     Ok(IngressProof {
-        tx_id: H256::random(),
-        owner: signer.address(),
         signature,
-        block_relative_tx_offset: 0,
-        data_root: H256::random(),
-        data_size: 0,
+        data_root,
         proof: H256(root.id.clone()),
     })
 }
 
-pub fn verify_ingress_proof(proof: IngressProof, data: Vec<u8>) -> eyre::Result<bool> {
+pub fn verify_ingress_proof(proof: IngressProof, chunks: DataChunks) -> eyre::Result<bool> {
     let prehash = proof.proof.0;
     let sig = proof.signature.as_bytes();
 
     let recovered_address = recover_signer_unchecked(&sig, &prehash)?;
-    if recovered_address != proof.owner {
-        return Ok(false);
-    }
+
     // re-compute the proof
-    let recomputed = generate_ingress_proof_tree(data, recovered_address)?;
+    let recomputed = generate_ingress_proof_tree(chunks, recovered_address)?;
     // make sure they match
     Ok(recomputed.id == prehash)
 }
@@ -87,8 +80,8 @@ mod tests {
     use rand::Rng;
 
     use crate::{
-        generate_leaves, hash_sha256, ingress::verify_ingress_proof, irys::IrysSigner,
-        MAX_CHUNK_SIZE,
+        generate_leaves, hash_sha256, ingress::verify_ingress_proof, irys::IrysSigner, DataChunks,
+        H256, MAX_CHUNK_SIZE,
     };
 
     use super::generate_ingress_proof;
@@ -121,10 +114,15 @@ mod tests {
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
         let signer = IrysSigner::random_signer();
-        let proof = generate_ingress_proof(signer.clone(), data_bytes.clone())?;
+        let data_root = H256::random();
+        let chunks: DataChunks = data_bytes
+            .chunks(MAX_CHUNK_SIZE)
+            .map(|c| c.to_vec())
+            .collect();
+        let proof = generate_ingress_proof(signer.clone(), data_root, chunks.clone())?;
 
-        assert!(verify_ingress_proof(proof.clone(), data_bytes.clone())?);
-        let mut reversed = data_bytes.clone();
+        assert!(verify_ingress_proof(proof.clone(), chunks.clone())?);
+        let mut reversed = chunks.clone();
         reversed.reverse();
         assert!(!verify_ingress_proof(proof, reversed)?);
 
