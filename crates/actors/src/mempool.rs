@@ -359,7 +359,7 @@ mod tests {
         tracing_subscriber::FmtSubscriber::new().init();
 
         let builder = tempfile::Builder::new()
-            .prefix("reth-test-")
+            .prefix("irys-test-")
             .rand_bytes(8)
             .tempdir();
         let tmpdir = builder

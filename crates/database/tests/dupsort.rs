@@ -62,7 +62,7 @@ impl Compact for CachedChunk2 {
 #[test]
 fn db_subkey_test() -> eyre::Result<()> {
     let builder = tempfile::Builder::new()
-        .prefix("reth-test-")
+        .prefix("irys-test-")
         .rand_bytes(8)
         .tempdir();
     let tmpdir = builder
