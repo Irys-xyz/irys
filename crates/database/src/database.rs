@@ -5,11 +5,15 @@ use crate::db_cache::{
     CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders, Tables,
+    BlockRelativeTxPathIndex, CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders,
+    IrysTxHeaders, Tables,
 };
+use crate::tx_path::{BlockTxPathIndexEntry, BlockTxPathIndexKey, BlockTxPathIndexMeta};
+use crate::Ledger;
 use irys_types::{
-    hash_sha256, Chunk, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    TxRelativeChunkIndex, TxRelativeChunkOffset, H256,
+    hash_sha256, BlockHash, BlockLedgerRelativeChunkOffset, Chunk, ChunkPathHash, DataRoot,
+    IrysBlockHeader, IrysTransactionHeader, TxPath, TxRelativeChunkIndex, TxRelativeChunkOffset,
+    TxRoot, H256,
 };
 use reth::prometheus_exporter::install_prometheus_recorder;
 use reth_db::cursor::{DbDupCursorRO, DupWalker};
@@ -220,6 +224,44 @@ pub fn cached_chunk_by_chunk_key(
 ) -> Result<Option<CachedChunk>, DatabaseError> {
     let result = db.view(|tx| tx.get::<CachedChunks>(key).expect(ERROR_GET))?;
     Ok(result)
+}
+
+/// get the associated tx path for a block & ledger relative offset
+/// NOTE: this function ASSUMES that the index is VALID, specifically that it has no missing entries - as it "rounds up" the offset to the nearest entry to fufill the range component
+pub fn get_tx_path_by_block_ledger_offset(
+    db: &DatabaseEnv,
+    block_hash: BlockHash,
+    ledger: Ledger,
+    // offset is inclusive
+    offset: BlockLedgerRelativeChunkOffset,
+) -> Result<Option<TxPath>, DatabaseError> {
+    let tx = db.tx()?;
+    let mut cursor = tx.cursor_dup_read::<BlockRelativeTxPathIndex>()?;
+
+    Ok(cursor
+        .seek_by_key_subkey(BlockTxPathIndexKey { block_hash, ledger }, offset)?
+        .map(|e| e.meta.tx_path))
+}
+
+/// Stores the provided tx path under a compound key of block_hash + ledger, with a ranged subkey of end_offset
+pub fn store_tx_path_by_block_ledger_offset(
+    db: &DatabaseEnv,
+    block_hash: BlockHash,
+    ledger: Ledger,
+    // this should be the offset of the *last* chunk for this tx path, inclusive.
+    end_offset: BlockLedgerRelativeChunkOffset,
+    tx_path: TxPath,
+) -> Result<(), DatabaseError> {
+    let key = BlockTxPathIndexKey { block_hash, ledger };
+    let subkey = BlockTxPathIndexEntry {
+        end_offset,
+        meta: BlockTxPathIndexMeta { tx_path },
+    };
+    let write_tx = db.tx_mut()?;
+    write_tx.put::<BlockRelativeTxPathIndex>(key, subkey)?;
+    write_tx.commit()?;
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -53,13 +53,13 @@ pub fn generate_ingress_proof(
     chunks: DataChunks,
 ) -> eyre::Result<IngressProof> {
     let root = generate_ingress_proof_tree(chunks, signer.address())?;
-    let proof: [u8; 32] = root.id.clone();
+    let proof: [u8; 32] = root.id;
     let mut signature: Signature = signer.signer.sign_prehash_recoverable(&proof)?.into();
     signature = signature.with_chain_id(IRYS_CHAIN_ID);
     Ok(IngressProof {
         signature,
         data_root,
-        proof: H256(root.id.clone()),
+        proof: H256(root.id),
     })
 }
 

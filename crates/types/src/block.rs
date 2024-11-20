@@ -14,11 +14,13 @@ use alloy_primitives::{Address, B256};
 
 use serde::{Deserialize, Serialize};
 
+pub type BlockHash = H256;
+
 #[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
 /// Stores deserialized fields from a JSON formatted Irys block header.
 pub struct IrysBlockHeader {
     /// The block identifier.
-    pub block_hash: H256,
+    pub block_hash: BlockHash,
 
     /// Difficulty threshold used to produce the current block.
     pub diff: U256,
@@ -130,6 +132,8 @@ pub struct PoaData {
     pub data_path: Base64,
     pub chunk: Base64,
 }
+
+pub type TxRoot = H256;
 
 #[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Compact, Arbitrary)]
 pub struct TransactionLedger {

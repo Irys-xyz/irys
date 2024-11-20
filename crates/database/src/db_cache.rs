@@ -55,9 +55,8 @@ impl From<CachedChunkIndexEntry> for CachedChunkIndexMetadata {
     }
 }
 
-// assert at compile time that the size of the index entry will be smaller than the maximum keysize (as dupsort values are constrained to the max MDBX keysize)
-// note: this does *not* take into account compress/compact, this is designed to be "worse case"
-const _: () = assert!(std::mem::size_of::<CachedChunkIndexEntry>() <= 511);
+/// note: the total size + the subkey must be < 2022 bytes (half a 4k DB page size - see MDBX .set_geometry)
+const _: () = assert!(std::mem::size_of::<CachedChunkIndexEntry>() <= 2022);
 
 // used for the Compact impl
 const KEY_BYTES: usize = std::mem::size_of::<TxRelativeChunkIndex>();

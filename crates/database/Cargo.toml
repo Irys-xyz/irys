@@ -23,6 +23,7 @@ irys-types.workspace = true
 test-fuzz.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
-
+irys-testing-utils.workspace = true
+rand.workspace = true
 [lints]
 workspace = true

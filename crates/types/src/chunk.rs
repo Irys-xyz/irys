@@ -41,3 +41,6 @@ pub type DataRoot = H256;
 pub type TxRelativeChunkIndex = u32;
 
 pub type DataChunks = Vec<Vec<u8>>;
+
+/// the Block and ledger relative chunk offset
+pub type BlockLedgerRelativeChunkOffset = u64;

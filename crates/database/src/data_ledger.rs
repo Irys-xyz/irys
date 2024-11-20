@@ -1,4 +1,7 @@
-use irys_types::{H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT, SUBMIT_LEDGER_EPOCH_LENGTH};
+use irys_types::{
+    Compact, H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT, SUBMIT_LEDGER_EPOCH_LENGTH,
+};
+use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 
 /// A slot in a data ledger containing one or more partition hashes
@@ -183,7 +186,8 @@ impl LedgerCore for TermLedger {
 }
 
 /// Names for each of the ledgers as well as their ledger_num discriminant
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum Ledger {
     /// The permanent publish ledger
     Publish = 0,
@@ -205,6 +209,10 @@ impl Ledger {
     /// Make it possible to iterate over all the LedgerNums in order
     pub fn iter() -> impl Iterator<Item = Ledger> {
         Self::ALL.iter().copied()
+    }
+    /// get the associated numeric ID
+    pub fn get_id(&self) -> u32 {
+        *self as u32
     }
 }
 
