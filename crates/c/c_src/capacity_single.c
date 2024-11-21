@@ -44,7 +44,7 @@ entropy_chunk_errors compute_start_entropy_chunk(const unsigned char *mining_add
         return error;
     }
 
-    return compute_start_entropy_chunk2(seed_hash, hash_size, chunk);;
+    return compute_start_entropy_chunk2(seed_hash, hash_size, chunk);
 }
 
 entropy_chunk_errors compute_start_entropy_chunk2(const unsigned char *previous_segment, size_t previous_segment_len, unsigned char *chunk) {
@@ -60,7 +60,6 @@ entropy_chunk_errors compute_start_entropy_chunk2(const unsigned char *previous_
         EVP_DigestInit_ex(mdctx, PACKING_HASH_ALG, NULL);
         EVP_DigestUpdate(mdctx, previous_segment, previous_segment_len);
         EVP_DigestFinal_ex(mdctx, chunk + chunk_len, &segment_len);
-
         previous_segment = chunk + chunk_len;
         previous_segment_len = segment_len;
         chunk_len += segment_len;
@@ -107,7 +106,10 @@ entropy_chunk_errors compute_entropy_chunk2(const unsigned char *segment, const 
 
         EVP_DigestInit_ex(mdctx, PACKING_HASH_ALG, NULL);
         EVP_DigestUpdate(mdctx, segment, segment_len);
-        EVP_DigestUpdate(mdctx, entropy_chunk + start_offset, PACKING_HASH_SIZE);
+        if (hash_count / HASH_ITERATIONS_PER_BLOCK < 2)
+          EVP_DigestUpdate(mdctx, entropy_chunk + start_offset, PACKING_HASH_SIZE);
+        else
+          EVP_DigestUpdate(mdctx, new_entropy_chunk + start_offset, PACKING_HASH_SIZE);
         EVP_DigestFinal_ex(mdctx, new_entropy_chunk + start_offset, &segment_hash_len);
 
         segment = new_entropy_chunk + start_offset;

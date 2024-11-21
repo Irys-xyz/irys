@@ -5160,8 +5160,10 @@ dependencies = [
  "irys-primitives",
  "irys-types",
  "libc",
+ "openssl",
  "openssl-src",
  "pkg-config",
+ "rand",
  "vcpkg",
 ]
 

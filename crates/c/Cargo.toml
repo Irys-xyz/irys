@@ -12,6 +12,8 @@ eyre.workspace = true
 irys-primitives.workspace = true
 irys-types.workspace = true
 libc = "0.2.0"
+openssl.workspace = true
+rand.workspace = true
 
 [build-dependencies]
 bindgen = "0.70.1"
