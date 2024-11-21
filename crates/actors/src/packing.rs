@@ -79,18 +79,12 @@ impl PackingActor {
 }
 
 fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
-    assert!(
-        input.len() % N != 0,
-        "Input vector must have a length of {}",
-        N
-    );
+    assert!(input.len() % N == 0, "wrong input N {}", N);
     let length = input.len() / N;
+    let ptr = input.as_ptr() as *const [u8; N];
+    std::mem::forget(input); // So input never drops
 
-    unsafe {
-        let ptr = input.as_ptr() as *const [u8; N];
-        let result = Vec::from_raw_parts(ptr as *mut [u8; N], length, length);
-        result
-    }
+    unsafe { Vec::from_raw_parts(ptr as *mut [u8; N], length, length) }
 }
 
 struct PartitionInfo {
@@ -129,4 +123,12 @@ impl Handler<PackingRequestRange> for PackingActor {
     fn handle(&mut self, msg: PackingRequestRange, ctx: &mut Self::Context) -> Self::Result {
         self.chunks.write().unwrap().push_back(msg);
     }
+}
+
+#[test]
+fn test_casting() {
+    let v: Vec<u8> = (1..=9).collect();
+    let c2 = cast_vec_u8_to_vec_u8_array::<3>(v);
+
+    assert_eq!(c2, vec![[1, 2, 3], [4, 5, 6], [7, 8, 9]])
 }
