@@ -1,18 +1,27 @@
 [package]
 edition = "2021"
-name = "chain"
+name = "irys-chain"
 version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+# Irys
+irys-database.workspace = true
+irys-storage.workspace = true
+irys-c.workspace = true
+irys-reth-node-bridge.workspace = true
+irys-types.workspace = true
+irys-api-server.workspace = true
+irys-config.workspace = true
+irys-testing-utils.workspace = true
+irys-actors.workspace = true
+#
 assert_matches = "1.5.0"
 clap = "4.5.20"
 color-eyre = "0.6.2"
 eyre = "0.6.8"
-irys-c.workspace = true
-irys-reth-node-bridge.workspace = true
-irys-types.workspace = true
+
 rand = "0.8.5"
 rand_chacha = "0.3.1"
 reth-codecs-derive.workspace = true
@@ -31,9 +40,8 @@ jsonrpsee.workspace = true
 reth-e2e-test-utils.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-actors.workspace = true
-database = { path = "../database" }
-irys-storage = { path = "../storage" }
+
+
 alloy-network = { path = "../../ext/alloy/crates/network" }
 alloy-signer-local.workspace = true
 alloy-core.workspace = true
@@ -46,8 +54,7 @@ arbitrary = { workspace = true, features = [
 	"derive",
 ] } # arbitrary.workspace = truebytes.workspace = true
 bytes.workspace = true
-irys-api-server.workspace = true
-irys-config.workspace = true
+
 modular-bitfield.workspace = true
 reth-cli-runner.workspace = true
 test-fuzz.workspace = true
@@ -63,7 +70,6 @@ alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true
 alloy-provider.workspace = true
-irys-testing-utils.workspace = true
 [[bin]]
 name = "irys"
 path = "src/main.rs"

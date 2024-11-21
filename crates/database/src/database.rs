@@ -22,6 +22,7 @@ use reth_db::{
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     ClientVersion, Database, DatabaseEnv, DatabaseError,
 };
+use reth_db::{HasName, HasTableType};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
@@ -30,14 +31,17 @@ const ERROR_PUT: &str = "Not able to insert value into table.";
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
 /// necessary. Read/Write mode.
-pub fn open_or_create_db<P: AsRef<Path>>(path: P) -> eyre::Result<DatabaseEnv> {
+pub fn open_or_create_db<P: AsRef<Path>, T: HasName + HasTableType>(
+    path: P,
+    tables: &[T],
+) -> eyre::Result<DatabaseEnv> {
     let args = DatabaseArguments::new(ClientVersion::default())
         .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded));
 
     // Register the prometheus recorder before creating the database,
-    // because database init needs it to register metrics.
+    // because irys_database init needs it to register metrics.
     let _ = install_prometheus_recorder();
-    let db = reth_create_db(path, args)?.with_metrics_and_tables(Tables::ALL);
+    let db = reth_create_db(path, args)?.with_metrics_and_tables(tables);
 
     Ok(db)
 }
@@ -229,7 +233,7 @@ mod tests {
     use irys_types::{IrysBlockHeader, IrysTransactionHeader};
     //use tempfile::tempdir;
 
-    use crate::{config::get_data_dir, database::block_by_hash};
+    use crate::{block_by_hash, config::get_data_dir, tables::Tables};
 
     use super::{insert_block, open_or_create_db};
 
@@ -241,7 +245,7 @@ mod tests {
 
         let mut tx = IrysTransactionHeader::default();
         tx.id.0[0] = 2;
-        let db = open_or_create_db(path).unwrap();
+        let db = open_or_create_db(path, Tables::ALL).unwrap();
 
         // // Write a Tx
         // {

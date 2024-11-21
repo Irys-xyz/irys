@@ -11,11 +11,11 @@ use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::{fmt, u128};
 
-use database::{impl_compression_for_compact, open_or_create_db};
+use irys_database::{impl_compression_for_compact, open_or_create_db};
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
 
-use database::db_cache::CachedChunk;
+use irys_database::db_cache::CachedChunk;
 
 impl_compression_for_compact!(CachedChunk2);
 
@@ -69,7 +69,7 @@ fn db_subkey_test() -> eyre::Result<()> {
         .expect("Not able to create a temporary directory.")
         .into_path();
 
-    let db = open_or_create_db(tmpdir)?.with_metrics_and_tables(Tables::ALL);
+    let db = open_or_create_db(tmpdir, Tables::ALL)?;
     let write_tx = db.tx_mut()?;
     // write two chunks to the same key
     let chunk = CachedChunk2 {

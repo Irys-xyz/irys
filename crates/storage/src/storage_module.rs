@@ -1,8 +1,11 @@
 use eyre::{eyre, Result};
+use irys_database::submodule::{create_or_open_submodule_db, read_data_path, write_data_path};
 use irys_types::{
-    partition::PartHash, ChunkBytes, ChunkOffset, CHUNK_SIZE, H256, NUM_CHUNKS_IN_PARTITION,
+    app_state::DatabaseProvider, partition::PartHash, ChunkBytes, ChunkOffset, DataPath,
+    CHUNK_SIZE, NUM_CHUNKS_IN_PARTITION,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
+use reth_db::{Database, DatabaseEnv};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -77,6 +80,8 @@ impl Default for StorageModuleConfig {
 struct StorageSubmodule {
     /// Persistent storage handle
     file: Arc<Mutex<File>>,
+    /// Persistent database env
+    db: DatabaseProvider,
 }
 
 /// Defines how chunk data is processed and stored
@@ -107,10 +112,11 @@ impl StorageModule {
         let mut intervals = StorageIntervals::new();
 
         for (interval, dir) in storage_module_info.submodules.clone() {
+            let sub_base_path = Path::new(base_path).join(dir);
             // Get a file handle to the chunks.data file in the submodule
-            let path = Path::new(base_path).join(dir).join("chunks.dat");
+            let path = sub_base_path.join("chunks.dat");
             println!("{:?}", path);
-            let chunks_file = Arc::new(Mutex::new(
+            let chunks_file: Arc<Mutex<File>> = Arc::new(Mutex::new(
                 OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -119,14 +125,29 @@ impl StorageModule {
                     .unwrap_or_else(|_| panic!("Failed to open: {}", path.display())),
             ));
 
-            map.insert_strict(interval.clone(), StorageSubmodule { file: chunks_file })
-                .unwrap_or_else(|_| {
+            let submodule_db_path = sub_base_path.join("db");
+            let submodule_db =
+                create_or_open_submodule_db(&submodule_db_path).unwrap_or_else(|_| {
                     panic!(
-                        "Failed to insert interval: {}-{}",
-                        interval.start(),
-                        interval.end()
+                        "Failed to open submodule database: {}",
+                        submodule_db_path.display()
                     )
                 });
+
+            map.insert_strict(
+                interval.clone(),
+                StorageSubmodule {
+                    file: chunks_file,
+                    db: DatabaseProvider(Arc::new(submodule_db)),
+                },
+            )
+            .unwrap_or_else(|_| {
+                panic!(
+                    "Failed to insert submodule over interval: {}-{}",
+                    interval.start(),
+                    interval.end()
+                )
+            });
 
             let _ =
                 intervals.insert_merge_touching_if_values_equal(interval, ChunkType::Uninitialized);
@@ -305,6 +326,38 @@ impl StorageModule {
         pending.insert(chunk_offset, (bytes, chunk_type));
     }
 
+    /// Writes the provided bytes to the submodule's storage, and the data_path to the submodules's database
+    pub fn write_data_chunk(
+        &mut self,
+        chunk_offset: ChunkOffset,
+        bytes: ChunkBytes,
+        data_path: DataPath,
+    ) -> eyre::Result<()> {
+        // write to the chunk storage and store the data_path in the submodule's database.
+        self.write_chunk(chunk_offset, bytes, ChunkType::Data);
+        // get submodule ref to get database env
+        let (_interval, submodule) = self
+            .submodules
+            .get_key_value_at_point(chunk_offset)
+            .unwrap();
+
+        // write data_path
+        let _ = submodule
+            .db
+            .update(|tx| write_data_path(tx, chunk_offset, data_path))?;
+
+        Ok(())
+    }
+
+    pub fn read_data_path(&mut self, chunk_offset: ChunkOffset) -> eyre::Result<Option<DataPath>> {
+        let (_interval, submodule) = self
+            .submodules
+            .get_key_value_at_point(chunk_offset)
+            .unwrap();
+
+        submodule.db.view(|tx| read_data_path(tx, chunk_offset))?
+    }
+
     /// Writes chunk data to physical storage and updates state tracking
     ///
     /// Process:
@@ -456,6 +509,7 @@ pub fn write_info_file(path: &Path, info: &StorageModuleInfo) -> eyre::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use nodit::interval::ii;
     #[test]
     fn test() {
@@ -574,5 +628,39 @@ mod tests {
         let ints = storage_module.intervals.read().unwrap();
         let module_intervals = ints.clone().into_iter().collect::<Vec<_>>();
         assert_eq!(file_intervals, module_intervals);
+    }
+    #[test]
+    fn datapath_test() -> eyre::Result<()> {
+        let infos = vec![StorageModuleInfo {
+            module_num: 0,
+            partition_hash: None,
+            submodules: vec![
+                (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
+            ],
+        }];
+
+        let tmp_dir = setup_tracing_and_temp_dir();
+        let base_path = tmp_dir.to_str().unwrap();
+        initialize_storage_files(base_path, &infos)?;
+
+        let config = StorageModuleConfig {
+            min_writes_before_sync: 1,
+            chunk_size: 32,
+            num_chunks_in_partition: 20,
+        };
+
+        // Create a StorageModule with the specified submodules and config
+        let storage_module_info = &infos[0];
+        let mut storage_module = StorageModule::new(base_path, storage_module_info, Some(config));
+        let offset = 0;
+        let chunk = vec![0, 1, 2, 3, 4];
+        let data_path = vec![4, 3, 2, 1];
+
+        storage_module.write_data_chunk(offset, chunk, data_path.clone())?;
+
+        let ret_path = storage_module.read_data_path(offset)?;
+        assert_eq!(ret_path, Some(data_path));
+
+        Ok(())
     }
 }

@@ -1,5 +1,5 @@
 use actix::Addr;
-use actors::mining::{PartitionMiningActor, Seed};
+use irys_actors::mining::{PartitionMiningActor, Seed};
 use irys_types::{H256, HASHES_PER_CHECKPOINT, NUM_CHECKPOINTS_IN_VDF_STEP, VDF_SHA_1S};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::Receiver;

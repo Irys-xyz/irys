@@ -12,9 +12,10 @@ pub mod database;
 /// Data in the caches can be pending or in a block still subject to re-org so
 /// it is not suitable for mining.
 pub mod db_cache;
-
 /// Data in the indexes is confirmed data
 pub mod db_index;
+/// Tables & methods specific to submodule databases
+pub mod submodule;
 /// Local macro definition of chain specific mdbx tables
 pub mod tables;
 

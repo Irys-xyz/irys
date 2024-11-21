@@ -17,5 +17,8 @@ actix.workspace = true
 bytes.workspace = true
 futures.workspace = true
 serde_json.workspace = true
+reth-db.workspace = true
+irys-database.workspace = true
+irys-testing-utils.workspace = true
 [lints]
 workspace = true

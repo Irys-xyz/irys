@@ -7,10 +7,10 @@ use std::{
 };
 
 use actix::{Actor, Context, Handler, Message};
+use irys_packing::capacity_pack_range_with_data;
 use irys_primitives::IrysTxId;
 use irys_storage::StorageModule;
 use irys_types::{irys::IrysSigner, Address, ChunkState, Interval, IntervalState, U256};
-use packing::capacity_pack_range_with_data;
 use tokio::runtime::Handle;
 
 #[derive(Message, Clone)]

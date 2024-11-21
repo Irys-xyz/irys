@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use actix::prelude::*;
-use database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
+use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, CHUNK_SIZE, H256};
 
 use crate::block_producer::BlockConfirmedMessage;

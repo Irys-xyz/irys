@@ -1,7 +1,7 @@
 use actix::{Actor, Context, Handler, Message};
-use database::db_cache::{chunk_offset_to_index, data_size_to_chunk_count, CachedChunk};
-use database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use eyre::eyre;
+use irys_database::db_cache::{chunk_offset_to_index, data_size_to_chunk_count, CachedChunk};
+use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_types::ingress::generate_ingress_proof_tree;
 use irys_types::irys::IrysSigner;
 use irys_types::ChunkBin;
@@ -129,7 +129,7 @@ impl Handler<TxIngressMessage> for MempoolActor {
         //return Err(TxIngressError::Unfunded);
 
         // Cache the data_root in the database
-        let _ = database::cache_data_root(&self.db, &tx);
+        let _ = irys_database::cache_data_root(&self.db, &tx);
 
         Ok(())
     }
@@ -142,7 +142,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         // TODO: maintain a shared read transaction so we have read isolation
         let chunk = chunk_msg.0;
         // Check to see if we have a cached data_root for this chunk
-        let result = database::cached_data_root_by_data_root(&self.db, chunk.data_root);
+        let result = irys_database::cached_data_root_by_data_root(&self.db, chunk.data_root);
 
         let cached_data_root = result
             .map_err(|_| ChunkIngressError::DatabaseError)? // Convert DatabaseError to ChunkIngressError
@@ -188,7 +188,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         if path_result.leaf_hash == hash_sha256(&chunk.bytes.0).unwrap() {
             // TODO: fix all these unwraps!
             // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
-            database::cache_chunk(&self.db, chunk).unwrap();
+            irys_database::cache_chunk(&self.db, chunk).unwrap();
 
             let tx = self.db.tx().unwrap();
             let root_hash: H256 = root_hash.into();
@@ -343,7 +343,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use assert_matches::assert_matches;
-    use database::{config::get_data_dir, open_or_create_db, tables::Tables};
+    use irys_database::{config::get_data_dir, open_or_create_db, tables::Tables};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{irys::IrysSigner, Base64, MAX_CHUNK_SIZE};
     use rand::Rng;
@@ -396,7 +396,7 @@ mod tests {
         assert_matches!(result, Ok(()));
 
         // Verify the data_root was added to the cache
-        let result = database::cached_data_root_by_data_root(&arc_db2, data_root).unwrap();
+        let result = irys_database::cached_data_root_by_data_root(&arc_db2, data_root).unwrap();
         assert_matches!(result, Some(_));
 
         // Loop though each of the transaction chunks
@@ -425,14 +425,14 @@ mod tests {
             assert_matches!(result, Ok(()));
 
             // Verify the chunk is added to the ChunksCache
-            let (meta, chunk) = database::cached_chunk_by_offset(&arc_db2, data_root, offset)
+            let (meta, chunk) = irys_database::cached_chunk_by_offset(&arc_db2, data_root, offset)
                 .unwrap()
                 .unwrap();
             assert_eq!(meta.chunk_path_hash, key);
             assert_eq!(chunk.data_path, data_path);
             assert_eq!(chunk.chunk, Some(chunk_bytes));
 
-            let result = database::cached_chunk_by_chunk_key(&arc_db2, key).unwrap();
+            let result = irys_database::cached_chunk_by_chunk_key(&arc_db2, key).unwrap();
             assert_matches!(result, Some(_));
         }
 

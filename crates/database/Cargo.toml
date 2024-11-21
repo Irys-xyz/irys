@@ -1,5 +1,5 @@
 [package]
-name = "database"
+name = "irys-database"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -23,6 +23,6 @@ irys-types.workspace = true
 test-fuzz.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
-
+irys-testing-utils.workspace = true
 [lints]
 workspace = true
