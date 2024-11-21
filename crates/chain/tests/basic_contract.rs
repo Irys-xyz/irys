@@ -8,7 +8,7 @@ use alloy_sol_macro::sol;
 use chain::{chain::start_for_testing, IrysNodeCtx};
 use futures::future::select;
 use irys_config::IrysNodeConfig;
-use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address};
+use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, H256};
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
 use tracing::info;
@@ -119,8 +119,8 @@ where
             .actor_addresses
             .block_producer
             .send(SolutionContext {
-                partition_id: 0,
-                chunk_index: 0,
+                partition_hash: H256::random(),
+                chunk_offset: 0,
                 mining_address: Address::random(),
             })
             .await?

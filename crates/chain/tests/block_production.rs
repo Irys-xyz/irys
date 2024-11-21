@@ -10,7 +10,8 @@ use eyre::eyre;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
 use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, Address, IrysTransaction, IRYS_CHAIN_ID,
+    block_production::SolutionContext, irys::IrysSigner, Address, IrysTransaction, H256,
+    IRYS_CHAIN_ID,
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
@@ -79,8 +80,8 @@ async fn test_blockprod() -> eyre::Result<()> {
         .actor_addresses
         .block_producer
         .send(SolutionContext {
-            partition_id: 0,
-            chunk_index: 0,
+            partition_hash: H256::random(),
+            chunk_offset: 0,
             mining_address: node.config.mining_signer.address(),
         })
         .await?
@@ -128,8 +129,8 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
     for i in 1..10 {
         info!("mining block {}", i);
         let fut = node.actor_addresses.block_producer.send(SolutionContext {
-            partition_id: 0,
-            chunk_index: 0,
+            partition_hash: H256::random(),
+            chunk_offset: 0,
             mining_address: node.config.mining_signer.address(),
         });
         let (block, reth_exec_env) = fut.await?.unwrap();
@@ -166,8 +167,8 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
         .actor_addresses
         .block_producer
         .send(SolutionContext {
-            partition_id: 0,
-            chunk_index: 0,
+            partition_hash: H256::random(),
+            chunk_offset: 0,
             mining_address: Address::random(),
         })
         .await?
@@ -297,8 +298,8 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .actor_addresses
         .block_producer
         .send(SolutionContext {
-            partition_id: 0,
-            chunk_index: 0,
+            partition_hash: H256::random(),
+            chunk_offset: 0,
             mining_address: node.config.mining_signer.address(),
         })
         .await?

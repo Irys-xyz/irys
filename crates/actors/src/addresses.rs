@@ -15,7 +15,7 @@ use crate::{
 pub struct ActorAddresses {
     pub partitions: Vec<Addr<PartitionMiningActor>>,
     pub block_producer: Addr<BlockProducerActor>,
-    pub packing: Addr<PackingActor>,
+    // pub packing: Addr<PackingActor>,
     pub mempool: Addr<MempoolActor>,
     pub block_index: Addr<BlockIndexActor>,
     pub epoch_service: Addr<EpochServiceActor>,

@@ -8,7 +8,7 @@ use std::{
 
 use actix::{Actor, Context, Handler, Message};
 use irys_primitives::IrysTxId;
-use irys_storage::StorageProvider;
+use irys_storage::StorageModule;
 use irys_types::{irys::IrysSigner, Address, ChunkState, Interval, IntervalState, U256};
 use packing::capacity_pack_range_with_data;
 use tokio::runtime::Handle;
@@ -23,7 +23,7 @@ struct PackingRequestRange {
 type AtomicChunkRange = Arc<RwLock<VecDeque<PackingRequestRange>>>;
 
 pub struct PackingActor {
-    storage_provider: StorageProvider,
+    storage_module: Arc<RwLock<StorageModule>>,
     runtime_handle: Handle,
     chunks: AtomicChunkRange,
 }
@@ -31,15 +31,15 @@ pub struct PackingActor {
 const CHUNK_POLL_TIME_MS: u64 = 1_000;
 
 impl PackingActor {
-    pub fn new(handle: Handle, storage_provider: StorageProvider) -> Self {
+    pub fn new(handle: Handle, storage_module: Arc<RwLock<StorageModule>>) -> Self {
         Self {
             runtime_handle: handle,
-            storage_provider,
+            storage_module,
             chunks: Arc::new(RwLock::new(VecDeque::with_capacity(1000))),
         }
     }
 
-    async fn poll_chunks(chunks: AtomicChunkRange, storage_provider: StorageProvider) {
+    async fn poll_chunks(chunks: AtomicChunkRange, storage_module: Arc<RwLock<StorageModule>>) {
         // Loop which runs all jobs every 1 second (defined in CHUNK_POLL_TIME_MS)
         loop {
             if let Some(next_range) = chunks.read().unwrap().front() {
@@ -68,17 +68,6 @@ impl PackingActor {
                 };
 
                 // TODO: Write to disk correctly
-                let _ = storage_provider
-                    .write_chunks(
-                        next_range.partition_id,
-                        next_range.chunk_interval,
-                        range,
-                        None,
-                        IntervalState {
-                            chunk_state: ChunkState::Packed,
-                        },
-                    )
-                    .unwrap();
 
                 // Remove from queue once complete
                 let _ = chunks.write().unwrap().pop_front();
@@ -123,7 +112,7 @@ impl Actor for PackingActor {
         // Create packing worker that runs every
         self.runtime_handle.spawn(Self::poll_chunks(
             self.chunks.clone(),
-            self.storage_provider.clone(),
+            self.storage_module.clone(),
         ));
 
         Context::new().run(self)

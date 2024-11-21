@@ -1,9 +1,10 @@
 use actix::{Actor, Context, Handler, Message};
 use database::data_ledger::*;
 use eyre::{Error, Result};
+use irys_storage::{ii, StorageModuleInfo};
 use irys_types::{
-    Address, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT,
-    PARTITION_SIZE,
+    Address, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH, NUM_CHUNKS_IN_PARTITION,
+    NUM_PARTITIONS_PER_SLOT, PARTITION_SIZE,
 };
 use openssl::sha;
 use std::{
@@ -24,6 +25,8 @@ pub struct EpochServiceConfig {
     num_partitions_per_slot: u64,
     /// Size (in bytes) of each partition
     partition_size: u64,
+    /// Number of chunks in a partition
+    num_chunks_in_partition: u64,
 }
 
 impl Default for EpochServiceConfig {
@@ -33,9 +36,13 @@ impl Default for EpochServiceConfig {
             num_blocks_in_epoch: NUM_BLOCKS_IN_EPOCH,
             num_partitions_per_slot: NUM_PARTITIONS_PER_SLOT,
             partition_size: PARTITION_SIZE,
+            num_chunks_in_partition: NUM_CHUNKS_IN_PARTITION,
         }
     }
 }
+
+/// A H256 hash that uniquely identifies a partition
+pub type PartHash = H256;
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug)]
@@ -45,11 +52,11 @@ pub struct EpochServiceActor {
     /// Protocol-managed data ledgers (one permanent, N term)
     pub ledgers: Arc<RwLock<Ledgers>>,
     /// Active data partition state mapped by partition hash
-    pub data_partitions: HashMap<H256, PartitionAssignment>,
+    pub data_partitions: HashMap<PartHash, PartitionAssignment>,
     /// Available capacity partitions mapped by partition hash
-    pub capacity_partitions: HashMap<H256, PartitionAssignment>,
+    pub capacity_partitions: HashMap<PartHash, PartitionAssignment>,
     /// Sequential list of activated partition hashes
-    pub all_active_partitions: Vec<H256>,
+    pub all_active_partitions: Vec<PartHash>,
     /// Identifier of this mining node
     pub miner_address: Address,
     /// Current partition & ledger parameters
@@ -65,15 +72,9 @@ impl Actor for EpochServiceActor {
 #[rtype(result = "Result<(),EpochServiceError>")]
 pub struct NewEpochMessage(pub Arc<IrysBlockHeader>);
 
-impl NewEpochMessage {
-    fn into_inner(self) -> Arc<IrysBlockHeader> {
-        self.0
-    }
-}
-
 impl Handler<NewEpochMessage> for EpochServiceActor {
     type Result = Result<(), EpochServiceError>;
-    fn handle(&mut self, msg: NewEpochMessage, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: NewEpochMessage, _ctx: &mut Self::Context) -> Self::Result {
         let new_epoch_block = msg.0;
 
         self.perform_epoch_tasks(new_epoch_block)?;
@@ -83,6 +84,7 @@ impl Handler<NewEpochMessage> for EpochServiceActor {
 }
 
 /// Wraps the internal Arc<RwLock<>> to make the reference readonly
+#[derive(Debug)]
 pub struct LedgersReadGuard {
     ledgers: Arc<RwLock<Ledgers>>,
 }
@@ -114,11 +116,29 @@ impl Handler<GetLedgersMessage> for EpochServiceActor {
     }
 }
 
+/// Retrieve a read only reference to the ledger partition assignments
+#[derive(Message, Debug)]
+#[rtype(result = "Result<Vec<StorageModuleInfo>, EpochServiceError>")]
+pub struct GetGenesisStorageModulesMessage;
+
+impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
+    type Result = Result<Vec<StorageModuleInfo>, EpochServiceError>;
+
+    fn handle(
+        &mut self,
+        _msg: GetGenesisStorageModulesMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        Ok(self.get_genesis_storage_module_infos())
+    }
+}
+
 /// Reasons why the epoch service actors epoch tasks might fail
 #[derive(Debug)]
 pub enum EpochServiceError {
     /// Catchall error until more detailed errors are added
     InternalError,
+    /// Attempted to do epoch tasks on a block that was not an epoch block
     NotAnEpochBlock,
 }
 
@@ -126,7 +146,7 @@ pub enum EpochServiceError {
 #[derive(Debug, PartialEq)]
 pub struct PartitionAssignment {
     /// Hash of the partition
-    pub partition_hash: H256,
+    pub partition_hash: PartHash,
     /// Address of the miner pledged to store it
     pub miner_address: Address,
     /// If assigned to a ledger, the ledger number
@@ -434,6 +454,60 @@ impl EpochServiceActor {
 
         slots_to_add
     }
+
+    /// Configure storage modules for genesis partition assignments
+    pub fn get_genesis_storage_module_infos(&self) -> Vec<StorageModuleInfo> {
+        let ledgers = self.ledgers.read().unwrap();
+        let num_part_chunks = self.config.num_chunks_in_partition as u32;
+
+        // Configure publish ledger storage
+        let mut module_infos = ledgers
+            .get_slots(Ledger::Publish)
+            .iter()
+            .flat_map(|slot| &slot.partitions)
+            .enumerate()
+            .map(|(idx, partition)| StorageModuleInfo {
+                module_num: idx,
+                partition_hash: Some(partition.clone()),
+                submodules: vec![(ii(0, num_part_chunks), format!("submodule_{}", idx))],
+            })
+            .collect::<Vec<_>>();
+
+        let idx_start = module_infos.len();
+
+        // Configure submit ledger storage
+        let submit_infos = ledgers
+            .get_slots(Ledger::Submit)
+            .iter()
+            .flat_map(|slot| &slot.partitions)
+            .enumerate()
+            .map(|(idx, partition)| StorageModuleInfo {
+                module_num: idx_start + idx,
+                partition_hash: Some(partition.clone()),
+                submodules: vec![(
+                    ii(0, num_part_chunks),
+                    format!("submodule_{}", idx_start + idx),
+                )],
+            })
+            .collect::<Vec<_>>();
+
+        module_infos.extend(submit_infos);
+
+        // Sort the active capacity partitions by hash
+        let capacity_partitions: Vec<H256> = self.capacity_partitions.keys().copied().collect();
+
+        // Add initial capacity partition config
+        let cap_part = capacity_partitions.first().unwrap();
+        let idx = module_infos.len();
+        let cap_info = StorageModuleInfo {
+            module_num: idx,
+            partition_hash: Some(cap_part.clone()),
+            submodules: vec![(ii(0, num_part_chunks), format!("submodule_{}", idx))],
+        };
+
+        module_infos.push(cap_info);
+        module_infos
+    }
 }
 
 /// SHA256 hash the message parameter
@@ -484,7 +558,6 @@ impl SimpleRNG {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // use assert_matches::assert_matches;
 
     #[actix::test]
     async fn genesis_test() {
@@ -609,6 +682,9 @@ mod tests {
             .unwrap();
 
         println!("{:?}", ledgers.read());
+
+        let infos = epoch_service.get_genesis_storage_module_infos();
+        println!("{:#?}", infos);
     }
 
     #[actix::test]

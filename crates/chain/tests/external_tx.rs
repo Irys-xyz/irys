@@ -4,7 +4,9 @@ use alloy_core::primitives::{TxHash, U256};
 use chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
-use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, IRYS_CHAIN_ID};
+use irys_types::{
+    block_production::SolutionContext, irys::IrysSigner, Address, H256, IRYS_CHAIN_ID,
+};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
 use reth_primitives::GenesisAccount;
@@ -97,8 +99,8 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
             .actor_addresses
             .block_producer
             .send(SolutionContext {
-                partition_id: 0,
-                chunk_index: 0,
+                partition_hash: H256::random(),
+                chunk_offset: 0,
                 mining_address: Address::random(),
             })
             .await?

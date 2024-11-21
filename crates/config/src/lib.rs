@@ -6,7 +6,7 @@ use std::{
 
 use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;
-use irys_storage::{ii, partition_provider::PartitionStorageProvider};
+use irys_storage::ii;
 use irys_types::{
     block_production::Partition, irys::IrysSigner, Address, PartitionStorageProviderConfig,
     StorageModuleConfig, CHUNK_SIZE,
@@ -80,6 +80,7 @@ impl IrysNodeConfig {
         self
     }
 }
+
 /// get a set of preconfigured partitions and storage modules
 pub fn get_default_partitions_and_storage_providers(
     storage_module_dir: PathBuf,

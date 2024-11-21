@@ -56,17 +56,23 @@ async fn post_tx_and_chunks_golden_path() {
     let mempool_actor = MempoolActor::new(arc_db);
     let mempool_actor_addr = mempool_actor.start();
 
-    let block_producer_actor = BlockProducerActor {};
+    let block_producer_actor = BlockProducerActor {
+        db: todo!(),
+        mempool_addr: todo!(),
+        block_index_addr: todo!(),
+        reth_provider: todo!(),
+    };
     let block_producer_addr = block_producer_actor.start();
 
     let mut part_actors = Vec::new();
-    let packing_actor_addr = PackingActor::new(Handle::current()).start();
+    // let packing_actor_addr = PackingActor::new(Handle::current()).start();
 
     let app_state = ActorAddresses {
         partitions: part_actors,
         block_producer: block_producer_addr,
-        packing: packing_actor_addr,
         mempool: mempool_actor_addr,
+        block_index: todo!(),
+        epoch_service: todo!(),
     };
 
     // Initialize the app

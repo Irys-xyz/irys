@@ -1,7 +1,10 @@
+use std::sync::{Arc, RwLock};
+
 use crate::block_producer::BlockProducerActor;
 use actix::{Actor, Addr, Context, Handler, Message};
-use irys_storage::{ie, partition_provider::PartitionStorageProvider};
+use irys_storage::{ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
+use irys_types::Address;
 use irys_types::{
     block_production::{Partition, SolutionContext},
     H256, NUM_CHUNKS_IN_RECALL_RANGE, NUM_RECALL_RANGES_IN_PARTITION, U256,
@@ -12,26 +15,26 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error, info};
 
 pub struct PartitionMiningActor {
-    partition: Partition,
+    mining_address: Address,
     database_provider: DatabaseProvider,
     block_producer_actor: Addr<BlockProducerActor>,
-    part_storage_provider: PartitionStorageProvider,
+    storage_module: Arc<StorageModule>,
     should_mine: bool,
 }
 
 impl PartitionMiningActor {
     pub fn new(
-        partition: Partition,
+        mining_address: Address,
         database_provider: DatabaseProvider,
         block_producer_addr: Addr<BlockProducerActor>,
-        storage_provider: PartitionStorageProvider,
+        storage_module: Arc<StorageModule>,
         start_mining: bool,
     ) -> Self {
         Self {
-            partition,
+            mining_address,
             database_provider,
             block_producer_actor: block_producer_addr,
-            part_storage_provider: storage_provider,
+            storage_module,
             should_mine: start_mining,
         }
     }
@@ -51,20 +54,22 @@ impl PartitionMiningActor {
         let start_chunk_index = (recall_range_index * NUM_CHUNKS_IN_RECALL_RANGE) as usize;
 
         // haven't tested this, but it looks correct
-        let chunks = self
-            .part_storage_provider
-            .read_chunks(
-                ie(
+        let chunks;
+        {
+            chunks = self
+                .storage_module
+                .read_chunks(ii(
                     start_chunk_index as u32,
                     start_chunk_index as u32 + NUM_CHUNKS_IN_RECALL_RANGE as u32,
-                ),
-                None,
-            )
-            .unwrap();
+                ))
+                .unwrap();
+        }
 
         let mut hasher = Sha256::new();
         for (index, chunk) in chunks.iter().enumerate() {
-            hasher.update(chunk);
+            let (_chunk_offset, chunk_data) = chunk;
+            let (chunk_bytes, _chunk_type) = chunk_data;
+            hasher.update(chunk_bytes);
             let hash = hasher.finalize_reset().to_vec();
 
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
@@ -73,9 +78,9 @@ impl PartitionMiningActor {
             if solution_number >= difficulty {
                 dbg!("SOLUTION FOUND!!!!!!!!!");
                 let solution = SolutionContext {
-                    partition_id: self.partition.id,
-                    chunk_index: (start_chunk_index + index) as u32,
-                    mining_address: self.partition.mining_address,
+                    partition_hash: self.storage_module.partition_hash.unwrap(),
+                    chunk_offset: (start_chunk_index + index) as u32,
+                    mining_address: self.mining_address,
                 };
 
                 // TODO: Let all partitions know to stop mining
@@ -116,7 +121,8 @@ impl Handler<Seed> for PartitionMiningActor {
 
         debug!(
             "Partition {} -- looking for solution with difficulty >= {}",
-            self.partition.id, difficulty
+            self.storage_module.partition_hash.unwrap(),
+            difficulty
         );
 
         match self.mine_partition_with_seed(seed.into_inner(), difficulty) {

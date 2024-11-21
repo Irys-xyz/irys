@@ -1,14 +1,20 @@
-use std::sync::mpsc::Receiver;
+use std::sync::{mpsc::Receiver, Arc};
 
+use irys_storage::StorageModule;
 use irys_types::{
     block_production::{Partition, SolutionContext},
-    ChunkBin, CHUNK_SIZE, H256, NUM_CHUNKS_IN_RECALL_RANGE, NUM_RECALL_RANGES_IN_PARTITION, U256,
+    Address, ChunkBin, CHUNK_SIZE, H256, NUM_CHUNKS_IN_RECALL_RANGE,
+    NUM_RECALL_RANGES_IN_PARTITION, U256,
 };
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use sha2::{Digest, Sha256};
 
-pub fn mine_partition(partition: Partition, seed_receiver_channel: Receiver<H256>) {
+pub fn mine_storage_module(
+    mining_address: Address,
+    storage_module: Arc<StorageModule>,
+    seed_receiver_channel: Receiver<H256>,
+) {
     // Random difficulty
     let difficulty = U256::from_little_endian(H256::random().as_bytes());
     dbg!("Difficulty at start is {}", difficulty);
@@ -56,10 +62,10 @@ pub fn mine_partition(partition: Partition, seed_receiver_channel: Receiver<H256
             if solution_number >= difficulty {
                 dbg!("SOLUTION FOUND!!!!!!!!!");
                 let solution = SolutionContext {
-                    partition_id: partition.id,
+                    partition_hash: storage_module.partition_hash.unwrap(),
                     // TODO: Fix
-                    chunk_index: 0,
-                    mining_address: partition.mining_address,
+                    chunk_offset: 0,
+                    mining_address: mining_address,
                 };
                 // TODO: Send info to block builder code
 
