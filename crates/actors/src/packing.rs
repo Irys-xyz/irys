@@ -132,3 +132,11 @@ fn test_casting() {
 
     assert_eq!(c2, vec![[1, 2, 3], [4, 5, 6], [7, 8, 9]])
 }
+
+#[test]
+#[should_panic]
+#[should_panic(expected = "wrong input N 3")]
+fn test_casting_error() {
+    let v: Vec<u8> = (1..=10).collect();
+    let c2 = cast_vec_u8_to_vec_u8_array::<3>(v);
+}
