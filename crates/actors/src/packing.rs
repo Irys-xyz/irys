@@ -134,7 +134,6 @@ fn test_casting() {
 }
 
 #[test]
-#[should_panic]
 #[should_panic(expected = "wrong input N 3")]
 fn test_casting_error() {
     let v: Vec<u8> = (1..=10).collect();
