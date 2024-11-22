@@ -1,6 +1,6 @@
 use crate::Ledger;
 use bytes::{Buf, BufMut};
-use irys_types::{BlockHash, BlockLedgerRelativeChunkOffset, Compact, TxPath, TxRoot};
+use irys_types::{BlockHash, BlockRelativeChunkOffset, Compact, TxPath, TxRoot};
 use reth_db::table::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
     Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Compact, PartialOrd, Ord,
 )]
 /// This is a struct used to consistently construct the (primary) key used in the BlockRelativeTxPathIndex database
-pub struct BlockTxPathIndexKey {
+pub struct BlockRelativeTxPathIndexKey {
     /// the block hash of the block
     pub block_hash: BlockHash,
     /// the ledger number to scope the query to
@@ -21,7 +21,7 @@ const BLOCK_TX_PATH_INDEX_KEY_SIZE: usize =
 /// note: the total size + the subkey must be < 2022 bytes (half a 4k DB page size - see MDBX .set_geometry)
 const _: () = assert!(BLOCK_TX_PATH_INDEX_KEY_SIZE <= 2022);
 
-impl Encode for BlockTxPathIndexKey {
+impl Encode for BlockRelativeTxPathIndexKey {
     type Encoded = [u8; BLOCK_TX_PATH_INDEX_KEY_SIZE];
 
     fn encode(self) -> Self::Encoded {
@@ -31,7 +31,7 @@ impl Encode for BlockTxPathIndexKey {
     }
 }
 
-impl Decode for BlockTxPathIndexKey {
+impl Decode for BlockRelativeTxPathIndexKey {
     fn decode(value: &[u8]) -> Result<Self, reth_db::DatabaseError> {
         let (block_hash, ledger_num) = value.split_last_chunk().unwrap();
         let block_hash = BlockHash::decode(block_hash)?;
@@ -45,20 +45,20 @@ impl Decode for BlockTxPathIndexKey {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq /* Compact */)]
 /// This is a struct used to consistently construct the key used in the BlockRelativeTxPathIndex database
-pub struct BlockTxPathIndexEntry {
+pub struct BlockRelativeTxPathIndexEntry {
     /// Subkey (offset) - this should be the offset of the last chunk associated with this Tx, as MDBX dupsort will return keys >=
-    pub end_offset: BlockLedgerRelativeChunkOffset,
+    pub end_offset: BlockRelativeChunkOffset,
     /// the "value" being stored
-    pub meta: BlockTxPathIndexMeta,
+    pub meta: BlockRelativeTxPathIndexMeta,
 }
 
-const KEY_BYTES: usize = std::mem::size_of::<BlockLedgerRelativeChunkOffset>();
+const KEY_BYTES: usize = std::mem::size_of::<BlockRelativeChunkOffset>();
 
 // NOTE: Removing reth_codec and manually encode subkey
 // and compress second part of the value. If we have compression
 // over whole value (Even SubKey) that would mess up fetching of values with seek_by_key_subkey
 // as the subkey ordering is byte ordering over the entire stored value, so the key 1.) has to be the first element that's encoded and 2.) cannot be compressed
-impl Compact for BlockTxPathIndexEntry {
+impl Compact for BlockRelativeTxPathIndexEntry {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -71,9 +71,9 @@ impl Compact for BlockTxPathIndexEntry {
     }
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let offset =
-            BlockLedgerRelativeChunkOffset::from_be_bytes(buf[..KEY_BYTES].try_into().unwrap());
-        let (meta, out) = BlockTxPathIndexMeta::from_compact(&buf[KEY_BYTES..], len - KEY_BYTES);
+        let offset = BlockRelativeChunkOffset::from_be_bytes(buf[..KEY_BYTES].try_into().unwrap());
+        let (meta, out) =
+            BlockRelativeTxPathIndexMeta::from_compact(&buf[KEY_BYTES..], len - KEY_BYTES);
         (
             Self {
                 end_offset: offset,
@@ -88,13 +88,13 @@ impl Compact for BlockTxPathIndexEntry {
 /// This is a struct used to contain any metadata that should be stored as part of the dupsort index entry
 /// note: the total size + the subkey must be < 2022 bytes (half a 4k DB page size - see MDBX .set_geometry)
 
-pub struct BlockTxPathIndexMeta {
+pub struct BlockRelativeTxPathIndexMeta {
     /// The transaction root associated with the block & ledger relative chunk offset
     pub tx_path: TxPath,
 }
 
 // custom Compact impl as the default impl for Vec<u8> sucks as it's for Vec<T>, and the specialized functions also suck
-impl Compact for BlockTxPathIndexMeta {
+impl Compact for BlockRelativeTxPathIndexMeta {
     #[inline]
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
@@ -109,7 +109,7 @@ impl Compact for BlockTxPathIndexMeta {
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
         let mut v = Vec::with_capacity(len);
         v.put(buf.take(len));
-        (BlockTxPathIndexMeta { tx_path: v }, buf)
+        (BlockRelativeTxPathIndexMeta { tx_path: v }, buf)
     }
 }
 
@@ -132,20 +132,22 @@ mod tests {
         Database as _,
     };
 
-    use super::{BlockTxPathIndexEntry, BlockTxPathIndexKey, BlockTxPathIndexMeta};
+    use super::{
+        BlockRelativeTxPathIndexEntry, BlockRelativeTxPathIndexKey, BlockRelativeTxPathIndexMeta,
+    };
 
     #[test]
     fn block_relative_tx_path_index_key_encode_decode() -> eyre::Result<()> {
-        let key = BlockTxPathIndexKey {
+        let key = BlockRelativeTxPathIndexKey {
             block_hash: BlockHash::random(),
             ledger: Ledger::Submit,
         };
         let mut buf = vec![];
         let enc_key_len = key.to_compact(&mut buf);
-        let (key2, _) = BlockTxPathIndexKey::from_compact(&buf, enc_key_len);
+        let (key2, _) = BlockRelativeTxPathIndexKey::from_compact(&buf, enc_key_len);
         assert_eq!(key, key2);
         let enc_key = key.encode();
-        let dec_key = BlockTxPathIndexKey::decode(&enc_key)?;
+        let dec_key = BlockRelativeTxPathIndexKey::decode(&enc_key)?;
         assert_eq!(key, dec_key);
         Ok(())
     }
@@ -169,7 +171,7 @@ mod tests {
         let ledger = Ledger::Submit;
         let block_hash = BlockHash::zero();
 
-        database::store_tx_path_by_block_ledger_offset(
+        database::store_tx_path_by_block_offset(
             &db,
             block_hash,
             ledger,
@@ -177,7 +179,7 @@ mod tests {
             tx1_path.clone(),
         )?;
 
-        database::store_tx_path_by_block_ledger_offset(
+        database::store_tx_path_by_block_offset(
             &db,
             block_hash,
             ledger,

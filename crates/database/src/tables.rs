@@ -1,6 +1,6 @@
 use irys_types::{
-    ingress::IngressProof, BlockLedgerRelativeChunkOffset, ChunkPathHash, DataRoot,
-    IrysBlockHeader, IrysTransactionHeader, TxRelativeChunkIndex, H256,
+    ingress::IngressProof, BlockRelativeChunkOffset, ChunkPathHash, DataRoot, IrysBlockHeader,
+    IrysTransactionHeader, TxRelativeChunkIndex, H256,
 };
 use reth_codecs::Compact;
 use reth_db::{
@@ -14,7 +14,7 @@ use std::fmt;
 
 use crate::{
     db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
-    tx_path::{BlockTxPathIndexEntry, BlockTxPathIndexKey},
+    tx_path::{BlockRelativeTxPathIndexEntry, BlockRelativeTxPathIndexKey},
 };
 
 /// Adds wrapper structs for some primitive types so they can use `StructFlags` from Compact, when
@@ -84,8 +84,8 @@ impl_compression_for_compact!(
     CachedDataRoot,
     CachedChunkIndexEntry,
     CachedChunk,
-    BlockTxPathIndexKey,
-    BlockTxPathIndexEntry
+    BlockRelativeTxPathIndexKey,
+    BlockRelativeTxPathIndexEntry
 );
 
 tables! {
@@ -104,6 +104,6 @@ tables! {
     table IngressProofs<Key = DataRoot, Value = IngressProof>;
 
     /// maps block + ledger relative chunk offsets to their corresponding data root
-    table BlockRelativeTxPathIndex<Key = BlockTxPathIndexKey, Value =BlockTxPathIndexEntry,  SubKey = BlockLedgerRelativeChunkOffset >;
+    table BlockRelativeTxPathIndex<Key = BlockRelativeTxPathIndexKey, Value =BlockRelativeTxPathIndexEntry,  SubKey = BlockRelativeChunkOffset >;
 
 }

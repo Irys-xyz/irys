@@ -8,10 +8,12 @@ use crate::tables::{
     BlockRelativeTxPathIndex, CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders,
     IrysTxHeaders, Tables,
 };
-use crate::tx_path::{BlockTxPathIndexEntry, BlockTxPathIndexKey, BlockTxPathIndexMeta};
+use crate::tx_path::{
+    BlockRelativeTxPathIndexEntry, BlockRelativeTxPathIndexKey, BlockRelativeTxPathIndexMeta,
+};
 use crate::Ledger;
 use irys_types::{
-    hash_sha256, BlockHash, BlockLedgerRelativeChunkOffset, Chunk, ChunkPathHash, DataRoot,
+    hash_sha256, BlockHash, BlockRelativeChunkOffset, Chunk, ChunkPathHash, DataRoot,
     IrysBlockHeader, IrysTransactionHeader, TxPath, TxRelativeChunkIndex, TxRelativeChunkOffset,
     TxRoot, H256,
 };
@@ -233,29 +235,32 @@ pub fn get_tx_path_by_block_ledger_offset(
     block_hash: BlockHash,
     ledger: Ledger,
     // offset is inclusive
-    offset: BlockLedgerRelativeChunkOffset,
+    chunk_offset: BlockRelativeChunkOffset,
 ) -> Result<Option<TxPath>, DatabaseError> {
     let tx = db.tx()?;
     let mut cursor = tx.cursor_dup_read::<BlockRelativeTxPathIndex>()?;
 
     Ok(cursor
-        .seek_by_key_subkey(BlockTxPathIndexKey { block_hash, ledger }, offset)?
+        .seek_by_key_subkey(
+            BlockRelativeTxPathIndexKey { block_hash, ledger },
+            chunk_offset,
+        )?
         .map(|e| e.meta.tx_path))
 }
 
 /// Stores the provided tx path under a compound key of block_hash + ledger, with a ranged subkey of end_offset
-pub fn store_tx_path_by_block_ledger_offset(
+pub fn store_tx_path_by_block_offset(
     db: &DatabaseEnv,
     block_hash: BlockHash,
     ledger: Ledger,
     // this should be the offset of the *last* chunk for this tx path, inclusive.
-    end_offset: BlockLedgerRelativeChunkOffset,
+    end_chunk_offset: BlockRelativeChunkOffset,
     tx_path: TxPath,
 ) -> Result<(), DatabaseError> {
-    let key = BlockTxPathIndexKey { block_hash, ledger };
-    let subkey = BlockTxPathIndexEntry {
-        end_offset,
-        meta: BlockTxPathIndexMeta { tx_path },
+    let key = BlockRelativeTxPathIndexKey { block_hash, ledger };
+    let subkey = BlockRelativeTxPathIndexEntry {
+        end_offset: end_chunk_offset,
+        meta: BlockRelativeTxPathIndexMeta { tx_path },
     };
     let write_tx = db.tx_mut()?;
     write_tx.put::<BlockRelativeTxPathIndex>(key, subkey)?;
