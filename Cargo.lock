@@ -5287,6 +5287,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "derive_more 1.0.0",
+ "eyre",
  "modular-bitfield",
  "proptest-derive 0.5.0",
  "reth-codecs",
