@@ -9,12 +9,12 @@ use crate::tables::{
 };
 use irys_types::{
     hash_sha256, Chunk, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    TxRelativeChunkIndex, TxRelativeChunkOffset, H256,
+    TxRelativeChunkIndex, TxRelativeChunkOffset, H256, MEGABYTE, TERABYTE,
 };
 use reth::prometheus_exporter::install_prometheus_recorder;
 use reth_db::cursor::{DbDupCursorRO, DupWalker};
 use reth_db::mdbx::tx::Tx;
-use reth_db::mdbx::RO;
+use reth_db::mdbx::{Geometry, RO};
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::{
@@ -34,9 +34,14 @@ const ERROR_PUT: &str = "Not able to insert value into table.";
 pub fn open_or_create_db<P: AsRef<Path>, T: HasName + HasTableType>(
     path: P,
     tables: &[T],
+    args: Option<DatabaseArguments>,
 ) -> eyre::Result<DatabaseEnv> {
-    let args = DatabaseArguments::new(ClientVersion::default())
-        .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded));
+    let args = args.unwrap_or(
+        DatabaseArguments::new(ClientVersion::default())
+            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
+            // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
+            .with_growth_step((10 * MEGABYTE).try_into()?),
+    );
 
     // Register the prometheus recorder before creating the database,
     // because irys_database init needs it to register metrics.
