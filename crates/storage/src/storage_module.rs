@@ -1,5 +1,7 @@
 use eyre::{eyre, Result};
-use irys_types::{CHUNK_SIZE, H256, NUM_CHUNKS_IN_PARTITION};
+use irys_types::{
+    partition::PartHash, ChunkBytes, ChunkOffset, CHUNK_SIZE, H256, NUM_CHUNKS_IN_PARTITION,
+};
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -9,9 +11,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex, RwLock},
 };
-type ChunkOffset = u32;
-type ChunkBytes = Vec<u8>;
-type PartHash = H256;
+
 type SubmodulePath = String;
 
 // In-memory chunk data indexed by offset within partition

@@ -90,3 +90,9 @@ pub fn chunk_offset_to_index(offset: TxRelativeChunkOffset) -> eyre::Result<TxRe
     let div: u32 = offset.div_ceil(CHUNK_SIZE.try_into()?).try_into()?;
     Ok(div - 1)
 }
+
+/// converts a size (in bytes) to the number of chunks, rounding up (size 0 -> illegal state, size 1 -> 1, size 262144 -> 1, 262145 -> 2 )
+pub fn data_size_to_chunk_count(data_size: u64) -> eyre::Result<u32> {
+    assert_ne!(data_size, 0, "tx data_size 0 is illegal");
+    Ok(data_size.div_ceil(CHUNK_SIZE.try_into()?).try_into()?)
+}

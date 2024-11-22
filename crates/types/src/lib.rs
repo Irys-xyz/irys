@@ -10,6 +10,7 @@ pub mod consensus;
 pub mod ingress;
 pub mod irys;
 mod merkle;
+pub mod partition;
 pub mod serialization;
 pub mod storage;
 pub mod transaction;

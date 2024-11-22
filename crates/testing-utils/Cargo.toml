@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-irys-storage.workspace = true
 eyre.workspace = true
 irys-types.workspace = true
 rand.workspace = true

@@ -26,10 +26,13 @@ pub struct Chunk {
 /// a Chunk's tx relative offset
 /// due to legacy weirdness, the offset is of the end of the chunk, not the start
 /// i.e for the first chunk, the offset is 262144 instead of 0
-pub type TxRelativeChunkOffset = u64;
+pub type TxRelativeChunkOffset = u32;
 
 /// a fully padded chunk binary - note: only use this type in cases where smaller/end chunks *should* be padded to fill out the chunk
 pub type ChunkBin = [u8; CHUNK_SIZE as usize];
+
+/// a chunk binary - use this in cases where chunks may not be padded
+pub type ChunkBytes = Vec<u8>;
 
 /// sha256(chunk_path)
 pub type ChunkPathHash = H256;
@@ -44,3 +47,5 @@ pub type DataChunks = Vec<Vec<u8>>;
 
 /// the Block and ledger relative chunk offset
 pub type BlockLedgerRelativeChunkOffset = u64;
+
+pub type ChunkOffset = u32;

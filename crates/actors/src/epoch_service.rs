@@ -3,8 +3,8 @@ use database::data_ledger::*;
 use eyre::{Error, Result};
 use irys_storage::{ii, StorageModuleInfo};
 use irys_types::{
-    Address, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH, NUM_CHUNKS_IN_PARTITION,
-    NUM_PARTITIONS_PER_SLOT, PARTITION_SIZE,
+    partition::PartHash, Address, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
+    NUM_CHUNKS_IN_PARTITION, NUM_PARTITIONS_PER_SLOT, PARTITION_SIZE,
 };
 use openssl::sha;
 use std::{
@@ -40,9 +40,6 @@ impl Default for EpochServiceConfig {
         }
     }
 }
-
-/// A H256 hash that uniquely identifies a partition
-pub type PartHash = H256;
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug)]

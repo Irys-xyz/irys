@@ -1,10 +1,8 @@
-use crate::{IrysBlockHeader, H256};
+use crate::{partition::PartHash, IrysBlockHeader, H256};
 use actix::Message;
 use alloy_primitives::Address;
 use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
 use std::sync::Arc;
-
-pub type PartHash = H256;
 
 #[derive(Message, Debug)]
 #[rtype(result = "Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>")]

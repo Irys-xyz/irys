@@ -1,5 +1,5 @@
 use actix::{Actor, Context, Handler, Message};
-use database::db_cache::{chunk_offset_to_index, CachedChunk};
+use database::db_cache::{chunk_offset_to_index, data_size_to_chunk_count, CachedChunk};
 use database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use eyre::eyre;
 use irys_types::ingress::generate_ingress_proof_tree;
@@ -212,7 +212,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
             // data size is the offset of the last chunk
             // add one as index is 0-indexed
             let expected_chunk_count =
-                chunk_offset_to_index(cached_data_root.data_size).unwrap() + 1;
+                data_size_to_chunk_count(cached_data_root.data_size).unwrap();
             if chunk_count == expected_chunk_count {
                 // we *should* have all the chunks
                 // dispatch a ingress proof task
@@ -283,7 +283,7 @@ pub fn generate_ingress_proof(
     // we do this by constructing a set over the chunk hashes, checking if we've seen this hash before
     // if we have, we *must* error
     let mut set = HashSet::<H256>::new();
-    let expected_chunk_count = chunk_offset_to_index(size).unwrap() + 1;
+    let expected_chunk_count = data_size_to_chunk_count(size).unwrap();
     let mut data: DataChunks = Vec::with_capacity(expected_chunk_count as usize);
     let mut data_size: u64 = 0;
     for entry in dup_walker {
@@ -403,7 +403,7 @@ mod tests {
         for (index, chunk_node) in tx.chunks.iter().enumerate() {
             let min = chunk_node.min_byte_range;
             let max = chunk_node.max_byte_range;
-            let offset = tx.proofs[index].offset as u64;
+            let offset = tx.proofs[index].offset as u32;
             let data_path = Base64(tx.proofs[index].proof.to_vec());
             let key: H256 = hash_sha256(&data_path.0).unwrap().into();
             let chunk_bytes = Base64(data_bytes[min..max].to_vec());
