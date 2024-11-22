@@ -1,7 +1,7 @@
 use eyre::{eyre, Result};
 use irys_database::submodule::{create_or_open_submodule_db, read_data_path, write_data_path};
 use irys_types::{
-    app_state::DatabaseProvider, partition::PartHash, ChunkBytes, ChunkOffset, DataPath,
+    app_state::DatabaseProvider, partition::PartHash, Chunk, ChunkBytes, ChunkOffset, DataPath,
     CHUNK_SIZE, NUM_CHUNKS_IN_PARTITION,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
@@ -327,24 +327,19 @@ impl StorageModule {
     }
 
     /// Writes the provided bytes to the submodule's storage, and the data_path to the submodules's database
-    pub fn write_data_chunk(
-        &mut self,
-        chunk_offset: ChunkOffset,
-        bytes: ChunkBytes,
-        data_path: DataPath,
-    ) -> eyre::Result<()> {
+    pub fn write_data_chunk(&mut self, chunk: Chunk) -> eyre::Result<()> {
         // write to the chunk storage and store the data_path in the submodule's database.
-        self.write_chunk(chunk_offset, bytes, ChunkType::Data);
+        self.write_chunk(chunk.offset, chunk.bytes.into(), ChunkType::Data);
         // get submodule ref to get database env
         let (_interval, submodule) = self
             .submodules
-            .get_key_value_at_point(chunk_offset)
+            .get_key_value_at_point(chunk.offset)
             .unwrap();
 
         // write data_path
         let _ = submodule
             .db
-            .update(|tx| write_data_path(tx, chunk_offset, data_path))?;
+            .update(|tx| write_data_path(tx, chunk.offset, chunk.data_path.into()))?;
 
         Ok(())
     }
@@ -510,6 +505,7 @@ pub fn write_info_file(path: &Path, info: &StorageModuleInfo) -> eyre::Result<()
 mod tests {
     use super::*;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_types::H256;
     use nodit::interval::ii;
     #[test]
     fn test() {
@@ -653,10 +649,18 @@ mod tests {
         let storage_module_info = &infos[0];
         let mut storage_module = StorageModule::new(base_path, storage_module_info, Some(config));
         let offset = 0;
-        let chunk = vec![0, 1, 2, 3, 4];
+        let chunk_data = vec![0, 1, 2, 3, 4];
         let data_path = vec![4, 3, 2, 1];
 
-        storage_module.write_data_chunk(offset, chunk, data_path.clone())?;
+        let chunk = Chunk {
+            data_root: H256::zero(),
+            data_size: chunk_data.len() as u64,
+            data_path: data_path.clone().into(),
+            bytes: chunk_data.into(),
+            offset,
+        };
+
+        storage_module.write_data_chunk(chunk)?;
 
         let ret_path = storage_module.read_data_path(offset)?;
         assert_eq!(ret_path, Some(data_path));
