@@ -49,3 +49,6 @@ pub type DataChunks = Vec<Vec<u8>>;
 pub type BlockRelativeChunkOffset = u64;
 
 pub type ChunkOffset = u32;
+
+/// A transaction's data path
+pub type DataPath = Vec<u8>;

@@ -4,15 +4,18 @@ name = "irys-api-server"
 version = "0.1.0"
 
 [dependencies]
+# Irys
+irys-actors.workspace = true
+irys-database.workspace = true
+irys-types.workspace = true
+#
+
 actix-proxy = "0.2.0"
 actix-web = "4.9.0"
 awc = "3.5.1"
 base64-url = "2.0.0"
 serde_json = { workspace = true, features = ["std", "raw_value"] }
-irys-types.workspace = true
 serde.workspace = true
-actors.workspace = true
-database = { path = "../database" }
 actix.workspace = true
 rand = "0.8.5"
 tokio.workspace = true

@@ -2,7 +2,7 @@ use actix_web::{
     web::{self, Json},
     HttpResponse,
 };
-use actors::{
+use irys_actors::{
     mempool::{ChunkIngressError, ChunkIngressMessage},
     ActorAddresses,
 };

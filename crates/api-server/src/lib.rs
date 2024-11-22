@@ -2,7 +2,7 @@ mod routes;
 
 use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
-use actors::ActorAddresses;
+use irys_actors::ActorAddresses;
 use routes::{chunks, index, price, proxy::proxy, tx};
 
 pub async fn run_server(app_state: ActorAddresses) {
@@ -40,7 +40,7 @@ async fn post_tx_and_chunks_golden_path() {
     use ::database::{config::get_data_dir, open_or_create_db};
     use actix::{Actor, Addr};
     use actix_web::test;
-    use actors::{
+    use irys_actors::{
         block_producer::BlockProducerActor, mempool::MempoolActor, packing::PackingActor,
     };
     use awc::http::StatusCode;

@@ -282,36 +282,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "actors"
-version = "0.1.0"
-dependencies = [
- "actix",
- "actix_async_handler",
- "alloy-rpc-types-engine",
- "assert_matches",
- "color-eyre",
- "database",
- "eyre",
- "irys-primitives",
- "irys-reth-node-bridge",
- "irys-storage",
- "irys-testing-utils",
- "irys-types",
- "openssl",
- "packing",
- "rand",
- "rand_chacha",
- "reth",
- "reth-db",
- "serde_json",
- "sha2 0.10.8",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "addr2line"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2148,65 +2118,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
-name = "chain"
-version = "0.1.0"
-dependencies = [
- "actix",
- "actix-rt",
- "actors",
- "alloy-consensus",
- "alloy-contract",
- "alloy-core",
- "alloy-eips",
- "alloy-network",
- "alloy-provider",
- "alloy-rlp",
- "alloy-serde",
- "alloy-signer-local",
- "alloy-sol-macro",
- "alloy-sol-types",
- "arbitrary",
- "assert_matches",
- "bytes",
- "clap",
- "color-eyre",
- "database",
- "eyre",
- "futures",
- "futures-util",
- "hex",
- "irys-api-server",
- "irys-c",
- "irys-config",
- "irys-reth-node-bridge",
- "irys-storage",
- "irys-testing-utils",
- "irys-types",
- "jsonrpsee",
- "k256",
- "modular-bitfield",
- "rand",
- "rand_chacha",
- "reth",
- "reth-cli-runner",
- "reth-codecs",
- "reth-codecs-derive",
- "reth-db",
- "reth-db-api",
- "reth-db-models",
- "reth-e2e-test-utils",
- "reth-primitives",
- "reth-tracing",
- "serde",
- "serde_json",
- "sha2 0.10.8",
- "tempfile",
- "test-fuzz",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "chrono"
 version = "0.4.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2859,32 +2770,6 @@ checksum = "332d754c0af53bc87c108fed664d121ecf59207ec4196041f04d6ab9002ad33f"
 dependencies = [
  "data-encoding",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "database"
-version = "0.1.0"
-dependencies = [
- "arbitrary",
- "assert_matches",
- "bytes",
- "color-eyre",
- "eyre",
- "irys-config",
- "irys-testing-utils",
- "irys-types",
- "modular-bitfield",
- "rand",
- "reth",
- "reth-codecs",
- "reth-db",
- "reth-db-api",
- "serde",
- "serde_json",
- "tempfile",
- "test-fuzz",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -5214,6 +5099,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "irys-actors"
+version = "0.1.0"
+dependencies = [
+ "actix",
+ "actix_async_handler",
+ "alloy-rpc-types-engine",
+ "assert_matches",
+ "color-eyre",
+ "eyre",
+ "irys-database",
+ "irys-packing",
+ "irys-primitives",
+ "irys-reth-node-bridge",
+ "irys-storage",
+ "irys-testing-utils",
+ "irys-types",
+ "openssl",
+ "rand",
+ "rand_chacha",
+ "reth",
+ "reth-db",
+ "serde_json",
+ "sha2 0.10.8",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "irys-api-server"
 version = "0.1.0"
 dependencies = [
@@ -5221,10 +5136,10 @@ dependencies = [
  "actix-cors",
  "actix-proxy",
  "actix-web",
- "actors",
  "awc",
  "base64-url",
- "database",
+ "irys-actors",
+ "irys-database",
  "irys-types",
  "rand",
  "serde",
@@ -5250,12 +5165,70 @@ dependencies = [
 ]
 
 [[package]]
+name = "irys-chain"
+version = "0.1.0"
+dependencies = [
+ "actix",
+ "actix-rt",
+ "alloy-consensus",
+ "alloy-contract",
+ "alloy-core",
+ "alloy-eips",
+ "alloy-network",
+ "alloy-provider",
+ "alloy-rlp",
+ "alloy-serde",
+ "alloy-signer-local",
+ "alloy-sol-macro",
+ "alloy-sol-types",
+ "arbitrary",
+ "assert_matches",
+ "bytes",
+ "clap",
+ "color-eyre",
+ "eyre",
+ "futures",
+ "futures-util",
+ "hex",
+ "irys-actors",
+ "irys-api-server",
+ "irys-c",
+ "irys-config",
+ "irys-database",
+ "irys-reth-node-bridge",
+ "irys-storage",
+ "irys-testing-utils",
+ "irys-types",
+ "jsonrpsee",
+ "k256",
+ "modular-bitfield",
+ "rand",
+ "rand_chacha",
+ "reth",
+ "reth-cli-runner",
+ "reth-codecs",
+ "reth-codecs-derive",
+ "reth-db",
+ "reth-db-api",
+ "reth-db-models",
+ "reth-e2e-test-utils",
+ "reth-primitives",
+ "reth-tracing",
+ "serde",
+ "serde_json",
+ "sha2 0.10.8",
+ "tempfile",
+ "test-fuzz",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "irys-config"
 version = "0.1.0"
 dependencies = [
  "eyre",
  "irys-primitives",
- "irys-storage",
  "irys-types",
  "once_cell",
  "reth-chainspec",
@@ -5263,6 +5236,42 @@ dependencies = [
  "reth-primitives",
  "serde",
  "tracing",
+]
+
+[[package]]
+name = "irys-database"
+version = "0.1.0"
+dependencies = [
+ "arbitrary",
+ "assert_matches",
+ "bytes",
+ "color-eyre",
+ "eyre",
+ "irys-config",
+ "irys-testing-utils",
+ "irys-types",
+ "modular-bitfield",
+ "rand",
+ "reth",
+ "reth-codecs",
+ "reth-db",
+ "reth-db-api",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "test-fuzz",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "irys-packing"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "irys-c",
+ "irys-primitives",
+ "irys-types",
 ]
 
 [[package]]
@@ -5378,9 +5387,12 @@ dependencies = [
  "bytes",
  "eyre",
  "futures",
+ "irys-database",
+ "irys-testing-utils",
  "irys-types",
  "nodit",
  "rand",
+ "reth-db",
  "serde",
  "serde_json",
  "tracing",
@@ -6810,16 +6822,6 @@ dependencies = [
  "elliptic-curve",
  "primeorder",
  "sha2 0.10.8",
-]
-
-[[package]]
-name = "packing"
-version = "0.1.0"
-dependencies = [
- "eyre",
- "irys-c",
- "irys-primitives",
- "irys-types",
 ]
 
 [[package]]

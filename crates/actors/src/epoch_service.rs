@@ -1,6 +1,6 @@
 use actix::{Actor, Context, Handler, Message};
-use database::data_ledger::*;
 use eyre::{Error, Result};
+use irys_database::data_ledger::*;
 use irys_storage::{ii, StorageModuleInfo};
 use irys_types::{
     partition::PartHash, Address, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,

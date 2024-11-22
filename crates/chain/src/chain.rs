@@ -1,6 +1,6 @@
-use ::database::{tables::Tables, BlockIndex, Initialized};
+use ::irys_database::{tables::Tables, BlockIndex, Initialized};
 use actix::Actor;
-use actors::{
+use irys_actors::{
     block_index::BlockIndexActor,
     block_producer::{BlockConfirmedMessage, BlockProducerActor},
     epoch_service::{

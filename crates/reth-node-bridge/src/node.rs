@@ -214,7 +214,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     };
 
     // Register the prometheus recorder before creating the database,
-    // because database init needs it to register metrics.
+    // because irys_database init needs it to register metrics.
     let _ = install_prometheus_recorder();
 
     let data_dir = node_config.datadir();
@@ -362,7 +362,7 @@ where
     };
 
     // Register the prometheus recorder before creating the database,
-    // because database init needs it to register metrics.
+    // because irys_database init needs it to register metrics.
     let _ = install_prometheus_recorder();
 
     let data_dir = node_config.datadir();

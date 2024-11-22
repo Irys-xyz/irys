@@ -1,5 +1,5 @@
 [package]
-name = "database"
+name = "irys-database"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true

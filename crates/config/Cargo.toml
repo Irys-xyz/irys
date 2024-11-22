@@ -7,7 +7,6 @@ rust-version.workspace = true
 [dependencies]
 reth-primitives.workspace = true
 irys-types.workspace = true
-irys-storage.workspace = true
 eyre.workspace = true
 reth-chainspec.workspace = true
 irys-primitives.workspace = true

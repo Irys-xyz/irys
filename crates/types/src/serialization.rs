@@ -442,6 +442,18 @@ impl FromStr for Base64 {
     }
 }
 
+impl From<Vec<u8>> for Base64 {
+    fn from(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<Base64> for Vec<u8> {
+    fn from(value: Base64) -> Self {
+        value.0
+    }
+}
+
 impl Base64 {
     pub fn from_utf8_str(str: &str) -> Result<Self, Error> {
         Ok(Self(str.as_bytes().to_vec()))
@@ -464,6 +476,10 @@ impl Base64 {
 
     pub fn split_at(&self, mid: usize) -> (&[u8], &[u8]) {
         self.0.split_at(mid)
+    }
+
+    pub fn to_vec(self) -> Vec<u8> {
+        self.0
     }
 }
 

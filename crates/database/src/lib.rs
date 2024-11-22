@@ -15,6 +15,8 @@ pub mod tx_path;
 
 /// Data in the indexes is confirmed data
 pub mod db_index;
+/// Tables & methods specific to submodule databases
+pub mod submodule;
 /// Local macro definition of chain specific mdbx tables
 pub mod tables;
 

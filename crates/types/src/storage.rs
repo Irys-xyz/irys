@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::CHUNK_SIZE;
 
+pub const MEGABYTE: usize = 1024 * 1024;
+pub const GIGABYTE: usize = MEGABYTE * 1024;
+pub const TERABYTE: usize = GIGABYTE * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Storage provider config
 pub struct PartitionStorageProviderConfig {

@@ -1,5 +1,5 @@
-use chain::chain::start_irys_node;
 use clap::{command, Parser};
+use irys_chain::chain::start_irys_node;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
