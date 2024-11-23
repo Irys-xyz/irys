@@ -626,7 +626,7 @@ mod tests {
         assert_eq!(file_intervals, module_intervals);
     }
     #[test]
-    fn datapath_test() -> eyre::Result<()> {
+    fn data_path_test() -> eyre::Result<()> {
         let infos = vec![StorageModuleInfo {
             module_num: 0,
             partition_hash: None,
@@ -635,8 +635,8 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir();
-        let base_path = tmp_dir.to_str().unwrap();
+        let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
+        let base_path = tmp_dir.path().to_str().unwrap();
         initialize_storage_files(base_path, &infos)?;
 
         let config = StorageModuleConfig {

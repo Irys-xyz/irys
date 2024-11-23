@@ -46,9 +46,12 @@ pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeC
     start_irys_node(config).await
 }
 
-pub async fn start_for_testing_default() -> eyre::Result<IrysNodeCtx> {
+pub async fn start_for_testing_default(
+    name: Option<&str>,
+    keep: bool,
+) -> eyre::Result<IrysNodeCtx> {
     let config = IrysNodeConfig {
-        base_directory: setup_tracing_and_temp_dir(),
+        base_directory: setup_tracing_and_temp_dir(name, keep).into_path(),
         ..Default::default()
     };
     start_irys_node(config).await

@@ -120,7 +120,7 @@ mod tests {
         tx_path::KEY_BYTES,
         Ledger,
     };
-    use irys_testing_utils::utils::temporary_directory;
+    use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::{BlockHash, Compact, TxPath, TxRoot, H256};
     use rand::Rng as _;
     use reth::revm::primitives::Bytes;
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn block_relative_tx_path_index() -> eyre::Result<()> {
-        let tmp_dir = temporary_directory();
+        let tmp_dir = setup_tracing_and_temp_dir(Some("block_relative_tx_path_index"), false);
         let db = open_or_create_db(tmp_dir, Tables::ALL, None)?;
 
         let data_size = 2000; // max key size is 2022

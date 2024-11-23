@@ -355,7 +355,7 @@ mod tests {
 
     #[actix::test]
     async fn post_transaction_and_chunks() -> eyre::Result<()> {
-        let tmpdir = setup_tracing_and_temp_dir();
+        let tmpdir = setup_tracing_and_temp_dir(Some("post_transaction_and_chunks"), false);
 
         let db = open_or_create_db(tmpdir, Tables::ALL, None).unwrap();
         let arc_db1 = DatabaseProvider(Arc::new(db));

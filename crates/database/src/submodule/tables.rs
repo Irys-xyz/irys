@@ -31,7 +31,7 @@ fn test_offset_range_queries() -> eyre::Result<()> {
     use reth_db::cursor::*;
     use reth_db::transaction::*;
 
-    let temp_dir = setup_tracing_and_temp_dir();
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_offset_range_queries"), false);
 
     let db = open_or_create_db(temp_dir, Tables::ALL, None).unwrap();
 
