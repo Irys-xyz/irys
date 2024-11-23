@@ -4,21 +4,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 // 26 + 4 + 2 bytes
 pub struct RangeSpecifier {
-    partition_index: U208, // 3 64-bit words + 1 16 bit word
+    partition_index: U208, // 3 64-bit words + 1 16 bit word, 26 bytes
     offset: u32,
     chunk_count: u16,
 }
 
 impl From<[u8; 32]> for RangeSpecifier {
     fn from(value: [u8; 32]) -> Self {
-        let (partition_index, rest) = value.split_first_chunk::<26>().unwrap();
-        let (offset, rest) = rest.split_first_chunk().unwrap();
-        let (chunk_count, _rest) = rest.split_first_chunk().unwrap();
-
         RangeSpecifier {
-            partition_index: U208::from_le_bytes(*partition_index),
-            offset: u32::from_le_bytes(*offset),
-            chunk_count: u16::from_le_bytes(*chunk_count),
+            partition_index: U208::from_le_bytes::<26>(value[..26].try_into().unwrap()),
+            offset: u32::from_le_bytes(value[26..30].try_into().unwrap()),
+            chunk_count: u16::from_le_bytes(value[30..32].try_into().unwrap()),
         }
     }
 }
