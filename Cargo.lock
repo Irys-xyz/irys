@@ -5275,6 +5275,7 @@ dependencies = [
  "irys-c",
  "irys-primitives",
  "irys-types",
+ "rand",
 ]
 
 [[package]]

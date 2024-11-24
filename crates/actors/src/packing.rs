@@ -50,22 +50,19 @@ impl PackingActor {
 
                 let f = fs::File::open(filename.clone()).unwrap();
 
-                let data_in_range = match fs::read(filename) {
+                let mut data_in_range = match fs::read(filename) {
                     Ok(r) => cast_vec_u8_to_vec_u8_array(r),
                     Err(_) => continue,
                 };
 
-                // TODO: Pack range
-                let range = match capacity_pack_range_with_data(
-                    data_in_range,
+                // Packs data_in_range
+                capacity_pack_range_with_data(
+                    &mut data_in_range,
                     mining_addr,
                     next_range.chunk_interval.start() as u64,
                     IrysTxId::random(),
                     None,
-                ) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
+                );
 
                 // TODO: Write to disk correctly
 
