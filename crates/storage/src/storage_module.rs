@@ -508,7 +508,7 @@ mod tests {
     use irys_types::H256;
     use nodit::interval::ii;
     #[test]
-    fn test() {
+    fn storage_module_test() {
         let infos = vec![StorageModuleInfo {
             module_num: 0,
             partition_hash: None,
@@ -519,8 +519,8 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir();
-        let base_path = PathBuf::from(tmp_dir.to_str().unwrap());
+        let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
         let _ = initialize_storage_files(&base_path, &infos);
 
         // Verify the StorageModuleInfo file was crated in the base path
@@ -634,10 +634,10 @@ mod tests {
                 (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
             ],
         }];
-      
+
         let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
-        let base_path = tmp_dir.path().to_str().unwrap();
-        initialize_storage_files(base_path, &infos)?;
+        let base_path = tmp_dir.path().to_path_buf();
+        initialize_storage_files(&base_path, &infos)?;
 
         let config = StorageModuleConfig {
             min_writes_before_sync: 1,

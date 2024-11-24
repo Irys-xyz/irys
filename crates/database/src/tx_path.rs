@@ -116,7 +116,7 @@ impl Compact for BlockRelativeTxPathIndexMeta {
 mod tests {
     use crate::{
         database, open_or_create_db,
-        tables::{BlockRelativeTxPathIndex, Tables},
+        tables::{BlockRelativeTxPathIndex, IrysTables},
         tx_path::KEY_BYTES,
         Ledger,
     };
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn block_relative_tx_path_index() -> eyre::Result<()> {
         let tmp_dir = setup_tracing_and_temp_dir(Some("block_relative_tx_path_index"), false);
-        let db = open_or_create_db(tmp_dir, Tables::ALL, None)?;
+        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None)?;
 
         let data_size = 2000; // max key size is 2022
         let mut data_bytes = vec![0u8; data_size];

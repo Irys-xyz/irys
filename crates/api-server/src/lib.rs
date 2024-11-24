@@ -35,7 +35,7 @@ pub async fn run_server(app_state: ActorAddresses) {
 #[cfg(test)]
 #[actix_web::test]
 async fn post_tx_and_chunks_golden_path() {
-    use irys_database::tables::Tables;
+    use irys_database::tables::IrysTables;
     use reth::tasks::TaskManager;
     use std::sync::Arc;
 
@@ -52,7 +52,7 @@ async fn post_tx_and_chunks_golden_path() {
     use rand::Rng;
 
     let path = get_data_dir();
-    let db = open_or_create_db(path, Tables::ALL, None).unwrap();
+    let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
     let arc_db = Arc::new(db);
 
     let task_manager = TaskManager::current();

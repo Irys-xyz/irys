@@ -8,11 +8,11 @@ use reth_db::{
 
 use crate::open_or_create_db;
 
-use super::tables::{ChunkPathByOffset, Tables};
+use super::tables::{ChunkPathByOffset, SubmoduleTables};
 
 /// Creates or opens a *submodule* MDBX database
 pub fn create_or_open_submodule_db<P: AsRef<Path>>(path: P) -> eyre::Result<DatabaseEnv> {
-    open_or_create_db(path, Tables::ALL, None)
+    open_or_create_db(path, SubmoduleTables::ALL, None)
 }
 
 /// writes a chunk's data path to the database using the provided transaction

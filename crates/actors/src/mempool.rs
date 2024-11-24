@@ -351,7 +351,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use assert_matches::assert_matches;
-    use irys_database::{config::get_data_dir, open_or_create_db, tables::Tables};
+    use irys_database::{config::get_data_dir, open_or_create_db, tables::IrysTables};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{irys::IrysSigner, Base64, MAX_CHUNK_SIZE};
     use rand::Rng;
@@ -365,7 +365,7 @@ mod tests {
     async fn post_transaction_and_chunks() -> eyre::Result<()> {
         let tmpdir = setup_tracing_and_temp_dir(Some("post_transaction_and_chunks"), false);
 
-        let db = open_or_create_db(tmpdir, Tables::ALL, None).unwrap();
+        let db = open_or_create_db(tmpdir, IrysTables::ALL, None).unwrap();
         let arc_db1 = DatabaseProvider(Arc::new(db));
         let arc_db2 = DatabaseProvider(Arc::clone(&arc_db1));
 

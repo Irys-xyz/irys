@@ -6,7 +6,7 @@ use crate::db_cache::{
 };
 use crate::tables::{
     BlockRelativeTxPathIndex, CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders,
-    IrysTxHeaders, Tables,
+    IrysTables, IrysTxHeaders,
 };
 use crate::tx_path::{
     BlockRelativeTxPathIndexEntry, BlockRelativeTxPathIndexKey, BlockRelativeTxPathIndexMeta,
@@ -285,7 +285,7 @@ mod tests {
     use irys_types::{IrysBlockHeader, IrysTransactionHeader};
     //use tempfile::tempdir;
 
-    use crate::{block_by_hash, config::get_data_dir, tables::Tables};
+    use crate::{block_by_hash, config::get_data_dir, tables::IrysTables};
 
     use super::{insert_block, open_or_create_db};
 
@@ -297,7 +297,7 @@ mod tests {
 
         let mut tx = IrysTransactionHeader::default();
         tx.id.0[0] = 2;
-        let db = open_or_create_db(path, Tables::ALL, None).unwrap();
+        let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         // // Write a Tx
         // {

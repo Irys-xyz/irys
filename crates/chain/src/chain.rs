@@ -1,4 +1,4 @@
-use ::irys_database::{tables::Tables, BlockIndex, Initialized};
+use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::Actor;
 use irys_actors::{
     block_index::BlockIndexActor,
@@ -221,7 +221,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
             tokio_runtime.block_on(run_to_completion_or_panic(
                 &mut task_manager,
-                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, Tables::ALL, reth_handle_sender)),
+                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender)),
             )).unwrap();
         })?;
 

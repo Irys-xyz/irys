@@ -89,6 +89,7 @@ impl_compression_for_compact!(
 );
 
 tables! {
+    IrysTables;
     /// Stores the header hashes belonging to the canonical chain.
     table IrysBlockHeaders<Key = H256, Value = CompactIrysBlockHeader>;
 

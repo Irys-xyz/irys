@@ -19,6 +19,7 @@ use crate::{
 
 /// Per-submodule database tables
 tables! {
+    SubmoduleTables;
     /// Index that maps a partition-relative offset to a DataPath
     /// note: mdbx keys are always sorted, so range queries work :)
     /// TODO: use custom Compact impl for Vec<u8> so we don't have problems
@@ -33,7 +34,7 @@ fn test_offset_range_queries() -> eyre::Result<()> {
 
     let temp_dir = setup_tracing_and_temp_dir(Some("test_offset_range_queries"), false);
 
-    let db = open_or_create_db(temp_dir, Tables::ALL, None).unwrap();
+    let db = open_or_create_db(temp_dir, SubmoduleTables::ALL, None).unwrap();
 
     let write_tx = db.tx_mut()?;
 
