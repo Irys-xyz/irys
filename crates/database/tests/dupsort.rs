@@ -69,7 +69,7 @@ fn db_subkey_test() -> eyre::Result<()> {
         .expect("Not able to create a temporary directory.")
         .into_path();
 
-    let db = open_or_create_db(tmpdir, Tables::ALL)?;
+    let db = open_or_create_db(tmpdir, Tables::ALL, None)?;
     let write_tx = db.tx_mut()?;
     // write two chunks to the same key
     let chunk = CachedChunk2 {

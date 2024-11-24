@@ -5142,6 +5142,7 @@ dependencies = [
  "irys-database",
  "irys-types",
  "rand",
+ "reth",
  "serde",
  "serde_json",
  "tokio",
