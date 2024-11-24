@@ -7,6 +7,7 @@ use bytes::Buf;
 use eyre::Error;
 use rand::RngCore;
 use reth_codecs::Compact;
+use reth_db::table::{Compress, Decompress};
 use reth_db_api::table::{Decode, Encode};
 use reth_db_api::DatabaseError;
 use serde::{
@@ -414,6 +415,21 @@ impl Compact for H256 {
         let (v, remaining_buf) = <[u8; 32]>::from_compact(buf, len);
         // Fully qualify this call to avoid calling DecodeHash::from
         (<H256 as From<[u8; 32]>>::from(v), remaining_buf)
+    }
+}
+
+impl Compress for H256 {
+    type Compressed = Vec<u8>;
+
+    fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(self, buf: &mut B) {
+        let _ = Compact::to_compact(&self, buf);
+    }
+}
+
+impl Decompress for H256 {
+    fn decompress(value: &[u8]) -> Result<H256, DatabaseError> {
+        let (obj, _) = Compact::from_compact(value, value.len());
+        Ok(obj)
     }
 }
 

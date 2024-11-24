@@ -150,7 +150,7 @@ type IsDuplicate = bool;
 /// Caches a chunk - returns `true` if the chunk was a duplicate and was not inserted
 pub fn cache_chunk(db: &DatabaseEnv, chunk: Chunk) -> eyre::Result<IsDuplicate> {
     let chunk_index = chunk_offset_to_index(chunk.offset)?;
-    let chunk_path_hash: ChunkPathHash = hash_sha256(&chunk.data_path.0).unwrap().into();
+    let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
     if cached_chunk_by_chunk_key(db, chunk_path_hash)?.is_some() {
         warn!(
             "Chunk {} of {} is already cached, skipping..",

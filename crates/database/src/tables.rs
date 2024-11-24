@@ -1,6 +1,6 @@
 use irys_types::{
-    ingress::IngressProof, BlockRelativeChunkOffset, ChunkPathHash, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, TxRelativeChunkIndex, H256,
+    ingress::IngressProof, BlockRelativeChunkOffset, ChunkPathHash, DataPath, DataRoot,
+    IrysBlockHeader, IrysTransactionHeader, TxRelativeChunkIndex, H256,
 };
 use reth_codecs::Compact;
 use reth_db::{
@@ -14,6 +14,7 @@ use std::fmt;
 
 use crate::{
     db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
+    submodule::tables::ChunkOffsets,
     tx_path::{BlockRelativeTxPathIndexEntry, BlockRelativeTxPathIndexKey},
 };
 
@@ -85,7 +86,8 @@ impl_compression_for_compact!(
     CachedChunkIndexEntry,
     CachedChunk,
     BlockRelativeTxPathIndexKey,
-    BlockRelativeTxPathIndexEntry
+    BlockRelativeTxPathIndexEntry,
+    ChunkOffsets
 );
 
 tables! {
@@ -107,4 +109,6 @@ tables! {
     /// maps block + ledger relative chunk offsets to their corresponding data root
     table BlockRelativeTxPathIndex<Key = BlockRelativeTxPathIndexKey, Value =BlockRelativeTxPathIndexEntry,  SubKey = BlockRelativeChunkOffset >;
 
+    /// maps the chunk (data) path hash to the full data path
+    table ChunkDataPathByKey<Key = ChunkPathHash, Value = DataPath>;
 }

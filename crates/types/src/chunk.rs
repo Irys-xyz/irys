@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Base64, CHUNK_SIZE, H256};
+use crate::{hash_sha256, Base64, CHUNK_SIZE, H256};
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
 pub struct Chunk {
@@ -23,6 +23,16 @@ pub struct Chunk {
     pub offset: TxRelativeChunkOffset,
 }
 
+impl Chunk {
+    pub fn chunk_path_hash(&self) -> ChunkPathHash {
+        Chunk::hash_data_path(&self.data_path.0)
+    }
+
+    pub fn hash_data_path(data_path: &DataPath) -> ChunkPathHash {
+        hash_sha256(data_path).unwrap().into()
+    }
+}
+
 /// a Chunk's tx relative offset
 /// due to legacy weirdness, the offset is of the end of the chunk, not the start
 /// i.e for the first chunk, the offset is 262144 instead of 0
@@ -34,7 +44,7 @@ pub type ChunkBin = [u8; CHUNK_SIZE as usize];
 /// a chunk binary - use this in cases where chunks may not be padded
 pub type ChunkBytes = Vec<u8>;
 
-/// sha256(chunk_path)
+/// sha256(chunk_data_path)
 pub type ChunkPathHash = H256;
 
 // the root node ID for the merkle tree containing all the transaction's chunks
