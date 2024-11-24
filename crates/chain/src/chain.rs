@@ -162,11 +162,15 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     .unwrap();
 
                 // For Genesis we create the storage_modules and their files
-                initialize_storage_files("./storage_modules/", &storage_module_infos).unwrap();
+                initialize_storage_files(&arc_config.storage_module_dir(), &storage_module_infos)
+                    .unwrap();
 
                 for info in storage_module_infos {
-                    let arc_module =
-                        Arc::new(StorageModule::new("./storage_modules/", &info, None));
+                    let arc_module = Arc::new(StorageModule::new(
+                        &arc_config.storage_module_dir(),
+                        &info,
+                        None,
+                    ));
                     storage_modules.push(arc_module.clone());
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,

@@ -11,9 +11,10 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
+use tracing::info;
 
 type SubmodulePath = String;
 
@@ -98,7 +99,7 @@ pub enum ChunkType {
 impl StorageModule {
     /// Initializes a new StorageModule
     pub fn new(
-        base_path: &str,
+        base_path: &PathBuf,
         storage_module_info: &StorageModuleInfo,
         config: Option<StorageModuleConfig>,
     ) -> Self {
@@ -112,7 +113,7 @@ impl StorageModule {
         let mut intervals = StorageIntervals::new();
 
         for (interval, dir) in storage_module_info.submodules.clone() {
-            let sub_base_path = Path::new(base_path).join(dir);
+            let sub_base_path = base_path.join(dir);
             // Get a file handle to the chunks.data file in the submodule
             let path = sub_base_path.join("chunks.dat");
             println!("{:?}", path);
@@ -155,7 +156,7 @@ impl StorageModule {
 
         // TODO: if there are any gaps, or the range doesn't cover a full module range panic
 
-        let path = Path::new(base_path).join(format!(
+        let path = base_path.join(format!(
             "StorageModule_{}_intervals.json",
             storage_module_info.module_num
         ));
@@ -385,9 +386,9 @@ impl StorageModule {
             match result {
                 // TODO: better logging
                 Ok(bytes_written) => {
-                    println!("write_chunk_internal() -> bytes_written: {}", bytes_written)
+                    info!("write_chunk_internal() -> bytes_written: {}", bytes_written)
                 }
-                Err(err) => println!("{:?}", err),
+                Err(err) => info!("{:?}", err),
             }
         }
 
@@ -416,11 +417,10 @@ impl StorageModule {
 ///
 /// Used primarily for testing storage initialization
 #[allow(dead_code)]
-pub fn initialize_storage_files(base: &str, infos: &Vec<StorageModuleInfo>) -> Result<()> {
-    println!("base: {:?}", base);
-    let base_path = Path::new(base);
+pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleInfo>) -> Result<()> {
+    println!("base: {:?}", base_path);
     // Create base storage directory if it doesn't exist
-    fs::create_dir_all(base_path)?;
+    fs::create_dir_all(base_path.clone())?;
 
     for (idx, info) in infos.iter().enumerate() {
         // Create subdirectories for each range
@@ -519,13 +519,12 @@ mod tests {
             ],
         }];
 
-        // TODO: Update this to use ernesto's temp path
-        let base_path = "./storage_modules/test/";
-        let _ = initialize_storage_files(base_path, &infos);
+        let tmp_dir = setup_tracing_and_temp_dir();
+        let base_path = PathBuf::from(tmp_dir.to_str().unwrap());
+        let _ = initialize_storage_files(&base_path, &infos);
 
         // Verify the StorageModuleInfo file was crated in the base path
-        let file_infos =
-            read_info_file(&Path::new(base_path).join("StorageModule_0.json")).unwrap();
+        let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();
         assert_eq!(file_infos, infos[0]);
 
         // Override the default StorageModule config for testing
@@ -537,7 +536,7 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let mut storage_module = StorageModule::new(base_path, storage_module_info, Some(config));
+        let mut storage_module = StorageModule::new(&base_path, storage_module_info, Some(config));
 
         // Verify the entire storage module range is uninitialized
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
@@ -625,6 +624,7 @@ mod tests {
         let module_intervals = ints.clone().into_iter().collect::<Vec<_>>();
         assert_eq!(file_intervals, module_intervals);
     }
+
     #[test]
     fn data_path_test() -> eyre::Result<()> {
         let infos = vec![StorageModuleInfo {
@@ -634,7 +634,7 @@ mod tests {
                 (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
             ],
         }];
-
+      
         let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
         let base_path = tmp_dir.path().to_str().unwrap();
         initialize_storage_files(base_path, &infos)?;
@@ -647,7 +647,7 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let mut storage_module = StorageModule::new(base_path, storage_module_info, Some(config));
+        let mut storage_module = StorageModule::new(&base_path, storage_module_info, Some(config));
         let offset = 0;
         let chunk_data = vec![0, 1, 2, 3, 4];
         let data_path = vec![4, 3, 2, 1];
