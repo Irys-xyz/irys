@@ -5,6 +5,7 @@ use actix_web::{
     Result,
 };
 use awc::http::StatusCode;
+use irys_database::database;
 use irys_types::{IrysBlockHeader, H256};
 use reth_db::DatabaseEnv;
 
@@ -31,6 +32,7 @@ mod tests {
     use actix_web::{test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
+    use irys_database::tables::IrysTables;
     use irys_types::app_state::DatabaseProvider;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -43,7 +45,7 @@ mod tests {
 
         //let path = get_data_dir();
         let path = tempdir().unwrap();
-        let db = open_or_create_db(path).unwrap();
+        let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
         let blk = IrysBlockHeader::default();
         let result = database::insert_block(&db, &blk);
         assert!(result.is_ok(), "block can not be stored");
@@ -56,6 +58,7 @@ mod tests {
         let db_arc = Arc::new(db);
         let state = ApiState {
             db: DatabaseProvider(db_arc),
+            actors: todo!(),
         };
 
         let app = test::init_service(
@@ -80,12 +83,13 @@ mod tests {
     #[actix_web::test]
     async fn test_get_non_existent_block() -> Result<(), Error> {
         let path = tempdir().unwrap();
-        let db = open_or_create_db(path).unwrap();
+        let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
         let blk = IrysBlockHeader::default();
 
         let db_arc = Arc::new(db);
         let state = ApiState {
             db: DatabaseProvider(db_arc),
+            actors: todo!(),
         };
 
         let app = test::init_service(

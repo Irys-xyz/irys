@@ -86,12 +86,17 @@ async fn post_tx_and_chunks_golden_path() {
     let mut part_actors = Vec::new();
     // let packing_actor_addr = PackingActor::new(Handle::current()).start();
 
-    let app_state = ActorAddresses {
+    let actors = ActorAddresses {
         partitions: part_actors,
         block_producer: block_producer_addr,
         mempool: mempool_actor_addr,
         block_index: todo!(),
         epoch_service: todo!(),
+    };
+
+    let app_state = ApiState {
+        actors,
+        db: DatabaseProvider(arc_db),
     };
 
     // Initialize the app

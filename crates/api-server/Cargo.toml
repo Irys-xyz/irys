@@ -26,4 +26,4 @@ rand = "0.8.5"
 tokio.workspace = true
 actix-cors = "0.7.0"
 tracing.workspace = true
-reth.workspace = true
+

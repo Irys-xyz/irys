@@ -5141,7 +5141,7 @@ dependencies = [
  "base64-url",
  "irys-actors",
  "irys-database",
- "irys-reth-node-bridge", 
+ "irys-reth-node-bridge",
  "irys-types",
  "rand",
  "reth",

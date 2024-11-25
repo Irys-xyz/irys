@@ -11,6 +11,7 @@ use irys_actors::{
     mempool::{TxIngressError, TxIngressMessage},
     ActorAddresses,
 };
+use irys_database::database;
 use irys_types::{IrysTransactionHeader, H256};
 use reth_db::DatabaseEnv;
 use serde::{Deserialize, Serialize};
@@ -77,6 +78,7 @@ mod tests {
     use actix_web::{test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
+    use irys_database::tables::IrysTables;
     use irys_types::app_state::DatabaseProvider;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -89,7 +91,7 @@ mod tests {
 
         //let path = get_data_dir();
         let path = tempdir().unwrap();
-        let db = open_or_create_db(path).unwrap();
+        let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
         let tx = IrysTransactionHeader::default();
         let result = database::insert_tx(&db, &tx);
         assert!(result.is_ok(), "tx can not be stored");
@@ -102,6 +104,7 @@ mod tests {
         let db_arc = Arc::new(db);
         let state = ApiState {
             db: DatabaseProvider(db_arc),
+            actors: todo!(),
         };
 
         let app = test::init_service(
@@ -129,12 +132,13 @@ mod tests {
         // env_logger::init();
 
         let path = tempdir().unwrap();
-        let db = open_or_create_db(path).unwrap();
+        let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
         let tx = IrysTransactionHeader::default();
 
         let db_arc = Arc::new(db);
         let state = ApiState {
             db: DatabaseProvider(db_arc),
+            actors: todo!(),
         };
 
         let app = test::init_service(
