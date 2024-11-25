@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use actix::{Actor, Addr, AsyncContext, AtomicResponse, Context, Handler, Message, WrapFuture};
+use actix::prelude::*;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
@@ -209,7 +209,11 @@ fn get_current_block_height() -> u64 {
     0
 }
 
-#[derive(Message, Clone)]
+/// When a block is confirmed, this message broadcasts the block header and the
+/// submit ledger TX that were added as part of this block.
+/// This works for bootstrap node mining, but eventually blocks will be received
+/// from peers and confirmed and their tx will be negotiated though the mempool.
+#[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
 pub struct BlockConfirmedMessage(
     pub Arc<IrysBlockHeader>,
@@ -227,3 +231,15 @@ impl Handler<BlockConfirmedMessage> for BlockProducerActor {
         info!("Block height: {} num tx: {}", block.height, data_tx.len());
     }
 }
+
+/// Currently identical to [BlockConfirmedMessage] and acts as a placeholder
+/// for when the node will maintain a block tree of confirmed blocks and
+/// produce finalized blocks for the canonical chain when enough confirmations
+/// have occurred. Chunks are moved from the in-memory index to the storage
+/// modules when a block is finalized.
+#[derive(Message, Debug, Clone)]
+#[rtype(result = "()")]
+pub struct BlockFinalizedMessage(
+    pub Arc<IrysBlockHeader>,
+    pub Arc<Vec<IrysTransactionHeader>>,
+);

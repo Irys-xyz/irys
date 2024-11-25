@@ -142,7 +142,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
 
     fn handle(&mut self, chunk_msg: ChunkIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // TODO: maintain a shared read transaction so we have read isolation
-        let chunk = chunk_msg.0;
+        let chunk: Chunk = chunk_msg.0;
         // Check to see if we have a cached data_root for this chunk
         let result = irys_database::cached_data_root_by_data_root(&self.db, chunk.data_root);
 
@@ -166,11 +166,11 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         // Validate that the data_size for this chunk matches the data_size
         // recorded in the transaction header.
         if cached_data_root.data_size != chunk.data_size {
-            return Err(ChunkIngressError::InvalidDataHash);
+            return Err(ChunkIngressError::InvalidChunkSize);
         }
 
-        // Use that data_Size to identify  and validate that only the last chunk
-        // can be less than 256KB
+        // Use that data_Size to identify and validate that only the last chunk
+        // can be less than 256KiB (CHUNK_SIZE)
         let chunk_len = chunk.bytes.len() as u64;
         if (chunk.offset as u64) < chunk.data_size - 1 {
             // Ensure prefix chunks are all exactly CHUNK_SIZE
