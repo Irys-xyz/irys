@@ -155,7 +155,7 @@ impl TransactionLedger {
             })
             .collect::<Vec<DataRootLeave>>();
         //txs_data_roots.push(&[]); // TODO: check this ? mimics merkle::generate_leaves's push as last chunk has max. capacity 32
-        let data_root_leaves = generate_leaves_from_data_roots(&txs_data_roots).unwrap(); // TODO: wrong offsets, needs tx block relative offsets and not data root fixed sizes !
+        let data_root_leaves = generate_leaves_from_data_roots(&txs_data_roots).unwrap();
         let root = generate_data_root(data_root_leaves.clone()).unwrap();
         let root_id = root.id.clone();
         let proofs = resolve_proofs(root, None).unwrap();
