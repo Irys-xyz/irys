@@ -81,6 +81,7 @@ fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
     let ptr = input.as_ptr() as *const [u8; N];
     std::mem::forget(input); // So input never drops
 
+    // safety: we've asserted that `input` length is divisible by N
     unsafe { Vec::from_raw_parts(ptr as *mut [u8; N], length, length) }
 }
 
