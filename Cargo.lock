@@ -5108,6 +5108,7 @@ dependencies = [
  "assert_matches",
  "color-eyre",
  "eyre",
+ "irys-config",
  "irys-database",
  "irys-packing",
  "irys-primitives",

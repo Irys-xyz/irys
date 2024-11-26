@@ -1,6 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use actix::prelude::*;
+use irys_config::chain::StorageConfig;
 use irys_database::{BlockIndex, Initialized, Ledger};
 use irys_storage::ii;
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, TransactionLedger};
@@ -19,6 +20,7 @@ use crate::block_producer::BlockFinalizedMessage;
 pub struct ChunkStorageActor {
     /// Global block index for block bounds/offset tracking
     pub block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+    pub storage_config: Arc<StorageConfig>,
 }
 
 impl Actor for ChunkStorageActor {
@@ -27,8 +29,14 @@ impl Actor for ChunkStorageActor {
 
 impl ChunkStorageActor {
     /// Creates a new chunk storage actor
-    pub fn new(block_index: Arc<RwLock<BlockIndex<Initialized>>>) -> Self {
-        Self { block_index }
+    pub fn new(
+        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+        storage_config: Arc<StorageConfig>,
+    ) -> Self {
+        Self {
+            block_index,
+            storage_config,
+        }
     }
 
     /// Populates the relevant indexes to prepare storage modules for new chunks
@@ -67,15 +75,21 @@ impl ChunkStorageActor {
         );
 
         // loop though each tx_path and set up all the storage module indexes
+        let chunk_size = self.storage_config.chunk_size as usize;
+        let mut chunk_offset_cursor = chunk_interval.start() as usize;
         for tx_path in proofs {
+            let num_chunks_in_tx = tx_path.offset / chunk_size;
 
             // For each chunk_offset in the tx_path
+            for i in 0..num_chunks_in_tx {
+                chunk_offset_cursor += i;
 
-            //  - Find the storage module responsible for storing it
+                //  - Find the storage module responsible for storing the chunk offset
 
-            //	- add the tx path bytes and path_hash to the correct index
+                //	- add the tx path bytes and path_hash to the correct index
 
-            //  - add the  tx_path_hash and chunk_path_hash to the chunk_offset index
+                //  - add the  tx_path_hash and chunk_path_hash to the chunk_offset index
+            }
         }
 
         // loop though all the chunk_offsets added by this block
