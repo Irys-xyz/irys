@@ -121,7 +121,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let config = EpochServiceConfig {
                     storage_config: arc_storage_config,
                     ..Default::default()
-                }
+                };
 
                 let miner_address = node_config.mining_signer.address();
                 let epoch_service = EpochServiceActor::new(miner_address, Some(config));
