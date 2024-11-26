@@ -5304,6 +5304,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
+ "alloy-genesis",
  "alloy-network",
  "alloy-primitives",
  "alloy-rpc-types",
@@ -5324,6 +5325,7 @@ dependencies = [
  "jsonrpsee-types",
  "new_type",
  "once_cell",
+ "parking_lot 0.12.3",
  "patch-crate",
  "reth",
  "reth-auto-seal-consensus",
@@ -5368,6 +5370,7 @@ dependencies = [
  "reth-transaction-pool",
  "revm",
  "revm-primitives",
+ "schnellru",
  "serde",
  "serde_json",
  "serde_path_to_error",

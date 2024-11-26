@@ -28,7 +28,7 @@ reth-node-core.workspace = true
 reth-node-ethereum.workspace = true
 reth-node-metrics.workspace = true
 reth.workspace = true
-
+alloy-genesis.workspace = true
 reth-auto-seal-consensus.workspace = true
 # reth-basic-payload-builder.workspace = true
 reth-beacon-consensus.workspace = true
@@ -110,6 +110,8 @@ alloy-network.workspace = true
 alloy-consensus = { workspace = true, features = ["kzg"] }
 reth-payload-builder.workspace = true
 reth-rpc-layer.workspace = true
+parking_lot.workspace = true
+schnellru.workspace = true
 [features]
 default = ["jemalloc"]
 jemalloc = []
