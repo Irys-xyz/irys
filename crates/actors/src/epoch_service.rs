@@ -701,9 +701,24 @@ mod tests {
         let mut genesis_block = IrysBlockHeader::new();
         genesis_block.height = 0;
 
+        // Create a storage config for testing
+        let storage_config = StorageConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: 10,
+            num_chunks_in_recall_range: 2,
+            num_partitions_in_slot: 1,
+        };
+        let num_chunks_in_partition = storage_config.num_chunks_in_partition;
+
         // Create epoch service with random miner address
         let miner_address = Address::random();
-        let config = EpochServiceConfig::default();
+        let config = EpochServiceConfig {
+            capacity_scalar: 100,
+            num_blocks_in_epoch: 100,
+            storage_config: Arc::new(storage_config),
+        };
+        let num_blocks_in_epoch = config.num_blocks_in_epoch;
+
         let mut epoch_service = EpochServiceActor::new(miner_address, Some(config));
 
         // Process genesis message directly instead of through actor system
@@ -713,8 +728,8 @@ mod tests {
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new();
-        new_epoch_block.height = NUM_BLOCKS_IN_EPOCH;
-        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = NUM_CHUNKS_IN_PARTITION / 2;
+        new_epoch_block.height = num_blocks_in_epoch;
+        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.into()), &mut ctx);
 
@@ -729,11 +744,11 @@ mod tests {
 
         // Simulate a subsequent epoch block that adds multiple ledger slots
         let mut new_epoch_block = IrysBlockHeader::new();
-        new_epoch_block.height = NUM_BLOCKS_IN_EPOCH * 2;
+        new_epoch_block.height = num_blocks_in_epoch * 2;
         new_epoch_block.ledgers[Ledger::Submit as usize].max_chunk_offset =
-            (NUM_CHUNKS_IN_PARTITION as f64 * 2.5) as u64;
+            (num_chunks_in_partition as f64 * 2.5) as u64;
         new_epoch_block.ledgers[Ledger::Publish as usize].max_chunk_offset =
-            (NUM_CHUNKS_IN_PARTITION as f64 * 0.75) as u64;
+            (num_chunks_in_partition as f64 * 0.75) as u64;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.into()), &mut ctx);
 
