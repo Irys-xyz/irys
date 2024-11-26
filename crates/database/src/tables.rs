@@ -1,6 +1,6 @@
 use irys_types::{
-    ingress::IngressProof, BlockRelativeChunkOffset, ChunkPathHash, DataPath, DataRoot,
-    IrysBlockHeader, IrysTransactionHeader, TxRelativeChunkIndex, H256,
+    ingress::IngressProof, partition::PartitionHash, BlockRelativeChunkOffset, ChunkDataPath,
+    ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, TxRelativeChunkIndex, H256,
 };
 use reth_codecs::Compact;
 use reth_db::{
@@ -14,8 +14,7 @@ use std::fmt;
 
 use crate::{
     db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
-    submodule::tables::ChunkOffsets,
-    tx_path::{BlockRelativeTxPathIndexEntry, BlockRelativeTxPathIndexKey},
+    submodule::tables::{ChunkOffsets, ChunkPathHashes},
 };
 
 /// Adds wrapper structs for some primitive types so they can use `StructFlags` from Compact, when
@@ -85,9 +84,9 @@ impl_compression_for_compact!(
     CachedDataRoot,
     CachedChunkIndexEntry,
     CachedChunk,
-    BlockRelativeTxPathIndexKey,
-    BlockRelativeTxPathIndexEntry,
-    ChunkOffsets
+    ChunkOffsets,
+    ChunkPathHashes,
+    PartitionHashes
 );
 
 tables! {
@@ -106,9 +105,12 @@ tables! {
 
     table IngressProofs<Key = DataRoot, Value = IngressProof>;
 
-    /// maps block + ledger relative chunk offsets to their corresponding data root
-    table BlockRelativeTxPathIndex<Key = BlockRelativeTxPathIndexKey, Value =BlockRelativeTxPathIndexEntry,  SubKey = BlockRelativeChunkOffset >;
-
-    /// maps the chunk (data) path hash to the full data path
-    table ChunkDataPathByKey<Key = ChunkPathHash, Value = DataPath>;
+    /// Maps a data root to the partition hashes that store it. Primarily used for chunk ingress.
+    /// Common case is a 1:1, but 1:N is possible
+    table PartitionHashesByDataRoot<Key = DataRoot, Value = PartitionHashes>;
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]
+/// partition hashes
+/// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
+pub struct PartitionHashes(pub Vec<PartitionHash>);

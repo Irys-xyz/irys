@@ -1,8 +1,10 @@
 use eyre::{eyre, Result};
-use irys_database::submodule::{create_or_open_submodule_db, read_data_path, write_data_path};
+use irys_database::submodule::{
+    create_or_open_submodule_db, get_data_path_by_offset, write_chunk_data_path,
+};
 use irys_types::{
-    app_state::DatabaseProvider, partition::PartHash, Chunk, ChunkBytes, ChunkOffset, DataPath,
-    CHUNK_SIZE, NUM_CHUNKS_IN_PARTITION,
+    app_state::DatabaseProvider, partition::PartitionHash, Chunk, ChunkBytes, ChunkDataPath,
+    ChunkOffset, CHUNK_SIZE, NUM_CHUNKS_IN_PARTITION,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use reth_db::{Database, DatabaseEnv};
@@ -31,7 +33,7 @@ type StorageIntervals = NoditMap<u32, Interval<u32>, ChunkType>;
 #[derive(Debug)]
 pub struct StorageModule {
     /// The (Optional) partition hash assigned to this storage module
-    pub partition_hash: Option<PartHash>,
+    pub partition_hash: Option<PartitionHash>,
     /// In-memory chunk buffer awaiting disk write
     pending_writes: Arc<RwLock<ChunkMap>>,
     /// Tracks the storage state of each chunk across all submodules
@@ -50,7 +52,7 @@ pub struct StorageModuleInfo {
     /// An integer uniquely identifying the module
     pub module_num: usize,
     /// Hash of partition this storage module belongs to, if assigned
-    pub partition_hash: Option<PartHash>,
+    pub partition_hash: Option<PartitionHash>,
     /// Range of chunk offsets and path for each submodule
     pub submodules: Vec<(Interval<u32>, SubmodulePath)>,
 }
@@ -340,18 +342,23 @@ impl StorageModule {
         // write data_path
         let _ = submodule
             .db
-            .update(|tx| write_data_path(tx, chunk.offset, chunk.data_path.into()))?;
+            .update(|tx| write_chunk_data_path(tx, chunk.offset, chunk.data_path.into(), None))?;
 
         Ok(())
     }
 
-    pub fn read_data_path(&mut self, chunk_offset: ChunkOffset) -> eyre::Result<Option<DataPath>> {
+    pub fn read_data_path(
+        &mut self,
+        chunk_offset: ChunkOffset,
+    ) -> eyre::Result<Option<ChunkDataPath>> {
         let (_interval, submodule) = self
             .submodules
             .get_key_value_at_point(chunk_offset)
             .unwrap();
 
-        submodule.db.view(|tx| read_data_path(tx, chunk_offset))?
+        submodule
+            .db
+            .view(|tx| get_data_path_by_offset(tx, chunk_offset))?
     }
 
     /// Writes chunk data to physical storage and updates state tracking

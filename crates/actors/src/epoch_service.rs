@@ -3,7 +3,7 @@ use eyre::{Error, Result};
 use irys_database::data_ledger::*;
 use irys_storage::{ii, StorageModuleInfo};
 use irys_types::{
-    partition::PartHash, Address, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
+    partition::PartitionHash, Address, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
     NUM_CHUNKS_IN_PARTITION, NUM_PARTITIONS_PER_SLOT, PARTITION_SIZE,
 };
 use openssl::sha;
@@ -50,11 +50,11 @@ pub struct EpochServiceActor {
     /// Protocol-managed data ledgers (one permanent, N term)
     pub ledgers: Arc<RwLock<Ledgers>>,
     /// Active data partition state mapped by partition hash
-    pub data_partitions: HashMap<PartHash, PartitionAssignment>,
+    pub data_partitions: HashMap<PartitionHash, PartitionAssignment>,
     /// Available capacity partitions mapped by partition hash
-    pub capacity_partitions: HashMap<PartHash, PartitionAssignment>,
+    pub capacity_partitions: HashMap<PartitionHash, PartitionAssignment>,
     /// Sequential list of activated partition hashes
-    pub all_active_partitions: Vec<PartHash>,
+    pub all_active_partitions: Vec<PartitionHash>,
     /// Identifier of this mining node
     pub miner_address: Address,
     /// Current partition & ledger parameters
@@ -142,7 +142,7 @@ impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
 #[derive(Debug, PartialEq)]
 pub struct PartitionAssignment {
     /// Hash of the partition
-    pub partition_hash: PartHash,
+    pub partition_hash: PartitionHash,
     /// Address of the miner pledged to store it
     pub miner_address: Address,
     /// If assigned to a ledger, the ledger number

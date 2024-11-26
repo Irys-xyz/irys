@@ -28,7 +28,7 @@ impl Chunk {
         Chunk::hash_data_path(&self.data_path.0)
     }
 
-    pub fn hash_data_path(data_path: &DataPath) -> ChunkPathHash {
+    pub fn hash_data_path(data_path: &ChunkDataPath) -> ChunkPathHash {
         hash_sha256(data_path).unwrap().into()
     }
 }
@@ -60,5 +60,5 @@ pub type BlockRelativeChunkOffset = u64;
 
 pub type ChunkOffset = u32;
 
-/// A transaction's data path
-pub type DataPath = Vec<u8>;
+/// A chunks's data path
+pub type ChunkDataPath = Vec<u8>;

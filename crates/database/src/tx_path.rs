@@ -114,12 +114,7 @@ impl Compact for BlockRelativeTxPathIndexMeta {
 }
 
 mod tests {
-    use crate::{
-        database, open_or_create_db,
-        tables::{BlockRelativeTxPathIndex, IrysTables},
-        tx_path::KEY_BYTES,
-        Ledger,
-    };
+    use crate::{database, open_or_create_db, tables::IrysTables, tx_path::KEY_BYTES, Ledger};
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::{BlockHash, Compact, TxPath, TxRoot, H256};
     use rand::Rng as _;
@@ -152,65 +147,65 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn block_relative_tx_path_index() -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("block_relative_tx_path_index"), false);
-        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None)?;
+    // #[test]
+    // fn block_relative_tx_path_index() -> eyre::Result<()> {
+    //     let tmp_dir = setup_tracing_and_temp_dir(Some("block_relative_tx_path_index"), false);
+    //     let db = open_or_create_db(tmp_dir, IrysTables::ALL, None)?;
 
-        let data_size = 2000; // max key size is 2022
-        let mut data_bytes = vec![0u8; data_size];
-        rand::thread_rng().fill(&mut data_bytes[..]);
+    //     let data_size = 2000; // max key size is 2022
+    //     let mut data_bytes = vec![0u8; data_size];
+    //     rand::thread_rng().fill(&mut data_bytes[..]);
 
-        let tx1_path = data_bytes.clone();
-        let tx1_offset = 100;
+    //     let tx1_path = data_bytes.clone();
+    //     let tx1_offset = 100;
 
-        let tx2_path = data_bytes.clone()/* TxRoot::random() */;
-        let tx2_offset = 142;
+    //     let tx2_path = data_bytes.clone()/* TxRoot::random() */;
+    //     let tx2_offset = 142;
 
-        // common block keys: hash & ledger
-        let ledger = Ledger::Submit;
-        let block_hash = BlockHash::zero();
+    //     // common block keys: hash & ledger
+    //     let ledger = Ledger::Submit;
+    //     let block_hash = BlockHash::zero();
 
-        database::store_tx_path_by_block_offset(
-            &db,
-            block_hash,
-            ledger,
-            tx1_offset,
-            tx1_path.clone(),
-        )?;
+    //     database::store_tx_path_by_block_offset(
+    //         &db,
+    //         block_hash,
+    //         ledger,
+    //         tx1_offset,
+    //         tx1_path.clone(),
+    //     )?;
 
-        database::store_tx_path_by_block_offset(
-            &db,
-            block_hash,
-            ledger,
-            tx2_offset,
-            tx2_path.clone(),
-        )?;
+    //     database::store_tx_path_by_block_offset(
+    //         &db,
+    //         block_hash,
+    //         ledger,
+    //         tx2_offset,
+    //         tx2_path.clone(),
+    //     )?;
 
-        let tx_path =
-            database::get_tx_path_by_block_ledger_offset(&db, block_hash, ledger, tx1_offset)?;
-        assert_eq!(tx_path, Some(tx1_path.clone()));
+    //     let tx_path =
+    //         database::get_tx_path_by_block_ledger_offset(&db, block_hash, ledger, tx1_offset)?;
+    //     assert_eq!(tx_path, Some(tx1_path.clone()));
 
-        // get an offset before the tx1 end_offset, this should return tx1's tx_path
-        let tx_path =
-            database::get_tx_path_by_block_ledger_offset(&db, block_hash, ledger, tx1_offset - 10)?;
-        assert_eq!(tx_path, Some(tx1_path.clone()));
+    //     // get an offset before the tx1 end_offset, this should return tx1's tx_path
+    //     let tx_path =
+    //         database::get_tx_path_by_block_ledger_offset(&db, block_hash, ledger, tx1_offset - 10)?;
+    //     assert_eq!(tx_path, Some(tx1_path.clone()));
 
-        // get after tx1's end offset, this should return tx2's tx_path
-        let tx_path =
-            database::get_tx_path_by_block_ledger_offset(&db, block_hash, ledger, tx1_offset + 10)?;
-        assert_eq!(tx_path, Some(tx2_path.clone()));
+    //     // get after tx1's end offset, this should return tx2's tx_path
+    //     let tx_path =
+    //         database::get_tx_path_by_block_ledger_offset(&db, block_hash, ledger, tx1_offset + 10)?;
+    //     assert_eq!(tx_path, Some(tx2_path.clone()));
 
-        // get exactly on tx2's end offset, should return tx2's data root
-        let tx_path =
-            database::get_tx_path_by_block_ledger_offset(&db, block_hash, ledger, tx2_offset)?;
-        assert_eq!(tx_path, Some(tx2_path.clone()));
+    //     // get exactly on tx2's end offset, should return tx2's data root
+    //     let tx_path =
+    //         database::get_tx_path_by_block_ledger_offset(&db, block_hash, ledger, tx2_offset)?;
+    //     assert_eq!(tx_path, Some(tx2_path.clone()));
 
-        // get beyond tx2's end offset, should return nothing.
-        let tx_path =
-            database::get_tx_path_by_block_ledger_offset(&db, block_hash, ledger, tx2_offset + 10)?;
-        assert_eq!(tx_path, None);
+    //     // get beyond tx2's end offset, should return nothing.
+    //     let tx_path =
+    //         database::get_tx_path_by_block_ledger_offset(&db, block_hash, ledger, tx2_offset + 10)?;
+    //     assert_eq!(tx_path, None);
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 }
