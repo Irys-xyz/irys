@@ -107,14 +107,14 @@ impl Handler<SolutionContext> for BlockProducerActor {
                         TransactionLedger {
                             tx_root: TransactionLedger::merklize_tx_root(&data_txs).0,
                             txids: H256List(data_tx_ids.clone()),
-                            ledger_size: 0 as u128,
+                            max_chunk_offset: 0,
                             expires: None,
                         },
                         // Term Submit Ledger
                         TransactionLedger {
                             tx_root: TransactionLedger::merklize_tx_root(&vec![]).0,
                             txids: H256List::new(),
-                            ledger_size: 0 as u128,
+                            max_chunk_offset: 0,
                             expires: Some(1622543200),
                         },
                     ],

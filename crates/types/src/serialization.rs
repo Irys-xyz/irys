@@ -20,28 +20,28 @@ use fixed_hash::construct_fixed_hash;
 use uint::construct_uint;
 
 //==============================================================================
-// u128 Type
+// u64 Type
 //------------------------------------------------------------------------------
-pub mod u128_stringify {
+pub mod u64_stringify {
     use serde::{self, Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        // Convert u128 to string
+        // Convert u64 to string
         serializer.serialize_str(&value.to_string())
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
     where
         D: Deserializer<'de>,
     {
         let s: String = Deserialize::deserialize(deserializer)?;
 
         // Parse string back to u128
-        s.parse::<u128>()
-            .map_err(|e| serde::de::Error::custom(format!("Failed to parse u128: {}", e)))
+        s.parse::<u64>()
+            .map_err(|e| serde::de::Error::custom(format!("Failed to parse u64: {}", e)))
     }
 }
 

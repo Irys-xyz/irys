@@ -24,8 +24,6 @@ pub struct EpochServiceConfig {
     num_blocks_in_epoch: u64,
     /// The number of replica partitions in a ledger slot
     num_partitions_per_slot: u64,
-    /// Size (in bytes) of each partition
-    partition_size: u64,
     /// Number of chunks in a partition
     num_chunks_in_partition: u64,
 }
@@ -36,7 +34,6 @@ impl Default for EpochServiceConfig {
             capacity_scalar: CAPACITY_SCALAR,
             num_blocks_in_epoch: NUM_BLOCKS_IN_EPOCH,
             num_partitions_per_slot: NUM_PARTITIONS_PER_SLOT,
-            partition_size: PARTITION_SIZE,
             num_chunks_in_partition: NUM_CHUNKS_IN_PARTITION,
         }
     }
@@ -440,21 +437,21 @@ impl EpochServiceActor {
             let ledger = &ledgers[ledger_num];
             num_slots = ledger.slot_count() as u64;
         }
-        let partition_size = self.config.partition_size;
-        let max_capacity = (num_slots * partition_size) as u128;
-        let ledger_size = new_epoch_block.ledgers[ledger_num as usize].ledger_size;
+        let partition_chunk_count = self.config.num_chunks_in_partition;
+        let max_chunk_capacity = num_slots * partition_chunk_count;
+        let ledger_size = new_epoch_block.ledgers[ledger_num as usize].max_chunk_offset;
 
         // Add capacity slots if ledger usage exceeds 50% of partition size from max capacity
-        let add_capacity_threshold: u128 = max_capacity - partition_size as u128 / 2;
+        let add_capacity_threshold = max_chunk_capacity - partition_chunk_count / 2;
         let mut slots_to_add: u64 = 0;
         if ledger_size >= add_capacity_threshold {
             // Add 1 slot for buffer plus enough slots to handle size above threshold
-            let excess = ledger_size.saturating_sub(max_capacity);
-            slots_to_add = 1 + (excess as u64 / partition_size);
+            let excess = ledger_size.saturating_sub(max_chunk_capacity);
+            slots_to_add = 1 + (excess as u64 / partition_chunk_count);
 
             // Check if we need to add an additional slot for excess > half of
             // the partition size
-            if excess as u64 % partition_size >= partition_size / 2 {
+            if excess as u64 % partition_chunk_count >= partition_chunk_count / 2 {
                 slots_to_add += 1;
             }
         }
@@ -720,7 +717,7 @@ mod tests {
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new();
         new_epoch_block.height = NUM_BLOCKS_IN_EPOCH;
-        new_epoch_block.ledgers[Ledger::Submit as usize].ledger_size = (PARTITION_SIZE / 2) as u128;
+        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = NUM_CHUNKS_IN_PARTITION / 2;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.into()), &mut ctx);
 
@@ -736,10 +733,10 @@ mod tests {
         // Simulate a subsequent epoch block that adds multiple ledger slots
         let mut new_epoch_block = IrysBlockHeader::new();
         new_epoch_block.height = NUM_BLOCKS_IN_EPOCH * 2;
-        new_epoch_block.ledgers[Ledger::Submit as usize].ledger_size =
-            (PARTITION_SIZE as f64 * 2.5) as u128;
-        new_epoch_block.ledgers[Ledger::Publish as usize].ledger_size =
-            (PARTITION_SIZE as f64 * 0.75) as u128;
+        new_epoch_block.ledgers[Ledger::Submit as usize].max_chunk_offset =
+            (NUM_CHUNKS_IN_PARTITION as f64 * 2.5) as u64;
+        new_epoch_block.ledgers[Ledger::Publish as usize].max_chunk_offset =
+            (NUM_CHUNKS_IN_PARTITION as f64 * 0.75) as u64;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.into()), &mut ctx);
 

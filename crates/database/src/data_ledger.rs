@@ -1,5 +1,5 @@
 use irys_types::{
-    ChunkOffset, Compact, H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT,
+    ChunkOffset, Compact, TransactionLedger, H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT,
     SUBMIT_LEDGER_EPOCH_LENGTH,
 };
 use serde::{Deserialize, Serialize};
@@ -316,6 +316,20 @@ impl IndexMut<Ledger> for Ledgers {
             Ledger::Publish => &mut self.perm,
             Ledger::Submit => &mut self.term[0],
         }
+    }
+}
+
+impl Index<Ledger> for Vec<TransactionLedger> {
+    type Output = TransactionLedger;
+
+    fn index(&self, ledger: Ledger) -> &Self::Output {
+        &self[ledger as usize]
+    }
+}
+
+impl IndexMut<Ledger> for Vec<TransactionLedger> {
+    fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
+        &mut self[ledger as usize]
     }
 }
 

@@ -2,11 +2,15 @@
 //!
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
-use std::{fmt, str::FromStr};
+use std::{
+    fmt,
+    ops::{Index, IndexMut},
+    str::FromStr,
+};
 
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify, resolve_proofs,
-    u128_stringify, validate_path, Arbitrary, Base64, Compact, DataRootLeave, H256List,
+    u64_stringify, validate_path, Arbitrary, Base64, Compact, DataRootLeave, H256List,
     IrysSignature, IrysTransactionHeader, Proof, Signature, H256, U256,
 };
 
@@ -108,14 +112,14 @@ impl IrysBlockHeader {
                 TransactionLedger {
                     tx_root: H256::zero(),
                     txids,
-                    ledger_size: 0 as u128,
+                    max_chunk_offset: 0,
                     expires: None,
                 },
                 // Term Submit Ledger
                 TransactionLedger {
                     tx_root: H256::zero(),
                     txids: H256List::new(),
-                    ledger_size: 0 as u128,
+                    max_chunk_offset: 0,
                     expires: Some(1622543200),
                 },
             ],
@@ -139,8 +143,8 @@ pub struct TransactionLedger {
     pub tx_root: H256,
     /// List of transaction ids included in the block
     pub txids: H256List,
-    #[serde(default, with = "u128_stringify")]
-    pub ledger_size: u128,
+    #[serde(default, with = "u64_stringify")]
+    pub max_chunk_offset: u64,
     pub expires: Option<u64>,
 }
 
@@ -247,7 +251,7 @@ mod tests {
             ledgers: vec![TransactionLedger {
                 tx_root: H256::zero(),
                 txids,
-                ledger_size: 100 as u128,
+                max_chunk_offset: 100,
                 expires: Some(1622543200),
             }],
             evm_block_hash: B256::ZERO,
