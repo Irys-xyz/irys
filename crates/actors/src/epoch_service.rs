@@ -138,8 +138,28 @@ impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
     }
 }
 
+/// Retrieve partition assignemt (ledger and its relative offet) for a partition
+#[derive(Message, Debug)]
+#[rtype(result = "Option<PartitionAssignment>")]
+pub struct GetPartitionAssignmentMessage(pub PartitionHash);
+
+impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
+    type Result = Option<PartitionAssignment>;
+
+    fn handle(
+        &mut self,
+        msg: GetPartitionAssignmentMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        self.data_partitions
+            .get(&msg.0)
+            .copied()
+            .or(self.capacity_partitions.get(&msg.0).copied())
+    }
+}
+
 /// Temporary struct tracking partition assignments to miners - will be moved to database
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, MessageResponse, Clone, Copy)]
 pub struct PartitionAssignment {
     /// Hash of the partition
     pub partition_hash: PartitionHash,
