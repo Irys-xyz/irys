@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Base64, CHUNK_SIZE, H256};
+use crate::{hash_sha256, Base64, CHUNK_SIZE, H256};
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
 pub struct Chunk {
@@ -8,7 +8,7 @@ pub struct Chunk {
     /// transaction header. Having this present makes it easier to do cached
     /// chunk lookups by data_root on the ingress node.
     pub data_root: DataRoot,
-    /// Total size of the data this chunk belongs to. Helps identify if this
+    /// Total size of the data stored in this chunk. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
     pub data_size: u64,
@@ -23,6 +23,16 @@ pub struct Chunk {
     pub offset: TxRelativeChunkOffset,
 }
 
+impl Chunk {
+    pub fn chunk_path_hash(&self) -> ChunkPathHash {
+        Chunk::hash_data_path(&self.data_path.0)
+    }
+
+    pub fn hash_data_path(data_path: &ChunkDataPath) -> ChunkPathHash {
+        hash_sha256(data_path).unwrap().into()
+    }
+}
+
 /// a Chunk's tx relative offset
 /// due to legacy weirdness, the offset is of the end of the chunk, not the start
 /// i.e for the first chunk, the offset is 262144 instead of 0
@@ -34,7 +44,7 @@ pub type ChunkBin = [u8; CHUNK_SIZE as usize];
 /// a chunk binary - use this in cases where chunks may not be padded
 pub type ChunkBytes = Vec<u8>;
 
-/// sha256(chunk_path)
+/// sha256(chunk_data_path)
 pub type ChunkPathHash = H256;
 
 // the root node ID for the merkle tree containing all the transaction's chunks
@@ -50,5 +60,5 @@ pub type BlockRelativeChunkOffset = u64;
 
 pub type ChunkOffset = u32;
 
-/// A transaction's data path
-pub type DataPath = Vec<u8>;
+/// A chunks's data path
+pub type ChunkDataPath = Vec<u8>;

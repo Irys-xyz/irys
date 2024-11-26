@@ -2,11 +2,11 @@ use actix_web::{
     web::{self, Json},
     HttpResponse,
 };
+use awc::http::StatusCode;
 use irys_actors::{
     mempool::{ChunkIngressError, ChunkIngressMessage},
     ActorAddresses,
 };
-use awc::http::StatusCode;
 use irys_types::Chunk;
 
 /// Handles the HTTP POST request for adding a chunk to the mempool.

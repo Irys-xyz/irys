@@ -1,11 +1,20 @@
+mod error;
 mod routes;
 
 use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
-use irys_actors::ActorAddresses;
-use routes::{chunks, index, price, proxy::proxy, tx};
 
-pub async fn run_server(app_state: ActorAddresses) {
+use irys_actors::ActorAddresses;
+use irys_types::app_state::DatabaseProvider;
+use routes::{block, chunks, index, price, proxy::proxy, tx};
+
+#[derive(Clone)]
+pub struct ApiState {
+    pub actors: ActorAddresses,
+    pub db: DatabaseProvider,
+}
+
+pub async fn run_server(app_state: ApiState) {
     HttpServer::new(move || {
         let awc_client = awc::Client::new();
 
@@ -15,7 +24,9 @@ pub async fn run_server(app_state: ActorAddresses) {
             .service(
                 web::scope("v1")
                     .route("/info", web::get().to(index::info_route))
+                    .route("/block/{block_hash}", web::get().to(block::get_block))
                     .route("/chunk", web::post().to(chunks::post_chunk))
+                    .route("/tx/{tx_id}", web::get().to(tx::get_tx))
                     .route("/tx", web::post().to(tx::post_tx))
                     .route("/price/{size}", web::get().to(price::get_price)),
             )
@@ -35,25 +46,33 @@ pub async fn run_server(app_state: ActorAddresses) {
 #[cfg(test)]
 #[actix_web::test]
 async fn post_tx_and_chunks_golden_path() {
+    use irys_database::tables::IrysTables;
+    use reth::tasks::TaskManager;
     use std::sync::Arc;
 
-    use ::database::{config::get_data_dir, open_or_create_db};
+    use ::irys_database::{config::get_data_dir, open_or_create_db};
     use actix::{Actor, Addr};
     use actix_web::test;
+    use awc::http::StatusCode;
     use irys_actors::{
         block_producer::BlockProducerActor, mempool::MempoolActor, packing::PackingActor,
     };
-    use awc::http::StatusCode;
     use irys_types::{chunk, hash_sha256, irys::IrysSigner, Base64, Chunk, H256, MAX_CHUNK_SIZE};
     use tokio::runtime::Handle;
 
     use rand::Rng;
 
     let path = get_data_dir();
-    let db = open_or_create_db(path).unwrap();
+    let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
     let arc_db = Arc::new(db);
 
-    let mempool_actor = MempoolActor::new(arc_db);
+    let task_manager = TaskManager::current();
+
+    let mempool_actor = MempoolActor::new(
+        irys_types::app_state::DatabaseProvider(arc_db),
+        task_manager.executor(),
+        IrysSigner::random_signer(),
+    );
     let mempool_actor_addr = mempool_actor.start();
 
     let block_producer_actor = BlockProducerActor {
@@ -67,12 +86,17 @@ async fn post_tx_and_chunks_golden_path() {
     let mut part_actors = Vec::new();
     // let packing_actor_addr = PackingActor::new(Handle::current()).start();
 
-    let app_state = ActorAddresses {
+    let actors = ActorAddresses {
         partitions: part_actors,
         block_producer: block_producer_addr,
         mempool: mempool_actor_addr,
         block_index: todo!(),
         epoch_service: todo!(),
+    };
+
+    let app_state = ApiState {
+        actors,
+        db: DatabaseProvider(arc_db),
     };
 
     // Initialize the app
@@ -92,10 +116,7 @@ async fn post_tx_and_chunks_golden_path() {
 
     // Create a new Irys API instance & a signed transaction
     let irys = IrysSigner::random_signer();
-    let tx = irys
-        .create_transaction(data_bytes.clone(), None)
-        .await
-        .unwrap();
+    let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
     let tx = irys.sign_transaction(tx).unwrap();
 
     // Make a POST request with JSON payload
@@ -114,7 +135,7 @@ async fn post_tx_and_chunks_golden_path() {
         let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
-        let offset = tx.proofs[index].offset;
+        let offset = tx.proofs[index].offset as u32;
         let data_path = Base64(tx.proofs[index].proof.to_vec());
 
         let chunk = Chunk {

@@ -1,4 +1,4 @@
-use crate::{partition::PartHash, IrysBlockHeader, H256};
+use crate::{partition::PartitionHash, IrysBlockHeader, H256};
 use actix::Message;
 use alloy_primitives::Address;
 use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 #[derive(Message, Debug)]
 #[rtype(result = "Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>")]
 pub struct SolutionContext {
-    pub partition_hash: PartHash,
+    pub partition_hash: PartitionHash,
     pub chunk_offset: u32,
     pub mining_address: Address,
 }

@@ -1,12 +1,9 @@
 use irys_types::{
-    ingress::IngressProof, BlockRelativeChunkOffset, ChunkPathHash, DataRoot, IrysBlockHeader,
+    ingress::IngressProof, partition::PartitionHash, ChunkPathHash, DataRoot, IrysBlockHeader,
     IrysTransactionHeader, TxRelativeChunkIndex, H256,
 };
 use reth_codecs::Compact;
-use reth_db::{
-    table::{DupSort, Table},
-    tables, DatabaseError,
-};
+use reth_db::{table::DupSort, tables, DatabaseError};
 use reth_db::{HasName, HasTableType, TableType, TableViewer};
 use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
@@ -14,7 +11,7 @@ use std::fmt;
 
 use crate::{
     db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
-    tx_path::{BlockRelativeTxPathIndexEntry, BlockRelativeTxPathIndexKey},
+    submodule::tables::{ChunkOffsets, ChunkPathHashes},
 };
 
 /// Adds wrapper structs for some primitive types so they can use `StructFlags` from Compact, when
@@ -84,11 +81,13 @@ impl_compression_for_compact!(
     CachedDataRoot,
     CachedChunkIndexEntry,
     CachedChunk,
-    BlockRelativeTxPathIndexKey,
-    BlockRelativeTxPathIndexEntry
+    ChunkOffsets,
+    ChunkPathHashes,
+    PartitionHashes
 );
 
 tables! {
+    IrysTables;
     /// Stores the header hashes belonging to the canonical chain.
     table IrysBlockHeaders<Key = H256, Value = CompactIrysBlockHeader>;
 
@@ -103,7 +102,12 @@ tables! {
 
     table IngressProofs<Key = DataRoot, Value = IngressProof>;
 
-    /// maps block + ledger relative chunk offsets to their corresponding data root
-    table BlockRelativeTxPathIndex<Key = BlockRelativeTxPathIndexKey, Value =BlockRelativeTxPathIndexEntry,  SubKey = BlockRelativeChunkOffset >;
-
+    /// Maps a data root to the partition hashes that store it. Primarily used for chunk ingress.
+    /// Common case is a 1:1, but 1:N is possible
+    table PartitionHashesByDataRoot<Key = DataRoot, Value = PartitionHashes>;
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]
+/// partition hashes
+/// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
+pub struct PartitionHashes(pub Vec<PartitionHash>);

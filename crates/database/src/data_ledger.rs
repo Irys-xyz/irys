@@ -1,5 +1,6 @@
 use irys_types::{
-    Compact, H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT, SUBMIT_LEDGER_EPOCH_LENGTH,
+    ChunkOffset, Compact, TransactionLedger, H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT,
+    SUBMIT_LEDGER_EPOCH_LENGTH,
 };
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
@@ -316,4 +317,36 @@ impl IndexMut<Ledger> for Ledgers {
             Ledger::Submit => &mut self.term[0],
         }
     }
+}
+
+impl Index<Ledger> for Vec<TransactionLedger> {
+    type Output = TransactionLedger;
+
+    fn index(&self, ledger: Ledger) -> &Self::Output {
+        &self[ledger as usize]
+    }
+}
+
+impl IndexMut<Ledger> for Vec<TransactionLedger> {
+    fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
+        &mut self[ledger as usize]
+    }
+}
+
+/// Gets a ledger-relative slot index from a ledger-relative chunk offset
+pub fn get_slot_index_by_offset(
+    chunks_per_partition: u32,
+    ledger_relative_offset: ChunkOffset,
+) -> u32 {
+    // "div_floor"
+    ledger_relative_offset / chunks_per_partition
+}
+
+#[test]
+fn test_get_slot_index_by_offset() -> eyre::Result<()> {
+    let chunks_per_partition = 1000_u32;
+    assert_eq!(get_slot_index_by_offset(chunks_per_partition, 0), 0);
+    assert_eq!(get_slot_index_by_offset(chunks_per_partition, 999), 0);
+    assert_eq!(get_slot_index_by_offset(chunks_per_partition, 1000), 1);
+    Ok(())
 }

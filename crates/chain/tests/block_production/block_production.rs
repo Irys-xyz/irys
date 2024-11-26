@@ -4,9 +4,9 @@ use alloy_consensus::TxEnvelope;
 use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
-use chain::chain::start_for_testing;
 use eyre::eyre;
 use irys_actors::mempool::TxIngressMessage;
+use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
 use irys_types::{

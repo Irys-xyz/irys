@@ -7,17 +7,23 @@ version = "0.1.0"
 # Irys
 irys-actors.workspace = true
 irys-database.workspace = true
+irys-reth-node-bridge.workspace = true
 irys-types.workspace = true
 #
 
 actix-proxy = "0.2.0"
 actix-web = "4.9.0"
 awc = "3.5.1"
+base58 = "0.2.0"
 base64-url = "2.0.0"
+reth.workspace = true
+reth-db.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 serde.workspace = true
+tempfile = "3.10"
 actix.workspace = true
 rand = "0.8.5"
 tokio.workspace = true
 actix-cors = "0.7.0"
 tracing.workspace = true
+

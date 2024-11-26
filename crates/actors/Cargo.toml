@@ -10,6 +10,7 @@ irys-types.workspace = true
 irys-database.workspace = true
 irys-packing.workspace = true
 irys-storage.workspace = true
+irys-config.workspace = true
 actix.workspace = true
 rand = "0.8.5"
 rand_chacha = "0.3.1"

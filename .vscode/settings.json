@@ -4,6 +4,7 @@
 		"borsh",
 		"chacha",
 		"chainspec",
+		"Deque",
 		"hasher",
 		"Irys",
 		"keccak",

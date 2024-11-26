@@ -22,6 +22,8 @@ use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::info;
+
+use crate::block_producer::BlockConfirmedMessage;
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]
 pub struct MempoolActor {
@@ -140,7 +142,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
 
     fn handle(&mut self, chunk_msg: ChunkIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // TODO: maintain a shared read transaction so we have read isolation
-        let chunk = chunk_msg.0;
+        let chunk: Chunk = chunk_msg.0;
         // Check to see if we have a cached data_root for this chunk
         let result = irys_database::cached_data_root_by_data_root(&self.db, chunk.data_root);
 
@@ -164,11 +166,11 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         // Validate that the data_size for this chunk matches the data_size
         // recorded in the transaction header.
         if cached_data_root.data_size != chunk.data_size {
-            return Err(ChunkIngressError::InvalidDataHash);
+            return Err(ChunkIngressError::InvalidChunkSize);
         }
 
-        // Use that data_Size to identify  and validate that only the last chunk
-        // can be less than 256KB
+        // Use that data_Size to identify and validate that only the last chunk
+        // can be less than 256KiB (CHUNK_SIZE)
         let chunk_len = chunk.bytes.len() as u64;
         if (chunk.offset as u64) < chunk.data_size - 1 {
             // Ensure prefix chunks are all exactly CHUNK_SIZE
@@ -249,18 +251,24 @@ impl Handler<GetBestMempoolTxs> for MempoolActor {
     }
 }
 
-// Message for getting txs for block building
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
-pub struct RemoveConfirmedTxs(pub Vec<H256>);
-
-impl Handler<RemoveConfirmedTxs> for MempoolActor {
+impl Handler<BlockConfirmedMessage> for MempoolActor {
     type Result = ();
+    fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
+        // Access the block header through msg.0
+        let block = &msg.0;
+        let data_tx = &msg.1;
 
-    fn handle(&mut self, msg: RemoveConfirmedTxs, ctx: &mut Self::Context) -> Self::Result {
-        for tx_id in msg.0 {
-            self.valid_tx.remove(&tx_id);
+        // Loop through the storage tx in each ledger
+        for tx in data_tx.iter() {
+            // Remove them from the pending valid_tx pool
+            self.valid_tx.remove(&tx.id);
         }
+
+        info!(
+            "Removing confirmed tx - Block height: {} num tx: {}",
+            block.height,
+            data_tx.len()
+        );
     }
 }
 
@@ -343,7 +351,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use assert_matches::assert_matches;
-    use irys_database::{config::get_data_dir, open_or_create_db, tables::Tables};
+    use irys_database::{config::get_data_dir, open_or_create_db, tables::IrysTables};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{irys::IrysSigner, Base64, MAX_CHUNK_SIZE};
     use rand::Rng;
@@ -355,9 +363,9 @@ mod tests {
 
     #[actix::test]
     async fn post_transaction_and_chunks() -> eyre::Result<()> {
-        let tmpdir = setup_tracing_and_temp_dir();
+        let tmpdir = setup_tracing_and_temp_dir(Some("post_transaction_and_chunks"), false);
 
-        let db = open_or_create_db(tmpdir, Tables::ALL, None).unwrap();
+        let db = open_or_create_db(tmpdir, IrysTables::ALL, None).unwrap();
         let arc_db1 = DatabaseProvider(Arc::new(db));
         let arc_db2 = DatabaseProvider(Arc::clone(&arc_db1));
 

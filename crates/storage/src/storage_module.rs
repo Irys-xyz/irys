@@ -1,8 +1,10 @@
 use eyre::{eyre, Result};
-use irys_database::submodule::{create_or_open_submodule_db, read_data_path, write_data_path};
+use irys_database::submodule::{
+    create_or_open_submodule_db, get_data_path_by_offset, write_chunk_data_path,
+};
 use irys_types::{
-    app_state::DatabaseProvider, partition::PartHash, Chunk, ChunkBytes, ChunkOffset, DataPath,
-    CHUNK_SIZE, NUM_CHUNKS_IN_PARTITION,
+    app_state::DatabaseProvider, partition::PartitionHash, Chunk, ChunkBytes, ChunkDataPath,
+    ChunkOffset, CHUNK_SIZE, NUM_CHUNKS_IN_PARTITION,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use reth_db::{Database, DatabaseEnv};
@@ -11,9 +13,10 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
+use tracing::info;
 
 type SubmodulePath = String;
 
@@ -30,7 +33,7 @@ type StorageIntervals = NoditMap<u32, Interval<u32>, ChunkType>;
 #[derive(Debug)]
 pub struct StorageModule {
     /// The (Optional) partition hash assigned to this storage module
-    pub partition_hash: Option<PartHash>,
+    pub partition_hash: Option<PartitionHash>,
     /// In-memory chunk buffer awaiting disk write
     pending_writes: Arc<RwLock<ChunkMap>>,
     /// Tracks the storage state of each chunk across all submodules
@@ -49,7 +52,7 @@ pub struct StorageModuleInfo {
     /// An integer uniquely identifying the module
     pub module_num: usize,
     /// Hash of partition this storage module belongs to, if assigned
-    pub partition_hash: Option<PartHash>,
+    pub partition_hash: Option<PartitionHash>,
     /// Range of chunk offsets and path for each submodule
     pub submodules: Vec<(Interval<u32>, SubmodulePath)>,
 }
@@ -98,7 +101,7 @@ pub enum ChunkType {
 impl StorageModule {
     /// Initializes a new StorageModule
     pub fn new(
-        base_path: &str,
+        base_path: &PathBuf,
         storage_module_info: &StorageModuleInfo,
         config: Option<StorageModuleConfig>,
     ) -> Self {
@@ -112,7 +115,7 @@ impl StorageModule {
         let mut intervals = StorageIntervals::new();
 
         for (interval, dir) in storage_module_info.submodules.clone() {
-            let sub_base_path = Path::new(base_path).join(dir);
+            let sub_base_path = base_path.join(dir);
             // Get a file handle to the chunks.data file in the submodule
             let path = sub_base_path.join("chunks.dat");
             println!("{:?}", path);
@@ -155,7 +158,7 @@ impl StorageModule {
 
         // TODO: if there are any gaps, or the range doesn't cover a full module range panic
 
-        let path = Path::new(base_path).join(format!(
+        let path = base_path.join(format!(
             "StorageModule_{}_intervals.json",
             storage_module_info.module_num
         ));
@@ -339,18 +342,23 @@ impl StorageModule {
         // write data_path
         let _ = submodule
             .db
-            .update(|tx| write_data_path(tx, chunk.offset, chunk.data_path.into()))?;
+            .update(|tx| write_chunk_data_path(tx, chunk.offset, chunk.data_path.into(), None))?;
 
         Ok(())
     }
 
-    pub fn read_data_path(&mut self, chunk_offset: ChunkOffset) -> eyre::Result<Option<DataPath>> {
+    pub fn read_data_path(
+        &mut self,
+        chunk_offset: ChunkOffset,
+    ) -> eyre::Result<Option<ChunkDataPath>> {
         let (_interval, submodule) = self
             .submodules
             .get_key_value_at_point(chunk_offset)
             .unwrap();
 
-        submodule.db.view(|tx| read_data_path(tx, chunk_offset))?
+        submodule
+            .db
+            .view(|tx| get_data_path_by_offset(tx, chunk_offset))?
     }
 
     /// Writes chunk data to physical storage and updates state tracking
@@ -385,9 +393,9 @@ impl StorageModule {
             match result {
                 // TODO: better logging
                 Ok(bytes_written) => {
-                    println!("write_chunk_internal() -> bytes_written: {}", bytes_written)
+                    info!("write_chunk_internal() -> bytes_written: {}", bytes_written)
                 }
-                Err(err) => println!("{:?}", err),
+                Err(err) => info!("{:?}", err),
             }
         }
 
@@ -416,11 +424,10 @@ impl StorageModule {
 ///
 /// Used primarily for testing storage initialization
 #[allow(dead_code)]
-pub fn initialize_storage_files(base: &str, infos: &Vec<StorageModuleInfo>) -> Result<()> {
-    println!("base: {:?}", base);
-    let base_path = Path::new(base);
+pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleInfo>) -> Result<()> {
+    println!("base: {:?}", base_path);
     // Create base storage directory if it doesn't exist
-    fs::create_dir_all(base_path)?;
+    fs::create_dir_all(base_path.clone())?;
 
     for (idx, info) in infos.iter().enumerate() {
         // Create subdirectories for each range
@@ -508,7 +515,7 @@ mod tests {
     use irys_types::H256;
     use nodit::interval::ii;
     #[test]
-    fn test() {
+    fn storage_module_test() {
         let infos = vec![StorageModuleInfo {
             module_num: 0,
             partition_hash: None,
@@ -519,13 +526,12 @@ mod tests {
             ],
         }];
 
-        // TODO: Update this to use ernesto's temp path
-        let base_path = "./storage_modules/test/";
-        let _ = initialize_storage_files(base_path, &infos);
+        let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        let _ = initialize_storage_files(&base_path, &infos);
 
         // Verify the StorageModuleInfo file was crated in the base path
-        let file_infos =
-            read_info_file(&Path::new(base_path).join("StorageModule_0.json")).unwrap();
+        let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();
         assert_eq!(file_infos, infos[0]);
 
         // Override the default StorageModule config for testing
@@ -537,7 +543,7 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let mut storage_module = StorageModule::new(base_path, storage_module_info, Some(config));
+        let mut storage_module = StorageModule::new(&base_path, storage_module_info, Some(config));
 
         // Verify the entire storage module range is uninitialized
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
@@ -625,8 +631,9 @@ mod tests {
         let module_intervals = ints.clone().into_iter().collect::<Vec<_>>();
         assert_eq!(file_intervals, module_intervals);
     }
+
     #[test]
-    fn datapath_test() -> eyre::Result<()> {
+    fn data_path_test() -> eyre::Result<()> {
         let infos = vec![StorageModuleInfo {
             module_num: 0,
             partition_hash: None,
@@ -635,9 +642,9 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir();
-        let base_path = tmp_dir.to_str().unwrap();
-        initialize_storage_files(base_path, &infos)?;
+        let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        initialize_storage_files(&base_path, &infos)?;
 
         let config = StorageModuleConfig {
             min_writes_before_sync: 1,
@@ -647,7 +654,7 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let mut storage_module = StorageModule::new(base_path, storage_module_info, Some(config));
+        let mut storage_module = StorageModule::new(&base_path, storage_module_info, Some(config));
         let offset = 0;
         let chunk_data = vec![0, 1, 2, 3, 4];
         let data_path = vec![4, 3, 2, 1];

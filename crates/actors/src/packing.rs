@@ -2,7 +2,6 @@ use std::{
     collections::VecDeque,
     fs,
     io::{Seek, Write},
-    os::unix::fs::FileExt,
     sync::{Arc, RwLock},
 };
 
@@ -13,7 +12,7 @@ use irys_storage::StorageModule;
 use irys_types::{irys::IrysSigner, Address, ChunkState, Interval, IntervalState, U256};
 use tokio::runtime::Handle;
 
-#[derive(Message, Clone)]
+#[derive(Debug, Message, Clone)]
 #[rtype("()")]
 struct PackingRequestRange {
     pub partition_id: u64,
@@ -22,6 +21,7 @@ struct PackingRequestRange {
 
 type AtomicChunkRange = Arc<RwLock<VecDeque<PackingRequestRange>>>;
 
+#[derive(Debug)]
 pub struct PackingActor {
     storage_module: Arc<RwLock<StorageModule>>,
     runtime_handle: Handle,

@@ -1,4 +1,4 @@
-use ::irys_database::{tables::Tables, BlockIndex, Initialized};
+use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::Actor;
 use irys_actors::{
     block_index::BlockIndexActor,
@@ -12,8 +12,8 @@ use irys_actors::{
     packing::PackingActor,
     ActorAddresses,
 };
-use irys_api_server::run_server;
-use irys_config::IrysNodeConfig;
+use irys_api_server::{run_server, ApiState};
+use irys_config::{chain::StorageConfig, IrysNodeConfig};
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
@@ -46,9 +46,12 @@ pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeC
     start_irys_node(config).await
 }
 
-pub async fn start_for_testing_default() -> eyre::Result<IrysNodeCtx> {
+pub async fn start_for_testing_default(
+    name: Option<&str>,
+    keep: bool,
+) -> eyre::Result<IrysNodeCtx> {
     let config = IrysNodeConfig {
-        base_directory: setup_tracing_and_temp_dir(),
+        base_directory: setup_tracing_and_temp_dir(name, keep).into_path(),
         ..Default::default()
     };
     start_irys_node(config).await
@@ -69,6 +72,13 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
     let irys_genesis = node_config.chainspec_builder.genesis();
     let arc_genesis = Arc::new(irys_genesis);
     let arc_config = Arc::new(node_config);
+    let storage_config_for_testing = StorageConfig {
+        chunk_size: 32,
+        num_chunks_in_partition: 10,
+        num_chunks_in_recall_range: 2,
+        num_partitions_in_slot: 1,
+    };
+    let arc_storage_config = Arc::new(storage_config_for_testing);
     let mut storage_modules: Vec<Arc<StorageModule>> = Vec::new();
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
         BlockIndex::default()
@@ -108,7 +118,11 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let mempool_actor_addr = mempool_actor.start();
 
                 // Initialize the epoch_service actor to handle partition ledger assignments
-                let config = EpochServiceConfig::default();
+                let config = EpochServiceConfig {
+                    storage_config: arc_storage_config,
+                    ..Default::default()
+                };
+
                 let miner_address = node_config.mining_signer.address();
                 let epoch_service = EpochServiceActor::new(miner_address, Some(config));
                 let epoch_service_actor_addr = epoch_service.start();
@@ -133,8 +147,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let ledgers_guard = epoch_service_actor_addr
                     .send(GetLedgersMessage)
                     .await
-                    .unwrap()
-                    .unwrap(); // I don't like this double unwrap but I haven't figured out how to avoid it.
+                    .unwrap();
 
                 {
                     let ledgers = ledgers_guard.read();
@@ -155,15 +168,18 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let storage_module_infos = epoch_service_actor_addr
                     .send(GetGenesisStorageModulesMessage)
                     .await
-                    .unwrap()
                     .unwrap();
 
                 // For Genesis we create the storage_modules and their files
-                initialize_storage_files("./storage_modules/", &storage_module_infos).unwrap();
+                initialize_storage_files(&arc_config.storage_module_dir(), &storage_module_infos)
+                    .unwrap();
 
                 for info in storage_module_infos {
-                    let arc_module =
-                        Arc::new(StorageModule::new("./storage_modules/", &info, None));
+                    let arc_module = Arc::new(StorageModule::new(
+                        &arc_config.storage_module_dir(),
+                        &info,
+                        None,
+                    ));
                     storage_modules.push(arc_module.clone());
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
@@ -199,7 +215,11 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     config: arc_config.clone(),
                 });
 
-                run_server(actor_addresses).await;
+                run_server(ApiState {
+                    actors: actor_addresses,
+                    db,
+                })
+                .await;
             });
         })?;
 
@@ -216,7 +236,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
             tokio_runtime.block_on(run_to_completion_or_panic(
                 &mut task_manager,
-                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, Tables::ALL, reth_handle_sender)),
+                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender)),
             )).unwrap();
         })?;
 

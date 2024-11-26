@@ -37,17 +37,19 @@ impl BlockIndexActor {
             .map(|tx| ((tx.data_size + CHUNK_SIZE - 1) / CHUNK_SIZE) * CHUNK_SIZE)
             .sum::<u64>();
 
+        let chunks_added = bytes_added / CHUNK_SIZE;
+
         let mut index = self.block_index.write().unwrap();
 
         // Get previous ledger sizes or default to 0 for genesis
-        let (publish_size, submit_size) =
+        let (max_publish_chunks, max_submit_chunks) =
             if index.num_blocks() == 0 && irys_block_header.height == 0 {
-                (0, bytes_added as u128)
+                (0, chunks_added)
             } else {
                 let prev_block = index.get_item(0).unwrap();
                 (
-                    prev_block.ledgers[Ledger::Publish as usize].ledger_size,
-                    prev_block.ledgers[Ledger::Submit as usize].ledger_size + bytes_added as u128,
+                    prev_block.ledgers[Ledger::Publish as usize].max_chunk_offset,
+                    prev_block.ledgers[Ledger::Submit as usize].max_chunk_offset + chunks_added,
                 )
             };
 
@@ -56,12 +58,12 @@ impl BlockIndexActor {
             num_ledgers: 2,
             ledgers: vec![
                 LedgerIndexItem {
-                    ledger_size: publish_size,
-                    tx_root: H256::zero(),
+                    max_chunk_offset: max_publish_chunks,
+                    tx_root: irys_block_header.ledgers[Ledger::Publish].tx_root,
                 },
                 LedgerIndexItem {
-                    ledger_size: submit_size,
-                    tx_root: H256::zero(),
+                    max_chunk_offset: max_submit_chunks,
+                    tx_root: irys_block_header.ledgers[Ledger::Submit].tx_root,
                 },
             ],
         };

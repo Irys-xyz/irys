@@ -1,6 +1,6 @@
 use irys_types::{
-    ingress::IngressProof, ChunkOffset, ChunkPathHash, DataPath, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, TxRelativeChunkIndex, H256,
+    ingress::IngressProof, ChunkDataPath, ChunkOffset, ChunkPathHash, DataRoot, IrysBlockHeader,
+    IrysTransactionHeader, TxPath, TxPathHash, TxRelativeChunkIndex, H256,
 };
 use reth_codecs::Compact;
 use reth_db::{
@@ -19,10 +19,34 @@ use crate::{
 
 /// Per-submodule database tables
 tables! {
-    /// Index that maps a partition-relative offset to a DataPath
+    SubmoduleTables;
+
+    /// Maps a partition relative offset to a chunk's path hashes
     /// note: mdbx keys are always sorted, so range queries work :)
     /// TODO: use custom Compact impl for Vec<u8> so we don't have problems
-    table ChunkPathByOffset<Key = ChunkOffset, Value = DataPath>;
+    table ChunkPathHashByOffset<Key = ChunkOffset, Value = ChunkPathHashes>;
+
+    /// Maps a chunk's data path hash to the full data path
+    table ChunkDataPathByPathHash<Key = ChunkPathHash, Value = ChunkDataPath>;
+
+    /// Maps a tx path hash to the full tx path
+    table TxPathByTxPathHash<Key = TxPathHash, Value = TxPath>;
+
+    /// Maps a chunk path hash to the list of submodule-relative offsets it should inhabit
+    table ChunkOffsetsByPathHash<Key = ChunkPathHash, Value = ChunkOffsets>;
+
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]
+/// chunk offsets
+/// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
+pub struct ChunkOffsets(pub Vec<ChunkOffset>);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]
+/// compound value, containing the data path and tx path hashes
+pub struct ChunkPathHashes {
+    pub data_path_hash: Option<H256>, // ChunkPathHash - we can't use the alias types as proc_macro just deals with tokens
+    pub tx_path_hash: Option<H256>,   // TxPathHash
 }
 
 #[test]
@@ -31,29 +55,42 @@ fn test_offset_range_queries() -> eyre::Result<()> {
     use reth_db::cursor::*;
     use reth_db::transaction::*;
 
-    let temp_dir = setup_tracing_and_temp_dir();
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_offset_range_queries"), false);
 
-    let db = open_or_create_db(temp_dir, Tables::ALL, None).unwrap();
+    let db = open_or_create_db(temp_dir, SubmoduleTables::ALL, None).unwrap();
 
     let write_tx = db.tx_mut()?;
 
-    let d = vec![0, 1, 2, 3, 4];
+    let data_path_hash = H256::random();
+    let tx_path_hash = H256::random();
 
-    write_tx.put::<ChunkPathByOffset>(1, d.clone())?;
-    write_tx.put::<ChunkPathByOffset>(100, d.clone())?;
-    write_tx.put::<ChunkPathByOffset>(0, d.clone())?;
+    let path_hashes = ChunkPathHashes {
+        data_path_hash: Some(data_path_hash),
+        tx_path_hash: Some(tx_path_hash),
+    };
+
+    write_tx.put::<ChunkPathHashByOffset>(1, path_hashes.clone())?;
+    write_tx.put::<ChunkPathHashByOffset>(100, path_hashes.clone())?;
+    write_tx.put::<ChunkPathHashByOffset>(0, path_hashes.clone())?;
 
     write_tx.commit()?;
 
     let read_tx = db.tx()?;
 
-    let mut read_cursor = read_tx.cursor_read::<ChunkPathByOffset>()?;
+    let mut read_cursor = read_tx.cursor_read::<ChunkPathHashByOffset>()?;
 
     let walker = read_cursor.walk(None)?;
 
     let res = walker.collect::<Result<Vec<_>, _>>()?;
 
-    assert_eq!(res, vec![(0, d.clone()), (1, d.clone()), (100, d.clone())]);
+    assert_eq!(
+        res,
+        vec![
+            (0, path_hashes.clone()),
+            (1, path_hashes.clone()),
+            (100, path_hashes.clone())
+        ]
+    );
 
     Ok(())
 }

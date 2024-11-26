@@ -1,7 +1,7 @@
 use std::{fs::remove_dir_all, time::Duration};
 
 use alloy_core::primitives::{TxHash, U256};
-use chain::chain::start_for_testing;
+use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_types::{

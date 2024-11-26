@@ -11,7 +11,6 @@ pub mod database;
 /// Data in the caches can be pending or in a block still subject to re-org so
 /// it is not suitable for mining.
 pub mod db_cache;
-pub mod tx_path;
 
 /// Data in the indexes is confirmed data
 pub mod db_index;
