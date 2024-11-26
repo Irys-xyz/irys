@@ -1,12 +1,9 @@
 use irys_types::{
-    ingress::IngressProof, partition::PartitionHash, BlockRelativeChunkOffset, ChunkDataPath,
-    ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, TxRelativeChunkIndex, H256,
+    ingress::IngressProof, partition::PartitionHash, ChunkPathHash, DataRoot, IrysBlockHeader,
+    IrysTransactionHeader, TxRelativeChunkIndex, H256,
 };
 use reth_codecs::Compact;
-use reth_db::{
-    table::{DupSort, Table},
-    tables, DatabaseError,
-};
+use reth_db::{table::DupSort, tables, DatabaseError};
 use reth_db::{HasName, HasTableType, TableType, TableViewer};
 use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
