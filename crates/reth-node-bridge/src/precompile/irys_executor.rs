@@ -31,6 +31,8 @@ use revm_primitives::PrecompileOutput;
 use schnellru::{ByLength, LruMap};
 use std::{collections::HashMap, sync::Arc};
 
+use crate::precompile::programmable_data::PROGRAMMABLE_DATA_PRECOMPILE;
+
 /// Type alias for the LRU cache used within the [`PrecompileCache`].
 type PrecompileLRUCache = LruMap<(Bytes, u64), PrecompileResult>;
 
@@ -260,25 +262,27 @@ where
 }
 
 // reserve space for any future eth precompiles
-const BASE_PRECOMPILE_ADDRESS: u64 = 1337;
+const BASE_PRECOMPILE_OFFSET: u64 = 1337;
 
 pub fn irys_precompiles() -> Precompiles {
     vec![PROGRAMMABLE_DATA_PRECOMPILE]
 }
 
 #[repr(u64)]
-pub enum IrysPrecompileAddresses {
-    ProgrammableData = BASE_PRECOMPILE_ADDRESS,
+pub enum IrysPrecompileOffsets {
+    ProgrammableData = BASE_PRECOMPILE_OFFSET,
 }
 
-const PROGRAMMABLE_DATA_PRECOMPILE: PrecompileWithAddress = PrecompileWithAddress(
-    u64_to_address(IrysPrecompileAddresses::ProgrammableData as u64),
-    Precompile::Env(programmable_data_precompile),
-);
+impl IrysPrecompileOffsets {
+    pub const fn to_address(self) -> Address {
+        u64_to_address(self as u64)
+    }
+}
 
-fn programmable_data_precompile(call_data: &Bytes, gas_limit: u64, env: &Env) -> PrecompileResult {
-    let mut gas_used = 1000;
-    Ok(PrecompileOutput::new(gas_used, vec![].into()))
+impl Into<Address> for IrysPrecompileOffsets {
+    fn into(self) -> Address {
+        self.to_address()
+    }
 }
 
 // #[tokio::main]

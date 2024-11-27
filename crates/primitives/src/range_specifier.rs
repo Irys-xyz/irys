@@ -1,12 +1,12 @@
-use alloy_primitives::aliases::U208;
+use alloy_primitives::{aliases::U208, B256};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 // 26 + 4 + 2 bytes
 pub struct RangeSpecifier {
-    partition_index: U208, // 3 64-bit words + 1 16 bit word, 26 bytes
-    offset: u32,
-    chunk_count: u16,
+    pub partition_index: U208, // 3 64-bit words + 1 16 bit word, 26 bytes
+    pub offset: u32,
+    pub chunk_count: u16,
 }
 
 impl From<[u8; 32]> for RangeSpecifier {
@@ -27,6 +27,18 @@ impl From<RangeSpecifier> for [u8; 32] {
         buf[30..32].copy_from_slice(&value.chunk_count.to_le_bytes());
 
         buf
+    }
+}
+
+impl From<RangeSpecifier> for B256 {
+    fn from(value: RangeSpecifier) -> Self {
+        B256::from(&value.to_slice())
+    }
+}
+
+impl From<B256> for RangeSpecifier {
+    fn from(value: B256) -> Self {
+        RangeSpecifier::from_slice(value.0)
     }
 }
 

@@ -1,6 +1,7 @@
 use std::{fs::remove_dir_all, future::Future, time::Duration};
 
-use alloy_core::primitives::U256;
+use alloy_core::primitives::{aliases::U208, U256};
+use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
@@ -8,9 +9,10 @@ use alloy_sol_macro::sol;
 use futures::future::select;
 use irys_chain::{chain::start_for_testing, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
+use irys_reth_node_bridge::precompile::irys_executor::IrysPrecompileOffsets;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, H256};
-use reth_primitives::GenesisAccount;
+use reth_primitives::{irys_primitives::range_specifier::RangeSpecifier, GenesisAccount};
 use tokio::time::sleep;
 use tracing::info;
 
@@ -19,13 +21,13 @@ use tracing::info;
 sol!(
     #[allow(missing_docs)]
     #[sol(rpc)]
-    IrysERC20,
-    "../../fixtures/contracts/out/IrysERC20.sol/IrysERC20.json"
+    IrysProgrammableDataBasic,
+    "../../fixtures/contracts/out/IrysProgrammableDataBasic.sol/ProgrammableDataBasic.json"
 );
 
 #[tokio::test]
-async fn test_erc20() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_erc20"), false);
+async fn test_programmable_data() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();
     let main_address = config.mining_signer.address();
@@ -63,36 +65,67 @@ async fn test_erc20() -> eyre::Result<()> {
         .wallet(wallet)
         .on_http("http://localhost:8080".parse()?);
 
-    let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.address()));
+    let mut deploy_fut = Box::pin(IrysProgrammableDataBasic::deploy(alloy_provider));
 
     let contract =
         future_or_mine_on_timeout(node.clone(), &mut deploy_fut, Duration::from_millis(2_000))
             .await??;
 
-    info!("Contract address is {:?}", contract.address());
-    let main_balance = contract.balanceOf(main_address).call().await?._0;
-    assert_eq!(main_balance, U256::from(10000000000000000000000 as u128));
+    let precompile_address: Address = IrysPrecompileOffsets::ProgrammableData.into();
+    info!(
+        "Contract address is {:?}, precompile address is {:?}",
+        contract.address(),
+        precompile_address
+    );
 
-    let transfer_call_builder = contract.transfer(account1.address(), U256::from(10));
-    let transfer_call = transfer_call_builder.send().await?;
-    let mut transfer_receipt_fut = Box::pin(transfer_call.get_receipt());
+    let mut invocation_builder =
+        contract.get_pd_chunks(U256::from(0), U256::from(0), U256::from(10));
 
-    let _ = future_or_mine_on_timeout(
+    let range_specifier = RangeSpecifier {
+        partition_index: U208::from(0),
+        offset: 0,
+        chunk_count: 10,
+    };
+
+    invocation_builder = invocation_builder.access_list(
+        vec![AccessListItem {
+            address: precompile_address,
+            storage_keys: vec![range_specifier.into()],
+        }]
+        .into(),
+    );
+
+    let invocation_call = invocation_builder.send().await?;
+
+    let mut invocation_receipt_fut = Box::pin(invocation_call.get_receipt());
+
+    let res = future_or_mine_on_timeout(
         node.clone(),
-        &mut transfer_receipt_fut,
+        &mut invocation_receipt_fut,
         Duration::from_millis(2_000),
     )
     .await??;
 
-    // check balance for account1
-    let addr1_balance = contract.balanceOf(account1.address()).call().await?._0;
-    let main_balance2 = contract.balanceOf(main_address).call().await?._0;
+    dbg!(res);
+    // // let transfer_call = transfer_call_builder.send().await?;
+    // let mut transfer_receipt_fut = Box::pin(transfer_call.get_receipt());
 
-    assert_eq!(addr1_balance, U256::from(10));
-    assert_eq!(
-        main_balance2,
-        U256::from(10000000000000000000000 - 10 as u128)
-    );
+    // let _ = future_or_mine_on_timeout(
+    //     node.clone(),
+    //     &mut transfer_receipt_fut,
+    //     Duration::from_millis(2_000),
+    // )
+    // .await??;
+
+    // // check balance for account1
+    // let addr1_balance = contract.balanceOf(account1.address()).call().await?._0;
+    // let main_balance2 = contract.balanceOf(main_address).call().await?._0;
+
+    // assert_eq!(addr1_balance, U256::from(10));
+    // assert_eq!(
+    //     main_balance2,
+    //     U256::from(10000000000000000000000 - 10 as u128)
+    // );
 
     Ok(())
 }

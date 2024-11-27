@@ -46,6 +46,7 @@ use tracing::info;
 
 use crate::{
     launcher::CustomEngineNodeLauncher,
+    precompile::irys_executor::{IrysEvmConfig, IrysExecutorBuilder},
     rpc::{AccountStateExt, AccountStateExtApiServer},
 };
 
@@ -79,12 +80,13 @@ pub type RethNode = NodeAdapter<
             CoinbaseTipOrdering<EthPooledTransaction>,
             DiskFileBlobStore,
         >,
-        EthEvmConfig,
-        EthExecutorProvider,
+        IrysEvmConfig,
+        EthExecutorProvider<IrysEvmConfig>,
         Arc<dyn Consensus>,
         EthereumEngineValidator,
     >,
 >;
+
 pub type RethNodeAddOns = EthereumAddOns;
 pub type RethNodeExitHandle = NodeHandle<RethNode, RethNodeAddOns>;
 
@@ -248,7 +250,7 @@ pub async fn run_node<T: HasName + HasTableType>(
             .with_types_and_provider::<EthereumNode, BlockchainProvider2<
                 NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
             >>()
-            .with_components(EthereumNode::components())
+            .with_components(EthereumNode::components().executor(IrysExecutorBuilder::default()))
             .with_add_ons(EthereumAddOns::default())
             .extend_rpc_modules(move |ctx| {
                 let provider = ctx.provider().clone();
