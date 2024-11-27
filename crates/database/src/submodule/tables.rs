@@ -35,6 +35,9 @@ tables! {
     /// Maps a chunk path hash to the list of submodule-relative offsets it should inhabit
     table ChunkOffsetsByPathHash<Key = ChunkPathHash, Value = ChunkOffsets>;
 
+    /// Maps a data root to the list of submodule-relative start offsets
+    table StartOffsetsByDataRoot<Key = DataRoot, Value = StartOffsets>;
+
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]
@@ -48,6 +51,11 @@ pub struct ChunkPathHashes {
     pub data_path_hash: Option<H256>, // ChunkPathHash - we can't use the alias types as proc_macro just deals with tokens
     pub tx_path_hash: Option<H256>,   // TxPathHash
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]
+/// chunk offsets
+/// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
+pub struct StartOffsets(pub Vec<ChunkOffset>);
 
 #[test]
 fn test_offset_range_queries() -> eyre::Result<()> {
