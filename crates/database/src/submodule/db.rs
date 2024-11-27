@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use irys_types::{Chunk, ChunkDataPath, ChunkOffset, ChunkPathHash, TxPath, TxPathHash};
+use irys_types::{Chunk, ChunkDataPath, ChunkOffset, ChunkPathHash, DataRoot, TxPath, TxPathHash};
 use reth_db::{
     transaction::{DbTx, DbTxMut},
     Database, DatabaseEnv,
@@ -10,7 +10,7 @@ use crate::open_or_create_db;
 
 use super::tables::{
     ChunkDataPathByPathHash, ChunkOffsetsByPathHash, ChunkPathHashByOffset, ChunkPathHashes,
-    SubmoduleTables, TxPathByTxPathHash,
+    StartOffsets, StartOffsetsByDataRoot, SubmoduleTables, TxPathByTxPathHash,
 };
 
 /// Creates or opens a *submodule* MDBX database
@@ -124,4 +124,34 @@ pub fn set_path_hashes_by_offset<T: DbTxMut>(
     path_hashes: ChunkPathHashes,
 ) -> eyre::Result<()> {
     Ok(tx.put::<ChunkPathHashByOffset>(offset, path_hashes)?)
+}
+
+/// get all the start offsets for the data_root
+pub fn get_start_offsets_by_data_root<T: DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+) -> eyre::Result<Option<StartOffsets>> {
+    Ok(tx.get::<StartOffsetsByDataRoot>(data_root)?)
+}
+
+/// set (overwrite) all the start offsets for the data_root
+pub fn set_start_offsets_by_data_root<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    start_offsets: StartOffsets,
+) -> eyre::Result<()> {
+    Ok(tx.put::<StartOffsetsByDataRoot>(data_root, start_offsets)?)
+}
+
+///add a start offset to the start offsets for the data_root
+pub fn add_start_offset_to_data_root_index<T: DbTxMut + DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+    start_offset: ChunkOffset,
+) -> eyre::Result<()> {
+    let mut offsets = get_start_offsets_by_data_root(tx, data_root)?.unwrap_or_default();
+    offsets.0.push(start_offset);
+    set_start_offsets_by_data_root(tx, data_root, offsets)?;
+
+    Ok(())
 }
