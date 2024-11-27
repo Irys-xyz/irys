@@ -114,7 +114,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
             .unwrap();
 
         // check irys DB for built block
-        let db_irys_block = irys_database::block_by_hash(&node.db, block.block_hash)?.unwrap();
+        let db_irys_block = irys_database::block_by_hash(&node.db, &block.block_hash)?.unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
         sleep(Duration::from_millis(10_000)).await;

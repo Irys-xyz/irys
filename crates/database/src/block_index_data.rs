@@ -308,7 +308,11 @@ fn append_items_to_file(items: &Vec<BlockIndexItem>, config: &IrysNodeConfig) ->
 
 fn load_index_from_file(config: &IrysNodeConfig) -> io::Result<Vec<BlockIndexItem>> {
     let path = config.block_index_dir().join(FILE_NAME);
-    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
 
     // Determine the file size
     let file_size = file.seek(SeekFrom::End(0))?;
