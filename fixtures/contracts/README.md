@@ -8,7 +8,7 @@ To use this project, you have to:
 3.) build the contracts by running `forge build`   
 
 If you want to create a new contract:   
-1.) Add a new subfolder and then add a rule for the output folder in ./.gitignore in the Contracts folder  
+1.) Add a new subfolder and then add a rule for the output folder in ./.gitignore in the contracts folder  
 2.) Run `forge build`  
 3.) Add the appropriate macros to your rust code, a good example is from crates/chain/tests/block_production/basic_contract.rs:   
 ```rs
@@ -18,7 +18,7 @@ sol!(
     #[allow(missing_docs)]
     #[sol(rpc)]
     IrysERC20,
-    "<../relative/path/to/>fixtures/Contracts/out/IrysERC20.sol/IrysERC20.json"
+    "<../relative/path/to/>fixtures/contracts/out/IrysERC20.sol/IrysERC20.json"
 );
 ```
   

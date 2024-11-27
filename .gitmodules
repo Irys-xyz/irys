@@ -11,9 +11,9 @@
 	path = ext/alloy
 	url = https://github.com/Irys-xyz/alloy
 
-[submodule "fixtures/Contracts/lib/openzeppelin-contracts"]
-	path = fixtures/Contracts/lib/openzeppelin-contracts
+[submodule "fixtures/contracts/lib/openzeppelin-contracts"]
+	path = fixtures/contracts/lib/openzeppelin-contracts
 	url = https://github.com/OpenZeppelin/openzeppelin-contracts
-[submodule "fixtures/Contracts/lib/forge-std"]
-	path = fixtures/Contracts/lib/forge-std
+[submodule "fixtures/contracts/lib/forge-std"]
+	path = fixtures/contracts/lib/forge-std
 	url = https://github.com/foundry-rs/forge-std
