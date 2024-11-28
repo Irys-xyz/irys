@@ -78,7 +78,7 @@ impl PartitionMiningActor {
             if solution_number >= difficulty {
                 dbg!("SOLUTION FOUND!!!!!!!!!");
                 let solution = SolutionContext {
-                    partition_hash: self.storage_module.partition_hash.unwrap(),
+                    partition_hash: self.storage_module.partition_hash().unwrap(),
                     chunk_offset: (start_chunk_index + index) as u32,
                     mining_address: self.mining_address,
                 };
@@ -121,7 +121,7 @@ impl Handler<Seed> for PartitionMiningActor {
 
         debug!(
             "Partition {} -- looking for solution with difficulty >= {}",
-            self.storage_module.partition_hash.unwrap(),
+            self.storage_module.partition_hash().unwrap(),
             difficulty
         );
 

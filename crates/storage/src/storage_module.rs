@@ -3,8 +3,9 @@ use irys_database::submodule::{
     create_or_open_submodule_db, get_data_path_by_offset, write_chunk_data_path,
 };
 use irys_types::{
-    app_state::DatabaseProvider, partition::PartitionHash, Chunk, ChunkBytes, ChunkDataPath,
-    ChunkOffset, CHUNK_SIZE, NUM_CHUNKS_IN_PARTITION,
+    app_state::DatabaseProvider,
+    partition::{PartitionAssignment, PartitionHash},
+    Chunk, ChunkBytes, ChunkDataPath, ChunkOffset, CHUNK_SIZE, NUM_CHUNKS_IN_PARTITION,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use reth_db::{Database, DatabaseEnv};
@@ -32,8 +33,8 @@ type StorageIntervals = NoditMap<u32, Interval<u32>, ChunkType>;
 /// Maps a logical partition (fixed size) to physical storage across multiple drives
 #[derive(Debug)]
 pub struct StorageModule {
-    /// The (Optional) partition hash assigned to this storage module
-    pub partition_hash: Option<PartitionHash>,
+    /// The (Optional) info about a partition assigned to this storage module
+    pub partition_assignment: Option<PartitionAssignment>,
     /// In-memory chunk buffer awaiting disk write
     pending_writes: Arc<RwLock<ChunkMap>>,
     /// Tracks the storage state of each chunk across all submodules
@@ -52,7 +53,7 @@ pub struct StorageModuleInfo {
     /// An integer uniquely identifying the module
     pub module_num: usize,
     /// Hash of partition this storage module belongs to, if assigned
-    pub partition_hash: Option<PartitionHash>,
+    pub partition_assignment: Option<PartitionAssignment>,
     /// Range of chunk offsets and path for each submodule
     pub submodules: Vec<(Interval<u32>, SubmodulePath)>,
 }
@@ -177,12 +178,21 @@ impl StorageModule {
         }
 
         StorageModule {
-            partition_hash: storage_module_info.partition_hash,
+            partition_assignment: storage_module_info.partition_assignment,
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
             intervals: Arc::new(RwLock::new(intervals)),
             submodules: map,
             config,
             intervals_file,
+        }
+    }
+
+    /// Returns the StorageModules partition_hash if assigned
+    pub fn partition_hash(&self) -> Option<PartitionHash> {
+        if let Some(part_assign) = self.partition_assignment {
+            Some(part_assign.partition_hash)
+        } else {
+            None
         }
     }
 
@@ -518,7 +528,7 @@ mod tests {
     fn storage_module_test() {
         let infos = vec![StorageModuleInfo {
             module_num: 0,
-            partition_hash: None,
+            partition_assignment: None,
             submodules: vec![
                 (ii(0, 4), "hdd0-4TB".to_string()),  // 0 to 4 inclusive
                 (ii(5, 9), "hdd1-4TB".to_string()),  // 5 to 9 inclusive
@@ -636,7 +646,7 @@ mod tests {
     fn data_path_test() -> eyre::Result<()> {
         let infos = vec![StorageModuleInfo {
             module_num: 0,
-            partition_hash: None,
+            partition_assignment: None,
             submodules: vec![
                 (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
             ],

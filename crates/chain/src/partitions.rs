@@ -62,7 +62,7 @@ pub fn mine_storage_module(
             if solution_number >= difficulty {
                 dbg!("SOLUTION FOUND!!!!!!!!!");
                 let solution = SolutionContext {
-                    partition_hash: storage_module.partition_hash.unwrap(),
+                    partition_hash: storage_module.partition_hash().unwrap(),
                     // TODO: Fix
                     chunk_offset: 0,
                     mining_address: mining_address,
