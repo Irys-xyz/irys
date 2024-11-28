@@ -9,7 +9,7 @@ use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::submodule::tables::StartOffsets;
+use crate::submodule::tables::RelativeStartOffsets;
 use crate::{
     db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
     submodule::tables::{ChunkOffsets, ChunkPathHashes},
@@ -85,7 +85,7 @@ impl_compression_for_compact!(
     ChunkOffsets,
     ChunkPathHashes,
     PartitionHashes,
-    StartOffsets
+    RelativeStartOffsets
 );
 
 tables! {

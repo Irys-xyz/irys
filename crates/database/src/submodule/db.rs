@@ -1,6 +1,10 @@
 use std::path::Path;
 
-use irys_types::{Chunk, ChunkDataPath, ChunkOffset, ChunkPathHash, DataRoot, TxPath, TxPathHash};
+use bytes::Buf;
+use irys_types::{
+    Chunk, ChunkDataPath, ChunkOffset, ChunkPathHash, Compact, DataRoot, RelativeChunkOffset,
+    TxPath, TxPathHash,
+};
 use reth_db::{
     transaction::{DbTx, DbTxMut},
     Database, DatabaseEnv,
@@ -10,7 +14,7 @@ use crate::open_or_create_db;
 
 use super::tables::{
     ChunkDataPathByPathHash, ChunkOffsetsByPathHash, ChunkPathHashByOffset, ChunkPathHashes,
-    StartOffsets, StartOffsetsByDataRoot, SubmoduleTables, TxPathByTxPathHash,
+    RelativeStartOffsets, StartOffsetsByDataRoot, SubmoduleTables, TxPathByTxPathHash,
 };
 
 /// Creates or opens a *submodule* MDBX database
@@ -96,6 +100,15 @@ pub fn get_full_tx_path<T: DbTx>(tx: &T, path_hash: TxPathHash) -> eyre::Result<
     Ok(tx.get::<TxPathByTxPathHash>(path_hash)?)
 }
 
+pub fn add_full_tx_path<T: DbTxMut>(
+    tx: &T,
+    path_hash: TxPathHash,
+    tx_path: TxPath,
+) -> eyre::Result<()> {
+    tx.put::<TxPathByTxPathHash>(path_hash, tx_path)?;
+    Ok(())
+}
+
 pub fn add_data_path_hash_to_offset_index<T: DbTxMut + DbTx>(
     tx: &T,
     offset: ChunkOffset,
@@ -130,7 +143,7 @@ pub fn set_path_hashes_by_offset<T: DbTxMut>(
 pub fn get_start_offsets_by_data_root<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
-) -> eyre::Result<Option<StartOffsets>> {
+) -> eyre::Result<Option<RelativeStartOffsets>> {
     Ok(tx.get::<StartOffsetsByDataRoot>(data_root)?)
 }
 
@@ -138,7 +151,7 @@ pub fn get_start_offsets_by_data_root<T: DbTx>(
 pub fn set_start_offsets_by_data_root<T: DbTxMut>(
     tx: &T,
     data_root: DataRoot,
-    start_offsets: StartOffsets,
+    start_offsets: RelativeStartOffsets,
 ) -> eyre::Result<()> {
     Ok(tx.put::<StartOffsetsByDataRoot>(data_root, start_offsets)?)
 }
@@ -147,7 +160,7 @@ pub fn set_start_offsets_by_data_root<T: DbTxMut>(
 pub fn add_start_offset_to_data_root_index<T: DbTxMut + DbTx>(
     tx: &T,
     data_root: DataRoot,
-    start_offset: ChunkOffset,
+    start_offset: RelativeChunkOffset,
 ) -> eyre::Result<()> {
     let mut offsets = get_start_offsets_by_data_root(tx, data_root)?.unwrap_or_default();
     offsets.0.push(start_offset);

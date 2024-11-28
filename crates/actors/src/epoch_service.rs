@@ -2,14 +2,14 @@ use actix::{Actor, Context, Handler, Message, MessageResponse};
 use eyre::{Error, Result};
 use irys_config::chain::StorageConfig;
 use irys_database::data_ledger::*;
-use irys_storage::{ii, StorageModuleInfo};
+use irys_storage::{ii, InclusiveInterval, StorageModuleInfo};
 use irys_types::{
-    partition::{PartitionAssignment, PartitionHash},
-    Address, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
+    partition::PartitionHash, Address, Interval, IrysBlockHeader, CAPACITY_SCALAR, H256,
+    NUM_BLOCKS_IN_EPOCH,
 };
 use openssl::sha;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tracing::info;
@@ -131,7 +131,7 @@ impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
     }
 }
 
-/// Retrieve partition assignemt (ledger and its relative offet) for a partition
+/// Retrieve partition assignment (ledger and its relative offset) for a partition
 #[derive(Message, Debug)]
 #[rtype(result = "Option<PartitionAssignment>")]
 pub struct GetPartitionAssignmentMessage(pub PartitionHash);
@@ -149,6 +149,71 @@ impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
             .copied()
             .or(self.capacity_partitions.get(&msg.0).copied())
     }
+}
+
+#[derive(Message, Debug)]
+#[rtype(result = "Vec<PartitionAssignment>")]
+pub struct GetOverlappingPartitionsMessage {
+    pub ledger: Ledger,
+    pub chunk_range: Interval<u64>,
+}
+
+impl Handler<GetOverlappingPartitionsMessage> for EpochServiceActor {
+    type Result = Vec<PartitionAssignment>;
+
+    fn handle(
+        &mut self,
+        msg: GetOverlappingPartitionsMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        let ledger = msg.ledger;
+        let chunk_range: Interval<u64> = msg.chunk_range;
+
+        // Cache config and get read lock on ledgers
+        let num_chunks_in_partition = self.config.storage_config.num_chunks_in_partition;
+        let ledgers = self.ledgers.read().unwrap();
+        let ledger_slots = ledgers[ledger].get_slots();
+
+        // Enumerate the leger slots and find any that overlap the chunk_range
+        let slots: Vec<_> = ledger_slots
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| {
+                let slot_start = *idx as u64 * num_chunks_in_partition;
+                let slot_end = slot_start + num_chunks_in_partition;
+                chunk_range.overlaps(&ii(slot_start, slot_end))
+            })
+            .map(|(_, slot)| slot)
+            .collect();
+
+        // Get all the partition hashes from the overlapping slots
+        let unique_slot_partition_hashes: HashSet<H256> = slots
+            .iter()
+            .flat_map(|slot| &slot.partitions)
+            .copied()
+            .collect();
+
+        // Finally retrieve the PartitionAssignments for those partition hashes
+        let matching_assignments: Vec<_> = unique_slot_partition_hashes
+            .iter()
+            .filter_map(|hash| self.data_partitions.get(hash).cloned())
+            .collect();
+
+        matching_assignments
+    }
+}
+
+/// Temporary struct tracking partition assignments to miners - will be moved to database
+#[derive(Debug, PartialEq, MessageResponse, Clone, Copy)]
+pub struct PartitionAssignment {
+    /// Hash of the partition
+    pub partition_hash: PartitionHash,
+    /// Address of the miner pledged to store it
+    pub miner_address: Address,
+    /// If assigned to a ledger, the ledger number
+    pub ledger_num: Option<u64>,
+    /// If assigned to a ledger, the index in the ledger
+    pub slot_index: Option<usize>,
 }
 
 impl EpochServiceActor {

@@ -1,16 +1,17 @@
 use eyre::{eyre, Result};
 use irys_database::submodule::{
+    add_full_tx_path, add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
     create_or_open_submodule_db, get_data_path_by_offset, write_chunk_data_path,
 };
 use irys_types::{
-    app_state::DatabaseProvider,
-    partition::{PartitionAssignment, PartitionHash},
-    Chunk, ChunkBytes, ChunkDataPath, ChunkOffset, CHUNK_SIZE, NUM_CHUNKS_IN_PARTITION,
+    app_state::DatabaseProvider, partition::PartitionHash, Chunk, ChunkBytes, ChunkDataPath,
+    ChunkOffset, DataRoot, TxPath, TxPathHash, CHUNK_SIZE, NUM_CHUNKS_IN_PARTITION,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use reth_db::{Database, DatabaseEnv};
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp,
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -337,6 +338,51 @@ impl StorageModule {
         // Add the chunk to pending writes
         let mut pending = self.pending_writes.write().unwrap();
         pending.insert(chunk_offset, (bytes, chunk_type));
+    }
+
+    /// Adds a tx_path_hash and bytes to each submodule index that intersects
+    /// the transactions bytes, also updates the chunk_offset indexes
+    pub fn add_tx_path_to_index(
+        &self,
+        tx_path_hash: TxPathHash,
+        tx_path: TxPath,
+        chunk_range: Interval<u32>,
+    ) -> eyre::Result<()> {
+        let overlapping = self.submodules.overlapping(chunk_range).collect::<Vec<_>>();
+
+        for (interval, submodule) in overlapping {
+            let _ = submodule.db.update(|tx| -> eyre::Result<()> {
+                // First make sure the submodule has the full tx_path by its path_hash
+                add_full_tx_path(tx, tx_path_hash, tx_path.clone())?;
+                // Next figure out what part of the submodule intersects the tx range
+                if let Some(range) = interval.intersection(&chunk_range) {
+                    // then loop though each chunk updating the offset_index with the tx_path_hash
+                    for chunk_offset in range.start()..=range.end() {
+                        add_tx_path_hash_to_offset_index(
+                            tx,
+                            chunk_offset,
+                            Some(tx_path_hash.clone()),
+                        )?;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+
+        Ok(())
+    }
+
+    pub fn add_start_offset_by_data_root(&self, data_root: DataRoot, start_offset: i32) {
+        let chunk_offset = cmp::max(start_offset, 0) as u32;
+        // Find submodule containing this chunk
+        let (interval, submodule) = self
+            .submodules
+            .get_key_value_at_point(chunk_offset)
+            .unwrap();
+
+        let _ = submodule
+            .db
+            .update(|tx| add_start_offset_to_data_root_index(tx, data_root, start_offset));
     }
 
     /// Writes the provided bytes to the submodule's storage, and the data_path to the submodules's database

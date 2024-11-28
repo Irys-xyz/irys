@@ -1,6 +1,6 @@
 use irys_types::{
     ingress::IngressProof, ChunkDataPath, ChunkOffset, ChunkPathHash, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, TxPath, TxPathHash, TxRelativeChunkIndex, H256,
+    IrysTransactionHeader, RelativeChunkOffset, TxPath, TxPathHash, TxRelativeChunkIndex, H256,
 };
 use reth_codecs::Compact;
 use reth_db::{
@@ -36,7 +36,7 @@ tables! {
     table ChunkOffsetsByPathHash<Key = ChunkPathHash, Value = ChunkOffsets>;
 
     /// Maps a data root to the list of submodule-relative start offsets
-    table StartOffsetsByDataRoot<Key = DataRoot, Value = StartOffsets>;
+    table StartOffsetsByDataRoot<Key = DataRoot, Value = RelativeStartOffsets>;
 
 }
 
@@ -55,7 +55,7 @@ pub struct ChunkPathHashes {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]
 /// chunk offsets
 /// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
-pub struct StartOffsets(pub Vec<ChunkOffset>);
+pub struct RelativeStartOffsets(pub Vec<RelativeChunkOffset>);
 
 #[test]
 fn test_offset_range_queries() -> eyre::Result<()> {
