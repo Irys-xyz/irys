@@ -135,14 +135,12 @@ async fn get_overlapping_storage_modules(
     let module_pairs: Vec<_> = storage_modules
         .iter()
         .filter_map(|module| {
-            module.partition_hash.map(|hash| {
-                assignments
-                    .iter()
-                    .find(|(assign_hash, _)| assign_hash == &hash)
-                    .map(|(_, slot_idx)| (module, (*slot_idx).unwrap()))
-            })
+            let hash = module.partition_hash().unwrap();
+            assignments
+                .iter()
+                .find(|(assign_hash, _)| assign_hash == &hash)
+                .map(|(_, slot_idx)| (module, slot_idx.unwrap()))
         })
-        .flatten()
         .collect();
 
     if assignments.len() != module_pairs.len() {

@@ -4,8 +4,10 @@ use irys_database::submodule::{
     create_or_open_submodule_db, get_data_path_by_offset, write_chunk_data_path,
 };
 use irys_types::{
-    app_state::DatabaseProvider, partition::PartitionHash, Chunk, ChunkBytes, ChunkDataPath,
-    ChunkOffset, DataRoot, TxPath, TxPathHash, CHUNK_SIZE, NUM_CHUNKS_IN_PARTITION,
+    app_state::DatabaseProvider,
+    partition::{PartitionAssignment, PartitionHash},
+    Chunk, ChunkBytes, ChunkDataPath, ChunkOffset, DataRoot, TxPath, TxPathHash, CHUNK_SIZE,
+    NUM_CHUNKS_IN_PARTITION,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use reth_db::{Database, DatabaseEnv};

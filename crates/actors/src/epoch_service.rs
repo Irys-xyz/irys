@@ -4,8 +4,8 @@ use irys_config::chain::StorageConfig;
 use irys_database::data_ledger::*;
 use irys_storage::{ii, InclusiveInterval, StorageModuleInfo};
 use irys_types::{
-    partition::PartitionHash, Address, Interval, IrysBlockHeader, CAPACITY_SCALAR, H256,
-    NUM_BLOCKS_IN_EPOCH,
+    partition::{PartitionAssignment, PartitionHash},
+    Address, Interval, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
 };
 use openssl::sha;
 use std::{
@@ -201,19 +201,6 @@ impl Handler<GetOverlappingPartitionsMessage> for EpochServiceActor {
 
         matching_assignments
     }
-}
-
-/// Temporary struct tracking partition assignments to miners - will be moved to database
-#[derive(Debug, PartialEq, MessageResponse, Clone, Copy)]
-pub struct PartitionAssignment {
-    /// Hash of the partition
-    pub partition_hash: PartitionHash,
-    /// Address of the miner pledged to store it
-    pub miner_address: Address,
-    /// If assigned to a ledger, the ledger number
-    pub ledger_num: Option<u64>,
-    /// If assigned to a ledger, the index in the ledger
-    pub slot_index: Option<usize>,
 }
 
 impl EpochServiceActor {
