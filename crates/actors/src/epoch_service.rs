@@ -5,7 +5,7 @@ use irys_database::data_ledger::*;
 use irys_storage::{ii, InclusiveInterval, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    Address, Interval, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
+    IrysBlockHeader, LedgerChunkRange, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
 };
 use openssl::sha;
 use std::{
@@ -151,11 +151,14 @@ impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
     }
 }
 
+/// Returns a vec of PartitionAssignments that overlap the provided chunk_range
 #[derive(Message, Debug)]
 #[rtype(result = "Vec<PartitionAssignment>")]
 pub struct GetOverlappingPartitionsMessage {
+    /// The ledger (Submit/Publish) being inspected
     pub ledger: Ledger,
-    pub chunk_range: Interval<u64>,
+    /// The ledger relative chunk range for the query
+    pub chunk_range: LedgerChunkRange,
 }
 
 impl Handler<GetOverlappingPartitionsMessage> for EpochServiceActor {
@@ -167,7 +170,7 @@ impl Handler<GetOverlappingPartitionsMessage> for EpochServiceActor {
         _ctx: &mut Self::Context,
     ) -> Self::Result {
         let ledger = msg.ledger;
-        let chunk_range: Interval<u64> = msg.chunk_range;
+        let chunk_range = msg.chunk_range;
 
         // Cache config and get read lock on ledgers
         let num_chunks_in_partition = self.config.storage_config.num_chunks_in_partition;
@@ -604,6 +607,8 @@ impl SimpleRNG {
 //------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    use irys_types::Address;
+
     use super::*;
 
     #[actix::test]

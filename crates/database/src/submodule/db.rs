@@ -2,7 +2,7 @@ use std::path::Path;
 
 use bytes::Buf;
 use irys_types::{
-    Chunk, ChunkDataPath, ChunkOffset, ChunkPathHash, Compact, DataRoot, RelativeChunkOffset,
+    Chunk, ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset,
     TxPath, TxPathHash,
 };
 use reth_db::{
@@ -25,7 +25,7 @@ pub fn create_or_open_submodule_db<P: AsRef<Path>>(path: P) -> eyre::Result<Data
 /// writes a chunk's data path to the database using the provided write transaction
 pub fn write_chunk_data_path<T: DbTxMut + DbTx>(
     tx: &T,
-    offset: ChunkOffset,
+    offset: PartitionChunkOffset,
     data_path: ChunkDataPath,
     // optional path hash, computed from data_path if None
     path_hash: Option<ChunkPathHash>,
@@ -43,7 +43,7 @@ pub fn write_chunk_data_path<T: DbTxMut + DbTx>(
 /// writes a chunk's data path to the database using the provided transaction
 pub fn add_offset_for_path_hash<T: DbTxMut + DbTx>(
     tx: &T,
-    offset: ChunkOffset,
+    offset: PartitionChunkOffset,
     path_hash: ChunkPathHash,
 ) -> eyre::Result<()> {
     let mut offsets = tx
@@ -61,7 +61,7 @@ pub fn add_offset_for_path_hash<T: DbTxMut + DbTx>(
 /// gets the full data path for the chunk with the provided offset
 pub fn get_data_path_by_offset<T: DbTx>(
     tx: &T,
-    offset: ChunkOffset,
+    offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<ChunkDataPath>> {
     if let Some(data_path_hash) =
         get_path_hashes_by_offset(tx, offset)?.and_then(|h| h.data_path_hash)
@@ -73,7 +73,10 @@ pub fn get_data_path_by_offset<T: DbTx>(
 }
 
 /// gets the full tx path for the chunk with the provided offset
-pub fn get_tx_path_by_offset<T: DbTx>(tx: &T, offset: ChunkOffset) -> eyre::Result<Option<TxPath>> {
+pub fn get_tx_path_by_offset<T: DbTx>(
+    tx: &T,
+    offset: PartitionChunkOffset,
+) -> eyre::Result<Option<TxPath>> {
     if let Some(tx_path_hash) = get_path_hashes_by_offset(tx, offset)?.and_then(|h| h.tx_path_hash)
     {
         Ok(get_full_tx_path(tx, tx_path_hash)?)
@@ -84,7 +87,7 @@ pub fn get_tx_path_by_offset<T: DbTx>(tx: &T, offset: ChunkOffset) -> eyre::Resu
 
 pub fn get_path_hashes_by_offset<T: DbTx>(
     tx: &T,
-    offset: ChunkOffset,
+    offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<ChunkPathHashes>> {
     Ok(tx.get::<ChunkPathHashByOffset>(offset)?)
 }
@@ -111,7 +114,7 @@ pub fn add_full_tx_path<T: DbTxMut>(
 
 pub fn add_data_path_hash_to_offset_index<T: DbTxMut + DbTx>(
     tx: &T,
-    offset: ChunkOffset,
+    offset: PartitionChunkOffset,
     path_hash: Option<ChunkPathHash>,
 ) -> eyre::Result<()> {
     let mut chunk_hashes = get_path_hashes_by_offset(tx, offset)?.unwrap_or_default();
@@ -122,7 +125,7 @@ pub fn add_data_path_hash_to_offset_index<T: DbTxMut + DbTx>(
 
 pub fn add_tx_path_hash_to_offset_index<T: DbTxMut + DbTx>(
     tx: &T,
-    offset: ChunkOffset,
+    offset: PartitionChunkOffset,
     path_hash: Option<TxPathHash>,
 ) -> eyre::Result<()> {
     let mut chunk_hashes = get_path_hashes_by_offset(tx, offset)?.unwrap_or_default();
@@ -133,7 +136,7 @@ pub fn add_tx_path_hash_to_offset_index<T: DbTxMut + DbTx>(
 
 pub fn set_path_hashes_by_offset<T: DbTxMut>(
     tx: &T,
-    offset: ChunkOffset,
+    offset: PartitionChunkOffset,
     path_hashes: ChunkPathHashes,
 ) -> eyre::Result<()> {
     Ok(tx.put::<ChunkPathHashByOffset>(offset, path_hashes)?)

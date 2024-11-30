@@ -1,17 +1,21 @@
 use actix::prelude::*;
 use irys_config::chain::StorageConfig;
-use irys_database::{submodule::add_full_tx_path, BlockIndex, Initialized, Ledger};
+use irys_database::{
+    cached_chunk_by_offset, submodule::add_full_tx_path, BlockIndex, Initialized, Ledger,
+};
 use irys_storage::{ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    Address, DataRoot, Interval, IrysBlockHeader, IrysTransactionHeader, Proof, TransactionLedger,
-    H256, NUM_PARTITIONS_PER_SLOT,
+    app_state::DatabaseProvider, Address, Chunk, DataRoot, Interval, IrysBlockHeader,
+    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, TransactionLedger, H256,
+    NUM_PARTITIONS_PER_SLOT,
 };
 use openssl::sha;
+use reth::network::cache;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
-use tracing::error;
+use tracing::{error, info};
 
 use crate::{
     block_producer::BlockFinalizedMessage,
@@ -33,6 +37,7 @@ pub struct ChunkStorageActor {
     pub storage_config: Arc<StorageConfig>,
     pub epoch_service_addr: Addr<EpochServiceActor>,
     pub storage_modules: Vec<Arc<StorageModule>>,
+    pub db: DatabaseProvider,
 }
 
 impl Actor for ChunkStorageActor {
@@ -47,6 +52,7 @@ impl ChunkStorageActor {
         storage_config: Arc<StorageConfig>,
         epoch_service_addr: Addr<EpochServiceActor>,
         storage_modules: Vec<Arc<StorageModule>>,
+        db: DatabaseProvider,
     ) -> Self {
         Self {
             miner_address,
@@ -54,6 +60,7 @@ impl ChunkStorageActor {
             storage_config,
             epoch_service_addr,
             storage_modules,
+            db,
         }
     }
 }
@@ -62,7 +69,7 @@ fn get_block_range(
     block_header: &IrysBlockHeader,
     ledger: Ledger,
     block_index: Arc<RwLock<BlockIndex<Initialized>>>,
-) -> Interval<u64> {
+) -> LedgerChunkRange {
     // Use the block index to get the ledger relative chunk offset of the
     // start of this new block from the previous block.
     let index_reader = block_index.read().unwrap();
@@ -75,10 +82,10 @@ fn get_block_range(
         0
     };
 
-    let block_offsets = ii(
+    let block_offsets = LedgerChunkRange(ii(
         start_chunk_offset,
         block_header.ledgers[ledger].max_chunk_offset,
-    );
+    ));
 
     block_offsets
 }
@@ -99,16 +106,16 @@ fn get_tx_path_pairs(
 }
 
 async fn get_overlapping_storage_modules(
-    chunk_range: Interval<u64>,
+    chunk_range: LedgerChunkRange,
     miner_address: Address,
     epoch_service: Addr<EpochServiceActor>,
     storage_modules: &Vec<Arc<StorageModule>>,
-) -> eyre::Result<Vec<(&Arc<StorageModule>, usize)>> {
+) -> eyre::Result<Vec<&Arc<StorageModule>>> {
     // Get all the PartitionAssignments that are overlapped by this transactions chunks
     let assignments = epoch_service
         .send(GetOverlappingPartitionsMessage {
             ledger: Ledger::Submit,
-            chunk_range,
+            chunk_range: chunk_range.into(),
         })
         .await
         .unwrap();
@@ -132,24 +139,23 @@ async fn get_overlapping_storage_modules(
         .map(|a| (a.partition_hash, a.slot_index))
         .collect();
 
-    let module_pairs: Vec<_> = storage_modules
+    let modules: Vec<_> = storage_modules
         .iter()
-        .filter_map(|module| {
+        .filter(|module| {
             let hash = module.partition_hash().unwrap();
             assignments
                 .iter()
-                .find(|(assign_hash, _)| assign_hash == &hash)
-                .map(|(_, slot_idx)| (module, slot_idx.unwrap()))
+                .any(|(assign_hash, _)| assign_hash == &hash)
         })
         .collect();
 
-    if assignments.len() != module_pairs.len() {
+    if assignments.len() != modules.len() {
         return Err(eyre::eyre!(
             "Unable to find storage module for assigned partition hash"
         ));
     }
 
-    Ok(module_pairs)
+    Ok(modules)
 }
 
 impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
@@ -164,34 +170,33 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
         let chunk_size = self.storage_config.chunk_size as usize;
         let miner_address = self.miner_address;
         let storage_modules = self.storage_modules.clone();
-        let num_chunks_in_partition = self.storage_config.num_chunks_in_partition;
+        let db = self.db.clone();
 
         // Async move closure to call async methods withing a non async fn
         Box::pin(async move {
             let path_pairs = get_tx_path_pairs(&block_header, &txs).unwrap();
-            let ledger_relative_block_range =
-                get_block_range(&block_header, Ledger::Submit, block_index.clone());
+            let block_range = get_block_range(&block_header, Ledger::Submit, block_index.clone());
 
-            // loop though each tx_path and set up all the storage module indexes
             let mut prev_byte_offset = 0;
-            let mut ledger_relative_prev_chunk_offset = ledger_relative_block_range.start();
+            let mut prev_chunk_offset: LedgerChunkOffset = block_range.start();
 
+            // loop though each tx_path and add entries to the indexes in the storage modules
+            // overlapped by the tx_path's chunks
             for (tx_path, data_root) in path_pairs {
+                // Compute the tx path hash for each tx_path proof
                 let tx_path_hash = H256::from(hash_sha256(&tx_path.proof).unwrap());
 
-                // Calculate chunks in this tx path segment
+                // Calculate the number of chunks added to the ledger by this transaction
                 let tx_byte_length = tx_path.offset - prev_byte_offset;
                 let num_chunks_in_tx = (tx_byte_length / chunk_size) as u64;
 
                 // Calculate the ledger relative chunk range for this transaction
-                let ledger_relative_tx_range = ii(
-                    ledger_relative_prev_chunk_offset,
-                    ledger_relative_prev_chunk_offset + num_chunks_in_tx,
-                );
+                let tx_chunk_range =
+                    LedgerChunkRange(ii(prev_chunk_offset, prev_chunk_offset + num_chunks_in_tx));
 
                 // Retrieve the storage modules that are overlapped by this range
                 let matching_modules = get_overlapping_storage_modules(
-                    ledger_relative_tx_range,
+                    tx_chunk_range,
                     miner_address,
                     epoch_service.clone(),
                     &storage_modules,
@@ -199,48 +204,64 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                 .await
                 .unwrap();
 
-                // Add the tx_path to each of the modules indexes
-                for (module, slot_index) in matching_modules {
-                    // Range of the StorageModule in the ledger
-                    let start = slot_index as u64 * num_chunks_in_partition;
-                    let ledger_relative_module_range = ii(start, start + num_chunks_in_partition);
-
-                    // Compute a module relative tx overlap range
-                    // TODO: only ever use module relative offsets inside modules
-                    let overlap_range = ledger_relative_tx_range
-                        .intersection(&ledger_relative_module_range)
-                        .unwrap();
-
-                    // Transform the ledger relative overlap range to module relative
-                    let module_relative_chunk_range = ii(
-                        (overlap_range.start() - ledger_relative_module_range.start()) as u32,
-                        (overlap_range.end() - ledger_relative_module_range.start()) as u32,
-                    );
-
-                    if let Err(e) = module.add_tx_path_to_index(
+                // Update each of the affected StorageModules
+                for storage_module in matching_modules {
+                    // Store the tx_path_hash and its path bytes
+                    if let Err(e) = storage_module.add_tx_path_to_index(
                         tx_path_hash,
                         tx_path.proof.clone(),
-                        module_relative_chunk_range,
+                        tx_chunk_range,
                     ) {
                         error!("Failed to add tx path to index: {}", e);
                         return Err(());
                     }
-
-                    // TODO: better here for overlapping modules
-                    let start_offset = ledger_relative_prev_chunk_offset as i32;
-                    module.add_start_offset_by_data_root(data_root, start_offset);
+                    // Update the start_offset index
+                    if let Err(e) =
+                        storage_module.add_start_offset_by_data_root(data_root, tx_chunk_range)
+                    {
+                        error!("Failed to add start_offset to index: {}", e);
+                        return Err(());
+                    }
                 }
+
+                // Loop through transaction's chunks
+                for chunk_offset in 0..num_chunks_in_tx as u32 {
+                    // Get chunk from cache
+                    if let Ok(Some(chunk_info)) =
+                        cached_chunk_by_offset(&db, data_root, chunk_offset)
+                    {
+                        // Compute the ledger relative chunk_offset
+                        let ledger_offset = chunk_offset as u64 + tx_chunk_range.start();
+
+                        // Grab the correct storage module for the offset
+                        let matching_module = storage_modules.iter().find_map(|module| {
+                            module
+                                .get_storage_module_range()
+                                .ok()
+                                .filter(|range| range.contains_point(ledger_offset))
+                                .map(|_| module)
+                        });
+
+                        // Add the cached chunk to the StorageModule index and disk
+                        if let Some(storage_module) = matching_module {
+                            info!("cached_chunk found: {:?}", chunk_info.0);
+                            // TODO: This doesn't yet take into account packing
+                            // let cached_chunk = chunk_info.1;
+                            // let _ = storage_module.write_data_chunk(Chunk {
+                            //     data_root,
+                            //     data_size: chunk_size as u64,
+                            //     data_path: cached_chunk.data_path,
+                            //     bytes: cached_chunk.chunk.unwrap(),
+                            //     offset: chunk_offset,
+                            // });
+                        }
+                    }
+                }
+
                 prev_byte_offset = tx_path.offset;
-                ledger_relative_prev_chunk_offset += num_chunks_in_tx;
+                prev_chunk_offset += num_chunks_in_tx;
             }
 
-            // // loop though all the chunk_offsets added by this block
-            for i in ledger_relative_block_range.start()..=ledger_relative_block_range.end() {
-                //
-                //		- get their chunk path hash keys
-                //
-                //		- attempt to retrieve the chunk bytes from the mempool and add them to the storage module
-            }
             Ok(())
         })
     }

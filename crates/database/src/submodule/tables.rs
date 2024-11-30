@@ -1,5 +1,5 @@
 use irys_types::{
-    ingress::IngressProof, ChunkDataPath, ChunkOffset, ChunkPathHash, DataRoot, IrysBlockHeader,
+    ingress::IngressProof, ChunkDataPath, PartitionChunkOffset, ChunkPathHash, DataRoot, IrysBlockHeader,
     IrysTransactionHeader, RelativeChunkOffset, TxPath, TxPathHash, TxRelativeChunkIndex, H256,
 };
 use reth_codecs::Compact;
@@ -24,7 +24,7 @@ tables! {
     /// Maps a partition relative offset to a chunk's path hashes
     /// note: mdbx keys are always sorted, so range queries work :)
     /// TODO: use custom Compact impl for Vec<u8> so we don't have problems
-    table ChunkPathHashByOffset<Key = ChunkOffset, Value = ChunkPathHashes>;
+    table ChunkPathHashByOffset<Key = PartitionChunkOffset, Value = ChunkPathHashes>;
 
     /// Maps a chunk's data path hash to the full data path
     table ChunkDataPathByPathHash<Key = ChunkPathHash, Value = ChunkDataPath>;
@@ -43,7 +43,7 @@ tables! {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]
 /// chunk offsets
 /// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
-pub struct ChunkOffsets(pub Vec<ChunkOffset>);
+pub struct ChunkOffsets(pub Vec<PartitionChunkOffset>);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]
 /// compound value, containing the data path and tx path hashes

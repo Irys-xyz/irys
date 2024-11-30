@@ -93,11 +93,13 @@ tables! {
     /// Stores the header hashes belonging to the canonical chain.
     table IrysBlockHeaders<Key = H256, Value = CompactIrysBlockHeader>;
 
+    /// Stores the tx header headers that have been confirmed
     table IrysTxHeaders<Key = H256, Value = CompactTxHeader>;
 
+    /// Indexes the DataRoots currently in the cache
     table CachedDataRoots<Key = DataRoot, Value = CachedDataRoot>;
 
-    /// Index mapping a data root to a set of orderded-by-index index entries, which contain the chunk path hash ('chunk id')
+    /// Index mapping a data root to a set of ordered-by-index index entries, which contain the chunk path hash ('chunk id')
     table CachedChunksIndex<Key = DataRoot, Value = CachedChunkIndexEntry, SubKey = TxRelativeChunkIndex>;
     /// Table mapping a chunk path hash to a cached chunk (with data)
     table CachedChunks<Key =ChunkPathHash , Value = CachedChunk>;
