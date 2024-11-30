@@ -1,12 +1,13 @@
 use eyre::{eyre, Result};
 use irys_database::submodule::{
-    add_full_tx_path, add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
+    add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
+    add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
     create_or_open_submodule_db, get_data_path_by_offset, write_chunk_data_path,
 };
 use irys_types::{
     app_state::DatabaseProvider,
     partition::{PartitionAssignment, PartitionHash},
-    Chunk, ChunkBytes, ChunkDataPath, DataRoot, LedgerChunkOffset, LedgerChunkRange,
+    Chunk, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset, LedgerChunkRange,
     PartitionChunkOffset, PartitionChunkRange, TxPath, TxPathHash, CHUNK_SIZE,
     NUM_CHUNKS_IN_PARTITION,
 };
@@ -377,6 +378,36 @@ impl StorageModule {
                 Ok(())
             })?;
         }
+        Ok(())
+    }
+
+    /// Stores the data_path and offset lookups in the correct submodule index
+    pub fn add_data_path_to_index(
+        &self,
+        data_path_hash: ChunkPathHash,
+        data_path: ChunkDataPath,
+        ledger_offset: LedgerChunkOffset,
+    ) -> eyre::Result<()> {
+        // Convert the ledger relative offset to partition relative
+        let local_offset = self.make_offset_partition_relative(ledger_offset)?;
+
+        if local_offset < 0 {
+            return Err(eyre::eyre!("chunk offset not in storage module"));
+        }
+        let local_offset = local_offset as u32;
+
+        // Find submodule containing this chunk
+        let (interval, submodule) = self
+            .submodules
+            .get_key_value_at_point(local_offset)
+            .unwrap();
+
+        let _ = submodule.db.update(|tx| -> eyre::Result<()> {
+            add_full_data_path(tx, data_path_hash, data_path)?;
+            add_data_path_hash_to_offset_index(tx, local_offset, Some(data_path_hash))?;
+            Ok(())
+        });
+
         Ok(())
     }
 

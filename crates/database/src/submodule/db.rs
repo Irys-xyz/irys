@@ -99,6 +99,15 @@ pub fn get_full_data_path<T: DbTx>(
     Ok(tx.get::<ChunkDataPathByPathHash>(path_hash)?)
 }
 
+pub fn add_full_data_path<T: DbTxMut>(
+    tx: &T,
+    path_hash: ChunkPathHash,
+    data_path: ChunkDataPath,
+) -> eyre::Result<()> {
+    tx.put::<ChunkDataPathByPathHash>(path_hash, data_path)?;
+    Ok(())
+}
+
 pub fn get_full_tx_path<T: DbTx>(tx: &T, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> {
     Ok(tx.get::<TxPathByTxPathHash>(path_hash)?)
 }

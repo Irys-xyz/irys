@@ -239,6 +239,12 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
 
                         // Add the cached chunk to the StorageModule index and disk
                         if let Some(storage_module) = matching_module {
+                            // For now, write the data_path for the chunk offset
+                            let _ = storage_module.add_data_path_to_index(
+                                chunk_info.0.chunk_path_hash,
+                                chunk_info.1.data_path.into(),
+                                ledger_offset,
+                            );
                             info!("cached_chunk found: {:?}", chunk_info.0);
                             // TODO: This doesn't yet take into account packing
                             // let cached_chunk = chunk_info.1;
