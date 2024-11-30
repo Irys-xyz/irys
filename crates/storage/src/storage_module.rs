@@ -503,6 +503,8 @@ impl StorageModule {
         Ok(())
     }
 
+    /// Utility method asking the StorageModule to return its chunk range in
+    /// ledger relative coordinates
     pub fn get_storage_module_range(&self) -> eyre::Result<LedgerChunkRange> {
         if let Some(part_assign) = self.partition_assignment {
             if let Some(slot_index) = part_assign.slot_index {
@@ -517,6 +519,9 @@ impl StorageModule {
         }
     }
 
+    /// Internal utility function to take a ledger relative range and make it
+    /// Partition relative (relative to the partition assigned to the
+    /// StorageModule)
     fn make_range_partition_relative(
         &self,
         chunk_range: LedgerChunkRange,
@@ -527,6 +532,9 @@ impl StorageModule {
         Ok(PartitionChunkRange(ii(start as u32, end as u32)))
     }
 
+    /// Internal utility function to take a ledger relative offset and makes it
+    /// Partition relative (relative to the partition assigned to the
+    /// StorageModule)
     fn make_offset_partition_relative(&self, start_offset: LedgerChunkOffset) -> eyre::Result<i32> {
         let storage_module_range = self.get_storage_module_range()?;
         let start = start_offset as i64 - storage_module_range.start() as i64;
