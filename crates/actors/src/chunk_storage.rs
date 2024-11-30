@@ -7,10 +7,8 @@ use irys_storage::{ii, InclusiveInterval, StorageModule};
 use irys_types::{
     app_state::DatabaseProvider, Address, Chunk, DataRoot, Interval, IrysBlockHeader,
     IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, TransactionLedger, H256,
-    NUM_PARTITIONS_PER_SLOT,
 };
 use openssl::sha;
-use reth::network::cache;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
@@ -31,7 +29,6 @@ use crate::{
 /// - Manages storage state transitions
 #[derive(Debug)]
 pub struct ChunkStorageActor {
-    pub miner_address: Address,
     /// Global block index for block bounds/offset tracking
     pub block_index: Arc<RwLock<BlockIndex<Initialized>>>,
     pub storage_config: Arc<StorageConfig>,
@@ -47,7 +44,6 @@ impl Actor for ChunkStorageActor {
 impl ChunkStorageActor {
     /// Creates a new chunk storage actor
     pub fn new(
-        miner_address: Address,
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         storage_config: Arc<StorageConfig>,
         epoch_service_addr: Addr<EpochServiceActor>,
@@ -55,7 +51,6 @@ impl ChunkStorageActor {
         db: DatabaseProvider,
     ) -> Self {
         Self {
-            miner_address,
             block_index,
             storage_config,
             epoch_service_addr,
@@ -168,7 +163,7 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
         let epoch_service = self.epoch_service_addr.clone();
         let block_index = self.block_index.clone();
         let chunk_size = self.storage_config.chunk_size as usize;
-        let miner_address = self.miner_address;
+        let miner_address = self.storage_config.miner_address;
         let storage_modules = self.storage_modules.clone();
         let db = self.db.clone();
 
