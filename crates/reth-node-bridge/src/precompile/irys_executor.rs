@@ -111,9 +111,8 @@ impl IrysEvmConfig {
     {
         // first we need the evm spec id, which determines the precompiles
         let spec_id = handler.cfg.spec_id;
-        let spec_id2 = PrecompileSpecId::from_spec_id(spec_id);
-        let mut loaded_precompiles: ContextPrecompiles<DB> = ContextPrecompiles::new(spec_id2);
-        // loaded_precompiles.extend(precompiles);
+        let mut loaded_precompiles: ContextPrecompiles<DB> =
+            ContextPrecompiles::new(PrecompileSpecId::from_spec_id(spec_id));
 
         let wrapped_precompiles: Vec<(Address, ContextPrecompile<DB>)> = precompiles
             .iter()
