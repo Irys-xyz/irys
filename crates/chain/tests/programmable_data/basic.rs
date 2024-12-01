@@ -21,7 +21,7 @@ use reth_primitives::{irys_primitives::range_specifier::RangeSpecifier, GenesisA
 use tokio::time::sleep;
 use tracing::info;
 use IrysProgrammableDataBasic::ProgrammableDataArgs;
-// use IrysProgrammableDataBasic::PdArgs;
+
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
 sol!(

@@ -11,7 +11,7 @@ use std::{
 
 use clap::{command, Args, Parser};
 use irys_config::IrysNodeConfig;
-use irys_types::{app_state::DatabaseProvider, reth_provider::IrysRethProvider, H256};
+use irys_types::reth_provider::IrysRethProvider;
 use reth::{
     chainspec::EthereumChainSpecParser,
     cli::{Cli, Commands},
@@ -41,7 +41,6 @@ use reth_transaction_pool::{
     blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
     EthTransactionValidator, Pool, TransactionValidationTaskExecutor,
 };
-use tokio::time::sleep;
 use tracing::info;
 
 use crate::{
@@ -91,7 +90,7 @@ pub type RethNode = NodeAdapter<
 >;
 
 // reth node with the standard EVM
-pub type RethNode2 = NodeAdapter<
+pub type RethNodeStandard = NodeAdapter<
     FullNodeTypesAdapter<
         NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
         BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,

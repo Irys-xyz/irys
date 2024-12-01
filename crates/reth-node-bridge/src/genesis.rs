@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use strum::IntoEnumIterator;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 pub struct ClearViewer<'a, DB: Database> {
     db: &'a DB,
@@ -53,6 +53,7 @@ pub fn add_genesis_block(
     ext: &IrysExt,
     info: GenesisInfo,
 ) -> RpcResult<Genesis> {
+    warn!("genesis reloading via reth RPC is deprecated");
     let GenesisInfo {
         accounts,
         shadows,
@@ -217,12 +218,6 @@ pub fn add_genesis_block(
     // the reload operation doesn't wait for the reponse response of this method/RPC call to finish, it *does* have a 500ms delay, but that might not be
     // sufficient in certain conditions
     let _res = sender.send(ReloadPayload::ReloadConfig(chain.clone()));
-    // match &v {
-    //     Some(tx) => {
-    //       ;
-    //     }
-    //     None => (),
-    // }
 
     Ok(chain.genesis)
 }

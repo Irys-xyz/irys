@@ -44,8 +44,6 @@ alloy-genesis = { path = "./ext/alloy/crates/genesis", default-features = false 
 alloy-primitives = { path = "./ext/alloy-core/crates/primitives", features = [
     "arbitrary",
 ] }
-parking_lot = "0.12"
-schnellru = "0.2"
 rand = "0.8.5"
 hex = "0.4"
 alloy-rlp = "0.3.4"

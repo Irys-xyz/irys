@@ -21,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
-use tracing::info;
+use tracing::{debug, info};
 
 type SubmodulePath = String;
 
@@ -563,6 +563,7 @@ impl StorageModule {
 /// Used primarily for testing storage initialization
 #[allow(dead_code)]
 pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleInfo>) -> Result<()> {
+    debug!(target: "irys::storage_module", base_path=?base_path, "Initializing storage files" );
     // Create base storage directory if it doesn't exist
     fs::create_dir_all(base_path.clone())?;
 
