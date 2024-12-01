@@ -1,5 +1,5 @@
 use irys_types::{
-    ChunkOffset, Compact, TransactionLedger, H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT,
+    PartitionChunkOffset, Compact, TransactionLedger, H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT,
     SUBMIT_LEDGER_EPOCH_LENGTH,
 };
 use serde::{Deserialize, Serialize};
@@ -336,7 +336,7 @@ impl IndexMut<Ledger> for Vec<TransactionLedger> {
 /// Gets a ledger-relative slot index from a ledger-relative chunk offset
 pub fn get_slot_index_by_offset(
     chunks_per_partition: u32,
-    ledger_relative_offset: ChunkOffset,
+    ledger_relative_offset: PartitionChunkOffset,
 ) -> u32 {
     // "div_floor"
     ledger_relative_offset / chunks_per_partition

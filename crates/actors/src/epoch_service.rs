@@ -1,14 +1,14 @@
 use actix::{Actor, Context, Handler, Message, MessageResponse};
 use eyre::{Error, Result};
-use irys_config::chain::StorageConfig;
 use irys_database::data_ledger::*;
-use irys_storage::{ii, StorageModuleInfo};
+use irys_storage::{ii, InclusiveInterval, StorageModuleInfo};
 use irys_types::{
-    partition::PartitionHash, Address, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
+    partition::{PartitionAssignment, PartitionHash},
+    IrysBlockHeader, LedgerChunkRange, StorageConfig, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
 };
 use openssl::sha;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tracing::info;
@@ -49,8 +49,6 @@ pub struct EpochServiceActor {
     pub capacity_partitions: HashMap<PartitionHash, PartitionAssignment>,
     /// Sequential list of activated partition hashes
     pub all_active_partitions: Vec<PartitionHash>,
-    /// Identifier of this mining node
-    pub miner_address: Address,
     /// Current partition & ledger parameters
     pub config: EpochServiceConfig,
 }
@@ -132,7 +130,7 @@ impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
     }
 }
 
-/// Retrieve partition assignemt (ledger and its relative offet) for a partition
+/// Retrieve partition assignment (ledger and its relative offset) for a partition
 #[derive(Message, Debug)]
 #[rtype(result = "Option<PartitionAssignment>")]
 pub struct GetPartitionAssignmentMessage(pub PartitionHash);
@@ -152,22 +150,64 @@ impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
     }
 }
 
-/// Temporary struct tracking partition assignments to miners - will be moved to database
-#[derive(Debug, PartialEq, MessageResponse, Clone, Copy)]
-pub struct PartitionAssignment {
-    /// Hash of the partition
-    pub partition_hash: PartitionHash,
-    /// Address of the miner pledged to store it
-    pub miner_address: Address,
-    /// If assigned to a ledger, the ledger number
-    pub ledger_num: Option<u64>,
-    /// If assigned to a ledger, the index in the ledger
-    pub slot_index: Option<usize>,
+/// Returns a vec of PartitionAssignments that overlap the provided chunk_range
+#[derive(Message, Debug)]
+#[rtype(result = "Vec<PartitionAssignment>")]
+pub struct GetOverlappingPartitionsMessage {
+    /// The ledger (Submit/Publish) being inspected
+    pub ledger: Ledger,
+    /// The ledger relative chunk range for the query
+    pub chunk_range: LedgerChunkRange,
+}
+
+impl Handler<GetOverlappingPartitionsMessage> for EpochServiceActor {
+    type Result = Vec<PartitionAssignment>;
+
+    fn handle(
+        &mut self,
+        msg: GetOverlappingPartitionsMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        let ledger = msg.ledger;
+        let chunk_range = msg.chunk_range;
+
+        // Cache config and get read lock on ledgers
+        let num_chunks_in_partition = self.config.storage_config.num_chunks_in_partition;
+        let ledgers = self.ledgers.read().unwrap();
+        let ledger_slots = ledgers[ledger].get_slots();
+
+        // Enumerate the leger slots and find any that overlap the chunk_range
+        let slots: Vec<_> = ledger_slots
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| {
+                let slot_start = *idx as u64 * num_chunks_in_partition;
+                let slot_end = slot_start + num_chunks_in_partition;
+                chunk_range.overlaps(&ii(slot_start, slot_end))
+            })
+            .map(|(_, slot)| slot)
+            .collect();
+
+        // Get all the partition hashes from the overlapping slots
+        let unique_slot_partition_hashes: HashSet<H256> = slots
+            .iter()
+            .flat_map(|slot| &slot.partitions)
+            .copied()
+            .collect();
+
+        // Finally retrieve the PartitionAssignments for those partition hashes
+        let matching_assignments: Vec<_> = unique_slot_partition_hashes
+            .iter()
+            .filter_map(|hash| self.data_partitions.get(hash).cloned())
+            .collect();
+
+        matching_assignments
+    }
 }
 
 impl EpochServiceActor {
     /// Create a new instance of the epoch service actor
-    pub fn new(miner_address: Address, config: Option<EpochServiceConfig>) -> Self {
+    pub fn new(config: Option<EpochServiceConfig>) -> Self {
         let config = match config {
             Some(cfg) => cfg,
             // If no config was provided, use the default protocol parameters
@@ -180,7 +220,6 @@ impl EpochServiceActor {
             data_partitions: HashMap::new(),
             capacity_partitions: HashMap::new(),
             all_active_partitions: Vec::new(),
-            miner_address,
             config,
         }
     }
@@ -383,7 +422,7 @@ impl EpochServiceActor {
                 *partition_hash,
                 PartitionAssignment {
                     partition_hash: *partition_hash,
-                    miner_address: self.miner_address.clone(),
+                    miner_address: self.config.storage_config.miner_address.clone(),
                     ledger_num: None,
                     slot_index: None,
                 },
@@ -478,7 +517,7 @@ impl EpochServiceActor {
             .enumerate()
             .map(|(idx, partition)| StorageModuleInfo {
                 module_num: idx,
-                partition_hash: Some(partition.clone()),
+                partition_assignment: Some(*self.data_partitions.get(partition).unwrap()),
                 submodules: vec![(ii(0, num_part_chunks), format!("submodule_{}", idx))],
             })
             .collect::<Vec<_>>();
@@ -493,7 +532,7 @@ impl EpochServiceActor {
             .enumerate()
             .map(|(idx, partition)| StorageModuleInfo {
                 module_num: idx_start + idx,
-                partition_hash: Some(partition.clone()),
+                partition_assignment: Some(*self.data_partitions.get(partition).unwrap()),
                 submodules: vec![(
                     ii(0, num_part_chunks),
                     format!("submodule_{}", idx_start + idx),
@@ -511,7 +550,7 @@ impl EpochServiceActor {
         let idx = module_infos.len();
         let cap_info = StorageModuleInfo {
             module_num: idx,
-            partition_hash: Some(cap_part.clone()),
+            partition_assignment: Some(*self.capacity_partitions.get(cap_part).unwrap()),
             submodules: vec![(ii(0, num_part_chunks), format!("submodule_{}", idx))],
         };
 
@@ -567,6 +606,8 @@ impl SimpleRNG {
 //------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    use irys_types::Address;
+
     use super::*;
 
     #[actix::test]
@@ -576,9 +617,9 @@ mod tests {
         genesis_block.height = 0;
 
         // Create epoch service with random miner address
-        let miner_address = Address::random();
         let config = EpochServiceConfig::default();
-        let mut epoch_service = EpochServiceActor::new(miner_address, Some(config.clone()));
+        let mut epoch_service = EpochServiceActor::new(Some(config.clone()));
+        let miner_address = config.storage_config.miner_address;
 
         // Process genesis message directly instead of through actor system
         // This allows us to inspect the actor's state after processing
@@ -707,11 +748,12 @@ mod tests {
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_in_slot: 1,
+            miner_address: Address::random(),
+            min_writes_before_sync: 1,
         };
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;
 
-        // Create epoch service with random miner address
-        let miner_address = Address::random();
+        // Create epoch service
         let config = EpochServiceConfig {
             capacity_scalar: 100,
             num_blocks_in_epoch: 100,
@@ -719,7 +761,7 @@ mod tests {
         };
         let num_blocks_in_epoch = config.num_blocks_in_epoch;
 
-        let mut epoch_service = EpochServiceActor::new(miner_address, Some(config));
+        let mut epoch_service = EpochServiceActor::new(Some(config));
 
         // Process genesis message directly instead of through actor system
         // This allows us to inspect the actor's state after processing

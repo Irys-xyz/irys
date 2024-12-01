@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
 };
 
-use nodit::{Interval, NoditMap};
+use nodit::{InclusiveInterval, Interval, IntervalType, NoditMap};
 use serde::{Deserialize, Serialize};
 
 use crate::CHUNK_SIZE;
@@ -11,6 +11,82 @@ use crate::CHUNK_SIZE;
 pub const MEGABYTE: usize = 1024 * 1024;
 pub const GIGABYTE: usize = MEGABYTE * 1024;
 pub const TERABYTE: usize = GIGABYTE * 1024;
+
+/// Partition relative chunk offsets
+pub type PartitionChunkOffset = u32;
+
+/// Partition relative chunk interval/ranges
+#[derive(Debug, Copy, Clone)]
+pub struct PartitionChunkRange(pub Interval<PartitionChunkOffset>);
+
+impl Deref for PartitionChunkRange {
+    type Target = Interval<PartitionChunkOffset>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Interval<u32>> for PartitionChunkRange {
+    fn from(interval: Interval<PartitionChunkOffset>) -> Self {
+        Self(interval)
+    }
+}
+
+impl InclusiveInterval<u32> for PartitionChunkRange {
+    fn start(&self) -> u32 {
+        self.0.start()
+    }
+
+    fn end(&self) -> u32 {
+        self.0.end()
+    }
+}
+
+/// Ledger Relative chunk offsets
+pub type LedgerChunkOffset = u64;
+
+/// Ledger Relative chunk interval/ranges
+#[derive(Debug, Copy, Clone)]
+pub struct LedgerChunkRange(pub Interval<LedgerChunkOffset>);
+
+impl Deref for LedgerChunkRange {
+    type Target = Interval<LedgerChunkOffset>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Interval<u64>> for LedgerChunkRange {
+    fn from(interval: Interval<LedgerChunkOffset>) -> Self {
+        Self(interval)
+    }
+}
+
+/// Add impl Into<Interval<u64>> for owned conversion
+impl From<LedgerChunkRange> for Interval<u64> {
+    fn from(range: LedgerChunkRange) -> Self {
+        range.0
+    }
+}
+
+// Add Deref implementation to convert to Interval<u64>
+impl AsRef<Interval<u64>> for LedgerChunkRange {
+    fn as_ref(&self) -> &Interval<u64> {
+        &self.0
+    }
+}
+
+impl InclusiveInterval<u64> for LedgerChunkRange {
+    fn start(&self) -> u64 {
+        self.0.start()
+    }
+
+    fn end(&self) -> u64 {
+        self.0.end()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Storage provider config

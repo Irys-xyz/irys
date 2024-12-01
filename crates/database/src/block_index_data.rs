@@ -6,6 +6,7 @@ use irys_config::IrysNodeConfig;
 use irys_types::H256;
 use std::fs::{self, remove_file, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 
 /// This struct represents the `Uninitialized` block_index type state.
@@ -210,6 +211,20 @@ impl LedgerIndexItem {
         item.tx_root = H256::from_slice(&bytes[8..40]);
 
         item
+    }
+}
+
+impl Index<Ledger> for Vec<LedgerIndexItem> {
+    type Output = LedgerIndexItem;
+
+    fn index(&self, ledger: Ledger) -> &Self::Output {
+        &self[ledger as usize]
+    }
+}
+
+impl IndexMut<Ledger> for Vec<LedgerIndexItem> {
+    fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
+        &mut self[ledger as usize]
     }
 }
 

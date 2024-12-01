@@ -232,14 +232,14 @@ impl Handler<BlockConfirmedMessage> for BlockProducerActor {
     }
 }
 
-/// Currently identical to [BlockConfirmedMessage] and acts as a placeholder
-/// for when the node will maintain a block tree of confirmed blocks and
-/// produce finalized blocks for the canonical chain when enough confirmations
-/// have occurred. Chunks are moved from the in-memory index to the storage
-/// modules when a block is finalized.
+/// Similar to [BlockConfirmedMessage] (but takes ownership of parameters) and
+/// acts as a placeholder for when the node will maintain a block tree of
+/// confirmed blocks and produce finalized blocks for the canonical chain when
+///  enough confirmations have occurred. Chunks are moved from the in-memory
+/// index to the storage modules when a block is finalized.
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
-pub struct BlockFinalizedMessage(
-    pub Arc<IrysBlockHeader>,
-    pub Arc<Vec<IrysTransactionHeader>>,
-);
+#[rtype(result = "Result<(), ()>")]
+pub struct BlockFinalizedMessage {
+    pub block_header: IrysBlockHeader,
+    pub txs: Vec<IrysTransactionHeader>,
+}

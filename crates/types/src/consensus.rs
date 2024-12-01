@@ -30,3 +30,4 @@ pub const CAPACITY_SCALAR: u64 = 100; // Scaling factor for the capacity project
 pub const NUM_BLOCKS_IN_EPOCH: u64 = 100;
 pub const SUBMIT_LEDGER_EPOCH_LENGTH: u64 = 5;
 pub const NUM_PARTITIONS_PER_SLOT: u64 = 1;
+pub const NUM_WRITES_BEFORE_SYNC: u64 = 5;

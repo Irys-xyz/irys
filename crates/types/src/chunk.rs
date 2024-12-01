@@ -58,7 +58,9 @@ pub type DataChunks = Vec<Vec<u8>>;
 /// the Block relative chunk offset
 pub type BlockRelativeChunkOffset = u64;
 
-pub type ChunkOffset = u32;
+/// Used to track chunk offset ranges that span storage modules or submodules
+///  a negative offset means the range began in a prior (sub)module
+pub type RelativeChunkOffset = i32;
 
 /// A chunks's data path
 pub type ChunkDataPath = Vec<u8>;
