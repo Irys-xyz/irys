@@ -1,75 +1,97 @@
-//! This example shows how to implement a node with a custom EVM that uses a stateful precompile
-
-#![cfg_attr(not(test), warn(unused_crate_dependencies))]
-
-use alloy_genesis::Genesis;
 use alloy_primitives::{Address, Bytes, U256};
-use parking_lot::RwLock;
+use irys_types::reth_provider::IrysRethProvider;
 use reth::{
     api::NextBlockEnvAttributes,
-    builder::{components::ExecutorBuilder, BuilderContext, NodeBuilder},
+    builder::{
+        components::{ExecutorBuilder, PayloadServiceBuilder},
+        BuilderContext,
+    },
+    payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
     primitives::revm_primitives::{BlockEnv, CfgEnvWithHandlerCfg, Env, PrecompileResult, TxEnv},
     revm::{
         handler::register::EvmHandler,
         inspector_handle_register,
         precompile::{Precompile, PrecompileSpecId},
-        ContextPrecompile, ContextPrecompiles, Database, Evm, EvmBuilder, GetInspector,
+        ContextPrecompiles, Database, Evm, EvmBuilder, GetInspector,
     },
-    tasks::TaskManager,
+    rpc::types::engine::PayloadAttributes,
+    transaction_pool::TransactionPool,
 };
-use reth_chainspec::{Chain, ChainSpec};
-use reth_node_api::{ConfigureEvm, ConfigureEvmEnv, FullNodeTypes, NodeTypes};
-use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
-use reth_node_ethereum::{node::EthereumAddOns, EthEvmConfig, EthExecutorProvider, EthereumNode};
-use reth_primitives::{
-    revm_primitives::{SpecId, StatefulPrecompileMut},
-    Header, TransactionSigned,
+use reth_chainspec::ChainSpec;
+use reth_node_api::{
+    ConfigureEvm, ConfigureEvmEnv, FullNodeTypes, NodeTypes, NodeTypesWithEngine, PayloadTypes,
 };
-use reth_tracing::{RethTracer, Tracer};
-use revm::precompile::{u64_to_address, PrecompileWithAddress};
-use revm_primitives::PrecompileOutput;
-use schnellru::{ByLength, LruMap};
-use std::{collections::HashMap, sync::Arc};
+use reth_node_ethereum::{node::EthereumPayloadBuilder, EthEvmConfig, EthExecutorProvider};
+use reth_primitives::{Header, TransactionSigned};
+use revm::{precompile::u64_to_address, ContextPrecompile};
+use revm_primitives::StatefulPrecompile;
+use std::sync::Arc;
+use tracing::info;
 
 use crate::precompile::programmable_data::PROGRAMMABLE_DATA_PRECOMPILE;
 
-/// Type alias for the LRU cache used within the [`PrecompileCache`].
-type PrecompileLRUCache = LruMap<(Bytes, u64), PrecompileResult>;
+// TODO: sometimes the EVM is initialized with spec ID CANCUN, and sometimes with MERGE
+// for now it doesn't matter much, but we do want to fix it eventually.
+// edit: I think it's this: https://github.com/Irys-xyz/reth/blob/fabcd84e06a8e51b3bfb51c390ea136de9e5d3e2/crates/evm/src/lib.rs#L59
+// for some reason the spec id is passed in after init
+// but doing so doesn't update the precompiles..
 
-/// Type alias for the thread-safe `Arc<RwLock<_>>` wrapper around [`PrecompileCache`].
-type CachedPrecompileResult = Arc<RwLock<PrecompileLRUCache>>;
+type Precompiles = Vec<CustomPrecompileWithAddress>;
 
-/// A cache for precompile inputs / outputs.
-///
-/// This assumes that the precompile is a standard precompile, as in `StandardPrecompileFn`, meaning
-/// its inputs are only `(Bytes, u64)`.
-///
-/// NOTE: This does not work with "context stateful precompiles", ie `ContextStatefulPrecompile` or
-/// `ContextStatefulPrecompileMut`. They are explicitly banned.
-#[derive(Debug, Default)]
-pub struct PrecompileCache {
-    /// Caches for each precompile input / output.
-    cache: HashMap<(Address, SpecId), CachedPrecompileResult>,
+#[derive(Clone, Debug)]
+pub struct CustomPrecompileWithAddress(pub Address, pub PrecompileFn);
+
+impl From<(Address, PrecompileFn)> for CustomPrecompileWithAddress {
+    fn from(value: (Address, PrecompileFn)) -> Self {
+        CustomPrecompileWithAddress(value.0, value.1)
+    }
 }
 
-type Precompiles = Vec<PrecompileWithAddress>;
+impl From<CustomPrecompileWithAddress> for (Address, PrecompileFn) {
+    fn from(value: CustomPrecompileWithAddress) -> Self {
+        (value.0, value.1)
+    }
+}
+
+impl CustomPrecompileWithAddress {
+    /// Returns reference of address.
+    #[inline]
+    pub fn address(&self) -> &Address {
+        &self.0
+    }
+
+    /// Returns reference of precompile.
+    #[inline]
+    pub fn precompile(&self) -> &PrecompileFn {
+        &self.1
+    }
+}
+
+#[derive(Debug, Clone)]
+// provides context to the precompile
+pub struct PrecompileStateProvider {
+    pub provider: IrysRethProvider,
+}
 
 /// Custom EVM configuration
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct IrysEvmConfig {
     inner: EthEvmConfig,
-    precompile_cache: Arc<RwLock<PrecompileCache>>,
+    precompile_state_provider: PrecompileStateProvider,
     precompiles: Precompiles,
 }
 
 impl IrysEvmConfig {
     /// Creates a new instance.
-    /// TODO @JesseTheRobot double check how the cache works
-    pub fn new(chain_spec: Arc<ChainSpec>, precompiles: Precompiles) -> Self {
+    pub fn new(
+        chain_spec: Arc<ChainSpec>,
+        precompile_state_provider: PrecompileStateProvider,
+        precompiles: Precompiles,
+    ) -> Self {
         Self {
             inner: EthEvmConfig::new(chain_spec),
-            precompile_cache: Default::default(),
+            precompile_state_provider,
             precompiles,
         }
     }
@@ -82,81 +104,67 @@ impl IrysEvmConfig {
     /// This will use the default mainnet precompiles and wrap them with a cache.
     pub fn set_precompiles<EXT, DB>(
         handler: &mut EvmHandler<EXT, DB>,
-        cache: Arc<RwLock<PrecompileCache>>,
+        precompile_state_provider: PrecompileStateProvider,
         precompiles: Precompiles,
     ) where
         DB: Database,
     {
         // first we need the evm spec id, which determines the precompiles
         let spec_id = handler.cfg.spec_id;
+        let spec_id2 = PrecompileSpecId::from_spec_id(spec_id);
+        let mut loaded_precompiles: ContextPrecompiles<DB> = ContextPrecompiles::new(spec_id2);
+        // loaded_precompiles.extend(precompiles);
 
-        let mut loaded_precompiles: ContextPrecompiles<DB> =
-            ContextPrecompiles::new(PrecompileSpecId::from_spec_id(spec_id));
-        loaded_precompiles.extend(precompiles);
+        let wrapped_precompiles: Vec<(Address, ContextPrecompile<DB>)> = precompiles
+            .iter()
+            .map(|pwithaddr| {
+                Self::wrap_precompile::<DB>(pwithaddr.clone(), precompile_state_provider.clone())
+            })
+            .collect();
 
-        for (address, precompile) in loaded_precompiles.to_mut().iter_mut() {
-            // get or insert the cache for this address / spec
-            let mut cache = cache.write();
-            let cache = cache
-                .cache
-                .entry((*address, spec_id))
-                .or_insert(Arc::new(RwLock::new(LruMap::new(ByLength::new(1024)))));
-
-            *precompile = Self::wrap_precompile(precompile.clone(), cache.clone());
-        }
+        info!("extending with {} precompiles", &wrapped_precompiles.len());
+        loaded_precompiles.extend(wrapped_precompiles);
 
         // install the precompiles
         handler.pre_execution.load_precompiles = Arc::new(move || loaded_precompiles.clone());
     }
 
-    /// Given a [`ContextPrecompile`] and cache for a specific precompile, create a new precompile
-    /// that wraps the precompile with the cache.
+    /// Given a [`CustomPrecompileWithAddress`] and cache for a specific precompile, create a new precompile
+    /// that wraps the precompile with the provider.
     fn wrap_precompile<DB>(
-        precompile: ContextPrecompile<DB>,
-        cache: Arc<RwLock<LruMap<(Bytes, u64), PrecompileResult>>>,
-    ) -> ContextPrecompile<DB>
+        precompile: CustomPrecompileWithAddress,
+        precompile_state_provider: PrecompileStateProvider,
+    ) -> (Address, ContextPrecompile<DB>)
     where
         DB: Database,
     {
-        let ContextPrecompile::Ordinary(precompile) = precompile else {
-            // context stateful precompiles are not supported, due to lifetime issues or skill
-            // issues
-            panic!("precompile is not ordinary");
-        };
-
         let wrapped = WrappedPrecompile {
-            precompile,
-            cache: cache.clone(),
+            precompile: precompile.1,
+            precompile_state_provider,
         };
 
-        ContextPrecompile::Ordinary(Precompile::StatefulMut(Box::new(wrapped)))
+        (
+            precompile.0,
+            ContextPrecompile::Ordinary(Precompile::Stateful(Arc::new(wrapped))),
+        )
     }
 }
+
+pub type PrecompileFn = fn(&Bytes, u64, &Env, &PrecompileStateProvider) -> PrecompileResult;
 
 /// A custom precompile that contains the cache and precompile it wraps.
 #[derive(Clone)]
 pub struct WrappedPrecompile {
     /// The precompile to wrap.
-    precompile: Precompile,
+    precompile: PrecompileFn,
     /// The cache to use.
-    cache: Arc<RwLock<LruMap<(Bytes, u64), PrecompileResult>>>,
+    pub precompile_state_provider: PrecompileStateProvider,
 }
 
-impl StatefulPrecompileMut for WrappedPrecompile {
-    fn call_mut(&mut self, bytes: &Bytes, gas_price: u64, _env: &Env) -> PrecompileResult {
-        let mut cache = self.cache.write();
-        let key = (bytes.clone(), gas_price);
-
-        // get the result if it exists
-        if let Some(result) = cache.get(&key) {
-            return result.clone();
-        }
-
-        // call the precompile if cache miss
-        let output = self.precompile.call(bytes, gas_price, _env);
-        cache.insert(key, output.clone());
-
-        output
+impl StatefulPrecompile for WrappedPrecompile {
+    // wrapper so it calls it like a normal precompile
+    fn call(&self, bytes: &Bytes, gas_price: u64, env: &Env) -> PrecompileResult {
+        (self.precompile)(bytes, gas_price, env, &self.precompile_state_provider)
     }
 }
 
@@ -200,42 +208,73 @@ impl ConfigureEvm for IrysEvmConfig {
     type DefaultExternalContext<'a> = ();
 
     fn evm<DB: Database>(&self, db: DB) -> Evm<'_, Self::DefaultExternalContext<'_>, DB> {
-        let new_cache = self.precompile_cache.clone();
         EvmBuilder::default()
             .with_db(db)
             // add additional precompiles
             .append_handler_register_box(Box::new(move |handler| {
-                IrysEvmConfig::set_precompiles(handler, new_cache.clone(), self.precompiles.clone())
+                IrysEvmConfig::set_precompiles(
+                    handler,
+                    self.precompile_state_provider.clone(),
+                    self.precompiles.clone(),
+                )
             }))
             .build()
     }
+
+    fn default_external_context<'a>(&self) -> Self::DefaultExternalContext<'a> {}
+
+    // // custom for always-on tracing
+    // type DefaultExternalContext<'a> = TracerEip3155;
+
+    // fn evm<DB: Database>(&self, db: DB) -> Evm<'_, TracerEip3155, DB> {
+    //     let inspector = self.default_external_context();
+    //     EvmBuilder::default()
+    //         .with_db(db)
+    //         .with_external_context(inspector)
+    //         // add additional precompiles
+    //         .append_handler_register_box(Box::new(move |handler| {
+    //             IrysEvmConfig::set_precompiles(
+    //                 handler,
+    //                 self.precompile_state_provider.clone(),
+    //                 self.precompiles.clone(),
+    //             )
+    //         }))
+    //         .append_handler_register(inspector_handle_register)
+    //         .build()
+    // }
+
+    // fn default_external_context<'a>(&self) -> Self::DefaultExternalContext<'a> {
+    //     TracerEip3155::new(Box::new(stderr())).without_summary()
+    // }
+    // // end of custom for always-on tracing
 
     fn evm_with_inspector<DB, I>(&self, db: DB, inspector: I) -> Evm<'_, I, DB>
     where
         DB: Database,
         I: GetInspector<DB>,
     {
-        let new_cache = self.precompile_cache.clone();
         EvmBuilder::default()
             .with_db(db)
             .with_external_context(inspector)
             // add additional precompiles
             .append_handler_register_box(Box::new(move |handler| {
-                IrysEvmConfig::set_precompiles(handler, new_cache.clone(), self.precompiles.clone())
+                IrysEvmConfig::set_precompiles(
+                    handler,
+                    self.precompile_state_provider.clone(),
+                    self.precompiles.clone(),
+                )
             }))
             .append_handler_register(inspector_handle_register)
             .build()
     }
-
-    fn default_external_context<'a>(&self) -> Self::DefaultExternalContext<'a> {}
 }
 
 /// Builds a regular ethereum block executor that uses the custom EVM.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct IrysExecutorBuilder {
     /// The precompile cache to use for all executors.
-    precompile_cache: Arc<RwLock<PrecompileCache>>,
+    pub precompile_state_provider: PrecompileStateProvider,
 }
 
 impl<Node> ExecutorBuilder<Node> for IrysExecutorBuilder
@@ -247,11 +286,15 @@ where
 
     async fn build_evm(
         self,
+
         ctx: &BuilderContext<Node>,
     ) -> eyre::Result<(Self::EVM, Self::Executor)> {
+        let precompile_state_provider = PrecompileStateProvider {
+            provider: ctx.irys_ext.clone().unwrap().provider,
+        };
         let evm_config = IrysEvmConfig {
             inner: EthEvmConfig::new(ctx.chain_spec()),
-            precompile_cache: self.precompile_cache.clone(),
+            precompile_state_provider,
             precompiles: irys_precompiles(),
         };
         Ok((
@@ -261,12 +304,48 @@ where
     }
 }
 
-// reserve space for any future eth precompiles
-const BASE_PRECOMPILE_OFFSET: u64 = 1337;
+/// Builds a regular ethereum block executor that uses the custom EVM.
+#[derive(Debug, Default, Clone)]
+#[non_exhaustive]
+pub struct IrysPayloadBuilder {
+    inner: EthereumPayloadBuilder,
+}
+
+impl<Types, Node, Pool> PayloadServiceBuilder<Node, Pool> for IrysPayloadBuilder
+where
+    Types: NodeTypesWithEngine<ChainSpec = ChainSpec>,
+    Node: FullNodeTypes<Types = Types>,
+    Pool: TransactionPool + Unpin + 'static,
+    Types::Engine: PayloadTypes<
+        BuiltPayload = EthBuiltPayload,
+        PayloadAttributes = PayloadAttributes,
+        PayloadBuilderAttributes = EthPayloadBuilderAttributes,
+    >,
+{
+    async fn spawn_payload_service(
+        self,
+        ctx: &BuilderContext<Node>,
+        pool: Pool,
+    ) -> eyre::Result<reth::payload::PayloadBuilderHandle<Types::Engine>> {
+        let precompile_state_provider = PrecompileStateProvider {
+            provider: ctx.irys_ext.clone().unwrap().provider,
+        };
+        let evm_config = IrysEvmConfig {
+            inner: EthEvmConfig::new(ctx.chain_spec()),
+            precompile_state_provider,
+            precompiles: irys_precompiles(),
+        };
+
+        self.inner.spawn(evm_config, ctx, pool)
+    }
+}
 
 pub fn irys_precompiles() -> Precompiles {
     vec![PROGRAMMABLE_DATA_PRECOMPILE]
 }
+
+// reserve space for any future eth precompiles
+const BASE_PRECOMPILE_OFFSET: u64 = 1337;
 
 #[repr(u64)]
 pub enum IrysPrecompileOffsets {
@@ -284,39 +363,3 @@ impl Into<Address> for IrysPrecompileOffsets {
         self.to_address()
     }
 }
-
-// #[tokio::main]
-// async fn main() -> eyre::Result<()> {
-//     let _guard = RethTracer::new().init()?;
-
-//     let tasks = TaskManager::current();
-
-//     // create a custom chain spec
-//     let spec = ChainSpec::builder()
-//         .chain(Chain::mainnet())
-//         .genesis(Genesis::default())
-//         .london_activated()
-//         .paris_activated()
-//         .shanghai_activated()
-//         .cancun_activated()
-//         .build();
-
-//     let node_config = NodeConfig::test()
-//         .with_rpc(RpcServerArgs::default().with_http())
-//         .with_chain(spec);
-
-//     let handle = NodeBuilder::new(node_config)
-//         .testing_node(tasks.executor())
-//         // configure the node with regular ethereum types
-//         .with_types::<EthereumNode>()
-//         // use default ethereum components but with our executor
-//         .with_components(EthereumNode::components().executor(MyExecutorBuilder::default()))
-//         .with_add_ons(EthereumAddOns::default())
-//         .launch()
-//         .await
-//         .unwrap();
-
-//     println!("Node started");
-
-//     handle.node_exit_future.await
-// }

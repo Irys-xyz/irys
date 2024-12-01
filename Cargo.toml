@@ -46,7 +46,6 @@ alloy-primitives = { path = "./ext/alloy-core/crates/primitives", features = [
 ] }
 parking_lot = "0.12"
 schnellru = "0.2"
-
 rand = "0.8.5"
 hex = "0.4"
 alloy-rlp = "0.3.4"
@@ -54,6 +53,8 @@ alloy-rpc-types = { path = "./ext/alloy/crates/rpc-types" }
 alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine", features = [
     "serde",
 ] }
+
+alloy-rpc-types-trace = { path = "./ext/alloy/crates/rpc-types-trace" }
 reth-e2e-test-utils = { path = "./ext/reth/crates/e2e-test-utils" }
 alloy-serde = { path = "./ext/alloy/crates/serde", default-features = false }
 alloy-signer-local = { path = "./ext/alloy/crates/signer-local" }
@@ -62,7 +63,9 @@ alloy-sol-macro = { path = "./ext/alloy-core/crates/sol-macro", features = [
 ] }
 alloy-sol-types = { path = "./ext/alloy-core/crates/sol-types" }
 alloy-contract = { path = "./ext/alloy/crates/contract" }
-alloy-provider = { path = "./ext/alloy/crates/provider" }
+alloy-provider = { path = "./ext/alloy/crates/provider", features = [
+    "trace-api",
+] }
 
 arbitrary = { version = "1.3", features = ["derive"] }
 once_cell = "1.19.0"
@@ -121,7 +124,7 @@ reth-rpc-types-compat = { path = "./ext/reth/crates/rpc/rpc-types-compat" }
 reth-transaction-pool = { path = "./ext/reth/crates/transaction-pool" }
 reth-stages-types = { path = "./ext/reth/crates/stages/types" }
 alloy-network = { path = "./ext/alloy/crates/network" }
-revm = { path = "./ext/revm/crates/revm" }
+revm = { path = "./ext/revm/crates/revm", features = ["std", "serde-json"] }
 revm-primitives = { path = "./ext/revm/crates/primitives" }
 reth-payload-builder = { path = "./ext/reth/crates/payload/builder" }
 serde = { version = "1.0", default-features = false }

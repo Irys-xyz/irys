@@ -118,7 +118,6 @@ impl StorageModule {
             let sub_base_path = base_path.join(dir);
             // Get a file handle to the chunks.data file in the submodule
             let path = sub_base_path.join("chunks.dat");
-            println!("{:?}", path);
             let chunks_file: Arc<Mutex<File>> = Arc::new(Mutex::new(
                 OpenOptions::new()
                     .read(true)
@@ -425,7 +424,6 @@ impl StorageModule {
 /// Used primarily for testing storage initialization
 #[allow(dead_code)]
 pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleInfo>) -> Result<()> {
-    println!("base: {:?}", base_path);
     // Create base storage directory if it doesn't exist
     fs::create_dir_all(base_path.clone())?;
 
@@ -433,7 +431,6 @@ pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleIn
         // Create subdirectories for each range
         for (_, dir) in info.submodules.clone() {
             let path = base_path.join(dir);
-            println!(".{:?}", path);
             fs::create_dir_all(&path)?;
 
             // Create empty data file if it doesn't exist

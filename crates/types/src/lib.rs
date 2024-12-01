@@ -11,10 +11,10 @@ pub mod ingress;
 pub mod irys;
 mod merkle;
 pub mod partition;
+pub mod reth_provider;
 pub mod serialization;
 pub mod storage;
 pub mod transaction;
-
 pub use block::*;
 pub use consensus::*;
 pub use serialization::*;

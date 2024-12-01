@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use irys_types::{
     ingress::IngressProof, partition::PartitionHash, ChunkPathHash, DataRoot, IrysBlockHeader,
     IrysTransactionHeader, TxRelativeChunkIndex, H256,
@@ -105,6 +106,9 @@ tables! {
     /// Maps a data root to the partition hashes that store it. Primarily used for chunk ingress.
     /// Common case is a 1:1, but 1:N is possible
     table PartitionHashesByDataRoot<Key = DataRoot, Value = PartitionHashes>;
+
+    // !!THIS IS TEMPORARY AND JUST FOR THE DEMO!!
+    table ProgrammableDataChunkCache<Key = u32, Value = Vec<u8>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]

@@ -10,6 +10,8 @@ version = "0.1.0"
 # alloy-eips = { git = "https://github.com/alloy-rs/alloy", rev = "64feb9b" }
 # alloy-rpc-types-engine = { git = "https://github.com/alloy-rs/alloy", rev = "64feb9b" }
 # alloy-signer-wallet = { git = "https://github.com/alloy-rs/alloy", rev = "64feb9b" }
+irys-database.workspace = true
+
 
 alloy-eips.workspace = true
 alloy-rpc-types.workspace = true

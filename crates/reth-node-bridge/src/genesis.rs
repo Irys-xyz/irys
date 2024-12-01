@@ -13,7 +13,7 @@ use reth_db::transaction::{DbTx, DbTxMut};
 use reth_db::{DatabaseEnv, DatabaseError, TableViewer, Tables};
 
 use reth_node_builder::{NodeTypesWithDB, NodeTypesWithDBAdapter, NodeTypesWithEngine};
-use reth_node_core::irys_ext::{IrysExtWrapped, NodeExitReason, ReloadPayload};
+use reth_node_core::irys_ext::{IrysExt, NodeExitReason, ReloadPayload};
 
 use reth_node_ethereum::EthereumNode;
 use reth_provider::providers::{BlockchainProvider, BlockchainProvider2};
@@ -57,7 +57,7 @@ pub struct GenesisInfo {
 
 pub fn add_genesis_block(
     provider: &BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
-    ext: &IrysExtWrapped,
+    ext: &IrysExt,
     info: GenesisInfo,
 ) -> RpcResult<Genesis> {
     let GenesisInfo {
@@ -206,7 +206,7 @@ pub fn add_genesis_block(
     //     )
     // })?;
 
-    let v = ext.0.write().map_err(|e| {
+    let sender = ext.reload.write().map_err(|e| {
         ErrorObjectOwned::owned::<String>(
             -32080,
             "error locking reload channel",
@@ -223,12 +223,13 @@ pub fn add_genesis_block(
     // WARNING: RACE CONDITION
     // the reload operation doesn't wait for the reponse response of this method/RPC call to finish, it *does* have a 500ms delay, but that might not be
     // sufficient in certain conditions
-    match &v.reload {
-        Some(tx) => {
-            let _res = tx.send(ReloadPayload::ReloadConfig(chain.clone()));
-        }
-        None => (),
-    }
+    let _res = sender.send(ReloadPayload::ReloadConfig(chain.clone()));
+    // match &v {
+    //     Some(tx) => {
+    //       ;
+    //     }
+    //     None => (),
+    // }
 
     Ok(chain.genesis)
 }
