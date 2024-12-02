@@ -4,3 +4,4 @@
 ./database
 ./crates/chain/database
 .tmp
+/.VSCodeCounter
