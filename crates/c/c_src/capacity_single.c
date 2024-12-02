@@ -8,29 +8,20 @@
 entropy_chunk_errors compute_seed_hash(const unsigned char *mining_addr, size_t mining_addr_size, unsigned long int chunk_offset, const unsigned char *partition_hash, size_t partition_hash_size, unsigned char *seed_hash) {
     int input_len = mining_addr_size + sizeof(uint64_t) + partition_hash_size;
     uint64_t chunk_offset_u64 = (uint64_t) chunk_offset;
-    unsigned char *input = malloc(input_len);
-    if (!input) {
-        return MEMORY_ALLOCATION_ERROR;
-    }
-
-    // Copy the mining address, chunk offset and partition ID into the input buffer
-    memcpy(input, mining_addr, mining_addr_size);
-    memcpy(input + mining_addr_size, partition_hash, partition_hash_size);
-    memcpy(input + mining_addr_size + partition_hash_size, &chunk_offset_u64, sizeof(uint64_t));
 
     // Compute the hash
     EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
     if (!mdctx) {
-        free(input);
         return SEED_HASH_ERROR;
     }
 
     unsigned int hash_len;
     EVP_DigestInit_ex(mdctx, PACKING_HASH_ALG, NULL);
-    EVP_DigestUpdate(mdctx, input, input_len);
+    EVP_DigestUpdate(mdctx, mining_addr, mining_addr_size);
+    EVP_DigestUpdate(mdctx, partition_hash, partition_hash_size);
+    EVP_DigestUpdate(mdctx, &chunk_offset_u64, sizeof(uint64_t));        
     EVP_DigestFinal_ex(mdctx, seed_hash, &hash_len);
     EVP_MD_CTX_free(mdctx);
-    free(input);
 
     return NO_ERROR;
 }

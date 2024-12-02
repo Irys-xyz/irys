@@ -1,5 +1,4 @@
 use irys_primitives::Address;
-use irys_types::{ChunkBin, CHUNK_SIZE};
 use openssl::sha;
 
 pub const SHA_HASH_SIZE: usize = 32;
@@ -17,32 +16,33 @@ pub fn compute_seed_hash(
     hasher.finish()
 }
 
-/// 2D Packing
+/// 2D Packing, not efficient, changing result to an array improves performance by 2x
 pub fn compute_entropy_chunk(
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: [u8; SHA_HASH_SIZE],
     iterations: u32,
-) -> ChunkBin {
+    chunk_size: usize,
+) -> Vec<u8> {
     let mut previous_segment = compute_seed_hash(mining_address, chunk_offset, partition_hash);
-    let mut entropy_chunk: ChunkBin = [0; CHUNK_SIZE as usize];
+    let mut entropy_chunk: Vec<u8> = Vec::<u8>::with_capacity(chunk_size);
 
     // Phase1: secuential hashing
-    for i in 0..(CHUNK_SIZE as usize / SHA_HASH_SIZE) {
+    for i in 0..(chunk_size as usize / SHA_HASH_SIZE) {
         previous_segment = sha::sha256(&previous_segment);
         for j in 0..SHA_HASH_SIZE as usize {
-            entropy_chunk[i * SHA_HASH_SIZE + j] = previous_segment[j]
+            entropy_chunk.push(previous_segment[j]); // inserting in [i * SHA_HASH_SIZE + j] entropy_chunk vector
         }
     }
 
     // Phase2: 2D hash packing
     // Phase1 number hashes
-    let mut hash_count = CHUNK_SIZE as usize / SHA_HASH_SIZE;
+    let mut hash_count = chunk_size as usize / SHA_HASH_SIZE;
     while hash_count < iterations as usize {
-        let i = (hash_count % (CHUNK_SIZE as usize / SHA_HASH_SIZE)) * SHA_HASH_SIZE;
+        let i = (hash_count % (chunk_size as usize / SHA_HASH_SIZE)) * SHA_HASH_SIZE;
         let mut hasher = sha::Sha256::new();
         if i == 0 {
-            hasher.update(&entropy_chunk[CHUNK_SIZE as usize - SHA_HASH_SIZE..]);
+            hasher.update(&entropy_chunk[chunk_size as usize - SHA_HASH_SIZE..]);
         } else {
             hasher.update(&entropy_chunk[i - 32..i]);
         }
@@ -78,8 +78,13 @@ mod tests {
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
 
+        let now = Instant::now();
+
         let rust_hash =
             capacity_single::compute_seed_hash(mining_address, chunk_offset, partition_hash);
+
+        let elapsed = now.elapsed();
+        println!("Rust seed implementation: {:.2?}", elapsed);
 
         let mut c_hash = Vec::<u8>::with_capacity(SHA_HASH_SIZE);
         let mining_addr_len = mining_address.len(); // note: might not line up with capacity? that should be fine...
@@ -88,6 +93,8 @@ mod tests {
         let partition_hash_len = partition_hash.len();
         let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
         let c_hash_ptr = c_hash.as_ptr() as *mut u8;
+
+        let now = Instant::now();
 
         unsafe {
             compute_seed_hash(
@@ -101,6 +108,9 @@ mod tests {
             // we need to move the `len` ptr so rust picks up on the data the C fn wrote to the vec
             c_hash.set_len(c_hash.capacity());
         }
+
+        let elapsed = now.elapsed();
+        println!("C seed implementation: {:.2?}", elapsed);
 
         assert_eq!(rust_hash.to_vec(), c_hash, "Seed hashes should be equal")
     }
@@ -120,6 +130,7 @@ mod tests {
             chunk_offset,
             partition_hash,
             iterations,
+            CHUNK_SIZE as usize,
         );
 
         let elapsed = now.elapsed();
@@ -152,6 +163,6 @@ mod tests {
         let elapsed = now.elapsed();
         println!("C implementation: {:.2?}", elapsed);
 
-        assert_eq!(chunk.to_vec(), c_chunk, "Chunks should be equal")
+        assert_eq!(chunk, c_chunk, "Chunks should be equal")
     }
 }

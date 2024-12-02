@@ -7,13 +7,13 @@ use irys_types::{Address, ChunkBin, CHUNK_SIZE};
 pub const PACKING_SHA_1_5_S: u32 = 22_500_000;
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
-/// defaults to [`PACKING_SHA_1_5_S`]`
+/// defaults to [`PACKING_SHA_1_5_S`]`, returns entropy chunk in out_entropy_chunk parameter.
 pub fn capacity_pack_range(
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: IrysTxId,
     iterations: Option<u32>,
-    entropy_chunk: &mut Vec<u8>,
+    out_entropy_chunk: &mut Vec<u8>,
 ) {
     let mining_address: [u8; 20] = mining_address.0.into();
     let partition_hash: [u8; 32] = partition_hash.0.into();
@@ -23,7 +23,7 @@ pub fn capacity_pack_range(
 
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
-    let entropy_chunk_ptr = entropy_chunk.as_ptr() as *mut u8;
+    let entropy_chunk_ptr = out_entropy_chunk.as_ptr() as *mut u8;
 
     let iterations: u32 = iterations.unwrap_or(PACKING_SHA_1_5_S);
 
@@ -38,7 +38,7 @@ pub fn capacity_pack_range(
             iterations,
         );
         // we need to move the `len` ptr so rust picks up on the data the C fn wrote to the vec
-        entropy_chunk.set_len(entropy_chunk.capacity());
+        out_entropy_chunk.set_len(out_entropy_chunk.capacity());
     }
 }
 
