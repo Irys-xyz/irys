@@ -9,7 +9,9 @@ use actix::{Actor, Context, Handler, Message};
 use irys_packing::capacity_pack_range_with_data;
 use irys_primitives::IrysTxId;
 use irys_storage::StorageModule;
-use irys_types::{irys::IrysSigner, Address, ChunkState, Interval, IntervalState, U256};
+use irys_types::{
+    irys::IrysSigner, Address, ChunkState, Interval, IntervalState, CHUNK_SIZE, U256,
+};
 use tokio::runtime::Handle;
 
 #[derive(Debug, Message, Clone)]
@@ -40,6 +42,8 @@ impl PackingActor {
     }
 
     async fn poll_chunks(chunks: AtomicChunkRange, storage_module: Arc<RwLock<StorageModule>>) {
+        let chunk_size = storage_module.read().unwrap().config.chunk_size;
+
         // Loop which runs all jobs every 1 second (defined in CHUNK_POLL_TIME_MS)
         loop {
             if let Some(next_range) = chunks.read().unwrap().front() {
@@ -62,6 +66,7 @@ impl PackingActor {
                     next_range.chunk_interval.start() as u64,
                     IrysTxId::random(),
                     None,
+                    chunk_size as usize,
                 );
 
                 // TODO: Write to disk correctly

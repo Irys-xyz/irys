@@ -39,7 +39,7 @@ pub struct StorageModule {
     /// Physical storage locations indexed by chunk ranges
     submodules: SubmoduleMap,
     /// Runtime configuration parameters
-    config: StorageModuleConfig,
+    pub config: StorageModuleConfig,
     /// Persistent file handle
     intervals_file: Arc<Mutex<File>>,
 }
