@@ -606,7 +606,7 @@ impl SimpleRNG {
 //------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use irys_types::Address;
+    use irys_types::{Address, PACKING_SHA_1_5_S};
 
     use super::*;
 
@@ -750,6 +750,7 @@ mod tests {
             num_partitions_in_slot: 1,
             miner_address: Address::random(),
             min_writes_before_sync: 1,
+            entropy_packing_iterations: PACKING_SHA_1_5_S,
         };
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;
 
