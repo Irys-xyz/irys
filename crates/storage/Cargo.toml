@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+openssl.workspace = true
 nodit.workspace = true
 eyre.workspace = true
 serde.workspace = true

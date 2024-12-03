@@ -5165,8 +5165,10 @@ dependencies = [
  "irys-primitives",
  "irys-types",
  "libc",
+ "openssl",
  "openssl-src",
  "pkg-config",
+ "rand",
  "vcpkg",
 ]
 
@@ -5279,6 +5281,7 @@ dependencies = [
  "irys-c",
  "irys-primitives",
  "irys-types",
+ "rand",
 ]
 
 [[package]]
@@ -5399,6 +5402,7 @@ dependencies = [
  "irys-testing-utils",
  "irys-types",
  "nodit",
+ "openssl",
  "rand",
  "reth-db",
  "serde",

@@ -8,3 +8,4 @@ irys-c.workspace = true
 irys-primitives.workspace = true
 irys-types.workspace = true
 eyre.workspace = true
+rand.workspace = true
