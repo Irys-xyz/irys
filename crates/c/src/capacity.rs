@@ -1,13 +1,12 @@
 use std::ffi::c_ulong;
 
 use irys_primitives::{Address, IrysTxId};
+use irys_types::PACKING_SHA_1_5_S;
 
 #[allow(non_upper_case_globals)]
 #[allow(non_camel_case_types)]
 #[allow(non_snake_case)]
 include!(concat!(env!("OUT_DIR"), "/capacity_bindings.rs"));
-
-pub const PACKING_SHA_1_5_S: u32 = 22_500_000;
 
 fn capacity_single_test() {
     // 20 bytes - evm

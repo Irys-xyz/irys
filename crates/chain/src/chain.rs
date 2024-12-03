@@ -24,7 +24,7 @@ use irys_storage::{
 };
 use irys_types::{
     app_state::DatabaseProvider, block_production::PartitionId, partition::PartitionHash,
-    StorageConfig, H256,
+    StorageConfig, H256, PACKING_SHA_1_5_S,
 };
 use reth::{
     builder::FullNode,
@@ -85,6 +85,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
         num_partitions_in_slot: 1,
         miner_address: arc_config.mining_signer.address(),
         min_writes_before_sync: 1,
+        entropy_packing_iterations: PACKING_SHA_1_5_S,
     };
     let arc_storage_config = Arc::new(storage_config_for_testing);
     let mut storage_modules: StorageModuleVec = Vec::new();

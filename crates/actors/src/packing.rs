@@ -7,7 +7,7 @@ use std::{
 use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
 
 use eyre::eyre;
-use irys_packing::{capacity_single::compute_entropy_chunk, PACKING_SHA_1_5_S};
+use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_storage::{
     ii, initialize_storage_files, ChunkType, InclusiveInterval, StorageModule, StorageModuleInfo,
 };
@@ -110,7 +110,11 @@ impl PackingActor {
 
             let mining_address = assignment.miner_address;
             let partition_hash = assignment.partition_hash;
-            let chunk_size = storage_module.config.chunk_size;
+            let StorageConfig {
+                chunk_size,
+                entropy_packing_iterations,
+                ..
+            } = storage_module.config;
 
             for i in chunk_range.start()..=chunk_range.end() {
                 // each semaphore permit corresponds to a single chunk to be packed, as we assume it'll use an entire CPU thread's worth of compute.
@@ -129,7 +133,7 @@ impl PackingActor {
                         mining_address,
                         i as u64,
                         partition_hash.0,
-                        PACKING_SHA_1_5_S,
+                        entropy_packing_iterations,
                         chunk_size.try_into().unwrap(),
                         &mut out,
                     );

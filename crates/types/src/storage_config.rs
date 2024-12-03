@@ -15,6 +15,8 @@ pub struct StorageConfig {
     pub miner_address: Address,
     /// Number of writes before a StorageModule syncs to disk
     pub min_writes_before_sync: u64,
+    /// Number of sha256 iterations required to pack a chunk
+    pub entropy_packing_iterations: u32,
 }
 
 impl Default for StorageConfig {
@@ -26,6 +28,7 @@ impl Default for StorageConfig {
             num_partitions_in_slot: NUM_PARTITIONS_PER_SLOT,
             miner_address: Address::random(),
             min_writes_before_sync: NUM_WRITES_BEFORE_SYNC,
+            entropy_packing_iterations: PACKING_SHA_1_5_S,
         }
     }
 }

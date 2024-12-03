@@ -1,9 +1,7 @@
 use std::ops::BitXor;
 
 pub use irys_c::{capacity, capacity_single};
-use irys_types::{partition::PartitionHash, Address, ChunkBytes, CHUNK_SIZE};
-
-pub const PACKING_SHA_1_5_S: u32 = 22_500_000;
+use irys_types::{partition::PartitionHash, Address, ChunkBytes, CHUNK_SIZE, PACKING_SHA_1_5_S};
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
 /// defaults to [`PACKING_SHA_1_5_S`]`, returns entropy chunk in out_entropy_chunk parameter.

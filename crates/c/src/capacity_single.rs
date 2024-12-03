@@ -61,11 +61,10 @@ pub fn compute_entropy_chunk(
 mod tests {
     use crate::{
         capacity::{compute_entropy_chunk, compute_seed_hash},
-        capacity_single,
-        capacity_single::SHA_HASH_SIZE,
+        capacity_single::{self, SHA_HASH_SIZE},
     };
     use irys_primitives::Address;
-    use irys_types::CHUNK_SIZE;
+    use irys_types::{CHUNK_SIZE, PACKING_SHA_1_5_S};
     use rand;
     use rand::Rng;
     use std::time::Instant;
@@ -122,7 +121,7 @@ mod tests {
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-        let iterations = 22_500_000;
+        let iterations = PACKING_SHA_1_5_S;
 
         let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
 
