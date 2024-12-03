@@ -10,7 +10,7 @@ use irys_actors::{
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
-    packing::{PackingActor, PackingConfig},
+    packing::{PackingActor, PackingConfig, PackingRequest},
     ActorAddresses,
 };
 use irys_api_server::{run_server, ApiState};
@@ -19,7 +19,9 @@ pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
-use irys_storage::{initialize_storage_files, StorageModule, StorageModuleVec, StorageModules};
+use irys_storage::{
+    initialize_storage_files, ChunkType, StorageModule, StorageModuleVec, StorageModules,
+};
 use irys_types::{
     app_state::DatabaseProvider, block_production::PartitionId, partition::PartitionHash,
     StorageConfig, H256,
@@ -205,6 +207,20 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let packing_actor_addr =
                     PackingActor::new(Handle::current(), reth_node.task_executor.clone(), None)
                         .start();
+
+                // request packing for uninitialized ranges
+                for sm in storage_modules {
+                    let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
+                    let _ = uninitialized
+                        .iter()
+                        .map(|interval| {
+                            packing_actor_addr.do_send(PackingRequest {
+                                storage_module: sm.clone(),
+                                chunk_range: (*interval).into(),
+                            })
+                        })
+                        .collect::<Vec<()>>();
+                }
 
                 let actor_addresses = ActorAddresses {
                     partitions: part_actors_clone,

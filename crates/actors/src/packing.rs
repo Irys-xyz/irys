@@ -4,8 +4,9 @@ use std::{
     time::Duration,
 };
 
-use actix::{Actor, Context, Handler, Message, MessageResponse};
+use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
 
+use eyre::eyre;
 use irys_packing::{capacity_single::compute_entropy_chunk, PACKING_SHA_1_5_S};
 use irys_storage::{
     ii, initialize_storage_files, ChunkType, InclusiveInterval, StorageModule, StorageModuleInfo,
@@ -16,11 +17,7 @@ use irys_types::{
     Address, PartitionChunkRange, StorageConfig,
 };
 use reth::tasks::{TaskExecutor, TaskManager};
-use tokio::{
-    runtime::Handle,
-    sync::Semaphore,
-    time::{sleep, timeout},
-};
+use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
 
 #[derive(Debug, Message, Clone)]
@@ -139,7 +136,7 @@ impl PackingActor {
                     // computation is done, release semaphore
                     drop(permit);
                     // write the chunk
-                    debug!(target: "irys::packing", "Writing chunk {} to {}", &i, &storage_module.module_num);
+                    debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.module_num);
                     storage_module.write_chunk(i, out, ChunkType::Entropy);
                 });
             }
@@ -180,6 +177,7 @@ impl Handler<PackingRequest> for PackingActor {
     type Result = ();
 
     fn handle(&mut self, msg: PackingRequest, ctx: &mut Self::Context) -> Self::Result {
+        debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.start(), &msg.chunk_range.end(), &msg.storage_module.module_num);
         self.pending_jobs.write().unwrap().push_back(msg);
     }
 }
@@ -206,6 +204,31 @@ impl Handler<GetInternals> for PackingActor {
             config: self.config.clone(),
         }
     }
+}
+
+/// waits for any pending & active packing tasks to complete
+pub async fn wait_for_packing(
+    packing_addr: Addr<PackingActor>,
+    timeout: Option<Duration>,
+) -> eyre::Result<()> {
+    let internals = packing_addr.send(GetInternals()).await?;
+    tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(5)), async {
+        loop {
+            if internals.pending_jobs.read().unwrap().len() == 0 {
+                // try to get all the semaphore permits - this is how we know that the packing is done
+                let _permit = internals
+                    .semaphore
+                    .acquire_many(internals.config.concurrency as u32)
+                    .await
+                    .unwrap();
+                break Some(());
+            } else {
+                sleep(Duration::from_millis(100)).await
+            }
+        }
+    })
+    .await?
+    .ok_or_else(|| eyre!("timed out waiting for packing to complete"))
 }
 
 #[actix::test]
@@ -253,27 +276,7 @@ async fn test_packing_actor() -> eyre::Result<()> {
 
     packing_addr.send(request).await?;
 
-    let internals = packing_addr.send(GetInternals()).await?;
-    // busypoll the job queue
-
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if internals.pending_jobs.read().unwrap().len() == 0 {
-                // try to get all the semaphores - this is how we know that the packing is done
-                let _permit = internals
-                    .semaphore
-                    .acquire_many(internals.config.concurrency as u32)
-                    .await
-                    .unwrap();
-
-                break Some(());
-            } else {
-                sleep(Duration::from_millis(100)).await
-            }
-        }
-    })
-    .await?
-    .unwrap();
+    wait_for_packing(packing_addr, None).await?;
 
     storage_module.sync_pending_chunks()?;
     // check that the chunks are marked as packed
