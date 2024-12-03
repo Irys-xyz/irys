@@ -1,4 +1,6 @@
 //! Validates merkle tree proofs for Irys transaction data and proof chunks
+
+use crate::H256;
 use alloy_primitives::Address;
 use borsh::BorshDeserialize;
 use borsh_derive::BorshDeserialize;
@@ -288,6 +290,11 @@ pub fn generate_leaves(data: Vec<u8>) -> Result<Vec<Node>, Error> {
         data_chunks.push(&[]);
     }
 
+    generate_leaves_from_chunks(&data_chunks)
+}
+
+/// Generates merkle leaves from chunks
+pub fn generate_leaves_from_chunks(data_chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
     for chunk in data_chunks.into_iter() {
@@ -334,7 +341,39 @@ pub fn generate_ingress_leaves(
             left_child: None,
             right_child: None,
         });
+
         min_byte_range = min_byte_range + &chunk.len();
+    }
+    Ok(leaves)
+}
+
+pub struct DataRootLeave {
+    pub data_root: H256,
+    pub tx_size: usize,
+}
+
+/// Generates merkle leaves from data roots
+pub fn generate_leaves_from_data_roots(
+    data_roots: &Vec<DataRootLeave>,
+) -> Result<Vec<Node>, Error> {
+    let mut leaves = Vec::<Node>::new();
+    let mut min_byte_range = 0;
+    for data_root in data_roots.into_iter() {
+        let data_root_hash = hash_sha256(&data_root.data_root.0)?;
+        let max_byte_range = min_byte_range + data_root.tx_size;
+        let offset = max_byte_range.to_note_vec();
+        let id = hash_all_sha256(vec![&data_root_hash, &offset])?;
+
+        leaves.push(Node {
+            id,
+            data_hash: Some(data_root_hash),
+            min_byte_range,
+            max_byte_range,
+            left_child: None,
+            right_child: None,
+        });
+
+        min_byte_range = max_byte_range;
     }
     Ok(leaves)
 }

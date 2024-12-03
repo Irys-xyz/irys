@@ -1,3 +1,4 @@
+pub mod block;
 pub mod chunks;
 pub mod index;
 pub mod price;

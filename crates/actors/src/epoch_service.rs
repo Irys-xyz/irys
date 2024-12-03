@@ -1,14 +1,14 @@
 use actix::{Actor, Context, Handler, Message, MessageResponse};
 use eyre::{Error, Result};
 use irys_database::data_ledger::*;
-use irys_storage::{ii, StorageModuleInfo};
+use irys_storage::{ii, InclusiveInterval, StorageModuleInfo};
 use irys_types::{
-    partition::PartHash, Address, IrysBlockHeader, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
-    NUM_CHUNKS_IN_PARTITION, NUM_PARTITIONS_PER_SLOT, PARTITION_SIZE,
+    partition::{PartitionAssignment, PartitionHash},
+    IrysBlockHeader, LedgerChunkRange, StorageConfig, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
 };
 use openssl::sha;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tracing::info;
@@ -19,15 +19,11 @@ pub struct EpochServiceConfig {
     /// Capacity partitions are allocated on a logarithmic curve, this scalar
     /// shifts the curve on the Y axis. Allowing there to be more or less
     /// capacity partitions relative to data partitions.
-    capacity_scalar: u64,
+    pub capacity_scalar: u64,
     /// The length of an epoch denominated in block heights
-    num_blocks_in_epoch: u64,
-    /// The number of replica partitions in a ledger slot
-    num_partitions_per_slot: u64,
-    /// Size (in bytes) of each partition
-    partition_size: u64,
-    /// Number of chunks in a partition
-    num_chunks_in_partition: u64,
+    pub num_blocks_in_epoch: u64,
+    /// Reference to global storage config for node
+    pub storage_config: Arc<StorageConfig>,
 }
 
 impl Default for EpochServiceConfig {
@@ -35,9 +31,7 @@ impl Default for EpochServiceConfig {
         Self {
             capacity_scalar: CAPACITY_SCALAR,
             num_blocks_in_epoch: NUM_BLOCKS_IN_EPOCH,
-            num_partitions_per_slot: NUM_PARTITIONS_PER_SLOT,
-            partition_size: PARTITION_SIZE,
-            num_chunks_in_partition: NUM_CHUNKS_IN_PARTITION,
+            storage_config: StorageConfig::default().into(),
         }
     }
 }
@@ -50,13 +44,11 @@ pub struct EpochServiceActor {
     /// Protocol-managed data ledgers (one permanent, N term)
     pub ledgers: Arc<RwLock<Ledgers>>,
     /// Active data partition state mapped by partition hash
-    pub data_partitions: HashMap<PartHash, PartitionAssignment>,
+    pub data_partitions: HashMap<PartitionHash, PartitionAssignment>,
     /// Available capacity partitions mapped by partition hash
-    pub capacity_partitions: HashMap<PartHash, PartitionAssignment>,
+    pub capacity_partitions: HashMap<PartitionHash, PartitionAssignment>,
     /// Sequential list of activated partition hashes
-    pub all_active_partitions: Vec<PartHash>,
-    /// Identifier of this mining node
-    pub miner_address: Address,
+    pub all_active_partitions: Vec<PartitionHash>,
     /// Current partition & ledger parameters
     pub config: EpochServiceConfig,
 }
@@ -138,22 +130,84 @@ impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
     }
 }
 
-/// Temporary struct tracking partition assignments to miners - will be moved to database
-#[derive(Debug, PartialEq)]
-pub struct PartitionAssignment {
-    /// Hash of the partition
-    pub partition_hash: PartHash,
-    /// Address of the miner pledged to store it
-    pub miner_address: Address,
-    /// If assigned to a ledger, the ledger number
-    pub ledger_num: Option<u64>,
-    /// If assigned to a ledger, the index in the ledger
-    pub slot_index: Option<usize>,
+/// Retrieve partition assignment (ledger and its relative offset) for a partition
+#[derive(Message, Debug)]
+#[rtype(result = "Option<PartitionAssignment>")]
+pub struct GetPartitionAssignmentMessage(pub PartitionHash);
+
+impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
+    type Result = Option<PartitionAssignment>;
+
+    fn handle(
+        &mut self,
+        msg: GetPartitionAssignmentMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        self.data_partitions
+            .get(&msg.0)
+            .copied()
+            .or(self.capacity_partitions.get(&msg.0).copied())
+    }
+}
+
+/// Returns a vec of PartitionAssignments that overlap the provided chunk_range
+#[derive(Message, Debug)]
+#[rtype(result = "Vec<PartitionAssignment>")]
+pub struct GetOverlappingPartitionsMessage {
+    /// The ledger (Submit/Publish) being inspected
+    pub ledger: Ledger,
+    /// The ledger relative chunk range for the query
+    pub chunk_range: LedgerChunkRange,
+}
+
+impl Handler<GetOverlappingPartitionsMessage> for EpochServiceActor {
+    type Result = Vec<PartitionAssignment>;
+
+    fn handle(
+        &mut self,
+        msg: GetOverlappingPartitionsMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        let ledger = msg.ledger;
+        let chunk_range = msg.chunk_range;
+
+        // Cache config and get read lock on ledgers
+        let num_chunks_in_partition = self.config.storage_config.num_chunks_in_partition;
+        let ledgers = self.ledgers.read().unwrap();
+        let ledger_slots = ledgers[ledger].get_slots();
+
+        // Enumerate the leger slots and find any that overlap the chunk_range
+        let slots: Vec<_> = ledger_slots
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| {
+                let slot_start = *idx as u64 * num_chunks_in_partition;
+                let slot_end = slot_start + num_chunks_in_partition;
+                chunk_range.overlaps(&ii(slot_start, slot_end))
+            })
+            .map(|(_, slot)| slot)
+            .collect();
+
+        // Get all the partition hashes from the overlapping slots
+        let unique_slot_partition_hashes: HashSet<H256> = slots
+            .iter()
+            .flat_map(|slot| &slot.partitions)
+            .copied()
+            .collect();
+
+        // Finally retrieve the PartitionAssignments for those partition hashes
+        let matching_assignments: Vec<_> = unique_slot_partition_hashes
+            .iter()
+            .filter_map(|hash| self.data_partitions.get(hash).cloned())
+            .collect();
+
+        matching_assignments
+    }
 }
 
 impl EpochServiceActor {
     /// Create a new instance of the epoch service actor
-    pub fn new(miner_address: Address, config: Option<EpochServiceConfig>) -> Self {
+    pub fn new(config: Option<EpochServiceConfig>) -> Self {
         let config = match config {
             Some(cfg) => cfg,
             // If no config was provided, use the default protocol parameters
@@ -166,7 +220,6 @@ impl EpochServiceActor {
             data_partitions: HashMap::new(),
             capacity_partitions: HashMap::new(),
             all_active_partitions: Vec::new(),
-            miner_address,
             config,
         }
     }
@@ -333,7 +386,7 @@ impl EpochServiceActor {
     /// data partitions and scaling factor
     fn get_num_capacity_partitions(num_data_partitions: u64, config: &EpochServiceConfig) -> u64 {
         // Every ledger needs at least one slot filled with data partitions
-        let min_count = Ledger::ALL.len() as u64 * config.num_partitions_per_slot;
+        let min_count = Ledger::ALL.len() as u64 * config.storage_config.num_partitions_in_slot;
         let base_count = std::cmp::max(num_data_partitions, min_count);
         let log_10 = (base_count as f64).log10();
         let trunc = truncate_to_3_decimals(log_10);
@@ -369,7 +422,7 @@ impl EpochServiceActor {
                 *partition_hash,
                 PartitionAssignment {
                     partition_hash: *partition_hash,
-                    miner_address: self.miner_address.clone(),
+                    miner_address: self.config.storage_config.miner_address.clone(),
                     ledger_num: None,
                     slot_index: None,
                 },
@@ -420,21 +473,21 @@ impl EpochServiceActor {
             let ledger = &ledgers[ledger_num];
             num_slots = ledger.slot_count() as u64;
         }
-        let partition_size = self.config.partition_size;
-        let max_capacity = (num_slots * partition_size) as u128;
-        let ledger_size = new_epoch_block.ledgers[ledger_num as usize].ledger_size;
+        let partition_chunk_count = self.config.storage_config.num_chunks_in_partition;
+        let max_chunk_capacity = num_slots * partition_chunk_count;
+        let ledger_size = new_epoch_block.ledgers[ledger_num as usize].max_chunk_offset;
 
         // Add capacity slots if ledger usage exceeds 50% of partition size from max capacity
-        let add_capacity_threshold: u128 = max_capacity - partition_size as u128 / 2;
+        let add_capacity_threshold = max_chunk_capacity - partition_chunk_count / 2;
         let mut slots_to_add: u64 = 0;
         if ledger_size >= add_capacity_threshold {
             // Add 1 slot for buffer plus enough slots to handle size above threshold
-            let excess = ledger_size.saturating_sub(max_capacity);
-            slots_to_add = 1 + (excess as u64 / partition_size);
+            let excess = ledger_size.saturating_sub(max_chunk_capacity);
+            slots_to_add = 1 + (excess as u64 / partition_chunk_count);
 
             // Check if we need to add an additional slot for excess > half of
             // the partition size
-            if excess as u64 % partition_size >= partition_size / 2 {
+            if excess as u64 % partition_chunk_count >= partition_chunk_count / 2 {
                 slots_to_add += 1;
             }
         }
@@ -454,7 +507,7 @@ impl EpochServiceActor {
     /// Configure storage modules for genesis partition assignments
     pub fn get_genesis_storage_module_infos(&self) -> Vec<StorageModuleInfo> {
         let ledgers = self.ledgers.read().unwrap();
-        let num_part_chunks = self.config.num_chunks_in_partition as u32;
+        let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
 
         // Configure publish ledger storage
         let mut module_infos = ledgers
@@ -464,7 +517,7 @@ impl EpochServiceActor {
             .enumerate()
             .map(|(idx, partition)| StorageModuleInfo {
                 module_num: idx,
-                partition_hash: Some(partition.clone()),
+                partition_assignment: Some(*self.data_partitions.get(partition).unwrap()),
                 submodules: vec![(ii(0, num_part_chunks), format!("submodule_{}", idx))],
             })
             .collect::<Vec<_>>();
@@ -479,7 +532,7 @@ impl EpochServiceActor {
             .enumerate()
             .map(|(idx, partition)| StorageModuleInfo {
                 module_num: idx_start + idx,
-                partition_hash: Some(partition.clone()),
+                partition_assignment: Some(*self.data_partitions.get(partition).unwrap()),
                 submodules: vec![(
                     ii(0, num_part_chunks),
                     format!("submodule_{}", idx_start + idx),
@@ -497,7 +550,7 @@ impl EpochServiceActor {
         let idx = module_infos.len();
         let cap_info = StorageModuleInfo {
             module_num: idx,
-            partition_hash: Some(cap_part.clone()),
+            partition_assignment: Some(*self.capacity_partitions.get(cap_part).unwrap()),
             submodules: vec![(ii(0, num_part_chunks), format!("submodule_{}", idx))],
         };
 
@@ -553,6 +606,8 @@ impl SimpleRNG {
 //------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    use irys_types::Address;
+
     use super::*;
 
     #[actix::test]
@@ -562,9 +617,9 @@ mod tests {
         genesis_block.height = 0;
 
         // Create epoch service with random miner address
-        let miner_address = Address::random();
         let config = EpochServiceConfig::default();
-        let mut epoch_service = EpochServiceActor::new(miner_address, Some(config.clone()));
+        let mut epoch_service = EpochServiceActor::new(Some(config.clone()));
+        let miner_address = config.storage_config.miner_address;
 
         // Process genesis message directly instead of through actor system
         // This allows us to inspect the actor's state after processing
@@ -585,11 +640,11 @@ mod tests {
 
             assert_eq!(
                 pub_slots[0].partitions.len() as u64,
-                config.num_partitions_per_slot
+                config.storage_config.num_partitions_in_slot
             );
             assert_eq!(
                 sub_slots[0].partitions.len() as u64,
-                config.num_partitions_per_slot
+                config.storage_config.num_partitions_in_slot
             );
 
             let pub_ledger_num = Ledger::Publish as u64;
@@ -615,7 +670,7 @@ mod tests {
                 }
                 assert_eq!(
                     slot.partitions.len(),
-                    config.num_partitions_per_slot as usize
+                    config.storage_config.num_partitions_in_slot as usize
                 );
             }
 
@@ -639,7 +694,7 @@ mod tests {
                 }
                 assert_eq!(
                     slot.partitions.len(),
-                    config.num_partitions_per_slot as usize
+                    config.storage_config.num_partitions_in_slot as usize
                 );
             }
         }
@@ -687,10 +742,26 @@ mod tests {
         let mut genesis_block = IrysBlockHeader::new();
         genesis_block.height = 0;
 
-        // Create epoch service with random miner address
-        let miner_address = Address::random();
-        let config = EpochServiceConfig::default();
-        let mut epoch_service = EpochServiceActor::new(miner_address, Some(config));
+        // Create a storage config for testing
+        let storage_config = StorageConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: 10,
+            num_chunks_in_recall_range: 2,
+            num_partitions_in_slot: 1,
+            miner_address: Address::random(),
+            min_writes_before_sync: 1,
+        };
+        let num_chunks_in_partition = storage_config.num_chunks_in_partition;
+
+        // Create epoch service
+        let config = EpochServiceConfig {
+            capacity_scalar: 100,
+            num_blocks_in_epoch: 100,
+            storage_config: Arc::new(storage_config),
+        };
+        let num_blocks_in_epoch = config.num_blocks_in_epoch;
+
+        let mut epoch_service = EpochServiceActor::new(Some(config));
 
         // Process genesis message directly instead of through actor system
         // This allows us to inspect the actor's state after processing
@@ -699,8 +770,8 @@ mod tests {
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new();
-        new_epoch_block.height = NUM_BLOCKS_IN_EPOCH;
-        new_epoch_block.ledgers[Ledger::Submit as usize].ledger_size = (PARTITION_SIZE / 2) as u128;
+        new_epoch_block.height = num_blocks_in_epoch;
+        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.into()), &mut ctx);
 
@@ -715,11 +786,11 @@ mod tests {
 
         // Simulate a subsequent epoch block that adds multiple ledger slots
         let mut new_epoch_block = IrysBlockHeader::new();
-        new_epoch_block.height = NUM_BLOCKS_IN_EPOCH * 2;
-        new_epoch_block.ledgers[Ledger::Submit as usize].ledger_size =
-            (PARTITION_SIZE as f64 * 2.5) as u128;
-        new_epoch_block.ledgers[Ledger::Publish as usize].ledger_size =
-            (PARTITION_SIZE as f64 * 0.75) as u128;
+        new_epoch_block.height = num_blocks_in_epoch * 2;
+        new_epoch_block.ledgers[Ledger::Submit as usize].max_chunk_offset =
+            (num_chunks_in_partition as f64 * 2.5) as u64;
+        new_epoch_block.ledgers[Ledger::Publish as usize].max_chunk_offset =
+            (num_chunks_in_partition as f64 * 0.75) as u64;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.into()), &mut ctx);
 

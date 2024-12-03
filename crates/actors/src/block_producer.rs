@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use actix::{Actor, Addr, AsyncContext, AtomicResponse, Context, Handler, Message, WrapFuture};
+use actix::prelude::*;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
@@ -105,16 +105,16 @@ impl Handler<SolutionContext> for BlockProducerActor {
                     ledgers: vec![
                         // Permanent Publish Ledger
                         TransactionLedger {
-                            tx_root: H256::zero(),
+                            tx_root: TransactionLedger::merklize_tx_root(&data_txs).0,
                             txids: H256List(data_tx_ids.clone()),
-                            ledger_size: 0 as u128,
+                            max_chunk_offset: 0,
                             expires: None,
                         },
                         // Term Submit Ledger
                         TransactionLedger {
-                            tx_root: H256::zero(),
+                            tx_root: TransactionLedger::merklize_tx_root(&vec![]).0,
                             txids: H256List::new(),
-                            ledger_size: 0 as u128,
+                            max_chunk_offset: 0,
                             expires: Some(1622543200),
                         },
                     ],
@@ -209,7 +209,11 @@ fn get_current_block_height() -> u64 {
     0
 }
 
-#[derive(Message, Clone)]
+/// When a block is confirmed, this message broadcasts the block header and the
+/// submit ledger TX that were added as part of this block.
+/// This works for bootstrap node mining, but eventually blocks will be received
+/// from peers and confirmed and their tx will be negotiated though the mempool.
+#[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
 pub struct BlockConfirmedMessage(
     pub Arc<IrysBlockHeader>,
@@ -226,4 +230,16 @@ impl Handler<BlockConfirmedMessage> for BlockProducerActor {
         // Do something with the block
         info!("Block height: {} num tx: {}", block.height, data_tx.len());
     }
+}
+
+/// Similar to [BlockConfirmedMessage] (but takes ownership of parameters) and
+/// acts as a placeholder for when the node will maintain a block tree of
+/// confirmed blocks and produce finalized blocks for the canonical chain when
+///  enough confirmations have occurred. Chunks are moved from the in-memory
+/// index to the storage modules when a block is finalized.
+#[derive(Message, Debug, Clone)]
+#[rtype(result = "Result<(), ()>")]
+pub struct BlockFinalizedMessage {
+    pub block_header: IrysBlockHeader,
+    pub txs: Vec<IrysTransactionHeader>,
 }

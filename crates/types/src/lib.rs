@@ -13,6 +13,7 @@ mod merkle;
 pub mod partition;
 pub mod serialization;
 pub mod storage;
+pub mod storage_config;
 pub mod transaction;
 
 pub use block::*;
@@ -27,3 +28,4 @@ pub use chunk::*;
 pub use merkle::*;
 pub use nodit::Interval;
 pub use reth_codecs::Compact;
+pub use storage_config::*;

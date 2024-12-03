@@ -6,6 +6,7 @@ use irys_config::IrysNodeConfig;
 use irys_types::H256;
 use std::fs::{self, remove_file, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 
 /// This struct represents the `Uninitialized` block_index type state.
@@ -30,7 +31,6 @@ pub struct BlockIndex<State = Uninitialized> {
     config: Option<Arc<IrysNodeConfig>>,
 }
 
-const HASH_INDEX_ITEM_SIZE: u64 = 48 + 16 + 32;
 const FILE_NAME: &str = "index.dat";
 
 /// Use a Type State pattern for BlockIndex with two states, Uninitialized and Initialized
@@ -123,15 +123,16 @@ impl BlockIndex<Initialized> {
 
     /// For a given byte offset in a ledger, what block was responsible for adding
     /// that byte to the data ledger?
-    pub fn get_block_bounds(&self, ledger: Ledger, byte_offset: u128) -> BlockBounds {
+    pub fn get_block_bounds(&self, ledger: Ledger, chunk_offset: u64) -> BlockBounds {
         let mut block_bounds: BlockBounds = Default::default();
         block_bounds.ledger = ledger;
 
-        let result = self.get_block_index_item(ledger, byte_offset);
+        let result = self.get_block_index_item(ledger, chunk_offset);
         if let Ok((block_height, found_item)) = result {
             let previous_item = self.get_item(block_height - 1).unwrap();
-            block_bounds.start_ledger_offset = previous_item.ledgers[ledger as usize].ledger_size;
-            block_bounds.end_ledger_offset = found_item.ledgers[ledger as usize].ledger_size;
+            block_bounds.start_chunk_offset =
+                previous_item.ledgers[ledger as usize].max_chunk_offset;
+            block_bounds.end_chunk_offset = found_item.ledgers[ledger as usize].max_chunk_offset;
             block_bounds.tx_root = found_item.ledgers[ledger as usize].tx_root;
             block_bounds.height = block_height as u128;
         }
@@ -141,10 +142,10 @@ impl BlockIndex<Initialized> {
     fn get_block_index_item(
         &self,
         ledger: Ledger,
-        byte_offset: u128,
+        chunk_offset: u64,
     ) -> Result<(usize, &BlockIndexItem)> {
         let result = self.items.binary_search_by(|item| {
-            if byte_offset < item.ledgers[ledger as usize].ledger_size {
+            if chunk_offset < item.ledgers[ledger as usize].max_chunk_offset {
                 std::cmp::Ordering::Greater
             } else {
                 std::cmp::Ordering::Less
@@ -167,15 +168,15 @@ impl BlockIndex<Initialized> {
 /// and then after the blocks transactions were applied to the ledger
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct BlockBounds {
-    /// Height of the block
+    /// Block height where these bounds apply
     pub height: u128,
-    /// Ledger for which the bounds are described
+    /// Target ledger (Publish or Submit)
     pub ledger: Ledger,
-    /// The (inclusive) ledger byte offset before the blocks tx are applied
-    pub start_ledger_offset: u128,
-    /// The (non inclusive) ledger byte offset after the blocks tx are applied
-    pub end_ledger_offset: u128,
-    /// The tx root of the ledger in that block
+    /// First chunk offset included in this block (inclusive)
+    pub start_chunk_offset: u64,
+    /// Final chunk offset after processing block transactions
+    pub end_chunk_offset: u64,
+    /// Merkle root (tx_root) of all transactions this block applied to the ledger
     pub tx_root: H256,
 }
 
@@ -184,32 +185,46 @@ pub struct BlockBounds {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LedgerIndexItem {
     /// Size in bytes of the ledger
-    pub ledger_size: u128, // 16 bytes
+    pub max_chunk_offset: u64, // 8 bytes
     /// The merkle root of the TX that apply to this ledger in the current block
     pub tx_root: H256, // 32 bytes
 }
 
 impl LedgerIndexItem {
-    fn to_bytes(&self) -> [u8; 48] {
-        // Fixed size of 48 bytes
-        let mut bytes = [0u8; 48];
-        bytes[0..16].copy_from_slice(&self.ledger_size.to_le_bytes()); // First 16 bytes
-        bytes[16..48].copy_from_slice(self.tx_root.as_bytes()); // Next 32 bytes
+    fn to_bytes(&self) -> [u8; 40] {
+        // Fixed size of 40 bytes
+        let mut bytes = [0u8; 40];
+        bytes[0..8].copy_from_slice(&self.max_chunk_offset.to_le_bytes()); // First 8 bytes
+        bytes[8..40].copy_from_slice(self.tx_root.as_bytes()); // Next 32 bytes
         bytes
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
         let mut item = LedgerIndexItem::default();
 
-        // Read ledger size (first 16 bytes)
-        let mut size_bytes = [0u8; 16];
-        size_bytes.copy_from_slice(&bytes[0..16]);
-        item.ledger_size = u128::from_le_bytes(size_bytes);
+        // Read ledger size (first 8 bytes)
+        let mut size_bytes = [0u8; 8];
+        size_bytes.copy_from_slice(&bytes[0..8]);
+        item.max_chunk_offset = u64::from_le_bytes(size_bytes);
 
         // Read tx root (next 32 bytes)
-        item.tx_root = H256::from_slice(&bytes[16..48]);
+        item.tx_root = H256::from_slice(&bytes[8..40]);
 
         item
+    }
+}
+
+impl Index<Ledger> for Vec<LedgerIndexItem> {
+    type Output = LedgerIndexItem;
+
+    fn index(&self, ledger: Ledger) -> &Self::Output {
+        &self[ledger as usize]
+    }
+}
+
+impl IndexMut<Ledger> for Vec<LedgerIndexItem> {
+    fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
+        &mut self[ledger as usize]
     }
 }
 
@@ -223,13 +238,13 @@ pub struct BlockIndexItem {
     /// The number of ledgers this block tracks
     pub num_ledgers: u8, // 1 byte
     /// The metadata about each of the blocks ledgers
-    pub ledgers: Vec<LedgerIndexItem>, // Vec of 48 byte items
+    pub ledgers: Vec<LedgerIndexItem>, // Vec of 40 byte items
 }
 
 impl BlockIndexItem {
     // Serialize the BlockIndexItem to bytes
     fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(33 + self.ledgers.len() * 48);
+        let mut bytes = Vec::with_capacity(33 + self.ledgers.len() * 40);
 
         // Write fixed fields
         bytes.extend_from_slice(self.block_hash.as_bytes()); // 32 bytes
@@ -237,7 +252,7 @@ impl BlockIndexItem {
 
         // Write each ledger item
         for ledger_index_item in &self.ledgers {
-            bytes.extend_from_slice(&ledger_index_item.to_bytes()); // 48 bytes each
+            bytes.extend_from_slice(&ledger_index_item.to_bytes()); // 40 bytes each
         }
 
         bytes
@@ -256,8 +271,8 @@ impl BlockIndexItem {
         item.ledgers = Vec::with_capacity(num_ledgers);
 
         for i in 0..num_ledgers {
-            let start = 33 + (i * 48);
-            let ledger_bytes = &bytes[start..start + 48];
+            let start = 33 + (i * 40);
+            let ledger_bytes = &bytes[start..start + 40];
             item.ledgers.push(LedgerIndexItem::from_bytes(ledger_bytes));
         }
 
@@ -288,16 +303,6 @@ fn ensure_path_exists(config: &IrysNodeConfig) -> eyre::Result<()> {
 }
 
 #[allow(dead_code)]
-fn read_item_at(block_height: u64, config: &IrysNodeConfig) -> io::Result<BlockIndexItem> {
-    let path = config.block_index_dir().join(FILE_NAME);
-    let mut file = File::open(path)?;
-    let mut buffer = [0; HASH_INDEX_ITEM_SIZE as usize];
-    file.seek(SeekFrom::Start(block_height * HASH_INDEX_ITEM_SIZE))?;
-    file.read_exact(&mut buffer)?;
-    Ok(BlockIndexItem::from_bytes(&buffer))
-}
-
-#[allow(dead_code)]
 fn append_item(item: BlockIndexItem, config: &IrysNodeConfig) -> io::Result<()> {
     let path = config.block_index_dir().join(FILE_NAME);
     let mut file = OpenOptions::new().append(true).open(path)?;
@@ -316,21 +321,13 @@ fn append_items_to_file(items: &Vec<BlockIndexItem>, config: &IrysNodeConfig) ->
     Ok(())
 }
 
-#[allow(dead_code)]
-fn update_file_item_at(
-    block_height: u64,
-    item: BlockIndexItem,
-    config: &IrysNodeConfig,
-) -> io::Result<()> {
-    let path = config.block_index_dir().join(FILE_NAME);
-    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-    file.seek(SeekFrom::Start(block_height * HASH_INDEX_ITEM_SIZE))?;
-    file.write_all(&item.to_bytes())?;
-    Ok(())
-}
 fn load_index_from_file(config: &IrysNodeConfig) -> io::Result<Vec<BlockIndexItem>> {
     let path = config.block_index_dir().join(FILE_NAME);
-    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
 
     // Determine the file size
     let file_size = file.seek(SeekFrom::End(0))?;
@@ -346,7 +343,7 @@ fn load_index_from_file(config: &IrysNodeConfig) -> io::Result<Vec<BlockIndexIte
     while offset + 33 <= buffer.len() {
         // Read num_ledgers to determine full item size
         let num_ledgers = buffer[offset + 32] as usize;
-        let item_size = 33 + (num_ledgers * 48); // 33 bytes header + ledger items
+        let item_size = 33 + (num_ledgers * 40); // 33 bytes header + ledger items
 
         // Ensure we have enough bytes for the full item
         if offset + item_size > buffer.len() {
@@ -385,25 +382,11 @@ mod tests {
                 num_ledgers: 2,
                 ledgers: vec![
                     LedgerIndexItem {
-                        ledger_size: 100,
+                        max_chunk_offset: 100,
                         tx_root: H256::random(),
                     },
                     LedgerIndexItem {
-                        ledger_size: 1000,
-                        tx_root: H256::random(),
-                    },
-                ],
-            },
-            BlockIndexItem {
-                block_hash: H256::random(),
-                num_ledgers: 2,
-                ledgers: vec![
-                    LedgerIndexItem {
-                        ledger_size: 200,
-                        tx_root: H256::random(),
-                    },
-                    LedgerIndexItem {
-                        ledger_size: 2000,
+                        max_chunk_offset: 1000,
                         tx_root: H256::random(),
                     },
                 ],
@@ -413,11 +396,25 @@ mod tests {
                 num_ledgers: 2,
                 ledgers: vec![
                     LedgerIndexItem {
-                        ledger_size: 300,
+                        max_chunk_offset: 200,
                         tx_root: H256::random(),
                     },
                     LedgerIndexItem {
-                        ledger_size: 3000,
+                        max_chunk_offset: 2000,
+                        tx_root: H256::random(),
+                    },
+                ],
+            },
+            BlockIndexItem {
+                block_hash: H256::random(),
+                num_ledgers: 2,
+                ledgers: vec![
+                    LedgerIndexItem {
+                        max_chunk_offset: 300,
+                        tx_root: H256::random(),
+                    },
+                    LedgerIndexItem {
+                        max_chunk_offset: 3000,
                         tx_root: H256::random(),
                     },
                 ],
@@ -450,8 +447,8 @@ mod tests {
             BlockBounds {
                 height: 1,
                 ledger: Ledger::Publish,
-                start_ledger_offset: 100,
-                end_ledger_offset: 200,
+                start_chunk_offset: 100,
+                end_chunk_offset: 200,
                 tx_root: block_items[1].ledgers[Ledger::Publish as usize].tx_root
             }
         );
@@ -462,8 +459,8 @@ mod tests {
             BlockBounds {
                 height: 1,
                 ledger: Ledger::Submit,
-                start_ledger_offset: 1000,
-                end_ledger_offset: 2000,
+                start_chunk_offset: 1000,
+                end_chunk_offset: 2000,
                 tx_root: block_items[1].ledgers[Ledger::Submit as usize].tx_root
             }
         );

@@ -1,11 +1,20 @@
+mod error;
 mod routes;
 
 use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
-use irys_actors::ActorAddresses;
-use routes::{chunks, index, price, proxy::proxy, tx};
 
-pub async fn run_server(app_state: ActorAddresses) {
+use irys_actors::ActorAddresses;
+use irys_types::app_state::DatabaseProvider;
+use routes::{block, chunks, index, price, proxy::proxy, tx};
+
+#[derive(Clone)]
+pub struct ApiState {
+    pub actors: ActorAddresses,
+    pub db: DatabaseProvider,
+}
+
+pub async fn run_server(app_state: ApiState) {
     HttpServer::new(move || {
         let awc_client = awc::Client::new();
 
@@ -15,7 +24,9 @@ pub async fn run_server(app_state: ActorAddresses) {
             .service(
                 web::scope("v1")
                     .route("/info", web::get().to(index::info_route))
+                    .route("/block/{block_hash}", web::get().to(block::get_block))
                     .route("/chunk", web::post().to(chunks::post_chunk))
+                    .route("/tx/{tx_id}", web::get().to(tx::get_tx))
                     .route("/tx", web::post().to(tx::post_tx))
                     .route("/price/{size}", web::get().to(price::get_price)),
             )
@@ -75,12 +86,17 @@ async fn post_tx_and_chunks_golden_path() {
     let mut part_actors = Vec::new();
     // let packing_actor_addr = PackingActor::new(Handle::current()).start();
 
-    let app_state = ActorAddresses {
+    let actors = ActorAddresses {
         partitions: part_actors,
         block_producer: block_producer_addr,
         mempool: mempool_actor_addr,
         block_index: todo!(),
         epoch_service: todo!(),
+    };
+
+    let app_state = ApiState {
+        actors,
+        db: DatabaseProvider(arc_db),
     };
 
     // Initialize the app

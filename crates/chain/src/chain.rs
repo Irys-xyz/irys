@@ -12,14 +12,14 @@ use irys_actors::{
     packing::PackingActor,
     ActorAddresses,
 };
-use irys_api_server::run_server;
+use irys_api_server::{run_server, ApiState};
 use irys_config::IrysNodeConfig;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
 use irys_storage::{initialize_storage_files, StorageModule};
-use irys_types::{app_state::DatabaseProvider, block_production::PartitionId, H256};
+use irys_types::{app_state::DatabaseProvider, block_production::PartitionId, StorageConfig, H256};
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
@@ -72,6 +72,15 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
     let irys_genesis = node_config.chainspec_builder.genesis();
     let arc_genesis = Arc::new(irys_genesis);
     let arc_config = Arc::new(node_config);
+    let storage_config_for_testing = StorageConfig {
+        chunk_size: 32,
+        num_chunks_in_partition: 10,
+        num_chunks_in_recall_range: 2,
+        num_partitions_in_slot: 1,
+        miner_address: arc_config.mining_signer.address(),
+        min_writes_before_sync: 1,
+    };
+    let arc_storage_config = Arc::new(storage_config_for_testing);
     let mut storage_modules: Vec<Arc<StorageModule>> = Vec::new();
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
         BlockIndex::default()
@@ -111,9 +120,13 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let mempool_actor_addr = mempool_actor.start();
 
                 // Initialize the epoch_service actor to handle partition ledger assignments
-                let config = EpochServiceConfig::default();
+                let config = EpochServiceConfig {
+                    storage_config: arc_storage_config,
+                    ..Default::default()
+                };
+
                 let miner_address = node_config.mining_signer.address();
-                let epoch_service = EpochServiceActor::new(miner_address, Some(config));
+                let epoch_service = EpochServiceActor::new(Some(config));
                 let epoch_service_actor_addr = epoch_service.start();
 
                 // Initialize the block index actor and tell it about the genesis block
@@ -204,7 +217,11 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     config: arc_config.clone(),
                 });
 
-                run_server(actor_addresses).await;
+                run_server(ApiState {
+                    actors: actor_addresses,
+                    db,
+                })
+                .await;
             });
         })?;
 

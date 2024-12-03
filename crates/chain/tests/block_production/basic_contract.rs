@@ -8,6 +8,7 @@ use alloy_sol_macro::sol;
 use futures::future::select;
 use irys_chain::{chain::start_for_testing, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
+use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, H256};
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
@@ -24,7 +25,9 @@ sol!(
 
 #[tokio::test]
 async fn test_erc20() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_erc20"), false);
     let mut config = IrysNodeConfig::default();
+    config.base_directory = temp_dir.path().to_path_buf();
     let main_address = config.mining_signer.address();
 
     let account1 = IrysSigner::random_signer();
