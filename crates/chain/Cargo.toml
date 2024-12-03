@@ -55,6 +55,7 @@ arbitrary = { workspace = true, features = [
 ] } # arbitrary.workspace = truebytes.workspace = true
 bytes.workspace = true
 
+derive_more.workspace = true
 modular-bitfield.workspace = true
 reth-cli-runner.workspace = true
 test-fuzz.workspace = true

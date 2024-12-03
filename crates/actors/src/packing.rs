@@ -1,83 +1,137 @@
 use std::{
     collections::VecDeque,
-    fs,
-    io::{Seek, Write},
     sync::{Arc, RwLock},
+    time::Duration,
 };
 
 use actix::{Actor, Context, Handler, Message};
-use irys_packing::capacity_pack_range_with_data;
-use irys_primitives::IrysTxId;
-use irys_storage::StorageModule;
-use irys_types::{irys::IrysSigner, Address, ChunkState, Interval, IntervalState, U256};
-use tokio::runtime::Handle;
+use irys_packing::capacity_pack_range;
+use irys_storage::{InclusiveInterval, StorageModule};
+use irys_types::PartitionChunkRange;
+use reth::tasks::TaskExecutor;
+use tokio::{runtime::Handle, sync::Semaphore};
+use tracing::{debug, warn};
 
 #[derive(Debug, Message, Clone)]
 #[rtype("()")]
-struct PackingRequestRange {
-    pub partition_id: u64,
-    pub chunk_interval: Interval<u32>,
+struct PackingRequest {
+    pub storage_module: Arc<StorageModule>,
+    pub chunk_range: PartitionChunkRange,
 }
 
-type AtomicChunkRange = Arc<RwLock<VecDeque<PackingRequestRange>>>;
+type PackingJobs = Arc<RwLock<VecDeque<PackingRequest>>>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+/// Packing actor state
 pub struct PackingActor {
-    storage_module: Arc<RwLock<StorageModule>>,
-    runtime_handle: Handle,
-    chunks: AtomicChunkRange,
+    /// used to execute the internal job poll future
+    actix_runtime_handle: Handle,
+    /// used to spawn threads to perform packing
+    task_executor: TaskExecutor,
+    /// list of all the pending packing jobs
+    pending_jobs: PackingJobs,
+    /// semaphore to control concurrency
+    semaphore: Arc<Semaphore>,
+    /// packing process configuration
+    config: PackingConfig,
 }
 
-const CHUNK_POLL_TIME_MS: u64 = 1_000;
+#[derive(Debug, Clone)]
+/// configuration for the packing actor
+pub struct PackingConfig {
+    poll_duration: Duration,
+    concurrency: u16,
+}
+impl Default for PackingConfig {
+    fn default() -> Self {
+        Self {
+            poll_duration: Duration::from_millis(1000),
+            concurrency: 4,
+        }
+    }
+}
 
 impl PackingActor {
-    pub fn new(handle: Handle, storage_module: Arc<RwLock<StorageModule>>) -> Self {
+    /// creates a new packing actor
+    pub fn new(
+        actix_runtime_handle: Handle,
+        task_executor: TaskExecutor,
+        config: Option<PackingConfig>,
+    ) -> Self {
+        let config = config.unwrap_or_default();
         Self {
-            runtime_handle: handle,
-            storage_module,
-            chunks: Arc::new(RwLock::new(VecDeque::with_capacity(1000))),
+            actix_runtime_handle,
+            task_executor,
+            pending_jobs: Arc::new(RwLock::new(VecDeque::with_capacity(32))),
+            semaphore: Arc::new(Semaphore::new(config.concurrency.into())),
+            config,
         }
     }
 
-    async fn poll_chunks(chunks: AtomicChunkRange, storage_module: Arc<RwLock<StorageModule>>) {
-        // Loop which runs all jobs every 1 second (defined in CHUNK_POLL_TIME_MS)
+    async fn process_jobs(self) {
         loop {
-            if let Some(next_range) = chunks.read().unwrap().front() {
-                let PartitionInfo {
-                    filename,
-                    mining_addr,
-                } = get_partition_info(next_range.partition_id);
+            // block as the compiler can't reason about explicit read guard drops with Send bounds apparently
+            let front = {
+                let pending_read_guard = self.pending_jobs.read().unwrap();
+                pending_read_guard.front().cloned()
+            };
 
-                let f = fs::File::open(filename.clone()).unwrap();
+            let next_range = match front {
+                Some(v) => v,
+                None => {
+                    debug!("no packing requests in queue, sleeping...");
+                    tokio::time::sleep(self.config.poll_duration).await;
+                    continue;
+                }
+            };
 
-                let data_in_range = match fs::read(filename) {
-                    Ok(r) => cast_vec_u8_to_vec_u8_array(r),
-                    Err(_) => continue,
-                };
+            // TODO: should we be validating if the requested range is valid?
+            let PackingRequest {
+                storage_module,
+                chunk_range,
+            } = next_range;
 
-                // TODO: Pack range
-                let range = match capacity_pack_range_with_data(
-                    data_in_range,
-                    mining_addr,
-                    next_range.chunk_interval.start() as u64,
-                    IrysTxId::random(),
-                    None,
-                ) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
+            let assignment = match storage_module.partition_assignment {
+                Some(v) => v,
+                None => {
+                    warn!(target:"irys::packing", "Partition assignment for storage module {} is `None`, cannot pack requested range {:?}", &storage_module.module_num, &chunk_range);
+                    self.pending_jobs.write().unwrap().pop_front();
+                    continue;
+                }
+            };
 
-                // TODO: Write to disk correctly
+            let mining_address = assignment.miner_address;
+            let partition_hash = assignment.partition_hash;
 
-                // Remove from queue once complete
-                let _ = chunks.write().unwrap().pop_front();
+            for i in chunk_range.start()..chunk_range.end() {
+                // each semaphore permit corresponds to a single chunk to be packed, as we assume it'll use an entire CPU thread's worth of compute.
+                // when we implement GPU packing, this is where we need to fork the logic between the two methods - GPU can take larger contiguous segments
+                // whereas CPU will do this permit system
+
+                // TODO: have stateful executor threads / an arena for entropy chunks so we don't have to allocate chunks all over the place when we can just re-use
+                // TODO: improve this! use wakers instead of polling, allow for work-stealing, use a dedicated thread pool w/ lower priorities etc.
+                let semaphore: Arc<Semaphore> = self.semaphore.clone();
+                let storage_module = storage_module.clone();
+                // wait for the permit before spawning the thread
+                let permit = semaphore.acquire_owned().await.unwrap();
+                self.task_executor.spawn_blocking(async move {
+                    let entropy_chunk =
+                        capacity_pack_range(mining_address, i as u64, partition_hash, None)
+                            .unwrap();
+                    // computation has finished, release permit
+                    drop(permit);
+                    // write the chunk
+                    storage_module.write_chunk(i, entropy_chunk, irys_storage::ChunkType::Entropy);
+                });
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(CHUNK_POLL_TIME_MS)).await;
+            // Remove from queue once complete
+            let _ = self.pending_jobs.write().unwrap().pop_front();
         }
     }
 }
 
+#[inline]
 fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
     assert!(
         input.len() % N != 0,
@@ -93,40 +147,25 @@ fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
     }
 }
 
-struct PartitionInfo {
-    mining_addr: Address,
-    filename: String,
-}
-
-fn get_partition_info(id: u64) -> PartitionInfo {
-    PartitionInfo {
-        mining_addr: Address::random(),
-        filename: "".to_string(),
-    }
-}
-
 impl Actor for PackingActor {
     type Context = Context<Self>;
 
     fn start(self) -> actix::Addr<Self> {
-        // Create packing worker that runs every
-        self.runtime_handle.spawn(Self::poll_chunks(
-            self.chunks.clone(),
-            self.storage_module.clone(),
-        ));
+        self.actix_runtime_handle
+            .spawn(Self::process_jobs(self.clone()));
 
         Context::new().run(self)
     }
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        ctx.set_mailbox_capacity(1000000);
+        ctx.set_mailbox_capacity(5_000);
     }
 }
 
-impl Handler<PackingRequestRange> for PackingActor {
+impl Handler<PackingRequest> for PackingActor {
     type Result = ();
 
-    fn handle(&mut self, msg: PackingRequestRange, ctx: &mut Self::Context) -> Self::Result {
-        self.chunks.write().unwrap().push_back(msg);
+    fn handle(&mut self, msg: PackingRequest, ctx: &mut Self::Context) -> Self::Result {
+        self.pending_jobs.write().unwrap().push_back(msg);
     }
 }

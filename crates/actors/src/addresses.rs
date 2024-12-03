@@ -15,7 +15,7 @@ use crate::{
 pub struct ActorAddresses {
     pub partitions: Vec<Addr<PartitionMiningActor>>,
     pub block_producer: Addr<BlockProducerActor>,
-    // pub packing: Addr<PackingActor>,
+    pub packing: Addr<PackingActor>,
     pub mempool: Addr<MempoolActor>,
     pub block_index: Addr<BlockIndexActor>,
     pub epoch_service: Addr<EpochServiceActor>,
@@ -30,7 +30,7 @@ impl ActorAddresses {
     pub fn start_mining(&self) -> eyre::Result<()> {
         self.set_mining(true)
     }
-    /// Send a custom control message toa all known partition actors
+    /// Send a custom control message to all known partition actors
     pub fn set_mining(&self, should_mine: bool) -> eyre::Result<()> {
         for part in self.partitions.iter() {
             part.try_send(MiningControl(should_mine))?;

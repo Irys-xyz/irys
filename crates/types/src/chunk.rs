@@ -38,10 +38,9 @@ impl Chunk {
 /// i.e for the first chunk, the offset is 262144 instead of 0
 pub type TxRelativeChunkOffset = u32;
 
-/// a fully padded chunk binary - note: only use this type in cases where smaller/end chunks *should* be padded to fill out the chunk
-pub type ChunkBin = [u8; CHUNK_SIZE as usize];
-
-/// a chunk binary - use this in cases where chunks may not be padded
+/// a chunk binary
+/// this type is unsized (i.e not a [u8; N]) as chunks can have variable sizes
+/// either for testing or due to it being the last unpadded chunk
 pub type ChunkBytes = Vec<u8>;
 
 /// sha256(chunk_data_path)

@@ -4,7 +4,6 @@ use irys_database::db_cache::{chunk_offset_to_index, data_size_to_chunk_count, C
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_types::ingress::generate_ingress_proof_tree;
 use irys_types::irys::IrysSigner;
-use irys_types::ChunkBin;
 use irys_types::DataRoot;
 use irys_types::{
     app_state::DatabaseProvider, chunk::Chunk, hash_sha256, validate_path, IrysTransactionHeader,

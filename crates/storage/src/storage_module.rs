@@ -1,3 +1,4 @@
+use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, Result};
 use irys_database::submodule::{
     add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
@@ -37,6 +38,8 @@ type StorageIntervals = NoditMap<u32, Interval<u32>, ChunkType>;
 /// Maps a logical partition (fixed size) to physical storage across multiple drives
 #[derive(Debug)]
 pub struct StorageModule {
+    /// an integer uniquely identifying the module
+    pub module_num: usize,
     /// The (Optional) info about a partition assigned to this storage module
     pub partition_assignment: Option<PartitionAssignment>,
     /// In-memory chunk buffer awaiting disk write
@@ -80,6 +83,29 @@ pub enum ChunkType {
     Data,
     /// Chunk has not been initialized
     Uninitialized,
+}
+
+// we can't put this in `types` due to dependency cycles
+#[derive(Debug, Clone, Deref, DerefMut)]
+pub struct StorageModules(pub StorageModuleVec);
+
+pub type StorageModuleVec = Vec<Arc<StorageModule>>;
+
+impl StorageModules {
+    pub fn inner(self) -> StorageModuleVec {
+        self.0
+    }
+
+    // returns the first SM (if any) with the provided partition hash
+    pub fn get_by_partition_hash(
+        &self,
+        partition_hash: PartitionHash,
+    ) -> Option<Arc<StorageModule>> {
+        self.0
+            .iter()
+            .find(|sm| sm.partition_hash().is_some_and(|ph| ph == partition_hash))
+            .cloned()
+    }
 }
 
 impl StorageModule {
@@ -161,6 +187,7 @@ impl StorageModule {
         }
 
         StorageModule {
+            module_num: storage_module_info.module_num,
             partition_assignment: storage_module_info.partition_assignment,
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
             intervals: Arc::new(RwLock::new(intervals)),

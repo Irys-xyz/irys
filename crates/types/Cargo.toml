@@ -22,10 +22,11 @@ alloy-rpc-types-engine.workspace = true
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 assert_matches = "1.5.0"
 
+futures.workspace = true
 tokio.workspace = true
 actix.workspace = true
 openssl.workspace = true
-
+tracing.workspace = true
 reth-db.workspace = true
 alloy-core.workspace = true
 alloy-signer.workspace = true

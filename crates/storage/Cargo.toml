@@ -20,5 +20,6 @@ serde_json.workspace = true
 reth-db.workspace = true
 irys-database.workspace = true
 irys-testing-utils.workspace = true
+derive_more.workspace = true
 [lints]
 workspace = true

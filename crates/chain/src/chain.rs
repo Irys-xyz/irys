@@ -1,5 +1,6 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::Actor;
+use derive_more::derive::Deref;
 use irys_actors::{
     block_index::BlockIndexActor,
     block_producer::{BlockConfirmedMessage, BlockProducerActor},
@@ -9,7 +10,7 @@ use irys_actors::{
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
-    packing::PackingActor,
+    packing::{PackingActor, PackingConfig},
     ActorAddresses,
 };
 use irys_api_server::{run_server, ApiState};
@@ -18,8 +19,11 @@ pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
-use irys_storage::{initialize_storage_files, StorageModule};
-use irys_types::{app_state::DatabaseProvider, block_production::PartitionId, StorageConfig, H256};
+use irys_storage::{initialize_storage_files, StorageModule, StorageModuleVec, StorageModules};
+use irys_types::{
+    app_state::DatabaseProvider, block_production::PartitionId, partition::PartitionHash,
+    StorageConfig, H256,
+};
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
@@ -81,7 +85,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
         min_writes_before_sync: 1,
     };
     let arc_storage_config = Arc::new(storage_config_for_testing);
-    let mut storage_modules: Vec<Arc<StorageModule>> = Vec::new();
+    let mut storage_modules: StorageModuleVec = Vec::new();
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
         BlockIndex::default()
             .reset(&arc_config.clone())?
@@ -198,13 +202,14 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let part_actors_clone = part_actors.clone();
                 std::thread::spawn(move || run_vdf(H256::random(), new_seed_rx, part_actors));
 
-                // let packing_actor_addr =
-                //     PackingActor::new(Handle::current(), storage_provider.clone()).start();
+                let packing_actor_addr =
+                    PackingActor::new(Handle::current(), reth_node.task_executor.clone(), None)
+                        .start();
 
                 let actor_addresses = ActorAddresses {
                     partitions: part_actors_clone,
                     block_producer: block_producer_addr,
-                    // packing: packing_actor_addr,
+                    packing: packing_actor_addr,
                     mempool: mempool_actor_addr,
                     block_index: block_index_actor_addr,
                     epoch_service: epoch_service_actor_addr,

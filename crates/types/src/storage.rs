@@ -1,6 +1,7 @@
 use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
+    sync::Arc,
 };
 
 use nodit::{InclusiveInterval, Interval, IntervalType, NoditMap};
