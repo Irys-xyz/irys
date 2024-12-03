@@ -5397,6 +5397,7 @@ dependencies = [
  "irys-testing-utils",
  "irys-types",
  "nodit",
+ "openssl",
  "rand",
  "reth-db",
  "serde",

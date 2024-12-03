@@ -178,9 +178,6 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
             // loop though each tx_path and add entries to the indexes in the storage modules
             // overlapped by the tx_path's chunks
             for (tx_path, data_root) in path_pairs {
-                // Compute the tx path hash for each tx_path proof
-                let tx_path_hash = H256::from(hash_sha256(&tx_path.proof).unwrap());
-
                 // Calculate the number of chunks added to the ledger by this transaction
                 let tx_byte_length = tx_path.offset - prev_byte_offset;
                 let num_chunks_in_tx = (tx_byte_length / chunk_size) as u64;
@@ -202,26 +199,22 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                 // Update each of the affected StorageModules
                 for storage_module in matching_modules {
                     // Store the tx_path_hash and its path bytes
-                    if let Err(e) = storage_module.add_tx_path_to_index(
-                        tx_path_hash,
+                    if let Err(e) = storage_module.index_transaction_data(
                         tx_path.proof.clone(),
+                        data_root,
                         tx_chunk_range,
                     ) {
-                        error!("Failed to add tx path to index: {}", e);
-                        return Err(());
-                    }
-                    // Update the start_offset index
-                    if let Err(e) =
-                        storage_module.add_start_offset_by_data_root(data_root, tx_chunk_range)
-                    {
-                        error!("Failed to add start_offset to index: {}", e);
+                        error!(
+                            "Failed to add tx path + data_root + start_offset to index: {}",
+                            e
+                        );
                         return Err(());
                     }
                 }
 
                 // Loop through transaction's chunks
                 for chunk_offset in 0..num_chunks_in_tx as u32 {
-                    // Get chunk from cache
+                    // Get chunk from the global cache
                     if let Ok(Some(chunk_info)) =
                         cached_chunk_by_offset(&db, data_root, chunk_offset)
                     {
