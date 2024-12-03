@@ -1,8 +1,7 @@
 use std::ops::BitXor;
 
-use irys_c::{capacity, capacity_single};
-use irys_primitives::IrysTxId;
-use irys_types::{Address, ChunkBytes, CHUNK_SIZE, H256};
+pub use irys_c::{capacity, capacity_single};
+use irys_types::{partition::PartitionHash, Address, ChunkBytes, CHUNK_SIZE};
 
 pub const PACKING_SHA_1_5_S: u32 = 22_500_000;
 
@@ -13,12 +12,12 @@ pub const PACKING_SHA_1_5_S: u32 = 22_500_000;
 pub fn capacity_pack_range_c(
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
-    partition_hash: H256,
+    partition_hash: PartitionHash,
     iterations: Option<u32>,
     out_entropy_chunk: &mut Vec<u8>,
 ) {
     let mining_addr_len = mining_address.len(); // note: might not line up with capacity? that should be fine...
-    let partition_hash_len = partition_hash.len();
+    let partition_hash_len = partition_hash.0.len();
 
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
@@ -51,10 +50,10 @@ const PACKING_TYPE: PackingType = PackingType::CPU;
 
 /// 2D Packing Rust implementation
 pub fn capacity_pack_range_with_data(
-    data: &mut Vec<ChunkBin>,
+    data: &mut Vec<ChunkBytes>,
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
-    partition_hash: IrysTxId,
+    partition_hash: PartitionHash,
     iterations: Option<u32>,
     chunk_size: usize,
 ) {
@@ -81,10 +80,10 @@ pub fn capacity_pack_range_with_data(
 
 /// 2D Packing C implementation
 pub fn capacity_pack_range_with_data_c(
-    data: &mut Vec<ChunkBin>,
+    data: &mut Vec<ChunkBytes>,
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
-    partition_hash: IrysTxId,
+    partition_hash: PartitionHash,
     iterations: Option<u32>,
 ) {
     match PACKING_TYPE {
@@ -105,7 +104,7 @@ pub fn capacity_pack_range_with_data_c(
     }
 }
 
-fn xor_vec_u8_arrays_in_place<const N: usize>(a: &mut [u8; N], b: &Vec<u8>) {
+fn xor_vec_u8_arrays_in_place(a: &mut Vec<u8>, b: &Vec<u8>) {
     for i in 0..a.len() {
         a[i] = a[i].bitxor(b[i]);
     }
@@ -172,21 +171,21 @@ fn test_chunks_packing() {
     rng.fill(&mut partition_hash);
 
     let num_chunks: usize = 4;
-    let mut chunks: Vec<ChunkBin> = Vec::with_capacity(num_chunks);
-    let mut chunks_rust: Vec<ChunkBin> = Vec::with_capacity(num_chunks);
+    let mut chunks: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
+    let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
     for _i in 0..num_chunks {
         let mut chunk = [0u8; CHUNK_SIZE as usize];
         rng.fill_bytes(&mut chunk);
-        chunks.push(chunk);
-        chunks_rust.push(chunk);
+        chunks.push(chunk.to_vec());
+        chunks_rust.push(chunk.to_vec());
     }
 
     assert_eq!(chunks, chunks_rust, "Rust and C packing should start equal");
 
     // pick random chunk to verify later
     let rnd_chunk_pos = rng.gen_range(0..num_chunks);
-    let mut rnd_chunk = chunks[rnd_chunk_pos];
+    let mut rnd_chunk = chunks[rnd_chunk_pos].clone();
 
     let now = Instant::now();
 

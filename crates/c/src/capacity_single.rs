@@ -3,6 +3,7 @@ use openssl::sha;
 
 pub const SHA_HASH_SIZE: usize = 32;
 
+#[inline]
 pub fn compute_seed_hash(
     address: Address,
     offset: std::ffi::c_ulong,
@@ -19,6 +20,7 @@ pub fn compute_seed_hash(
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
 /// defaults to `[PACKING_SHA_1_5_S]`, returns entropy chunk in `out_entropy_chunk` parameter.
 /// Precondition: `out_entropy_chunk` should have at least `chunk_size` capacity
+#[inline]
 pub fn compute_entropy_chunk(
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
@@ -29,7 +31,7 @@ pub fn compute_entropy_chunk(
 ) {
     let mut previous_segment = compute_seed_hash(mining_address, chunk_offset, partition_hash);
     out_entropy_chunk.clear();
-    // Phase1: secuential hashing
+    // Phase 1: sequential hashing
     for _i in 0..(chunk_size as usize / SHA_HASH_SIZE) {
         previous_segment = sha::sha256(&previous_segment);
         for j in 0..SHA_HASH_SIZE as usize {
@@ -37,8 +39,7 @@ pub fn compute_entropy_chunk(
         }
     }
 
-    // Phase2: 2D hash packing
-    // Phase1 number hashes
+    // Phase 2: 2D hash packing
     let mut hash_count = chunk_size as usize / SHA_HASH_SIZE;
     while hash_count < iterations as usize {
         let i = (hash_count % (chunk_size as usize / SHA_HASH_SIZE)) * SHA_HASH_SIZE;
@@ -46,14 +47,13 @@ pub fn compute_entropy_chunk(
         if i == 0 {
             hasher.update(&out_entropy_chunk[chunk_size as usize - SHA_HASH_SIZE..]);
         } else {
-            hasher.update(&out_entropy_chunk[i - 32..i]);
+            hasher.update(&out_entropy_chunk[i - SHA_HASH_SIZE..i]);
         }
         hasher.update(&out_entropy_chunk[i..i + SHA_HASH_SIZE]);
         let hash = hasher.finish();
-        for j in 0..SHA_HASH_SIZE as usize {
-            out_entropy_chunk[i + j] = hash[j];
-        }
-        hash_count = hash_count + 1;
+        out_entropy_chunk[i..i + SHA_HASH_SIZE].copy_from_slice(&hash);
+
+        hash_count += 1
     }
 }
 
