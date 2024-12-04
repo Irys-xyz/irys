@@ -186,7 +186,7 @@ impl Handler<SolutionContext> for BlockProducerActor {
                     .await
                     .unwrap();
 
-                irys_database::insert_block(&db, &irys_block).unwrap();
+                irys_database::insert_block_header(&db, &irys_block).unwrap();
 
                 let block = Arc::new(irys_block);
                 let txs = Arc::new(data_txs);

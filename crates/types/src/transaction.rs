@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Base64, IrysSignature, H256};
 
+pub type IrysTransactionId = H256;
+
 #[derive(
     Clone,
     Debug,

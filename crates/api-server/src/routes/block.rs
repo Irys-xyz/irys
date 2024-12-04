@@ -14,7 +14,7 @@ pub async fn get_block(
     path: web::Path<H256>,
 ) -> Result<Json<IrysBlockHeader>, ApiError> {
     let block_hash: H256 = path.into_inner();
-    match database::block_by_hash(&state.db, &block_hash) {
+    match database::block_header_by_hash(&state.db, &block_hash) {
         Result::Err(_error) => Err(ApiError::Internal {
             err: String::from("db error"),
         }),
@@ -47,10 +47,10 @@ mod tests {
         let path = tempdir().unwrap();
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
         let blk = IrysBlockHeader::default();
-        let result = database::insert_block(&db, &blk);
+        let result = database::insert_block_header(&db, &blk);
         assert!(result.is_ok(), "block can not be stored");
 
-        let blk_get = database::block_by_hash(&db, &blk.block_hash)
+        let blk_get = database::block_header_by_hash(&db, &blk.block_hash)
             .expect("db error")
             .expect("no block");
         assert_eq!(blk, blk_get, "retrived another block");

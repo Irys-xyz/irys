@@ -60,7 +60,7 @@ pub async fn get_tx(
     path: web::Path<H256>,
 ) -> Result<Json<IrysTransactionHeader>, ApiError> {
     let tx_id: H256 = path.into_inner();
-    match database::tx_by_txid(&state.db, &tx_id) {
+    match database::tx_header_by_txid(&state.db, &tx_id) {
         Result::Err(_error) => Err(ApiError::Internal {
             err: String::from("db error"),
         }),
@@ -93,10 +93,10 @@ mod tests {
         let path = tempdir().unwrap();
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
         let tx = IrysTransactionHeader::default();
-        let result = database::insert_tx(&db, &tx);
+        let result = database::insert_tx_header(&db, &tx);
         assert!(result.is_ok(), "tx can not be stored");
 
-        let tx_get = database::tx_by_txid(&db, &tx.id)
+        let tx_get = database::tx_header_by_txid(&db, &tx.id)
             .expect("db error")
             .expect("no tx");
         assert_eq!(tx, tx_get, "retrived another tx");

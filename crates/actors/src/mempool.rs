@@ -439,7 +439,7 @@ mod tests {
             assert_eq!(chunk.data_path, data_path);
             assert_eq!(chunk.chunk, Some(chunk_bytes));
 
-            let result = irys_database::cached_chunk_by_chunk_key(&arc_db2, key).unwrap();
+            let result = irys_database::cached_chunk_by_chunk_path_hash(&arc_db2, key).unwrap();
             assert_matches!(result, Some(_));
         }
 
