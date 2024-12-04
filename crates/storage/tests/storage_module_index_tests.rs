@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
-use irys_database::submodule::{
-    get_full_tx_path, get_path_hashes_by_offset, get_start_offsets_by_data_root,
+use irys_database::{
+    assign_data_root, cache_chunk, get_partition_hashes_by_data_root, open_or_create_db,
+    submodule::{get_full_tx_path, get_path_hashes_by_offset, get_start_offsets_by_data_root},
+    tables::IrysTables,
 };
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    irys::IrysSigner, partition::PartitionAssignment, Address, IrysTransaction,
+    irys::IrysSigner, partition::PartitionAssignment, Address, Base64, Chunk, IrysTransaction,
     IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PartitionChunkRange, StorageConfig,
     TransactionLedger, H256,
 };
@@ -24,7 +26,7 @@ fn tx_path_overlap_tests() {
         num_partitions_in_slot: 1,
         miner_address: Address::random(),
         min_writes_before_sync: 1,
-        ..Default::default()
+        entropy_packing_iterations: 1,
     };
     let chunk_size = storage_config.chunk_size;
 
@@ -108,7 +110,7 @@ fn tx_path_overlap_tests() {
     ];
 
     // Loop though all the data_chunks and create wrapper tx for them
-    let signer = IrysSigner::random_signer();
+    let signer = IrysSigner::random_signer_with_chunk_size(chunk_size as usize);
     let mut txs: Vec<IrysTransaction> = Vec::new();
 
     for chunks in data_chunks {
@@ -265,6 +267,109 @@ fn tx_path_overlap_tests() {
     );
 
     verify_tx_path_offsets(&submodule4, tx_path_hash, tx_partition_range, &[]);
+
+    verify_data_root_start_offset(submodule3, data_root, 19);
+    verify_data_root_start_offset(submodule4, data_root, -1); // Offset is from previous Partition
+
+    // Tx:5 - Perfectly fills the submodule without overlapping
+    let tx_path = &proofs[4].proof;
+    let data_root = tx_headers[4].data_root;
+    let offset = proofs[4].offset as u64;
+    let bytes_in_tx = (offset + 1) - ((tx_ledger_range.end() + 1) * storage_config.chunk_size);
+    let start_chunk_offset = tx_ledger_range.end() + 1;
+    let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
+        start_chunk_offset,
+        &partition_1_range,
+        bytes_in_tx,
+        chunk_size,
+    );
+
+    let _ = storage_modules[1].index_transaction_data(tx_path.to_vec(), data_root, tx_ledger_range);
+
+    let tx_path_hash = H256::from(hash_sha256(&tx_path).unwrap());
+    verify_tx_path_in_submodule(submodule4, &tx_path, tx_path_hash);
+
+    verify_tx_path_offsets(&submodule4, tx_path_hash, tx_partition_range, &[]);
+
+    // =========================================================================
+    // Post Chunks Tests
+    // =========================================================================
+
+    // Manually update the data_root -> partition_hash index
+    let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+    let part_hash_0 = storage_modules[0].partition_hash().unwrap();
+    let part_hash_1 = storage_modules[1].partition_hash().unwrap();
+    let _ = db.update(|tx| -> eyre::Result<()> {
+        // Partition 0
+        assign_data_root(tx, tx_headers[0].data_root, part_hash_0)?;
+        assign_data_root(tx, tx_headers[1].data_root, part_hash_0)?;
+        assign_data_root(tx, tx_headers[2].data_root, part_hash_0)?;
+        assign_data_root(tx, tx_headers[3].data_root, part_hash_0)?;
+
+        // Partition 1
+        assign_data_root(tx, tx_headers[3].data_root, part_hash_1)?;
+        assign_data_root(tx, tx_headers[4].data_root, part_hash_1)?;
+
+        Ok(())
+    });
+
+    // Loop though all the transactions and add their chunks to the cache
+    for tx in &txs {
+        let mut prev_byte_offset: u64 = 0;
+        info!("num chunks in tx: {:?}", tx.proofs.len());
+        for (i, proof) in tx.proofs.iter().enumerate() {
+            let chunk_bytes =
+                Base64(tx.data.0[prev_byte_offset as usize..=proof.offset as usize].to_vec());
+
+            // verify the chunk length
+            assert_eq!(chunk_bytes.len(), chunk_size as usize);
+
+            // verify the chunk hash
+            let chunk_hash = hash_sha256(&chunk_bytes.0).unwrap();
+            assert_eq!(chunk_hash, tx.chunks[i].data_hash.unwrap());
+
+            let chunk = Chunk {
+                data_root: tx.header.data_root,
+                data_size: chunk_bytes.len() as u64,
+                data_path: Base64(proof.proof.clone()),
+                bytes: chunk_bytes,
+                offset: proof.offset as u32,
+            };
+
+            let _ = db.update_eyre(|tx| cache_chunk(tx, chunk));
+            prev_byte_offset = proof.offset as u64 + 1; // Update for next iteration
+        }
+    }
+
+    // Now loop through all the transactions using their data roots to write chunks
+    // to the storage modules
+    for tx in &txs {
+        let data_root = tx.header.data_root;
+
+        // Retrieve the partition assignments from the data root
+        let hashes = db
+            .view(|tx| get_partition_hashes_by_data_root(tx, data_root))
+            .unwrap()
+            .unwrap();
+        if let Some(partition_hashes) = hashes {
+            // loop though the assigned partitions
+            for part_hash in partition_hashes.0 {
+                // Get the storage module
+                let storage_module = storage_modules
+                    .iter()
+                    .find(|&sm| sm.partition_hash() == Some(part_hash))
+                    .unwrap();
+
+                // Ok we've got the storage_module..
+
+                // need a way to walk all the tx relative chunk offsets in a data root
+
+                // build Chunk{}'s for them and write them to the storage module
+
+                //storage_module.write_data_chunk(chunk)
+            }
+        }
+    }
 }
 
 fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {

@@ -1,6 +1,6 @@
 //! Validates merkle tree proofs for Irys transaction data and proof chunks
 
-use crate::H256;
+use crate::{chunk, H256};
 use alloy_primitives::Address;
 use borsh::BorshDeserialize;
 use borsh_derive::BorshDeserialize;
@@ -283,10 +283,10 @@ pub fn validate_chunk(
 }
 
 /// Generates data chunks from which the calculation of root id starts.
-pub fn generate_leaves(data: Vec<u8>) -> Result<Vec<Node>, Error> {
-    let mut data_chunks: Vec<&[u8]> = data.chunks(MAX_CHUNK_SIZE).collect();
+pub fn generate_leaves(data: Vec<u8>, chunk_size: usize) -> Result<Vec<Node>, Error> {
+    let mut data_chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
 
-    if data_chunks.last().unwrap().len() == MAX_CHUNK_SIZE {
+    if data_chunks.last().unwrap().len() == chunk_size {
         data_chunks.push(&[]);
     }
 
