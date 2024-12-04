@@ -444,7 +444,7 @@ impl StorageModule {
                 add_full_data_path(tx, data_path_hash, data_path)?;
                 add_data_path_hash_to_offset_index(tx, partition_offset, Some(data_path_hash))?;
                 Ok(())
-            })? // Added ? operator here
+            })?
         } else {
             Err(eyre::eyre!(
                 "No submodule found for Partition Offset {:?}",
