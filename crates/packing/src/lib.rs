@@ -102,7 +102,8 @@ pub fn capacity_pack_range_with_data_c(
     }
 }
 
-fn xor_vec_u8_arrays_in_place(a: &mut Vec<u8>, b: &Vec<u8>) {
+#[inline]
+pub fn xor_vec_u8_arrays_in_place(a: &mut Vec<u8>, b: &Vec<u8>) {
     for i in 0..a.len() {
         a[i] = a[i].bitxor(b[i]);
     }

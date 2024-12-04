@@ -1,10 +1,11 @@
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, Result};
 use irys_database::submodule::{
-    add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
+    self, add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
     add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
     create_or_open_submodule_db, get_data_path_by_offset, write_chunk_data_path,
 };
+use irys_packing::xor_vec_u8_arrays_in_place;
 use irys_types::{
     app_state::DatabaseProvider,
     partition::{PartitionAssignment, PartitionHash},
@@ -439,8 +440,30 @@ impl StorageModule {
 
     /// Writes the provided bytes to the submodule's storage, and the data_path to the submodules's database
     pub fn write_data_chunk(&self, chunk: Chunk) -> eyre::Result<()> {
+        // read the metadata
+        // using a guard so it's in a block
+        {
+            let intervals = self.intervals.read().unwrap();
+            let chunk_state = intervals.get_at_point(chunk.offset);
+            if !chunk_state.is_some_and(|s| *s == ChunkType::Entropy) {
+                // invalid chunk state - either it's not in the map (!!) or it's not entropy
+                // we should not be writing to this spot regardless.
+                return Err(eyre!(
+                    "Invalid chunk state {:?} for offset {} - expected this to be an Entropy chunk",
+                    &chunk_state,
+                    &chunk.offset
+                ));
+            }
+        };
+
+        // read entropy from the storage module
+        let entropy = self.read_chunk_internal(chunk.offset)?;
+        // xor
+        let mut data = chunk.bytes.0;
+        xor_vec_u8_arrays_in_place(&mut data, &entropy);
+
         // write to the chunk storage and store the data_path in the submodule's database.
-        self.write_chunk(chunk.offset, chunk.bytes.into(), ChunkType::Data);
+        self.write_chunk(chunk.offset, data, ChunkType::Data);
         // get submodule ref to get database env
         let (_interval, submodule) = self
             .submodules

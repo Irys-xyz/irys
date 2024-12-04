@@ -5399,6 +5399,7 @@ dependencies = [
  "eyre",
  "futures",
  "irys-database",
+ "irys-packing",
  "irys-testing-utils",
  "irys-types",
  "nodit",
