@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use irys_database::{
-    assign_data_root, cache_chunk, get_partition_hashes_by_data_root, open_or_create_db,
+    assign_data_root, cache_chunk, cached_chunk_by_offset, get_partition_hashes_by_data_root,
+    open_or_create_db,
     submodule::{get_full_tx_path, get_path_hashes_by_offset, get_start_offsets_by_data_root},
     tables::IrysTables,
 };
@@ -14,7 +15,7 @@ use irys_types::{
 };
 use openssl::sha;
 use reth_db::Database;
-use tracing::info;
+use tracing::{error, info};
 
 #[test]
 fn tx_path_overlap_tests() {
@@ -97,17 +98,24 @@ fn tx_path_overlap_tests() {
 
     // Create a list of BLOBs that represent transaction data
     let data_chunks = vec![
-        vec![[b'a'; 32], [b'b'; 32], [b'c'; 32]], // Fill most of one submodule
-        vec![[b'd'; 32], [b'e'; 32], [b'f'; 32]], // Overlap the next submodule
+        vec![[0; 32], [1; 32], [2; 32]], // Fill most of one submodule
+        vec![[3; 32], [4; 32], [5; 32]], // Overlap the next submodule
         vec![
-            [b'g'; 32], [b'h'; 32], [b'i'; 32], [b'j'; 32], [b'k'; 32], [b'l'; 32], [b'm'; 32],
-            [b'n'; 32], [b'o'; 32], [b'p'; 32], [b'q'; 32], [b'r'; 32], [b's'; 32],
+            [6; 32], [7; 32], [8; 32], [9; 32], [10; 32], [11; 32], [12; 32], [13; 32], [14; 32],
+            [15; 32], [16; 32], [17; 32], [18; 32],
         ], // Stop one short of filling the StorageModule
-        vec![[b't'; 32], [b'u'; 32], [b'v'; 32]], // Overlap the next StorageModule
-        vec![
-            [b'w'; 32], [b'x'; 32], [b'y'; 32], [b'z'; 32], [b'1'; 32], [b'2'; 32],
-        ], // Perfectly fills the submodule without overlapping
+        vec![[19; 32], [20; 32], [21; 32]], // Overlap the next StorageModule
+        vec![[22; 32], [23; 32], [24; 32], [25; 32], [26; 32], [27; 32]], // Perfectly fills the submodule without overlapping
     ];
+
+    // Helpful logging when debugging
+    // let mut chunk_index = 0;
+    // for chunk_group in &data_chunks {
+    //     for chunk in chunk_group {
+    //         println!("write[{:?}]: {:?}", chunk_index, chunk);
+    //         chunk_index += 1;
+    //     }
+    // }
 
     // Loop though all the data_chunks and create wrapper tx for them
     let signer = IrysSigner::random_signer_with_chunk_size(chunk_size as usize);
@@ -336,15 +344,17 @@ fn tx_path_overlap_tests() {
                 offset: proof.offset as u32,
             };
 
-            let _ = db.update_eyre(|tx| cache_chunk(tx, chunk));
+            let _ = db.update_eyre(|tx| cache_chunk(tx, chunk, chunk_size));
             prev_byte_offset = proof.offset as u64 + 1; // Update for next iteration
         }
     }
 
-    // Now loop through all the transactions using their data roots to write chunks
-    // to the storage modules
+    // Now loop through all the transactions using their data_roots and data_sizes
+    // to write data chunks to the storage modules
+    let mut ledger_offset: LedgerChunkOffset = 0;
     for tx in &txs {
         let data_root = tx.header.data_root;
+        let num_chunks = (tx.header.data_size / chunk_size) as u32;
 
         // Retrieve the partition assignments from the data root
         let hashes = db
@@ -352,6 +362,7 @@ fn tx_path_overlap_tests() {
             .unwrap()
             .unwrap();
         if let Some(partition_hashes) = hashes {
+            let mut chunks_added = 0;
             // loop though the assigned partitions
             for part_hash in partition_hashes.0 {
                 // Get the storage module
@@ -360,13 +371,103 @@ fn tx_path_overlap_tests() {
                     .find(|&sm| sm.partition_hash() == Some(part_hash))
                     .unwrap();
 
-                // Ok we've got the storage_module..
+                let _ = db.view(|tx| {
+                    for i in chunks_added..num_chunks {
+                        // first make sure the ledger_offset falls within the bounds
+                        // of the storage_module. Sometime txs contain ledger relative
+                        // chunk_offsets that span multiple storage modules.
+                        if storage_module.contains_offset(ledger_offset) == false {
+                            continue;
+                        }
 
-                // need a way to walk all the tx relative chunk offsets in a data root
+                        // Request the chunk from the global db index by  data root & tx relative offset
+                        let offset = (i + 1) * chunk_size as u32;
+                        let res =
+                            cached_chunk_by_offset(tx, data_root, offset, chunk_size).unwrap();
 
-                // build Chunk{}'s for them and write them to the storage module
+                        // Build a Chunk struct to store in the submodule
+                        if let Some((_metadata, chunk)) = res {
+                            let chunk_bytes = chunk.chunk.unwrap();
+                            let chunk_byte_value = chunk_bytes.0[0];
+                            info!("chunk_bytes: {:?}", chunk_byte_value);
+                            let chunk = Chunk {
+                                data_root: data_root,
+                                data_size: chunk_bytes.len() as u64,
+                                data_path: chunk.data_path,
+                                bytes: chunk_bytes,
+                                offset: offset as u32,
+                            };
 
-                //storage_module.write_data_chunk(chunk)
+                            let res = storage_module.write_data_chunk(chunk, ledger_offset);
+                            if let Err(err) = res {
+                                error!("{:?}", err);
+                                panic!("Should not have failed writes, because we check the offset with storage_module.contains_offset(...)");
+                            }
+                        }
+
+                        ledger_offset += 1;
+                        chunks_added += 1;
+                    }
+                });
+
+                //storage_module.print_pending_writes();
+            }
+        }
+    }
+
+    // These are synchronous operations
+    let _ = storage_modules[0].sync_pending_chunks();
+    let _ = storage_modules[1].sync_pending_chunks();
+
+    // For each of the storage modules, makes sure they sync to disk
+    let chunks1 = storage_modules[0].read_chunks(ii(0, 19)).unwrap();
+    let chunks2 = storage_modules[1].read_chunks(ii(0, 19)).unwrap();
+
+    // This is just helpful logging, could be commented out
+    for i in 0..=19 {
+        if let Some(chunk) = chunks1.get(&i) {
+            let preview = &chunk.0[..chunk.0.len().min(5)];
+            info!(
+                "storage_module[0][{:?}]: {:?}... - {:?}",
+                i, preview, chunk.1
+            );
+        } else {
+            info!("storage_module[0][{:?}]: None", i);
+        }
+    }
+    for i in 0..=19 {
+        if let Some(chunk) = chunks2.get(&i) {
+            let preview = &chunk.0[..chunk.0.len().min(5)];
+            info!(
+                "storage_module[1][{:?}]: {:?}... - {:?}",
+                i, preview, chunk.1
+            );
+        } else {
+            info!("storage_module[1][{:?}]: None", i);
+        }
+    }
+
+    // Test the chunks read back from the storage modules
+    for i in 0..=19 {
+        if let Some(chunk) = chunks1.get(&i) {
+            let bytes = [i as u8; 32];
+            assert_eq!(chunk.0, bytes);
+            println!("read[sm0]: {:?}", bytes);
+        } else {
+            panic!("Chunk {:?} not found!", i);
+        }
+    }
+
+    for i in 0..=19 {
+        if let Some(chunk) = chunks2.get(&i) {
+            let bytes = [20 + i as u8; 32];
+            assert_eq!(chunk.0, bytes);
+            println!("read[sm1]: {:?}", bytes);
+        } else {
+            if i <= 7 {
+                panic!("Chunk {:?} not found!", i + 20);
+            } else {
+                // expected missing chunk
             }
         }
     }

@@ -131,8 +131,12 @@ type IsDuplicate = bool;
 
 /// Caches a [`Chunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
-pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: Chunk) -> eyre::Result<IsDuplicate> {
-    let chunk_index = chunk_offset_to_index(chunk.offset)?;
+pub fn cache_chunk<T: DbTx + DbTxMut>(
+    tx: &T,
+    chunk: Chunk,
+    chunk_size: u64,
+) -> eyre::Result<IsDuplicate> {
+    let chunk_index = chunk_offset_to_index(chunk.offset, chunk_size)?;
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
     if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
         warn!(
@@ -161,8 +165,9 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
     chunk_offset: TxRelativeChunkOffset,
+    chunk_size: u64,
 ) -> eyre::Result<Option<CachedChunkIndexMetadata>> {
-    let chunk_index = chunk_offset_to_index(chunk_offset)?;
+    let chunk_index = chunk_offset_to_index(chunk_offset, chunk_size)?;
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
     Ok(cursor
         .seek_by_key_subkey(data_root, chunk_index)?
@@ -175,8 +180,9 @@ pub fn cached_chunk_by_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
     chunk_offset: TxRelativeChunkOffset,
+    chunk_size: u64,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
-    let chunk_index = chunk_offset_to_index(chunk_offset)?;
+    let chunk_index = chunk_offset_to_index(chunk_offset, chunk_size)?;
 
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
 

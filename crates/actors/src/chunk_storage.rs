@@ -216,9 +216,9 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                 // Loop through transaction's chunks
                 for chunk_offset in 0..num_chunks_in_tx as u32 {
                     // Get chunk from the global cache
-                    if let Ok(Some(chunk_info)) =
-                        db.view_eyre(|tx| cached_chunk_by_offset(tx, data_root, chunk_offset))
-                    {
+                    if let Ok(Some(chunk_info)) = db.view_eyre(|tx| {
+                        cached_chunk_by_offset(tx, data_root, chunk_offset, chunk_size as u64)
+                    }) {
                         // Compute the ledger relative chunk_offset
                         let ledger_offset = chunk_offset as u64 + tx_chunk_range.start();
 

@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
-use tracing::info;
+use tracing::{debug, info};
 
 type SubmodulePath = String;
 
@@ -207,6 +207,18 @@ impl StorageModule {
         }
     }
 
+    /// Returns whether the given chunk offset falls within this StorageModules assigned range
+    pub fn contains_offset(&self, chunk_offset: LedgerChunkOffset) -> bool {
+        self.partition_assignment
+            .and_then(|part| part.slot_index)
+            .map(|slot_index| {
+                let start_offset = slot_index as u64 * self.config.num_chunks_in_partition;
+                let end_offset = start_offset + self.config.num_chunks_in_partition;
+                (start_offset..end_offset).contains(&chunk_offset)
+            })
+            .unwrap_or(false)
+    }
+
     /// Only used in testing to get a db reference to verify insertions happened.
     pub fn get_submodule(&self, local_offset: PartitionChunkOffset) -> Option<&StorageSubmodule> {
         if let Some(submodule) = self.submodules.get_at_point(local_offset) {
@@ -368,6 +380,12 @@ impl StorageModule {
         pending.insert(chunk_offset, (bytes, chunk_type));
     }
 
+    /// Test utility function
+    pub fn print_pending_writes(&self) {
+        let pending = self.pending_writes.read().unwrap();
+        debug!("pending_writes: {:?}", pending);
+    }
+
     /// Indexes transaction data by mapping chunks to transaction paths across storage submodules.
     /// Stores three mappings: tx path hashes -> tx_path, chunk offsets -> tx paths, and data roots -> start offset.
     /// Updates all overlapping submodules within the given chunk range.
@@ -419,18 +437,20 @@ impl StorageModule {
         partition_offset: PartitionChunkOffset,
     ) -> eyre::Result<()> {
         // Find submodule containing this chunk
-        let (_interval, submodule) = self
-            .submodules
-            .get_key_value_at_point(partition_offset)
-            .unwrap();
+        let res = self.submodules.get_key_value_at_point(partition_offset);
 
-        let _ = submodule.db.update(|tx| -> eyre::Result<()> {
-            add_full_data_path(tx, data_path_hash, data_path)?;
-            add_data_path_hash_to_offset_index(tx, partition_offset, Some(data_path_hash))?;
-            Ok(())
-        });
-
-        Ok(())
+        if let Ok((_interval, submodule)) = res {
+            submodule.db.update(|tx| -> eyre::Result<()> {
+                add_full_data_path(tx, data_path_hash, data_path)?;
+                add_data_path_hash_to_offset_index(tx, partition_offset, Some(data_path_hash))?;
+                Ok(())
+            })? // Added ? operator here
+        } else {
+            Err(eyre::eyre!(
+                "No submodule found for Partition Offset {:?}",
+                partition_offset
+            ))
+        }
     }
 
     /// Writes the provided bytes to the submodule's storage, and the data_path to the submodules's database

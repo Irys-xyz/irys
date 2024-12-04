@@ -123,6 +123,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     db.clone(),
                     reth_node.task_executor.clone(),
                     node_config.mining_signer.clone(),
+                    (*arc_storage_config).clone(),
                 );
                 let mempool_actor_addr = mempool_actor.start();
 
