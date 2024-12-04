@@ -8,7 +8,7 @@ use color_eyre::eyre::eyre;
 use eyre::Error;
 use openssl::sha;
 
-use crate::{chunk::Chunk, Base64, DataChunks};
+use crate::{Base64, DataChunks};
 
 /// Single struct used for original data chunks (Leaves) and branch nodes (hashes of pairs of child nodes).
 #[derive(Debug, PartialEq, Clone)]
@@ -283,10 +283,10 @@ pub fn validate_chunk(
 }
 
 /// Generates data chunks from which the calculation of root id starts.
-pub fn generate_leaves(data: Vec<u8>) -> Result<Vec<Node>, Error> {
-    let mut data_chunks: Vec<&[u8]> = data.chunks(MAX_CHUNK_SIZE).collect();
+pub fn generate_leaves(data: Vec<u8>, chunk_size: usize) -> Result<Vec<Node>, Error> {
+    let mut data_chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
 
-    if data_chunks.last().unwrap().len() == MAX_CHUNK_SIZE {
+    if data_chunks.last().unwrap().len() == chunk_size {
         data_chunks.push(&[]);
     }
 

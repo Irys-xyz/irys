@@ -5,11 +5,13 @@ use crate::db_cache::{
     CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTables, IrysTxHeaders,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders,
+    PartitionHashes, PartitionHashesByDataRoot,
 };
 
 use crate::Ledger;
 use eyre::eyre;
+use irys_types::partition::PartitionHash;
 use irys_types::{
     hash_sha256, BlockHash, BlockRelativeChunkOffset, Chunk, ChunkPathHash, DataRoot,
     IrysBlockHeader, IrysTransactionHeader, IrysTransactionId, TxPath, TxRelativeChunkIndex,
@@ -129,8 +131,12 @@ type IsDuplicate = bool;
 
 /// Caches a [`Chunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
-pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: Chunk) -> eyre::Result<IsDuplicate> {
-    let chunk_index = chunk_offset_to_index(chunk.offset)?;
+pub fn cache_chunk<T: DbTx + DbTxMut>(
+    tx: &T,
+    chunk: Chunk,
+    chunk_size: u64,
+) -> eyre::Result<IsDuplicate> {
+    let chunk_index = chunk_offset_to_index(chunk.offset, chunk_size)?;
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
     if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
         warn!(
@@ -159,8 +165,9 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
     chunk_offset: TxRelativeChunkOffset,
+    chunk_size: u64,
 ) -> eyre::Result<Option<CachedChunkIndexMetadata>> {
-    let chunk_index = chunk_offset_to_index(chunk_offset)?;
+    let chunk_index = chunk_offset_to_index(chunk_offset, chunk_size)?;
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
     Ok(cursor
         .seek_by_key_subkey(data_root, chunk_index)?
@@ -173,8 +180,9 @@ pub fn cached_chunk_by_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
     chunk_offset: TxRelativeChunkOffset,
+    chunk_size: u64,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
-    let chunk_index = chunk_offset_to_index(chunk_offset)?;
+    let chunk_index = chunk_offset_to_index(chunk_offset, chunk_size)?;
 
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
 
@@ -202,6 +210,42 @@ pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
     key: &ChunkPathHash,
 ) -> Result<Option<CachedChunk>, DatabaseError> {
     Ok(tx.get::<CachedChunks>(*key)?)
+}
+
+/// Associates a partition hash with a data root, appending to existing
+/// partition hashes if present or creating a new list if not. Indicates
+/// that chunks of this data overlap with the partition.
+pub fn assign_data_root<T: DbTxMut + DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+    partition_hash: PartitionHash,
+) -> eyre::Result<()> {
+    let partition_hashes = if let Some(mut phs) = get_partition_hashes_by_data_root(tx, data_root)?
+    {
+        phs.0.push(partition_hash);
+        phs
+    } else {
+        PartitionHashes(vec![partition_hash])
+    };
+    set_partition_hashes_by_data_root(tx, data_root, partition_hashes)?;
+    Ok(())
+}
+
+/// Stores list of partition hashes for a data root in the database
+pub fn set_partition_hashes_by_data_root<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    partition_hashes: PartitionHashes,
+) -> eyre::Result<()> {
+    Ok(tx.put::<PartitionHashesByDataRoot>(data_root, partition_hashes)?)
+}
+
+/// Retrieves list of partition hashes for a data root from the database
+pub fn get_partition_hashes_by_data_root<T: DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+) -> eyre::Result<Option<PartitionHashes>> {
+    Ok(tx.get::<PartitionHashesByDataRoot>(data_root)?)
 }
 
 #[cfg(test)]

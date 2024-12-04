@@ -6,6 +6,7 @@ use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_types::{
     block_production::SolutionContext, irys::IrysSigner, Address, H256, IRYS_CHAIN_ID,
+    MAX_CHUNK_SIZE,
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
@@ -30,6 +31,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
         mining_signer: IrysSigner {
             signer: SigningKey::from_slice(DEV_WALLET.as_slice())?,
             chain_id: IRYS_CHAIN_ID,
+            chunk_size: MAX_CHUNK_SIZE,
         },
         ..Default::default()
     };
@@ -43,6 +45,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
     let account1 = IrysSigner {
         signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
         chain_id: IRYS_CHAIN_ID,
+        chunk_size: MAX_CHUNK_SIZE,
     };
     assert_eq!(
         account1.address(),

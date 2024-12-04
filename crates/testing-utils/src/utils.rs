@@ -13,10 +13,10 @@ use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt, FmtSub
 pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
     // tracing-subscriber is so the tracing log macros (i.e info!) work
     // TODO: expose tracing configuration
-    SubscriberBuilder::default()
+    let _ = SubscriberBuilder::default()
         .with_max_level(LevelFilter::DEBUG)
         .finish()
-        .init();
+        .try_init();
 
     temporary_directory(name, keep)
 }

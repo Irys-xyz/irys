@@ -5,6 +5,7 @@ pub mod last_tx;
 pub mod new_account;
 pub mod payload;
 pub mod shadow;
+pub mod range_specifier;
 
 pub use commitment::*;
 pub use dest_hash::*;

@@ -1,8 +1,8 @@
 use foldhash::fast::RandomState;
+use irys_primitives::shadow::Shadows;
 use irys_primitives::{Address, Genesis, GenesisAccount};
-use jsonrpsee::{core::RpcResult, proc_macros::rpc};
+use jsonrpsee::core::RpcResult;
 use jsonrpsee_types::ErrorObjectOwned;
-
 use reth::primitives::StaticFileSegment;
 use reth::revm::database::StateProviderDatabase;
 use reth::revm::state_change::apply_shadow;
@@ -10,28 +10,21 @@ use reth_db::database::Database;
 use reth_db::static_file::iter_static_files;
 use reth_db::table::Table;
 use reth_db::transaction::{DbTx, DbTxMut};
-use reth_db::{DatabaseEnv, DatabaseError, TableViewer, Tables};
-
-use reth_node_builder::{NodeTypesWithDB, NodeTypesWithDBAdapter, NodeTypesWithEngine};
-use reth_node_core::irys_ext::{IrysExtWrapped, NodeExitReason, ReloadPayload};
-
+use reth_db::{DatabaseEnv, TableViewer, Tables};
+use reth_node_builder::NodeTypesWithDBAdapter;
+use reth_node_core::irys_ext::{IrysExt, ReloadPayload};
 use reth_node_ethereum::EthereumNode;
-use reth_provider::providers::{BlockchainProvider, BlockchainProvider2};
+use reth_provider::providers::BlockchainProvider2;
 use reth_provider::{ChainSpecProvider, StateProviderFactory, StaticFileProviderFactory};
-
-use revm::db::{CacheDB, State};
+use revm::db::CacheDB;
 use revm::{DatabaseCommit, JournaledState};
-
-use irys_primitives::shadow::{ShadowTx, Shadows};
 use revm_primitives::ruint::Uint;
-use revm_primitives::{AccountInfo, Bytecode, Bytes, FixedBytes, HashSet, SpecId, B256};
+use revm_primitives::{AccountInfo, Bytecode, FixedBytes, HashSet, SpecId};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
-
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use strum::IntoEnumIterator;
-
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 pub struct ClearViewer<'a, DB: Database> {
     db: &'a DB,
@@ -57,9 +50,10 @@ pub struct GenesisInfo {
 
 pub fn add_genesis_block(
     provider: &BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
-    ext: &IrysExtWrapped,
+    ext: &IrysExt,
     info: GenesisInfo,
 ) -> RpcResult<Genesis> {
+    warn!("genesis reloading via reth RPC is deprecated");
     let GenesisInfo {
         accounts,
         shadows,
@@ -206,7 +200,7 @@ pub fn add_genesis_block(
     //     )
     // })?;
 
-    let v = ext.0.write().map_err(|e| {
+    let sender = ext.reload.write().map_err(|e| {
         ErrorObjectOwned::owned::<String>(
             -32080,
             "error locking reload channel",
@@ -223,12 +217,7 @@ pub fn add_genesis_block(
     // WARNING: RACE CONDITION
     // the reload operation doesn't wait for the reponse response of this method/RPC call to finish, it *does* have a 500ms delay, but that might not be
     // sufficient in certain conditions
-    match &v.reload {
-        Some(tx) => {
-            let _res = tx.send(ReloadPayload::ReloadConfig(chain.clone()));
-        }
-        None => (),
-    }
+    let _res = sender.send(ReloadPayload::ReloadConfig(chain.clone()));
 
     Ok(chain.genesis)
 }
