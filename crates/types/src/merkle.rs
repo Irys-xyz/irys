@@ -1,6 +1,6 @@
 //! Validates merkle tree proofs for Irys transaction data and proof chunks
 
-use crate::{chunk, H256};
+use crate::H256;
 use alloy_primitives::Address;
 use borsh::BorshDeserialize;
 use borsh_derive::BorshDeserialize;
@@ -8,7 +8,7 @@ use color_eyre::eyre::eyre;
 use eyre::Error;
 use openssl::sha;
 
-use crate::{chunk::Chunk, Base64, DataChunks};
+use crate::{Base64, DataChunks};
 
 /// Single struct used for original data chunks (Leaves) and branch nodes (hashes of pairs of child nodes).
 #[derive(Debug, PartialEq, Clone)]
