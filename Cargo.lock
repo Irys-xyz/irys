@@ -8177,6 +8177,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "derive_more 1.0.0",
+ "eyre",
  "metrics",
  "modular-bitfield",
  "parity-scale-codec",

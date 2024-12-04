@@ -130,7 +130,9 @@ impl Handler<TxIngressMessage> for MempoolActor {
         //return Err(TxIngressError::Unfunded);
 
         // Cache the data_root in the database
-        let _ = irys_database::cache_data_root(&self.db, &tx);
+        let _ = self
+            .db
+            .update_eyre(|db_tx| irys_database::cache_data_root(db_tx, &tx));
 
         Ok(())
     }
@@ -143,7 +145,9 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         // TODO: maintain a shared read transaction so we have read isolation
         let chunk: Chunk = chunk_msg.0;
         // Check to see if we have a cached data_root for this chunk
-        let result = irys_database::cached_data_root_by_data_root(&self.db, chunk.data_root);
+        let result = self
+            .db
+            .update_eyre(|tx| irys_database::cached_data_root_by_data_root(tx, chunk.data_root));
 
         let cached_data_root = result
             .map_err(|_| ChunkIngressError::DatabaseError)? // Convert DatabaseError to ChunkIngressError
@@ -189,7 +193,9 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         if path_result.leaf_hash == hash_sha256(&chunk.bytes.0).unwrap() {
             // TODO: fix all these unwraps!
             // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
-            irys_database::cache_chunk(&self.db, chunk).unwrap();
+            self.db
+                .update_eyre(|tx| irys_database::cache_chunk(tx, chunk))
+                .unwrap();
 
             let tx = self.db.tx().unwrap();
             let root_hash: H256 = root_hash.into();
@@ -402,8 +408,10 @@ mod tests {
         // Verify the transaction was added
         assert_matches!(result, Ok(()));
 
+        let db_tx = arc_db2.tx()?;
+
         // Verify the data_root was added to the cache
-        let result = irys_database::cached_data_root_by_data_root(&arc_db2, data_root).unwrap();
+        let result = irys_database::cached_data_root_by_data_root(&db_tx, data_root).unwrap();
         assert_matches!(result, Some(_));
 
         // Loop though each of the transaction chunks
@@ -432,14 +440,14 @@ mod tests {
             assert_matches!(result, Ok(()));
 
             // Verify the chunk is added to the ChunksCache
-            let (meta, chunk) = irys_database::cached_chunk_by_offset(&arc_db2, data_root, offset)
+            let (meta, chunk) = irys_database::cached_chunk_by_offset(&db_tx, data_root, offset)
                 .unwrap()
                 .unwrap();
             assert_eq!(meta.chunk_path_hash, key);
             assert_eq!(chunk.data_path, data_path);
             assert_eq!(chunk.chunk, Some(chunk_bytes));
 
-            let result = irys_database::cached_chunk_by_chunk_path_hash(&arc_db2, key).unwrap();
+            let result = irys_database::cached_chunk_by_chunk_path_hash(&db_tx, &key).unwrap();
             assert_matches!(result, Some(_));
         }
 

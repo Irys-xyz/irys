@@ -9,6 +9,7 @@ use irys_types::{
     TransactionLedger, H256,
 };
 use openssl::sha;
+use reth_db::Database;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
@@ -216,7 +217,7 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                 for chunk_offset in 0..num_chunks_in_tx as u32 {
                     // Get chunk from the global cache
                     if let Ok(Some(chunk_info)) =
-                        cached_chunk_by_offset(&db, data_root, chunk_offset)
+                        db.view_eyre(|tx| cached_chunk_by_offset(tx, data_root, chunk_offset))
                     {
                         // Compute the ledger relative chunk_offset
                         let ledger_offset = chunk_offset as u64 + tx_chunk_range.start();
