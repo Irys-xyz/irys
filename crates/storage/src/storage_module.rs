@@ -1,15 +1,17 @@
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, Result};
 use irys_database::submodule::{
-    add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
+    self, add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
     add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
-    create_or_open_submodule_db, get_data_path_by_offset, write_chunk_data_path,
+    create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
+    tables::RelativeStartOffsets, write_chunk_data_path,
 };
 use irys_types::{
     app_state::DatabaseProvider,
     partition::{PartitionAssignment, PartitionHash},
     Chunk, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset, LedgerChunkRange,
-    PartitionChunkOffset, PartitionChunkRange, StorageConfig, TxPath, TxPathHash, H256,
+    PartitionChunkOffset, PartitionChunkRange, RelativeChunkOffset, StorageConfig, TxPath,
+    TxPathHash, H256,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use openssl::sha;
@@ -453,23 +455,42 @@ impl StorageModule {
         }
     }
 
-    /// Writes the provided bytes to the submodule's storage, and the data_path to the submodules's database
-    pub fn write_data_chunk(
-        &self,
-        chunk: Chunk,
-        ledger_offset: LedgerChunkOffset,
-    ) -> eyre::Result<()> {
-        let partition_offset = self.make_offset_partition_relative_guarded(ledger_offset)?;
-        // write to the chunk storage and store the data_path in the submodule's database.
-        self.write_chunk(partition_offset, chunk.bytes.into(), ChunkType::Data);
+    /// Writes chunk data and its data_path to relevant storage locations
+    pub fn write_data_chunk(&self, chunk: Chunk) -> eyre::Result<()> {
+        let start_offsets = self.collect_start_offsets(chunk.data_root)?;
+        let chunk_offset = (chunk.offset as u64 / self.config.chunk_size) - 1;
+        let data_path = chunk.data_path.0.clone();
+        let data_path_hash = Chunk::hash_data_path(&data_path);
 
-        self.add_data_path_to_index(
-            Chunk::hash_data_path(&chunk.data_path.0),
-            chunk.data_path.into(),
-            partition_offset,
-        )?;
+        for start_offset in start_offsets.0 {
+            let partition_offset = (start_offset + chunk_offset as i32)
+                .try_into()
+                .map_err(|_| eyre::eyre!("Invalid negative offset: {}", start_offset))?;
+
+            self.write_chunk(
+                partition_offset,
+                chunk.bytes.clone().into(),
+                ChunkType::Data,
+            );
+            self.add_data_path_to_index(data_path_hash, data_path.clone(), partition_offset)?;
+        }
 
         Ok(())
+    }
+
+    /// Internal helper function to find all the RelativeStartOffsets for a data_root
+    /// in this StorageModule
+    fn collect_start_offsets(&self, data_root: DataRoot) -> eyre::Result<RelativeStartOffsets> {
+        let mut offsets = RelativeStartOffsets::default();
+        for (_, submodule) in self.submodules.iter() {
+            if let Some(rel_offsets) = submodule
+                .db
+                .view(|tx| get_start_offsets_by_data_root(tx, data_root))??
+            {
+                offsets.0.extend(rel_offsets.0);
+            }
+        }
+        Ok(offsets)
     }
 
     pub fn read_data_path(

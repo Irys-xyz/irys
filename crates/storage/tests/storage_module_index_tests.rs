@@ -398,7 +398,7 @@ fn tx_path_overlap_tests() {
                                 offset: offset as u32,
                             };
 
-                            let res = storage_module.write_data_chunk(chunk, ledger_offset);
+                            let res = storage_module.write_data_chunk(chunk);
                             if let Err(err) = res {
                                 error!("{:?}", err);
                                 panic!("Should not have failed writes, because we check the offset with storage_module.contains_offset(...)");
