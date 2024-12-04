@@ -283,7 +283,10 @@ impl StorageModule {
     /// Takes a range [start, end) of partition-relative offsets (end exclusive).
     /// Returns a map of chunk offsets to their data and type, excluding uninitialized chunks.
     /// Chunks are read from physical storage for initialized intervals that overlap the range.
-    pub fn read_chunks(&self, chunk_range: Interval<u32>) -> eyre::Result<ChunkMap> {
+    pub fn read_chunks(
+        &self,
+        chunk_range: Interval<PartitionChunkOffset>,
+    ) -> eyre::Result<ChunkMap> {
         let mut chunk_map = ChunkMap::new();
         // Query overlapping intervals from storage map
         let intervals = self.intervals.read().unwrap();
@@ -311,7 +314,7 @@ impl StorageModule {
     /// 3. Reads the chunk data into a buffer
     ///
     /// Returns the chunk bytes or an error if read fails
-    fn read_chunk_internal(&self, chunk_offset: u32) -> eyre::Result<ChunkBytes> {
+    fn read_chunk_internal(&self, chunk_offset: PartitionChunkOffset) -> eyre::Result<ChunkBytes> {
         // Find submodule containing this chunk
         let (interval, submodule) = self
             .submodules
@@ -355,6 +358,7 @@ impl StorageModule {
     /// and written during periodic sync operations.
     pub fn write_chunk(
         &self,
+
         chunk_offset: PartitionChunkOffset,
         bytes: Vec<u8>,
         chunk_type: ChunkType,
@@ -412,25 +416,17 @@ impl StorageModule {
         &self,
         data_path_hash: ChunkPathHash,
         data_path: ChunkDataPath,
-        ledger_offset: LedgerChunkOffset,
+        partition_offset: PartitionChunkOffset,
     ) -> eyre::Result<()> {
-        // Convert the ledger relative offset to partition relative
-        let local_offset = self.make_offset_partition_relative(ledger_offset)?;
-
-        if local_offset < 0 {
-            return Err(eyre::eyre!("chunk offset not in storage module"));
-        }
-        let local_offset = local_offset as u32;
-
         // Find submodule containing this chunk
         let (_interval, submodule) = self
             .submodules
-            .get_key_value_at_point(local_offset)
+            .get_key_value_at_point(partition_offset)
             .unwrap();
 
         let _ = submodule.db.update(|tx| -> eyre::Result<()> {
             add_full_data_path(tx, data_path_hash, data_path)?;
-            add_data_path_hash_to_offset_index(tx, local_offset, Some(data_path_hash))?;
+            add_data_path_hash_to_offset_index(tx, partition_offset, Some(data_path_hash))?;
             Ok(())
         });
 
@@ -438,35 +434,38 @@ impl StorageModule {
     }
 
     /// Writes the provided bytes to the submodule's storage, and the data_path to the submodules's database
-    pub fn write_data_chunk(&self, chunk: Chunk) -> eyre::Result<()> {
+    pub fn write_data_chunk(
+        &self,
+        chunk: Chunk,
+        ledger_offset: LedgerChunkOffset,
+    ) -> eyre::Result<()> {
+        let partition_offset = self.make_offset_partition_relative_guarded(ledger_offset)?;
         // write to the chunk storage and store the data_path in the submodule's database.
-        self.write_chunk(chunk.offset, chunk.bytes.into(), ChunkType::Data);
-        // get submodule ref to get database env
-        let (_interval, submodule) = self
-            .submodules
-            .get_key_value_at_point(chunk.offset)
-            .unwrap();
+        self.write_chunk(partition_offset, chunk.bytes.into(), ChunkType::Data);
 
-        // write data_path
-        let _ = submodule
-            .db
-            .update(|tx| write_chunk_data_path(tx, chunk.offset, chunk.data_path.into(), None))?;
+        self.add_data_path_to_index(
+            Chunk::hash_data_path(&chunk.data_path.0),
+            chunk.data_path.into(),
+            partition_offset,
+        )?;
 
         Ok(())
     }
 
     pub fn read_data_path(
         &mut self,
-        chunk_offset: PartitionChunkOffset,
+        ledger_offset: LedgerChunkOffset,
     ) -> eyre::Result<Option<ChunkDataPath>> {
+        let partition_offset = self.make_offset_partition_relative_guarded(ledger_offset)?;
+
         let (_interval, submodule) = self
             .submodules
-            .get_key_value_at_point(chunk_offset)
+            .get_key_value_at_point(partition_offset)
             .unwrap();
 
         submodule
             .db
-            .view(|tx| get_data_path_by_offset(tx, chunk_offset))?
+            .view(|tx| get_data_path_by_offset(tx, partition_offset))?
     }
 
     /// Writes chunk data to physical storage and updates state tracking
@@ -480,7 +479,7 @@ impl StorageModule {
     /// Note: Chunk size must match size in StorageModule.config
     fn write_chunk_internal(
         &self,
-        chunk_offset: u32,
+        chunk_offset: PartitionChunkOffset,
         bytes: Vec<u8>,
         chunk_type: ChunkType,
     ) -> eyre::Result<()> {
@@ -548,13 +547,31 @@ impl StorageModule {
         Ok(PartitionChunkRange(ii(start as u32, end as u32)))
     }
 
-    /// Internal utility function to take a ledger relative offset and makes it
+    /// utility function to take a ledger relative offset and makes it
     /// Partition relative (relative to the partition assigned to the
     /// StorageModule)
-    fn make_offset_partition_relative(&self, start_offset: LedgerChunkOffset) -> eyre::Result<i32> {
+    pub fn make_offset_partition_relative(
+        &self,
+        start_offset: LedgerChunkOffset,
+    ) -> eyre::Result<i32> {
         let storage_module_range = self.get_storage_module_range()?;
         let start = start_offset as i64 - storage_module_range.start() as i64;
         Ok(start.try_into()?)
+    }
+
+    /// utility function to take a ledger relative offset and makes it
+    /// Partition relative (relative to the partition assigned to the
+    /// StorageModule)
+    /// This version will return an Err if the provided ledger chunk offset is out of range for this storage module
+    pub fn make_offset_partition_relative_guarded(
+        &self,
+        start_offset: LedgerChunkOffset,
+    ) -> eyre::Result<u32> {
+        let local_offset = self.make_offset_partition_relative(start_offset)?;
+        if local_offset < 0 {
+            return Err(eyre::eyre!("chunk offset not in storage module"));
+        }
+        Ok(local_offset.try_into()?)
     }
 }
 
@@ -695,7 +712,7 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let mut storage_module = StorageModule::new(&base_path, storage_module_info, Some(config));
+        let storage_module = StorageModule::new(&base_path, storage_module_info, Some(config));
 
         // Verify the entire storage module range is uninitialized
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
@@ -788,7 +805,7 @@ mod tests {
     fn data_path_test() -> eyre::Result<()> {
         let infos = vec![StorageModuleInfo {
             module_num: 0,
-            partition_assignment: None,
+            partition_assignment: Some(PartitionAssignment::default()),
             submodules: vec![
                 (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
             ],
@@ -819,9 +836,9 @@ mod tests {
             offset,
         };
 
-        storage_module.write_data_chunk(chunk)?;
+        storage_module.write_data_chunk(chunk, 0)?;
 
-        let ret_path = storage_module.read_data_path(offset)?;
+        let ret_path = storage_module.read_data_path(0)?;
         assert_eq!(ret_path, Some(data_path));
 
         Ok(())

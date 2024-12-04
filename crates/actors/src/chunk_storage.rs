@@ -237,7 +237,9 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                             let _ = storage_module.add_data_path_to_index(
                                 chunk_info.0.chunk_path_hash,
                                 chunk_info.1.data_path.into(),
-                                ledger_offset,
+                                storage_module
+                                    .make_offset_partition_relative_guarded(ledger_offset)
+                                    .unwrap(),
                             );
                             info!("cached_chunk found: {:?}", chunk_info.0);
                             // TODO: This doesn't yet take into account packing
