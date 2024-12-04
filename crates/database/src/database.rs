@@ -70,7 +70,7 @@ pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &IrysTransactionHeader) -
     Ok(tx.put::<IrysTxHeaders>(tx_header.id, tx_header.clone().into())?)
 }
 
-/// Gets a [`IrysTransactionHeader`] bu it's [`IrysTransactionId`]
+/// Gets a [`IrysTransactionHeader`] by it's [`IrysTransactionId`]
 pub fn tx_header_by_txid<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
