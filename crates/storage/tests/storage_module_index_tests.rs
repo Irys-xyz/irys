@@ -24,6 +24,7 @@ fn tx_path_overlap_tests() {
         num_partitions_in_slot: 1,
         miner_address: Address::random(),
         min_writes_before_sync: 1,
+        ..Default::default()
     };
     let chunk_size = storage_config.chunk_size;
 

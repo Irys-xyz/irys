@@ -9,6 +9,7 @@ use irys_types::{
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
+use reth_db::Database as _;
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
 use tracing::info;
@@ -114,8 +115,10 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
             .unwrap();
 
         // check irys DB for built block
-        let db_irys_block =
-            irys_database::block_header_by_hash(&node.db, &block.block_hash)?.unwrap();
+        let db_irys_block = &node
+            .db
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+            .unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
         sleep(Duration::from_millis(10_000)).await;

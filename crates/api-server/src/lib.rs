@@ -84,12 +84,14 @@ async fn post_tx_and_chunks_golden_path() {
     let block_producer_addr = block_producer_actor.start();
 
     let mut part_actors = Vec::new();
-    // let packing_actor_addr = PackingActor::new(Handle::current()).start();
+    let packing_actor_addr =
+        PackingActor::new(Handle::current(), task_manager.executor(), None).start();
 
     let actors = ActorAddresses {
         partitions: part_actors,
         block_producer: block_producer_addr,
         mempool: mempool_actor_addr,
+        packing: packing_actor_addr,
         block_index: todo!(),
         epoch_service: todo!(),
     };
