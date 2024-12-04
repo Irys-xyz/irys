@@ -57,7 +57,9 @@ async fn post_tx_and_chunks_golden_path() {
     use irys_actors::{
         block_producer::BlockProducerActor, mempool::MempoolActor, packing::PackingActor,
     };
-    use irys_types::{chunk, hash_sha256, irys::IrysSigner, Base64, Chunk, H256, MAX_CHUNK_SIZE};
+    use irys_types::{
+        chunk, hash_sha256, irys::IrysSigner, Base64, Chunk, StorageConfig, H256, MAX_CHUNK_SIZE,
+    };
     use tokio::runtime::Handle;
 
     use rand::Rng;
@@ -67,11 +69,13 @@ async fn post_tx_and_chunks_golden_path() {
     let arc_db = Arc::new(db);
 
     let task_manager = TaskManager::current();
+    let storage_config = StorageConfig::default();
 
     let mempool_actor = MempoolActor::new(
         irys_types::app_state::DatabaseProvider(arc_db),
         task_manager.executor(),
         IrysSigner::random_signer(),
+        storage_config,
     );
     let mempool_actor_addr = mempool_actor.start();
 
@@ -84,12 +88,14 @@ async fn post_tx_and_chunks_golden_path() {
     let block_producer_addr = block_producer_actor.start();
 
     let mut part_actors = Vec::new();
-    // let packing_actor_addr = PackingActor::new(Handle::current()).start();
+    let packing_actor_addr =
+        PackingActor::new(Handle::current(), task_manager.executor(), None).start();
 
     let actors = ActorAddresses {
         partitions: part_actors,
         block_producer: block_producer_addr,
         mempool: mempool_actor_addr,
+        packing: packing_actor_addr,
         block_index: todo!(),
         epoch_service: todo!(),
     };

@@ -18,3 +18,14 @@ pub struct PartitionAssignment {
     /// If assigned to a ledger, the index in the ledger
     pub slot_index: Option<usize>,
 }
+
+impl Default for PartitionAssignment {
+    fn default() -> Self {
+        Self {
+            partition_hash: PartitionHash::zero(),
+            miner_address: Address::ZERO,
+            ledger_num: Some(0),
+            slot_index: Some(0),
+        }
+    }
+}

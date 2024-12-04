@@ -5166,8 +5166,10 @@ dependencies = [
  "irys-primitives",
  "irys-types",
  "libc",
+ "openssl",
  "openssl-src",
  "pkg-config",
+ "rand",
  "vcpkg",
 ]
 
@@ -5193,6 +5195,7 @@ dependencies = [
  "bytes",
  "clap",
  "color-eyre",
+ "derive_more 1.0.0",
  "eyre",
  "futures",
  "futures-util",
@@ -5279,6 +5282,7 @@ dependencies = [
  "irys-c",
  "irys-primitives",
  "irys-types",
+ "rand",
 ]
 
 [[package]]
@@ -5395,12 +5399,14 @@ dependencies = [
  "actix",
  "actix-rt",
  "bytes",
+ "derive_more 1.0.0",
  "eyre",
  "futures",
  "irys-database",
  "irys-testing-utils",
  "irys-types",
  "nodit",
+ "openssl",
  "rand",
  "reth-db",
  "serde",
@@ -5444,6 +5450,7 @@ dependencies = [
  "color-eyre",
  "eyre",
  "fixed-hash",
+ "futures",
  "k256",
  "modular-bitfield",
  "nodit",
@@ -5458,6 +5465,7 @@ dependencies = [
  "serde_json",
  "test-fuzz",
  "tokio",
+ "tracing",
  "uint",
  "zerocopy 0.8.9",
 ]
@@ -8173,6 +8181,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "derive_more 1.0.0",
+ "eyre",
  "metrics",
  "modular-bitfield",
  "parity-scale-codec",

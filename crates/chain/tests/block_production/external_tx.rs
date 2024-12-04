@@ -6,9 +6,11 @@ use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_types::{
     block_production::SolutionContext, irys::IrysSigner, Address, H256, IRYS_CHAIN_ID,
+    MAX_CHUNK_SIZE,
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
+use reth_db::Database as _;
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
 use tracing::info;
@@ -29,6 +31,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
         mining_signer: IrysSigner {
             signer: SigningKey::from_slice(DEV_WALLET.as_slice())?,
             chain_id: IRYS_CHAIN_ID,
+            chunk_size: MAX_CHUNK_SIZE,
         },
         ..Default::default()
     };
@@ -42,6 +45,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
     let account1 = IrysSigner {
         signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
         chain_id: IRYS_CHAIN_ID,
+        chunk_size: MAX_CHUNK_SIZE,
     };
     assert_eq!(
         account1.address(),
@@ -114,7 +118,10 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
             .unwrap();
 
         // check irys DB for built block
-        let db_irys_block = irys_database::block_by_hash(&node.db, &block.block_hash)?.unwrap();
+        let db_irys_block = &node
+            .db
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+            .unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
         sleep(Duration::from_millis(10_000)).await;

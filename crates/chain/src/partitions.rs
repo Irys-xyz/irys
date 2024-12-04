@@ -3,7 +3,7 @@ use std::sync::{mpsc::Receiver, Arc};
 use irys_storage::StorageModule;
 use irys_types::{
     block_production::{Partition, SolutionContext},
-    Address, ChunkBin, CHUNK_SIZE, H256, NUM_CHUNKS_IN_RECALL_RANGE,
+    Address, ChunkBytes, CHUNK_SIZE, H256, NUM_CHUNKS_IN_RECALL_RANGE,
     NUM_RECALL_RANGES_IN_PARTITION, U256,
 };
 use rand::{RngCore, SeedableRng};
@@ -39,14 +39,14 @@ pub fn mine_storage_module(
         let start_chunk_index = (recall_range_index * NUM_CHUNKS_IN_RECALL_RANGE) as usize;
 
         // Create a contiguous piece of memory on the heap where chunks can be written into
-        let mut chunks_buffer: Vec<ChunkBin> =
+        let mut chunks_buffer: Vec<ChunkBytes> =
             Vec::with_capacity((NUM_CHUNKS_IN_RECALL_RANGE * CHUNK_SIZE) as usize);
 
         // TODO: read chunks. For now creates random
         for _ in 0..NUM_CHUNKS_IN_RECALL_RANGE {
             let mut data = [0u8; CHUNK_SIZE as usize];
             rand::thread_rng().fill_bytes(&mut data);
-            chunks_buffer.push(data);
+            chunks_buffer.push(data.to_vec());
         }
 
         let mut hasher = Sha256::new();

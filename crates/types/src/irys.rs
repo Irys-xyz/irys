@@ -1,6 +1,6 @@
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysSignature,
-    IrysTransaction, IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID,
+    IrysTransaction, IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID, MAX_CHUNK_SIZE,
 };
 use alloy_core::primitives::keccak256;
 
@@ -15,6 +15,7 @@ use rand::rngs::OsRng;
 pub struct IrysSigner {
     pub signer: SigningKey,
     pub chain_id: u64,
+    pub chunk_size: usize,
 }
 
 /// Encapsulates an Irys API for doing client type things, making transactions,
@@ -24,6 +25,15 @@ impl IrysSigner {
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
             chain_id: IRYS_CHAIN_ID,
+            chunk_size: MAX_CHUNK_SIZE,
+        }
+    }
+
+    pub fn random_signer_with_chunk_size(chunk_size: usize) -> Self {
+        IrysSigner {
+            signer: k256::ecdsa::SigningKey::random(&mut OsRng),
+            chain_id: IRYS_CHAIN_ID,
+            chunk_size,
         }
     }
 
@@ -40,7 +50,7 @@ impl IrysSigner {
         data: Vec<u8>,
         anchor: Option<H256>, //TODO!: more parameters as they are implemented
     ) -> Result<IrysTransaction> {
-        let mut transaction = self.merklize(data)?;
+        let mut transaction = self.merklize(data, self.chunk_size)?;
 
         // TODO: These should be calculated from some pricing params passed in
         // as a parameter
@@ -78,8 +88,8 @@ impl IrysSigner {
 
     /// Builds a merkle tree, with a root, including all the proofs for each
     /// chunk.
-    fn merklize(&self, data: Vec<u8>) -> Result<IrysTransaction> {
-        let mut chunks = generate_leaves(data.clone())?;
+    fn merklize(&self, data: Vec<u8>, chunk_size: usize) -> Result<IrysTransaction> {
+        let mut chunks = generate_leaves(data.clone(), chunk_size)?;
         let root = generate_data_root(chunks.clone())?;
         let data_root = H256(root.id.clone());
         let mut proofs = resolve_proofs(root, None)?;

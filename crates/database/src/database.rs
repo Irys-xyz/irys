@@ -5,14 +5,17 @@ use crate::db_cache::{
     CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTables, IrysTxHeaders,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders,
+    PartitionHashes, PartitionHashesByDataRoot,
 };
 
 use crate::Ledger;
+use eyre::eyre;
+use irys_types::partition::PartitionHash;
 use irys_types::{
     hash_sha256, BlockHash, BlockRelativeChunkOffset, Chunk, ChunkPathHash, DataRoot,
-    IrysBlockHeader, IrysTransactionHeader, TxPath, TxRelativeChunkIndex, TxRelativeChunkOffset,
-    TxRoot, H256, MEGABYTE,
+    IrysBlockHeader, IrysTransactionHeader, IrysTransactionId, TxPath, TxRelativeChunkIndex,
+    TxRelativeChunkOffset, TxRoot, H256, MEGABYTE,
 };
 use reth::prometheus_exporter::install_prometheus_recorder;
 use reth_db::cursor::{DbDupCursorRO, DupWalker};
@@ -28,9 +31,6 @@ use reth_db::{
 use reth_db::{HasName, HasTableType};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
-
-const ERROR_GET: &str = "Not able to get value from table.";
-const ERROR_PUT: &str = "Not able to insert value into table.";
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
 /// necessary. Read/Write mode.
@@ -53,59 +53,42 @@ pub fn open_or_create_db<P: AsRef<Path>, T: HasName + HasTableType>(
 
     Ok(db)
 }
-
-pub fn insert_block(db: &DatabaseEnv, block: &IrysBlockHeader) -> Result<(), DatabaseError> {
-    let value = block;
-    let key = value.block_hash;
-
-    db.update(|tx| {
-        tx.put::<IrysBlockHeaders>(key, value.clone().into())
-            .expect(ERROR_PUT)
-    })
+/// Inserts a [`IrysBlockHeader`] into [`IrysBlockHeaders`]
+pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre::Result<()> {
+    Ok(tx.put::<IrysBlockHeaders>(block.block_hash, block.clone().into())?)
+}
+/// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
+pub fn block_header_by_hash<T: DbTx>(
+    tx: &T,
+    block_hash: &BlockHash,
+) -> eyre::Result<Option<IrysBlockHeader>> {
+    Ok(tx
+        .get::<IrysBlockHeaders>(*block_hash)?
+        .and_then(|r| Some(IrysBlockHeader::from(r))))
 }
 
-pub fn block_by_hash(
-    db: &DatabaseEnv,
-    block_hash: &H256,
-) -> Result<Option<IrysBlockHeader>, DatabaseError> {
-    let key = block_hash;
-
-    let result = db.view(|tx| tx.get::<IrysBlockHeaders>(*key).expect(ERROR_GET))?;
-    match result {
-        None => Ok(None),
-        Some(txh) => Ok(Some(IrysBlockHeader::from(txh))),
-    }
+/// Inserts a [`IrysTransactionHeader`] into [`IrysTxHeaders`]
+pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &IrysTransactionHeader) -> eyre::Result<()> {
+    Ok(tx.put::<IrysTxHeaders>(tx_header.id, tx_header.clone().into())?)
 }
 
-pub fn insert_tx(db: &DatabaseEnv, tx: &IrysTransactionHeader) -> Result<(), DatabaseError> {
-    let key = tx.id;
-    let value = tx;
-
-    db.update(|tx| {
-        tx.put::<IrysTxHeaders>(key, value.clone().into())
-            .expect(ERROR_PUT)
-    })
+/// Gets a [`IrysTransactionHeader`] by it's [`IrysTransactionId`]
+pub fn tx_header_by_txid<T: DbTx>(
+    tx: &T,
+    txid: &IrysTransactionId,
+) -> eyre::Result<Option<IrysTransactionHeader>> {
+    Ok(tx
+        .get::<IrysTxHeaders>(*txid)?
+        .and_then(|r| Some(IrysTransactionHeader::from(r))))
 }
 
-pub fn tx_by_txid(
-    db: &DatabaseEnv,
-    txid: &H256,
-) -> Result<Option<IrysTransactionHeader>, DatabaseError> {
-    let key = txid;
-    let result = db.view(|tx| tx.get::<IrysTxHeaders>(*key).expect(ERROR_GET))?;
-    match result {
-        None => Ok(None),
-        Some(txh) => Ok(Some(IrysTransactionHeader::from(txh))),
-    }
-}
-
-/// Takes an IrysTransactionHeader and caches its data_root and tx.id in a
-/// cache database table. Tracks all the tx.ids' that share the same data_root.
-pub fn cache_data_root(
-    db: &DatabaseEnv,
-    tx: &IrysTransactionHeader,
-) -> Result<Option<CachedDataRoot>, DatabaseError> {
-    let key = tx.data_root;
+/// Takes an [`IrysTransactionHeader`] and caches its data_root and tx.id in a
+/// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same data_root.
+pub fn cache_data_root<T: DbTx + DbTxMut>(
+    tx: &T,
+    tx_header: &IrysTransactionHeader,
+) -> eyre::Result<Option<CachedDataRoot>> {
+    let key = tx_header.data_root;
 
     // Calculate the duration since UNIX_EPOCH
     let now = SystemTime::now();
@@ -115,46 +98,47 @@ pub fn cache_data_root(
     let timestamp = duration_since_epoch.as_millis();
 
     // Access the current cached entry from the database
-    let result = db.view(|tx| tx.get::<CachedDataRoots>(key).expect(ERROR_GET))?;
+    let result = tx.get::<CachedDataRoots>(key)?;
 
     // Create or update the CachedDataRoot
     let mut cached_data_root = result.unwrap_or_else(|| CachedDataRoot {
         timestamp,
-        data_size: tx.data_size,
-        txid_set: vec![tx.id.clone()],
+        data_size: tx_header.data_size,
+        txid_set: vec![tx_header.id.clone()],
     });
 
     // If the entry exists, update the timestamp and add the txid if necessary
-    if !cached_data_root.txid_set.contains(&tx.id) {
-        cached_data_root.txid_set.push(tx.id.clone());
+    if !cached_data_root.txid_set.contains(&tx_header.id) {
+        cached_data_root.txid_set.push(tx_header.id.clone());
     }
     cached_data_root.timestamp = timestamp;
 
     // Update the database with the modified or new entry
-    db.update(|tx| {
-        tx.put::<CachedDataRoots>(key, cached_data_root.clone().into())
-            .expect(ERROR_PUT)
-    })?;
+    tx.put::<CachedDataRoots>(key, cached_data_root.clone().into())?;
 
     Ok(Some(cached_data_root))
 }
 
-/// Retrieves a CashedDataRoot struct using a data_root as key.
-pub fn cached_data_root_by_data_root(
-    db: &DatabaseEnv,
+/// Gets a [`CachedDataRoot`] by it's [`DataRoot`] from [`CachedDataRoots`] .
+pub fn cached_data_root_by_data_root<T: DbTx>(
+    tx: &T,
     data_root: DataRoot,
-) -> Result<Option<CachedDataRoot>, DatabaseError> {
-    let key = data_root;
-    let result = db.view(|tx| tx.get::<CachedDataRoots>(key).expect(ERROR_GET))?;
-    Ok(result)
+) -> eyre::Result<Option<CachedDataRoot>> {
+    Ok(tx.get::<CachedDataRoots>(data_root)?)
 }
 
 type IsDuplicate = bool;
-/// Caches a chunk - returns `true` if the chunk was a duplicate and was not inserted
-pub fn cache_chunk(db: &DatabaseEnv, chunk: Chunk) -> eyre::Result<IsDuplicate> {
-    let chunk_index = chunk_offset_to_index(chunk.offset)?;
+
+/// Caches a [`Chunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
+/// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
+pub fn cache_chunk<T: DbTx + DbTxMut>(
+    tx: &T,
+    chunk: Chunk,
+    chunk_size: u64,
+) -> eyre::Result<IsDuplicate> {
+    let chunk_index = chunk_offset_to_index(chunk.offset, chunk_size)?;
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
-    if cached_chunk_by_chunk_key(db, chunk_path_hash)?.is_some() {
+    if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
         warn!(
             "Chunk {} of {} is already cached, skipping..",
             &chunk_path_hash, &chunk.data_root
@@ -170,44 +154,35 @@ pub fn cache_chunk(db: &DatabaseEnv, chunk: Chunk) -> eyre::Result<IsDuplicate> 
         "Caching chunk {} ({}) of {}",
         &chunk_index, &chunk_path_hash, &chunk.data_root
     );
-    db.update(|tx: &Tx<reth_db::mdbx::RW>| {
-        tx.put::<CachedChunksIndex>(chunk.data_root, value)
-            .expect(ERROR_PUT);
-        tx.put::<CachedChunks>(chunk_path_hash, chunk.into())
-            .expect(ERROR_PUT);
-    })?;
+
+    tx.put::<CachedChunksIndex>(chunk.data_root, value)?;
+    tx.put::<CachedChunks>(chunk_path_hash, chunk.into())?;
     Ok(false)
 }
 
-/// Retrieves a cached chunk from the cache using its parent data root and offset
-pub fn cached_chunk_meta_by_offset(
-    db: &DatabaseEnv,
+/// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxRelativeChunkOffset`]
+pub fn cached_chunk_meta_by_offset<T: DbTx>(
+    tx: &T,
     data_root: DataRoot,
     chunk_offset: TxRelativeChunkOffset,
+    chunk_size: u64,
 ) -> eyre::Result<Option<CachedChunkIndexMetadata>> {
-    let chunk_index = chunk_offset_to_index(chunk_offset)?;
-    let tx = db.tx()?;
+    let chunk_index = chunk_offset_to_index(chunk_offset, chunk_size)?;
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-    let result = if let Some(result) = cursor.seek_by_key_subkey(data_root, chunk_index)? {
-        if result.index == chunk_index {
-            Ok(Some(result.meta))
-        } else {
-            Ok(None)
-        }
-    } else {
-        Ok(None)
-    };
-    tx.commit()?;
-    return result;
+    Ok(cursor
+        .seek_by_key_subkey(data_root, chunk_index)?
+        // make sure we find the exact subkey - dupsort seek can seek to the value, or a value greater than if it doesn't exist.
+        .filter(|result| result.index == chunk_index)
+        .and_then(|index_entry| Some(index_entry.meta)))
 }
-/// Retrieves a cached chunk from the cache using its parent data root and offset
-pub fn cached_chunk_by_offset(
-    db: &DatabaseEnv,
+/// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxRelativeChunkOffset`]
+pub fn cached_chunk_by_offset<T: DbTx>(
+    tx: &T,
     data_root: DataRoot,
     chunk_offset: TxRelativeChunkOffset,
+    chunk_size: u64,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
-    let chunk_index = chunk_offset_to_index(chunk_offset)?;
-    let tx = db.tx()?;
+    let chunk_index = chunk_offset_to_index(chunk_offset, chunk_size)?;
 
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
 
@@ -225,19 +200,52 @@ pub fn cached_chunk_by_offset(
     } else {
         Ok(None)
     };
-    tx.commit()?;
 
     return result;
 }
 
-/// Retrieves a cached chunk from the cache using its chunk_key (the sha256
-/// hash of the data_path bytes)
-pub fn cached_chunk_by_chunk_key(
-    db: &DatabaseEnv,
-    key: H256,
+/// Retrieves a [`CachedChunk`] from [`CachedChunks`] using its [`ChunkPathHash`]
+pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
+    tx: &T,
+    key: &ChunkPathHash,
 ) -> Result<Option<CachedChunk>, DatabaseError> {
-    let result = db.view(|tx| tx.get::<CachedChunks>(key).expect(ERROR_GET))?;
-    Ok(result)
+    Ok(tx.get::<CachedChunks>(*key)?)
+}
+
+/// Associates a partition hash with a data root, appending to existing
+/// partition hashes if present or creating a new list if not. Indicates
+/// that chunks of this data overlap with the partition.
+pub fn assign_data_root<T: DbTxMut + DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+    partition_hash: PartitionHash,
+) -> eyre::Result<()> {
+    let partition_hashes = if let Some(mut phs) = get_partition_hashes_by_data_root(tx, data_root)?
+    {
+        phs.0.push(partition_hash);
+        phs
+    } else {
+        PartitionHashes(vec![partition_hash])
+    };
+    set_partition_hashes_by_data_root(tx, data_root, partition_hashes)?;
+    Ok(())
+}
+
+/// Stores list of partition hashes for a data root in the database
+pub fn set_partition_hashes_by_data_root<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    partition_hashes: PartitionHashes,
+) -> eyre::Result<()> {
+    Ok(tx.put::<PartitionHashesByDataRoot>(data_root, partition_hashes)?)
+}
+
+/// Retrieves list of partition hashes for a data root from the database
+pub fn get_partition_hashes_by_data_root<T: DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+) -> eyre::Result<Option<PartitionHashes>> {
+    Ok(tx.get::<PartitionHashesByDataRoot>(data_root)?)
 }
 
 #[cfg(test)]
@@ -245,14 +253,15 @@ mod tests {
 
     use assert_matches::assert_matches;
     use irys_types::{IrysBlockHeader, IrysTransactionHeader};
+    use reth_db::Database;
     //use tempfile::tempdir;
 
-    use crate::{block_by_hash, config::get_data_dir, tables::IrysTables};
+    use crate::{block_header_by_hash, config::get_data_dir, tables::IrysTables};
 
-    use super::{insert_block, open_or_create_db};
+    use super::{insert_block_header, open_or_create_db};
 
     #[test]
-    fn insert_and_get_tests() {
+    fn insert_and_get_tests() -> eyre::Result<()> {
         //let path = tempdir().unwrap();
         let path = get_data_dir();
         println!("TempDir: {:?}", path);
@@ -277,20 +286,21 @@ mod tests {
 
         let mut block_header = IrysBlockHeader::new();
         block_header.block_hash.0[0] = 1;
-
+        let tx = db.tx_mut()?;
         // Write a Block
         {
-            let result = insert_block(&db, &block_header);
+            let result = insert_block_header(&tx, &block_header);
             println!("result: {:?}", result);
             assert_matches!(result, Ok(_));
         }
 
         // Read a Block
         {
-            let result = block_by_hash(&db, &block_header.block_hash);
-            assert_eq!(result, Ok(Some(block_header)));
-            println!("result: {:?}", result.unwrap().unwrap());
-        }
+            let result = block_header_by_hash(&tx, &block_header.block_hash)?;
+            assert_eq!(result, Some(block_header));
+            println!("result: {:?}", result.unwrap());
+        };
+        Ok(())
     }
 
     // #[test]

@@ -7,22 +7,25 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_database::database;
 use irys_types::{IrysBlockHeader, H256};
-use reth_db::DatabaseEnv;
+use reth_db::{Database, DatabaseEnv};
 
 pub async fn get_block(
     state: web::Data<ApiState>,
     path: web::Path<H256>,
 ) -> Result<Json<IrysBlockHeader>, ApiError> {
     let block_hash: H256 = path.into_inner();
-    match database::block_by_hash(&state.db, &block_hash) {
-        Result::Err(_error) => Err(ApiError::Internal {
+    match state
+        .db
+        .view_eyre(|tx| database::block_header_by_hash(tx, &block_hash))
+    {
+        Err(_error) => Err(ApiError::Internal {
             err: String::from("db error"),
         }),
-        Result::Ok(None) => Err(ApiError::ErrNoId {
+        Ok(None) => Err(ApiError::ErrNoId {
             id: block_hash.to_string(),
             err: String::from("block hash not found"),
         }),
-        Result::Ok(Some(tx_header)) => Ok(web::Json(tx_header)),
+        Ok(Some(tx_header)) => Ok(web::Json(tx_header)),
     }
 }
 
@@ -47,10 +50,11 @@ mod tests {
         let path = tempdir().unwrap();
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
         let blk = IrysBlockHeader::default();
-        let result = database::insert_block(&db, &blk);
+        let mut rw_tx = db.tx_mut().unwrap();
+        let result = database::insert_block_header(&rw_tx, &blk);
         assert!(result.is_ok(), "block can not be stored");
 
-        let blk_get = database::block_by_hash(&db, &blk.block_hash)
+        let blk_get = database::block_header_by_hash(&rw_tx, &blk.block_hash)
             .expect("db error")
             .expect("no block");
         assert_eq!(blk, blk_get, "retrived another block");

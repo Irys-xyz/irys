@@ -38,10 +38,9 @@ impl Chunk {
 /// i.e for the first chunk, the offset is 262144 instead of 0
 pub type TxRelativeChunkOffset = u32;
 
-/// a fully padded chunk binary - note: only use this type in cases where smaller/end chunks *should* be padded to fill out the chunk
-pub type ChunkBin = [u8; CHUNK_SIZE as usize];
-
-/// a chunk binary - use this in cases where chunks may not be padded
+/// a chunk binary
+/// this type is unsized (i.e not a [u8; N]) as chunks can have variable sizes
+/// either for testing or due to it being the last unpadded chunk
 pub type ChunkBytes = Vec<u8>;
 
 /// sha256(chunk_data_path)
@@ -58,8 +57,8 @@ pub type DataChunks = Vec<Vec<u8>>;
 /// the Block relative chunk offset
 pub type BlockRelativeChunkOffset = u64;
 
-/// Used to track chunk offset ranges that span storage modules or submodules
-///  a negative offset means the range began in a prior (sub)module
+/// Used to track chunk offset ranges that span storage modules
+///  a negative offset means the range began in a prior partition/storage module
 pub type RelativeChunkOffset = i32;
 
 /// A chunks's data path

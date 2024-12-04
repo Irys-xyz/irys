@@ -15,6 +15,7 @@ use irys_types::{
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
+use reth_db::Database;
 use reth_primitives::{
     irys_primitives::{IrysTxId, ShadowResult},
     GenesisAccount,
@@ -109,7 +110,11 @@ async fn test_blockprod() -> eyre::Result<()> {
     // assert_eq!(reth_block.number, block.height);
 
     // check irys DB for built block
-    let db_irys_block = irys_database::block_by_hash(&node.db, &block.block_hash)?.unwrap();
+
+    let db_irys_block = &node
+        .db
+        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+        .unwrap();
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
@@ -146,8 +151,10 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
         // assert_eq!(reth_block.number, block.height);
 
         // check irys DB for built block
-        let db_irys_block = irys_database::block_by_hash(&node.db, &block.block_hash)?.unwrap();
-
+        let db_irys_block = &node
+            .db
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+            .unwrap();
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
         // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
         sleep(Duration::from_millis(1500)).await;
@@ -187,8 +194,10 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
     // assert_eq!(reth_block.number, block.height);
 
     // check irys DB for built block
-    let db_irys_block = irys_database::block_by_hash(&node.db, &block.block_hash)?.unwrap();
-
+    let db_irys_block = &node
+        .db
+        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+        .unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
     Ok(())
@@ -333,7 +342,10 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         U256::from(1)
     );
     // check irys DB for built block
-    let db_irys_block = irys_database::block_by_hash(&node.db, &block.block_hash)?.unwrap();
+    let db_irys_block = &node
+        .db
+        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+        .unwrap();
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 

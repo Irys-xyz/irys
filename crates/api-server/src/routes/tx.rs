@@ -13,7 +13,7 @@ use irys_actors::{
 };
 use irys_database::database;
 use irys_types::{IrysTransactionHeader, H256};
-use reth_db::DatabaseEnv;
+use reth_db::{Database, DatabaseEnv};
 use serde::{Deserialize, Serialize};
 use serde_json;
 
@@ -60,15 +60,18 @@ pub async fn get_tx(
     path: web::Path<H256>,
 ) -> Result<Json<IrysTransactionHeader>, ApiError> {
     let tx_id: H256 = path.into_inner();
-    match database::tx_by_txid(&state.db, &tx_id) {
-        Result::Err(_error) => Err(ApiError::Internal {
+    match state
+        .db
+        .view_eyre(|tx| database::tx_header_by_txid(tx, &tx_id))
+    {
+        Err(_error) => Err(ApiError::Internal {
             err: String::from("db error"),
         }),
-        Result::Ok(None) => Err(ApiError::ErrNoId {
+        Ok(None) => Err(ApiError::ErrNoId {
             id: tx_id.to_string(),
             err: String::from("tx not found"),
         }),
-        Result::Ok(Some(tx_header)) => Ok(web::Json(tx_header)),
+        Ok(Some(tx_header)) => Ok(web::Json(tx_header)),
     }
 }
 
@@ -93,10 +96,11 @@ mod tests {
         let path = tempdir().unwrap();
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
         let tx = IrysTransactionHeader::default();
-        let result = database::insert_tx(&db, &tx);
+        let rw_tx = db.tx_mut().unwrap();
+        let result = database::insert_tx_header(&rw_tx, &tx);
         assert!(result.is_ok(), "tx can not be stored");
 
-        let tx_get = database::tx_by_txid(&db, &tx.id)
+        let tx_get = database::tx_header_by_txid(&rw_tx, &tx.id)
             .expect("db error")
             .expect("no tx");
         assert_eq!(tx, tx_get, "retrived another tx");

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+openssl.workspace = true
 nodit.workspace = true
 eyre.workspace = true
 serde.workspace = true
@@ -20,5 +21,6 @@ serde_json.workspace = true
 reth-db.workspace = true
 irys-database.workspace = true
 irys-testing-utils.workspace = true
+derive_more.workspace = true
 [lints]
 workspace = true

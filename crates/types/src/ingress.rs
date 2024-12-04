@@ -91,7 +91,7 @@ mod tests {
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
         let signer = IrysSigner::random_signer();
-        let leaves = generate_leaves(data_bytes.clone())?;
+        let leaves = generate_leaves(data_bytes.clone(), MAX_CHUNK_SIZE)?;
         let interleave_value = signer.address();
         let interleave_hash = hash_sha256(&interleave_value.0 .0)?;
 

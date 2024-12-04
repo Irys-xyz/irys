@@ -1,5 +1,6 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::Actor;
+use derive_more::derive::Deref;
 use irys_actors::{
     block_index::BlockIndexActor,
     block_producer::{BlockConfirmedMessage, BlockProducerActor},
@@ -9,7 +10,7 @@ use irys_actors::{
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
-    packing::PackingActor,
+    packing::{PackingActor, PackingConfig, PackingRequest},
     ActorAddresses,
 };
 use irys_api_server::{run_server, ApiState};
@@ -18,8 +19,13 @@ pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
-use irys_storage::{initialize_storage_files, StorageModule};
-use irys_types::{app_state::DatabaseProvider, block_production::PartitionId, StorageConfig, H256};
+use irys_storage::{
+    initialize_storage_files, ChunkType, StorageModule, StorageModuleVec, StorageModules,
+};
+use irys_types::{
+    app_state::DatabaseProvider, block_production::PartitionId, partition::PartitionHash,
+    StorageConfig, H256, PACKING_SHA_1_5_S,
+};
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
@@ -80,9 +86,10 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
         num_partitions_in_slot: 1,
         miner_address: arc_config.mining_signer.address(),
         min_writes_before_sync: 1,
+        entropy_packing_iterations: PACKING_SHA_1_5_S,
     };
     let arc_storage_config = Arc::new(storage_config_for_testing);
-    let mut storage_modules: Vec<Arc<StorageModule>> = Vec::new();
+    let mut storage_modules: StorageModuleVec = Vec::new();
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
         BlockIndex::default()
             .reset(&arc_config.clone())?
@@ -117,6 +124,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     db.clone(),
                     reth_node.task_executor.clone(),
                     node_config.mining_signer.clone(),
+                    (*arc_storage_config).clone(),
                 );
                 let mempool_actor_addr = mempool_actor.start();
 
@@ -199,13 +207,28 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let part_actors_clone = part_actors.clone();
                 std::thread::spawn(move || run_vdf(H256::random(), new_seed_rx, part_actors));
 
-                // let packing_actor_addr =
-                //     PackingActor::new(Handle::current(), storage_provider.clone()).start();
+                let packing_actor_addr =
+                    PackingActor::new(Handle::current(), reth_node.task_executor.clone(), None)
+                        .start();
+
+                // request packing for uninitialized ranges
+                for sm in storage_modules {
+                    let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
+                    let _ = uninitialized
+                        .iter()
+                        .map(|interval| {
+                            packing_actor_addr.do_send(PackingRequest {
+                                storage_module: sm.clone(),
+                                chunk_range: (*interval).into(),
+                            })
+                        })
+                        .collect::<Vec<()>>();
+                }
 
                 let actor_addresses = ActorAddresses {
                     partitions: part_actors_clone,
                     block_producer: block_producer_addr,
-                    // packing: packing_actor_addr,
+                    packing: packing_actor_addr,
                     mempool: mempool_actor_addr,
                     block_index: block_index_actor_addr,
                     epoch_service: epoch_service_actor_addr,
