@@ -19,6 +19,7 @@ use reth_db::transaction::DbTxMut;
 use reth_db::Database;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::sync::Arc;
 use tracing::info;
 
@@ -117,6 +118,10 @@ impl ChunkIngressError {
     pub fn other(err: impl Into<String>) -> Self {
         Self::Other(err.into())
     }
+    /// Allows converting an error that implements Display into an Other error
+    pub fn other_display(err: impl Display) -> Self {
+        Self::Other(err.to_string())
+    }
 }
 
 impl Handler<TxIngressMessage> for MempoolActor {
@@ -184,26 +189,28 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
             return Err(ChunkIngressError::InvalidChunkSize);
         }
 
-        // Use that data_Size to identify and validate that only the last chunk
+        // Use data_size to identify and validate that only the last chunk
         // can be less than chunk_size
-
         let chunk_len = chunk.bytes.len() as u64;
+
         // TODO: Mark the data_root as invalid if the chunk is an incorrect size
         let chunk_size = self.storage_config.chunk_size;
 
         if (chunk.offset as u64) < chunk.data_size - 1 {
-            // Ensure prefix chunks are all exactly CHUNK_SIZE
+            // Ensure prefix chunks are all exactly chunk_size
             if chunk_len != chunk_size {
                 return Err(ChunkIngressError::InvalidChunkSize);
             }
         } else {
-            // Ensure the last chunk is no larger than CHUNK_SIZE
+            // Ensure the last chunk is no larger than chunk_size
             if chunk_len > chunk_size {
                 return Err(ChunkIngressError::InvalidChunkSize);
             }
         }
 
-        if path_result.leaf_hash != hash_sha256(&chunk.bytes.0).unwrap() {
+        if path_result.leaf_hash
+            != hash_sha256(&chunk.bytes.0).map_err(|_| ChunkIngressError::InvalidDataHash)?
+        {
             return Err(ChunkIngressError::InvalidDataHash);
         }
         // Check that the leaf hash on the data_path matches the chunk_hash
@@ -213,13 +220,17 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
 
         self.db
             .update_eyre(|tx| irys_database::cache_chunk(tx, chunk, chunk_size))
-            .unwrap();
+            .map_err(|_| ChunkIngressError::DatabaseError)?;
 
-        let tx = self.db.tx().unwrap();
         let root_hash: H256 = root_hash.into();
 
         // check if we have generated an ingress proof for this tx already
-        if tx.get::<IngressProofs>(root_hash).unwrap().is_some() {
+        // TODO: hook into whatever manages ingress proofs
+        if read_tx
+            .get::<IngressProofs>(root_hash)
+            .map_err(|_| ChunkIngressError::DatabaseError)?
+            .is_some()
+        {
             info!(
                 "We've already generated an ingress proof for data root {}",
                 &root_hash
@@ -228,16 +239,23 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         };
 
         // check if we have all the chunks for this tx
-        let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>().unwrap();
 
+        let mut cursor = read_tx
+            .cursor_dup_read::<CachedChunksIndex>()
+            .map_err(|_| ChunkIngressError::DatabaseError)?;
         // get the number of dupsort values (aka the number of chunks)
         // this ASSUMES that the index isn't corrupt (no double values etc)
         // the ingress proof generation task does a more thorough check
-        let chunk_count = cursor.dup_count(root_hash).unwrap().unwrap();
+        let chunk_count = cursor
+            .dup_count(root_hash)
+            .map_err(|_| ChunkIngressError::DatabaseError)?
+            .ok_or(ChunkIngressError::DatabaseError)?;
+
         // data size is the offset of the last chunk
         // add one as index is 0-indexed
         let expected_chunk_count =
             data_size_to_chunk_count(cached_data_root.data_size, chunk_size).unwrap();
+
         if chunk_count == expected_chunk_count {
             // we *should* have all the chunks
             // dispatch a ingress proof task
@@ -298,6 +316,8 @@ impl Handler<BlockConfirmedMessage> for MempoolActor {
     }
 }
 
+/// Generates an ingress proof for a specific data_root
+/// pulls required data from all sources
 pub fn generate_ingress_proof(
     db: DatabaseProvider,
     data_root: DataRoot,
