@@ -482,7 +482,7 @@ impl StorageModule {
                     return Err(eyre!(
                         "Invalid chunk state {:?} for offset {} - expected this to be an Entropy chunk",
                         &chunk_state,
-                        &chunk.offset
+                        &partition_offset
                     ));
                 }
             };
@@ -635,6 +635,15 @@ impl StorageModule {
             return Err(eyre::eyre!("chunk offset not in storage module"));
         }
         Ok(local_offset.try_into()?)
+    }
+
+    /// Test utility function to mark a StorageModule as packed
+    pub fn pack_with_zeros(&self) {
+        let entropy_bytes = vec![0u8; self.config.chunk_size as usize];
+        for chunk_offset in 0..self.config.num_chunks_in_partition as u32 {
+            self.write_chunk(chunk_offset, entropy_bytes.clone(), ChunkType::Entropy);
+            self.sync_pending_chunks().unwrap();
+        }
     }
 }
 
@@ -895,8 +904,7 @@ mod tests {
         let data_root = H256::zero();
 
         // Pack the storage module
-        storage_module.write_chunk(0, vec![0, 0, 0, 0, 0], ChunkType::Entropy);
-        let _ = storage_module.sync_pending_chunks();
+        storage_module.pack_with_zeros();
 
         let _ =
             storage_module.index_transaction_data(tx_path, data_root, LedgerChunkRange(ii(0, 0)));

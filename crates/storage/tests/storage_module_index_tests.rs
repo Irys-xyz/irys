@@ -91,6 +91,7 @@ fn tx_path_overlap_tests() {
             Some(storage_config.clone()),
         ));
         storage_modules.push(arc_module.clone());
+        arc_module.pack_with_zeros();
     }
 
     let partition_0_range = LedgerChunkRange(ii(0, 19));
@@ -400,8 +401,7 @@ fn tx_path_overlap_tests() {
 
                             let res = storage_module.write_data_chunk(chunk);
                             if let Err(err) = res {
-                                error!("{:?}", err);
-                                panic!("Should not have failed writes, because we check the offset with storage_module.contains_offset(...)");
+                                panic!("{}", err);
                             }
                         }
 
@@ -425,22 +425,22 @@ fn tx_path_overlap_tests() {
 
     // This is just helpful logging, could be commented out
     for i in 0..=19 {
-        if let Some(chunk) = chunks1.get(&i) {
-            let preview = &chunk.0[..chunk.0.len().min(5)];
+        if let Some((chunk, chunk_type)) = chunks1.get(&i) {
+            let preview = &chunk[..chunk.len().min(5)];
             info!(
                 "storage_module[0][{:?}]: {:?}... - {:?}",
-                i, preview, chunk.1
+                i, preview, chunk_type
             );
         } else {
             info!("storage_module[0][{:?}]: None", i);
         }
     }
     for i in 0..=19 {
-        if let Some(chunk) = chunks2.get(&i) {
-            let preview = &chunk.0[..chunk.0.len().min(5)];
+        if let Some((chunk, chunk_type)) = chunks2.get(&i) {
+            let preview = &chunk[..chunk.len().min(5)];
             info!(
                 "storage_module[1][{:?}]: {:?}... - {:?}",
-                i, preview, chunk.1
+                i, preview, chunk_type
             );
         } else {
             info!("storage_module[1][{:?}]: None", i);
@@ -449,26 +449,24 @@ fn tx_path_overlap_tests() {
 
     // Test the chunks read back from the storage modules
     for i in 0..=19 {
-        if let Some(chunk) = chunks1.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks1.get(&i) {
             let bytes = [i as u8; 32];
-            assert_eq!(chunk.0, bytes);
-            println!("read[sm0]: {:?}", bytes);
-        } else {
-            panic!("Chunk {:?} not found!", i);
+            assert_eq!(*chunk, bytes);
+            assert_eq!(*chunk_type, ChunkType::Data);
+            println!("read[sm0]: {:?}", chunk);
         }
     }
 
     for i in 0..=19 {
-        if let Some(chunk) = chunks2.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks2.get(&i) {
             let bytes = [20 + i as u8; 32];
-            assert_eq!(chunk.0, bytes);
-            println!("read[sm1]: {:?}", bytes);
-        } else {
             if i <= 7 {
-                panic!("Chunk {:?} not found!", i + 20);
+                assert_eq!(*chunk, bytes);
+                assert_eq!(*chunk_type, ChunkType::Data);
             } else {
-                // expected missing chunk
+                assert_eq!(*chunk_type, ChunkType::Entropy)
             }
+            println!("read[sm1]: {:?}", chunk);
         }
     }
 }
