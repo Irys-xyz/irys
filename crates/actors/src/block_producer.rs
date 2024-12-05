@@ -11,7 +11,7 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, Address, Base64, H256List,
     IrysBlockHeader, IrysSignature, IrysTransactionHeader, PoaData, Signature, TransactionLedger,
-    H256, U256,
+    CHUNK_SIZE, H256, NUM_CHUNKS_IN_PARTITION, NUM_PARTITIONS_PER_SLOT, U256,
 };
 use reth::revm::primitives::B256;
 use reth_db::Database;
@@ -19,6 +19,7 @@ use tracing::info;
 
 use crate::{
     block_index::{BlockIndexActor, GetBlockHeightMessage},
+    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool::{GetBestMempoolTxs, MempoolActor},
 };
 
@@ -26,6 +27,7 @@ pub struct BlockProducerActor {
     pub db: DatabaseProvider,
     pub mempool_addr: Addr<MempoolActor>,
     pub block_index_addr: Addr<BlockIndexActor>,
+    pub epoch_service: Addr<EpochServiceActor>,
     pub reth_provider: RethNodeProvider,
 }
 
@@ -34,12 +36,14 @@ impl BlockProducerActor {
         db: DatabaseProvider,
         mempool_addr: Addr<MempoolActor>,
         block_index_addr: Addr<BlockIndexActor>,
+        epoch_service: Addr<EpochServiceActor>,
         reth_provider: RethNodeProvider,
     ) -> Self {
         Self {
             db,
             mempool_addr,
             block_index_addr,
+            epoch_service,
             reth_provider,
         }
     }
@@ -58,13 +62,12 @@ impl Handler<SolutionContext> for BlockProducerActor {
 
         let mempool_addr = self.mempool_addr.clone();
         let block_index_addr = self.block_index_addr.clone();
-        info!("After");
-        let current_height = 0;
+        let epoch_service_addr = self.epoch_service.clone();
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
         let self_addr = ctx.address();
 
-        return AtomicResponse::new(Box::pin(
+        AtomicResponse::new(Box::pin(
             async move {
                 // Acquire lock and check that the height hasn't changed identifying a race condition
                 // TEMP: This demonstrates how to get the block height from the block_index_actor
@@ -73,6 +76,14 @@ impl Handler<SolutionContext> for BlockProducerActor {
                     .await
                     .unwrap();
                 info!("block_height: {:?}", bh);
+
+                // Translate partition hash, chunk offset -> ledger, ledger chunk offset
+                let pa = epoch_service_addr
+                    .send(GetPartitionAssignmentMessage(msg.partition_hash))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                info!("parittion assignment: {:?}", pa);
 
                 let data_txs: Vec<IrysTransactionHeader> =
                     mempool_addr.send(GetBestMempoolTxs).await.unwrap();
@@ -93,9 +104,12 @@ impl Handler<SolutionContext> for BlockProducerActor {
                     previous_block_hash: H256::zero(),
                     previous_cumulative_diff: U256::from(4000),
                     poa: PoaData {
-                        tx_path: Base64::from_str("").unwrap(),
-                        data_path: Base64::from_str("").unwrap(),
-                        chunk: Base64::from_str("").unwrap(),
+                        tx_path: Base64(msg.tx_path),
+                        data_path: Base64(msg.data_path),
+                        chunk: Base64(msg.chunk),
+                        ledger_num: pa.ledger_num.unwrap() as u64,
+                        partition_chunk_offset: msg.chunk_offset as u64,
+                        partition_hash: msg.partition_hash,
                     },
                     reward_address: Address::ZERO,
                     reward_key: Base64::from_str("").unwrap(),
@@ -203,12 +217,8 @@ impl Handler<SolutionContext> for BlockProducerActor {
                 Some((block.clone(), exec_payload))
             }
             .into_actor(self),
-        ));
+        ))
     }
-}
-
-fn get_current_block_height() -> u64 {
-    0
 }
 
 /// When a block is confirmed, this message broadcasts the block header and the

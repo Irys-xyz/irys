@@ -167,6 +167,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     db.clone(),
                     mempool_actor_addr.clone(),
                     block_index_actor_addr.clone(),
+                    epoch_service_actor_addr.clone(),
                     reth_node.clone(),
                 );
                 let block_producer_addr = block_producer_actor.start();

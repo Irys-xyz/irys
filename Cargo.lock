@@ -5103,9 +5103,11 @@ name = "irys-actors"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "actix-rt",
  "actix_async_handler",
  "alloy-rpc-types-engine",
  "assert_matches",
+ "base64-url",
  "color-eyre",
  "eyre",
  "irys-config",
@@ -5116,6 +5118,7 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "nodit",
  "openssl",
  "rand",
  "rand_chacha",
@@ -5251,6 +5254,7 @@ dependencies = [
 name = "irys-database"
 version = "0.1.0"
 dependencies = [
+ "actix",
  "arbitrary",
  "assert_matches",
  "bytes",

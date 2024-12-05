@@ -9,9 +9,10 @@ use std::{
 };
 
 use crate::{
-    generate_data_root, generate_leaves_from_data_roots, option_u64_stringify, resolve_proofs,
-    u64_stringify, validate_path, Arbitrary, Base64, Compact, DataRootLeave, H256List,
-    IrysSignature, IrysTransactionHeader, Proof, Signature, H256, U256,
+    generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
+    partition::PartitionHash, resolve_proofs, u64_stringify, validate_path, Arbitrary, Base64,
+    Compact, DataRootLeave, H256List, IrysSignature, IrysTransactionHeader, Proof, Signature, H256,
+    U256,
 };
 
 use alloy_primitives::{Address, B256};
@@ -100,6 +101,9 @@ impl IrysBlockHeader {
                 tx_path: Base64::from_str("").unwrap(),
                 data_path: Base64::from_str("").unwrap(),
                 chunk: Base64::from_str("").unwrap(),
+                partition_hash: PartitionHash::zero(),
+                partition_chunk_offset: 0,
+                ledger_num: 0,
             },
             reward_address: Address::ZERO,
             reward_key: Base64::from_str("").unwrap(),
@@ -134,6 +138,9 @@ pub struct PoaData {
     pub tx_path: Base64,
     pub data_path: Base64,
     pub chunk: Base64,
+    pub ledger_num: u64,
+    pub partition_chunk_offset: u64, // TODO: implement Compact for u32 ?
+    pub partition_hash: PartitionHash,
 }
 
 pub type TxRoot = H256;
@@ -154,7 +161,7 @@ impl TransactionLedger {
         if data_txs.is_empty() {
             return (H256::zero(), vec![]);
         }
-        let mut txs_data_roots = data_txs
+        let txs_data_roots = data_txs
             .iter()
             .map(|h| DataRootLeave {
                 data_root: h.data_root,
@@ -244,6 +251,9 @@ mod tests {
                 tx_path: Base64::from_str("").unwrap(),
                 data_path: Base64::from_str("").unwrap(),
                 chunk: Base64::from_str("").unwrap(),
+                partition_hash: H256::zero(),
+                partition_chunk_offset: 0,
+                ledger_num: 0,
             },
             reward_address: Address::ZERO,
             reward_key: Base64::from_str("").unwrap(),

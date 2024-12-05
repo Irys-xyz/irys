@@ -1,6 +1,7 @@
 //! Manages a list of `{block_hash, weave_size, tx_root}`entries, indexed by
 //! block height.
 use crate::data_ledger::Ledger;
+use actix::dev::MessageResponse;
 use color_eyre::eyre::Result;
 use irys_config::IrysNodeConfig;
 use irys_types::H256;
@@ -139,7 +140,7 @@ impl BlockIndex<Initialized> {
         block_bounds
     }
 
-    fn get_block_index_item(
+    pub fn get_block_index_item(
         &self,
         ledger: Ledger,
         chunk_offset: u64,
@@ -166,7 +167,7 @@ impl BlockIndex<Initialized> {
 
 /// BlockBounds describe the size of a ledger at the start of a block
 /// and then after the blocks transactions were applied to the ledger
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, MessageResponse)]
 pub struct BlockBounds {
     /// Block height where these bounds apply
     pub height: u128,
@@ -231,7 +232,7 @@ impl IndexMut<Ledger> for Vec<LedgerIndexItem> {
 /// Core metadata of the [BlockIndex] this struct tracks the ledger size and
 /// tx root for each ledger per block. Enabling lookups to that find the tx_root
 /// for a ledger at a particular byte offset in the ledger.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, MessageResponse)]
 pub struct BlockIndexItem {
     /// The hash of the block
     pub block_hash: H256, // 32 bytes
