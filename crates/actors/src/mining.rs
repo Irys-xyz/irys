@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use crate::block_producer::BlockProducerActor;
-use actix::{Actor, Addr, Context, Handler, Message};
+use actix::{dev::ToEnvelope, Actor, Addr, Context, Handler, Message};
 use irys_storage::{ie, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::Address;
@@ -9,30 +9,27 @@ use irys_types::{block_production::SolutionContext, H256, U256};
 use openssl::sha;
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
-#[cfg(test)]
-use actix::actors::mocker::Mocker;
-
-#[cfg(not(test))]
-type BlockProducerLocalActor = BlockProducerActor;
-
-#[cfg(test)]
-type BlockProducerLocalActor = Mocker<BlockProducerActor>;
-
-pub struct PartitionMiningActor {
+pub struct PartitionMiningActor<T = BlockProducerActor>
+where
+    T: Actor,
+{
     mining_address: Address,
     database_provider: DatabaseProvider,
-    block_producer_actor: Addr<BlockProducerLocalActor>,
+    block_producer_actor: Addr<T>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
 }
 
-impl PartitionMiningActor {
+impl<T> PartitionMiningActor<T>
+where
+    T: Actor,
+{
     pub fn new(
         mining_address: Address,
         database_provider: DatabaseProvider,
-        block_producer_addr: Addr<BlockProducerLocalActor>,
+        block_producer_addr: Addr<T>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
     ) -> Self {
@@ -110,7 +107,10 @@ impl PartitionMiningActor {
     }
 }
 
-impl Actor for PartitionMiningActor {
+impl<T> Actor for PartitionMiningActor<T>
+where
+    T: Actor,
+{
     type Context = Context<Self>;
 }
 
@@ -124,7 +124,10 @@ impl Seed {
     }
 }
 
-impl Handler<Seed> for PartitionMiningActor {
+impl<T> Handler<Seed> for PartitionMiningActor<T>
+where
+    T: Actor<Context = Context<T>> + Handler<SolutionContext>,
+{
     type Result = ();
 
     fn handle(&mut self, seed: Seed, _ctx: &mut Context<Self>) -> Self::Result {
@@ -192,8 +195,10 @@ fn hash_to_number(hash: &[u8]) -> U256 {
 
 #[cfg(test)]
 mod tests {
-    use crate::mining::{BlockProducerLocalActor, PartitionMiningActor, Seed};
+    use crate::mining::{BlockProducerActor, PartitionMiningActor, Seed};
     //use actix::SystemRegistry;
+    use actix::actors::mocker::Mocker;
+    type BlockProducerMockActor = Mocker<BlockProducerActor>;
 
     use actix::{prelude::*, Actor, Addr};
     use irys_database::{open_or_create_db, tables::IrysTables};
@@ -218,7 +223,7 @@ mod tests {
         let data_path = [4, 3, 2, 1];
         let tx_path = [4, 3, 2, 1];
 
-        let mocker = BlockProducerLocalActor::mock(Box::new(move |msg, _ctx| {
+        let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
             let solution: SolutionContext = *msg.downcast::<SolutionContext>().unwrap();
             assert_eq!(
                 partition_hash, solution.partition_hash,
@@ -241,7 +246,7 @@ mod tests {
             Box::new(())
         }));
 
-        let block_producer_actor_addr: Addr<BlockProducerLocalActor> = mocker.start();
+        let block_producer_actor_addr: Addr<BlockProducerMockActor> = mocked_block_producer.start();
         //SystemRegistry::set(block_producer_actor_addr);
 
         // Set up the storage geometry for this test
