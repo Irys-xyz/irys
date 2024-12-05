@@ -486,6 +486,9 @@ mod tests {
             assert_matches!(result, Ok(()));
 
             // Verify the chunk is added to the ChunksCache
+            // use a new read tx so we can see the writes
+            let db_tx = arc_db2.tx()?;
+
             let (meta, chunk) =
                 irys_database::cached_chunk_by_offset(&db_tx, data_root, offset, chunk_size)
                     .unwrap()
