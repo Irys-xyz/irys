@@ -109,20 +109,20 @@ pub enum ChunkIngressError {
     InvalidChunkSize,
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
-    /// Catch-all variant for other errors.
-    Other(String),
+    // /// Catch-all variant for other errors.
+    // Other(String),
 }
 
-impl ChunkIngressError {
-    /// Returns an other error with the given message.
-    pub fn other(err: impl Into<String>) -> Self {
-        Self::Other(err.into())
-    }
-    /// Allows converting an error that implements Display into an Other error
-    pub fn other_display(err: impl Display) -> Self {
-        Self::Other(err.to_string())
-    }
-}
+// impl ChunkIngressError {
+//     /// Returns an other error with the given message.
+//     pub fn other(err: impl Into<String>) -> Self {
+//         Self::Other(err.into())
+//     }
+//     /// Allows converting an error that implements Display into an Other error
+//     pub fn other_display(err: impl Display) -> Self {
+//         Self::Other(err.to_string())
+//     }
+// }
 
 impl Handler<TxIngressMessage> for MempoolActor {
     type Result = Result<(), TxIngressError>;
