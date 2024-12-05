@@ -239,6 +239,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         };
 
         // check if we have all the chunks for this tx
+        let read_tx = self.db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let mut cursor = read_tx
             .cursor_dup_read::<CachedChunksIndex>()
