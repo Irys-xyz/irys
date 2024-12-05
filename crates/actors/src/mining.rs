@@ -47,11 +47,16 @@ where
         seed: H256,
         difficulty: U256,
     ) -> Option<SolutionContext> {
-        // TODO: add a partition_state that keeps track of efficient sampling
+        let partition_hash = match self.storage_module.partition_hash() {
+            Some(p) => p,
+            None => return None, // if storage module has no assigned partition we can not mine it
+        };
+
         let mut rng = ChaCha20Rng::from_seed(seed.into());
 
         let config = self.storage_module.config.clone();
 
+        // TODO: add a partition_state that keeps track of efficient sampling
         // For now, Pick a random recall range in the partition
         let recall_range_index =
             rng.next_u64() % (config.num_chunks_in_partition / config.num_chunks_in_recall_range);
@@ -88,11 +93,11 @@ where
             if solution_number >= difficulty {
                 debug!("SOLUTION FOUND!!!!!!!!!");
                 let solution = SolutionContext {
-                    partition_hash: self.storage_module.partition_hash().unwrap(),
+                    partition_hash,
                     chunk_offset: solution_chunk_offset,
                     mining_address: self.mining_address,
-                    tx_path: tx_path.unwrap(),
-                    data_path: data_path.unwrap(),
+                    tx_path, // capacity partitions have no tx_path nor data_path
+                    data_path,
                     chunk: chunk_bytes.clone(),
                 };
 
@@ -237,9 +242,13 @@ mod tests {
                 mining_address, solution.mining_address,
                 "Not expected partition"
             );
-            assert_eq!(tx_path.to_vec(), solution.tx_path, "Not expected partition");
             assert_eq!(
-                data_path.to_vec(),
+                Some(tx_path.to_vec()),
+                solution.tx_path,
+                "Not expected partition"
+            );
+            assert_eq!(
+                Some(data_path.to_vec()),
                 solution.data_path,
                 "Not expected partition"
             );

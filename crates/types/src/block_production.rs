@@ -10,8 +10,8 @@ pub struct SolutionContext {
     pub partition_hash: PartitionHash,
     pub chunk_offset: u32,
     pub mining_address: Address,
-    pub tx_path: TxPath,
-    pub data_path: ChunkDataPath,
+    pub tx_path: Option<TxPath>, // capacity partitions have no tx_path nor data_path
+    pub data_path: Option<ChunkDataPath>,
     pub chunk: Vec<u8>,
 }
 #[derive(Debug, Clone)]

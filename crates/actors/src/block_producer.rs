@@ -104,8 +104,8 @@ impl Handler<SolutionContext> for BlockProducerActor {
                     previous_block_hash: H256::zero(),
                     previous_cumulative_diff: U256::from(4000),
                     poa: PoaData {
-                        tx_path: Base64(msg.tx_path),
-                        data_path: Base64(msg.data_path),
+                        tx_path: Base64(msg.tx_path.unwrap_or(Vec::new())),
+                        data_path: Base64(msg.data_path.unwrap_or(Vec::new())),
                         chunk: Base64(msg.chunk),
                         ledger_num: pa.ledger_num.unwrap() as u64,
                         partition_chunk_offset: msg.chunk_offset as u64,
