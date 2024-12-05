@@ -458,7 +458,12 @@ impl StorageModule {
     /// Writes chunk data and its data_path to relevant storage locations
     pub fn write_data_chunk(&self, chunk: Chunk) -> eyre::Result<()> {
         let start_offsets = self.collect_start_offsets(chunk.data_root)?;
-        let chunk_offset = (chunk.offset as u64 / self.config.chunk_size) - 1;
+
+        if start_offsets.0.len() == 0 {
+            return Err(eyre::eyre!("Chunks data_root not found in storage module"));
+        }
+
+        let chunk_offset = (chunk.offset as u64 / self.config.chunk_size).max(1) - 1;
         let data_path = chunk.data_path.0.clone();
         let data_path_hash = Chunk::hash_data_path(&data_path);
 
@@ -467,55 +472,34 @@ impl StorageModule {
                 .try_into()
                 .map_err(|_| eyre::eyre!("Invalid negative offset: {}", start_offset))?;
 
-            self.write_chunk(
-                partition_offset,
-                chunk.bytes.clone().into(),
-                ChunkType::Data,
-            );
+            {
+                // read the metadata in a block so the read guard expires quickly
+                let intervals = self.intervals.read().unwrap();
+                let chunk_state = intervals.get_at_point(partition_offset);
+                if !chunk_state.is_some_and(|s| *s == ChunkType::Entropy) {
+                    // invalid chunk state - either it's not in the map (!!) or it's not entropy
+                    // we should not be writing to this spot regardless.
+                    return Err(eyre!(
+                        "Invalid chunk state {:?} for offset {} - expected this to be an Entropy chunk",
+                        &chunk_state,
+                        &chunk.offset
+                    ));
+                }
+            };
+
+            // read entropy from the storage module
+            let entropy = self.read_chunk_internal(partition_offset)?;
+            // xor
+            let mut data = chunk.bytes.0.clone();
+            xor_vec_u8_arrays_in_place(&mut data, &entropy);
+
+            self.write_chunk(partition_offset, data, ChunkType::Data);
             self.add_data_path_to_index(data_path_hash, data_path.clone(), partition_offset)?;
         }
 
         Ok(())
     }
 
-    /// Writes the provided bytes to the submodule's storage, and the data_path to the submodules's database
-    // pub fn write_data_chunk(&self, chunk: Chunk) -> eyre::Result<()> {
-    //     // read the metadata
-    //     // using a guard so it's in a block
-    //     {
-    //         let intervals = self.intervals.read().unwrap();
-    //         let chunk_state = intervals.get_at_point(chunk.offset);
-    //         if !chunk_state.is_some_and(|s| *s == ChunkType::Entropy) {
-    //             // invalid chunk state - either it's not in the map (!!) or it's not entropy
-    //             // we should not be writing to this spot regardless.
-    //             return Err(eyre!(
-    //                 "Invalid chunk state {:?} for offset {} - expected this to be an Entropy chunk",
-    //                 &chunk_state,
-    //                 &chunk.offset
-    //             ));
-    //         }
-    //     };
-
-    //     // read entropy from the storage module
-    //     let entropy = self.read_chunk_internal(chunk.offset)?;
-    //     // xor
-    //     let mut data = chunk.bytes.0;
-    //     xor_vec_u8_arrays_in_place(&mut data, &entropy);
-
-    //     // write to the chunk storage and store the data_path in the submodule's database.
-    //     self.write_chunk(chunk.offset, data, ChunkType::Data);
-    //     // get submodule ref to get database env
-    //     let (_interval, submodule) = self
-    //         .submodules
-    //         .get_key_value_at_point(chunk.offset)
-    //         .unwrap();
-
-    //     // write data_path
-    //     let _ = submodule
-    //         .db
-    //         .update(|tx| write_chunk_data_path(tx, chunk.offset, chunk.data_path.into(), None))?;
-
-    //     Ok(())
     /// Internal helper function to find all the RelativeStartOffsets for a data_root
     /// in this StorageModule
     fn collect_start_offsets(&self, data_root: DataRoot) -> eyre::Result<RelativeStartOffsets> {
@@ -759,7 +743,7 @@ fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {
 mod tests {
     use super::*;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::H256;
+    use irys_types::{storage, H256};
     use nodit::interval::ii;
     use openssl::sha;
     #[test]
@@ -897,6 +881,7 @@ mod tests {
         // Override the default StorageModule config for testing
         let config = StorageConfig {
             min_writes_before_sync: 1,
+            chunk_size: 5,
             ..Default::default()
         };
 
@@ -906,6 +891,15 @@ mod tests {
         let offset = 0;
         let chunk_data = vec![0, 1, 2, 3, 4];
         let data_path = vec![4, 3, 2, 1];
+        let tx_path = vec![5, 6, 7, 8];
+        let data_root = H256::zero();
+
+        // Pack the storage module
+        storage_module.write_chunk(0, vec![0, 0, 0, 0, 0], ChunkType::Entropy);
+        let _ = storage_module.sync_pending_chunks();
+
+        let _ =
+            storage_module.index_transaction_data(tx_path, data_root, LedgerChunkRange(ii(0, 0)));
 
         let chunk = Chunk {
             data_root: H256::zero(),
@@ -915,7 +909,7 @@ mod tests {
             offset,
         };
 
-        storage_module.write_data_chunk(chunk, 0)?;
+        storage_module.write_data_chunk(chunk)?;
 
         let ret_path = storage_module.read_data_path(0)?;
         assert_eq!(ret_path, Some(data_path));
