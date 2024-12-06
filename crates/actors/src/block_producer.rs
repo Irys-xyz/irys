@@ -11,7 +11,7 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, Address, Base64, H256List,
     IrysBlockHeader, IrysSignature, IrysTransactionHeader, PoaData, Signature, TransactionLedger,
-    CHUNK_SIZE, H256, NUM_CHUNKS_IN_PARTITION, NUM_PARTITIONS_PER_SLOT, U256,
+    H256, U256,
 };
 use reth::revm::primitives::B256;
 use reth_db::Database;

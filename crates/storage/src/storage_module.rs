@@ -3,9 +3,8 @@ use eyre::{eyre, Result};
 use irys_database::submodule::{
     self, add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
     add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
-    create_or_open_submodule_db, get_data_path_by_offset, get_tx_path_by_offset,
-    get_start_offsets_by_data_root,
-    tables::RelativeStartOffsets, write_chunk_data_path,
+    create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
+    get_tx_path_by_offset, tables::RelativeStartOffsets, write_chunk_data_path,
 };
 use irys_packing::xor_vec_u8_arrays_in_place;
 use irys_types::{

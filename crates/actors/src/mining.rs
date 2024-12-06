@@ -1,7 +1,7 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::block_producer::BlockProducerActor;
-use actix::{dev::ToEnvelope, Actor, Addr, Context, Handler, Message};
+use actix::{Actor, Addr, Context, Handler, Message};
 use irys_storage::{ie, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::Address;
@@ -46,15 +46,15 @@ where
         &mut self,
         seed: H256,
         difficulty: U256,
-    ) -> Option<SolutionContext> {
+    ) -> eyre::Result<Option<SolutionContext>> {
         let partition_hash = match self.storage_module.partition_hash() {
             Some(p) => p,
-            None => return None, // if storage module has no assigned partition we can not mine it
+            None => return Ok(None),
         };
 
         let mut rng = ChaCha20Rng::from_seed(seed.into());
 
-        let config = self.storage_module.config.clone();
+        let config = &self.storage_module.config;
 
         // TODO: add a partition_state that keeps track of efficient sampling
         // For now, Pick a random recall range in the partition
@@ -70,27 +70,19 @@ where
         );
 
         // haven't tested this, but it looks correct
-        let chunks = self
-            .storage_module
-            .read_chunks(ie(
-                start_chunk_index as u32,
-                start_chunk_index as u32 + config.num_chunks_in_recall_range as u32,
-            ))
-            .unwrap();
+        let chunks = self.storage_module.read_chunks(ie(
+            start_chunk_index as u32,
+            start_chunk_index as u32 + config.num_chunks_in_recall_range as u32,
+        ))?;
 
-        for (index, chunk) in chunks.iter().enumerate() {
-            let (_chunk_offset, (chunk_bytes, _chunk_type)) = chunk;
-            let hash = sha::sha256(chunk_bytes);
-
+        for (index, (_chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
-
-            let solution_number = hash_to_number(&hash);
             let solution_chunk_offset = (start_chunk_index + index) as u32;
             let (tx_path, data_path) = self
                 .storage_module
-                .read_tx_data_path(solution_chunk_offset as u64)
-                .unwrap();
-            if solution_number >= difficulty {
+                .read_tx_data_path(solution_chunk_offset as u64)?;
+
+            if hash_to_number(&sha::sha256(chunk_bytes)) >= difficulty {
                 debug!("SOLUTION FOUND!!!!!!!!!");
                 let solution = SolutionContext {
                     partition_hash,
@@ -104,11 +96,11 @@ where
                 // TODO: Let all partitions know to stop mining
 
                 // Once solution is sent stop mining and let all other partitions know
-                return Some(solution);
+                return Ok(Some(solution));
             }
         }
 
-        None
+        Ok(None)
     }
 }
 
@@ -150,19 +142,19 @@ where
         );
 
         match self.mine_partition_with_seed(seed.into_inner(), difficulty) {
-            Some(s) => match self.block_producer_actor.try_send(s) {
+            Ok(Some(s)) => match self.block_producer_actor.try_send(s) {
                 Ok(_) => {
                     debug!("Solution sent!");
-                    ()
                 }
                 Err(err) => error!("Error submitting solution to block producer {:?}", err),
             },
 
-            None => {
+            Ok(None) => {
                 debug!("No solution sent!");
-                ()
             }
+            Err(err) => error!("Error in hanling mining solution {:?}", err),
         };
+        ()
     }
 }
 
@@ -205,7 +197,7 @@ mod tests {
     use actix::actors::mocker::Mocker;
     type BlockProducerMockActor = Mocker<BlockProducerActor>;
 
-    use actix::{prelude::*, Actor, Addr};
+    use actix::{Actor, Addr};
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::{
         ie, initialize_storage_files, read_info_file, StorageModule, StorageModuleInfo,
@@ -216,7 +208,6 @@ mod tests {
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
     use std::sync::Arc;
-    use tracing::{debug, error, info};
 
     #[actix_rt::test]
     async fn test_solution() {

@@ -15,7 +15,7 @@ actix-proxy = "0.2.0"
 actix-web = "4.9.0"
 awc = "3.5.1"
 base58 = "0.2.0"
-base64-url = "2.0.0"
+base64-url.workspace = true
 reth.workspace = true
 reth-db.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }

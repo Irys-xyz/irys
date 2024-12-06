@@ -13,9 +13,9 @@ irys-storage.workspace = true
 irys-config.workspace = true
 actix.workspace = true
 nodit.workspace = true
+actix-rt.workspace = true
+base64-url.workspace = true
 
-actix-rt = "2.10.0"
-base64-url = "2.0.0"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
 sha2 = "0.10.8"
