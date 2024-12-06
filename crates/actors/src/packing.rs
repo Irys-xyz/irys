@@ -102,7 +102,7 @@ impl PackingActor {
             let assignment = match storage_module.partition_assignment {
                 Some(v) => v,
                 None => {
-                    warn!(target:"irys::packing", "Partition assignment for storage module {} is `None`, cannot pack requested range {:?}", &storage_module.module_num, &chunk_range);
+                    warn!(target:"irys::packing", "Partition assignment for storage module {} is `None`, cannot pack requested range {:?}", &storage_module.id, &chunk_range);
                     self.pending_jobs.write().unwrap().pop_front();
                     continue;
                 }
@@ -140,7 +140,7 @@ impl PackingActor {
                     // computation is done, release semaphore
                     drop(permit);
                     // write the chunk
-                    debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.module_num);
+                    debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.id);
                     storage_module.write_chunk(i, out, ChunkType::Entropy);
                 });
             }
@@ -181,7 +181,7 @@ impl Handler<PackingRequest> for PackingActor {
     type Result = ();
 
     fn handle(&mut self, msg: PackingRequest, ctx: &mut Self::Context) -> Self::Result {
-        debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.start(), &msg.chunk_range.end(), &msg.storage_module.module_num);
+        debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.start(), &msg.chunk_range.end(), &msg.storage_module.id);
         self.pending_jobs.write().unwrap().push_back(msg);
     }
 }
@@ -238,7 +238,7 @@ pub async fn wait_for_packing(
 #[actix::test]
 async fn test_packing_actor() -> eyre::Result<()> {
     let infos = vec![StorageModuleInfo {
-        module_num: 0,
+        id: 0,
         partition_assignment: Some(PartitionAssignment {
             partition_hash: PartitionHash::zero(),
             miner_address: Address::random(),

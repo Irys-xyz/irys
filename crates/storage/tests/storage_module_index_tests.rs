@@ -35,7 +35,7 @@ fn tx_path_overlap_tests() {
     // slots 0, 1, and 2
     let storage_module_infos = vec![
         StorageModuleInfo {
-            module_num: 0,
+            id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
@@ -49,7 +49,7 @@ fn tx_path_overlap_tests() {
             ],
         },
         StorageModuleInfo {
-            module_num: 1,
+            id: 1,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
@@ -62,7 +62,7 @@ fn tx_path_overlap_tests() {
             ],
         },
         StorageModuleInfo {
-            module_num: 2,
+            id: 2,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,

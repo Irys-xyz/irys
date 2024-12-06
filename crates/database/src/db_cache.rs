@@ -37,6 +37,17 @@ impl From<Chunk> for CachedChunk {
     }
 }
 
+// TODO: figure out if/how to use lifetimes to reduce the data cloning
+// (the write to DB copies the bytes anyway so it should just need a ref)
+impl From<&Chunk> for CachedChunk {
+    fn from(value: &Chunk) -> Self {
+        Self {
+            chunk: Some(value.bytes.clone()),
+            data_path: value.data_path.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary)]
 pub struct CachedChunkIndexEntry {
     pub index: TxRelativeChunkIndex, // subkey

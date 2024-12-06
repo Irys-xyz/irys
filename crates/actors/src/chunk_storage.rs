@@ -253,8 +253,8 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                                     offset: chunk_offset,
                                 };
 
-                                // Write teh chunk to the module
-                                if let Err(e) = storage_module.write_data_chunk(chunk) {
+                                // Write the chunk to the module
+                                if let Err(e) = storage_module.write_data_chunk(&chunk) {
                                     error!("Failed to write data chunk: {}", e);
                                     return Err(());
                                 }

@@ -516,7 +516,7 @@ impl EpochServiceActor {
             .flat_map(|slot| &slot.partitions)
             .enumerate()
             .map(|(idx, partition)| StorageModuleInfo {
-                module_num: idx,
+                id: idx,
                 partition_assignment: Some(*self.data_partitions.get(partition).unwrap()),
                 submodules: vec![(ii(0, num_part_chunks), format!("submodule_{}", idx))],
             })
@@ -531,7 +531,7 @@ impl EpochServiceActor {
             .flat_map(|slot| &slot.partitions)
             .enumerate()
             .map(|(idx, partition)| StorageModuleInfo {
-                module_num: idx_start + idx,
+                id: idx_start + idx,
                 partition_assignment: Some(*self.data_partitions.get(partition).unwrap()),
                 submodules: vec![(
                     ii(0, num_part_chunks),
@@ -549,7 +549,7 @@ impl EpochServiceActor {
         let cap_part = capacity_partitions.first().unwrap();
         let idx = module_infos.len();
         let cap_info = StorageModuleInfo {
-            module_num: idx,
+            id: idx,
             partition_assignment: Some(*self.capacity_partitions.get(cap_part).unwrap()),
             submodules: vec![(ii(0, num_part_chunks), format!("submodule_{}", idx))],
         };
