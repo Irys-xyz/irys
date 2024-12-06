@@ -14,7 +14,10 @@ use irys_types::{
     PartitionChunkOffset, PartitionChunkRange, RelativeChunkOffset, StorageConfig, TxPath,
     TxPathHash, H256,
 };
-use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
+use nodit::{
+    interval::{ie, ii},
+    InclusiveInterval, Interval, NoditMap, NoditSet,
+};
 use openssl::sha;
 use reth_db::{Database, DatabaseEnv};
 use serde::{Deserialize, Serialize};
@@ -588,7 +591,7 @@ impl StorageModule {
             if let Some(slot_index) = part_assign.slot_index {
                 let start = slot_index as u64 * self.config.num_chunks_in_partition;
                 let end = start + self.config.num_chunks_in_partition;
-                return Ok(LedgerChunkRange(ii(start, end)));
+                return Ok(LedgerChunkRange(ie(start, end)));
             } else {
                 return Err(eyre::eyre!("Ledger slot not assigned!"));
             }

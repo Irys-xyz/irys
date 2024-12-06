@@ -20,7 +20,7 @@ use reth_db::Database;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::block_producer::BlockConfirmedMessage;
 /// The Mempool oversees pending transactions and validation of incoming tx.
@@ -176,26 +176,30 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         // Validate that the data_size for this chunk matches the data_size
         // recorded in the transaction header.
         if cached_data_root.data_size != chunk.data_size {
+            println!(
+                "InvalidChunkSize: expected: {} got:{}",
+                cached_data_root.data_size, chunk.data_size
+            );
             return Err(ChunkIngressError::InvalidChunkSize);
         }
+
+        // TODO: Mark the data_root as invalid if the chunk is an incorrect size
+        let chunk_size = self.storage_config.chunk_size;
 
         // Use that data_Size to identify and validate that only the last chunk
         // can be less than 256KiB (CHUNK_SIZE)
         let chunk_len = chunk.bytes.len() as u64;
         if (chunk.offset as u64) < chunk.data_size - 1 {
             // Ensure prefix chunks are all exactly CHUNK_SIZE
-            if chunk_len != CHUNK_SIZE {
+            if chunk_len != chunk_size {
                 return Err(ChunkIngressError::InvalidChunkSize);
             }
         } else {
             // Ensure the last chunk is no larger than CHUNK_SIZE
-            if chunk_len > CHUNK_SIZE {
+            if chunk_len > chunk_size {
                 return Err(ChunkIngressError::InvalidChunkSize);
             }
         }
-
-        // TODO: Mark the data_root as invalid if the chunk is an incorrect size
-        let chunk_size = self.storage_config.chunk_size;
 
         // Check that the leaf hash on the data_path matches the chunk_hash
         if path_result.leaf_hash == hash_sha256(&chunk.bytes.0).unwrap() {
