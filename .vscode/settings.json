@@ -6,6 +6,7 @@
 		"chainspec",
 		"Deque",
 		"hasher",
+		"ingressed",
 		"Irys",
 		"keccak",
 		"Linearize",

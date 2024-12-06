@@ -71,6 +71,7 @@ async fn post_tx_and_chunks_golden_path() {
     let task_manager = TaskManager::current();
     let storage_config = StorageConfig::default();
 
+    // TODO Fixup this test, maybe with some stubs
     let mempool_actor = MempoolActor::new(
         irys_types::app_state::DatabaseProvider(arc_db),
         task_manager.executor(),
@@ -149,7 +150,7 @@ async fn post_tx_and_chunks_golden_path() {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            offset,
+            chunk_index: index as u32,
         };
 
         // Make a POST request with JSON payload

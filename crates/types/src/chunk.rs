@@ -8,7 +8,7 @@ pub struct Chunk {
     /// transaction header. Having this present makes it easier to do cached
     /// chunk lookups by data_root on the ingress node.
     pub data_root: DataRoot,
-    /// Total size of the data stored in this chunk. Helps identify if this
+    /// Total size of the data stored by this data_root. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
     pub data_size: u64,
@@ -18,9 +18,8 @@ pub struct Chunk {
     /// Raw bytes to be stored, should be CHUNK_SIZE in length unless it is the
     /// last chunk in the transaction
     pub bytes: Base64,
-    /// Offset of the chunk in the transactions data. Offsets are measured from
-    /// the highest (last) byte in the chunk not the first.
-    pub offset: TxRelativeChunkOffset,
+    // Index of the chunk in the transaction starting with 0
+    pub chunk_index: TxRelativeChunkIndex,
 }
 
 impl Chunk {
@@ -31,12 +30,19 @@ impl Chunk {
     pub fn hash_data_path(data_path: &ChunkDataPath) -> ChunkPathHash {
         hash_sha256(data_path).unwrap().into()
     }
-}
 
-/// a Chunk's tx relative offset
-/// due to legacy weirdness, the offset is of the end of the chunk, not the start
-/// i.e for the first chunk, the offset is 262144 instead of 0
-pub type TxRelativeChunkOffset = u32;
+    /// a Chunk's tx relative byte offset
+    /// due to legacy weirdness, the offset is of the end of the chunk, not the start
+    /// i.e for the first chunk, the offset is chunk_size instead of 0
+    pub fn byte_offset(&self, chunk_size: u64) -> u64 {
+        let last_index = self.data_size.div_ceil(chunk_size as u64);
+        if self.chunk_index as u64 == last_index {
+            return self.data_size;
+        } else {
+            return (self.chunk_index + 1) as u64 * chunk_size - 1;
+        }
+    }
+}
 
 /// a chunk binary
 /// this type is unsized (i.e not a [u8; N]) as chunks can have variable sizes

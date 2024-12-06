@@ -464,16 +464,12 @@ impl StorageModule {
         if start_offsets.0.len() == 0 {
             return Err(eyre::eyre!("Chunks data_root not found in storage module"));
         }
-        let div_ceil = (chunk.offset as u64).div_ceil(self.config.chunk_size);
-        let div_reg = chunk.offset as u64 / self.config.chunk_size;
-
-        let chunk_offset = div_ceil.max(1) - 1;
 
         let mut write_offsets = vec![];
         for start_offset in start_offsets.0 {
-            let partition_offset = (start_offset + chunk_offset as i32)
+            let partition_offset = (start_offset + chunk.chunk_index as i32)
                 .try_into()
-                .map_err(|_| eyre::eyre!("Invalid negative offset: {}", start_offset))?;
+                .map_err(|_| eyre::eyre!("Invalid negative offset: {}", chunk.chunk_index))?;
 
             {
                 // read the metadata in a block so the read guard expires quickly
@@ -904,7 +900,6 @@ mod tests {
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
         let mut storage_module = StorageModule::new(&base_path, storage_module_info, Some(config));
-        let offset = 0;
         let chunk_data = vec![0, 1, 2, 3, 4];
         let data_path = vec![4, 3, 2, 1];
         let tx_path = vec![5, 6, 7, 8];
@@ -921,7 +916,7 @@ mod tests {
             data_size: chunk_data.len() as u64,
             data_path: data_path.clone().into(),
             bytes: chunk_data.into(),
-            offset,
+            chunk_index: 0,
         };
 
         storage_module.write_data_chunk(&chunk)?;

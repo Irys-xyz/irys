@@ -1,6 +1,6 @@
 use actix::{Actor, Context, Handler, Message};
 use eyre::eyre;
-use irys_database::db_cache::{chunk_offset_to_index, data_size_to_chunk_count, CachedChunk};
+use irys_database::db_cache::{data_size_to_chunk_count, CachedChunk};
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_storage::StorageModuleVec;
 use irys_types::ingress::generate_ingress_proof_tree;
@@ -181,8 +181,13 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         // Next validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
         let root_hash = chunk.data_root.0;
-        let target_offset = chunk.offset as u128;
+        let target_offset = chunk.byte_offset(self.storage_config.chunk_size) as u128;
         let path_buff = &chunk.data_path;
+
+        println!(
+            "chunk_index:{} data_size:{} offset:{}",
+            chunk.chunk_index, chunk.data_size, target_offset
+        );
 
         let path_result = validate_path(root_hash, path_buff, target_offset)
             .map_err(|_| ChunkIngressError::InvalidProof)?;
@@ -190,7 +195,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         // Validate that the data_size for this chunk matches the data_size
         // recorded in the transaction header.
         if cached_data_root.data_size != chunk.data_size {
-            println!(
+            error!(
                 "InvalidChunkSize: expected: {} got:{}",
                 cached_data_root.data_size, chunk.data_size
             );
@@ -202,9 +207,15 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         let chunk_len = chunk.bytes.len() as u64;
 
         // TODO: Mark the data_root as invalid if the chunk is an incorrect size
+        // Someone may have created a data_root that seemed valid, but if the
+        // data_path is valid but the chunk size doesn't mach the protocols
+        // consensus size, then the data_root is actually invalid and no future
+        // chunks from that data_root should be ingressed.
         let chunk_size = self.storage_config.chunk_size;
 
-        if (chunk.offset as u64) < chunk.data_size - 1 {
+        // Is this chunk index any of the chunks before the last in the tx?
+        let num_chunks_in_tx = cached_data_root.data_size.div_ceil(chunk_size);
+        if (chunk.chunk_index as u64) < num_chunks_in_tx - 1 {
             // Ensure prefix chunks are all exactly chunk_size
             if chunk_len != chunk_size {
                 return Err(ChunkIngressError::InvalidChunkSize);
@@ -227,12 +238,12 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
 
         self.db
-            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk, chunk_size))
+            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         for sm in &self.storage_modules {
             if sm.get_write_offsets(&chunk).unwrap_or(vec![]).len() != 0 {
-                info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.offset, &chunk.data_root, &sm.id );
+                info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.chunk_index, &chunk.data_root, &sm.id );
                 sm.write_data_chunk(&chunk)
                     .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()))?;
             }
@@ -498,6 +509,10 @@ mod tests {
         println!("{:?}", tx.header);
         println!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
 
+        for proof in tx.proofs.iter() {
+            println!("offset: {}", proof.offset);
+        }
+
         // Wrap the transaction in a TxIngressMessage
         let data_root = tx.header.data_root;
         let data_size = tx.header.data_size;
@@ -514,13 +529,13 @@ mod tests {
         // Verify the data_root was added to the cache
         let result = irys_database::cached_data_root_by_data_root(&db_tx, data_root).unwrap();
         assert_matches!(result, Some(_));
-        let end_offset = tx.chunks.len() - 1;
+        let last_index = tx.chunks.len() - 1;
         // Loop though each of the transaction chunks
-        for (index, chunk_node) in tx.chunks.iter().enumerate() {
+        for (chunk_index, chunk_node) in tx.chunks.iter().enumerate() {
             let min = chunk_node.min_byte_range;
             let max = chunk_node.max_byte_range;
-            let offset = tx.proofs[index].offset as u32;
-            let data_path = Base64(tx.proofs[index].proof.to_vec());
+            let offset = tx.proofs[chunk_index].offset as u32;
+            let data_path = Base64(tx.proofs[chunk_index].proof.to_vec());
             let key: H256 = hash_sha256(&data_path.0).unwrap().into();
             let chunk_bytes = Base64(data_bytes[min..max].to_vec());
             // Create a ChunkIngressMessage for each chunk
@@ -530,12 +545,12 @@ mod tests {
                     data_size,
                     data_path: data_path.clone(),
                     bytes: chunk_bytes.clone(),
-                    offset,
+                    chunk_index: chunk_index as u32,
                 },
             };
 
-            let is_last_chunk = index == end_offset;
-            let interval = ii(0, end_offset as u64);
+            let is_last_chunk = chunk_index == last_index;
+            let interval = ii(0, last_index as u64);
             if is_last_chunk {
                 // artificially index the chunk with the submodule
                 // this will cause the last chunk to show up in cache & on disk
@@ -553,7 +568,7 @@ mod tests {
             let db_tx = arc_db2.tx()?;
 
             let (meta, chunk) =
-                irys_database::cached_chunk_by_offset(&db_tx, data_root, offset, chunk_size)
+                irys_database::cached_chunk_by_chunk_index(&db_tx, data_root, chunk_index as u32)
                     .unwrap()
                     .unwrap();
             assert_eq!(meta.chunk_path_hash, key);
@@ -568,7 +583,7 @@ mod tests {
             if is_last_chunk {
                 // read the set of chunks
                 // only offset 2 (last chunk) should have data
-                let res = storage_module.read_chunks(ii(0, end_offset as u32))?;
+                let res = storage_module.read_chunks(ii(0, last_index as u32))?;
                 let r = res.get(&2).unwrap();
                 let mut packed_bytes = r.0.clone();
                 // unpack the data (packing was all 0's)

@@ -1,6 +1,6 @@
 use actix::prelude::*;
 use irys_database::{
-    cached_chunk_by_offset, submodule::add_full_tx_path, BlockIndex, Initialized, Ledger,
+    cached_chunk_by_chunk_index, submodule::add_full_tx_path, BlockIndex, Initialized, Ledger,
 };
 use irys_storage::{ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
@@ -164,20 +164,13 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                 }
 
                 // Loop through transaction's chunks
-                for chunk_offset in 0..num_chunks_in_tx as u32 {
-                    // Is this the last chunk in the tx?
-                    let offset = if chunk_offset == num_chunks_in_tx {
-                        tx_byte_length as u32
-                    } else {
-                        (chunk_offset + 1) as u32 * chunk_size as u32
-                    };
-
+                for chunk_index in 0..num_chunks_in_tx {
                     // Get chunk from the global cache
-                    if let Ok(Some(chunk_info)) = db.view_eyre(|tx| {
-                        cached_chunk_by_offset(tx, data_root, offset, chunk_size as u64)
-                    }) {
+                    if let Ok(Some(chunk_info)) =
+                        db.view_eyre(|tx| cached_chunk_by_chunk_index(tx, data_root, chunk_index))
+                    {
                         // Compute the ledger relative chunk_offset
-                        let ledger_offset = chunk_offset as u64 + tx_chunk_range.start();
+                        let ledger_offset = chunk_index as u64 + tx_chunk_range.start();
 
                         // Grab the correct storage module for the offset
                         let matching_module = storage_modules.iter().find_map(|module| {
@@ -198,7 +191,7 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                                     data_size: tx_byte_length as u64,
                                     data_path,
                                     bytes,
-                                    offset,
+                                    chunk_index: chunk_index,
                                 };
 
                                 // Write the chunk to the module
@@ -242,6 +235,7 @@ mod tests {
 
     use super::*;
     use actix::prelude::*;
+    use chunk::TxRelativeChunkIndex;
     use irys_config::IrysNodeConfig;
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::*;
@@ -391,7 +385,7 @@ mod tests {
                     data_size: tx.header.data_size,
                     data_path: Base64::from(proof.proof.clone()),
                     bytes: Base64(tx.data.0[min..max].to_vec()),
-                    offset: offset as u32,
+                    chunk_index: i as TxRelativeChunkIndex,
                 };
                 let msg = ChunkIngressMessage(chunk);
                 let res = mempool_addr.send(msg).await?;

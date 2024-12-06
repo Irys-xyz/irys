@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use crate::db_cache::{
-    chunk_offset_to_index, CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata,
-    CachedDataRoot,
+    CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders,
@@ -15,7 +14,7 @@ use irys_types::partition::PartitionHash;
 use irys_types::{
     hash_sha256, BlockHash, BlockRelativeChunkOffset, Chunk, ChunkPathHash, DataRoot,
     IrysBlockHeader, IrysTransactionHeader, IrysTransactionId, TxPath, TxRelativeChunkIndex,
-    TxRelativeChunkOffset, TxRoot, H256, MEGABYTE,
+    TxRoot, H256, MEGABYTE,
 };
 use reth::prometheus_exporter::install_prometheus_recorder;
 use reth_db::cursor::{DbDupCursorRO, DupWalker};
@@ -131,12 +130,7 @@ type IsDuplicate = bool;
 
 /// Caches a [`Chunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
-pub fn cache_chunk<T: DbTx + DbTxMut>(
-    tx: &T,
-    chunk: &Chunk,
-    chunk_size: u64,
-) -> eyre::Result<IsDuplicate> {
-    let chunk_index = chunk_offset_to_index(chunk.offset, chunk_size)?;
+pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &Chunk) -> eyre::Result<IsDuplicate> {
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
     if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
         warn!(
@@ -146,13 +140,13 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(
         return Ok(true);
     }
     let value = CachedChunkIndexEntry {
-        index: chunk_index,
+        index: chunk.chunk_index,
         meta: CachedChunkIndexMetadata { chunk_path_hash },
     };
 
     debug!(
         "Caching chunk {} ({}) of {}",
-        &chunk_index, &chunk_path_hash, &chunk.data_root
+        &chunk.chunk_index, &chunk_path_hash, &chunk.data_root
     );
 
     tx.put::<CachedChunksIndex>(chunk.data_root, value)?;
@@ -164,10 +158,8 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(
 pub fn cached_chunk_meta_by_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
-    chunk_offset: TxRelativeChunkOffset,
-    chunk_size: u64,
+    chunk_index: TxRelativeChunkIndex,
 ) -> eyre::Result<Option<CachedChunkIndexMetadata>> {
-    let chunk_index = chunk_offset_to_index(chunk_offset, chunk_size)?;
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
     Ok(cursor
         .seek_by_key_subkey(data_root, chunk_index)?
@@ -176,14 +168,11 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
         .and_then(|index_entry| Some(index_entry.meta)))
 }
 /// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxRelativeChunkOffset`]
-pub fn cached_chunk_by_offset<T: DbTx>(
+pub fn cached_chunk_by_chunk_index<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
-    chunk_offset: TxRelativeChunkOffset,
-    chunk_size: u64,
+    chunk_index: TxRelativeChunkIndex,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
-    let chunk_index = chunk_offset_to_index(chunk_offset, chunk_size)?;
-
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
 
     let result = if let Some(index_entry) = cursor
