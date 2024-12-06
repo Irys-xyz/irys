@@ -5108,6 +5108,7 @@ dependencies = [
  "alloy-rpc-types-engine",
  "assert_matches",
  "color-eyre",
+ "derive_more 1.0.0",
  "eyre",
  "irys-config",
  "irys-database",

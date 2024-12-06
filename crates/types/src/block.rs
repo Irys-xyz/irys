@@ -138,6 +138,9 @@ pub struct PoaData {
 
 pub type TxRoot = H256;
 
+/// The numeric ledger ID
+pub type LedgerId = u32;
+
 #[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Compact, Arbitrary)]
 pub struct TransactionLedger {
     pub tx_root: H256,

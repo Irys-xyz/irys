@@ -1,5 +1,5 @@
 use irys_types::{
-    Compact, TransactionLedger, H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT,
+    Compact, LedgerId, TransactionLedger, H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT,
     SUBMIT_LEDGER_EPOCH_LENGTH,
 };
 use serde::{Deserialize, Serialize};
@@ -212,7 +212,7 @@ impl Ledger {
         Self::ALL.iter().copied()
     }
     /// get the associated numeric ID
-    pub fn get_id(&self) -> u32 {
+    pub fn get_id(&self) -> LedgerId {
         *self as u32
     }
 }

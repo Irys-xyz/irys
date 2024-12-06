@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, HashMap},
     str::FromStr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -77,7 +78,34 @@ impl Handler<SolutionContext> for BlockProducerActor {
                 let data_txs: Vec<IrysTransactionHeader> =
                     mempool_addr.send(GetBestMempoolTxs).await.unwrap();
 
-                let data_tx_ids = data_txs.iter().map(|h| h.id.clone()).collect::<Vec<H256>>();
+                // temp
+                let expires: HashMap<u32, Option<u64>> =
+                    HashMap::from_iter(vec![(0, None), (1, Some(1622543200))]);
+
+                // TODO: probably a nicer way to do this
+                let ledgers = data_txs
+                    .iter()
+                    // group into ledgers
+                    .fold(BTreeMap::new(), |mut acc, header| {
+                        // TODO: map ledger numbers  0 -> 1, 1 -> ..? _ -> _
+                        acc.entry(header.ledger_num)
+                            .or_insert_with(Vec::new)
+                            .push(header.clone());
+                        acc
+                    })
+                    .iter()
+                    // create ledgers
+                    .fold(Vec::new(), |mut acc, (ledger_id, txs)| {
+                        let tx_ids = txs.iter().map(|h| h.id.clone()).collect::<Vec<H256>>();
+                        acc.push(TransactionLedger {
+                            tx_root: TransactionLedger::merklize_tx_root(&txs).0,
+                            txids: H256List(tx_ids),
+                            max_chunk_offset: 0,
+                            expires: *expires.get(ledger_id).unwrap(),
+                        });
+                        acc
+                    });
+
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
                 let mut irys_block = IrysBlockHeader {
@@ -90,6 +118,7 @@ impl Handler<SolutionContext> for BlockProducerActor {
                     chunk_hash: H256::zero(),
                     height: bh,
                     block_hash: H256::zero(),
+                    // ask block index for latest block
                     previous_block_hash: H256::zero(),
                     previous_cumulative_diff: U256::from(4000),
                     poa: PoaData {
@@ -103,22 +132,7 @@ impl Handler<SolutionContext> for BlockProducerActor {
                         reth_signature: Signature::test_signature(),
                     },
                     timestamp: now.as_millis() as u64,
-                    ledgers: vec![
-                        // Permanent Publish Ledger
-                        TransactionLedger {
-                            tx_root: TransactionLedger::merklize_tx_root(&data_txs).0,
-                            txids: H256List(data_tx_ids.clone()),
-                            max_chunk_offset: 0,
-                            expires: None,
-                        },
-                        // Term Submit Ledger
-                        TransactionLedger {
-                            tx_root: TransactionLedger::merklize_tx_root(&vec![]).0,
-                            txids: H256List::new(),
-                            max_chunk_offset: 0,
-                            expires: Some(1622543200),
-                        },
-                    ],
+                    ledgers,
                     evm_block_hash: B256::ZERO,
                 };
 

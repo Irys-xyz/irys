@@ -1,7 +1,9 @@
-use actix::{Actor, Context, Handler, Message};
+use actix::{Actor, Context, Handler, Message, MessageResponse};
+use derive_more::derive::{Deref, DerefMut};
 use eyre::eyre;
 use irys_database::db_cache::{data_size_to_chunk_count, CachedChunk};
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
+use irys_database::Ledger;
 use irys_storage::StorageModuleVec;
 use irys_types::ingress::generate_ingress_proof_tree;
 use irys_types::irys::IrysSigner;
@@ -9,7 +11,7 @@ use irys_types::{
     app_state::DatabaseProvider, chunk::Chunk, hash_sha256, validate_path, IrysTransactionHeader,
     CHUNK_SIZE, H256,
 };
-use irys_types::{Address, DataChunks};
+use irys_types::{Address, DataChunks, LedgerId};
 use irys_types::{DataRoot, StorageConfig};
 use reth::tasks::TaskExecutor;
 use reth::tasks::TaskManager;
@@ -18,8 +20,8 @@ use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::Database;
-use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -307,10 +309,15 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
     }
 }
 
-// Message for getting txs for block building
+/// Message for getting txs for block building
 #[derive(Message, Debug)]
 #[rtype(result = "Vec<IrysTransactionHeader>")]
 pub struct GetBestMempoolTxs;
+
+// /// A structure that maps a ledger ID to a set of transactions
+// /// BTreeMap as it's always sorted
+// #[derive(Debug, MessageResponse, Clone, Deref, DerefMut)]
+// pub struct TxsByLedger(pub BTreeMap<LedgerId, Vec<IrysTransactionHeader>>);
 
 impl Handler<GetBestMempoolTxs> for MempoolActor {
     type Result = Vec<IrysTransactionHeader>;

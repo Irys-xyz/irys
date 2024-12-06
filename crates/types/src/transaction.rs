@@ -1,3 +1,4 @@
+use crate::LedgerId;
 use crate::{address_base58_stringify, Address, Arbitrary, Compact, Node, Proof, Signature};
 use alloy_primitives::{keccak256, FixedBytes};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -54,11 +55,11 @@ pub struct IrysTransactionHeader {
     /// Transaction signature bytes
     pub signature: IrysSignature,
 
+    /// Destination ledger for the transaction, default is 0 - Permanent Ledger
+    pub ledger_num: u32, /*  LedgerId, */
+
     /// Funds the storage of the transaction for the next 200+ years
     pub perm_fee: Option<u64>,
-
-    /// Destination ledger for the transaction, default is 0 - Permanent Ledger
-    pub ledger_num: Option<u64>,
 }
 
 impl IrysTransactionHeader {
@@ -89,15 +90,16 @@ impl IrysTransactionHeader {
         self.term_fee.encode(out);
         self.bundle_format.encode(out);
         self.tx_type.encode(out);
+        self.ledger_num.encode(out);
 
         // Encode the optional fields if they are provided
         if let Some(perm_fee) = self.perm_fee {
             perm_fee.encode(out);
         }
 
-        if let Some(ledger_num) = self.ledger_num {
-            ledger_num.encode(out);
-        }
+        // if let Some(ledger_num) = self.ledger_num {
+        //     ledger_num.encode(out);
+        // }
     }
 
     pub fn signature_hash(&self) -> FixedBytes<32> {
@@ -148,7 +150,7 @@ impl Default for IrysTransactionHeader {
             data_size: 0,
             term_fee: 0,
             perm_fee: None,
-            ledger_num: None,
+            ledger_num: 0,
             bundle_format: 0,
             tx_type: 0,
             signature: IrysSignature {
@@ -182,7 +184,7 @@ mod tests {
             data_size: 1024,
             term_fee: 100,
             perm_fee: Some(200),
-            ledger_num: Some(1),
+            ledger_num: 1,
             bundle_format: 0,
             tx_type: 1,
             signature: IrysSignature {
