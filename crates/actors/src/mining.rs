@@ -182,7 +182,7 @@ impl Handler<MiningControl> for PartitionMiningActor {
     }
 }
 
-fn get_latest_difficulty(db: &DatabaseProvider) -> U256 {
+fn get_latest_difficulty(_db: &DatabaseProvider) -> U256 {
     U256::zero()
 }
 
@@ -261,7 +261,7 @@ mod tests {
         };
 
         let infos = vec![StorageModuleInfo {
-            module_num: 0,
+            id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: partition_hash,
                 miner_address: mining_address,
@@ -311,9 +311,9 @@ mod tests {
                 data_size: chunk_size as u64,
                 data_path: data_path.to_vec().into(),
                 bytes: chunk_data.to_vec().into(),
-                offset: i,
+                chunk_index: i,
             };
-            storage_module.write_data_chunk(chunk).unwrap();
+            storage_module.write_data_chunk(&chunk).unwrap();
         }
 
         let _ = storage_module.sync_pending_chunks();

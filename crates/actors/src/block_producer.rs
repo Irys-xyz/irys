@@ -252,6 +252,6 @@ impl Handler<BlockConfirmedMessage> for BlockProducerActor {
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<(), ()>")]
 pub struct BlockFinalizedMessage {
-    pub block_header: IrysBlockHeader,
-    pub txs: Vec<IrysTransactionHeader>,
+    pub block_header: Arc<IrysBlockHeader>,
+    pub txs: Arc<Vec<IrysTransactionHeader>>,
 }

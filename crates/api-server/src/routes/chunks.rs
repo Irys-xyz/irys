@@ -43,6 +43,10 @@ pub async fn post_chunk(
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Failed to store chunk: {:?}", err)))
             }
+            ChunkIngressError::Other(err) => {
+                Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(format!("Internal error: {:?}", err)))
+            }
         };
     }
 

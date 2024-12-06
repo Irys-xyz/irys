@@ -100,7 +100,7 @@ tables! {
     table CachedDataRoots<Key = DataRoot, Value = CachedDataRoot>;
 
     /// Index mapping a data root to a set of ordered-by-index index entries, which contain the chunk path hash ('chunk id')
-    table CachedChunksIndex<Key = DataRoot, Value = CachedChunkIndexEntry, SubKey = TxRelativeChunkIndex>;
+    table CachedChunksIndex<Key = DataRoot, Value = CachedChunkIndexEntry, SubKey = u32>;
 
     /// Table mapping a chunk path hash to a cached chunk (with data)
     table CachedChunks<Key =ChunkPathHash , Value = CachedChunk>;

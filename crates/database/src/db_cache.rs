@@ -1,10 +1,7 @@
 use std::ops::Deref;
 
 use arbitrary::Arbitrary;
-use irys_types::{
-    Base64, Chunk, ChunkPathHash, Compact, TxRelativeChunkIndex, TxRelativeChunkOffset, CHUNK_SIZE,
-    H256,
-};
+use irys_types::{Base64, Chunk, ChunkPathHash, Compact, TxRelativeChunkIndex, H256};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
@@ -33,6 +30,17 @@ impl From<Chunk> for CachedChunk {
         Self {
             chunk: Some(value.bytes),
             data_path: value.data_path,
+        }
+    }
+}
+
+// TODO: figure out if/how to use lifetimes to reduce the data cloning
+// (the write to DB copies the bytes anyway so it should just need a ref)
+impl From<&Chunk> for CachedChunk {
+    fn from(value: &Chunk) -> Self {
+        Self {
+            chunk: Some(value.bytes.clone()),
+            data_path: value.data_path.clone(),
         }
     }
 }
@@ -83,15 +91,6 @@ impl Compact for CachedChunkIndexEntry {
             CachedChunkIndexMetadata::from_compact(&buf[KEY_BYTES..], len - KEY_BYTES);
         (Self { index, meta }, out)
     }
-}
-/// convert a chunk's tx relative offset to a tx relative index (i.e offset 262144 -> index 0, offset 262145 -> index 1)
-/// due to the fact offsets are the end bound, we minus 1 to get the intuitive 0 indexed offsets
-pub fn chunk_offset_to_index(
-    offset: TxRelativeChunkOffset,
-    chunk_size: u64,
-) -> eyre::Result<TxRelativeChunkIndex> {
-    let div: u32 = offset.div_ceil(chunk_size.try_into()?).try_into()?;
-    Ok(div - 1)
 }
 
 /// converts a size (in bytes) to the number of chunks, rounding up (size 0 -> illegal state, size 1 -> 1, size 262144 -> 1, 262145 -> 2 )

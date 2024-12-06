@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use irys_database::{
-    assign_data_root, cache_chunk, cached_chunk_by_offset, get_partition_hashes_by_data_root,
+    assign_data_root, cache_chunk, cached_chunk_by_chunk_index, get_partition_hashes_by_data_root,
     open_or_create_db,
     submodule::{get_full_tx_path, get_path_hashes_by_offset, get_start_offsets_by_data_root},
     tables::IrysTables,
@@ -35,7 +35,7 @@ fn tx_path_overlap_tests() {
     // slots 0, 1, and 2
     let storage_module_infos = vec![
         StorageModuleInfo {
-            module_num: 0,
+            id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
@@ -49,7 +49,7 @@ fn tx_path_overlap_tests() {
             ],
         },
         StorageModuleInfo {
-            module_num: 1,
+            id: 1,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
@@ -62,7 +62,7 @@ fn tx_path_overlap_tests() {
             ],
         },
         StorageModuleInfo {
-            module_num: 2,
+            id: 2,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
@@ -342,10 +342,10 @@ fn tx_path_overlap_tests() {
                 data_size: chunk_bytes.len() as u64,
                 data_path: Base64(proof.proof.clone()),
                 bytes: chunk_bytes,
-                offset: proof.offset as u32,
+                chunk_index: i as u32,
             };
 
-            let _ = db.update_eyre(|tx| cache_chunk(tx, chunk, chunk_size));
+            let _ = db.update_eyre(|tx| cache_chunk(tx, &chunk));
             prev_byte_offset = proof.offset as u64 + 1; // Update for next iteration
         }
     }
@@ -382,9 +382,7 @@ fn tx_path_overlap_tests() {
                         }
 
                         // Request the chunk from the global db index by  data root & tx relative offset
-                        let offset = (i + 1) * chunk_size as u32;
-                        let res =
-                            cached_chunk_by_offset(tx, data_root, offset, chunk_size).unwrap();
+                        let res = cached_chunk_by_chunk_index(tx, data_root, i as u32).unwrap();
 
                         // Build a Chunk struct to store in the submodule
                         if let Some((_metadata, chunk)) = res {
@@ -396,10 +394,10 @@ fn tx_path_overlap_tests() {
                                 data_size: chunk_bytes.len() as u64,
                                 data_path: chunk.data_path,
                                 bytes: chunk_bytes,
-                                offset: offset as u32,
+                                chunk_index: i as u32,
                             };
 
-                            let res = storage_module.write_data_chunk(chunk);
+                            let res = storage_module.write_data_chunk(&chunk);
                             if let Err(err) = res {
                                 panic!("{}", err);
                             }
