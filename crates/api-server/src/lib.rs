@@ -1,16 +1,21 @@
 mod error;
 mod routes;
 
+use actix::Addr;
 use actix_cors::Cors;
-use actix_web::{web, App, HttpServer};
+use actix_web::{
+    error::InternalError,
+    web::{self, JsonConfig},
+    App, HttpResponse, HttpServer,
+};
 
-use irys_actors::ActorAddresses;
+use irys_actors::mempool::MempoolActor;
 use irys_types::app_state::DatabaseProvider;
 use routes::{block, chunks, index, price, proxy::proxy, tx};
 
 #[derive(Clone)]
 pub struct ApiState {
-    pub actors: ActorAddresses,
+    pub mempool: Addr<MempoolActor>,
     pub db: DatabaseProvider,
 }
 
@@ -21,6 +26,14 @@ pub async fn run_server(app_state: ApiState) {
         App::new()
             .app_data(web::Data::new(app_state.clone()))
             .app_data(web::Data::new(awc_client))
+            .app_data(
+                JsonConfig::default()
+                    .limit(1024 * 1024) // Set JSON payload limit to 1MB
+                    .error_handler(|err, _req| {
+                        InternalError::from_response(err, HttpResponse::BadRequest().finish())
+                            .into()
+                    }),
+            )
             .service(
                 web::scope("v1")
                     .route("/info", web::get().to(index::info_route))
@@ -50,17 +63,14 @@ async fn post_tx_and_chunks_golden_path() {
     use reth::tasks::TaskManager;
     use std::sync::Arc;
 
+    std::env::set_var("RUST_LOG", "trace");
+
     use ::irys_database::{config::get_data_dir, open_or_create_db};
-    use actix::{Actor, Addr};
-    use actix_web::test;
+    use actix::Actor;
+    use actix_web::{middleware::Logger, test};
     use awc::http::StatusCode;
-    use irys_actors::{
-        block_producer::BlockProducerActor, mempool::MempoolActor, packing::PackingActor,
-    };
-    use irys_types::{
-        chunk, hash_sha256, irys::IrysSigner, Base64, Chunk, StorageConfig, H256, MAX_CHUNK_SIZE,
-    };
-    use tokio::runtime::Handle;
+    use irys_actors::mempool::MempoolActor;
+    use irys_types::{irys::IrysSigner, Base64, Chunk, StorageConfig, MAX_CHUNK_SIZE};
 
     use rand::Rng;
 
@@ -73,46 +83,30 @@ async fn post_tx_and_chunks_golden_path() {
 
     // TODO Fixup this test, maybe with some stubs
     let mempool_actor = MempoolActor::new(
-        irys_types::app_state::DatabaseProvider(arc_db),
+        irys_types::app_state::DatabaseProvider(arc_db.clone()),
         task_manager.executor(),
         IrysSigner::random_signer(),
         storage_config,
+        Arc::new(Vec::new()).to_vec(),
     );
     let mempool_actor_addr = mempool_actor.start();
 
-    let block_producer_actor = BlockProducerActor {
-        db: todo!(),
-        mempool_addr: todo!(),
-        block_index_addr: todo!(),
-        reth_provider: todo!(),
-    };
-    let block_producer_addr = block_producer_actor.start();
-
-    let mut part_actors = Vec::new();
-    let packing_actor_addr =
-        PackingActor::new(Handle::current(), task_manager.executor(), None).start();
-
-    let actors = ActorAddresses {
-        partitions: part_actors,
-        block_producer: block_producer_addr,
-        mempool: mempool_actor_addr,
-        packing: packing_actor_addr,
-        block_index: todo!(),
-        epoch_service: todo!(),
-    };
-
     let app_state = ApiState {
-        actors,
-        db: DatabaseProvider(arc_db),
+        db: DatabaseProvider(arc_db.clone()),
+        mempool: mempool_actor_addr,
     };
 
     // Initialize the app
     let app = test::init_service(
-        App::new().app_data(web::Data::new(app_state)).service(
-            web::scope("v1")
-                .route("/tx", web::post().to(tx::post_tx))
-                .route("/chunk", web::post().to(chunks::post_chunk)),
-        ),
+        App::new()
+            .app_data(JsonConfig::default().limit(1024 * 1024)) // 1MB limit
+            .app_data(web::Data::new(app_state))
+            .wrap(Logger::default())
+            .service(
+                web::scope("v1")
+                    .route("/tx", web::post().to(tx::post_tx))
+                    .route("/chunk", web::post().to(chunks::post_chunk)),
+            ),
     )
     .await;
 
@@ -132,6 +126,8 @@ async fn post_tx_and_chunks_golden_path() {
         .set_json(&tx.header)
         .to_request();
 
+    println!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
+
     // Call the service
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -142,7 +138,6 @@ async fn post_tx_and_chunks_golden_path() {
         let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
-        let offset = tx.proofs[index].offset as u32;
         let data_path = Base64(tx.proofs[index].proof.to_vec());
 
         let chunk = Chunk {
@@ -160,6 +155,7 @@ async fn post_tx_and_chunks_golden_path() {
             .to_request();
 
         let resp = test::call_service(&app, req).await;
+        // println!("{:#?}", resp.into_body());
         assert_eq!(resp.status(), StatusCode::OK);
     }
 }

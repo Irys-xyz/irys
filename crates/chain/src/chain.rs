@@ -234,7 +234,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     partitions: part_actors_clone,
                     block_producer: block_producer_addr,
                     packing: packing_actor_addr,
-                    mempool: mempool_actor_addr,
+                    mempool: mempool_actor_addr.clone(),
                     block_index: block_index_actor_addr,
                     epoch_service: epoch_service_actor_addr,
                 };
@@ -247,8 +247,8 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 });
 
                 run_server(ApiState {
-                    actors: actor_addresses,
                     db,
+                    mempool: mempool_actor_addr,
                 })
                 .await;
             });

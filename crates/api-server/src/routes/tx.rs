@@ -30,7 +30,7 @@ pub async fn post_tx(
 
     // Validate transaction is valid. Check balances etc etc.
     let tx_ingress_msg = TxIngressMessage { 0: tx };
-    let msg_result = state.actors.mempool.send(tx_ingress_msg).await;
+    let msg_result = state.mempool.send(tx_ingress_msg).await;
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
@@ -78,11 +78,14 @@ pub async fn get_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix::Actor;
     use actix_web::{test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
-    use irys_database::tables::IrysTables;
-    use irys_types::app_state::DatabaseProvider;
+    use irys_actors::mempool::MempoolActor;
+    use irys_database::{config::get_data_dir, tables::IrysTables};
+    use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
+    use reth::tasks::TaskManager;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -100,15 +103,28 @@ mod tests {
         let result = database::insert_tx_header(&rw_tx, &tx);
         assert!(result.is_ok(), "tx can not be stored");
 
+        let arc_db = Arc::new(db);
+
+        let task_manager = TaskManager::current();
+        let storage_config = StorageConfig::default();
+
+        let mempool_actor = MempoolActor::new(
+            irys_types::app_state::DatabaseProvider(arc_db.clone()),
+            task_manager.executor(),
+            IrysSigner::random_signer(),
+            storage_config,
+            Arc::new(Vec::new()).to_vec(),
+        );
+        let mempool_actor_addr = mempool_actor.start();
+
         let tx_get = database::tx_header_by_txid(&rw_tx, &tx.id)
             .expect("db error")
             .expect("no tx");
         assert_eq!(tx, tx_get, "retrived another tx");
 
-        let db_arc = Arc::new(db);
         let state = ApiState {
-            db: DatabaseProvider(db_arc),
-            actors: todo!(),
+            db: DatabaseProvider(arc_db.clone()),
+            mempool: mempool_actor_addr,
         };
 
         let app = test::init_service(
@@ -140,9 +156,21 @@ mod tests {
         let tx = IrysTransactionHeader::default();
 
         let db_arc = Arc::new(db);
+
+        let task_manager = TaskManager::current();
+        let storage_config = StorageConfig::default();
+
+        let mempool_actor = MempoolActor::new(
+            irys_types::app_state::DatabaseProvider(db_arc.clone()),
+            task_manager.executor(),
+            IrysSigner::random_signer(),
+            storage_config,
+            Arc::new(Vec::new()).to_vec(),
+        );
+        let mempool_actor_addr = mempool_actor.start();
         let state = ApiState {
             db: DatabaseProvider(db_arc),
-            actors: todo!(),
+            mempool: mempool_actor_addr,
         };
 
         let app = test::init_service(

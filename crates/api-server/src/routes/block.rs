@@ -32,11 +32,14 @@ pub async fn get_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix::Actor;
     use actix_web::{test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
+    use irys_actors::mempool::MempoolActor;
     use irys_database::tables::IrysTables;
-    use irys_types::app_state::DatabaseProvider;
+    use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
+    use reth::tasks::TaskManager;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -60,9 +63,20 @@ mod tests {
         assert_eq!(blk, blk_get, "retrived another block");
 
         let db_arc = Arc::new(db);
+        let task_manager = TaskManager::current();
+        let storage_config = StorageConfig::default();
+
+        let mempool_actor = MempoolActor::new(
+            irys_types::app_state::DatabaseProvider(db_arc.clone()),
+            task_manager.executor(),
+            IrysSigner::random_signer(),
+            storage_config,
+            Arc::new(Vec::new()).to_vec(),
+        );
+        let mempool_actor_addr = mempool_actor.start();
         let state = ApiState {
             db: DatabaseProvider(db_arc),
-            actors: todo!(),
+            mempool: mempool_actor_addr,
         };
 
         let app = test::init_service(
@@ -91,9 +105,21 @@ mod tests {
         let blk = IrysBlockHeader::default();
 
         let db_arc = Arc::new(db);
+
+        let task_manager = TaskManager::current();
+        let storage_config = StorageConfig::default();
+
+        let mempool_actor = MempoolActor::new(
+            irys_types::app_state::DatabaseProvider(db_arc.clone()),
+            task_manager.executor(),
+            IrysSigner::random_signer(),
+            storage_config,
+            Arc::new(Vec::new()).to_vec(),
+        );
+        let mempool_actor_addr = mempool_actor.start();
         let state = ApiState {
             db: DatabaseProvider(db_arc),
-            actors: todo!(),
+            mempool: mempool_actor_addr,
         };
 
         let app = test::init_service(
