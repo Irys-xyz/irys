@@ -345,7 +345,7 @@ fn tx_path_overlap_tests() {
                 offset: proof.offset as u32,
             };
 
-            let _ = db.update_eyre(|tx| cache_chunk(tx, chunk, chunk_size));
+            let _ = db.update_eyre(|tx| cache_chunk(tx, &chunk, chunk_size));
             prev_byte_offset = proof.offset as u64 + 1; // Update for next iteration
         }
     }
@@ -399,7 +399,7 @@ fn tx_path_overlap_tests() {
                                 offset: offset as u32,
                             };
 
-                            let res = storage_module.write_data_chunk(chunk);
+                            let res = storage_module.write_data_chunk(&chunk);
                             if let Err(err) = res {
                                 panic!("{}", err);
                             }
