@@ -274,7 +274,7 @@ mod tests {
         // Create StorageModules for testing
         let storage_module_infos = vec![
             StorageModuleInfo {
-                module_num: 0,
+                id: 0,
                 partition_assignment: Some(PartitionAssignment {
                     partition_hash: H256::random(),
                     miner_address: storage_config.miner_address,
@@ -286,7 +286,7 @@ mod tests {
                 ],
             },
             StorageModuleInfo {
-                module_num: 1,
+                id: 1,
                 partition_assignment: Some(PartitionAssignment {
                     partition_hash: H256::random(),
                     miner_address: storage_config.miner_address,
@@ -370,6 +370,7 @@ mod tests {
             task_manager.executor(),
             arc_config.mining_signer.clone(),
             storage_config.clone(),
+            storage_modules.clone(),
         );
         let mempool_addr = mempool_actor.start();
 
