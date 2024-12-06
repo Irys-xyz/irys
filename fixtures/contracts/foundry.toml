@@ -4,3 +4,6 @@ out = "out"
 remappings = ["@openzeppelin/contracts=lib/openzeppelin-contracts/contracts"]
 src = "src"
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+# Specify Version
+solc_version = "0.8.26"
+# auto_detect_solc = true

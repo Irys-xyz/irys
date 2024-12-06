@@ -222,7 +222,7 @@ mod tests {
     async fn test_solution() {
         let partition_hash = H256::random();
         let mining_address = Address::random();
-        let chunks_number = 4;
+        let chunks_number = 1;
         let chunk_size = 32;
         let chunk_data = [0; 32];
         let data_path = [4, 3, 2, 1];
@@ -274,7 +274,7 @@ mod tests {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: partition_hash,
                 miner_address: mining_address,
-                ledger_num: Some(1),
+                ledger_num: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
@@ -298,6 +298,9 @@ mod tests {
             Some(storage_config),
         ));
 
+        // Pack the storage module
+        storage_module.pack_with_zeros();
+
         let path = temporary_directory(None, false);
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
@@ -305,21 +308,23 @@ mod tests {
 
         let data_root = H256::random();
 
-        for i in 0..chunks_number {
-            let chunk = Chunk {
-                data_root: H256::zero(),
-                data_size: chunk_size as u64,
-                data_path: data_path.to_vec().into(),
-                bytes: chunk_data.to_vec().into(),
-                offset: i,
-            };
-            storage_module.write_data_chunk(chunk, i as u64).unwrap();
-        }
         let _ = storage_module.index_transaction_data(
             tx_path.to_vec(),
             data_root,
             LedgerChunkRange(ie(0, chunks_number as u64)),
         );
+
+        for i in 0..chunks_number {
+            let chunk = Chunk {
+                data_root: data_root,
+                data_size: chunk_size as u64,
+                data_path: data_path.to_vec().into(),
+                bytes: chunk_data.to_vec().into(),
+                offset: i,
+            };
+            storage_module.write_data_chunk(chunk).unwrap();
+        }
+
         let _ = storage_module.sync_pending_chunks();
 
         let partition_mining_actor = PartitionMiningActor::new(

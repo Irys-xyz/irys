@@ -101,6 +101,7 @@ tables! {
 
     /// Index mapping a data root to a set of ordered-by-index index entries, which contain the chunk path hash ('chunk id')
     table CachedChunksIndex<Key = DataRoot, Value = CachedChunkIndexEntry, SubKey = TxRelativeChunkIndex>;
+
     /// Table mapping a chunk path hash to a cached chunk (with data)
     table CachedChunks<Key =ChunkPathHash , Value = CachedChunk>;
 
@@ -109,6 +110,9 @@ tables! {
     /// Maps a data root to the partition hashes that store it. Primarily used for chunk ingress.
     /// Common case is a 1:1, but 1:N is possible
     table PartitionHashesByDataRoot<Key = DataRoot, Value = PartitionHashes>;
+
+    // !!THIS IS TEMPORARY - ONCE WE WORK OUT THE FULL PD DATA MODEL WE CAN REMOVE!!
+    table ProgrammableDataChunkCache<Key = u32, Value = Vec<u8>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]

@@ -39,6 +39,7 @@ use std::{
     collections::HashMap,
     sync::{mpsc, Arc, RwLock},
 };
+use tracing::{debug, info};
 
 use tokio::{
     runtime::Handle,
@@ -123,6 +124,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     db.clone(),
                     reth_node.task_executor.clone(),
                     node_config.mining_signer.clone(),
+                    (*arc_storage_config).clone(),
                 );
                 let mempool_actor_addr = mempool_actor.start();
 
@@ -141,14 +143,14 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let block_index_actor_addr = block_index_actor.start();
                 let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
                 match block_index_actor_addr.send(msg).await {
-                    Ok(_) => println!("Genesis block indexed"),
+                    Ok(_) => info!("Genesis block indexed"),
                     Err(_) => panic!("Failed to index genesis block"),
                 }
 
                 // Tell the epoch service to initialize the ledgers
                 let msg = NewEpochMessage(arc_genesis.clone());
                 match epoch_service_actor_addr.send(msg).await {
-                    Ok(_) => println!("Genesis Epoch tasks complete."),
+                    Ok(_) => info!("Genesis Epoch tasks complete."),
                     Err(_) => panic!("Failed to perform genesis epoch tasks"),
                 }
 
@@ -160,7 +162,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 {
                     let ledgers = ledgers_guard.read();
-                    println!("ledgers: {:?}", ledgers);
+                    debug!("ledgers: {:?}", ledgers);
                 }
 
                 let block_producer_actor = BlockProducerActor::new(

@@ -11,7 +11,7 @@ use std::{
 
 use clap::{command, Args, Parser};
 use irys_config::IrysNodeConfig;
-use irys_types::H256;
+use irys_types::reth_provider::IrysRethProvider;
 use reth::{
     chainspec::EthereumChainSpecParser,
     cli::{Cli, Commands},
@@ -41,11 +41,13 @@ use reth_transaction_pool::{
     blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
     EthTransactionValidator, Pool, TransactionValidationTaskExecutor,
 };
-use tokio::time::sleep;
 use tracing::info;
 
 use crate::{
     launcher::CustomEngineNodeLauncher,
+    precompile::irys_executor::{
+        IrysEvmConfig, IrysExecutorBuilder, IrysPayloadBuilder, PrecompileStateProvider,
+    },
     rpc::{AccountStateExt, AccountStateExtApiServer},
 };
 
@@ -59,7 +61,36 @@ macro_rules! vec_of_strings {
 // #[global_allocator]
 // static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
+// reth node with custom IrysExecutor
 pub type RethNode = NodeAdapter<
+    FullNodeTypesAdapter<
+        NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
+        BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+    >,
+    Components<
+        FullNodeTypesAdapter<
+            NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
+            BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+        >,
+        Pool<
+            TransactionValidationTaskExecutor<
+                EthTransactionValidator<
+                    BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+                    EthPooledTransaction,
+                >,
+            >,
+            CoinbaseTipOrdering<EthPooledTransaction>,
+            DiskFileBlobStore,
+        >,
+        IrysEvmConfig,
+        EthExecutorProvider<IrysEvmConfig>,
+        Arc<dyn Consensus>,
+        EthereumEngineValidator,
+    >,
+>;
+
+// reth node with the standard EVM
+pub type RethNodeStandard = NodeAdapter<
     FullNodeTypesAdapter<
         NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
         BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
@@ -85,6 +116,7 @@ pub type RethNode = NodeAdapter<
         EthereumEngineValidator,
     >,
 >;
+
 pub type RethNodeAddOns = EthereumAddOns;
 pub type RethNodeExitHandle = NodeHandle<RethNode, RethNodeAddOns>;
 
@@ -124,7 +156,7 @@ pub async fn run_node<T: HasName + HasTableType>(
         "--disable-discovery",
         "--http",
         "--http.api",
-        "debug,rpc,reth,eth",
+        "debug,rpc,reth,eth,trace",
         "--http.addr",
         "0.0.0.0",
         "--datadir",
@@ -226,6 +258,10 @@ pub async fn run_node<T: HasName + HasTableType>(
     let database =
         Arc::new(init_db(db_path.clone(), db.database_args())?.with_metrics_and_tables(tables));
 
+    let irys_provider = IrysRethProvider {
+        db: database.clone(),
+    };
+
     if with_unused_ports {
         node_config = node_config.with_unused_ports();
     }
@@ -248,7 +284,12 @@ pub async fn run_node<T: HasName + HasTableType>(
             .with_types_and_provider::<EthereumNode, BlockchainProvider2<
                 NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
             >>()
-            .with_components(EthereumNode::components())
+            .with_components(
+                EthereumNode::components()
+                .executor(IrysExecutorBuilder{ precompile_state_provider: PrecompileStateProvider { provider: irys_provider.clone()}})
+                .payload(IrysPayloadBuilder::default())
+            )
+            // .with_components(EthereumNode::components())
             .with_add_ons(EthereumAddOns::default())
             .extend_rpc_modules(move |ctx| {
                 let provider = ctx.provider().clone();
@@ -264,6 +305,7 @@ pub async fn run_node<T: HasName + HasTableType>(
                     builder.task_executor().clone(),
                     builder.config().datadir(),
                     engine_tree_config,
+                    irys_provider
                 );
                 builder.launch_with(launcher)
             })

@@ -19,7 +19,7 @@ use alloy_eips::eip2718::Encodable2718;
 use reth_db::DatabaseEnv;
 use reth_e2e_test_utils::transaction::{tx, TransactionTestContext};
 use reth_node_builder::NodeTypesWithDBAdapter;
-use reth_node_core::irys_ext::IrysExtWrapped;
+use reth_node_core::irys_ext::IrysExt;
 
 use reth_node_ethereum::EthereumNode;
 use reth_provider::providers::BlockchainProvider2;
@@ -112,14 +112,8 @@ pub trait AccountStateExtApi {
 }
 
 pub struct AccountStateExt {
-    //<DB: NodeTypesWithDB> { //<DB: FullProvider<dyn NodeTypesWithDB>>  {
-    // pub provider: DB,
-    // pub provider: BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
-    // pub provider:BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
     pub provider: BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
-    // pub tree:  Arc<dyn TreeViewer>,
-    // pub provider: dyn FullProvider<NodeTypesWithDB + NodeTypesWithEngine>,
-    pub irys_ext: IrysExtWrapped,
+    pub irys_ext: Option<IrysExt>,
     pub network: NetworkHandle,
 }
 
@@ -339,7 +333,7 @@ impl AccountStateExtApiServer for AccountStateExt {
     }
 
     fn add_genesis_block(&self, info: GenesisInfo) -> RpcResult<Genesis> {
-        crate::genesis::add_genesis_block(&self.provider, &self.irys_ext, info)
+        crate::genesis::add_genesis_block(&self.provider, &self.irys_ext.clone().unwrap(), info)
     }
 
     fn test_apply_shadow(&self, parent: BlockId, shadow: ShadowTx) -> RpcResult<ShadowReceipt> {

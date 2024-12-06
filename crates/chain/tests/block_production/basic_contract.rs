@@ -20,7 +20,7 @@ sol!(
     #[allow(missing_docs)]
     #[sol(rpc)]
     IrysERC20,
-    "../../fixtures/IrysERC20/IrysERC20.json"
+    "../../fixtures/contracts/out/IrysERC20.sol/IrysERC20.json"
 );
 
 #[tokio::test]

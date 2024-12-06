@@ -4,9 +4,9 @@ use irys_database::{
 };
 use irys_storage::{ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    app_state::DatabaseProvider, Address, Chunk, DataRoot, Interval, IrysBlockHeader,
-    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig,
-    TransactionLedger, H256,
+    app_state::DatabaseProvider, chunk, Address, Base64, Chunk, DataRoot, Interval,
+    IrysBlockHeader, IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
+    StorageConfig, TransactionLedger, H256,
 };
 use openssl::sha;
 use reth_db::Database;
@@ -181,11 +181,13 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
             for (tx_path, data_root) in path_pairs {
                 // Calculate the number of chunks added to the ledger by this transaction
                 let tx_byte_length = tx_path.offset - prev_byte_offset;
-                let num_chunks_in_tx = (tx_byte_length / chunk_size) as u64;
+                let num_chunks_in_tx = (tx_byte_length / chunk_size) as u32;
 
                 // Calculate the ledger relative chunk range for this transaction
-                let tx_chunk_range =
-                    LedgerChunkRange(ii(prev_chunk_offset, prev_chunk_offset + num_chunks_in_tx));
+                let tx_chunk_range = LedgerChunkRange(ii(
+                    prev_chunk_offset,
+                    prev_chunk_offset + num_chunks_in_tx as u64,
+                ));
 
                 // Retrieve the storage modules that are overlapped by this range
                 let matching_modules = get_overlapping_storage_modules(
@@ -214,11 +216,11 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                 }
 
                 // Loop through transaction's chunks
-                for chunk_offset in 0..num_chunks_in_tx as u32 {
+                for chunk_offset in 0..=num_chunks_in_tx as u32 {
                     // Get chunk from the global cache
-                    if let Ok(Some(chunk_info)) =
-                        db.view_eyre(|tx| cached_chunk_by_offset(tx, data_root, chunk_offset))
-                    {
+                    if let Ok(Some(chunk_info)) = db.view_eyre(|tx| {
+                        cached_chunk_by_offset(tx, data_root, chunk_offset, chunk_size as u64)
+                    }) {
                         // Compute the ledger relative chunk_offset
                         let ledger_offset = chunk_offset as u64 + tx_chunk_range.start();
 
@@ -233,30 +235,36 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
 
                         // Add the cached chunk to the StorageModule index and disk
                         if let Some(storage_module) = matching_module {
-                            // For now, write the data_path for the chunk offset
-                            let _ = storage_module.add_data_path_to_index(
-                                chunk_info.0.chunk_path_hash,
-                                chunk_info.1.data_path.into(),
-                                storage_module
-                                    .make_offset_partition_relative_guarded(ledger_offset)
-                                    .unwrap(),
-                            );
-                            info!("cached_chunk found: {:?}", chunk_info.0);
-                            // TODO: This doesn't yet take into account packing
-                            // let cached_chunk = chunk_info.1;
-                            // let _ = storage_module.write_data_chunk(Chunk {
-                            //     data_root,
-                            //     data_size: chunk_size as u64,
-                            //     data_path: cached_chunk.data_path,
-                            //     bytes: cached_chunk.chunk.unwrap(),
-                            //     offset: chunk_offset,
-                            // });
+                            let data_path = Base64::from(chunk_info.1.data_path.0.clone());
+                            if let Some(bytes) = chunk_info.1.chunk {
+                                // Is this the last chunk in the tx?
+                                let data_size = if chunk_offset == num_chunks_in_tx {
+                                    (tx_byte_length % chunk_size) as u64
+                                } else {
+                                    chunk_size as u64
+                                };
+
+                                // Create a Chunk struct
+                                let chunk = Chunk {
+                                    data_root,
+                                    data_size,
+                                    data_path,
+                                    bytes,
+                                    offset: chunk_offset,
+                                };
+
+                                // Write teh chunk to the module
+                                if let Err(e) = storage_module.write_data_chunk(chunk) {
+                                    error!("Failed to write data chunk: {}", e);
+                                    return Err(());
+                                }
+                            }
                         }
                     }
                 }
 
                 prev_byte_offset = tx_path.offset;
-                prev_chunk_offset += num_chunks_in_tx;
+                prev_chunk_offset += num_chunks_in_tx as u64;
             }
 
             Ok(())

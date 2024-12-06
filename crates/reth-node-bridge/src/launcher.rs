@@ -3,6 +3,7 @@
 
 use alloy_rpc_types::engine::ClientVersionV1;
 use futures::{future::Either, stream, stream_select, StreamExt};
+use irys_types::reth_provider::IrysRethProvider;
 use reth::payload::ExecutionPayloadValidator;
 use reth_beacon_consensus::{
     hooks::{EngineHooks, StaticFileHook},
@@ -24,7 +25,6 @@ use reth_node_api::{BuiltPayload, FullNodeTypes, NodeAddOns, NodeTypesWithEngine
 use reth_node_core::{
     dirs::{ChainPath, DataDirPath},
     exit::NodeExitFuture,
-    irys_ext::IrysExt,
     primitives::Head,
     rpc::eth::{helpers::AddDevSigners, FullEthApiServer},
     version::{CARGO_PKG_VERSION, CLIENT_CODE, NAME_CLIENT, VERGEN_GIT_SHA},
@@ -41,7 +41,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc::unbounded_channel, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use reth_node_core::irys_ext::IrysExtWrapped;
+use reth_node_core::irys_ext::IrysExt;
 
 use reth_node_builder::{
     common::{Attached, LaunchContextWith, WithConfigs},
@@ -61,6 +61,8 @@ pub struct CustomEngineNodeLauncher {
     /// Temporary configuration for engine tree.
     /// After engine is stabilized, this should be configured through node builder.
     pub engine_tree_config: TreeConfig,
+
+    pub irys_provider: IrysRethProvider,
 }
 
 impl CustomEngineNodeLauncher {
@@ -69,10 +71,12 @@ impl CustomEngineNodeLauncher {
         task_executor: TaskExecutor,
         data_dir: ChainPath<DataDirPath>,
         engine_tree_config: TreeConfig,
+        irys_provider: IrysRethProvider,
     ) -> Self {
         Self {
             ctx: LaunchContext::new(task_executor, data_dir),
             engine_tree_config,
+            irys_provider,
         }
     }
 }
@@ -98,6 +102,7 @@ where
         let Self {
             ctx,
             engine_tree_config,
+            irys_provider,
         } = self;
         let NodeBuilderWithComponents {
             adapter: NodeTypesAdapter { database },
@@ -120,9 +125,10 @@ where
         let (reload_tx, reload_rx) = unbounded_channel();
 
         // TODO: fix this.
-        let irys_ext = IrysExtWrapped(Arc::new(RwLock::new(IrysExt {
-            reload: Some(reload_tx),
-        })));
+        let irys_ext = IrysExt {
+            reload: Arc::new(RwLock::new(reload_tx)),
+            provider: irys_provider,
+        };
 
         // TODO: move tree_config and canon_state_notification_sender
         // initialization to with_blockchain_db once the engine revamp is done
@@ -434,7 +440,7 @@ where
             rpc_registry,
             config: ctx.node_config().clone(),
             data_dir: ctx.data_dir().clone(),
-            irys_ext: irys_ext.clone(),
+            irys_ext: Some(irys_ext.clone()),
         };
         // Notify on node started
         on_node_started.on_event(full_node.clone())?;
