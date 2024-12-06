@@ -133,7 +133,7 @@ type IsDuplicate = bool;
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
 pub fn cache_chunk<T: DbTx + DbTxMut>(
     tx: &T,
-    chunk: Chunk,
+    chunk: &Chunk,
     chunk_size: u64,
 ) -> eyre::Result<IsDuplicate> {
     let chunk_index = chunk_offset_to_index(chunk.offset, chunk_size)?;

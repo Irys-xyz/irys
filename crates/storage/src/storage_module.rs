@@ -46,7 +46,7 @@ type StorageIntervals = NoditMap<u32, Interval<u32>, ChunkType>;
 #[derive(Debug)]
 pub struct StorageModule {
     /// an integer uniquely identifying the module
-    pub module_num: usize,
+    pub id: usize,
     /// The (Optional) info about a partition assigned to this storage module
     pub partition_assignment: Option<PartitionAssignment>,
     /// In-memory chunk buffer awaiting disk write
@@ -62,10 +62,10 @@ pub struct StorageModule {
 }
 
 /// On-disk metadata for StorageModule persistence
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageModuleInfo {
     /// An integer uniquely identifying the module
-    pub module_num: usize,
+    pub id: usize,
     /// Hash of partition this storage module belongs to, if assigned
     pub partition_assignment: Option<PartitionAssignment>,
     /// Range of chunk offsets and path for each submodule
@@ -176,7 +176,7 @@ impl StorageModule {
 
         let path = base_path.join(format!(
             "StorageModule_{}_intervals.json",
-            storage_module_info.module_num
+            storage_module_info.id
         ));
         let intervals_file = Arc::new(Mutex::new(
             OpenOptions::new()
@@ -193,7 +193,7 @@ impl StorageModule {
         }
 
         StorageModule {
-            module_num: storage_module_info.module_num,
+            id: storage_module_info.id,
             partition_assignment: storage_module_info.partition_assignment,
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
             intervals: Arc::new(RwLock::new(intervals)),
@@ -375,7 +375,6 @@ impl StorageModule {
     /// and written during periodic sync operations.
     pub fn write_chunk(
         &self,
-
         chunk_offset: PartitionChunkOffset,
         bytes: Vec<u8>,
         chunk_type: ChunkType,
@@ -458,18 +457,19 @@ impl StorageModule {
         }
     }
 
-    /// Writes chunk data and its data_path to relevant storage locations
-    pub fn write_data_chunk(&self, chunk: Chunk) -> eyre::Result<()> {
+    /// Gets the list of partition-relative offsets in this partition that the chunk should be written to
+    pub fn get_write_offsets(&self, chunk: &Chunk) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let start_offsets = self.collect_start_offsets(chunk.data_root)?;
 
         if start_offsets.0.len() == 0 {
             return Err(eyre::eyre!("Chunks data_root not found in storage module"));
         }
+        let div_ceil = (chunk.offset as u64).div_ceil(self.config.chunk_size);
+        let div_reg = chunk.offset as u64 / self.config.chunk_size;
 
-        let chunk_offset = (chunk.offset as u64 / self.config.chunk_size).max(1) - 1;
-        let data_path = chunk.data_path.0.clone();
-        let data_path_hash = Chunk::hash_data_path(&data_path);
+        let chunk_offset = div_ceil.max(1) - 1;
 
+        let mut write_offsets = vec![];
         for start_offset in start_offsets.0 {
             let partition_offset = (start_offset + chunk_offset as i32)
                 .try_into()
@@ -479,17 +479,21 @@ impl StorageModule {
                 // read the metadata in a block so the read guard expires quickly
                 let intervals = self.intervals.read().unwrap();
                 let chunk_state = intervals.get_at_point(partition_offset);
-                if !chunk_state.is_some_and(|s| *s == ChunkType::Entropy) {
-                    // invalid chunk state - either it's not in the map (!!) or it's not entropy
-                    // we should not be writing to this spot regardless.
-                    return Err(eyre!(
-                        "Invalid chunk state {:?} for offset {} - expected this to be an Entropy chunk",
-                        &chunk_state,
-                        &partition_offset
-                    ));
+                if chunk_state.is_some_and(|s| *s == ChunkType::Entropy) {
+                    write_offsets.push(partition_offset)
                 }
             };
+        }
 
+        Ok(write_offsets)
+    }
+
+    /// Writes chunk data and its data_path to relevant storage locations
+    pub fn write_data_chunk(&self, chunk: &Chunk) -> eyre::Result<()> {
+        let data_path = &chunk.data_path.0;
+        let data_path_hash = Chunk::hash_data_path(&data_path);
+
+        for partition_offset in self.get_write_offsets(&chunk)? {
             // read entropy from the storage module
             let entropy = self.read_chunk_internal(partition_offset)?;
             // xor
@@ -686,7 +690,7 @@ pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleIn
         let path = format!(
             "{}StorageModule_{}_intervals.json",
             base_path.display(),
-            infos[0].module_num
+            infos[0].id
         );
         let path = Path::new(&path);
         if path.exists() {
@@ -761,7 +765,7 @@ mod tests {
     #[test]
     fn storage_module_test() {
         let infos = vec![StorageModuleInfo {
-            module_num: 0,
+            id: 0,
             partition_assignment: None,
             submodules: vec![
                 (ii(0, 4), "hdd0-4TB".to_string()),  // 0 to 4 inclusive
@@ -879,7 +883,7 @@ mod tests {
     #[test]
     fn data_path_test() -> eyre::Result<()> {
         let infos = vec![StorageModuleInfo {
-            module_num: 0,
+            id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
             submodules: vec![
                 (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
@@ -920,7 +924,7 @@ mod tests {
             offset,
         };
 
-        storage_module.write_data_chunk(chunk)?;
+        storage_module.write_data_chunk(&chunk)?;
 
         let ret_path = storage_module.read_data_path(0)?;
         assert_eq!(ret_path, Some(data_path));

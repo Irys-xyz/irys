@@ -120,17 +120,9 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
                 let db = DatabaseProvider(reth_node.provider.database.db.clone());
 
-                let mempool_actor = MempoolActor::new(
-                    db.clone(),
-                    reth_node.task_executor.clone(),
-                    node_config.mining_signer.clone(),
-                    (*arc_storage_config).clone(),
-                );
-                let mempool_actor_addr = mempool_actor.start();
-
                 // Initialize the epoch_service actor to handle partition ledger assignments
                 let config = EpochServiceConfig {
-                    storage_config: arc_storage_config,
+                    storage_config: arc_storage_config.clone(),
                     ..Default::default()
                 };
 
@@ -165,16 +157,6 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     debug!("ledgers: {:?}", ledgers);
                 }
 
-                let block_producer_actor = BlockProducerActor::new(
-                    db.clone(),
-                    mempool_actor_addr.clone(),
-                    block_index_actor_addr.clone(),
-                    reth_node.clone(),
-                );
-                let block_producer_addr = block_producer_actor.start();
-
-                let mut part_actors = Vec::new();
-
                 // Get the genesis storage modules and their assigned partitions
                 let storage_module_infos = epoch_service_actor_addr
                     .send(GetGenesisStorageModulesMessage)
@@ -192,17 +174,40 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                         None,
                     ));
                     storage_modules.push(arc_module.clone());
+                }
+
+                let mempool_actor = MempoolActor::new(
+                    db.clone(),
+                    reth_node.task_executor.clone(),
+                    node_config.mining_signer.clone(),
+                    (*arc_storage_config).clone(),
+                    storage_modules.clone(),
+                );
+
+                let mempool_actor_addr = mempool_actor.start();
+
+                let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
+
+                let block_producer_actor = BlockProducerActor::new(
+                    db.clone(),
+                    mempool_actor_addr.clone(),
+                    block_index_actor_addr.clone(),
+                    reth_node.clone(),
+                );
+                let block_producer_addr = block_producer_actor.start();
+
+                let mut part_actors = Vec::new();
+
+                for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
                         db.clone(),
                         block_producer_addr.clone(),
-                        arc_module.clone(),
+                        sm.clone(),
                         false, // do not start mining automatically
                     );
                     part_actors.push(partition_mining_actor.start());
                 }
-
-                let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
                 let part_actors_clone = part_actors.clone();
                 std::thread::spawn(move || run_vdf(H256::random(), new_seed_rx, part_actors));
@@ -212,7 +217,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                         .start();
 
                 // request packing for uninitialized ranges
-                for sm in storage_modules {
+                for sm in &storage_modules {
                     let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
                     let _ = uninitialized
                         .iter()

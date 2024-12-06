@@ -2,6 +2,7 @@ use actix::{Actor, Context, Handler, Message};
 use eyre::eyre;
 use irys_database::db_cache::{chunk_offset_to_index, data_size_to_chunk_count, CachedChunk};
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
+use irys_storage::StorageModuleVec;
 use irys_types::ingress::generate_ingress_proof_tree;
 use irys_types::irys::IrysSigner;
 use irys_types::{
@@ -19,6 +20,7 @@ use reth_db::transaction::DbTxMut;
 use reth_db::Database;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -36,6 +38,7 @@ pub struct MempoolActor {
     signer: IrysSigner,
     invalid_tx: Vec<H256>,
     storage_config: StorageConfig,
+    storage_modules: StorageModuleVec,
 }
 
 impl Actor for MempoolActor {
@@ -50,6 +53,7 @@ impl MempoolActor {
         task_exec: TaskExecutor,
         signer: IrysSigner,
         storage_config: StorageConfig,
+        storage_modules: StorageModuleVec,
     ) -> Self {
         Self {
             db,
@@ -58,6 +62,7 @@ impl MempoolActor {
             signer,
             task_exec,
             storage_config,
+            storage_modules,
         }
     }
 }
@@ -108,6 +113,19 @@ pub enum ChunkIngressError {
     InvalidChunkSize,
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
+    // Catch-all variant for other errors.
+    Other(String),
+}
+
+impl ChunkIngressError {
+    /// Returns an other error with the given message.
+    pub fn other(err: impl Into<String>) -> Self {
+        Self::Other(err.into())
+    }
+    /// Allows converting an error that implements Display into an Other error
+    pub fn other_display(err: impl Display) -> Self {
+        Self::Other(err.to_string())
+    }
 }
 
 impl Handler<TxIngressMessage> for MempoolActor {
@@ -151,14 +169,14 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
     fn handle(&mut self, chunk_msg: ChunkIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // TODO: maintain a shared read transaction so we have read isolation
         let chunk: Chunk = chunk_msg.0;
-        // Check to see if we have a cached data_root for this chunk
-        let result = self
-            .db
-            .view_eyre(|tx| irys_database::cached_data_root_by_data_root(tx, chunk.data_root));
 
-        let cached_data_root = result
-            .map_err(|_| ChunkIngressError::DatabaseError)? // Convert DatabaseError to ChunkIngressError
-            .ok_or(ChunkIngressError::InvalidDataHash)?; // Handle None case by converting it to an error
+        // Check to see if we have a cached data_root for this chunk
+        let read_tx = self.db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
+
+        let cached_data_root =
+            irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
+                .map_err(|_| ChunkIngressError::DatabaseError)? // Convert DatabaseError to ChunkIngressError
+                .ok_or(ChunkIngressError::InvalidDataHash)?; // Handle None case by converting it to an error
 
         // Next validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
@@ -166,12 +184,8 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         let target_offset = chunk.offset as u128;
         let path_buff = &chunk.data_path;
 
-        let path_result = match validate_path(root_hash, path_buff, target_offset) {
-            Ok(result) => result,
-            Err(_) => {
-                return Err(ChunkIngressError::InvalidProof);
-            }
-        };
+        let path_result = validate_path(root_hash, path_buff, target_offset)
+            .map_err(|_| ChunkIngressError::InvalidProof)?;
 
         // Validate that the data_size for this chunk matches the data_size
         // recorded in the transaction header.
@@ -183,77 +197,102 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
             return Err(ChunkIngressError::InvalidChunkSize);
         }
 
+        // Use data_size to identify and validate that only the last chunk
+        // can be less than chunk_size
+        let chunk_len = chunk.bytes.len() as u64;
+
         // TODO: Mark the data_root as invalid if the chunk is an incorrect size
         let chunk_size = self.storage_config.chunk_size;
 
-        // Use that data_Size to identify and validate that only the last chunk
-        // can be less than 256KiB (CHUNK_SIZE)
-        let chunk_len = chunk.bytes.len() as u64;
         if (chunk.offset as u64) < chunk.data_size - 1 {
-            // Ensure prefix chunks are all exactly CHUNK_SIZE
+            // Ensure prefix chunks are all exactly chunk_size
             if chunk_len != chunk_size {
                 return Err(ChunkIngressError::InvalidChunkSize);
             }
         } else {
-            // Ensure the last chunk is no larger than CHUNK_SIZE
+            // Ensure the last chunk is no larger than chunk_size
             if chunk_len > chunk_size {
                 return Err(ChunkIngressError::InvalidChunkSize);
             }
         }
 
-        // Check that the leaf hash on the data_path matches the chunk_hash
-        if path_result.leaf_hash == hash_sha256(&chunk.bytes.0).unwrap() {
-            // TODO: fix all these unwraps!
-            // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
-            self.db
-                .update_eyre(|tx| irys_database::cache_chunk(tx, chunk, chunk_size))
-                .unwrap();
-
-            let tx = self.db.tx().unwrap();
-            let root_hash: H256 = root_hash.into();
-
-            // check if we have generated an ingress proof for this tx already
-            if tx.get::<IngressProofs>(root_hash).unwrap().is_some() {
-                info!(
-                    "We've already generated an ingress proof for data root {}",
-                    &root_hash
-                );
-                return Ok(());
-            };
-
-            // check if we have all the chunks for this tx
-            let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>().unwrap();
-
-            // get the number of dupsort values (aka the number of chunks)
-            // this ASSUMES that the index isn't corrupt (no double values etc)
-            // the ingress proof generation task does a more thorough check
-            let chunk_count = cursor.dup_count(root_hash).unwrap().unwrap();
-            // data size is the offset of the last chunk
-            // add one as index is 0-indexed
-            let expected_chunk_count =
-                data_size_to_chunk_count(cached_data_root.data_size, chunk_size).unwrap();
-            if chunk_count == expected_chunk_count {
-                // we *should* have all the chunks
-                // dispatch a ingress proof task
-                let db1 = self.db.clone();
-                let signer1 = self.signer.clone();
-                self.task_exec.spawn_blocking(async move {
-                    generate_ingress_proof(
-                        db1,
-                        root_hash,
-                        cached_data_root.data_size,
-                        chunk_size,
-                        signer1,
-                    )
-                    // TODO: handle results instead of unwrapping
-                    .unwrap();
-                });
-            }
-
-            Ok(())
-        } else {
-            Err(ChunkIngressError::InvalidDataHash)
+        if path_result.leaf_hash
+            != hash_sha256(&chunk.bytes.0).map_err(|_| ChunkIngressError::InvalidDataHash)?
+        {
+            return Err(ChunkIngressError::InvalidDataHash);
         }
+        // Check that the leaf hash on the data_path matches the chunk_hash
+
+        // TODO: fix all these unwraps!
+        // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
+
+        self.db
+            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk, chunk_size))
+            .map_err(|_| ChunkIngressError::DatabaseError)?;
+
+        for sm in &self.storage_modules {
+            if sm.get_write_offsets(&chunk).unwrap_or(vec![]).len() != 0 {
+                info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.offset, &chunk.data_root, &sm.id );
+                sm.write_data_chunk(&chunk)
+                    .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()))?;
+            }
+        }
+
+        // ==== INGRESS PROOFS ====
+        let root_hash: H256 = root_hash.into();
+
+        // check if we have generated an ingress proof for this tx already
+        // TODO: hook into whatever manages ingress proofs
+        if read_tx
+            .get::<IngressProofs>(root_hash)
+            .map_err(|_| ChunkIngressError::DatabaseError)?
+            .is_some()
+        {
+            info!(
+                "We've already generated an ingress proof for data root {}",
+                &root_hash
+            );
+            return Ok(());
+        };
+
+        // check if we have all the chunks for this tx
+        let read_tx = self.db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
+
+        let mut cursor = read_tx
+            .cursor_dup_read::<CachedChunksIndex>()
+            .map_err(|_| ChunkIngressError::DatabaseError)?;
+        // get the number of dupsort values (aka the number of chunks)
+        // this ASSUMES that the index isn't corrupt (no double values etc)
+        // the ingress proof generation task does a more thorough check
+        let chunk_count = cursor
+            .dup_count(root_hash)
+            .map_err(|_| ChunkIngressError::DatabaseError)?
+            .ok_or(ChunkIngressError::DatabaseError)?;
+
+        // data size is the offset of the last chunk
+        // add one as index is 0-indexed
+        let expected_chunk_count =
+            data_size_to_chunk_count(cached_data_root.data_size, chunk_size).unwrap();
+
+        if chunk_count == expected_chunk_count {
+            // we *should* have all the chunks
+            // dispatch a ingress proof task
+            let db1 = self.db.clone();
+            let signer1 = self.signer.clone();
+            self.task_exec.spawn_blocking(async move {
+                generate_ingress_proof(
+                    db1,
+                    root_hash,
+                    cached_data_root.data_size,
+                    chunk_size,
+                    signer1,
+                )
+                // TODO: handle results instead of unwrapping
+                .unwrap();
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -295,6 +334,8 @@ impl Handler<BlockConfirmedMessage> for MempoolActor {
     }
 }
 
+/// Generates an ingress proof for a specific data_root
+/// pulls required data from all sources
 pub fn generate_ingress_proof(
     db: DatabaseProvider,
     data_root: DataRoot,
@@ -376,8 +417,14 @@ mod tests {
 
     use assert_matches::assert_matches;
     use irys_database::{config::get_data_dir, open_or_create_db, tables::IrysTables};
+    use irys_packing::xor_vec_u8_arrays_in_place;
+    use irys_storage::{ii, initialize_storage_files, ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{irys::IrysSigner, storage_config, Base64, MAX_CHUNK_SIZE};
+    use irys_types::{
+        irys::IrysSigner,
+        partition::{PartitionAssignment, PartitionHash},
+        storage_config, Base64, MAX_CHUNK_SIZE,
+    };
     use rand::Rng;
     use tokio::time::{sleep, timeout};
 
@@ -387,9 +434,10 @@ mod tests {
 
     #[actix::test]
     async fn post_transaction_and_chunks() -> eyre::Result<()> {
-        let tmpdir = setup_tracing_and_temp_dir(Some("post_transaction_and_chunks"), false);
+        let tmp_dir = setup_tracing_and_temp_dir(Some("post_transaction_and_chunks"), false);
+        let base_path = tmp_dir.path().to_path_buf();
 
-        let db = open_or_create_db(tmpdir, IrysTables::ALL, None).unwrap();
+        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
         let arc_db1 = DatabaseProvider(Arc::new(db));
         let arc_db2 = DatabaseProvider(Arc::clone(&arc_db1));
 
@@ -399,11 +447,41 @@ mod tests {
         let storage_config = StorageConfig::default();
         let chunk_size = storage_config.chunk_size;
 
+        let storage_module_info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: PartitionHash::zero(),
+                miner_address: Address::random(),
+                ledger_num: Some(0),
+                slot_index: Some(0),
+            }),
+            submodules: vec![
+                (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
+            ],
+        };
+        initialize_storage_files(&base_path, &vec![storage_module_info.clone()])?;
+
+        // Override the default StorageModule config for testing
+        let config = StorageConfig {
+            min_writes_before_sync: 1,
+            chunk_size,
+            ..Default::default()
+        };
+
+        let storage_module = Arc::new(StorageModule::new(
+            &base_path,
+            &storage_module_info,
+            Some(config),
+        ));
+
+        storage_module.pack_with_zeros();
+
         let mempool = MempoolActor::new(
             arc_db1,
             task_manager.executor(),
             IrysSigner::random_signer(),
             storage_config,
+            vec![storage_module.clone()],
         );
         let addr: Addr<MempoolActor> = mempool.start();
 
@@ -436,7 +514,7 @@ mod tests {
         // Verify the data_root was added to the cache
         let result = irys_database::cached_data_root_by_data_root(&db_tx, data_root).unwrap();
         assert_matches!(result, Some(_));
-
+        let end_offset = tx.chunks.len() - 1;
         // Loop though each of the transaction chunks
         for (index, chunk_node) in tx.chunks.iter().enumerate() {
             let min = chunk_node.min_byte_range;
@@ -456,6 +534,14 @@ mod tests {
                 },
             };
 
+            let is_last_chunk = index == end_offset;
+            let interval = ii(0, end_offset as u64);
+            if is_last_chunk {
+                // artificially index the chunk with the submodule
+                // this will cause the last chunk to show up in cache & on disk
+                storage_module.index_transaction_data(vec![0], data_root, interval.into())?;
+            }
+
             // Post the ChunkIngressMessage to the handle method on the mempool
             let result = addr.send(chunk_ingress_msg).await.unwrap();
 
@@ -472,10 +558,29 @@ mod tests {
                     .unwrap();
             assert_eq!(meta.chunk_path_hash, key);
             assert_eq!(chunk.data_path, data_path);
-            assert_eq!(chunk.chunk, Some(chunk_bytes));
+            assert_eq!(chunk.chunk, Some(chunk_bytes.clone()));
 
             let result = irys_database::cached_chunk_by_chunk_path_hash(&db_tx, &key).unwrap();
             assert_matches!(result, Some(_));
+
+            storage_module.sync_pending_chunks()?;
+
+            if is_last_chunk {
+                // read the set of chunks
+                // only offset 2 (last chunk) should have data
+                let res = storage_module.read_chunks(ii(0, end_offset as u32))?;
+                let r = res.get(&2).unwrap();
+                let mut packed_bytes = r.0.clone();
+                // unpack the data (packing was all 0's)
+                xor_vec_u8_arrays_in_place(&mut packed_bytes, &vec![0u8; chunk_size as usize]);
+                let packed_bytes_slice = &packed_bytes[0..chunk_bytes.0.len()];
+                let cbytes = chunk_bytes.0;
+                assert_eq!(packed_bytes_slice.len(), cbytes.len());
+                assert_eq!(packed_bytes_slice, cbytes);
+                assert_eq!(r.1, ChunkType::Data);
+            }
+
+            ()
         }
 
         // Modify one of the chunks
