@@ -13,6 +13,7 @@ use irys_actors::{
 };
 use irys_database::database;
 use irys_types::{IrysTransactionHeader, H256};
+use log::info;
 use reth_db::{Database, DatabaseEnv};
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -60,6 +61,7 @@ pub async fn get_tx(
     path: web::Path<H256>,
 ) -> Result<Json<IrysTransactionHeader>, ApiError> {
     let tx_id: H256 = path.into_inner();
+    info!("Get tx by tx_id: {}", tx_id);
     match state
         .db
         .view_eyre(|tx| database::tx_header_by_txid(tx, &tx_id))
@@ -79,29 +81,34 @@ pub async fn get_tx(
 mod tests {
     use super::*;
     use actix::Actor;
-    use actix_web::{test, App, Error};
+    use actix_web::{middleware::Logger, test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
+    use eyre::eyre;
     use irys_actors::mempool::MempoolActor;
     use irys_database::{config::get_data_dir, tables::IrysTables};
     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
+    use log::{debug, error, info, log_enabled, Level};
     use reth::tasks::TaskManager;
     use std::sync::Arc;
     use tempfile::tempdir;
 
     #[actix_web::test]
-    async fn test_get_tx() -> Result<(), Error> {
-        // TODO: set up testing log environment
-        // std::env::set_var("RUST_LOG", "debug");
-        // env_logger::init();
+    async fn test_get_tx() -> eyre::Result<()> {
+        //std::env::set_var("RUST_LOG", "debug");
+        let _ = env_logger::try_init();
 
-        //let path = get_data_dir();
         let path = tempdir().unwrap();
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
-        let tx = IrysTransactionHeader::default();
-        let rw_tx = db.tx_mut().unwrap();
-        let result = database::insert_tx_header(&rw_tx, &tx);
-        assert!(result.is_ok(), "tx can not be stored");
+        let tx_header = IrysTransactionHeader::default();
+        info!("Generated tx_id: {}", tx_header.id);
+
+        db.update(|tx| -> eyre::Result<()> { database::insert_tx_header(tx, &tx_header) })?;
+
+        match db.view_eyre(|tx| database::tx_header_by_txid(tx, &tx_header.id))? {
+            None => error!("tx not found, test db error!"),
+            Some(tx_header) => info!("tx found!"),
+        };
 
         let arc_db = Arc::new(db);
 
@@ -117,11 +124,6 @@ mod tests {
         );
         let mempool_actor_addr = mempool_actor.start();
 
-        let tx_get = database::tx_header_by_txid(&rw_tx, &tx.id)
-            .expect("db error")
-            .expect("no tx");
-        assert_eq!(tx, tx_get, "retrived another tx");
-
         let state = ApiState {
             db: DatabaseProvider(arc_db.clone()),
             mempool: mempool_actor_addr,
@@ -129,12 +131,13 @@ mod tests {
 
         let app = test::init_service(
             App::new()
+                .wrap(Logger::default())
                 .app_data(web::Data::new(state))
                 .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx))),
         )
         .await;
 
-        let id: String = tx.id.as_bytes().to_base58();
+        let id: String = tx_header.id.as_bytes().to_base58();
         let req = test::TestRequest::get()
             .uri(&format!("/v1/tx/{}", &id))
             .to_request();
@@ -142,7 +145,7 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let result: IrysTransactionHeader = test::read_body_json(resp).await;
-        assert_eq!(tx, result);
+        assert_eq!(tx_header, result);
         Ok(())
     }
 
