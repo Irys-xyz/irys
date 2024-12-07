@@ -90,16 +90,21 @@ impl Handler<BlockConfirmedMessage> for BlockIndexActor {
 
 /// Returns the current block height in the index
 #[derive(Message, Clone, Debug)]
-#[rtype(result = "u64")]
-pub struct GetBlockHeightMessage {}
+#[rtype(result = "Option<BlockIndexItem>")]
+pub struct GetLatestBlockIndexMessage {}
 
-impl Handler<GetBlockHeightMessage> for BlockIndexActor {
-    type Result = u64;
-
-    fn handle(&mut self, msg: GetBlockHeightMessage, ctx: &mut Self::Context) -> Self::Result {
+impl Handler<GetLatestBlockIndexMessage> for BlockIndexActor {
+    type Result = Option<BlockIndexItem>;
+    fn handle(&mut self, msg: GetLatestBlockIndexMessage, ctx: &mut Self::Context) -> Self::Result {
         let _ = ctx;
         let _ = msg;
 
-        self.block_index.read().unwrap().num_blocks()
+        let bi = self.block_index.read().unwrap();
+        let block_height = bi.num_blocks() as usize - 1;
+        if let Some(item) = bi.get_item(block_height) {
+            Some(item.clone())
+        } else {
+            None
+        }
     }
 }

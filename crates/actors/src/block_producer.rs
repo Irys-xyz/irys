@@ -6,6 +6,7 @@ use std::{
 
 use actix::prelude::*;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
+use irys_database::block_header_by_hash;
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
@@ -18,18 +19,25 @@ use reth_db::Database;
 use tracing::info;
 
 use crate::{
-    block_index::{BlockIndexActor, GetBlockHeightMessage},
+    block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
     mempool::{GetBestMempoolTxs, MempoolActor},
 };
 
+/// BlockProducerActor creates blocks from mining solutions
+#[derive(Debug)]
 pub struct BlockProducerActor {
+    /// Reference to the global database
     pub db: DatabaseProvider,
+    /// Address of the mempool actor
     pub mempool_addr: Addr<MempoolActor>,
+    /// Address of the bock_index actor
     pub block_index_addr: Addr<BlockIndexActor>,
+    /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
 }
 
 impl BlockProducerActor {
+    /// Initializes a new BlockProducerActor
     pub fn new(
         db: DatabaseProvider,
         mempool_addr: Addr<MempoolActor>,
@@ -49,17 +57,23 @@ impl Actor for BlockProducerActor {
     type Context = Context<Self>;
 }
 
-impl Handler<SolutionContext> for BlockProducerActor {
+#[derive(Message, Debug)]
+#[rtype(result = "Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>")]
+/// Announce to the node a mining solution has been found.
+pub struct SolutionFoundMessage(pub SolutionContext);
+
+impl Handler<SolutionFoundMessage> for BlockProducerActor {
     type Result =
         AtomicResponse<Self, Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>>;
 
-    fn handle(&mut self, msg: SolutionContext, ctx: &mut Self::Context) -> Self::Result {
-        info!("BlockProducerActor solution received {:?}", &msg);
+    fn handle(&mut self, msg: SolutionFoundMessage, ctx: &mut Self::Context) -> Self::Result {
+        let solution = msg.0;
+        info!("BlockProducerActor solution received {:?}", &solution);
 
         let mempool_addr = self.mempool_addr.clone();
         let block_index_addr = self.block_index_addr.clone();
         info!("After");
-        let current_height = 0;
+
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
         let self_addr = ctx.address();
@@ -68,11 +82,30 @@ impl Handler<SolutionContext> for BlockProducerActor {
             async move {
                 // Acquire lock and check that the height hasn't changed identifying a race condition
                 // TEMP: This demonstrates how to get the block height from the block_index_actor
-                let bh = block_index_addr
-                    .send(GetBlockHeightMessage {})
+                let latest_block = block_index_addr
+                    .send(GetLatestBlockIndexMessage {})
                     .await
                     .unwrap();
-                info!("block_height: {:?}", bh);
+
+                let prev_block_header: Option<IrysBlockHeader>;
+
+                if let Some(block_item) = latest_block {
+                    let prev_block_hash = block_item.block_hash;
+                    prev_block_header = db
+                        .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash))
+                        .unwrap();
+                } else {
+                    prev_block_header = None;
+                }
+
+                let height: u64;
+                if let Some(prev_block) = prev_block_header {
+                    info!("{}", prev_block);
+                    height = prev_block.height + 1;
+                } else {
+                    // Genesis block config
+                    height = 0;
+                }
 
                 let data_txs: Vec<IrysTransactionHeader> =
                     mempool_addr.send(GetBestMempoolTxs).await.unwrap();
@@ -81,6 +114,7 @@ impl Handler<SolutionContext> for BlockProducerActor {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
                 let mut irys_block = IrysBlockHeader {
+                    height,
                     diff: U256::from(1000),
                     cumulative_diff: U256::from(5000),
                     last_retarget: 1622543200,
@@ -88,7 +122,6 @@ impl Handler<SolutionContext> for BlockProducerActor {
                     previous_solution_hash: H256::zero(),
                     last_epoch_hash: H256::random(),
                     chunk_hash: H256::zero(),
-                    height: bh,
                     block_hash: H256::zero(),
                     previous_block_hash: H256::zero(),
                     previous_cumulative_diff: U256::from(4000),
@@ -205,10 +238,6 @@ impl Handler<SolutionContext> for BlockProducerActor {
             .into_actor(self),
         ));
     }
-}
-
-fn get_current_block_height() -> u64 {
-    0
 }
 
 /// When a block is confirmed, this message broadcasts the block header and the

@@ -6,7 +6,7 @@ use std::{
 };
 
 use {
-    irys_actors::block_index::{BlockIndexActor, GetBlockHeightMessage},
+    irys_actors::block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
     irys_actors::block_producer::BlockConfirmedMessage,
     irys_actors::mempool::{ChunkIngressMessage, MempoolActor, TxIngressMessage},
 };
@@ -176,7 +176,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
 
     // Get the blockheight from the actor
     let height = block_index_addr
-        .send(GetBlockHeightMessage {})
+        .send(GetLatestBlockIndexMessage {})
         .await
         .unwrap();
 

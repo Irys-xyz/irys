@@ -5,7 +5,7 @@ use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
-use irys_actors::mempool::TxIngressMessage;
+use irys_actors::{block_producer::SolutionFoundMessage, mempool::TxIngressMessage};
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
@@ -80,11 +80,11 @@ async fn test_blockprod() -> eyre::Result<()> {
     let (block, reth_exec_env) = node
         .actor_addresses
         .block_producer
-        .send(SolutionContext {
+        .send(SolutionFoundMessage(SolutionContext {
             partition_hash: H256::random(),
             chunk_offset: 0,
             mining_address: node.config.mining_signer.address(),
-        })
+        }))
         .await?
         .unwrap();
 
@@ -133,11 +133,14 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
 
     for i in 1..10 {
         info!("mining block {}", i);
-        let fut = node.actor_addresses.block_producer.send(SolutionContext {
-            partition_hash: H256::random(),
-            chunk_offset: 0,
-            mining_address: node.config.mining_signer.address(),
-        });
+        let fut = node
+            .actor_addresses
+            .block_producer
+            .send(SolutionFoundMessage(SolutionContext {
+                partition_hash: H256::random(),
+                chunk_offset: 0,
+                mining_address: node.config.mining_signer.address(),
+            }));
         let (block, reth_exec_env) = fut.await?.unwrap();
 
         //check reth for built block
@@ -173,11 +176,11 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
     let (block, _) = node
         .actor_addresses
         .block_producer
-        .send(SolutionContext {
+        .send(SolutionFoundMessage(SolutionContext {
             partition_hash: H256::random(),
             chunk_offset: 0,
             mining_address: Address::random(),
-        })
+        }))
         .await?
         .unwrap();
 
@@ -306,11 +309,11 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let (block, reth_exec_env) = node
         .actor_addresses
         .block_producer
-        .send(SolutionContext {
+        .send(SolutionFoundMessage(SolutionContext {
             partition_hash: H256::random(),
             chunk_offset: 0,
             mining_address: node.config.mining_signer.address(),
-        })
+        }))
         .await?
         .unwrap();
 

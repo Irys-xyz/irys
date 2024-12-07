@@ -1,6 +1,6 @@
 use std::sync::{Arc, RwLock};
 
-use crate::block_producer::BlockProducerActor;
+use crate::block_producer::{BlockProducerActor, SolutionFoundMessage};
 use actix::{Actor, Addr, Context, Handler, Message};
 use irys_storage::{ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
@@ -126,7 +126,7 @@ impl Handler<Seed> for PartitionMiningActor {
         );
 
         match self.mine_partition_with_seed(seed.into_inner(), difficulty) {
-            Some(s) => match self.block_producer_actor.try_send(s) {
+            Some(s) => match self.block_producer_actor.try_send(SolutionFoundMessage(s)) {
                 Ok(_) => (),
                 Err(err) => error!("Error submitting solution to block producer {:?}", err),
             },

@@ -174,6 +174,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                         None,
                     ));
                     storage_modules.push(arc_module.clone());
+                    arc_module.pack_with_zeros();
                 }
 
                 let mempool_actor = MempoolActor::new(

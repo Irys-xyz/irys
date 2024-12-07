@@ -1,6 +1,7 @@
 use std::{fs::remove_dir_all, time::Duration};
 
 use alloy_core::primitives::{TxHash, U256};
+use irys_actors::block_producer::SolutionFoundMessage;
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
@@ -102,11 +103,11 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
         let (block, _) = node
             .actor_addresses
             .block_producer
-            .send(SolutionContext {
+            .send(SolutionFoundMessage(SolutionContext {
                 partition_hash: H256::random(),
                 chunk_offset: 0,
                 mining_address: Address::random(),
-            })
+            }))
             .await?
             .unwrap();
 

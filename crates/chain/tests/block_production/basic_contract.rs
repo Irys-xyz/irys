@@ -6,6 +6,7 @@ use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use futures::future::select;
+use irys_actors::block_producer::SolutionFoundMessage;
 use irys_chain::{chain::start_for_testing, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -121,11 +122,11 @@ where
         let _ = node_ctx
             .actor_addresses
             .block_producer
-            .send(SolutionContext {
+            .send(SolutionFoundMessage(SolutionContext {
                 partition_hash: H256::random(),
                 chunk_offset: 0,
                 mining_address: Address::random(),
-            })
+            }))
             .await?
             .unwrap();
     }
