@@ -1,16 +1,17 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::Actor;
-use derive_more::derive::Deref;
+use alloy_serde::storage;
 use irys_actors::{
     block_index::BlockIndexActor,
     block_producer::{BlockConfirmedMessage, BlockProducerActor},
+    chunk_storage::ChunkStorageActor,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage, GetLedgersMessage,
         NewEpochMessage,
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
-    packing::{PackingActor, PackingConfig, PackingRequest},
+    packing::{PackingActor, PackingRequest},
     ActorAddresses,
 };
 use irys_api_server::{run_server, ApiState};
@@ -132,7 +133,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let epoch_service_actor_addr = epoch_service.start();
 
                 // Initialize the block index actor and tell it about the genesis block
-                let block_index_actor = BlockIndexActor::new(block_index);
+                let block_index_actor = BlockIndexActor::new(block_index.clone());
                 let block_index_actor_addr = block_index_actor.start();
                 let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
                 match block_index_actor_addr.send(msg).await {
@@ -188,11 +189,20 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 let mempool_actor_addr = mempool_actor.start();
 
+                let chunk_storage_actor = ChunkStorageActor::new(
+                    block_index.clone(),
+                    (*arc_storage_config).clone(),
+                    storage_modules.clone(),
+                    db.clone(),
+                );
+                let chunk_storage_addr = chunk_storage_actor.start();
+
                 let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
                     mempool_actor_addr.clone(),
+                    chunk_storage_addr.clone(),
                     block_index_actor_addr.clone(),
                     reth_node.clone(),
                 );

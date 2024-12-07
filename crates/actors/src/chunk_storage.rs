@@ -25,7 +25,7 @@ use crate::block_producer::BlockFinalizedMessage;
 /// - Manages storage state transitions
 #[derive(Debug)]
 pub struct ChunkStorageActor {
-    /// Tracks block boundaries and offsets for locating chunks in ledgersgi
+    /// Tracks block boundaries and offsets for locating chunks in ledgers
     pub block_index: Arc<RwLock<BlockIndex<Initialized>>>,
     /// Configuration parameters for storage system
     pub storage_config: StorageConfig,
@@ -68,7 +68,7 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
         let storage_modules = self.storage_modules.clone();
         let db = self.db.clone();
 
-        info!("BlockHeader: {:#?}", block_header);
+        info!("Finalized BlockHeader: {:#?}", block_header);
 
         // Async move closure to call async methods withing a non async fn
         Box::pin(async move {
