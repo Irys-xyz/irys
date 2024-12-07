@@ -9,6 +9,7 @@ use irys_actors::{block_producer::SolutionFoundMessage, mempool::TxIngressMessag
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
+use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     block_production::SolutionContext, irys::IrysSigner, Address, IrysTransaction, H256,
     IRYS_CHAIN_ID,
@@ -25,10 +26,10 @@ use tracing::info;
 
 #[tokio::test]
 async fn test_blockprod() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
-    if config.base_directory.exists() {
-        remove_dir_all(&config.base_directory)?;
-    }
+    config.base_directory = temp_dir.path().to_path_buf();
+
     let account1 = IrysSigner::random_signer();
     let account2 = IrysSigner::random_signer();
     let account3 = IrysSigner::random_signer();
@@ -123,10 +124,10 @@ async fn test_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn mine_ten_blocks() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
-    if config.base_directory.exists() {
-        remove_dir_all(&config.base_directory)?;
-    }
+    config.base_directory = temp_dir.path().to_path_buf();
+
     let node = start_for_testing(config).await?;
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
@@ -167,10 +168,10 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_basic_blockprod() -> eyre::Result<()> {
-    let config = IrysNodeConfig::default();
-    if config.base_directory.exists() {
-        remove_dir_all(&config.base_directory)?;
-    }
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
+    let mut config = IrysNodeConfig::default();
+    config.base_directory = temp_dir.path().to_path_buf();
+
     let node = start_for_testing(config).await?;
 
     let (block, _) = node
@@ -208,10 +209,10 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
-    if config.base_directory.exists() {
-        remove_dir_all(&config.base_directory)?;
-    }
+    config.base_directory = temp_dir.path().to_path_buf();
+
     let account1 = IrysSigner::random_signer();
     let account2 = IrysSigner::random_signer();
     let account3 = IrysSigner::random_signer();

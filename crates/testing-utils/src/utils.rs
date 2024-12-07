@@ -20,17 +20,23 @@ pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
 
     temporary_directory(name, keep)
 }
+
+/// Constant used to make sure .tmp shows up in the right place all the time
+pub const CARGO_MANIFEST_DIR: &'static str = env!("CARGO_MANIFEST_DIR");
+
 /// Creates a temporary directory
 pub fn temporary_directory(name: Option<&str>, keep: bool) -> TempDir {
-    let abs_tmp_path = absolute(PathBuf::from_str("../../.tmp").unwrap()).unwrap();
+    let tmp_path = PathBuf::from_str(CARGO_MANIFEST_DIR)
+        .unwrap()
+        .join("../../.tmp");
 
-    create_dir_all(&abs_tmp_path).unwrap();
+    create_dir_all(&tmp_path).unwrap();
 
     let builder = tempfile::Builder::new()
         .prefix(name.unwrap_or("irys-test-"))
         .rand_bytes(8)
         .keep(keep)
-        .tempdir_in(abs_tmp_path);
+        .tempdir_in(tmp_path);
 
     let temp_dir = builder.expect("Not able to create a temporary directory.");
 

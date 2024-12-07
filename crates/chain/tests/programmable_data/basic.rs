@@ -58,10 +58,6 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
         ),
     ]);
 
-    if config.base_directory.exists() {
-        remove_dir_all(&config.base_directory)?;
-    }
-
     let node = start_for_testing(config.clone()).await?;
 
     let signer: PrivateKeySigner = config.mining_signer.signer.into();
