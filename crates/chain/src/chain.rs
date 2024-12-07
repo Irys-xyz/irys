@@ -34,7 +34,7 @@ use reth::{
     tasks::{TaskExecutor, TaskManager},
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c};
-use reth_db::{HasName, HasTableType};
+use reth_db::{Database as _, HasName, HasTableType};
 use std::{
     cmp::min,
     collections::HashMap,
@@ -136,6 +136,8 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let block_index_actor = BlockIndexActor::new(block_index.clone());
                 let block_index_actor_addr = block_index_actor.start();
                 let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
+                db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
+                    .unwrap();
                 match block_index_actor_addr.send(msg).await {
                     Ok(_) => info!("Genesis block indexed"),
                     Err(_) => panic!("Failed to index genesis block"),
