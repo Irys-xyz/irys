@@ -95,13 +95,15 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     .unwrap();
 
                 let prev_block_header: Option<IrysBlockHeader>;
+                let prev_block_hash: H256;
 
                 if let Some(block_item) = latest_block {
-                    let prev_block_hash = block_item.block_hash;
+                    prev_block_hash = block_item.block_hash;
                     prev_block_header = db
                         .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash))
                         .unwrap();
                 } else {
+                    prev_block_hash = H256::default();
                     prev_block_header = None;
                 }
 
@@ -136,7 +138,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     previous_solution_hash: H256::zero(),
                     last_epoch_hash: H256::random(),
                     chunk_hash: H256::zero(),
-                    previous_block_hash: H256::zero(),
+                    previous_block_hash: prev_block_hash,
                     previous_cumulative_diff: U256::from(4000),
                     poa: PoaData {
                         tx_path: Base64::from_str("").unwrap(),
