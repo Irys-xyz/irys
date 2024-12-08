@@ -101,10 +101,6 @@ impl Handler<GetLatestBlockIndexMessage> for BlockIndexActor {
 
         let bi = self.block_index.read().unwrap();
         let block_height = bi.num_blocks().max(1) as usize - 1;
-        if let Some(item) = bi.get_item(block_height) {
-            Some(item.clone())
-        } else {
-            None
-        }
+        Some(bi.get_item(block_height)?.clone())
     }
 }
