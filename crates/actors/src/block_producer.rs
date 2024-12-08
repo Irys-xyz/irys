@@ -249,30 +249,39 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mempool_addr.do_send(block_confirm_message.clone());
 
                 // Retrieve all the transaction headers for the previous block
-                let prev_block_header = prev_block_header;
+                let prev_block_header = match prev_block_header {
+                    Some(header) => header,
+                    None => {
+                        error!("No previous block header found for height {}", height);
+                        return None;
+                    }
+                };
 
-                if let Some(prev) = prev_block_header {
-                    let txids = &prev.ledgers[Ledger::Submit].txids;
+                // Get all the transactions for the previous block, error if not found
+                let txs = match prev_block_header.ledgers[Ledger::Submit]
+                    .txids
+                    .iter()
+                    .map(|txid| {
+                        db.view_eyre(|tx| tx_header_by_txid(tx, txid))
+                            .and_then(|opt| {
+                                opt.ok_or_else(|| {
+                                    eyre::eyre!("No tx header found for txid {}", txid)
+                                })
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(txs) => txs,
+                    Err(e) => {
+                        error!("Failed to collect tx headers: {}", e);
+                        return None;
+                    }
+                };
 
-                    let tx_headers: Result<Vec<_>, _> = txids
-                        .iter()
-                        .map(|txid| {
-                            let header = db.view_eyre(|tx| tx_header_by_txid(tx, txid))?; // Note the double ??
-                            header.ok_or_else(|| eyre::eyre!("No tx header found for txid"))
-                        })
-                        .collect();
-                    let txs = tx_headers.unwrap();
-
-                    // Broadcast BlockFinalizedMessage
-                    let block_finalized_message = BlockFinalizedMessage {
-                        block_header: Arc::new(prev),
-                        txs: Arc::new(txs),
-                    };
-
-                    chunk_storage_addr.do_send(block_finalized_message);
-                } else {
-                    error!("No previous block header found for height {}", height);
-                }
+                chunk_storage_addr.do_send(BlockFinalizedMessage {
+                    block_header: Arc::new(prev_block_header),
+                    txs: Arc::new(txs),
+                });
 
                 Some((block.clone(), exec_payload))
             }
