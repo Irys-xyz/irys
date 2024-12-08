@@ -6,7 +6,7 @@ use std::{
 };
 
 use {
-    irys_actors::block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
+    irys_actors::block_index::BlockIndexActor,
     irys_actors::block_producer::BlockConfirmedMessage,
     irys_actors::mempool::{ChunkIngressMessage, MempoolActor, TxIngressMessage},
 };
@@ -174,11 +174,10 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let block_index_actor = BlockIndexActor::new(block_index.clone());
     let block_index_addr = block_index_actor.start();
 
-    // Get the blockheight from the actor
-    let height = block_index_addr
-        .send(GetLatestBlockIndexMessage {})
-        .await
-        .unwrap();
+    let height: u64;
+    {
+        height = block_index.read().unwrap().num_blocks().max(1) - 1;
+    }
 
     for tx in txs.iter() {
         println!("data_root: {:?}", tx.header.data_root.0);
