@@ -20,7 +20,7 @@ use reth_db::Database;
 use tracing::{error, info};
 
 use crate::{
-    block_index::{BlockIndexActor, GetBlockHeightMessage, GetLatestBlockIndexMessage},
+    block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
     chunk_storage::ChunkStorageActor,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool::{GetBestMempoolTxs, MempoolActor},
@@ -125,7 +125,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
                 // Translate partition hash, chunk offset -> ledger, ledger chunk offset
                 let pa = epoch_service_addr
-                    .send(GetPartitionAssignmentMessage(msg.partition_hash))
+                    .send(GetPartitionAssignmentMessage(solution.partition_hash))
                     .await
                     .unwrap()
                     .unwrap();
@@ -156,12 +156,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     previous_block_hash: prev_block_hash,
                     previous_cumulative_diff: U256::from(4000),
                     poa: PoaData {
-                        tx_path: Base64(msg.tx_path.unwrap_or(Vec::new())),
-                        data_path: Base64(msg.data_path.unwrap_or(Vec::new())),
-                        chunk: Base64(msg.chunk),
+                        tx_path: Base64(solution.tx_path.unwrap_or(Vec::new())),
+                        data_path: Base64(solution.data_path.unwrap_or(Vec::new())),
+                        chunk: Base64(solution.chunk),
                         ledger_num: pa.ledger_num.unwrap() as u64,
-                        partition_chunk_offset: msg.chunk_offset as u64,
-                        partition_hash: msg.partition_hash,
+                        partition_chunk_offset: solution.chunk_offset as u64,
+                        partition_hash: solution.partition_hash,
                     },
                     reward_address: Address::ZERO,
                     reward_key: Base64::from_str("").unwrap(),
