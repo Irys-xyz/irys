@@ -26,6 +26,9 @@ pub struct IrysBlockHeader {
     /// The block identifier.
     pub block_hash: BlockHash,
 
+    /// The block height.
+    pub height: u64,
+
     /// Difficulty threshold used to produce the current block.
     pub diff: U256,
 
@@ -47,9 +50,6 @@ pub struct IrysBlockHeader {
 
     /// `SHA-256` hash of the PoA chunk (unencoded) bytes.
     pub chunk_hash: H256,
-
-    /// The block height.
-    pub height: u64,
 
     // Previous block identifier.
     pub previous_block_hash: H256,

@@ -3,18 +3,17 @@ use actix_web::{
     HttpResponse,
 };
 use awc::http::StatusCode;
-use irys_actors::{
-    mempool::{ChunkIngressError, ChunkIngressMessage},
-    ActorAddresses,
-};
+use irys_actors::mempool::{ChunkIngressError, ChunkIngressMessage};
 use irys_types::Chunk;
+
+use crate::ApiState;
 
 /// Handles the HTTP POST request for adding a chunk to the mempool.
 /// This function takes in a JSON payload of a `Chunk` type, encapsulates it
 /// into a `ChunkIngressMessage` for further processing by the mempool actor,
 /// and manages error handling based on the results of message delivery and validation.
 pub async fn post_chunk(
-    state: web::Data<ActorAddresses>,
+    state: web::Data<ApiState>,
     body: Json<Chunk>,
 ) -> actix_web::Result<HttpResponse> {
     let chunk = body.into_inner();

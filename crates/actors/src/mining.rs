@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::block_producer::BlockProducerActor;
+use crate::block_producer::{BlockProducerActor, SolutionFoundMessage};
 use actix::{Actor, Addr, Context, Handler, Message};
 use irys_storage::{ie, StorageModule};
 use irys_types::app_state::DatabaseProvider;
@@ -123,7 +123,7 @@ impl Seed {
 
 impl<T> Handler<Seed> for PartitionMiningActor<T>
 where
-    T: Actor<Context = Context<T>> + Handler<SolutionContext>,
+    T: Actor<Context = Context<T>> + Handler<SolutionFoundMessage>,
 {
     type Result = ();
 
@@ -142,7 +142,7 @@ where
         );
 
         match self.mine_partition_with_seed(seed.into_inner(), difficulty) {
-            Ok(Some(s)) => match self.block_producer_actor.try_send(s) {
+            Ok(Some(s)) => match self.block_producer_actor.try_send(SolutionFoundMessage(s)) {
                 Ok(_) => {
                     debug!("Solution sent!");
                 }

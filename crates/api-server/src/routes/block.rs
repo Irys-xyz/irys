@@ -32,41 +32,58 @@ pub async fn get_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test, App, Error};
+    use actix::Actor;
+    use actix_web::{middleware::Logger, test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
+    use irys_actors::mempool::MempoolActor;
     use irys_database::tables::IrysTables;
-    use irys_types::app_state::DatabaseProvider;
+    use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
+    use log::{debug, error, info, log_enabled, Level};
+    use reth::tasks::TaskManager;
     use std::sync::Arc;
     use tempfile::tempdir;
 
     #[actix_web::test]
-    async fn test_get_block() -> Result<(), Error> {
-        // TODO: set up testing log environment
-        // std::env::set_var("RUST_LOG", "debug");
-        // env_logger::init();
+    async fn test_get_block() -> eyre::Result<()> {
+        //std::env::set_var("RUST_LOG", "debug");
+        let _ = env_logger::try_init();
 
         //let path = get_data_dir();
         let path = tempdir().unwrap();
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
         let blk = IrysBlockHeader::default();
-        let mut rw_tx = db.tx_mut().unwrap();
-        let result = database::insert_block_header(&rw_tx, &blk);
-        assert!(result.is_ok(), "block can not be stored");
 
-        let blk_get = database::block_header_by_hash(&rw_tx, &blk.block_hash)
-            .expect("db error")
-            .expect("no block");
-        assert_eq!(blk, blk_get, "retrived another block");
+        db.update(|tx| -> eyre::Result<()> { database::insert_block_header(tx, &blk) })?;
+
+        match db.view_eyre(|tx| database::block_header_by_hash(tx, &blk.block_hash))? {
+            None => error!("block not found, test db error!"),
+            Some(blk_get) => {
+                info!("block found!");
+                assert_eq!(blk, blk_get, "retrived another block");
+            }
+        };
 
         let db_arc = Arc::new(db);
+        let task_manager = TaskManager::current();
+        let storage_config = StorageConfig::default();
+
+        let mempool_actor = MempoolActor::new(
+            irys_types::app_state::DatabaseProvider(db_arc.clone()),
+            task_manager.executor(),
+            IrysSigner::random_signer(),
+            storage_config,
+            Arc::new(Vec::new()).to_vec(),
+        );
+        let mempool_actor_addr = mempool_actor.start();
         let state = ApiState {
             db: DatabaseProvider(db_arc),
-            actors: todo!(),
+            mempool: mempool_actor_addr,
         };
 
         let app = test::init_service(
             App::new()
+                .wrap(Logger::default())
                 .app_data(web::Data::new(state))
                 .service(web::scope("/v1").route("/block/{block_hash}", web::get().to(get_block))),
         )
@@ -91,9 +108,21 @@ mod tests {
         let blk = IrysBlockHeader::default();
 
         let db_arc = Arc::new(db);
+
+        let task_manager = TaskManager::current();
+        let storage_config = StorageConfig::default();
+
+        let mempool_actor = MempoolActor::new(
+            irys_types::app_state::DatabaseProvider(db_arc.clone()),
+            task_manager.executor(),
+            IrysSigner::random_signer(),
+            storage_config,
+            Arc::new(Vec::new()).to_vec(),
+        );
+        let mempool_actor_addr = mempool_actor.start();
         let state = ApiState {
             db: DatabaseProvider(db_arc),
-            actors: todo!(),
+            mempool: mempool_actor_addr,
         };
 
         let app = test::init_service(

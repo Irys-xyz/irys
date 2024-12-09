@@ -1,16 +1,17 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::Actor;
-use derive_more::derive::Deref;
+use alloy_serde::storage;
 use irys_actors::{
     block_index::BlockIndexActor,
     block_producer::{BlockConfirmedMessage, BlockProducerActor},
+    chunk_storage::ChunkStorageActor,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage, GetLedgersMessage,
         NewEpochMessage,
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
-    packing::{PackingActor, PackingConfig, PackingRequest},
+    packing::{PackingActor, PackingRequest},
     ActorAddresses,
 };
 use irys_api_server::{run_server, ApiState};
@@ -33,7 +34,7 @@ use reth::{
     tasks::{TaskExecutor, TaskManager},
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c};
-use reth_db::{HasName, HasTableType};
+use reth_db::{Database as _, HasName, HasTableType};
 use std::{
     cmp::min,
     collections::HashMap,
@@ -73,6 +74,7 @@ pub struct IrysNodeCtx {
 }
 
 pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
+    info!("Using directory {:?}", &node_config.base_directory);
     let (reth_handle_sender, reth_handle_receiver) =
         oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
     let (irys_node_handle_sender, irys_node_handle_receiver) = oneshot::channel::<IrysNodeCtx>();
@@ -131,9 +133,11 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let epoch_service_actor_addr = epoch_service.start();
 
                 // Initialize the block index actor and tell it about the genesis block
-                let block_index_actor = BlockIndexActor::new(block_index);
+                let block_index_actor = BlockIndexActor::new(block_index.clone());
                 let block_index_actor_addr = block_index_actor.start();
                 let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
+                db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
+                    .unwrap();
                 match block_index_actor_addr.send(msg).await {
                     Ok(_) => info!("Genesis block indexed"),
                     Err(_) => panic!("Failed to index genesis block"),
@@ -174,6 +178,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                         None,
                     ));
                     storage_modules.push(arc_module.clone());
+                    arc_module.pack_with_zeros();
                 }
 
                 let mempool_actor = MempoolActor::new(
@@ -186,11 +191,20 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 let mempool_actor_addr = mempool_actor.start();
 
+                let chunk_storage_actor = ChunkStorageActor::new(
+                    block_index.clone(),
+                    (*arc_storage_config).clone(),
+                    storage_modules.clone(),
+                    db.clone(),
+                );
+                let chunk_storage_addr = chunk_storage_actor.start();
+
                 let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
                     mempool_actor_addr.clone(),
+                    chunk_storage_addr.clone(),
                     block_index_actor_addr.clone(),
                     epoch_service_actor_addr.clone(),
                     reth_node.clone(),
@@ -235,7 +249,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     partitions: part_actors_clone,
                     block_producer: block_producer_addr,
                     packing: packing_actor_addr,
-                    mempool: mempool_actor_addr,
+                    mempool: mempool_actor_addr.clone(),
                     block_index: block_index_actor_addr,
                     epoch_service: epoch_service_actor_addr,
                 };
@@ -248,8 +262,8 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 });
 
                 run_server(ApiState {
-                    actors: actor_addresses,
                     db,
+                    mempool: mempool_actor_addr,
                 })
                 .await;
             });

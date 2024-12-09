@@ -239,15 +239,12 @@ pub fn get_partition_hashes_by_data_root<T: DbTx>(
 
 #[cfg(test)]
 mod tests {
-
-    use assert_matches::assert_matches;
     use irys_types::{IrysBlockHeader, IrysTransactionHeader};
     use reth_db::Database;
-    //use tempfile::tempdir;
 
     use crate::{block_header_by_hash, config::get_data_dir, tables::IrysTables};
 
-    use super::{insert_block_header, open_or_create_db};
+    use super::{insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid};
 
     #[test]
     fn insert_and_get_tests() -> eyre::Result<()> {
@@ -255,40 +252,26 @@ mod tests {
         let path = get_data_dir();
         println!("TempDir: {:?}", path);
 
-        let mut tx = IrysTransactionHeader::default();
-        tx.id.0[0] = 2;
+        let tx_header = IrysTransactionHeader::default();
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
-        // // Write a Tx
-        // {
-        //     let result = insert_tx(&db, &tx);
-        //     println!("result: {:?}", result);
-        //     assert_matches!(result, Ok(_));
-        // }
+        // Write a Tx
+        let _ = db.update(|tx| insert_tx_header(tx, &tx_header))?;
 
-        // // Read a Tx
-        // {
-        //     let result = tx_by_txid(&db, &tx.id);
-        //     assert_eq!(result, Ok(Some(tx)));
-        //     println!("result: {:?}", result.unwrap().unwrap());
-        // }
+        // Read a Tx
+        let result = db.view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?;
+        assert_eq!(result, Some(tx_header));
 
         let mut block_header = IrysBlockHeader::new();
         block_header.block_hash.0[0] = 1;
-        let tx = db.tx_mut()?;
+
         // Write a Block
-        {
-            let result = insert_block_header(&tx, &block_header);
-            println!("result: {:?}", result);
-            assert_matches!(result, Ok(_));
-        }
+        let _ = db.update(|tx| insert_block_header(tx, &block_header))?;
 
         // Read a Block
-        {
-            let result = block_header_by_hash(&tx, &block_header.block_hash)?;
-            assert_eq!(result, Some(block_header));
-            println!("result: {:?}", result.unwrap());
-        };
+        let result = db.view_eyre(|tx| block_header_by_hash(tx, &block_header.block_hash))?;
+        assert_eq!(result, Some(block_header));
+
         Ok(())
     }
 
