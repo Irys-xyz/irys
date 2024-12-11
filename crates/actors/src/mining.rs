@@ -111,7 +111,7 @@ where
     type Context = Context<Self>;
 }
 
-#[derive(Message, Debug)]
+#[derive(Message, Debug, PartialEq)]
 #[rtype(result = "()")]
 pub struct Seed(pub H256);
 
@@ -192,7 +192,8 @@ fn hash_to_number(hash: &[u8]) -> U256 {
 
 #[cfg(test)]
 mod tests {
-    use crate::mining::{BlockProducerActor, PartitionMiningActor, Seed};
+    use crate::block_producer::{BlockProducerActor, SolutionFoundMessage};
+    use crate::mining::{PartitionMiningActor, Seed};
     //use actix::SystemRegistry;
     use actix::actors::mocker::Mocker;
     type BlockProducerMockActor = Mocker<BlockProducerActor>;
@@ -208,6 +209,7 @@ mod tests {
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
     use std::sync::Arc;
+    use tracing::debug;
 
     #[actix_rt::test]
     async fn test_solution() {
@@ -220,27 +222,28 @@ mod tests {
         let tx_path = [4, 3, 2, 1];
 
         let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
-            let solution: SolutionContext = *msg.downcast::<SolutionContext>().unwrap();
+            let solution = *msg.downcast::<SolutionFoundMessage>().unwrap();
+            debug!("Solution received!");
             assert_eq!(
-                partition_hash, solution.partition_hash,
+                partition_hash, solution.0.partition_hash,
                 "Not expected partition"
             );
             assert!(
-                solution.chunk_offset < chunks_number * 2,
+                solution.0.chunk_offset < chunks_number * 2,
                 "Not expected oftset"
             );
             assert_eq!(
-                mining_address, solution.mining_address,
+                mining_address, solution.0.mining_address,
                 "Not expected partition"
             );
             assert_eq!(
                 Some(tx_path.to_vec()),
-                solution.tx_path,
+                solution.0.tx_path,
                 "Not expected partition"
             );
             assert_eq!(
                 Some(data_path.to_vec()),
-                solution.data_path,
+                solution.0.data_path,
                 "Not expected partition"
             );
             Box::new(())
