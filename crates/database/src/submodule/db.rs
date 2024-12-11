@@ -2,8 +2,8 @@ use std::path::Path;
 
 use bytes::Buf;
 use irys_types::{
-    Chunk, ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset,
-    TxPath, TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset, TxPath,
+    TxPathHash, UnpackedChunk,
 };
 use reth_db::{
     transaction::{DbTx, DbTxMut},
@@ -13,8 +13,9 @@ use reth_db::{
 use crate::open_or_create_db;
 
 use super::tables::{
-    ChunkDataPathByPathHash, ChunkOffsetsByPathHash, ChunkPathHashByOffset, ChunkPathHashes,
-    RelativeStartOffsets, StartOffsetsByDataRoot, SubmoduleTables, TxPathByTxPathHash,
+    ChunkDataPathByPathHash, ChunkMetadata, ChunkMetadataByChunkPathHash, ChunkOffsetsByPathHash,
+    ChunkPathHashByOffset, ChunkPathHashes, RelativeStartOffsets, StartOffsetsByDataRoot,
+    SubmoduleTables, TxPathByTxPathHash,
 };
 
 /// Creates or opens a *submodule* MDBX database
@@ -30,7 +31,7 @@ pub fn write_chunk_data_path<T: DbTxMut + DbTx>(
     // optional path hash, computed from data_path if None
     path_hash: Option<ChunkPathHash>,
 ) -> eyre::Result<()> {
-    let path_hash = path_hash.unwrap_or_else(|| Chunk::hash_data_path(&data_path));
+    let path_hash = path_hash.unwrap_or_else(|| UnpackedChunk::hash_data_path(&data_path));
     add_offset_for_path_hash(tx, offset, path_hash)?;
 
     Ok(add_data_path_hash_to_offset_index(
@@ -179,4 +180,21 @@ pub fn add_start_offset_to_data_root_index<T: DbTxMut + DbTx>(
     set_start_offsets_by_data_root(tx, data_root, offsets)?;
 
     Ok(())
+}
+/// Adds [`ChunkMetadata`] to a submodule specific database for a chunk
+pub fn set_metadata_for_chunk<T: DbTxMut>(
+    tx: &T,
+    path_hash: ChunkPathHash,
+    metadata: ChunkMetadata,
+) -> eyre::Result<()> {
+    tx.put::<ChunkMetadataByChunkPathHash>(path_hash, metadata)?;
+    Ok(())
+}
+
+/// Gets [`ChunkMetadata`] to a submodule specific database for a chunk
+pub fn get_metadata_for_chunk<T: DbTx>(
+    tx: &T,
+    path_hash: ChunkPathHash,
+) -> eyre::Result<Option<ChunkMetadata>> {
+    Ok(tx.get::<ChunkMetadataByChunkPathHash>(path_hash)?)
 }

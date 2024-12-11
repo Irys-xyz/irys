@@ -4,7 +4,7 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use irys_actors::mempool::{ChunkIngressError, ChunkIngressMessage};
-use irys_types::Chunk;
+use irys_types::UnpackedChunk;
 
 use crate::ApiState;
 
@@ -14,7 +14,7 @@ use crate::ApiState;
 /// and manages error handling based on the results of message delivery and validation.
 pub async fn post_chunk(
     state: web::Data<ApiState>,
-    body: Json<Chunk>,
+    body: Json<UnpackedChunk>,
 ) -> actix_web::Result<HttpResponse> {
     let chunk = body.into_inner();
 

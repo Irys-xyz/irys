@@ -3,16 +3,19 @@ use eyre::{eyre, Result};
 use irys_database::submodule::{
     self, add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
     add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
-    create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
-    tables::RelativeStartOffsets, write_chunk_data_path,
+    create_or_open_submodule_db, get_data_path_by_offset, get_full_data_path, get_full_tx_path,
+    get_metadata_for_chunk, get_path_hashes_by_offset, get_start_offsets_by_data_root,
+    get_tx_path_by_offset, set_metadata_for_chunk,
+    tables::{ChunkMetadata, ChunkPathHashes, RelativeStartOffsets},
+    write_chunk_data_path,
 };
 use irys_packing::xor_vec_u8_arrays_in_place;
 use irys_types::{
     app_state::DatabaseProvider,
     partition::{PartitionAssignment, PartitionHash},
-    Chunk, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset, LedgerChunkRange,
-    PartitionChunkOffset, PartitionChunkRange, RelativeChunkOffset, StorageConfig, TxPath,
-    TxPathHash, H256,
+    Base64, ChunkBytes, ChunkDataPath, ChunkEnum, ChunkPathHash, DataRoot, LedgerChunkOffset,
+    LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange, RelativeChunkOffset,
+    StorageConfig, TxPath, TxPathHash, UnpackedChunk, H256,
 };
 use nodit::{
     interval::{ie, ii},
@@ -26,6 +29,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
+    iter, mem,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
@@ -34,7 +38,12 @@ use tracing::{debug, info};
 type SubmodulePath = String;
 
 // In-memory chunk data indexed by offset within partition
-type ChunkMap = BTreeMap<PartitionChunkOffset, (ChunkBytes, ChunkType)>;
+pub type ChunkMap = BTreeMap<PartitionChunkOffset, (ChunkBytes, ChunkType)>;
+
+pub type ChunkMap2 =
+    NoditMap<PartitionChunkOffset, Interval<PartitionChunkOffset>, (ChunkBytes, ChunkType)>;
+
+pub type FullChunkMap = NoditMap<PartitionChunkOffset, Interval<PartitionChunkOffset>, ChunkEnum>;
 
 /// Storage submodules mapped to their chunk ranges
 type SubmoduleMap = NoditMap<u32, Interval<u32>, StorageSubmodule>;
@@ -300,27 +309,131 @@ impl StorageModule {
     /// Takes a range [start, end) of partition-relative offsets (end exclusive).
     /// Returns a map of chunk offsets to their data and type, excluding uninitialized chunks.
     /// Chunks are read from physical storage for initialized intervals that overlap the range.
-    pub fn read_chunks(
+    /// use an `Into` bound here for ergonomics
+    pub fn read_chunks<T: Into<PartitionChunkRange>>(
         &self,
-        chunk_range: Interval<PartitionChunkOffset>,
-    ) -> eyre::Result<ChunkMap> {
-        let mut chunk_map = ChunkMap::new();
+        chunk_range: T,
+    ) -> eyre::Result<ChunkMap2> {
+        self.read_chunks_internal(chunk_range.into(), None)
+    }
+
+    /// 'Internal' function that reads chunks from the specified range into a Nodit (interval) map
+    /// that will contain intervals of `None` or `Some` values based on the `requested_types` and the state of the underlying storage.
+    /// (`Some` values will be inserted if the storage is one of the `requested_types`, `None` values will be inserted otherwise)
+    pub fn read_chunks_internal(
+        &self,
+        chunk_range: PartitionChunkRange,
+        // defaults to vec![ChunkType::Data, ChunkType::Entropy]
+        requested_types: Option<Vec<ChunkType>>,
+    ) -> eyre::Result<ChunkMap2> {
+        let requested_types = requested_types.unwrap_or(vec![ChunkType::Data, ChunkType::Entropy]);
+        let mut chunk_map: ChunkMap2 = NoditMap::new();
         // Query overlapping intervals from storage map
         let intervals = self.intervals.read().unwrap();
         let iter = intervals.overlapping(chunk_range);
         for (interval, chunk_type) in iter {
-            if *chunk_type != ChunkType::Uninitialized {
+            if requested_types.contains(chunk_type) {
                 // For each chunk in the interval
                 for chunk_offset in interval.start()..=interval.end() {
                     // Read the chunk from disk
                     let bytes = self.read_chunk_internal(chunk_offset)?;
-
                     // Add it to the ChunkMap
-                    chunk_map.insert(chunk_offset, (bytes, chunk_type.clone()));
+                    chunk_map
+                        .insert_strict(ii(chunk_offset, chunk_offset), (bytes, chunk_type.clone()))
+                        .map_err(|_| eyre!("error building chunk map"))?;
                 }
-            }
+            } else {
+                // we just don't insert anything here
+                // chunk_map
+                //     .insert_strict(*interval, None)
+                //     .map_err(|_| eyre!("error building chunk map"))?;
+            };
         }
         Ok(chunk_map)
+    }
+
+    /// Reads chunks from the specified ledger-relative range and returns their data and storage state
+    ///
+    /// Takes a range [start, end) of ledger-relative offsets (end exclusive).
+    /// Returns a map of chunk offsets to their data and type, excluding uninitialized chunks.
+    /// Chunks are read from physical storage for initialized intervals that overlap the range.
+    pub fn read_ledger_chunks(
+        &self,
+        ledger_chunk_range: LedgerChunkRange,
+    ) -> eyre::Result<ChunkMap2> {
+        let chunk_range = self.make_range_partition_relative(ledger_chunk_range)?;
+        self.read_chunks(chunk_range)
+    }
+
+    /// Reads a ledger-relative interval of chunks from this storage module,
+    pub fn read_full_ledger_chunks(
+        &self,
+        ledger_chunk_range: LedgerChunkRange,
+    ) -> eyre::Result<FullChunkMap> {
+        let chunk_range = self.make_range_partition_relative(ledger_chunk_range)?;
+        let mut chunks = self.read_chunks(chunk_range)?;
+        let mut chunk_map: FullChunkMap = NoditMap::new();
+
+        let submodules = self.submodules.overlapping(chunk_range);
+        let assignment = self.get_assignment()?;
+        for (interval, submodule) in submodules {
+            // single read tx per submodule
+            let read_tx = submodule.db.tx()?;
+            for (chunk_interval, (chunk, _chunk_type)) in chunks.overlapping_mut(*interval) {
+                // we aren't going to read from this chunk from this iterator again, so we can take the value to avoid a clone
+                let chunk = mem::take(chunk);
+                // let chunk = match chunk {
+                //     // we aren't going to read from this chunk from this iterator again, so we can take the value to avoid a clone
+                //     Some((chunk, _)) => mem::take(chunk),
+                //     None => continue,
+                // };
+
+                assert!(chunk_interval.is_singular());
+
+                let data_path_hash =
+                    match get_path_hashes_by_offset(&read_tx, chunk_interval.start())? {
+                        Some(path_hashes) => path_hashes.data_path_hash.ok_or(eyre!(
+                            "unable to get data_path_hash for chunk {:?}",
+                            &chunk_interval
+                        ))?,
+                        None => Err(eyre!(
+                            "Unable to get path hashes for chunk {:?}",
+                            &chunk_interval
+                        ))?,
+                    };
+
+                let full_data_path = get_full_data_path(&read_tx, data_path_hash)?
+                    .expect("chunk is missing full_data_path");
+
+                let ChunkMetadata {
+                    data_root,
+                    data_size,
+                    chunk_index,
+                } = get_metadata_for_chunk(&read_tx, data_path_hash)?.ok_or(eyre!(
+                    "Unable to get metadata for chunk {:?}",
+                    &chunk_interval
+                ))?;
+
+                let full_chunk = PackedChunk {
+                    data_root,
+                    data_size,
+                    data_path: full_data_path.into(),
+                    bytes: chunk.into(),
+                    packing_address: assignment.miner_address,
+                    chunk_index,
+                };
+                chunk_map
+                    .insert_strict(*chunk_interval, ChunkEnum::Packed(full_chunk))
+                    .map_err(|_| {
+                        eyre!(
+                            "unable to insert chunk {:?} into chunk map",
+                            &chunk_interval
+                        )
+                    })?;
+            }
+        }
+
+        return Ok(chunk_map);
     }
 
     /// Reads a single chunk from its physical storage location
@@ -433,32 +546,53 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Stores the data_path and offset lookups in the correct submodule index
-    pub fn add_data_path_to_index(
+    /// Indexes a chunk by adding the following to the submodule-specific database:  
+    /// data path -> ChunkDataPathByPathHash  
+    /// data_path_hash -> ChunkPathHashByOffset  
+    /// data_root, data_size, chunk_index -> ChunkMetadataByChunkPathHash  
+    pub fn index_chunk(
         &self,
-        data_path_hash: ChunkPathHash,
-        data_path: ChunkDataPath,
         partition_offset: PartitionChunkOffset,
+        chunk: &UnpackedChunk,
     ) -> eyre::Result<()> {
-        // Find submodule containing this chunk
-        let res = self.submodules.get_key_value_at_point(partition_offset);
+        let data_path = &chunk.data_path.0;
+        let data_path_hash = UnpackedChunk::hash_data_path(&data_path);
 
-        if let Ok((_interval, submodule)) = res {
-            submodule.db.update(|tx| -> eyre::Result<()> {
-                add_full_data_path(tx, data_path_hash, data_path)?;
-                add_data_path_hash_to_offset_index(tx, partition_offset, Some(data_path_hash))?;
-                Ok(())
-            })?
-        } else {
-            Err(eyre::eyre!(
-                "No submodule found for Partition Offset {:?}",
-                partition_offset
-            ))
-        }
+        // Find submodule containing this chunk
+        let (_interval, submodule) = self
+            .submodules
+            .get_key_value_at_point(partition_offset)
+            .map_err(|_| {
+                eyre::eyre!(
+                    "No submodule found for Partition Offset {:?}",
+                    partition_offset
+                )
+            })?;
+
+        // if let Ok((_interval, submodule)) = res {
+        submodule.db.update(|tx| -> eyre::Result<()> {
+            add_full_data_path(tx, data_path_hash, data_path.clone())?;
+            add_data_path_hash_to_offset_index(tx, partition_offset, Some(data_path_hash))?;
+            set_metadata_for_chunk(
+                tx,
+                data_path_hash,
+                ChunkMetadata {
+                    data_root: chunk.data_root,
+                    data_size: chunk.data_size,
+                    chunk_index: chunk.chunk_index,
+                },
+            )?;
+            Ok(())
+        })?
+        // } else {
+        // }
     }
 
     /// Gets the list of partition-relative offsets in this partition that the chunk should be written to
-    pub fn get_write_offsets(&self, chunk: &Chunk) -> eyre::Result<Vec<PartitionChunkOffset>> {
+    pub fn get_write_offsets(
+        &self,
+        chunk: &UnpackedChunk,
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let start_offsets = self.collect_start_offsets(chunk.data_root)?;
 
         if start_offsets.0.len() == 0 {
@@ -485,10 +619,7 @@ impl StorageModule {
     }
 
     /// Writes chunk data and its data_path to relevant storage locations
-    pub fn write_data_chunk(&self, chunk: &Chunk) -> eyre::Result<()> {
-        let data_path = &chunk.data_path.0;
-        let data_path_hash = Chunk::hash_data_path(&data_path);
-
+    pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> eyre::Result<()> {
         for partition_offset in self.get_write_offsets(&chunk)? {
             // read entropy from the storage module
             let entropy = self.read_chunk_internal(partition_offset)?;
@@ -497,7 +628,7 @@ impl StorageModule {
             xor_vec_u8_arrays_in_place(&mut data, &entropy);
 
             self.write_chunk(partition_offset, data, ChunkType::Data);
-            self.add_data_path_to_index(data_path_hash, data_path.clone(), partition_offset)?;
+            self.index_chunk(partition_offset, chunk)?;
         }
 
         Ok(())
@@ -600,10 +731,10 @@ impl StorageModule {
         }
     }
 
-    /// Internal utility function to take a ledger relative range and make it
+    /// Utility function to take a ledger relative range and make it
     /// Partition relative (relative to the partition assigned to the
     /// StorageModule)
-    fn make_range_partition_relative(
+    pub fn make_range_partition_relative(
         &self,
         chunk_range: LedgerChunkRange,
     ) -> eyre::Result<PartitionChunkRange> {
@@ -648,6 +779,55 @@ impl StorageModule {
             self.sync_pending_chunks().unwrap();
         }
     }
+
+    /// Derives the storage module's assignment state from it's `[partition_assignment]`.  
+    /// No assignment -> UNASSIGNED  
+    /// Assignment but no ledger_num -> CAPACITY  
+    /// Assignment and ledger_num -> DATA  
+    pub fn get_state(&self) -> StorageModuleAssignmentState {
+        match self.partition_assignment {
+            Some(assignment) => {
+                if assignment.ledger_num.is_none() {
+                    return StorageModuleAssignmentState::CAPACITY;
+                }
+                StorageModuleAssignmentState::DATA
+            }
+            None => StorageModuleAssignmentState::UNASSIGNED,
+        }
+    }
+    pub fn is_unassigned(&self) -> bool {
+        self.get_state() == StorageModuleAssignmentState::UNASSIGNED
+    }
+    pub fn is_capacity(&self) -> bool {
+        self.get_state() == StorageModuleAssignmentState::CAPACITY
+    }
+    pub fn is_data(&self) -> bool {
+        self.get_state() == StorageModuleAssignmentState::DATA
+    }
+    pub fn ledger_num(&self) -> Option<u64> {
+        self.partition_assignment?.ledger_num
+    }
+
+    pub fn get_assignment(&self) -> Result<PartitionAssignment> {
+        self.partition_assignment.ok_or(eyre!(
+            "sm {} missing expected partition assignment",
+            &self.id
+        ))
+    }
+    // Method that returns an option so we can use `?`
+    // pub fn is_data_short(&self) -> Option<()> {
+    //     if self.is_data() {
+    //         return Some(());
+    //     }
+    //     None
+    // }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageModuleAssignmentState {
+    UNASSIGNED,
+    CAPACITY,
+    DATA,
 }
 
 /// Creates required storage directory structure and empty data files
@@ -810,7 +990,7 @@ mod tests {
 
         // Validate entropy chunk can be read after writing
         let chunks = storage_module.read_chunks(ii(1, 1)).unwrap();
-        let chunk = chunks.get(&1).unwrap();
+        let chunk = chunks.get_at_point(1).unwrap();
         assert_eq!(*chunk, (entropy_chunk.clone(), ChunkType::Entropy));
 
         // Validate that uninitialized chunks are not returned by read_chunks
@@ -849,8 +1029,8 @@ mod tests {
         assert_eq!(
             chunks.into_iter().collect::<Vec<_>>(),
             [
-                (4, (data1_chunk.clone(), ChunkType::Data)),
-                (5, (data2_chunk.clone(), ChunkType::Data))
+                (ii(4, 4), (data1_chunk.clone(), ChunkType::Data)),
+                (ii(5, 5), (data2_chunk.clone(), ChunkType::Data))
             ]
         );
 
@@ -861,9 +1041,9 @@ mod tests {
         assert_eq!(
             chunks.into_iter().collect::<Vec<_>>(),
             [
-                (1, (entropy_chunk, ChunkType::Entropy)),
-                (4, (data1_chunk.clone(), ChunkType::Data)),
-                (5, (data2_chunk.clone(), ChunkType::Data))
+                (ii(1, 1), (entropy_chunk, ChunkType::Entropy)),
+                (ii(4, 4), (data1_chunk.clone(), ChunkType::Data)),
+                (ii(5, 5), (data2_chunk.clone(), ChunkType::Data))
             ]
         );
 
@@ -911,7 +1091,7 @@ mod tests {
         let _ =
             storage_module.index_transaction_data(tx_path, data_root, LedgerChunkRange(ii(0, 0)));
 
-        let chunk = Chunk {
+        let chunk = UnpackedChunk {
             data_root: H256::zero(),
             data_size: chunk_data.len() as u64,
             data_path: data_path.clone().into(),

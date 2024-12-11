@@ -70,7 +70,7 @@ async fn post_tx_and_chunks_golden_path() {
     use actix_web::{middleware::Logger, test};
     use awc::http::StatusCode;
     use irys_actors::mempool::MempoolActor;
-    use irys_types::{irys::IrysSigner, Base64, Chunk, StorageConfig, MAX_CHUNK_SIZE};
+    use irys_types::{irys::IrysSigner, Base64, UnpackedChunk, StorageConfig, MAX_CHUNK_SIZE};
 
     use rand::Rng;
 
@@ -140,7 +140,7 @@ async fn post_tx_and_chunks_golden_path() {
         let max = chunk_node.max_byte_range;
         let data_path = Base64(tx.proofs[index].proof.to_vec());
 
-        let chunk = Chunk {
+        let chunk = UnpackedChunk {
             data_root,
             data_size,
             data_path,

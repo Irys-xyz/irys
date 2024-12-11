@@ -1,6 +1,6 @@
 use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset, TxPath,
-    TxPathHash, H256,
+    TxPathHash, TxRelativeChunkIndex, H256,
 };
 use reth_codecs::Compact;
 use reth_db::{
@@ -38,6 +38,17 @@ tables! {
     /// Maps a data root to the list of submodule-relative start offsets
     table StartOffsetsByDataRoot<Key = DataRoot, Value = RelativeStartOffsets>;
 
+    /// Maps a chunk path hash to it's metadata (data_root, data_size, chunk_index)
+    table ChunkMetadataByChunkPathHash<Key = ChunkPathHash, Value = ChunkMetadata>;
+
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]
+/// stores misc chunk metadata that we can't recover from other existing tables
+pub struct ChunkMetadata {
+    pub data_root: H256, /* DataRoot */
+    pub data_size: u64,
+    pub chunk_index: u32, /* TxRelativeChunkIndex */
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]

@@ -21,7 +21,7 @@ use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initializ
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, Chunk,
+    app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, UnpackedChunk,
     H256List, IrysBlockHeader, IrysSignature, IrysTransaction, IrysTransactionHeader, PoaData,
     Signature, StorageConfig, TransactionLedger, H256, U256,
 };
@@ -153,7 +153,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
     // Send chunks to mempool
     for tx in &txs {
         for (i, (proof, chunk)) in tx.proofs.iter().zip(&tx.chunks).enumerate() {
-            let chunk = Chunk {
+            let chunk = UnpackedChunk {
                 data_root: tx.header.data_root,
                 data_size: tx.header.data_size,
                 data_path: Base64::from(proof.proof.clone()),

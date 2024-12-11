@@ -5,3 +5,5 @@ mod interval_test;
 
 pub mod storage_module;
 pub use storage_module::*;
+pub mod storage_provider;
+pub use storage_provider::*;

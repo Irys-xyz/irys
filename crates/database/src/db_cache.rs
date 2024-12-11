@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
 use arbitrary::Arbitrary;
-use irys_types::{Base64, Chunk, ChunkPathHash, Compact, TxRelativeChunkIndex, H256};
+use irys_types::{Base64, UnpackedChunk, ChunkPathHash, Compact, TxRelativeChunkIndex, H256};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
@@ -25,8 +25,8 @@ pub struct CachedChunk {
     pub data_path: Base64,
 }
 
-impl From<Chunk> for CachedChunk {
-    fn from(value: Chunk) -> Self {
+impl From<UnpackedChunk> for CachedChunk {
+    fn from(value: UnpackedChunk) -> Self {
         Self {
             chunk: Some(value.bytes),
             data_path: value.data_path,
@@ -36,8 +36,8 @@ impl From<Chunk> for CachedChunk {
 
 // TODO: figure out if/how to use lifetimes to reduce the data cloning
 // (the write to DB copies the bytes anyway so it should just need a ref)
-impl From<&Chunk> for CachedChunk {
-    fn from(value: &Chunk) -> Self {
+impl From<&UnpackedChunk> for CachedChunk {
+    fn from(value: &UnpackedChunk) -> Self {
         Self {
             chunk: Some(value.bytes.clone()),
             data_path: value.data_path.clone(),
