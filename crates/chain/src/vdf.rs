@@ -7,7 +7,7 @@ use openssl::sha;
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
-use tracing::{debug, error};
+use tracing::{debug, info};
 
 /// Allows for overriding of the vdf steps generation parameters
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ impl Default for VDFStepsConfig {
         VDFStepsConfig {
             num_checkpoints_in_vdf_step: NUM_CHECKPOINTS_IN_VDF_STEP,
             nonce_limiter_reset_frequency: NONCE_LIMITER_RESET_FREQUENCY,
-            vdf_difficulty: VDF_SHA_1S,
+            vdf_difficulty: if cfg!(test) { 7_000 } else { VDF_SHA_1S },
         }
     }
 }
@@ -76,7 +76,7 @@ pub fn run_vdf<T>(
 ) where
     T: Actor<Context = Context<T>> + Handler<Seed>,
 {
-    print!("Started run vdf steps ...");
+    info!("Started running vdf steps ...");
     let mut hasher = Sha256::new();
     let mut hash: H256 = H256::from_slice(seed.as_bytes());
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
@@ -99,15 +99,15 @@ pub fn run_vdf<T>(
         );
 
         let elapsed = now.elapsed();
-        println!("Rust vdf step duration: {:.2?}", elapsed);
+        debug!("Vdf step duration: {:.2?}", elapsed);
 
         for a in &partition_channels {
-            println!("Send Seed {}", hash.clone());
-            let _ = a.do_send(Seed(hash));
+            debug!("Send Seed {}", hash.clone());
+            a.do_send(Seed(hash));
         }
 
         if let Ok(h) = new_seed_listener.try_recv() {
-            println!("New Send Seed {}", h); // TODO: wire new seed injections from chain accepted blocks message BlockConfirmedMessage
+            debug!("New Send Seed {}", h); // TODO: wire new seed injections from chain accepted blocks message BlockConfirmedMessage
             reset_seed = h;
         }
 
@@ -197,10 +197,11 @@ pub fn vdf_sha_verification(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing::{debug, level_filters::LevelFilter};
+    use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
 
     #[actix_rt::test]
     async fn test_vdf() {
-        println!("Test started ...");
         let mut hasher = Sha256::new();
         let mut checkpoints: Vec<H256> = vec![H256::default(); NUM_CHECKPOINTS_IN_VDF_STEP];
         let mut hash: H256 = H256::random();
@@ -208,27 +209,35 @@ mod tests {
         let mut salt: U256 = U256::from(10);
         let original_salt = salt;
 
+        let _ = SubscriberBuilder::default()
+            .with_max_level(LevelFilter::DEBUG)
+            .finish()
+            .try_init();
+
+        let config = VDFStepsConfig::default();
+
+        debug!("VDF difficulty: {}", config.vdf_difficulty);
         let now = Instant::now();
         vdf_sha(
             &mut hasher,
             &mut salt,
             &mut hash,
-            NUM_CHECKPOINTS_IN_VDF_STEP,
-            VDF_SHA_1S / NUM_CHECKPOINTS_IN_VDF_STEP as u64,
+            config.num_checkpoints_in_vdf_step,
+            config.vdf_difficulty,
             &mut checkpoints,
         );
         let elapsed = now.elapsed();
-        println!("vdf step: {:.2?}", elapsed);
+        debug!("vdf step: {:.2?}", elapsed);
 
         let now = Instant::now();
         let checkpoints2 = vdf_sha_verification(
             original_salt,
             original_hash,
-            NUM_CHECKPOINTS_IN_VDF_STEP,
-            VDF_SHA_1S as usize / NUM_CHECKPOINTS_IN_VDF_STEP,
+            config.num_checkpoints_in_vdf_step,
+            config.vdf_difficulty as usize,
         );
         let elapsed = now.elapsed();
-        println!("vdf original code verification: {:.2?}", elapsed);
+        debug!("vdf original code verification: {:.2?}", elapsed);
 
         assert_eq!(checkpoints, checkpoints2, "Should be equal");
     }
@@ -240,22 +249,29 @@ mod tests {
         use std::sync::mpsc;
         use tokio::time::{sleep, Duration};
 
-        println!("Test started ...");
         type PartitionMockMiner = Mocker<PartitionMiningActor>;
+
+        let _ = SubscriberBuilder::default()
+            .with_max_level(LevelFilter::DEBUG)
+            .finish()
+            .try_init();
 
         let seed = H256::random();
         let next_seed = H256::random();
 
+        let (miner_seed_tx, miner_seed_rx) = mpsc::channel::<Seed>();
+
         let mocked_miner = PartitionMockMiner::mock(Box::new(move |msg, _ctx| {
-            println!("seed received by miner");
             let rcv_seed = *msg.downcast::<Seed>().unwrap();
-            Box::new(())
+            debug!("seed received by miner {:?}", rcv_seed);
+            miner_seed_tx.send(rcv_seed).unwrap();
+            Box::new(Some(()))
         }));
 
         let mining_addr: Addr<PartitionMockMiner> = mocked_miner.start();
         let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
-        new_seed_tx.send(next_seed);
+        new_seed_tx.send(next_seed).unwrap();
 
         std::thread::spawn(move || {
             run_vdf(
@@ -266,6 +282,9 @@ mod tests {
             )
         });
 
-        sleep(Duration::from_millis(500)).await;
+        // wait for seed to arrive
+        sleep(Duration::from_millis(1200)).await;
+
+        let _ = miner_seed_rx.recv().unwrap();
     }
 }
