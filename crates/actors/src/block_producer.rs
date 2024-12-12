@@ -124,12 +124,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 }
 
                 // Translate partition hash, chunk offset -> ledger, ledger chunk offset
-                let pa = epoch_service_addr
+                let ledger_num = epoch_service_addr
                     .send(GetPartitionAssignmentMessage(solution.partition_hash))
                     .await
                     .unwrap()
-                    .unwrap();
-                info!("parittion assignment: {:?}", pa);
+                    .map(|pa| pa.ledger_num)
+                    .flatten();
 
                 let data_txs: Vec<IrysTransactionHeader> =
                     mempool_addr.send(GetBestMempoolTxs).await.unwrap();
@@ -156,10 +156,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     previous_block_hash: prev_block_hash,
                     previous_cumulative_diff: U256::from(4000),
                     poa: PoaData {
-                        tx_path: Base64(solution.tx_path.unwrap_or(Vec::new())),
-                        data_path: Base64(solution.data_path.unwrap_or(Vec::new())),
+                        tx_path: solution.tx_path.map(|tx_path| Base64(tx_path)),
+                        data_path: solution.data_path.map(|data_path| Base64(data_path)),
                         chunk: Base64(solution.chunk),
-                        ledger_num: pa.ledger_num.unwrap() as u64,
+                        ledger_num,
                         partition_chunk_offset: solution.chunk_offset as u64,
                         partition_hash: solution.partition_hash,
                     },

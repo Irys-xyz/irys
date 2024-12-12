@@ -85,6 +85,9 @@ async fn test_blockprod() -> eyre::Result<()> {
             partition_hash: H256::random(),
             chunk_offset: 0,
             mining_address: node.config.mining_signer.address(),
+            tx_path: None,
+            data_path: None,
+            chunk: Vec::new(),
         }))
         .await?
         .unwrap();
@@ -141,6 +144,9 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
                 partition_hash: H256::random(),
                 chunk_offset: 0,
                 mining_address: node.config.mining_signer.address(),
+                tx_path: None,
+                data_path: None,
+                chunk: Vec::new(),
             }));
         let (block, reth_exec_env) = fut.await?.unwrap();
 
@@ -181,6 +187,9 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
             partition_hash: H256::random(),
             chunk_offset: 0,
             mining_address: Address::random(),
+            tx_path: None,
+            data_path: None,
+            chunk: Vec::new(),
         }))
         .await?
         .unwrap();
@@ -314,6 +323,9 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             partition_hash: H256::random(),
             chunk_offset: 0,
             mining_address: node.config.mining_signer.address(),
+            tx_path: None,
+            data_path: None,
+            chunk: Vec::new(),
         }))
         .await?
         .unwrap();

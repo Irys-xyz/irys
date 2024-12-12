@@ -106,6 +106,9 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
                 partition_hash: H256::random(),
                 chunk_offset: 0,
                 mining_address: Address::random(),
+                tx_path: None,
+                data_path: None,
+                chunk: Vec::new(),
             }))
             .await?
             .unwrap();

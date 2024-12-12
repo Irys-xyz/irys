@@ -98,12 +98,12 @@ impl IrysBlockHeader {
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(4000),
             poa: PoaData {
-                tx_path: Base64::from_str("").unwrap(),
-                data_path: Base64::from_str("").unwrap(),
+                tx_path: None,
+                data_path: None,
                 chunk: Base64::from_str("").unwrap(),
                 partition_hash: PartitionHash::zero(),
                 partition_chunk_offset: 0,
-                ledger_num: 0,
+                ledger_num: None,
             },
             reward_address: Address::ZERO,
             reward_key: Base64::from_str("").unwrap(),
@@ -135,10 +135,10 @@ impl IrysBlockHeader {
 #[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Compact, Arbitrary)]
 /// Stores deserialized fields from a `poa` (Proof of Access) JSON
 pub struct PoaData {
-    pub tx_path: Base64,
-    pub data_path: Base64,
+    pub tx_path: Option<Base64>,
+    pub data_path: Option<Base64>,
     pub chunk: Base64,
-    pub ledger_num: u64,
+    pub ledger_num: Option<u64>,
     pub partition_chunk_offset: u64, // TODO: implement Compact for u32 ?
     pub partition_hash: PartitionHash,
 }
@@ -248,12 +248,12 @@ mod tests {
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(4000),
             poa: PoaData {
-                tx_path: Base64::from_str("").unwrap(),
-                data_path: Base64::from_str("").unwrap(),
+                tx_path: None,
+                data_path: None,
                 chunk: Base64::from_str("").unwrap(),
                 partition_hash: H256::zero(),
                 partition_chunk_offset: 0,
-                ledger_num: 0,
+                ledger_num: None,
             },
             reward_address: Address::ZERO,
             reward_key: Base64::from_str("").unwrap(),
