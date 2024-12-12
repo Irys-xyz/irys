@@ -122,6 +122,9 @@ where
                 partition_hash: H256::random(),
                 chunk_offset: 0,
                 mining_address: Address::random(),
+                tx_path: None,
+                data_path: None,
+                chunk: Vec::new(),
             }))
             .await?
             .unwrap();

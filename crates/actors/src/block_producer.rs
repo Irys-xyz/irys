@@ -37,6 +37,7 @@ pub struct BlockProducerActor {
     pub chunk_storage_addr: Addr<ChunkStorageActor>,
     /// Address of the bock_index actor
     pub block_index_addr: Addr<BlockIndexActor>,
+    /// Tracks the global state of partition assignments on the protocol
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
@@ -78,7 +79,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
     fn handle(&mut self, msg: SolutionFoundMessage, ctx: &mut Self::Context) -> Self::Result {
         let solution = msg.0;
-        info!("BlockProducerActor solution received {:?}", &solution);
+        // info!("BlockProducerActor solution received {:?}", &solution);
 
         let mempool_addr = self.mempool_addr.clone();
         let block_index_addr = self.block_index_addr.clone();
@@ -114,22 +115,22 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     prev_block_header = None;
                 }
 
-                let height: u64;
-                if let Some(prev_block) = &prev_block_header {
-                    info!("{}", prev_block);
-                    height = prev_block.height + 1;
-                } else {
-                    // Genesis block config
-                    height = 0;
-                }
+                // Retrieve all the transaction headers for the previous block
+                let prev_block_header = match prev_block_header {
+                    Some(header) => header,
+                    None => {
+                        error!("No previous block header found");
+                        return None;
+                    }
+                };
 
                 // Translate partition hash, chunk offset -> ledger, ledger chunk offset
-                let pa = epoch_service_addr
+                let ledger_num = epoch_service_addr
                     .send(GetPartitionAssignmentMessage(solution.partition_hash))
                     .await
                     .unwrap()
-                    .unwrap();
-                info!("parittion assignment: {:?}", pa);
+                    .map(|pa| pa.ledger_num)
+                    .flatten();
 
                 let data_txs: Vec<IrysTransactionHeader> =
                     mempool_addr.send(GetBestMempoolTxs).await.unwrap();
@@ -145,8 +146,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
                 let mut irys_block = IrysBlockHeader {
                     block_hash,
-                    height,
-                    diff: U256::from(1000),
+                    height: prev_block_header.height + 1,
+                    diff: prev_block_header.diff,
                     cumulative_diff: U256::from(5000),
                     last_retarget: 1622543200,
                     solution_hash: H256::zero(),
@@ -156,10 +157,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     previous_block_hash: prev_block_hash,
                     previous_cumulative_diff: U256::from(4000),
                     poa: PoaData {
-                        tx_path: Base64(solution.tx_path.unwrap_or(Vec::new())),
-                        data_path: Base64(solution.data_path.unwrap_or(Vec::new())),
+                        tx_path: solution.tx_path.map(|tx_path| Base64(tx_path)),
+                        data_path: solution.data_path.map(|data_path| Base64(data_path)),
                         chunk: Base64(solution.chunk),
-                        ledger_num: pa.ledger_num.unwrap() as u64,
+                        ledger_num,
                         partition_chunk_offset: solution.chunk_offset as u64,
                         partition_hash: solution.partition_hash,
                     },
@@ -266,15 +267,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 self_addr.do_send(block_confirm_message.clone());
                 block_index_addr.do_send(block_confirm_message.clone());
                 mempool_addr.do_send(block_confirm_message.clone());
-
-                // Retrieve all the transaction headers for the previous block
-                let prev_block_header = match prev_block_header {
-                    Some(header) => header,
-                    None => {
-                        error!("No previous block header found for height {}", height);
-                        return None;
-                    }
-                };
 
                 // Get all the transactions for the previous block, error if not found
                 let txs = match prev_block_header.ledgers[Ledger::Submit]
