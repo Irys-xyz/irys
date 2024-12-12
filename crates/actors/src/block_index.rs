@@ -5,7 +5,7 @@ use std::{
 
 use actix::prelude::*;
 use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
-use irys_types::{IrysBlockHeader, IrysTransactionHeader, CHUNK_SIZE, H256};
+use irys_types::{IrysBlockHeader, IrysTransactionHeader, CHUNK_SIZE, H256, U256};
 
 use crate::block_producer::BlockConfirmedMessage;
 
@@ -21,6 +21,7 @@ struct BlockLogEntry {
     pub block_hash: H256,
     pub height: u64,
     pub timestamp: u64,
+    pub difficulty: U256,
 }
 
 impl Actor for BlockIndexActor {
@@ -89,6 +90,7 @@ impl BlockIndexActor {
             block_hash: irys_block_header.block_hash,
             height: irys_block_header.height,
             timestamp: irys_block_header.timestamp,
+            difficulty: irys_block_header.diff,
         });
 
         if self.block_log.len() % 10 == 0 {
@@ -100,8 +102,8 @@ impl BlockIndexActor {
                     Duration::from_millis(0)
                 };
                 println!(
-                    "block - height: {} timestamp: {} duration: {:?}",
-                    entry.height, entry.timestamp, duration
+                    "block - height: {} timestamp: {} duration: {:?} diff: {}",
+                    entry.height, entry.timestamp, duration, entry.difficulty
                 );
                 prev_entry = Some(entry);
             }
