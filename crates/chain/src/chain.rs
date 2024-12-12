@@ -238,7 +238,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
                         db.clone(),
-                        block_producer_addr.clone(),
+                        block_producer_addr.clone().recipient(),
                         mining_broadcaster_addr.clone(),
                         sm.clone(),
                         false, // do not start mining automatically
