@@ -115,14 +115,14 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     prev_block_header = None;
                 }
 
-                let height: u64;
-                if let Some(prev_block) = &prev_block_header {
-                    // info!("{}", prev_block);
-                    height = prev_block.height + 1;
-                } else {
-                    // Genesis block config
-                    height = 0;
-                }
+                // Retrieve all the transaction headers for the previous block
+                let prev_block_header = match prev_block_header {
+                    Some(header) => header,
+                    None => {
+                        error!("No previous block header found");
+                        return None;
+                    }
+                };
 
                 // Translate partition hash, chunk offset -> ledger, ledger chunk offset
                 let ledger_num = epoch_service_addr
@@ -146,8 +146,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
                 let mut irys_block = IrysBlockHeader {
                     block_hash,
-                    height,
-                    diff: U256::from(1000),
+                    height: prev_block_header.height + 1,
+                    diff: prev_block_header.diff,
                     cumulative_diff: U256::from(5000),
                     last_retarget: 1622543200,
                     solution_hash: H256::zero(),
@@ -266,15 +266,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 self_addr.do_send(block_confirm_message.clone());
                 block_index_addr.do_send(block_confirm_message.clone());
                 mempool_addr.do_send(block_confirm_message.clone());
-
-                // Retrieve all the transaction headers for the previous block
-                let prev_block_header = match prev_block_header {
-                    Some(header) => header,
-                    None => {
-                        error!("No previous block header found for height {}", height);
-                        return None;
-                    }
-                };
 
                 // Get all the transactions for the previous block, error if not found
                 let txs = match prev_block_header.ledgers[Ledger::Submit]
