@@ -11,6 +11,7 @@ use irys_actors::{
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
+    mining_broadcaster::MiningBroadcaster,
     packing::{PackingActor, PackingRequest},
     ActorAddresses,
 };
@@ -230,12 +231,15 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let block_producer_addr = block_producer_actor.start();
 
                 let mut part_actors = Vec::new();
+                let mining_broadcaster = MiningBroadcaster::new();
+                let mining_broadcaster_addr = mining_broadcaster.start();
 
                 for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
                         db.clone(),
                         block_producer_addr.clone(),
+                        mining_broadcaster_addr.clone(),
                         sm.clone(),
                         false, // do not start mining automatically
                     );
@@ -243,7 +247,9 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 }
 
                 let part_actors_clone = part_actors.clone();
-                std::thread::spawn(move || run_vdf(H256::random(), new_seed_rx, part_actors));
+                std::thread::spawn(move || {
+                    run_vdf(H256::random(), new_seed_rx, mining_broadcaster_addr.clone())
+                });
 
                 let packing_actor_addr =
                     PackingActor::new(Handle::current(), reth_node.task_executor.clone(), None)

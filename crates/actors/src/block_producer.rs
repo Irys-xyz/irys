@@ -5,6 +5,7 @@ use std::{
 };
 
 use actix::prelude::*;
+use actors::mocker::Mocker;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
 use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
@@ -25,6 +26,13 @@ use crate::{
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool::{GetBestMempoolTxs, MempoolActor},
 };
+
+/// Used to mock up a BlockProducerActor
+pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
+
+/// A mocked BlockProducerActor only needs to implement SolutionFoundMessage
+#[derive(Debug)]
+pub struct MockedBlockProducerAddr(pub Recipient<SolutionFoundMessage>);
 
 /// BlockProducerActor creates blocks from mining solutions
 #[derive(Debug)]

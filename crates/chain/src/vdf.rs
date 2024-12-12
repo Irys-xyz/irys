@@ -1,5 +1,8 @@
-use actix::Addr;
-use irys_actors::mining::{PartitionMiningActor, Seed};
+use actix::{dev::ToEnvelope, Actor, Addr, Handler};
+use irys_actors::{
+    mining::{PartitionMiningActor, Seed},
+    mining_broadcaster::{BroadcastDifficultyUpdate, BroadcastMiningSeed, MiningBroadcaster},
+};
 use irys_types::{H256, HASHES_PER_CHECKPOINT, NUM_CHECKPOINTS_IN_VDF_STEP, VDF_SHA_1S};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::Receiver;
@@ -8,7 +11,7 @@ use tracing::debug;
 pub fn run_vdf(
     seed: H256,
     new_seed_listener: Receiver<H256>,
-    partition_channels: Vec<Addr<PartitionMiningActor>>,
+    mining_broadcaster: Addr<MiningBroadcaster>,
 ) {
     let mut hasher = Sha256::new();
 
@@ -26,10 +29,8 @@ pub fn run_vdf(
             }
         }
 
-        for a in &partition_channels {
-            debug!("Seed created {}", hash.clone());
-            a.do_send(Seed(hash));
-        }
+        debug!("Seed created {}", hash.clone());
+        mining_broadcaster.do_send(BroadcastMiningSeed(Seed(hash)));
 
         if let Ok(h) = new_seed_listener.try_recv() {
             hash = h;
