@@ -30,7 +30,7 @@ pub struct VDFLimiterInfo {
     /// The hash of the latest block mined below the current reset line.
     pub seed: H256,
     /// The hash of the latest block mined below the future reset line.
-    pub next_seed: H256, // TODO: this is H384 type in arweave
+    pub next_seed: H256,
     /// The output of the latest step of the previous block
     pub prev_output: H256,
     /// VDF_CHECKPOINT_COUNT_IN_STEP checkpoints from the most recent step in the nonce limiter process.

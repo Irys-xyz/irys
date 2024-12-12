@@ -40,31 +40,24 @@ pub fn step_number_to_salt_number(config: &VDFStepsConfig, step_number: u64) -> 
     }
 }
 
-/// Takes a checkpoint seed and applies the SHA384 block hash seed to it as
+/// Takes a checkpoint seed and applies the SHA256 block hash seed to it as
 /// entropy. First it SHA256 hashes the `reset_seed` then SHA256 hashes the
 /// output together with the `seed` hash.
 ///
 /// # Arguments
 ///
 /// * `seed` - The bytes of a SHA256 checkpoint hash
-/// * `reset_seed` - The bytes of a SHA384 block hash used as entropy
+/// * `reset_seed` - The bytes of a SHA256 block hash used as entropy
 ///
 /// # Returns
 ///
 /// A new SHA256 seed hash containing the `reset_seed` entropy to use for
 /// calculating checkpoints after the reset.
 pub fn apply_reset_seed(seed: H256, reset_seed: H256) -> H256 {
-    let mut hasher = sha::Sha256::new();
-
-    // First hash the reset_seed (a sha348 block hash)
-    // (You can see this logic in ar_nonce_limiter:mix_seed)
-    hasher.update(reset_seed.as_bytes());
-    let reset_hash = hasher.finish();
-
-    // Then merge the current seed with the SHA256 has of the block hash.
+    // Merge the current seed with the SHA256 has of the block hash.
     let mut hasher = sha::Sha256::new();
     hasher.update(seed.as_bytes());
-    hasher.update(&reset_hash);
+    hasher.update(reset_seed.as_bytes());
     H256::from(hasher.finish())
 }
 
@@ -130,8 +123,7 @@ pub fn vdf_sha(
     let mut local_salt: [u8; 32] = [0; 32];
 
     for checkpoint_idx in 0..num_checkpoints {
-        // BigEndian to match erlang TODO: check this as there is no erlang now ?
-        salt.to_big_endian(&mut local_salt);
+        salt.to_little_endian(&mut local_salt);
 
         for _ in 0..num_iterations {
             hasher.update(&local_salt);
@@ -147,7 +139,7 @@ pub fn vdf_sha(
     }
 }
 
-/// Code extracted from Arweave vdf verification code
+/// Vdf verification code
 pub fn vdf_sha_verification(
     salt: U256,
     seed: H256,
@@ -167,8 +159,7 @@ pub fn vdf_sha_verification(
             local_seed = checkpoints[checkpoint_idx - 1];
         }
 
-        // BigEndian to match erlang
-        local_salt.to_big_endian(salt_bytes.as_mut());
+        local_salt.to_little_endian(salt_bytes.as_mut());
 
         // Hash salt+seed
         let mut hasher = sha::Sha256::new();
