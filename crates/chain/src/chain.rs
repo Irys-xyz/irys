@@ -24,8 +24,9 @@ use irys_storage::{
     initialize_storage_files, ChunkType, StorageModule, StorageModuleVec, StorageModules,
 };
 use irys_types::{
-    app_state::DatabaseProvider, block_production::PartitionId, partition::PartitionHash,
-    StorageConfig, H256, PACKING_SHA_1_5_S,
+    app_state::DatabaseProvider, block_production::PartitionId, difficulty_adjustment_config,
+    get_initial_difficulty, partition::PartitionHash, DifficultyAdjustmentConfig, StorageConfig,
+    H256, PACKING_SHA_1_5_S, U256,
 };
 use reth::{
     builder::FullNode,
@@ -39,6 +40,7 @@ use std::{
     cmp::min,
     collections::HashMap,
     sync::{mpsc, Arc, RwLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tracing::{debug, info};
 
@@ -78,9 +80,15 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
     let (reth_handle_sender, reth_handle_receiver) =
         oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
     let (irys_node_handle_sender, irys_node_handle_receiver) = oneshot::channel::<IrysNodeCtx>();
-    let irys_genesis = node_config.chainspec_builder.genesis();
-    let arc_genesis = Arc::new(irys_genesis);
+    let mut irys_genesis = node_config.chainspec_builder.genesis();
     let arc_config = Arc::new(node_config);
+    let difficulty_adjustment_config = DifficultyAdjustmentConfig {
+        target_block_time: 50_0000, // 5 seconds
+        adjustment_interval: 10,    // every 10 blocks
+        adjustment_factor: 4.0,     // No more than 4x or 1/4th with each adjustment
+        min_difficulty: U256::one(),
+        max_difficulty: U256::MAX,
+    };
     let storage_config_for_testing = StorageConfig {
         chunk_size: 32,
         num_chunks_in_partition: 10,
@@ -90,6 +98,16 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
         min_writes_before_sync: 1,
         entropy_packing_iterations: PACKING_SHA_1_5_S,
     };
+
+    irys_genesis.diff = get_initial_difficulty(
+        &difficulty_adjustment_config,
+        &storage_config_for_testing,
+        3,
+    );
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    irys_genesis.timestamp = now.as_millis() as u64;
+    let arc_genesis = Arc::new(irys_genesis);
+
     let arc_storage_config = Arc::new(storage_config_for_testing);
     let mut storage_modules: StorageModuleVec = Vec::new();
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(

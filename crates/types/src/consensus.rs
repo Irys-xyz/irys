@@ -1,4 +1,11 @@
+/// Block time in milliseconds
 pub const BLOCK_TIME: u64 = 30_000;
+
+/// 2 weeks worth of blocks
+pub const DIFFICULTY_ADJUSTMENT_INTERVAL: u64 = (24u64 * 60 * 60 * 1000).div_ceil(BLOCK_TIME) * 14;
+
+/// A difficulty adjustment can be 4x larger or 1/4th the current difficulty
+pub const DIFFICULTY_ADJUSTMENT_FACTOR: f64 = 4.0;
 
 pub const CHUNK_SIZE: u64 = 256 * 1024;
 
@@ -19,7 +26,7 @@ pub const NUM_CHECKPOINTS_IN_VDF_STEP: usize = 25;
 
 // Typical ryzen 5900X iterations for 1 sec
 // pub const VDF_SHA_1S: u64 = 15_000_000;
-pub const VDF_SHA_1S: u64 = 1_000_000;
+pub const VDF_SHA_1S: u64 = 350_000;
 pub const PACKING_SHA_1_5_S: u32 = 22_500_000;
 
 pub const HASHES_PER_CHECKPOINT: u64 = VDF_SHA_1S / NUM_CHECKPOINTS_IN_VDF_STEP as u64;
