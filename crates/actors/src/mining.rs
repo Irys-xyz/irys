@@ -4,7 +4,6 @@ use crate::mining_broadcaster::{
 };
 use actix::prelude::*;
 use actix::{Actor, Addr, Context, Handler, Message};
-use dev::ToEnvelope;
 use irys_storage::{ie, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::Address;
@@ -12,9 +11,8 @@ use irys_types::{block_production::SolutionContext, H256, U256};
 use openssl::sha;
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use reth::primitives::Block;
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 pub struct PartitionMiningActor {
     mining_address: Address,
@@ -23,6 +21,7 @@ pub struct PartitionMiningActor {
     mining_broadcaster_addr: Addr<MiningBroadcaster>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
+    difficulty: U256,
 }
 
 impl PartitionMiningActor {
@@ -41,14 +40,11 @@ impl PartitionMiningActor {
             mining_broadcaster_addr,
             storage_module,
             should_mine: start_mining,
+            difficulty: U256::zero(),
         }
     }
 
-    fn mine_partition_with_seed(
-        &mut self,
-        seed: H256,
-        difficulty: U256,
-    ) -> eyre::Result<Option<SolutionContext>> {
+    fn mine_partition_with_seed(&mut self, seed: H256) -> eyre::Result<Option<SolutionContext>> {
         let partition_hash = match self.storage_module.partition_hash() {
             Some(p) => p,
             None => return Ok(None),
@@ -77,14 +73,20 @@ impl PartitionMiningActor {
             start_chunk_index as u32 + config.num_chunks_in_recall_range as u32,
         ))?;
 
-        for (index, (_chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
+        for (index, (chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
             let solution_chunk_offset = (start_chunk_index + index) as u32;
             let (tx_path, data_path) = self
                 .storage_module
                 .read_tx_data_path(solution_chunk_offset as u64)?;
 
-            if hash_to_number(&sha::sha256(chunk_bytes)) >= difficulty {
+            let mut hasher = sha::Sha256::new();
+            hasher.update(chunk_bytes);
+            hasher.update(&chunk_offset.to_le_bytes());
+            hasher.update(seed.as_bytes());
+            let test_solution = hash_to_number(&hasher.finish());
+            //println!("mined: {}", test_solution);
+            if test_solution >= self.difficulty {
                 debug!("SOLUTION FOUND!!!!!!!!!");
                 let solution = SolutionContext {
                     partition_hash,
@@ -140,15 +142,13 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
             return ();
         }
 
-        let difficulty = get_latest_difficulty(&self.database_provider);
-
         debug!(
             "Partition {} -- looking for solution with difficulty >= {}",
             self.storage_module.partition_hash().unwrap(),
-            difficulty
+            self.difficulty
         );
 
-        match self.mine_partition_with_seed(seed.into_inner(), difficulty) {
+        match self.mine_partition_with_seed(seed.into_inner()) {
             Ok(Some(s)) => match self.block_producer_actor.try_send(SolutionFoundMessage(s)) {
                 Ok(_) => {
                     debug!("Solution sent!");
@@ -168,8 +168,7 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {
-        let current_block_header = Some(msg.0).unwrap();
-        // Any additional logic needed when difficulty is updated
+        self.difficulty = msg.0.diff;
     }
 }
 
@@ -195,10 +194,6 @@ impl Handler<MiningControl> for PartitionMiningActor {
         );
         self.should_mine = should_mine
     }
-}
-
-fn get_latest_difficulty(_db: &DatabaseProvider) -> U256 {
-    U256::zero()
 }
 
 fn hash_to_number(hash: &[u8]) -> U256 {

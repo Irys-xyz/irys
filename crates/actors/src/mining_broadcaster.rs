@@ -69,6 +69,7 @@ impl Handler<BroadcastMiningSeed> for MiningBroadcaster {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
+        println!("Mining: {:?}", msg.0);
         self.subscribers.retain(|addr| addr.connected());
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());

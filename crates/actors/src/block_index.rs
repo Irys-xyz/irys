@@ -95,16 +95,14 @@ impl BlockIndexActor {
 
         if self.block_log.len() % 10 == 0 {
             let mut prev_entry: Option<&BlockLogEntry> = None;
+            println!("block_height, block_time(ms)");
             for entry in &self.block_log {
                 let duration = if let Some(ref pe) = prev_entry {
                     Duration::from_millis(entry.timestamp - pe.timestamp)
                 } else {
                     Duration::from_millis(0)
                 };
-                println!(
-                    "block - height: {} timestamp: {} duration: {:?} diff: {}",
-                    entry.height, entry.timestamp, duration, entry.difficulty
-                );
+                println!("{},{:?}", entry.height, duration.as_millis(),);
                 prev_entry = Some(entry);
             }
         }

@@ -26,7 +26,7 @@ pub const NUM_CHECKPOINTS_IN_VDF_STEP: usize = 25;
 
 // Typical ryzen 5900X iterations for 1 sec
 // pub const VDF_SHA_1S: u64 = 15_000_000;
-pub const VDF_SHA_1S: u64 = 350_000;
+pub const VDF_SHA_1S: u64 = 250_000; // We go way slow with openssl sha for now
 pub const PACKING_SHA_1_5_S: u32 = 22_500_000;
 
 pub const HASHES_PER_CHECKPOINT: u64 = VDF_SHA_1S / NUM_CHECKPOINTS_IN_VDF_STEP as u64;

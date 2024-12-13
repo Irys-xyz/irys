@@ -11,7 +11,7 @@ use irys_actors::{
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
-    mining_broadcaster::MiningBroadcaster,
+    mining_broadcaster::{BroadcastDifficultyUpdate, MiningBroadcaster},
     packing::{PackingActor, PackingRequest},
     ActorAddresses,
 };
@@ -84,9 +84,9 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
     let mut irys_genesis = node_config.chainspec_builder.genesis();
     let arc_config = Arc::new(node_config);
     let difficulty_adjustment_config = DifficultyAdjustmentConfig {
-        target_block_time: 50_0000, // 5 seconds
-        adjustment_interval: 10,    // every 10 blocks
-        adjustment_factor: 4.0,     // No more than 4x or 1/4th with each adjustment
+        target_block_time: 5_000, // 5 seconds
+        adjustment_interval: 10,  // every 10 blocks
+        adjustment_factor: 4.0,   // No more than 4x or 1/4th with each adjustment
         min_difficulty: U256::one(),
         max_difficulty: U256::MAX,
     };
@@ -245,6 +245,12 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     );
                     part_actors.push(partition_mining_actor.start());
                 }
+
+                // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
+                tokio::task::yield_now().await;
+
+                // Let the partition actors know about the genesis difficulty
+                mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(arc_genesis.clone()));
 
                 let part_actors_clone = part_actors.clone();
                 std::thread::spawn(move || {
