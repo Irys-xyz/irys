@@ -20,7 +20,7 @@ pub struct BlockIndexActor {
 struct BlockLogEntry {
     pub block_hash: H256,
     pub height: u64,
-    pub timestamp: u64,
+    pub timestamp: u128,
     pub difficulty: U256,
 }
 
@@ -95,14 +95,14 @@ impl BlockIndexActor {
 
         if self.block_log.len() % 10 == 0 {
             let mut prev_entry: Option<&BlockLogEntry> = None;
-            println!("block_height, block_time(ms)");
+            println!("block_height, block_time(ms), difficulty");
             for entry in &self.block_log {
                 let duration = if let Some(ref pe) = prev_entry {
-                    Duration::from_millis(entry.timestamp - pe.timestamp)
+                    Duration::from_millis((entry.timestamp - pe.timestamp) as u64)
                 } else {
                     Duration::from_millis(0)
                 };
-                println!("{},{:?}", entry.height, duration.as_millis(),);
+                println!("{}, {:?}, {}", entry.height, duration, entry.difficulty);
                 prev_entry = Some(entry);
             }
         }

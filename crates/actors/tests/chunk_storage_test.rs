@@ -187,7 +187,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let irys_block = IrysBlockHeader {
         diff: U256::from(1000),
         cumulative_diff: U256::from(5000),
-        last_retarget: 1622543200,
+        last_diff_timestamp: 1622543200,
         solution_hash: H256::zero(),
         previous_solution_hash: H256::zero(),
         last_epoch_hash: H256::random(),
@@ -209,7 +209,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
         signature: IrysSignature {
             reth_signature: Signature::test_signature(),
         },
-        timestamp: now.as_millis() as u64,
+        timestamp: now.as_millis(),
         ledgers: vec![
             // Permanent Publish Ledger
             TransactionLedger {

@@ -1,11 +1,14 @@
-/// Block time in milliseconds
-pub const BLOCK_TIME: u64 = 30_000;
+/// Block time in seconds
+pub const BLOCK_TIME: u64 = 30;
 
 /// 2 weeks worth of blocks
 pub const DIFFICULTY_ADJUSTMENT_INTERVAL: u64 = (24u64 * 60 * 60 * 1000).div_ceil(BLOCK_TIME) * 14;
 
 /// A difficulty adjustment can be 4x larger or 1/4th the current difficulty
-pub const DIFFICULTY_ADJUSTMENT_FACTOR: f64 = 4.0;
+pub const MAX_DIFFICULTY_ADJUSTMENT_FACTOR: u64 = 4;
+
+// A 10% change must be required before a difficulty adjustment will occur
+pub const MIN_DIFFICULTY_ADJUSTMENT_FACTOR: f64 = 0.1;
 
 pub const CHUNK_SIZE: u64 = 256 * 1024;
 

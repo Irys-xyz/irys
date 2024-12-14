@@ -11,7 +11,7 @@ use irys_actors::{
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
-    mining_broadcaster::{BroadcastDifficultyUpdate, MiningBroadcaster},
+    mining_broadcaster::{self, BroadcastDifficultyUpdate, MiningBroadcaster},
     packing::{PackingActor, PackingRequest},
     ActorAddresses,
 };
@@ -83,10 +83,11 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
     let (irys_node_handle_sender, irys_node_handle_receiver) = oneshot::channel::<IrysNodeCtx>();
     let mut irys_genesis = node_config.chainspec_builder.genesis();
     let arc_config = Arc::new(node_config);
-    let difficulty_adjustment_config = DifficultyAdjustmentConfig {
-        target_block_time: 5_000, // 5 seconds
-        adjustment_interval: 10,  // every 10 blocks
-        adjustment_factor: 4.0,   // No more than 4x or 1/4th with each adjustment
+    let mut difficulty_adjustment_config = DifficultyAdjustmentConfig {
+        target_block_time: 1,        // 5 seconds
+        adjustment_interval: 10,     // every X blocks
+        max_adjustment_factor: 4,    // No more than 4x or 1/4th with each adjustment
+        min_adjustment_factor: 0.25, // a minimum 25% adjustment threshold
         min_difficulty: U256::one(),
         max_difficulty: U256::MAX,
     };
@@ -105,8 +106,10 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
         &storage_config_for_testing,
         3,
     );
+    difficulty_adjustment_config.target_block_time = 5;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    irys_genesis.timestamp = now.as_millis() as u64;
+    irys_genesis.timestamp = now.as_millis();
+    irys_genesis.last_diff_timestamp = irys_genesis.timestamp;
     let arc_genesis = Arc::new(irys_genesis);
 
     let arc_storage_config = Arc::new(storage_config_for_testing);
@@ -220,19 +223,22 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
+                let mining_broadcaster = MiningBroadcaster::new();
+                let mining_broadcaster_addr = mining_broadcaster.start();
+
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
                     mempool_actor_addr.clone(),
                     chunk_storage_addr.clone(),
                     block_index_actor_addr.clone(),
+                    mining_broadcaster_addr.clone(),
                     epoch_service_actor_addr.clone(),
                     reth_node.clone(),
+                    difficulty_adjustment_config.clone(),
                 );
                 let block_producer_addr = block_producer_actor.start();
 
                 let mut part_actors = Vec::new();
-                let mining_broadcaster = MiningBroadcaster::new();
-                let mining_broadcaster_addr = mining_broadcaster.start();
 
                 for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(

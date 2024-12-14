@@ -11,7 +11,8 @@ use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, Address, Base64, H256List,
+    app_state::DatabaseProvider, block_production::SolutionContext, compute_difficulty_adjustment,
+    difficulty_adjustment_config, Address, Base64, DifficultyAdjustmentConfig, H256List,
     IrysBlockHeader, IrysSignature, IrysTransactionHeader, PoaData, Signature, TransactionLedger,
     H256, U256,
 };
@@ -25,6 +26,7 @@ use crate::{
     chunk_storage::ChunkStorageActor,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool::{GetBestMempoolTxs, MempoolActor},
+    mining_broadcaster::{self, BroadcastDifficultyUpdate, MiningBroadcaster},
 };
 
 /// Used to mock up a BlockProducerActor
@@ -45,10 +47,14 @@ pub struct BlockProducerActor {
     pub chunk_storage_addr: Addr<ChunkStorageActor>,
     /// Address of the bock_index actor
     pub block_index_addr: Addr<BlockIndexActor>,
+    /// Enables broadcast messages to partition mining actors
+    pub mining_broadcaster_addr: Addr<MiningBroadcaster>,
     /// Tracks the global state of partition assignments on the protocol
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
+    /// Difficulty adjustment parameters for the Irys Protocol
+    pub difficulty_config: DifficultyAdjustmentConfig,
 }
 
 impl BlockProducerActor {
@@ -58,16 +64,20 @@ impl BlockProducerActor {
         mempool_addr: Addr<MempoolActor>,
         chunk_storage_addr: Addr<ChunkStorageActor>,
         block_index_addr: Addr<BlockIndexActor>,
+        mining_broadcaster_addr: Addr<MiningBroadcaster>,
         epoch_service: Addr<EpochServiceActor>,
         reth_provider: RethNodeProvider,
+        difficulty_config: DifficultyAdjustmentConfig,
     ) -> Self {
         Self {
             db,
             mempool_addr,
             chunk_storage_addr,
             block_index_addr,
+            mining_broadcaster_addr,
             epoch_service,
             reth_provider,
+            difficulty_config,
         }
     }
 }
@@ -91,15 +101,15 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let mempool_addr = self.mempool_addr.clone();
         let block_index_addr = self.block_index_addr.clone();
-
         let epoch_service_addr = self.epoch_service.clone();
-
         let chunk_storage_addr = self.chunk_storage_addr.clone();
+        let mining_broadcaster_addr = self.mining_broadcaster_addr.clone();
         info!("After");
 
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
         let self_addr = ctx.address();
+        let difficulty_config = self.difficulty_config.clone();
 
         AtomicResponse::new(Box::pin(
             async move {
@@ -146,18 +156,45 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let data_tx_ids = data_txs.iter().map(|h| h.id.clone()).collect::<Vec<H256>>();
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
+                // Difficulty adjustment logic
+                let current_timestamp = now.as_millis();
+                let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
+                let last_difficulty = prev_block_header.diff;
+                let block_height = prev_block_header.height + 1;
+                let is_difficulty_updated;
+
+                // Determine the current difficulty
+                let diff = if let Some(computed_diff) = compute_difficulty_adjustment(
+                    block_height,
+                    current_timestamp,
+                    last_diff_timestamp,
+                    last_difficulty,
+                    &difficulty_config,
+                ) {
+                    if computed_diff == last_difficulty {
+                        info!("Maintained difficulty at block_height: {}", block_height)
+                    } else {
+                        info!("New difficulty computed at block_height: {}", block_height);
+                    }
+                    last_diff_timestamp = current_timestamp;
+                    is_difficulty_updated = true;
+                    computed_diff
+                } else {
+                    is_difficulty_updated = false;
+                    prev_block_header.diff
+                };
+
                 // TODO: Hash the block signature to create a block_hash
                 // Generate a very stupid block_hash right now which is just
                 // the hash of the timestamp
-                let timestamp = now.as_millis() as u64;
-                let block_hash = hash_sha256(&timestamp.to_le_bytes());
+                let block_hash = hash_sha256(&current_timestamp.to_le_bytes());
 
                 let mut irys_block = IrysBlockHeader {
                     block_hash,
-                    height: prev_block_header.height + 1,
-                    diff: prev_block_header.diff,
+                    height: block_height,
+                    diff,
                     cumulative_diff: U256::from(5000),
-                    last_retarget: 1622543200,
+                    last_diff_timestamp: last_diff_timestamp,
                     solution_hash: H256::zero(),
                     previous_solution_hash: H256::zero(),
                     last_epoch_hash: H256::random(),
@@ -177,7 +214,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     signature: IrysSignature {
                         reth_signature: Signature::test_signature(),
                     },
-                    timestamp,
+                    timestamp: current_timestamp,
                     ledgers: vec![
                         // Permanent Publish Ledger
                         TransactionLedger {
@@ -295,6 +332,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         return None;
                     }
                 };
+
+                if is_difficulty_updated {
+                    mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
+                }
 
                 chunk_storage_addr.do_send(BlockFinalizedMessage {
                     block_header: Arc::new(prev_block_header),

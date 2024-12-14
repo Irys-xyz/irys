@@ -4,15 +4,14 @@
 //! making them easy to reference and maintain.
 use std::{
     fmt,
-    ops::{Index, IndexMut},
     str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
-    partition::PartitionHash, resolve_proofs, u64_stringify, validate_path, Arbitrary, Base64,
-    Compact, DataRootLeave, H256List, IrysSignature, IrysTransactionHeader, Proof, Signature, H256,
-    U256,
+    partition::PartitionHash, resolve_proofs, u64_stringify, Arbitrary, Base64, Compact,
+    DataRootLeave, H256List, IrysSignature, IrysTransactionHeader, Proof, Signature, H256, U256,
 };
 
 use alloy_primitives::{Address, B256};
@@ -36,8 +35,8 @@ pub struct IrysBlockHeader {
     /// produce the past blocks including this one.
     pub cumulative_diff: U256,
 
-    /// Unix timestamp of the last difficulty adjustment
-    pub last_retarget: u64,
+    /// timestamp (in milliseconds) since UNIX_EPOCH of the last difficulty adjustment
+    pub last_diff_timestamp: u128,
 
     /// The solution hash for the block
     pub solution_hash: H256,
@@ -69,8 +68,8 @@ pub struct IrysBlockHeader {
     /// The block signature
     pub signature: IrysSignature,
 
-    /// timestamp of when the block was discovered/produced
-    pub timestamp: u64,
+    /// timestamp (in milliseconds) since UNIX_EPOCH of when the block was discovered/produced
+    pub timestamp: u128,
 
     /// A list of transaction ledgers, one for each active data ledger
     /// Maintains the block->tx_root->data_root relationship for each block
@@ -83,12 +82,13 @@ pub struct IrysBlockHeader {
 impl IrysBlockHeader {
     pub fn new() -> Self {
         let txids = H256List::new();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
         // Create a sample IrysBlockHeader object with mock data
         IrysBlockHeader {
             diff: U256::from(1000),
             cumulative_diff: U256::from(5000),
-            last_retarget: 1622543200,
+            last_diff_timestamp: 1622543200,
             solution_hash: H256::zero(),
             previous_solution_hash: H256::zero(),
             last_epoch_hash: H256::random(),
@@ -110,7 +110,7 @@ impl IrysBlockHeader {
             signature: IrysSignature {
                 reth_signature: Signature::test_signature(),
             },
-            timestamp: 1622543200,
+            timestamp: now.as_millis(),
             ledgers: vec![
                 // Permanent Publish Ledger
                 TransactionLedger {
@@ -223,6 +223,8 @@ impl fmt::Display for IrysBlockHeader {
 
 #[cfg(test)]
 mod tests {
+    use crate::validate_path;
+
     use super::*;
     use alloy_primitives::Signature;
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -238,7 +240,7 @@ mod tests {
         let mut header = IrysBlockHeader {
             diff: U256::from(1000),
             cumulative_diff: U256::from(5000),
-            last_retarget: 1622543200,
+            last_diff_timestamp: 1622543200,
             solution_hash: H256::zero(),
             previous_solution_hash: H256::zero(),
             last_epoch_hash: H256::random(),
