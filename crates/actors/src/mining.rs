@@ -241,25 +241,25 @@ mod tests {
                 *msg.downcast::<SolutionFoundMessage>().unwrap();
             let solution = solution_message.0;
             assert_eq!(
-                partition_hash, solution.0.partition_hash,
+                partition_hash, solution.partition_hash,
                 "Not expected partition"
             );
             assert!(
-                solution.0.chunk_offset < chunks_number * 2,
+                solution.chunk_offset < chunks_number * 2,
                 "Not expected oftset"
             );
             assert_eq!(
-                mining_address, solution.0.mining_address,
+                mining_address, solution.mining_address,
                 "Not expected partition"
             );
             assert_eq!(
                 Some(tx_path.to_vec()),
-                solution.0.tx_path,
+                solution.tx_path,
                 "Not expected partition"
             );
             assert_eq!(
                 Some(data_path.to_vec()),
-                solution.0.data_path,
+                solution.data_path,
                 "Not expected partition"
             );
             Box::new(())
