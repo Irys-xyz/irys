@@ -25,7 +25,6 @@ pub const NONCE_LIMITER_RESET_FREQUENCY: usize = 10 * 120;
 pub const NUM_CHECKPOINTS_IN_VDF_STEP: usize = 25;
 
 pub const VDF_SHA_1S: u64 = 530_000;
-
 pub const PACKING_SHA_1_5_S: u32 = 22_500_000;
 
 pub const IRYS_CHAIN_ID: u64 = 69727973; // "irys" in ascii
