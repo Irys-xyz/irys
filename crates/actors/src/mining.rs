@@ -1,7 +1,10 @@
-use std::sync::Arc;
-
 use crate::block_producer::{BlockProducerActor, SolutionFoundMessage};
+use crate::mining_broadcaster::{
+    self, BroadcastDifficultyUpdate, BroadcastMiningSeed, MiningBroadcaster, Subscribe, Unsubscribe,
+};
+use actix::prelude::*;
 use actix::{Actor, Addr, Context, Handler, Message};
+use dev::ToEnvelope;
 use irys_storage::{ie, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::Address;
@@ -9,27 +12,25 @@ use irys_types::{block_production::SolutionContext, H256, U256};
 use openssl::sha;
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
+use reth::primitives::Block;
+use std::sync::Arc;
 use tracing::{debug, error};
 
-pub struct PartitionMiningActor<T = BlockProducerActor>
-where
-    T: Actor,
-{
+pub struct PartitionMiningActor {
     mining_address: Address,
     database_provider: DatabaseProvider,
-    block_producer_actor: Addr<T>,
+    block_producer_actor: Recipient<SolutionFoundMessage>,
+    mining_broadcaster_addr: Addr<MiningBroadcaster>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
 }
 
-impl<T> PartitionMiningActor<T>
-where
-    T: Actor,
-{
+impl PartitionMiningActor {
     pub fn new(
         mining_address: Address,
         database_provider: DatabaseProvider,
-        block_producer_addr: Addr<T>,
+        block_producer_addr: Recipient<SolutionFoundMessage>,
+        mining_broadcaster_addr: Addr<MiningBroadcaster>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
     ) -> Self {
@@ -37,6 +38,7 @@ where
             mining_address,
             database_provider,
             block_producer_actor: block_producer_addr,
+            mining_broadcaster_addr,
             storage_module,
             should_mine: start_mining,
         }
@@ -104,15 +106,22 @@ where
     }
 }
 
-impl<T> Actor for PartitionMiningActor<T>
-where
-    T: Actor,
-{
+impl Actor for PartitionMiningActor {
     type Context = Context<Self>;
+
+    fn started(&mut self, ctx: &mut Context<Self>) {
+        let broadcaster = &self.mining_broadcaster_addr;
+        broadcaster.do_send(Subscribe(ctx.address()));
+    }
+
+    fn stopping(&mut self, ctx: &mut Context<Self>) -> Running {
+        let broadcaster = &self.mining_broadcaster_addr;
+        broadcaster.do_send(Unsubscribe(ctx.address()));
+        Running::Stop
+    }
 }
 
-#[derive(Message, Debug, PartialEq)]
-#[rtype(result = "()")]
+#[derive(Debug, Clone)]
 pub struct Seed(pub H256);
 
 impl Seed {
@@ -121,13 +130,11 @@ impl Seed {
     }
 }
 
-impl<T> Handler<Seed> for PartitionMiningActor<T>
-where
-    T: Actor<Context = Context<T>> + Handler<SolutionFoundMessage>,
-{
+impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
     type Result = ();
 
-    fn handle(&mut self, seed: Seed, _ctx: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
+        let seed = msg.0;
         if !self.should_mine {
             debug!("Mining disabled, skipping seed {:?}", seed);
             return ();
@@ -154,7 +161,15 @@ where
             }
             Err(err) => error!("Error in hanling mining solution {:?}", err),
         };
-        ()
+    }
+}
+
+impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
+    type Result = ();
+
+    fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {
+        let current_block_header = Some(msg.0).unwrap();
+        // Any additional logic needed when difficulty is updated
     }
 }
 
@@ -192,13 +207,13 @@ fn hash_to_number(hash: &[u8]) -> U256 {
 
 #[cfg(test)]
 mod tests {
-    use crate::block_producer::{BlockProducerActor, SolutionFoundMessage};
+    use crate::block_producer::{
+        BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
+    };
     use crate::mining::{PartitionMiningActor, Seed};
-    //use actix::SystemRegistry;
-    use actix::actors::mocker::Mocker;
-    type BlockProducerMockActor = Mocker<BlockProducerActor>;
+    use crate::mining_broadcaster::{self, BroadcastMiningSeed, MiningBroadcaster};
 
-    use actix::{Actor, Addr};
+    use actix::{Actor, Addr, Recipient};
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::{
         ie, initialize_storage_files, read_info_file, StorageModule, StorageModuleInfo,
@@ -222,8 +237,9 @@ mod tests {
         let tx_path = [4, 3, 2, 1];
 
         let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
-            let solution = *msg.downcast::<SolutionFoundMessage>().unwrap();
-            debug!("Solution received!");
+            let solution_message: SolutionFoundMessage =
+                *msg.downcast::<SolutionFoundMessage>().unwrap();
+            let solution = solution_message.0;
             assert_eq!(
                 partition_hash, solution.0.partition_hash,
                 "Not expected partition"
@@ -250,6 +266,9 @@ mod tests {
         }));
 
         let block_producer_actor_addr: Addr<BlockProducerMockActor> = mocked_block_producer.start();
+        let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
+        let mocked_addr = MockedBlockProducerAddr(recipient);
+
         //SystemRegistry::set(block_producer_actor_addr);
 
         // Set up the storage geometry for this test
@@ -321,15 +340,23 @@ mod tests {
 
         let _ = storage_module.sync_pending_chunks();
 
+        let mining_broadcaster = MiningBroadcaster::new();
+        let mining_broadcaster_addr = mining_broadcaster.start();
+
         let partition_mining_actor = PartitionMiningActor::new(
             mining_address,
             database_provider.clone(),
-            block_producer_actor_addr.clone(),
+            mocked_addr.0,
+            mining_broadcaster_addr,
             storage_module,
             true,
         );
 
         let seed: Seed = Seed(H256::random());
-        let _result = partition_mining_actor.start().send(seed).await.unwrap();
+        let _result = partition_mining_actor
+            .start()
+            .send(BroadcastMiningSeed(seed))
+            .await
+            .unwrap();
     }
 }

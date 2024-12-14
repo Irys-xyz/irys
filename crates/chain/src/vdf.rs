@@ -1,7 +1,11 @@
-use actix::{Actor, Addr, Context, Handler};
-use irys_actors::mining::Seed;
+use actix::{dev::ToEnvelope, Actor, Addr, Handler};
+use irys_actors::{
+    mining::{PartitionMiningActor, Seed},
+    mining_broadcaster::{BroadcastDifficultyUpdate, BroadcastMiningSeed, MiningBroadcaster},
+};
 use irys_types::{
-    H256, NONCE_LIMITER_RESET_FREQUENCY, NUM_CHECKPOINTS_IN_VDF_STEP, U256, VDF_SHA_1S,
+    H256, HASHES_PER_CHECKPOINT, NONCE_LIMITER_RESET_FREQUENCY, NUM_CHECKPOINTS_IN_VDF_STEP,
+    VDF_SHA_1S,
 };
 use openssl::sha;
 use sha2::{Digest, Sha256};
@@ -65,11 +69,8 @@ pub fn run_vdf<T>(
     config: VDFStepsConfig,
     seed: H256,
     new_seed_listener: Receiver<H256>,
-    partition_channels: Vec<Addr<T>>,
-) where
-    T: Actor<Context = Context<T>> + Handler<Seed>,
-{
-    info!("Started running vdf steps ...");
+    mining_broadcaster: Addr<MiningBroadcaster>,
+) {
     let mut hasher = Sha256::new();
     let mut hash: H256 = H256::from_slice(seed.as_bytes());
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
@@ -94,10 +95,8 @@ pub fn run_vdf<T>(
         let elapsed = now.elapsed();
         debug!("Vdf step duration: {:.2?}", elapsed);
 
-        for a in &partition_channels {
-            debug!("Send Seed {}", hash.clone());
-            a.do_send(Seed(hash));
-        }
+        debug!("Seed created {}", hash.clone());
+        mining_broadcaster.do_send(BroadcastMiningSeed(Seed(hash)));
 
         if let Ok(h) = new_seed_listener.try_recv() {
             debug!("New Send Seed {}", h); // TODO: wire new seed injections from chain accepted blocks message BlockConfirmedMessage
