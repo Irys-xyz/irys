@@ -1,6 +1,5 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::Actor;
-use alloy_serde::storage;
 use irys_actors::{
     block_index::BlockIndexActor,
     block_producer::{BlockConfirmedMessage, BlockProducerActor},
@@ -21,13 +20,10 @@ pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
-use irys_storage::{
-    initialize_storage_files, ChunkType, StorageModule, StorageModuleVec, StorageModules,
-};
+use irys_storage::{initialize_storage_files, ChunkType, StorageModule, StorageModuleVec};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::PartitionId, difficulty_adjustment_config,
-    get_initial_difficulty, partition::PartitionHash, DifficultyAdjustmentConfig, StorageConfig,
-    H256, PACKING_SHA_1_5_S, U256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, DifficultyAdjustmentConfig,
+    StorageConfig, H256, PACKING_SHA_1_5_S, U256,
 };
 use reth::{
     builder::FullNode,
@@ -38,8 +34,6 @@ use reth::{
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c};
 use reth_db::{Database as _, HasName, HasTableType};
 use std::{
-    cmp::min,
-    collections::HashMap,
     sync::{mpsc, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -93,19 +87,21 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
     };
     let storage_config_for_testing = StorageConfig {
         chunk_size: 32,
-        num_chunks_in_partition: 10,
-        num_chunks_in_recall_range: 2,
+        num_chunks_in_partition: 40,
+        num_chunks_in_recall_range: 8,
         num_partitions_in_slot: 1,
         miner_address: arc_config.mining_signer.address(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: PACKING_SHA_1_5_S,
     };
 
-    irys_genesis.diff = get_initial_difficulty(
+    irys_genesis.diff = calculate_initial_difficulty(
         &difficulty_adjustment_config,
         &storage_config_for_testing,
         3,
-    );
+    )
+    .unwrap();
+
     difficulty_adjustment_config.target_block_time = 5;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     irys_genesis.timestamp = now.as_millis();

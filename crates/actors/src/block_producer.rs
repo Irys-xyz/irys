@@ -11,10 +11,9 @@ use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, compute_difficulty_adjustment,
-    difficulty_adjustment_config, Address, Base64, DifficultyAdjustmentConfig, H256List,
-    IrysBlockHeader, IrysSignature, IrysTransactionHeader, PoaData, Signature, TransactionLedger,
-    H256, U256,
+    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, Address,
+    Base64, DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysSignature,
+    IrysTransactionHeader, PoaData, Signature, TransactionLedger, H256, U256,
 };
 use openssl::sha;
 use reth::revm::primitives::B256;
@@ -159,30 +158,23 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 // Difficulty adjustment logic
                 let current_timestamp = now.as_millis();
                 let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
-                let last_difficulty = prev_block_header.diff;
+                let current_difficulty = prev_block_header.diff;
                 let block_height = prev_block_header.height + 1;
-                let is_difficulty_updated;
+                let mut is_difficulty_updated = false;
 
-                // Determine the current difficulty
-                let diff = if let Some(computed_diff) = compute_difficulty_adjustment(
-                    block_height,
-                    current_timestamp,
-                    last_diff_timestamp,
-                    last_difficulty,
-                    &difficulty_config,
-                ) {
-                    if computed_diff == last_difficulty {
-                        info!("Maintained difficulty at block_height: {}", block_height)
+                let (diff, stats) = calculate_difficulty(block_height, last_diff_timestamp, current_timestamp, current_difficulty, &difficulty_config);
+
+                // Did an adjustment happen?
+                if let Some(stats) = stats {
+                    if stats.is_adjusted {
+                        println!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                        println!(" max: {}\nlast: {}\nnext: {}", U256::MAX, current_difficulty, diff);
+                        is_difficulty_updated = true;
                     } else {
-                        info!("New difficulty computed at block_height: {}", block_height);
+                        println!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
                     }
                     last_diff_timestamp = current_timestamp;
-                    is_difficulty_updated = true;
-                    computed_diff
-                } else {
-                    is_difficulty_updated = false;
-                    prev_block_header.diff
-                };
+                }
 
                 // TODO: Hash the block signature to create a block_hash
                 // Generate a very stupid block_hash right now which is just
@@ -192,7 +184,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let mut irys_block = IrysBlockHeader {
                     block_hash,
                     height: block_height,
-                    diff,
+                    diff: current_difficulty,
                     cumulative_diff: U256::from(5000),
                     last_diff_timestamp: last_diff_timestamp,
                     solution_hash: H256::zero(),
