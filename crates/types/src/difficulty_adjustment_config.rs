@@ -77,7 +77,7 @@ pub fn compute_difficulty_adjustment(
     // Log status and check if adjustment needed
     let min_threshold = (config.min_adjustment_factor * 1000.0) as u128;
     if time_stats.percent_change <= min_threshold {
-        info!(
+        println!(
             "\n🧊 Block time {:?} is {:.2}% {} than target {:?}, within threshold - no adjustment",
             time_stats.actual_mean,
             time_stats.percent_change as f64 / 10.0,
@@ -87,7 +87,7 @@ pub fn compute_difficulty_adjustment(
         return None;
     }
 
-    info!(
+    println!(
         "\n🧊 Block time {:?} is {:.2}% {} than target {:?}, adjusting {}",
         time_stats.actual_mean,
         time_stats.percent_change as f64 / 10.0,
@@ -102,7 +102,7 @@ pub fn compute_difficulty_adjustment(
     let target_time = time_stats.target_mean.as_secs();
     // Pre-divide by scale to avoid overflow when doing max_diff - last_difficulty
     let diff_inverse = (U256::MAX / scale - last_difficulty / scale)  // Room to adjust, scaled down
-        * actual_time                                                       // Multiply by time ratio 
+        * actual_time                                                       // Multiply by time ratio
         / target_time; // Complete the ratio
     let new_diff = U256::MAX - diff_inverse * scale; // Scale back up for final result
 
@@ -150,5 +150,75 @@ fn calculate_time_stats(
         } else {
             ("less", "UP to lengthen block times")
         },
+    }
+}
+
+//==============================================================================
+// Tests
+//------------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::Address;
+
+    use crate::{
+        compute_difficulty_adjustment, get_initial_difficulty, StorageConfig, PACKING_SHA_1_5_S,
+        U256,
+    };
+
+    use super::DifficultyAdjustmentConfig;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn test_adjustments() {
+        let mut difficulty_config = DifficultyAdjustmentConfig {
+            target_block_time: 5,        // 5 seconds
+            adjustment_interval: 10,     // every X blocks
+            max_adjustment_factor: 4,    // No more than 4x or 1/4th with each adjustment
+            min_adjustment_factor: 0.25, // a minimum 25% adjustment threshold
+            min_difficulty: U256::one(),
+            max_difficulty: U256::MAX,
+        };
+
+        let storage_config = StorageConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: 10,
+            num_chunks_in_recall_range: 2,
+            num_partitions_in_slot: 1,
+            miner_address: Address::random(),
+            min_writes_before_sync: 1,
+            entropy_packing_iterations: PACKING_SHA_1_5_S,
+        };
+
+        let prev_diff = get_initial_difficulty(&difficulty_config, &storage_config, 3);
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let current_timestamp = now.as_millis();
+
+        // Compute a timestamp that will result in blocks being 50% shorter than they should be
+        let target_time =
+            difficulty_config.adjustment_interval * difficulty_config.target_block_time;
+        let actual_time = target_time / 2;
+        let last_diff_timestamp = current_timestamp - (actual_time * 1000) as u128;
+
+        let new_diff = compute_difficulty_adjustment(
+            10,
+            current_timestamp,
+            last_diff_timestamp,
+            prev_diff,
+            &difficulty_config,
+        )
+        .unwrap();
+
+        let delta_diff = new_diff - prev_diff;
+        let scaled_diff = prev_diff / 2;
+
+        println!(
+            " prev_diff: {}\n  new_diff: {}\ndelta_diff: {}\nscale_diff: {}",
+            prev_diff, new_diff, delta_diff, scaled_diff
+        );
+
+        let guess_diff = prev_diff + (delta_diff / 2);
+        println!("guess_diff: {}", guess_diff);
+        println!("delta %: {}", ((delta_diff * 1000) / U256::MAX) / 1000);
     }
 }
