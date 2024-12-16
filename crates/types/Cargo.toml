@@ -4,9 +4,10 @@ name = "irys-types"
 version = "0.1.0"
 
 [dependencies]
+chrono = "0.4"
 uint = "0.9.5"
 base58 = "0.2.0"
-base64-url = "2.0.0"
+base64-url.workspace = true
 eyre = "0.6.8"
 fixed-hash = "0.8.0"
 rand = "0.8.5"

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+actix.workspace = true
 assert_matches.workspace = true
 irys-config.workspace = true
 reth.workspace = true

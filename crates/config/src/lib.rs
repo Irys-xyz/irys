@@ -1,5 +1,6 @@
 //! Crate dedicated to the IrysNodeConfig to avoid depdendency cycles
 use std::{
+    env,
     path::{absolute, PathBuf},
     str::FromStr as _,
 };
@@ -33,12 +34,14 @@ pub struct IrysNodeConfig {
 /// "sane" default configuration
 impl Default for IrysNodeConfig {
     fn default() -> Self {
-        let base_dir = absolute(PathBuf::from_str("../../.tmp").unwrap()).unwrap();
+        let base_dir = env::current_dir()
+            .expect("Unable to determine working dir, aborting")
+            .join(".irys");
+
         Self {
             chainspec_builder: IrysChainSpecBuilder::mainnet(),
             mining_signer: IrysSigner::random_signer(),
             instance_number: 1,
-
             base_directory: base_dir,
         }
     }

@@ -5100,9 +5100,11 @@ name = "irys-actors"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "actix-rt",
  "actix_async_handler",
  "alloy-rpc-types-engine",
  "assert_matches",
+ "base64-url",
  "eyre",
  "irys-config",
  "irys-database",
@@ -5112,6 +5114,7 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "nodit",
  "openssl",
  "rand",
  "rand_chacha",
@@ -5209,6 +5212,7 @@ dependencies = [
  "jsonrpsee",
  "k256",
  "modular-bitfield",
+ "openssl",
  "rand",
  "rand_chacha",
  "reth",
@@ -5228,6 +5232,7 @@ dependencies = [
  "test-fuzz",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5249,6 +5254,7 @@ dependencies = [
 name = "irys-database"
 version = "0.1.0"
 dependencies = [
+ "actix",
  "arbitrary",
  "assert_matches",
  "bytes",
@@ -5444,6 +5450,7 @@ dependencies = [
  "borsh",
  "borsh-derive",
  "bytes",
+ "chrono",
  "eyre",
  "fixed-hash",
  "futures",

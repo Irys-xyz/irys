@@ -4,6 +4,7 @@
 		"borsh",
 		"chacha",
 		"chainspec",
+		"datetime",
 		"Deque",
 		"hasher",
 		"ingressed",

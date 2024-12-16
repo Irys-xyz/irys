@@ -4,14 +4,14 @@
 //! making them easy to reference and maintain.
 use std::{
     fmt,
-    ops::{Index, IndexMut},
     str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
-    generate_data_root, generate_leaves_from_data_roots, option_u64_stringify, resolve_proofs,
-    u64_stringify, validate_path, Arbitrary, Base64, Compact, DataRootLeave, H256List,
-    IrysSignature, IrysTransactionHeader, Proof, Signature, H256, U256,
+    generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
+    partition::PartitionHash, resolve_proofs, u64_stringify, Arbitrary, Base64, Compact,
+    DataRootLeave, H256List, IrysSignature, IrysTransactionHeader, Proof, Signature, H256, U256,
 };
 
 use alloy_primitives::{Address, B256};
@@ -19,11 +19,44 @@ use serde::{Deserialize, Serialize};
 
 pub type BlockHash = H256;
 
+/// Stores the `vdf_limiter_info` in the [`IrysBlockHeader`]
+#[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
+pub struct VDFLimiterInfo {
+    /// The output of the latest step - the source of the entropy for the mining nonces.
+    pub output: H256,
+    /// The global sequence number of the nonce limiter step at which the block was found.
+    pub global_step_number: u64,
+    /// The hash of the latest block mined below the current reset line.
+    pub seed: H256,
+    /// The hash of the latest block mined below the future reset line.
+    pub next_seed: H256,
+    /// The output of the latest step of the previous block
+    pub prev_output: H256,
+    /// VDF_CHECKPOINT_COUNT_IN_STEP checkpoints from the most recent step in the nonce limiter process.
+    pub last_step_checkpoints: H256List,
+    /// A list of the output of each step of the nonce limiting process. Note: each step
+    /// has VDF_CHECKPOINT_COUNT_IN_STEP checkpoints, the last of which is that step's output.
+    /// This field would be more accurately named "steps" as checkpoints are between steps.
+    pub checkpoints: H256List,
+    /// The number of SHA2-256 iterations in a single VDF checkpoint. The protocol aims to keep the
+    /// checkpoint calculation time to around 40ms by varying this parameter. Note: there are
+    /// 25 checkpoints in a single VDF step - so the protocol aims to keep the step calculation at
+    /// 1 second by varying this parameter.
+    #[serde(default, with = "option_u64_stringify")]
+    pub vdf_difficulty: Option<u64>,
+    /// The VDF difficulty scheduled for to be applied after the next VDF reset line.
+    #[serde(default, with = "option_u64_stringify")]
+    pub next_vdf_difficulty: Option<u64>,
+}
+
 #[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
 /// Stores deserialized fields from a JSON formatted Irys block header.
 pub struct IrysBlockHeader {
     /// The block identifier.
     pub block_hash: BlockHash,
+
+    /// The block height.
+    pub height: u64,
 
     /// Difficulty threshold used to produce the current block.
     pub diff: U256,
@@ -32,8 +65,8 @@ pub struct IrysBlockHeader {
     /// produce the past blocks including this one.
     pub cumulative_diff: U256,
 
-    /// Unix timestamp of the last difficulty adjustment
-    pub last_retarget: u64,
+    /// timestamp (in milliseconds) since UNIX_EPOCH of the last difficulty adjustment
+    pub last_diff_timestamp: u128,
 
     /// The solution hash for the block
     pub solution_hash: H256,
@@ -46,9 +79,6 @@ pub struct IrysBlockHeader {
 
     /// `SHA-256` hash of the PoA chunk (unencoded) bytes.
     pub chunk_hash: H256,
-
-    /// The block height.
-    pub height: u64,
 
     // Previous block identifier.
     pub previous_block_hash: H256,
@@ -68,8 +98,8 @@ pub struct IrysBlockHeader {
     /// The block signature
     pub signature: IrysSignature,
 
-    /// timestamp of when the block was discovered/produced
-    pub timestamp: u64,
+    /// timestamp (in milliseconds) since UNIX_EPOCH of when the block was discovered/produced
+    pub timestamp: u128,
 
     /// A list of transaction ledgers, one for each active data ledger
     /// Maintains the block->tx_root->data_root relationship for each block
@@ -77,17 +107,20 @@ pub struct IrysBlockHeader {
     pub ledgers: Vec<TransactionLedger>,
 
     pub evm_block_hash: B256,
+
+    pub vdf_limiter_info: VDFLimiterInfo,
 }
 
 impl IrysBlockHeader {
     pub fn new() -> Self {
         let txids = H256List::new();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
         // Create a sample IrysBlockHeader object with mock data
         IrysBlockHeader {
             diff: U256::from(1000),
             cumulative_diff: U256::from(5000),
-            last_retarget: 1622543200,
+            last_diff_timestamp: 1622543200,
             solution_hash: H256::zero(),
             previous_solution_hash: H256::zero(),
             last_epoch_hash: H256::random(),
@@ -97,16 +130,19 @@ impl IrysBlockHeader {
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(4000),
             poa: PoaData {
-                tx_path: Base64::from_str("").unwrap(),
-                data_path: Base64::from_str("").unwrap(),
+                tx_path: None,
+                data_path: None,
                 chunk: Base64::from_str("").unwrap(),
+                partition_hash: PartitionHash::zero(),
+                partition_chunk_offset: 0,
+                ledger_num: None,
             },
             reward_address: Address::ZERO,
             reward_key: Base64::from_str("").unwrap(),
             signature: IrysSignature {
                 reth_signature: Signature::test_signature(),
             },
-            timestamp: 1622543200,
+            timestamp: now.as_millis(),
             ledgers: vec![
                 // Permanent Publish Ledger
                 TransactionLedger {
@@ -124,6 +160,7 @@ impl IrysBlockHeader {
                 },
             ],
             evm_block_hash: B256::ZERO,
+            vdf_limiter_info: VDFLimiterInfo::default(),
         }
     }
 }
@@ -131,9 +168,12 @@ impl IrysBlockHeader {
 #[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Compact, Arbitrary)]
 /// Stores deserialized fields from a `poa` (Proof of Access) JSON
 pub struct PoaData {
-    pub tx_path: Base64,
-    pub data_path: Base64,
+    pub tx_path: Option<Base64>,
+    pub data_path: Option<Base64>,
     pub chunk: Base64,
+    pub ledger_num: Option<u64>,
+    pub partition_chunk_offset: u64, // TODO: implement Compact for u32 ?
+    pub partition_hash: PartitionHash,
 }
 
 pub type TxRoot = H256;
@@ -157,7 +197,7 @@ impl TransactionLedger {
         if data_txs.is_empty() {
             return (H256::zero(), vec![]);
         }
-        let mut txs_data_roots = data_txs
+        let txs_data_roots = data_txs
             .iter()
             .map(|h| DataRootLeave {
                 data_root: h.data_root,
@@ -176,36 +216,6 @@ impl TransactionLedger {
     // tx_path/proof verification
 }
 
-/// Stores the `nonce_limiter_info` in the [`ArweaveBlockHeader`]
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Compact)]
-pub struct NonceLimiterInfo {
-    /// The output of the latest step - the source of the entropy for the mining nonces.
-    pub output: H256,
-    /// The global sequence number of the nonce limiter step at which the block was found.
-    pub global_step_number: u64,
-    /// The hash of the latest block mined below the current reset line.
-    pub seed: H256,
-    /// The hash of the latest block mined below the future reset line.
-    pub next_seed: H256,
-    /// The output of the latest step of the previous block
-    pub prev_output: H256,
-    /// NUM_CHECKPOINTS_IN_VDF_STEP from the most recent step in the nonce limiter process.
-    pub last_step_checkpoints: H256List,
-    /// A list of the output of each step of the nonce limiting process. Note: each step
-    /// has NUM_CHECKPOINTS_IN_VDF_STEP, the last of which is that step's output.
-    /// This field would be more accurately named "steps" as checkpoints are between steps.
-    pub checkpoints: H256List,
-    /// The number of SHA2-256 iterations in a single VDF checkpoint. The protocol aims to keep the
-    /// checkpoint calculation time to around 40ms by varying this parameter. Note: there are
-    /// 25 checkpoints in a single VDF step - so the protocol aims to keep the step calculation at
-    /// 1 second by varying this parameter.
-    #[serde(default, with = "option_u64_stringify")]
-    pub vdf_difficulty: Option<u64>,
-    /// The VDF difficulty scheduled for to be applied after the next VDF reset line.
-    #[serde(default, with = "option_u64_stringify")]
-    pub next_vdf_difficulty: Option<u64>,
-}
-
 // Implement the Display trait
 impl fmt::Display for IrysBlockHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -219,6 +229,8 @@ impl fmt::Display for IrysBlockHeader {
 
 #[cfg(test)]
 mod tests {
+    use crate::validate_path;
+
     use super::*;
     use alloy_primitives::Signature;
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -234,7 +246,7 @@ mod tests {
         let mut header = IrysBlockHeader {
             diff: U256::from(1000),
             cumulative_diff: U256::from(5000),
-            last_retarget: 1622543200,
+            last_diff_timestamp: 1622543200,
             solution_hash: H256::zero(),
             previous_solution_hash: H256::zero(),
             last_epoch_hash: H256::random(),
@@ -244,9 +256,12 @@ mod tests {
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(4000),
             poa: PoaData {
-                tx_path: Base64::from_str("").unwrap(),
-                data_path: Base64::from_str("").unwrap(),
+                tx_path: None,
+                data_path: None,
                 chunk: Base64::from_str("").unwrap(),
+                partition_hash: H256::zero(),
+                partition_chunk_offset: 0,
+                ledger_num: None,
             },
             reward_address: Address::ZERO,
             reward_key: Base64::from_str("").unwrap(),
@@ -261,6 +276,7 @@ mod tests {
                 expires: Some(1622543200),
             }],
             evm_block_hash: B256::ZERO,
+            vdf_limiter_info: VDFLimiterInfo::default(),
         };
 
         // Use a specific seed

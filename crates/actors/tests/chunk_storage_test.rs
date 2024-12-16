@@ -6,7 +6,7 @@ use std::{
 };
 
 use {
-    irys_actors::block_index::{BlockIndexActor, GetBlockHeightMessage},
+    irys_actors::block_index::BlockIndexActor,
     irys_actors::block_producer::BlockConfirmedMessage,
     irys_actors::mempool::{ChunkIngressMessage, MempoolActor, TxIngressMessage},
 };
@@ -23,7 +23,7 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, H256List,
     IrysBlockHeader, IrysSignature, IrysTransaction, IrysTransactionHeader, PoaData, Signature,
-    StorageConfig, TransactionLedger, UnpackedChunk, H256, U256,
+    StorageConfig, TransactionLedger, UnpackedChunk, VDFLimiterInfo, H256, U256,
 };
 use reth::{revm::primitives::B256, tasks::TaskManager};
 use tracing::info;
@@ -174,11 +174,10 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let block_index_actor = BlockIndexActor::new(block_index.clone());
     let block_index_addr = block_index_actor.start();
 
-    // Get the blockheight from the actor
-    let height = block_index_addr
-        .send(GetBlockHeightMessage {})
-        .await
-        .unwrap();
+    let height: u64;
+    {
+        height = block_index.read().unwrap().num_blocks().max(1) - 1;
+    }
 
     for tx in txs.iter() {
         println!("data_root: {:?}", tx.header.data_root.0);
@@ -188,7 +187,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let irys_block = IrysBlockHeader {
         diff: U256::from(1000),
         cumulative_diff: U256::from(5000),
-        last_retarget: 1622543200,
+        last_diff_timestamp: 1622543200,
         solution_hash: H256::zero(),
         previous_solution_hash: H256::zero(),
         last_epoch_hash: H256::random(),
@@ -198,16 +197,19 @@ async fn finalize_block_test() -> eyre::Result<()> {
         previous_block_hash: H256::zero(),
         previous_cumulative_diff: U256::from(4000),
         poa: PoaData {
-            tx_path: Base64::from_str("").unwrap(),
-            data_path: Base64::from_str("").unwrap(),
+            tx_path: None,
+            data_path: None,
             chunk: Base64::from_str("").unwrap(),
+            ledger_num: None,
+            partition_chunk_offset: 0,
+            partition_hash: PartitionHash::zero(),
         },
         reward_address: Address::ZERO,
         reward_key: Base64::from_str("").unwrap(),
         signature: IrysSignature {
             reth_signature: Signature::test_signature(),
         },
-        timestamp: now.as_millis() as u64,
+        timestamp: now.as_millis(),
         ledgers: vec![
             // Permanent Publish Ledger
             TransactionLedger {
@@ -225,6 +227,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
             },
         ],
         evm_block_hash: B256::ZERO,
+        vdf_limiter_info: VDFLimiterInfo::default(),
     };
 
     // Send the block confirmed message

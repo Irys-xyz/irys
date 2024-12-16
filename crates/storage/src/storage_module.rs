@@ -673,6 +673,23 @@ impl StorageModule {
             .view(|tx| get_data_path_by_offset(tx, partition_offset))?
     }
 
+    pub fn read_tx_data_path(
+        &self,
+        chunk_offset: LedgerChunkOffset,
+    ) -> eyre::Result<(Option<TxPath>, Option<ChunkDataPath>)> {
+        let (_interval, submodule) = self
+            .submodules
+            .get_key_value_at_point(chunk_offset as u32)
+            .unwrap();
+
+        submodule.db.view(|tx| {
+            Ok((
+                get_tx_path_by_offset(tx, chunk_offset as u32)?,
+                get_data_path_by_offset(tx, chunk_offset as u32)?,
+            ))
+        })?
+    }
+
     /// Writes chunk data to physical storage and updates state tracking
     ///
     /// Process:
@@ -1152,6 +1169,7 @@ mod tests {
         storage_module.write_data_chunk(&chunk)?;
 
         let ret_path = storage_module.read_data_path(0)?;
+
         assert_eq!(ret_path, Some(data_path));
 
         Ok(())

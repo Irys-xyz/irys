@@ -90,7 +90,7 @@ pub fn capacity_pack_range_with_data_c(
             data.iter_mut().enumerate().for_each(|(pos, mut chunk)| {
                 capacity_pack_range_c(
                     mining_address,
-                    chunk_offset + pos as u64 * CHUNK_SIZE,
+                    chunk_offset + pos as u64 * CHUNK_SIZE as u64,
                     partition_hash,
                     iterations,
                     &mut entropy_chunk,
@@ -219,7 +219,7 @@ fn test_chunks_packing() {
     let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
     capacity_pack_range_c(
         mining_address,
-        chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE,
+        chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE as u64,
         partition_hash.into(),
         Some(2 * CHUNK_SIZE as u32),
         &mut entropy_chunk,

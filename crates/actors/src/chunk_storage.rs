@@ -67,7 +67,7 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
         let storage_modules = self.storage_modules.clone();
         let db = self.db.clone();
 
-        info!("BlockHeader: {:#?}", block_header);
+        // info!("Finalized BlockHeader: {:#?}", block_header);
 
         // Async move closure to call async methods withing a non async fn
         Box::pin(async move {

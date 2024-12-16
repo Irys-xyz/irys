@@ -22,7 +22,7 @@ irys-actors.workspace = true
 assert_matches = "1.5.0"
 clap = "4.5.20"
 eyre = "0.6.8"
-
+openssl.workspace = true
 rand = "0.8.5"
 rand_chacha = "0.3.1"
 reth-codecs-derive.workspace = true
@@ -36,12 +36,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.107"
 sha2 = "0.10.8"
 tempfile = "3.10"
-actix-rt = "2.10.0"
+actix-rt.workspace = true
 jsonrpsee.workspace = true
 reth-e2e-test-utils.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-
+tracing-subscriber.workspace = true
 
 alloy-network = { path = "../../ext/alloy/crates/network" }
 alloy-signer-local.workspace = true

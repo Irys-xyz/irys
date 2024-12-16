@@ -1,8 +1,11 @@
-use std::sync::{Arc, RwLock};
+use std::{
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use actix::prelude::*;
 use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
-use irys_types::{IrysBlockHeader, IrysTransactionHeader, CHUNK_SIZE, H256};
+use irys_types::{IrysBlockHeader, IrysTransactionHeader, CHUNK_SIZE, H256, U256};
 
 use crate::block_producer::BlockConfirmedMessage;
 
@@ -10,6 +13,15 @@ use crate::block_producer::BlockConfirmedMessage;
 #[derive(Debug)]
 pub struct BlockIndexActor {
     block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+    block_log: Vec<BlockLogEntry>,
+}
+
+#[derive(Debug)]
+struct BlockLogEntry {
+    pub block_hash: H256,
+    pub height: u64,
+    pub timestamp: u128,
+    pub difficulty: U256,
 }
 
 impl Actor for BlockIndexActor {
@@ -20,7 +32,10 @@ impl BlockIndexActor {
     /// Create a new instance of the mempool actor passing in a reference
     /// counted reference to a DatabaseEnv
     pub fn new(block_index: Arc<RwLock<BlockIndex<Initialized>>>) -> Self {
-        Self { block_index }
+        Self {
+            block_index,
+            block_log: Vec::new(),
+        }
     }
 
     /// Adds a finalized block to the index
@@ -69,6 +84,28 @@ impl BlockIndexActor {
         };
 
         index.push_item(&block_index_item);
+
+        // Block log tracking
+        self.block_log.push(BlockLogEntry {
+            block_hash: irys_block_header.block_hash,
+            height: irys_block_header.height,
+            timestamp: irys_block_header.timestamp,
+            difficulty: irys_block_header.diff,
+        });
+
+        if self.block_log.len() % 10 == 0 {
+            let mut prev_entry: Option<&BlockLogEntry> = None;
+            println!("block_height, block_time(ms), difficulty");
+            for entry in &self.block_log {
+                let duration = if let Some(ref pe) = prev_entry {
+                    Duration::from_millis((entry.timestamp - pe.timestamp) as u64)
+                } else {
+                    Duration::from_millis(0)
+                };
+                println!("{}, {:?}, {}", entry.height, duration, entry.difficulty);
+                prev_entry = Some(entry);
+            }
+        }
     }
 }
 
@@ -90,16 +127,17 @@ impl Handler<BlockConfirmedMessage> for BlockIndexActor {
 
 /// Returns the current block height in the index
 #[derive(Message, Clone, Debug)]
-#[rtype(result = "u64")]
-pub struct GetBlockHeightMessage {}
+#[rtype(result = "Option<BlockIndexItem>")]
+pub struct GetLatestBlockIndexMessage {}
 
-impl Handler<GetBlockHeightMessage> for BlockIndexActor {
-    type Result = u64;
-
-    fn handle(&mut self, msg: GetBlockHeightMessage, ctx: &mut Self::Context) -> Self::Result {
+impl Handler<GetLatestBlockIndexMessage> for BlockIndexActor {
+    type Result = Option<BlockIndexItem>;
+    fn handle(&mut self, msg: GetLatestBlockIndexMessage, ctx: &mut Self::Context) -> Self::Result {
         let _ = ctx;
         let _ = msg;
 
-        self.block_index.read().unwrap().num_blocks()
+        let bi = self.block_index.read().unwrap();
+        let block_height = bi.num_blocks().max(1) as usize - 1;
+        Some(bi.get_item(block_height)?.clone())
     }
 }

@@ -5,10 +5,11 @@ use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
-use irys_actors::mempool::TxIngressMessage;
+use irys_actors::{block_producer::SolutionFoundMessage, mempool::TxIngressMessage};
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
+use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     block_production::SolutionContext, irys::IrysSigner, Address, IrysTransaction, H256,
     IRYS_CHAIN_ID,
@@ -25,10 +26,10 @@ use tracing::info;
 
 #[tokio::test]
 async fn test_blockprod() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
-    if config.base_directory.exists() {
-        remove_dir_all(&config.base_directory)?;
-    }
+    config.base_directory = temp_dir.path().to_path_buf();
+
     let account1 = IrysSigner::random_signer();
     let account2 = IrysSigner::random_signer();
     let account3 = IrysSigner::random_signer();
@@ -80,11 +81,14 @@ async fn test_blockprod() -> eyre::Result<()> {
     let (block, reth_exec_env) = node
         .actor_addresses
         .block_producer
-        .send(SolutionContext {
+        .send(SolutionFoundMessage(SolutionContext {
             partition_hash: H256::random(),
             chunk_offset: 0,
             mining_address: node.config.mining_signer.address(),
-        })
+            tx_path: None,
+            data_path: None,
+            chunk: Vec::new(),
+        }))
         .await?
         .unwrap();
 
@@ -123,21 +127,27 @@ async fn test_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn mine_ten_blocks() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
-    if config.base_directory.exists() {
-        remove_dir_all(&config.base_directory)?;
-    }
+    config.base_directory = temp_dir.path().to_path_buf();
+
     let node = start_for_testing(config).await?;
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
 
     for i in 1..10 {
         info!("mining block {}", i);
-        let fut = node.actor_addresses.block_producer.send(SolutionContext {
-            partition_hash: H256::random(),
-            chunk_offset: 0,
-            mining_address: node.config.mining_signer.address(),
-        });
+        let fut = node
+            .actor_addresses
+            .block_producer
+            .send(SolutionFoundMessage(SolutionContext {
+                partition_hash: H256::random(),
+                chunk_offset: 0,
+                mining_address: node.config.mining_signer.address(),
+                tx_path: None,
+                data_path: None,
+                chunk: Vec::new(),
+            }));
         let (block, reth_exec_env) = fut.await?.unwrap();
 
         //check reth for built block
@@ -164,20 +174,23 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_basic_blockprod() -> eyre::Result<()> {
-    let config = IrysNodeConfig::default();
-    if config.base_directory.exists() {
-        remove_dir_all(&config.base_directory)?;
-    }
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
+    let mut config = IrysNodeConfig::default();
+    config.base_directory = temp_dir.path().to_path_buf();
+
     let node = start_for_testing(config).await?;
 
     let (block, _) = node
         .actor_addresses
         .block_producer
-        .send(SolutionContext {
+        .send(SolutionFoundMessage(SolutionContext {
             partition_hash: H256::random(),
             chunk_offset: 0,
             mining_address: Address::random(),
-        })
+            tx_path: None,
+            data_path: None,
+            chunk: Vec::new(),
+        }))
         .await?
         .unwrap();
 
@@ -205,10 +218,10 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
-    if config.base_directory.exists() {
-        remove_dir_all(&config.base_directory)?;
-    }
+    config.base_directory = temp_dir.path().to_path_buf();
+
     let account1 = IrysSigner::random_signer();
     let account2 = IrysSigner::random_signer();
     let account3 = IrysSigner::random_signer();
@@ -306,11 +319,14 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let (block, reth_exec_env) = node
         .actor_addresses
         .block_producer
-        .send(SolutionContext {
+        .send(SolutionFoundMessage(SolutionContext {
             partition_hash: H256::random(),
             chunk_offset: 0,
             mining_address: node.config.mining_signer.address(),
-        })
+            tx_path: None,
+            data_path: None,
+            chunk: Vec::new(),
+        }))
         .await?
         .unwrap();
 

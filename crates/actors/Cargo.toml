@@ -12,9 +12,14 @@ irys-packing.workspace = true
 irys-storage.workspace = true
 irys-config.workspace = true
 actix.workspace = true
+nodit.workspace = true
+actix-rt.workspace = true
+base64-url.workspace = true
+
 rand = "0.8.5"
 rand_chacha = "0.3.1"
 sha2 = "0.10.8"
+
 tokio.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 reth-db.workspace = true
