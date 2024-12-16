@@ -5241,6 +5241,7 @@ dependencies = [
  "jsonrpsee",
  "k256",
  "modular-bitfield",
+ "openssl",
  "rand",
  "rand_chacha",
  "reth",
@@ -5260,6 +5261,7 @@ dependencies = [
  "test-fuzz",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

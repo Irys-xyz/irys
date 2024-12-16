@@ -219,6 +219,7 @@ mod tests {
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
     use std::sync::Arc;
+    use tracing::debug;
 
     #[actix_rt::test]
     async fn test_solution() {

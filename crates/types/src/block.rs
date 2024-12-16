@@ -19,6 +19,36 @@ use serde::{Deserialize, Serialize};
 
 pub type BlockHash = H256;
 
+/// Stores the `vdf_limiter_info` in the [`IrysBlockHeader`]
+#[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
+pub struct VDFLimiterInfo {
+    /// The output of the latest step - the source of the entropy for the mining nonces.
+    pub output: H256,
+    /// The global sequence number of the nonce limiter step at which the block was found.
+    pub global_step_number: u64,
+    /// The hash of the latest block mined below the current reset line.
+    pub seed: H256,
+    /// The hash of the latest block mined below the future reset line.
+    pub next_seed: H256,
+    /// The output of the latest step of the previous block
+    pub prev_output: H256,
+    /// VDF_CHECKPOINT_COUNT_IN_STEP checkpoints from the most recent step in the nonce limiter process.
+    pub last_step_checkpoints: H256List,
+    /// A list of the output of each step of the nonce limiting process. Note: each step
+    /// has VDF_CHECKPOINT_COUNT_IN_STEP checkpoints, the last of which is that step's output.
+    /// This field would be more accurately named "steps" as checkpoints are between steps.
+    pub checkpoints: H256List,
+    /// The number of SHA2-256 iterations in a single VDF checkpoint. The protocol aims to keep the
+    /// checkpoint calculation time to around 40ms by varying this parameter. Note: there are
+    /// 25 checkpoints in a single VDF step - so the protocol aims to keep the step calculation at
+    /// 1 second by varying this parameter.
+    #[serde(default, with = "option_u64_stringify")]
+    pub vdf_difficulty: Option<u64>,
+    /// The VDF difficulty scheduled for to be applied after the next VDF reset line.
+    #[serde(default, with = "option_u64_stringify")]
+    pub next_vdf_difficulty: Option<u64>,
+}
+
 #[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
 /// Stores deserialized fields from a JSON formatted Irys block header.
 pub struct IrysBlockHeader {
@@ -77,6 +107,8 @@ pub struct IrysBlockHeader {
     pub ledgers: Vec<TransactionLedger>,
 
     pub evm_block_hash: B256,
+
+    pub vdf_limiter_info: VDFLimiterInfo,
 }
 
 impl IrysBlockHeader {
@@ -128,6 +160,7 @@ impl IrysBlockHeader {
                 },
             ],
             evm_block_hash: B256::ZERO,
+            vdf_limiter_info: VDFLimiterInfo::default(),
         }
     }
 }
@@ -178,36 +211,6 @@ impl TransactionLedger {
 
     // tx_path = proof ?
     // tx_path/proof verification
-}
-
-/// Stores the `nonce_limiter_info` in the [`ArweaveBlockHeader`]
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Compact)]
-pub struct NonceLimiterInfo {
-    /// The output of the latest step - the source of the entropy for the mining nonces.
-    pub output: H256,
-    /// The global sequence number of the nonce limiter step at which the block was found.
-    pub global_step_number: u64,
-    /// The hash of the latest block mined below the current reset line.
-    pub seed: H256,
-    /// The hash of the latest block mined below the future reset line.
-    pub next_seed: H256,
-    /// The output of the latest step of the previous block
-    pub prev_output: H256,
-    /// NUM_CHECKPOINTS_IN_VDF_STEP from the most recent step in the nonce limiter process.
-    pub last_step_checkpoints: H256List,
-    /// A list of the output of each step of the nonce limiting process. Note: each step
-    /// has NUM_CHECKPOINTS_IN_VDF_STEP, the last of which is that step's output.
-    /// This field would be more accurately named "steps" as checkpoints are between steps.
-    pub checkpoints: H256List,
-    /// The number of SHA2-256 iterations in a single VDF checkpoint. The protocol aims to keep the
-    /// checkpoint calculation time to around 40ms by varying this parameter. Note: there are
-    /// 25 checkpoints in a single VDF step - so the protocol aims to keep the step calculation at
-    /// 1 second by varying this parameter.
-    #[serde(default, with = "option_u64_stringify")]
-    pub vdf_difficulty: Option<u64>,
-    /// The VDF difficulty scheduled for to be applied after the next VDF reset line.
-    #[serde(default, with = "option_u64_stringify")]
-    pub next_vdf_difficulty: Option<u64>,
 }
 
 // Implement the Display trait
@@ -270,6 +273,7 @@ mod tests {
                 expires: Some(1622543200),
             }],
             evm_block_hash: B256::ZERO,
+            vdf_limiter_info: VDFLimiterInfo::default(),
         };
 
         // Use a specific seed

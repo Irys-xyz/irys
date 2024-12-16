@@ -13,7 +13,7 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, Address,
     Base64, DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysSignature,
-    IrysTransactionHeader, PoaData, Signature, TransactionLedger, H256, U256,
+    IrysTransactionHeader, PoaData, Signature, TransactionLedger, VDFLimiterInfo, H256, U256,
 };
 use openssl::sha;
 use reth::revm::primitives::B256;
@@ -224,6 +224,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         },
                     ],
                     evm_block_hash: B256::ZERO,
+                    vdf_limiter_info: VDFLimiterInfo::default(),
                 };
 
                 // RethNodeContext is a type-aware wrapper that lets us interact with the reth node

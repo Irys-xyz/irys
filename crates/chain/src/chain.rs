@@ -44,7 +44,7 @@ use tokio::{
     sync::oneshot::{self},
 };
 
-use crate::vdf::run_vdf;
+use crate::vdf::{run_vdf, VDFStepsConfig};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 
 pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
@@ -256,7 +256,12 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 let part_actors_clone = part_actors.clone();
                 std::thread::spawn(move || {
-                    run_vdf(H256::random(), new_seed_rx, mining_broadcaster_addr.clone())
+                    run_vdf(
+                        VDFStepsConfig::default(),
+                        H256::random(),
+                        new_seed_rx,
+                        mining_broadcaster_addr.clone(),
+                    )
                 });
 
                 let packing_actor_addr =

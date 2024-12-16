@@ -27,12 +27,8 @@ pub const NONCE_LIMITER_RESET_FREQUENCY: usize = 10 * 120;
 // 25 checkpoints 40 ms each = 1000 ms
 pub const NUM_CHECKPOINTS_IN_VDF_STEP: usize = 25;
 
-// Typical ryzen 5900X iterations for 1 sec
-// pub const VDF_SHA_1S: u64 = 15_000_000;
-pub const VDF_SHA_1S: u64 = 250_000; // We go way slow with openssl sha for now
+pub const VDF_SHA_1S: u64 = 530_000;
 pub const PACKING_SHA_1_5_S: u32 = 22_500_000;
-
-pub const HASHES_PER_CHECKPOINT: u64 = VDF_SHA_1S / NUM_CHECKPOINTS_IN_VDF_STEP as u64;
 
 pub const IRYS_CHAIN_ID: u64 = 69727973; // "irys" in ascii
 

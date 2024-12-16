@@ -23,7 +23,7 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, Chunk,
     H256List, IrysBlockHeader, IrysSignature, IrysTransaction, IrysTransactionHeader, PoaData,
-    Signature, StorageConfig, TransactionLedger, H256, U256,
+    Signature, StorageConfig, TransactionLedger, VDFLimiterInfo, H256, U256,
 };
 use reth::{revm::primitives::B256, tasks::TaskManager};
 use tracing::info;
@@ -227,6 +227,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
             },
         ],
         evm_block_hash: B256::ZERO,
+        vdf_limiter_info: VDFLimiterInfo::default(),
     };
 
     // Send the block confirmed message
