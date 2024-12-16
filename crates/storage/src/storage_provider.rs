@@ -85,7 +85,7 @@ impl StorageProvider {
     }
 
     /// Attempts to get all the provided data_root relative range of chunks for a given data_root, first from the global chunk_cache, and then from any storage modules/partitions storing the chunks.
-    /// like other storage provider functions, this will return a map containing none values, PackedChunks or UnpackedChunks based on te best-effort of the resolver
+    /// like other storage provider functions, this will return a map containing None values, PackedChunks, or UnpackedChunks based on the best-effort of the resolver
     pub fn get_by_data_root_offset(
         &self,
         data_root: &DataRoot,
@@ -173,7 +173,7 @@ impl StorageProvider {
         };
 
         for sm in self.storage_modules.iter() {
-            // skip this SM if it doesn't have an assignment, or
+            // skip this SM if it doesn't have an assignment, or doesn't have the partition_hash we're after
             match sm.partition_assignment {
                 Some(partition_assignment) => {
                     if !storing_partitions

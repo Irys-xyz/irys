@@ -589,8 +589,6 @@ impl StorageModule {
             )?;
             Ok(())
         })?
-        // } else {
-        // }
     }
 
     /// Gets the list of partition-relative offsets in this partition that the chunk should be written to
@@ -841,14 +839,6 @@ impl StorageModule {
     pub fn ledger_num(&self) -> Option<u64> {
         self.partition_assignment?.ledger_num
     }
-
-    // Method that returns an option so we can use `?`
-    // pub fn is_data_short(&self) -> Option<()> {
-    //     if self.is_data() {
-    //         return Some(());
-    //     }
-    //     None
-    // }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
