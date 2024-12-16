@@ -1,7 +1,7 @@
 //! Manages a list of `{block_hash, weave_size, tx_root}`entries, indexed by
 //! block height.
 use crate::data_ledger::Ledger;
-use color_eyre::eyre::Result;
+use eyre::Result;
 use irys_config::IrysNodeConfig;
 use irys_types::H256;
 use std::fs::{self, remove_file, File, OpenOptions};
