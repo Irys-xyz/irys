@@ -318,8 +318,8 @@ impl StorageModule {
     }
 
     /// 'Internal' function that reads chunks from the specified range into a Nodit (interval) map
-    /// that will contain intervals of `None` or `Some` values based on the `requested_types` and the state of the underlying storage.
-    /// (`Some` values will be inserted if the storage is one of the `requested_types`, `None` values will be inserted otherwise)
+    /// that will contain intervals & values based on the `requested_types` and the state of the underlying storage.
+    /// (values will be inserted if the storage is one of the `requested_types`, no values will be inserted otherwise)
     pub fn read_chunks_internal(
         &self,
         chunk_range: PartitionChunkRange,
@@ -342,12 +342,8 @@ impl StorageModule {
                         .insert_strict(ii(chunk_offset, chunk_offset), (bytes, chunk_type.clone()))
                         .map_err(|_| eyre!("error building chunk map"))?;
                 }
-            } else {
-                // we just don't insert anything here
-                // chunk_map
-                //     .insert_strict(*interval, None)
-                //     .map_err(|_| eyre!("error building chunk map"))?;
-            };
+            }
+            // we just don't insert anything if this isn't the case
         }
         Ok(chunk_map)
     }
@@ -361,35 +357,42 @@ impl StorageModule {
         &self,
         ledger_chunk_range: LedgerChunkRange,
     ) -> eyre::Result<ChunkMap2> {
-        let chunk_range = self.make_range_partition_relative(ledger_chunk_range)?;
+        let chunk_range = self
+            .make_range_partition_relative(&ledger_chunk_range)?
+            .ok_or_else(|| eyre::eyre!("chunk_range does not overlap storage module range"))?;
         self.read_chunks(chunk_range)
     }
 
-    /// Reads a ledger-relative interval of chunks from this storage module,
+    /// Reads a ledger-relative interval of PackedChunks from this storage module,
+    // TODO: unify this with the data_root based resolver (which is better)
     pub fn read_full_ledger_chunks(
         &self,
-        ledger_chunk_range: LedgerChunkRange,
-    ) -> eyre::Result<FullChunkMap> {
-        let chunk_range = self.make_range_partition_relative(ledger_chunk_range)?;
-        let mut chunks = self.read_chunks(chunk_range)?;
+        ledger_chunk_range: &LedgerChunkRange,
+    ) -> eyre::Result<Option<FullChunkMap>> {
+        // TODO: make a macro for this "pass through some but short circuit on none" pattern
+        let assignment = match self.partition_assignment {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let chunk_range = match self.make_range_partition_relative(ledger_chunk_range)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let mut chunks = self.read_chunks_internal(chunk_range, Some(vec![ChunkType::Data]))?;
         let mut chunk_map: FullChunkMap = NoditMap::new();
 
         let submodules = self.submodules.overlapping(chunk_range);
-        let assignment = self.get_assignment()?;
+
         for (interval, submodule) in submodules {
             // single read tx per submodule
             let read_tx = submodule.db.tx()?;
             for (chunk_interval, (chunk, _chunk_type)) in chunks.overlapping_mut(*interval) {
                 // we aren't going to read from this chunk from this iterator again, so we can take the value to avoid a clone
                 let chunk = mem::take(chunk);
-                // let chunk = match chunk {
-                //     // we aren't going to read from this chunk from this iterator again, so we can take the value to avoid a clone
-                //     Some((chunk, _)) => mem::take(chunk),
-                //     None => continue,
-                // };
 
-                assert!(chunk_interval.is_singular());
-
+                debug_assert!(chunk_interval.is_singular());
+                // TODO: use the data_path_hash to check the unpacked chunk indexes
+                // if we can return an unpacked chunk, we should.
                 let data_path_hash =
                     match get_path_hashes_by_offset(&read_tx, chunk_interval.start())? {
                         Some(path_hashes) => path_hashes.data_path_hash.ok_or(eyre!(
@@ -433,7 +436,7 @@ impl StorageModule {
             }
         }
 
-        return Ok(chunk_map);
+        return Ok(Some(chunk_map));
     }
 
     /// Reads a single chunk from its physical storage location
@@ -523,7 +526,9 @@ impl StorageModule {
             .ok_or_else(|| eyre::eyre!("chunk_range does not overlap storage module range"))?;
 
         // Compute the partition relative overlapping chunk range
-        let partition_overlap = self.make_range_partition_relative(overlap)?;
+        let partition_overlap = self
+            .make_range_partition_relative(&overlap)?
+            .ok_or_else(|| eyre::eyre!("chunk_range does not overlap storage module range"))?;
         // Compute the Partition relative offset
         let relative_offset = self.make_offset_partition_relative(chunk_range.start())?;
 
@@ -538,7 +543,7 @@ impl StorageModule {
                         add_tx_path_hash_to_offset_index(tx, offset, Some(tx_path_hash.clone()))?;
                     }
                     // Also update the start offset by data_root index
-                    add_start_offset_to_data_root_index(tx, data_root, relative_offset)?;
+                    add_start_offset_to_data_root_index(tx, &data_root, relative_offset)?;
                 }
                 Ok(())
             })?;
@@ -593,7 +598,7 @@ impl StorageModule {
         &self,
         chunk: &UnpackedChunk,
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
-        let start_offsets = self.collect_start_offsets(chunk.data_root)?;
+        let start_offsets = self.collect_start_offsets(&chunk.data_root)?;
 
         if start_offsets.0.len() == 0 {
             return Err(eyre::eyre!("Chunks data_root not found in storage module"));
@@ -618,7 +623,7 @@ impl StorageModule {
         Ok(write_offsets)
     }
 
-    /// Writes chunk data and its data_path to relevant storage locations
+    /// Writes an unpacked data chunk to this storage module, packing it and indexing it into submodule specific tables
     pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> eyre::Result<()> {
         for partition_offset in self.get_write_offsets(&chunk)? {
             // read entropy from the storage module
@@ -634,9 +639,12 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Internal helper function to find all the RelativeStartOffsets for a data_root
+    /// Helper function to find all the RelativeStartOffsets for a data_root
     /// in this StorageModule
-    fn collect_start_offsets(&self, data_root: DataRoot) -> eyre::Result<RelativeStartOffsets> {
+    pub fn collect_start_offsets(
+        &self,
+        data_root: &DataRoot,
+    ) -> eyre::Result<RelativeStartOffsets> {
         let mut offsets = RelativeStartOffsets::default();
         for (_, submodule) in self.submodules.iter() {
             if let Some(rel_offsets) = submodule
@@ -718,35 +726,44 @@ impl StorageModule {
     /// Utility method asking the StorageModule to return its chunk range in
     /// ledger relative coordinates
     pub fn get_storage_module_range(&self) -> eyre::Result<LedgerChunkRange> {
-        if let Some(part_assign) = self.partition_assignment {
-            if let Some(slot_index) = part_assign.slot_index {
-                let start = slot_index as u64 * self.config.num_chunks_in_partition;
-                let end = start + self.config.num_chunks_in_partition;
-                return Ok(LedgerChunkRange(ie(start, end)));
-            } else {
-                return Err(eyre::eyre!("Ledger slot not assigned!"));
-            }
+        let partition_assignment = self
+            .partition_assignment
+            .ok_or(eyre!("Missing required partition assignment"))?;
+        if let Some(slot_index) = partition_assignment.slot_index {
+            let start = slot_index as u64 * self.config.num_chunks_in_partition;
+            let end = start + self.config.num_chunks_in_partition;
+            return Ok(LedgerChunkRange(ie(start, end)));
         } else {
-            return Err(eyre::eyre!("Partition not assigned!"));
+            return Err(eyre::eyre!("Ledger slot not assigned!"));
         }
     }
 
     /// Utility function to take a ledger relative range and make it
     /// Partition relative (relative to the partition assigned to the
-    /// StorageModule)
+    /// StorageModule)  
+    /// This function **will** clamp input values (start ONLY) to be valid partition relative bounds,  
+    /// i.e chunk_range ii(0, 5) with sm ledger range ii(2,4) would translate to partition relative range ii(0,2)  
     pub fn make_range_partition_relative(
         &self,
-        chunk_range: LedgerChunkRange,
-    ) -> eyre::Result<PartitionChunkRange> {
-        let storage_module_range = self.get_storage_module_range()?;
-        let start = chunk_range.start() - storage_module_range.start();
-        let end = chunk_range.end() - storage_module_range.start();
-        Ok(PartitionChunkRange(ii(start as u32, end as u32)))
+        chunk_range: &LedgerChunkRange,
+    ) -> eyre::Result<Option<PartitionChunkRange>> {
+        make_range_partition_relative(&self.get_storage_module_range()?, chunk_range)
+    }
+
+    /// Utility function to take a partiton relative range and make it
+    /// Ledger relative (relative to the ledger assigned to the
+    /// StorageModule)
+    pub fn make_range_ledger_relative(
+        &self,
+        chunk_range: PartitionChunkRange,
+    ) -> eyre::Result<LedgerChunkRange> {
+        make_range_ledger_relative(self.get_storage_module_range()?, chunk_range)
     }
 
     /// utility function to take a ledger relative offset and makes it
     /// Partition relative (relative to the partition assigned to the
     /// StorageModule)
+    /// these values can be negative, if a transaction spans two slots/partitions
     pub fn make_offset_partition_relative(
         &self,
         start_offset: LedgerChunkOffset,
@@ -808,12 +825,6 @@ impl StorageModule {
         self.partition_assignment?.ledger_num
     }
 
-    pub fn get_assignment(&self) -> Result<PartitionAssignment> {
-        self.partition_assignment.ok_or(eyre!(
-            "sm {} missing expected partition assignment",
-            &self.id
-        ))
-    }
     // Method that returns an option so we can use `?`
     // pub fn is_data_short(&self) -> Option<()> {
     //     if self.is_data() {
@@ -875,6 +886,45 @@ pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleIn
     }
 
     Ok(())
+}
+
+/// Utility function to take a ledger relative range and make it
+/// Partition relative (relative to the partition assigned to the
+/// StorageModule)  
+/// This function **will** clamp the start to be valid partition relative bounds,  
+/// i.e chunk_range ii(0, 5) with sm ledger range ii(2,4) would translate to partition relative range ii(0,2)  
+pub fn make_range_partition_relative(
+    storage_module_range: &LedgerChunkRange,
+    chunk_range: &LedgerChunkRange,
+) -> eyre::Result<Option<PartitionChunkRange>> {
+    let intersection = match storage_module_range.intersection(chunk_range) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+
+    Ok(Some(PartitionChunkRange(ii(
+        intersection
+            .start()
+            .max(chunk_range.start())
+            .saturating_sub(storage_module_range.start())
+            .try_into()?,
+        intersection
+            .end()
+            .saturating_sub(storage_module_range.start())
+            .try_into()?,
+    ))))
+}
+
+/// Utility function to take a partiton relative range and make it
+/// Ledger relative (relative to the ledger assigned to the
+/// StorageModule)
+pub fn make_range_ledger_relative(
+    storage_module_range: LedgerChunkRange,
+    chunk_range: PartitionChunkRange,
+) -> eyre::Result<LedgerChunkRange> {
+    let start = chunk_range.start() as u64 + storage_module_range.start();
+    let end = chunk_range.end() as u64 + storage_module_range.start();
+    Ok(LedgerChunkRange(ii(start, end)))
 }
 
 /// Reads and deserializes intervals from storage state file

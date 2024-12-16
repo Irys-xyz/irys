@@ -9,9 +9,9 @@ use irys_database::{
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    irys::IrysSigner, partition::PartitionAssignment, Address, Base64, UnpackedChunk, IrysTransaction,
+    irys::IrysSigner, partition::PartitionAssignment, Address, Base64, IrysTransaction,
     IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PartitionChunkRange, StorageConfig,
-    TransactionLedger, H256,
+    TransactionLedger, UnpackedChunk, H256,
 };
 use openssl::sha;
 use reth_db::Database;
@@ -359,7 +359,7 @@ fn tx_path_overlap_tests() {
 
         // Retrieve the partition assignments from the data root
         let hashes = db
-            .view(|tx| get_partition_hashes_by_data_root(tx, data_root))
+            .view(|tx| get_partition_hashes_by_data_root(tx, &data_root))
             .unwrap()
             .unwrap();
         if let Some(partition_hashes) = hashes {
@@ -382,7 +382,7 @@ fn tx_path_overlap_tests() {
                         }
 
                         // Request the chunk from the global db index by  data root & tx relative offset
-                        let res = cached_chunk_by_chunk_index(tx, data_root, i as u32).unwrap();
+                        let res = cached_chunk_by_chunk_index(tx, &data_root, &(i as u32)).unwrap();
 
                         // Build a Chunk struct to store in the submodule
                         if let Some((_metadata, chunk)) = res {
@@ -423,7 +423,7 @@ fn tx_path_overlap_tests() {
 
     // This is just helpful logging, could be commented out
     for i in 0..=19 {
-        if let Some((chunk, chunk_type)) = chunks1.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks1.get_at_point(i) {
             let preview = &chunk[..chunk.len().min(5)];
             info!(
                 "storage_module[0][{:?}]: {:?}... - {:?}",
@@ -434,7 +434,7 @@ fn tx_path_overlap_tests() {
         }
     }
     for i in 0..=19 {
-        if let Some((chunk, chunk_type)) = chunks2.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks2.get_at_point(i) {
             let preview = &chunk[..chunk.len().min(5)];
             info!(
                 "storage_module[1][{:?}]: {:?}... - {:?}",
@@ -447,7 +447,7 @@ fn tx_path_overlap_tests() {
 
     // Test the chunks read back from the storage modules
     for i in 0..=19 {
-        if let Some((chunk, chunk_type)) = chunks1.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks1.get_at_point(i) {
             let bytes = [i as u8; 32];
             assert_eq!(*chunk, bytes);
             assert_eq!(*chunk_type, ChunkType::Data);
@@ -456,7 +456,7 @@ fn tx_path_overlap_tests() {
     }
 
     for i in 0..=19 {
-        if let Some((chunk, chunk_type)) = chunks2.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks2.get_at_point(i) {
             let bytes = [20 + i as u8; 32];
             if i <= 7 {
                 assert_eq!(*chunk, bytes);
@@ -555,7 +555,7 @@ fn verify_data_root_start_offset(
     submodule
         .db
         .view(|tx| {
-            let relative_start_offsets = get_start_offsets_by_data_root(tx, data_root)
+            let relative_start_offsets = get_start_offsets_by_data_root(tx, &data_root)
                 .unwrap()
                 .expect("start offsets not found");
             assert_eq!(relative_start_offsets.0.len(), 1);
