@@ -6,9 +6,8 @@ use irys_database::{
 };
 use irys_storage::{ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    app_state::DatabaseProvider, chunk, Base64, UnpackedChunk, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig,
-    TransactionLedger,
+    app_state::DatabaseProvider, chunk, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
+    LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, TransactionLedger, UnpackedChunk,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
@@ -129,7 +128,7 @@ fn process_transaction_chunks(
 ) -> Result<(), ()> {
     for chunk_index in 0..num_chunks_in_tx {
         // Attempt to retrieve the cached chunk from the mempool
-        let chunk_info = match get_cached_chunk(db, data_root, chunk_index) {
+        let chunk_info = match get_cached_chunk(db, &data_root, &chunk_index) {
             Ok(Some(info)) => info,
             _ => continue,
         };
@@ -226,10 +225,10 @@ fn update_storage_module_indexes(
 }
 fn get_cached_chunk(
     db: &DatabaseProvider,
-    data_root: DataRoot,
-    chunk_index: u32,
+    data_root: &DataRoot,
+    chunk_index: &u32,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
-    db.view_eyre(|tx| cached_chunk_by_chunk_index(tx, data_root, chunk_index))
+    db.view_eyre(|tx| cached_chunk_by_chunk_index(tx, &data_root, &chunk_index))
 }
 
 fn find_storage_module(

@@ -6,8 +6,8 @@ use irys_storage::StorageModuleVec;
 use irys_types::ingress::generate_ingress_proof_tree;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, IrysTransactionHeader,
-    CHUNK_SIZE, H256,
+    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
+    IrysTransactionHeader, CHUNK_SIZE, H256,
 };
 use irys_types::{Address, DataChunks};
 use irys_types::{DataRoot, StorageConfig};
@@ -174,7 +174,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         let read_tx = self.db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let cached_data_root =
-            irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
+            irys_database::cached_data_root_by_data_root(&read_tx, &chunk.data_root)
                 .map_err(|_| ChunkIngressError::DatabaseError)? // Convert DatabaseError to ChunkIngressError
                 .ok_or(ChunkIngressError::InvalidDataHash)?; // Handle None case by converting it to an error
 
@@ -527,7 +527,7 @@ mod tests {
         let db_tx = arc_db2.tx()?;
 
         // Verify the data_root was added to the cache
-        let result = irys_database::cached_data_root_by_data_root(&db_tx, data_root).unwrap();
+        let result = irys_database::cached_data_root_by_data_root(&db_tx, &data_root).unwrap();
         assert_matches!(result, Some(_));
         let last_index = tx.chunks.len() - 1;
         // Loop though each of the transaction chunks
@@ -567,10 +567,13 @@ mod tests {
             // use a new read tx so we can see the writes
             let db_tx = arc_db2.tx()?;
 
-            let (meta, chunk) =
-                irys_database::cached_chunk_by_chunk_index(&db_tx, data_root, chunk_index as u32)
-                    .unwrap()
-                    .unwrap();
+            let (meta, chunk) = irys_database::cached_chunk_by_chunk_index(
+                &db_tx,
+                &data_root,
+                &(chunk_index as u32),
+            )
+            .unwrap()
+            .unwrap();
             assert_eq!(meta.chunk_path_hash, key);
             assert_eq!(chunk.data_path, data_path);
             assert_eq!(chunk.chunk, Some(chunk_bytes.clone()));
@@ -584,7 +587,7 @@ mod tests {
                 // read the set of chunks
                 // only offset 2 (last chunk) should have data
                 let res = storage_module.read_chunks(ii(0, last_index as u32))?;
-                let r = res.get(&2).unwrap();
+                let r = res.get_at_point(2).unwrap();
                 let mut packed_bytes = r.0.clone();
                 // unpack the data (packing was all 0's)
                 xor_vec_u8_arrays_in_place(&mut packed_bytes, &vec![0u8; chunk_size as usize]);

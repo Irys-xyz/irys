@@ -12,9 +12,9 @@ use crate::Ledger;
 use eyre::eyre;
 use irys_types::partition::PartitionHash;
 use irys_types::{
-    hash_sha256, BlockHash, BlockRelativeChunkOffset, UnpackedChunk, ChunkPathHash, DataRoot,
-    IrysBlockHeader, IrysTransactionHeader, IrysTransactionId, TxPath, TxRelativeChunkIndex,
-    TxRoot, H256, MEGABYTE,
+    hash_sha256, BlockHash, BlockRelativeChunkOffset, ChunkPathHash, DataRoot, IrysBlockHeader,
+    IrysTransactionHeader, IrysTransactionId, TxPath, TxRelativeChunkIndex, TxRoot, UnpackedChunk,
+    H256, MEGABYTE,
 };
 use reth::prometheus_exporter::install_prometheus_recorder;
 use reth_db::cursor::{DbDupCursorRO, DupWalker};
@@ -121,9 +121,9 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
 /// Gets a [`CachedDataRoot`] by it's [`DataRoot`] from [`CachedDataRoots`] .
 pub fn cached_data_root_by_data_root<T: DbTx>(
     tx: &T,
-    data_root: DataRoot,
+    data_root: &DataRoot,
 ) -> eyre::Result<Option<CachedDataRoot>> {
-    Ok(tx.get::<CachedDataRoots>(data_root)?)
+    Ok(tx.get::<CachedDataRoots>(*data_root)?)
 }
 
 type IsDuplicate = bool;
@@ -170,14 +170,14 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
 /// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxRelativeChunkOffset`]
 pub fn cached_chunk_by_chunk_index<T: DbTx>(
     tx: &T,
-    data_root: DataRoot,
-    chunk_index: TxRelativeChunkIndex,
+    data_root: &DataRoot,
+    chunk_index: &TxRelativeChunkIndex,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
 
     let result = if let Some(index_entry) = cursor
-        .seek_by_key_subkey(data_root, chunk_index)?
-        .filter(|e| e.index == chunk_index)
+        .seek_by_key_subkey(*data_root, *chunk_index)?
+        .filter(|e| e.index == *chunk_index)
     {
         let meta: CachedChunkIndexMetadata = index_entry.into();
         // expect that the cached chunk always has an entry if the index entry exists
@@ -209,7 +209,7 @@ pub fn assign_data_root<T: DbTxMut + DbTx>(
     data_root: DataRoot,
     partition_hash: PartitionHash,
 ) -> eyre::Result<()> {
-    let partition_hashes = if let Some(mut phs) = get_partition_hashes_by_data_root(tx, data_root)?
+    let partition_hashes = if let Some(mut phs) = get_partition_hashes_by_data_root(tx, &data_root)?
     {
         phs.0.push(partition_hash);
         phs
@@ -232,9 +232,9 @@ pub fn set_partition_hashes_by_data_root<T: DbTxMut>(
 /// Retrieves list of partition hashes for a data root from the database
 pub fn get_partition_hashes_by_data_root<T: DbTx>(
     tx: &T,
-    data_root: DataRoot,
+    data_root: &DataRoot,
 ) -> eyre::Result<Option<PartitionHashes>> {
-    Ok(tx.get::<PartitionHashesByDataRoot>(data_root)?)
+    Ok(tx.get::<PartitionHashesByDataRoot>(*data_root)?)
 }
 
 #[cfg(test)]

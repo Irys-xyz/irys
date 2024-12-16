@@ -155,24 +155,24 @@ pub fn set_path_hashes_by_offset<T: DbTxMut>(
 /// get all the start offsets for the data_root
 pub fn get_start_offsets_by_data_root<T: DbTx>(
     tx: &T,
-    data_root: DataRoot,
+    data_root: &DataRoot,
 ) -> eyre::Result<Option<RelativeStartOffsets>> {
-    Ok(tx.get::<StartOffsetsByDataRoot>(data_root)?)
+    Ok(tx.get::<StartOffsetsByDataRoot>(*data_root)?)
 }
 
 /// set (overwrite) all the start offsets for the data_root
 pub fn set_start_offsets_by_data_root<T: DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_root: &DataRoot,
     start_offsets: RelativeStartOffsets,
 ) -> eyre::Result<()> {
-    Ok(tx.put::<StartOffsetsByDataRoot>(data_root, start_offsets)?)
+    Ok(tx.put::<StartOffsetsByDataRoot>(*data_root, start_offsets)?)
 }
 
 ///add a start offset to the start offsets for the data_root
 pub fn add_start_offset_to_data_root_index<T: DbTxMut + DbTx>(
     tx: &T,
-    data_root: DataRoot,
+    data_root: &DataRoot,
     start_offset: RelativeChunkOffset,
 ) -> eyre::Result<()> {
     let mut offsets = get_start_offsets_by_data_root(tx, data_root)?.unwrap_or_default();
