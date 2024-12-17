@@ -1,10 +1,13 @@
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, Result};
-use irys_database::submodule::{
-    self, add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
-    add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
-    create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
-    get_tx_path_by_offset, tables::RelativeStartOffsets, write_chunk_data_path,
+use irys_database::{
+    submodule::{
+        self, add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
+        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
+        create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
+        get_tx_path_by_offset, tables::RelativeStartOffsets, write_chunk_data_path,
+    },
+    Ledger,
 };
 use irys_packing::xor_vec_u8_arrays_in_place;
 use irys_types::{
@@ -757,6 +760,48 @@ fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {
     hasher.update(message);
     let result = hasher.finish();
     Ok(result)
+}
+
+/// Retrieves all the storage modules overlapped by a range in a given ledger
+pub fn get_overlapped_storage_modules(
+    storage_modules: &[Arc<StorageModule>],
+    ledger: Ledger,
+    tx_chunk_range: &LedgerChunkRange,
+) -> Vec<Arc<StorageModule>> {
+    storage_modules
+        .iter()
+        .filter(|module| {
+            module
+                .partition_assignment
+                .and_then(|pa| pa.ledger_num)
+                .map_or(false, |num| num == ledger as u64)
+                && module
+                    .get_storage_module_range()
+                    .map_or(false, |range| range.overlaps(tx_chunk_range))
+        })
+        .cloned() // Clone the Arc, which is cheap
+        .collect()
+}
+
+/// For a given ledger and ledger offset this function attempts to find
+/// a storage module that overlaps the offset
+pub fn get_overlapped_storage_module(
+    storage_modules: &[Arc<StorageModule>],
+    ledger: Ledger,
+    chunk_offset: LedgerChunkOffset,
+) -> Option<Arc<StorageModule>> {
+    storage_modules
+        .iter()
+        .find(|module| {
+            module
+                .partition_assignment
+                .and_then(|pa| pa.ledger_num)
+                .map_or(false, |num| num == ledger as u64)
+                && module
+                    .get_storage_module_range()
+                    .map_or(false, |range| range.contains_point(chunk_offset))
+        })
+        .cloned()
 }
 
 //==============================================================================

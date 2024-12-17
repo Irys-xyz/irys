@@ -36,8 +36,9 @@ mod tests {
     use actix_web::{middleware::Logger, test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
-    use irys_actors::{chunk_provider::ChunkProviderActor, mempool::MempoolActor};
+    use irys_actors::mempool::MempoolActor;
     use irys_database::tables::IrysTables;
+    use irys_storage::ChunkProvider;
     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
     use log::{debug, error, info, log_enabled, Level};
     use reth::tasks::TaskManager;
@@ -76,17 +77,16 @@ mod tests {
             Arc::new(Vec::new()).to_vec(),
         );
         let mempool_actor_addr = mempool_actor.start();
-        let chunk_provider_actor = ChunkProviderActor::new(
+        let chunk_provider = ChunkProvider::new(
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
             DatabaseProvider(db_arc.clone()),
         );
-        let chunk_provider_addr = chunk_provider_actor.start();
 
         let app_state = ApiState {
             db: DatabaseProvider(db_arc.clone()),
             mempool: mempool_actor_addr,
-            chunk_provider: chunk_provider_addr,
+            chunk_provider: Arc::new(chunk_provider),
         };
 
         let app = test::init_service(
@@ -128,17 +128,16 @@ mod tests {
             Arc::new(Vec::new()).to_vec(),
         );
         let mempool_actor_addr = mempool_actor.start();
-        let chunk_provider_actor = ChunkProviderActor::new(
+        let chunk_provider = ChunkProvider::new(
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
             DatabaseProvider(db_arc.clone()),
         );
-        let chunk_provider_addr = chunk_provider_actor.start();
 
         let app_state = ApiState {
             db: DatabaseProvider(db_arc.clone()),
             mempool: mempool_actor_addr,
-            chunk_provider: chunk_provider_addr,
+            chunk_provider: Arc::new(chunk_provider),
         };
 
         let app = test::init_service(

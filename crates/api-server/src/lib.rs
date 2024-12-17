@@ -1,6 +1,8 @@
 mod error;
 mod routes;
 
+use std::sync::Arc;
+
 use actix::Addr;
 use actix_cors::Cors;
 use actix_web::{
@@ -9,14 +11,15 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 
-use irys_actors::{chunk_provider::ChunkProviderActor, mempool::MempoolActor};
+use irys_actors::mempool::MempoolActor;
+use irys_storage::ChunkProvider;
 use irys_types::app_state::DatabaseProvider;
 use routes::{block, get_chunk, index, post_chunk, price, proxy::proxy, tx};
 
 #[derive(Clone)]
 pub struct ApiState {
     pub mempool: Addr<MempoolActor>,
-    pub chunk_provider: Addr<ChunkProviderActor>,
+    pub chunk_provider: Arc<ChunkProvider>,
     pub db: DatabaseProvider,
 }
 
@@ -96,17 +99,16 @@ async fn post_tx_and_chunks_golden_path() {
     );
     let mempool_actor_addr = mempool_actor.start();
 
-    let chunk_provider_actor = ChunkProviderActor::new(
+    let chunk_provider = ChunkProvider::new(
         storage_config.clone(),
         Arc::new(Vec::new()).to_vec(),
         DatabaseProvider(arc_db.clone()),
     );
-    let chunk_provider_addr = chunk_provider_actor.start();
 
     let app_state = ApiState {
         db: DatabaseProvider(arc_db.clone()),
         mempool: mempool_actor_addr,
-        chunk_provider: chunk_provider_addr,
+        chunk_provider: Arc::new(chunk_provider),
     };
 
     // Initialize the app

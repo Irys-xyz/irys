@@ -4,7 +4,7 @@ use irys_database::{
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
     BlockIndex, Initialized, Ledger,
 };
-use irys_storage::{ie, ii, InclusiveInterval, StorageModule};
+use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
     app_state::DatabaseProvider, Base64, Chunk, DataRoot, IrysBlockHeader, IrysTransactionHeader,
     LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, TransactionLedger,
@@ -197,47 +197,6 @@ fn get_tx_path_pairs(
         .into_iter()
         .zip(txs.iter().map(|tx| (tx.data_root, tx.data_size)))
         .collect())
-}
-
-fn get_overlapped_storage_modules(
-    storage_modules: &[Arc<StorageModule>],
-    ledger: Ledger,
-    tx_chunk_range: &LedgerChunkRange,
-) -> Vec<Arc<StorageModule>> {
-    storage_modules
-        .iter()
-        .filter(|module| {
-            module
-                .partition_assignment
-                .and_then(|pa| pa.ledger_num)
-                .map_or(false, |num| num == ledger as u64)
-                && module
-                    .get_storage_module_range()
-                    .map_or(false, |range| range.overlaps(tx_chunk_range))
-        })
-        .cloned() // Clone the Arc, which is cheap
-        .collect()
-}
-
-/// For a given ledger and ledger offset this function attempts to find
-/// a storage module that overlaps the offset
-pub fn get_overlapped_storage_module(
-    storage_modules: &[Arc<StorageModule>],
-    ledger: Ledger,
-    chunk_offset: LedgerChunkOffset,
-) -> Option<Arc<StorageModule>> {
-    storage_modules
-        .iter()
-        .find(|module| {
-            module
-                .partition_assignment
-                .and_then(|pa| pa.ledger_num)
-                .map_or(false, |num| num == ledger as u64)
-                && module
-                    .get_storage_module_range()
-                    .map_or(false, |range| range.contains_point(chunk_offset))
-        })
-        .cloned()
 }
 
 fn update_storage_module_indexes(

@@ -3,7 +3,6 @@ use actix::Actor;
 use irys_actors::{
     block_index::BlockIndexActor,
     block_producer::{BlockConfirmedMessage, BlockProducerActor},
-    chunk_provider::ChunkProviderActor,
     chunk_storage::ChunkStorageActor,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage, GetLedgersMessage,
@@ -21,7 +20,9 @@ pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
-use irys_storage::{initialize_storage_files, ChunkType, StorageModule, StorageModuleVec};
+use irys_storage::{
+    initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
+};
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, storage_config,
     DifficultyAdjustmentConfig, StorageConfig, H256, PACKING_SHA_1_5_S, U256,
@@ -296,16 +297,12 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     config: arc_config.clone(),
                 });
 
-                let chunk_provider_actor = ChunkProviderActor::new(
-                    storage_config.clone(),
-                    storage_modules.clone(),
-                    db.clone(),
-                );
-                let chunk_provider_addr = chunk_provider_actor.start();
+                let chunk_provider =
+                    ChunkProvider::new(storage_config.clone(), storage_modules.clone(), db.clone());
 
                 run_server(ApiState {
                     mempool: mempool_actor_addr,
-                    chunk_provider: chunk_provider_addr,
+                    chunk_provider: Arc::new(chunk_provider),
                     db,
                 })
                 .await;
