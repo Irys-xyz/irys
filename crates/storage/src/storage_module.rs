@@ -12,10 +12,11 @@ use irys_database::{
 use irys_packing::xor_vec_u8_arrays_in_place;
 use irys_types::{
     app_state::DatabaseProvider,
+    get_leaf_proof,
     partition::{PartitionAssignment, PartitionHash},
-    Chunk, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset, LedgerChunkRange,
-    PartitionChunkOffset, PartitionChunkRange, RelativeChunkOffset, StorageConfig, TxPath,
-    TxPathHash, H256,
+    Base64, Chunk, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset,
+    LedgerChunkRange, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize, StorageConfig,
+    TxPath, H256,
 };
 use nodit::{
     interval::{ie, ii},
@@ -502,7 +503,7 @@ impl StorageModule {
 
     /// Internal helper function to find all the RelativeStartOffsets for a data_root
     /// in this StorageModule
-    fn collect_start_offsets(&self, data_root: DataRoot) -> eyre::Result<RelativeStartOffsets> {
+    pub fn collect_start_offsets(&self, data_root: DataRoot) -> eyre::Result<RelativeStartOffsets> {
         let mut offsets = RelativeStartOffsets::default();
         for (_, submodule) in self.submodules.iter() {
             if let Some(rel_offsets) = submodule
@@ -515,22 +516,59 @@ impl StorageModule {
         Ok(offsets)
     }
 
-    pub fn read_data_path(
-        &mut self,
-        ledger_offset: LedgerChunkOffset,
-    ) -> eyre::Result<Option<ChunkDataPath>> {
-        let partition_offset = self.make_offset_partition_relative_guarded(ledger_offset)?;
+    /// Returns an initialize Chunk struct if successful, None otherwise
+    pub fn get_wrapped_chunk(&self, ledger_offset: LedgerChunkOffset) -> Option<Chunk> {
+        // Get paths and process them
+        let (tx_path, data_path) = self.read_tx_data_path(ledger_offset).ok()?;
 
-        let (_interval, submodule) = self
-            .submodules
-            .get_key_value_at_point(partition_offset)
-            .unwrap();
+        let data_root = match tx_path {
+            Some(bytes) => {
+                let proof = get_leaf_proof(&Base64::from(bytes)).ok()?;
+                proof.hash().map(H256::from).unwrap_or_default()
+            }
+            None => H256::zero(),
+        };
 
-        submodule
-            .db
-            .view(|tx| get_data_path_by_offset(tx, partition_offset))?
+        let (data_path, data_size) = match data_path {
+            Some(dp) => {
+                let path_buff = Base64::from(dp.clone());
+                let proof = get_leaf_proof(&path_buff).ok()?;
+                (Base64::from(dp), proof.offset() as u64)
+            }
+            None => (Base64::default(), 0),
+        };
+
+        // Get chunk info and calculate index
+        let range = self.get_storage_module_range().ok()?;
+        let partition_offset = (ledger_offset - range.start()) as u32;
+        let closest_offsets = self.collect_start_offsets(data_root).ok()?;
+        println!(
+            "module id: {} data_root: {}, offsets: {:#?}",
+            self.id, data_root, closest_offsets
+        );
+        let closest_offset = closest_offsets
+            .0
+            .iter()
+            .filter(|&&offset| offset <= partition_offset as i32)
+            .max()
+            .copied()?;
+
+        let chunks = self
+            .read_chunks(ii(partition_offset, partition_offset))
+            .ok()?;
+        let chunk_info = chunks.get(&partition_offset)?;
+
+        Some(Chunk {
+            data_root,
+            data_size,
+            data_path,
+            bytes: Base64::from(chunk_info.0.clone()),
+            chunk_index: (ledger_offset - (range.start() as i128 + closest_offset as i128) as u64)
+                as u32,
+        })
     }
 
+    /// Gets the tx_path and data_path for a chunk using its ledger relative offset
     pub fn read_tx_data_path(
         &self,
         chunk_offset: LedgerChunkOffset,
@@ -977,7 +1015,7 @@ mod tests {
 
         storage_module.write_data_chunk(&chunk)?;
 
-        let ret_path = storage_module.read_data_path(0)?;
+        let (_, ret_path) = storage_module.read_tx_data_path(0)?;
 
         assert_eq!(ret_path, Some(data_path));
 

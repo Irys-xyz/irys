@@ -5,8 +5,6 @@ use actix_web::{
 };
 
 use irys_database::Ledger;
-use irys_storage::ChunkType;
-use irys_types::LedgerChunkOffset;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -26,15 +24,10 @@ pub async fn get_chunk(
         }
     };
 
-    let Some((chunk_data, chunk_type)) = state.chunk_provider.get_chunk(ledger, path.ledger_offset)
-    else {
-        return Ok(HttpResponse::NotFound().body("Chunk not found"));
+    let chunk = match state.chunk_provider.get_chunk(ledger, path.ledger_offset) {
+        Some(chunk) => chunk,
+        None => return Ok(HttpResponse::NotFound().body("Chunk not found")),
     };
 
-    match chunk_type {
-        ChunkType::Data => Ok(HttpResponse::Ok()
-            .content_type("application/octet-stream")
-            .body(chunk_data)),
-        other => Ok(HttpResponse::NotFound().body(format!("Chunk not found type: {:?}", other))),
-    }
+    Ok(HttpResponse::Ok().json(chunk))
 }

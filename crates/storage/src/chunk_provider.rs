@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use irys_database::Ledger;
-use irys_types::{DatabaseProvider, LedgerChunkOffset, StorageConfig};
-use nodit::interval::ii;
+use irys_types::{Chunk, DatabaseProvider, LedgerChunkOffset, StorageConfig};
 
 use crate::{get_overlapped_storage_module, ChunkType, StorageModule};
 
@@ -31,31 +30,10 @@ impl ChunkProvider {
         }
     }
 
-    pub fn get_chunk(
-        &self,
-        ledger: Ledger,
-        ledger_offset: LedgerChunkOffset,
-    ) -> Option<(Vec<u8>, ChunkType)> {
-        // Retrieve the chunk
-        let storage_module =
-            get_overlapped_storage_module(&self.storage_modules, ledger, ledger_offset);
-
-        storage_module.and_then(|module| {
-            let range = module.get_storage_module_range().ok()?;
-            let partition_offset = (ledger_offset - range.start()) as u32;
-
-            let chunks = module
-                .read_chunks(ii(partition_offset, partition_offset))
-                .ok()?;
-            let chunk_info = chunks.get(&partition_offset)?;
-
-            println!(
-                "Get Chunk - Ledger: {:?} Offset: {} {}",
-                ledger, ledger_offset, module.id
-            );
-            println!("{:?}", chunk_info);
-
-            Some((chunk_info.0.clone(), chunk_info.1.clone()))
-        })
+    /// Retrieves a chunk from a ledger
+    pub fn get_chunk(&self, ledger: Ledger, ledger_offset: LedgerChunkOffset) -> Option<Chunk> {
+        // Get basic chunk info
+        let module = get_overlapped_storage_module(&self.storage_modules, ledger, ledger_offset)?;
+        module.get_wrapped_chunk(ledger_offset)
     }
 }
