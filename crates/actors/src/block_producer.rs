@@ -152,6 +152,17 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let data_txs: Vec<IrysTransactionHeader> =
                     mempool_addr.send(GetBestMempoolTxs).await.unwrap();
 
+                let chunk_size = 32;
+
+                let bytes_added = data_txs
+                    .iter()
+                    .map(|tx| ((tx.data_size + chunk_size - 1) / chunk_size) * chunk_size)
+                    .sum::<u64>();
+        
+                let chunks_added = bytes_added / chunk_size;
+
+                let max_chunk_offset = prev_block_header.ledgers[Ledger::Submit].max_chunk_offset + chunks_added;
+
                 let data_tx_ids = data_txs.iter().map(|h| h.id.clone()).collect::<Vec<H256>>();
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
@@ -219,7 +230,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         TransactionLedger {
                             tx_root: TransactionLedger::merklize_tx_root(&data_txs).0,
                             txids: H256List(data_tx_ids.clone()),
-                            max_chunk_offset: 0,
+                            max_chunk_offset,
                             expires: Some(1622543200),
                         },
                     ],
@@ -313,7 +324,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         db.view_eyre(|tx| tx_header_by_txid(tx, txid))
                             .and_then(|opt| {
                                 opt.ok_or_else(|| {
-                                    eyre::eyre!("No tx header found for txid {}", txid)
+                                    eyre::eyre!("No tx header found for txid {:?}", txid)
                                 })
                             })
                     })
