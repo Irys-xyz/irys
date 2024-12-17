@@ -4,7 +4,10 @@ use std::{
 };
 
 use actix::prelude::*;
-use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
+
+use irys_database::{
+    BlockBounds, BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem,
+};
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
 
 use crate::block_producer::BlockConfirmedMessage;
@@ -155,5 +158,21 @@ impl Handler<GetLatestBlockIndexMessage> for BlockIndexActor {
         let bi = self.block_index.read().unwrap();
         let block_height = bi.num_blocks().max(1) as usize - 1;
         Some(bi.get_item(block_height)?.clone())
+    }
+}
+
+/// Returns the block bounds containing ledger offset
+#[derive(Message, Clone, Debug)]
+#[rtype(result = "Option<BlockBounds>")]
+pub struct GetBlockBoundsMessage {
+    pub ledger: Ledger,
+    pub chunk_offset: u64,
+}
+
+impl Handler<GetBlockBoundsMessage> for BlockIndexActor {
+    type Result = Option<BlockBounds>;
+    fn handle(&mut self, msg: GetBlockBoundsMessage, _ctx: &mut Self::Context) -> Self::Result {
+        let bi = self.block_index.read().unwrap();
+        Some(bi.get_block_bounds(msg.ledger, msg.chunk_offset))
     }
 }

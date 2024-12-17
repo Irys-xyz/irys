@@ -8,11 +8,12 @@ use eyre::eyre;
 use irys_actors::{block_producer::SolutionFoundMessage, mempool::TxIngressMessage};
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
+use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, Address, IrysTransaction, H256,
-    IRYS_CHAIN_ID,
+    block_production::SolutionContext, irys::IrysSigner, vdf_config::VDFStepsConfig, Address,
+    IrysTransaction, H256, IRYS_CHAIN_ID,
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
@@ -23,6 +24,35 @@ use reth_primitives::{
 };
 use tokio::time::sleep;
 use tracing::info;
+
+/// Create a valid capacity PoA
+#[cfg(test)]
+pub fn capacity_chunk_solution(miner_addr: Address) -> SolutionContext {
+    let partition_hash = H256::zero();
+    let vdf_config = VDFStepsConfig::default(); // TODO: take it from test's vdf config
+    let chunk_size = 32; // TODO: take it from test's storage config
+
+    // TODO: use this when capacity chunks are packed
+    //let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+    // compute_entropy_chunk(
+    //     miner_addr,
+    //     0,
+    //     partition_hash.into(),
+    //     vdf_config.vdf_difficulty as u32,
+    //     chunk_size, // take it from storage config
+    //     &mut entropy_chunk,
+    // );
+
+    let entropy_chunk = vec![0u8; chunk_size as usize];
+    SolutionContext {
+        partition_hash,
+        chunk_offset: 0,
+        mining_address: miner_addr,
+        tx_path: None,
+        data_path: None,
+        chunk: entropy_chunk,
+    }
+}
 
 #[tokio::test]
 async fn test_blockprod() -> eyre::Result<()> {
@@ -78,17 +108,12 @@ async fn test_blockprod() -> eyre::Result<()> {
         // txs.push(tx);
     }
 
+    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address());
+
     let (block, reth_exec_env) = node
         .actor_addresses
         .block_producer
-        .send(SolutionFoundMessage(SolutionContext {
-            partition_hash: H256::random(),
-            chunk_offset: 0,
-            mining_address: node.config.mining_signer.address(),
-            tx_path: None,
-            data_path: None,
-            chunk: Vec::new(),
-        }))
+        .send(SolutionFoundMessage(poa_solution))
         .await?
         .unwrap();
 
@@ -135,19 +160,14 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
 
+    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address());
+
     for i in 1..10 {
         info!("mining block {}", i);
         let fut = node
             .actor_addresses
             .block_producer
-            .send(SolutionFoundMessage(SolutionContext {
-                partition_hash: H256::random(),
-                chunk_offset: 0,
-                mining_address: node.config.mining_signer.address(),
-                tx_path: None,
-                data_path: None,
-                chunk: Vec::new(),
-            }));
+            .send(SolutionFoundMessage(poa_solution.clone()));
         let (block, reth_exec_env) = fut.await?.unwrap();
 
         //check reth for built block
@@ -180,17 +200,12 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
 
     let node = start_for_testing(config).await?;
 
+    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address());
+
     let (block, _) = node
         .actor_addresses
         .block_producer
-        .send(SolutionFoundMessage(SolutionContext {
-            partition_hash: H256::random(),
-            chunk_offset: 0,
-            mining_address: Address::random(),
-            tx_path: None,
-            data_path: None,
-            chunk: Vec::new(),
-        }))
+        .send(SolutionFoundMessage(poa_solution))
         .await?
         .unwrap();
 
@@ -316,17 +331,12 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         // txs.push(tx);
     }
 
+    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address());
+
     let (block, reth_exec_env) = node
         .actor_addresses
         .block_producer
-        .send(SolutionFoundMessage(SolutionContext {
-            partition_hash: H256::random(),
-            chunk_offset: 0,
-            mining_address: node.config.mining_signer.address(),
-            tx_path: None,
-            data_path: None,
-            chunk: Vec::new(),
-        }))
+        .send(SolutionFoundMessage(poa_solution))
         .await?
         .unwrap();
 

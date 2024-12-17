@@ -7,13 +7,17 @@ use std::{
 use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
+use color_eyre::eyre::eyre;
+use eyre::Result;
 use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
+use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, Address,
-    Base64, DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysSignature,
-    IrysTransactionHeader, PoaData, Signature, TransactionLedger, VDFLimiterInfo, H256, U256,
+    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
+    storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64,
+    DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysSignature, IrysTransactionHeader,
+    PoaData, Signature, TransactionLedger, VDFLimiterInfo, H256, U256,
 };
 use openssl::sha;
 use reth::revm::primitives::B256;
@@ -22,6 +26,7 @@ use tracing::{error, info};
 
 use crate::{
     block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
+    block_validation::poa_is_valid,
     chunk_storage::ChunkStorageActor,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool::{GetBestMempoolTxs, MempoolActor},
@@ -54,6 +59,8 @@ pub struct BlockProducerActor {
     pub reth_provider: RethNodeProvider,
     /// Difficulty adjustment parameters for the Irys Protocol
     pub difficulty_config: DifficultyAdjustmentConfig,
+    pub storage_config: StorageConfig,
+    pub vdf_config: VDFStepsConfig,
 }
 
 impl BlockProducerActor {
@@ -67,6 +74,8 @@ impl BlockProducerActor {
         epoch_service: Addr<EpochServiceActor>,
         reth_provider: RethNodeProvider,
         difficulty_config: DifficultyAdjustmentConfig,
+        storage_config: StorageConfig,
+        vdf_config: VDFStepsConfig,
     ) -> Self {
         Self {
             db,
@@ -77,6 +86,8 @@ impl BlockProducerActor {
             epoch_service,
             reth_provider,
             difficulty_config,
+            storage_config,
+            vdf_config,
         }
     }
 }
@@ -96,7 +107,17 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
     fn handle(&mut self, msg: SolutionFoundMessage, ctx: &mut Self::Context) -> Self::Result {
         let solution = msg.0;
-        // info!("BlockProducerActor solution received {:?}", &solution);
+        info!(
+            "BlockProducerActor solution received partition_hash:{:?} offset:{} capacity:{} chunk_length:{}",
+            solution.partition_hash,
+            solution.chunk_offset,
+            solution.tx_path.is_none(),
+            solution.chunk.len(),
+        );
+
+        if solution.chunk.len() <= 32 {
+            info!("Chunk:{:?}", solution.chunk)
+        }
 
         let mempool_addr = self.mempool_addr.clone();
         let block_index_addr = self.block_index_addr.clone();
@@ -109,6 +130,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let db = self.db.clone();
         let self_addr = ctx.address();
         let difficulty_config = self.difficulty_config.clone();
+
+        let storage_config = self.storage_config.clone();
+        let vdf_config = self.vdf_config.clone();
 
         AtomicResponse::new(Box::pin(
             async move {
@@ -181,6 +205,28 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 // the hash of the timestamp
                 let block_hash = hash_sha256(&current_timestamp.to_le_bytes());
 
+                let poa = PoaData {
+                    tx_path: solution.tx_path.map(|tx_path| Base64(tx_path)),
+                    data_path: solution.data_path.map(|data_path| Base64(data_path)),
+                    chunk: Base64(solution.chunk),
+                    ledger_num,
+                    partition_chunk_offset: solution.chunk_offset as u64,
+                    partition_hash: solution.partition_hash,
+                };
+
+                if let Err(err) = poa_is_valid(
+                    &poa,
+                    &block_index_addr,
+                    &epoch_service_addr,
+                    &storage_config,
+                    &vdf_config,
+                )
+                .await
+                {
+                    error!("PoA error {:?}", err);
+                    return None;
+                }
+
                 let mut irys_block = IrysBlockHeader {
                     block_hash,
                     height: block_height,
@@ -193,14 +239,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     chunk_hash: H256::zero(),
                     previous_block_hash: prev_block_hash,
                     previous_cumulative_diff: U256::from(4000),
-                    poa: PoaData {
-                        tx_path: solution.tx_path.map(|tx_path| Base64(tx_path)),
-                        data_path: solution.data_path.map(|data_path| Base64(data_path)),
-                        chunk: Base64(solution.chunk),
-                        ledger_num,
-                        partition_chunk_offset: solution.chunk_offset as u64,
-                        partition_hash: solution.partition_hash,
-                    },
+                    poa,
                     reward_address: Address::ZERO,
                     reward_key: Base64::from_str("").unwrap(),
                     signature: IrysSignature {

@@ -1,3 +1,5 @@
 mod basic_contract;
-mod block_production;
+pub mod block_production;
 mod external_tx;
+
+use block_production::*;

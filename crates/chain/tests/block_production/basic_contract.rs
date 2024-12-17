@@ -1,5 +1,6 @@
 use std::{fs::remove_dir_all, future::Future, time::Duration};
 
+use crate::block_production::capacity_chunk_solution;
 use alloy_core::primitives::U256;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
@@ -10,11 +11,10 @@ use irys_actors::block_producer::SolutionFoundMessage;
 use irys_chain::{chain::start_for_testing, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, H256};
+use irys_types::{irys::IrysSigner, Address, H256};
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
 use tracing::info;
-
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
 sol!(
@@ -105,6 +105,8 @@ pub async fn future_or_mine_on_timeout<F, T>(
 where
     F: Future<Output = T> + Unpin,
 {
+    let poa_solution = capacity_chunk_solution(node_ctx.config.mining_signer.address());
+
     loop {
         let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;
         match race {
@@ -115,17 +117,11 @@ where
                 info!("deployment timed out, creating new block..")
             }
         };
+
         let _ = node_ctx
             .actor_addresses
             .block_producer
-            .send(SolutionFoundMessage(SolutionContext {
-                partition_hash: H256::random(),
-                chunk_offset: 0,
-                mining_address: Address::random(),
-                tx_path: None,
-                data_path: None,
-                chunk: Vec::new(),
-            }))
+            .send(SolutionFoundMessage(poa_solution.clone()))
             .await?
             .unwrap();
     }

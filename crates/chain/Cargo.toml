@@ -18,6 +18,7 @@ irys-api-server.workspace = true
 irys-config.workspace = true
 irys-testing-utils.workspace = true
 irys-actors.workspace = true
+irys-packing.workspace = true
 #
 assert_matches = "1.5.0"
 clap = "4.5.20"
@@ -37,6 +38,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.107"
 sha2 = "0.10.8"
 tempfile = "3.10"
+env_logger = "0.11.5"
 actix-rt.workspace = true
 jsonrpsee.workspace = true
 reth-e2e-test-utils.workspace = true

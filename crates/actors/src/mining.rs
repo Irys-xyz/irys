@@ -48,7 +48,10 @@ impl PartitionMiningActor {
     ) -> eyre::Result<Option<SolutionContext>> {
         let partition_hash = match self.storage_module.partition_hash() {
             Some(p) => p,
-            None => return Ok(None),
+            None => {
+                info!("No parittion assigned !");
+                return Ok(None);
+            }
         };
 
         // Hash together the mining_seed and partition to get randomness for the rng
@@ -70,7 +73,7 @@ impl PartitionMiningActor {
         // Starting chunk index within partition
         let start_chunk_index = (recall_range_index * num_chunks_in_recall_range) as usize;
 
-        debug!(
+        info!(
             "Recall range index {} start chunk index {}",
             recall_range_index, start_chunk_index
         );
@@ -95,6 +98,11 @@ impl PartitionMiningActor {
                 .storage_module
                 .read_tx_data_path(partition_chunk_offset as u64)?;
 
+            info!(
+                "partition_hash: {}, chunk offset: {}",
+                partition_hash, chunk_offset
+            );
+
             let mut hasher = sha::Sha256::new();
             hasher.update(chunk_bytes);
             hasher.update(&partition_chunk_offset.to_le_bytes());
@@ -102,11 +110,11 @@ impl PartitionMiningActor {
             let test_solution = hash_to_number(&hasher.finish());
 
             if test_solution >= self.difficulty {
-                debug!("SOLUTION FOUND!!!!!!!!!");
+                info!("SOLUTION FOUND!!!!!!!!!");
 
-                println!("{:?}", chunk_bytes);
+                info!("{:?}", chunk_bytes);
 
-                println!(
+                info!(
                     "Solution Found - partition_id: {}, ledger_offset: {}/{}, range_offset: {}/{}",
                     self.storage_module.id,
                     partition_chunk_offset,
@@ -128,6 +136,8 @@ impl PartitionMiningActor {
 
                 // Once solution is sent stop mining and let all other partitions know
                 return Ok(Some(solution));
+            } else {
+                info!("NO SOLUTION!!!!")
             }
         }
 
@@ -248,7 +258,7 @@ mod tests {
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
     use std::sync::Arc;
-    use tracing::debug;
+    use tracing::{debug, info};
 
     #[actix_rt::test]
     async fn test_solution() {
@@ -264,6 +274,7 @@ mod tests {
             let solution_message: SolutionFoundMessage =
                 *msg.downcast::<SolutionFoundMessage>().unwrap();
             let solution = solution_message.0;
+            info!("Solution found arrived to mock actor!");
             assert_eq!(
                 partition_hash, solution.partition_hash,
                 "Not expected partition"

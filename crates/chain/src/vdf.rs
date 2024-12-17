@@ -4,35 +4,14 @@ use irys_actors::{
     mining_broadcaster::{BroadcastMiningSeed, MiningBroadcaster},
 };
 use irys_types::{
-    H256, NONCE_LIMITER_RESET_FREQUENCY, NUM_CHECKPOINTS_IN_VDF_STEP, U256, VDF_SHA_1S,
+    vdf_config::VDFStepsConfig, H256, NONCE_LIMITER_RESET_FREQUENCY, NUM_CHECKPOINTS_IN_VDF_STEP,
+    U256, VDF_SHA_1S,
 };
 use openssl::sha;
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 use tracing::debug;
-
-/// Allows for overriding of the vdf steps generation parameters
-#[derive(Debug, Clone)]
-pub struct VDFStepsConfig {
-    pub num_checkpoints_in_vdf_step: usize,
-    pub nonce_limiter_reset_frequency: usize,
-    pub vdf_difficulty: u64,
-}
-
-impl Default for VDFStepsConfig {
-    fn default() -> Self {
-        VDFStepsConfig {
-            num_checkpoints_in_vdf_step: NUM_CHECKPOINTS_IN_VDF_STEP,
-            nonce_limiter_reset_frequency: NONCE_LIMITER_RESET_FREQUENCY,
-            vdf_difficulty: if cfg!(test) || cfg!(debug_assertions) {
-                7_000
-            } else {
-                VDF_SHA_1S
-            },
-        }
-    }
-}
 
 /// Derives a salt value from the step_number for checkpoint hashing
 ///

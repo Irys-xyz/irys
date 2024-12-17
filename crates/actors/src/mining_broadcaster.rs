@@ -3,6 +3,7 @@ use actix::prelude::*;
 use dev::ToEnvelope;
 use irys_types::IrysBlockHeader;
 use std::sync::Arc;
+use tracing::info;
 
 // Message types
 
@@ -69,7 +70,7 @@ impl Handler<BroadcastMiningSeed> for MiningBroadcaster {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
-        println!("Mining: {:?}", msg.0);
+        info!("Mining: {:?}", msg.0);
         self.subscribers.retain(|addr| addr.connected());
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());
