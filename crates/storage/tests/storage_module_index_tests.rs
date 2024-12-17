@@ -9,7 +9,7 @@ use irys_database::{
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    irys::IrysSigner, partition::PartitionAssignment, Address, Base64, Chunk, IrysTransaction,
+    irys::IrysSigner, partition::PartitionAssignment, Address, Base64, UnpackedChunk, IrysTransaction,
     IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PartitionChunkRange, StorageConfig,
     TransactionLedger, H256,
 };
@@ -337,7 +337,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             let chunk_hash = hash_sha256(&chunk_bytes.0).unwrap();
             assert_eq!(chunk_hash, tx.chunks[i].data_hash.unwrap());
 
-            let chunk = Chunk {
+            let chunk = UnpackedChunk {
                 data_root: tx.header.data_root,
                 data_size: chunk_bytes.len() as u64,
                 data_path: Base64(proof.proof.clone()),
@@ -389,7 +389,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                             let chunk_bytes = chunk.chunk.unwrap();
                             let chunk_byte_value = chunk_bytes.0[0];
                             info!("chunk_bytes: {:?}", chunk_byte_value);
-                            let chunk = Chunk {
+                            let chunk = UnpackedChunk {
                                 data_root: data_root,
                                 data_size: chunk_bytes.len() as u64,
                                 data_path: chunk.data_path,

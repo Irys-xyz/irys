@@ -250,7 +250,7 @@ mod tests {
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::IrysBlockHeader;
     use irys_types::{
-        app_state::DatabaseProvider, block_production::SolutionContext, chunk::Chunk,
+        app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
     use std::any::Any;
@@ -345,7 +345,7 @@ mod tests {
         );
 
         for i in 0..chunks_number {
-            let chunk = Chunk {
+            let chunk = UnpackedChunk {
                 data_root: data_root,
                 data_size: chunk_size as u64,
                 data_path: data_path.to_vec().into(),

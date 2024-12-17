@@ -5,7 +5,7 @@ use irys_database::{
         self, add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
         add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
         create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
-        get_tx_path_by_offset, tables::RelativeStartOffsets, write_chunk_data_path,
+        get_tx_path_by_offset, tables::RelativeStartOffsets,
     },
     Ledger,
 };
@@ -14,9 +14,9 @@ use irys_types::{
     app_state::DatabaseProvider,
     get_leaf_proof,
     partition::{PartitionAssignment, PartitionHash},
-    Base64, Chunk, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset,
-    LedgerChunkRange, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize, StorageConfig,
-    TxPath, H256,
+    Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset,
+    LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize,
+    StorageConfig, TxPath, UnpackedChunk, H256,
 };
 use nodit::{
     interval::{ie, ii},
@@ -483,7 +483,10 @@ impl StorageModule {
     }
 
     /// Gets the list of partition-relative offsets in this partition that the chunk should be written to
-    pub fn get_write_offsets(&self, chunk: &Chunk) -> eyre::Result<Vec<PartitionChunkOffset>> {
+    pub fn get_write_offsets(
+        &self,
+        chunk: &UnpackedChunk,
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let start_offsets = self.collect_start_offsets(chunk.data_root)?;
 
         if start_offsets.0.len() == 0 {
@@ -510,9 +513,9 @@ impl StorageModule {
     }
 
     /// Writes chunk data and its data_path to relevant storage locations
-    pub fn write_data_chunk(&self, chunk: &Chunk) -> eyre::Result<()> {
+    pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> eyre::Result<()> {
         let data_path = &chunk.data_path.0;
-        let data_path_hash = Chunk::hash_data_path(&data_path);
+        let data_path_hash = UnpackedChunk::hash_data_path(&data_path);
 
         for partition_offset in self.get_write_offsets(&chunk)? {
             // read entropy from the storage module
@@ -553,7 +556,10 @@ impl StorageModule {
     ///
     /// Note: Handles cases where data spans partition boundaries by supporting
     /// negative offsets in the calculation of chunk position
-    pub fn generate_full_chunk(&self, ledger_offset: LedgerChunkOffset) -> Result<Option<Chunk>> {
+    pub fn generate_full_chunk(
+        &self,
+        ledger_offset: LedgerChunkOffset,
+    ) -> Result<Option<PackedChunk>> {
         // Get paths and process them
         let (tx_path, data_path) = self.read_tx_data_path(ledger_offset)?;
 
@@ -607,12 +613,13 @@ impl StorageModule {
         // ledger_offset provided by the caller
         let chunk_index = (ledger_offset - data_root_start_offset) as u32;
 
-        Ok(Some(Chunk {
+        Ok(Some(PackedChunk {
             data_root,
             data_size,
             data_path,
             bytes: Base64::from(chunk_info.0.clone()),
             chunk_index,
+            packing_address: self.storage_config.miner_address,
         }))
     }
 
@@ -1057,7 +1064,7 @@ mod tests {
         let _ =
             storage_module.index_transaction_data(tx_path, data_root, LedgerChunkRange(ii(0, 0)));
 
-        let chunk = Chunk {
+        let chunk = UnpackedChunk {
             data_root: H256::zero(),
             data_size: chunk_data.len() as u64,
             data_path: data_path.clone().into(),
