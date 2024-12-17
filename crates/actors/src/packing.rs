@@ -261,6 +261,8 @@ async fn test_packing_actor() -> eyre::Result<()> {
     // Override the default StorageModule config for testing
     let storage_config = StorageConfig {
         min_writes_before_sync: 1,
+        entropy_packing_iterations: 1_000,
+        num_chunks_in_partition: 5,
         ..Default::default()
     };
 
@@ -270,7 +272,7 @@ async fn test_packing_actor() -> eyre::Result<()> {
         &base_path,
         storage_module_info,
         storage_config.clone(),
-    ));
+    )?);
 
     let request = PackingRequest {
         storage_module: storage_module.clone(),

@@ -254,7 +254,7 @@ mod tests {
     async fn test_solution() {
         let partition_hash = H256::random();
         let mining_address = Address::random();
-        let chunks_number = 1;
+        let chunks_number = 4;
         let chunk_size = 32;
         let chunk_data = [0; 32];
         let data_path = [4, 3, 2, 1];
@@ -300,7 +300,7 @@ mod tests {
         // Set up the storage geometry for this test
         let storage_config = StorageConfig {
             chunk_size,
-            num_chunks_in_partition: 4,
+            num_chunks_in_partition: chunks_number.try_into().unwrap(),
             num_chunks_in_recall_range: 2,
             num_partitions_in_slot: 1,
             miner_address: mining_address,
@@ -331,11 +331,8 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let mut storage_module = Arc::new(StorageModule::new(
-            &base_path,
-            storage_module_info,
-            storage_config,
-        ));
+        let storage_module =
+            Arc::new(StorageModule::new(&base_path, storage_module_info, storage_config).unwrap());
 
         // Pack the storage module
         storage_module.pack_with_zeros();

@@ -192,11 +192,15 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 // Create a list of storage modules wrapping the storage files
                 for info in storage_module_infos {
-                    let arc_module = Arc::new(StorageModule::new(
-                        &arc_config.storage_module_dir(),
-                        &info,
-                        (*arc_storage_config).clone(),
-                    ));
+                    let arc_module = Arc::new(
+                        StorageModule::new(
+                            &arc_config.storage_module_dir(),
+                            &info,
+                            (*arc_storage_config).clone(),
+                        )
+                        // TODO: remove this unwrap
+                        .unwrap(),
+                    );
                     storage_modules.push(arc_module.clone());
                     arc_module.pack_with_zeros();
                 }
