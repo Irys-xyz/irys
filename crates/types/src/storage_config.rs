@@ -28,7 +28,8 @@ impl Default for StorageConfig {
             num_partitions_in_slot: NUM_PARTITIONS_PER_SLOT,
             miner_address: Address::random(),
             min_writes_before_sync: NUM_WRITES_BEFORE_SYNC,
-            entropy_packing_iterations: PACKING_SHA_1_5_S,
+            // TODO: revert this back
+            entropy_packing_iterations: 1_000, /* PACKING_SHA_1_5_S */
         }
     }
 }
