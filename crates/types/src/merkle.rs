@@ -49,6 +49,7 @@ pub struct BranchProof {
 pub trait ProofDeserialize<T> {
     fn try_from_proof_slice(slice: &[u8]) -> Result<T, Error>;
     fn offset(&self) -> usize;
+    fn hash(&self) -> Option<[u8; HASH_SIZE]>;
 }
 
 impl ProofDeserialize<LeafProof> for LeafProof {
@@ -59,6 +60,10 @@ impl ProofDeserialize<LeafProof> for LeafProof {
     fn offset(&self) -> usize {
         usize::from_be_bytes(self.offset)
     }
+
+    fn hash(&self) -> Option<[u8; HASH_SIZE]> {
+        Some(self.data_hash)
+    }
 }
 
 impl ProofDeserialize<BranchProof> for BranchProof {
@@ -68,6 +73,9 @@ impl ProofDeserialize<BranchProof> for BranchProof {
     }
     fn offset(&self) -> usize {
         usize::from_be_bytes(self.offset)
+    }
+    fn hash(&self) -> Option<[u8; HASH_SIZE]> {
+        None
     }
 }
 
@@ -94,6 +102,12 @@ pub struct ValidatePathResult {
     pub leaf_hash: [u8; HASH_SIZE],
     pub left_bound: u128,
     pub right_bound: u128,
+}
+
+pub fn get_leaf_proof(path_buff: &Base64) -> Result<LeafProof, Error> {
+    let (_, leaf) = path_buff.split_at(path_buff.len() - HASH_SIZE - NOTE_SIZE);
+    let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
+    Ok(leaf_proof)
 }
 
 pub fn validate_path(
@@ -213,7 +227,7 @@ pub fn print_debug(proof: &Vec<u8>, target_offset: u128) -> Result<([u8; 32], u1
         );
     }
     println!(
-        "  LeafProof: data_hash: {}, offset: {}",
+        "  LeafProof: data_hash: {:?}, offset: {}",
         base64_url::encode(&leaf_proof.data_hash),
         usize::from_be_bytes(leaf_proof.offset)
     );
@@ -359,14 +373,14 @@ pub fn generate_leaves_from_data_roots(
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
     for data_root in data_roots.into_iter() {
-        let data_root_hash = hash_sha256(&data_root.data_root.0)?;
+        let data_root_hash = &data_root.data_root.0;
         let max_byte_range = min_byte_range + data_root.tx_size;
         let offset = max_byte_range.to_note_vec();
-        let id = hash_all_sha256(vec![&data_root_hash, &offset])?;
+        let id = hash_all_sha256(vec![data_root_hash, &offset])?;
 
         leaves.push(Node {
             id,
-            data_hash: Some(data_root_hash),
+            data_hash: Some(*data_root_hash),
             min_byte_range,
             max_byte_range,
             left_child: None,
