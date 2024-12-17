@@ -155,9 +155,11 @@ impl Handler<TxIngressMessage> for MempoolActor {
         //return Err(TxIngressError::Unfunded);
 
         // Cache the data_root in the database
-        let _ = self
-            .db
-            .update_eyre(|db_tx| irys_database::cache_data_root(db_tx, &tx));
+        let _ = self.db.update_eyre(|db_tx| {
+            irys_database::cache_data_root(db_tx, &tx)?;
+            irys_database::insert_tx_header(db_tx, &tx)?;
+            Ok(())
+        });
 
         Ok(())
     }
