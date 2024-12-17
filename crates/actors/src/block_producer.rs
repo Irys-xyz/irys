@@ -11,9 +11,7 @@ use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, Address,
-    Base64, DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysSignature,
-    IrysTransactionHeader, PoaData, Signature, TransactionLedger, VDFLimiterInfo, H256, U256,
+    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, Address, Base64, DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysSignature, IrysTransactionHeader, PoaData, Signature, StorageConfig, TransactionLedger, VDFLimiterInfo, H256, U256
 };
 use openssl::sha;
 use reth::revm::primitives::B256;
@@ -52,6 +50,8 @@ pub struct BlockProducerActor {
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
+    /// Storage config 
+    pub storage_config: StorageConfig,
     /// Difficulty adjustment parameters for the Irys Protocol
     pub difficulty_config: DifficultyAdjustmentConfig,
 }
@@ -66,6 +66,7 @@ impl BlockProducerActor {
         mining_broadcaster_addr: Addr<MiningBroadcaster>,
         epoch_service: Addr<EpochServiceActor>,
         reth_provider: RethNodeProvider,
+        storage_config: StorageConfig,
         difficulty_config: DifficultyAdjustmentConfig,
     ) -> Self {
         Self {
@@ -76,6 +77,7 @@ impl BlockProducerActor {
             mining_broadcaster_addr,
             epoch_service,
             reth_provider,
+            storage_config,
             difficulty_config,
         }
     }
@@ -109,6 +111,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let db = self.db.clone();
         let self_addr = ctx.address();
         let difficulty_config = self.difficulty_config.clone();
+        let chunk_size = self.storage_config.chunk_size;
 
         AtomicResponse::new(Box::pin(
             async move {
@@ -151,8 +154,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
                 let data_txs: Vec<IrysTransactionHeader> =
                     mempool_addr.send(GetBestMempoolTxs).await.unwrap();
-
-                let chunk_size = 32;
 
                 let bytes_added = data_txs
                     .iter()

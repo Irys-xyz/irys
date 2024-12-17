@@ -233,6 +233,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     mining_broadcaster_addr.clone(),
                     epoch_service_actor_addr.clone(),
                     reth_node.clone(),
+                    storage_config.clone(),
                     difficulty_adjustment_config.clone(),
                 );
                 let block_producer_addr = block_producer_actor.start();
