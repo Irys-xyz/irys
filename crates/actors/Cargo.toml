@@ -25,7 +25,6 @@ serde_json = { workspace = true, features = ["std", "raw_value"] }
 reth-db.workspace = true
 irys-primitives.workspace = true
 eyre.workspace = true
-color-eyre = "0.6.2"
 openssl.workspace = true
 irys-reth-node-bridge.workspace = true
 reth.workspace = true

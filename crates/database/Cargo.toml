@@ -6,7 +6,6 @@ rust-version.workspace = true
 
 [dependencies]
 actix.workspace = true
-color-eyre = "0.6.2"
 assert_matches.workspace = true
 irys-config.workspace = true
 reth.workspace = true

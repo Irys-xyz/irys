@@ -4,7 +4,7 @@ use alloy_primitives::Address;
 use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
 use std::sync::Arc;
 
-#[derive(Message, Debug, PartialEq)]
+#[derive(Message, Debug, Clone, PartialEq)]
 #[rtype(result = "Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>")]
 pub struct SolutionContext {
     pub partition_hash: PartitionHash,

@@ -10,7 +10,7 @@ use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{Address, PartitionChunkOffset, SimpleRNG};
 use openssl::sha;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub struct PartitionMiningActor {
     mining_address: Address,
@@ -75,14 +75,21 @@ impl PartitionMiningActor {
             recall_range_index, start_chunk_index
         );
 
-        // haven't tested this, but it looks correct
-        let chunks = self.storage_module.read_chunks(ie(
+        let read_range = ie(
             start_chunk_index as u32,
             start_chunk_index as u32 + config.num_chunks_in_recall_range as u32,
-        ))?;
+        );
+
+        // haven't tested this, but it looks correct
+        let chunks = self.storage_module.read_chunks(read_range)?;
+        debug!(
+            "Got chunks {} from read range {:?}",
+            &chunks.len(),
+            &read_range
+        );
 
         if chunks.len() == 0 {
-            println!(
+            warn!(
                 "No chunks found - storage_module_id:{}",
                 self.storage_module.id
             );
@@ -233,8 +240,7 @@ mod tests {
         BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
     };
     use crate::mining::{PartitionMiningActor, Seed};
-    use crate::mining_broadcaster::{self, BroadcastMiningSeed, MiningBroadcaster};
-
+    use crate::mining_broadcaster::{BroadcastMiningSeed, MiningBroadcaster};
     use actix::{Actor, Addr, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
@@ -247,48 +253,36 @@ mod tests {
         app_state::DatabaseProvider, block_production::SolutionContext, chunk::Chunk,
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
-    use std::sync::Arc;
-    use tracing::debug;
+    use std::any::Any;
+    use std::sync::{Arc, RwLock};
+    use std::time::Duration;
+    use tokio::time::sleep;
 
     #[actix_rt::test]
     async fn test_solution() {
         let partition_hash = H256::random();
         let mining_address = Address::random();
-        let chunks_number = 1;
+        let chunks_number = 4;
         let chunk_size = 32;
         let chunk_data = [0; 32];
         let data_path = [4, 3, 2, 1];
         let tx_path = [4, 3, 2, 1];
+        let rwlock: RwLock<Option<SolutionContext>> = RwLock::new(None);
+        let arc_rwlock = Arc::new(rwlock);
+        let closure_arc = arc_rwlock.clone();
 
         let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
             let solution_message: SolutionFoundMessage =
                 *msg.downcast::<SolutionFoundMessage>().unwrap();
             let solution = solution_message.0;
-            assert_eq!(
-                partition_hash, solution.partition_hash,
-                "Not expected partition"
-            );
-            assert!(
-                solution.chunk_offset < chunks_number * 2,
-                "Not expected offset"
-            );
-            assert_eq!(
-                mining_address, solution.mining_address,
-                "Not expected partition"
-            );
-            assert_eq!(
-                Some(tx_path.to_vec()),
-                solution.tx_path,
-                "Not expected partition"
-            );
-            assert_eq!(
-                Some(data_path.to_vec()),
-                solution.data_path,
-                "Not expected partition"
-            );
 
-            // Return None or Some(...) depending on your test needs
-            Box::new(None::<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>)
+            {
+                let mut lck = closure_arc.write().unwrap();
+                lck.replace(solution);
+            }
+
+            let inner_result = None::<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>;
+            Box::new(Some(inner_result)) as Box<dyn Any>
         }));
 
         let block_producer_actor_addr: Addr<BlockProducerMockActor> = mocked_block_producer.start();
@@ -300,7 +294,7 @@ mod tests {
         // Set up the storage geometry for this test
         let storage_config = StorageConfig {
             chunk_size,
-            num_chunks_in_partition: 4,
+            num_chunks_in_partition: chunks_number.try_into().unwrap(),
             num_chunks_in_recall_range: 2,
             num_partitions_in_slot: 1,
             miner_address: mining_address,
@@ -331,11 +325,8 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let mut storage_module = Arc::new(StorageModule::new(
-            &base_path,
-            storage_module_info,
-            storage_config,
-        ));
+        let storage_module =
+            Arc::new(StorageModule::new(&base_path, storage_module_info, storage_config).unwrap());
 
         // Pack the storage module
         storage_module.pack_with_zeros();
@@ -384,5 +375,49 @@ mod tests {
             .send(BroadcastMiningSeed(seed))
             .await
             .unwrap();
+
+        // busypoll the solution context rwlock
+        let solution = 'outer: loop {
+            match arc_rwlock.try_read() {
+                Ok(lck) => {
+                    if lck.is_none() {
+                        sleep(Duration::from_millis(50)).await;
+                    } else {
+                        break 'outer lck.as_ref().unwrap().clone();
+                    }
+                }
+                Err(_) => sleep(Duration::from_millis(50)).await,
+            }
+        };
+
+        tokio::task::yield_now().await;
+
+        // now we validate the solution context
+        assert_eq!(
+            partition_hash, solution.partition_hash,
+            "Not expected partition"
+        );
+
+        assert!(
+            solution.chunk_offset < chunks_number * 2,
+            "Not expected offset"
+        );
+
+        assert_eq!(
+            mining_address, solution.mining_address,
+            "Not expected partition"
+        );
+
+        assert_eq!(
+            Some(tx_path.to_vec()),
+            solution.tx_path,
+            "Not expected partition"
+        );
+
+        assert_eq!(
+            Some(data_path.to_vec()),
+            solution.data_path,
+            "Not expected partition"
+        );
     }
 }

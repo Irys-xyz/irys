@@ -1,7 +1,7 @@
 use actix::{Actor, Context, Handler, Message, MessageResponse};
 use eyre::{Error, Result};
 use irys_database::data_ledger::*;
-use irys_storage::{ii, InclusiveInterval, StorageModuleInfo};
+use irys_storage::{ie, ii, InclusiveInterval, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     IrysBlockHeader, LedgerChunkRange, SimpleRNG, StorageConfig, CAPACITY_SCALAR, H256,
@@ -464,7 +464,7 @@ impl EpochServiceActor {
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx,
                 partition_assignment: Some(*self.data_partitions.get(partition).unwrap()),
-                submodules: vec![(ii(0, num_part_chunks), format!("submodule_{}", idx))],
+                submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx))],
             })
             .collect::<Vec<_>>();
 
@@ -480,7 +480,7 @@ impl EpochServiceActor {
                 id: idx_start + idx,
                 partition_assignment: Some(*self.data_partitions.get(partition).unwrap()),
                 submodules: vec![(
-                    ii(0, num_part_chunks),
+                    ie(0, num_part_chunks),
                     format!("submodule_{}", idx_start + idx),
                 )],
             })
@@ -497,7 +497,7 @@ impl EpochServiceActor {
         let cap_info = StorageModuleInfo {
             id: idx,
             partition_assignment: Some(*self.capacity_partitions.get(cap_part).unwrap()),
-            submodules: vec![(ii(0, num_part_chunks), format!("submodule_{}", idx))],
+            submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx))],
         };
 
         module_infos.push(cap_info);

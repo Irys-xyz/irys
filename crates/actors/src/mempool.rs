@@ -478,10 +478,15 @@ mod tests {
         let config = StorageConfig {
             min_writes_before_sync: 1,
             chunk_size,
+            num_chunks_in_partition: 5,
             ..Default::default()
         };
 
-        let storage_module = Arc::new(StorageModule::new(&base_path, &storage_module_info, config));
+        let storage_module = Arc::new(StorageModule::new(
+            &base_path,
+            &storage_module_info,
+            config,
+        )?);
 
         storage_module.pack_with_zeros();
 

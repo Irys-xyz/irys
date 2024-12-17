@@ -4,7 +4,7 @@ use crate::H256;
 use alloy_primitives::Address;
 use borsh::BorshDeserialize;
 use borsh_derive::BorshDeserialize;
-use color_eyre::eyre::eyre;
+use eyre::eyre;
 use eyre::Error;
 use openssl::sha;
 
