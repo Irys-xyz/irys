@@ -24,10 +24,11 @@ pub async fn get_chunk(
         }
     };
 
-    let chunk = match state.chunk_provider.get_chunk(ledger, path.ledger_offset) {
-        Some(chunk) => chunk,
-        None => return Ok(HttpResponse::NotFound().body("Chunk not found")),
-    };
-
-    Ok(HttpResponse::Ok().json(chunk))
+    match state.chunk_provider.get_chunk(ledger, path.ledger_offset) {
+        Ok(Some(chunk)) => Ok(HttpResponse::Ok().json(chunk)),
+        Ok(None) => Ok(HttpResponse::NotFound().body("Chunk not found")),
+        Err(e) => {
+            Ok(HttpResponse::InternalServerError().body(format!("Error retrieving chunk: {}", e)))
+        }
+    }
 }

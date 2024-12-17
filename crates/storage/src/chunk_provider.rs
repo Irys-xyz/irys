@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use eyre::OptionExt;
 use irys_database::Ledger;
 use irys_types::{Chunk, DatabaseProvider, LedgerChunkOffset, StorageConfig};
 
@@ -31,9 +32,14 @@ impl ChunkProvider {
     }
 
     /// Retrieves a chunk from a ledger
-    pub fn get_chunk(&self, ledger: Ledger, ledger_offset: LedgerChunkOffset) -> Option<Chunk> {
+    pub fn get_chunk(
+        &self,
+        ledger: Ledger,
+        ledger_offset: LedgerChunkOffset,
+    ) -> eyre::Result<Option<Chunk>> {
         // Get basic chunk info
-        let module = get_storage_module_at_offset(&self.storage_modules, ledger, ledger_offset)?;
-        module.get_wrapped_chunk(ledger_offset)
+        let module = get_storage_module_at_offset(&self.storage_modules, ledger, ledger_offset)
+            .ok_or_eyre("No storage module contains this chunk")?;
+        module.generate_full_chunk(ledger_offset)
     }
 }
