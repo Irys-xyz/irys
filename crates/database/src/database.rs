@@ -12,9 +12,9 @@ use crate::Ledger;
 use eyre::eyre;
 use irys_types::partition::PartitionHash;
 use irys_types::{
-    hash_sha256, BlockHash, BlockRelativeChunkOffset, Chunk, ChunkPathHash, DataRoot,
-    IrysBlockHeader, IrysTransactionHeader, IrysTransactionId, TxPath, TxRelativeChunkIndex,
-    TxRoot, H256, MEGABYTE,
+    hash_sha256, BlockHash, BlockRelativeChunkOffset, ChunkPathHash, DataRoot, IrysBlockHeader,
+    IrysTransactionHeader, IrysTransactionId, TxPath, TxRelativeChunkIndex, TxRoot, UnpackedChunk,
+    H256, MEGABYTE,
 };
 use reth::prometheus_exporter::install_prometheus_recorder;
 use reth_db::cursor::{DbDupCursorRO, DupWalker};
@@ -130,7 +130,7 @@ type IsDuplicate = bool;
 
 /// Caches a [`Chunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
-pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &Chunk) -> eyre::Result<IsDuplicate> {
+pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
     if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
         warn!(

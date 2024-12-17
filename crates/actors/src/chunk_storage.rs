@@ -6,7 +6,7 @@ use irys_database::{
 };
 use irys_storage::{ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    app_state::DatabaseProvider, chunk, Base64, Chunk, DataRoot, IrysBlockHeader,
+    app_state::DatabaseProvider, chunk, Base64, UnpackedChunk, DataRoot, IrysBlockHeader,
     IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig,
     TransactionLedger,
 };
@@ -255,7 +255,7 @@ fn write_chunk_to_module(
     let data_path = Base64::from(chunk_info.1.data_path.0.clone());
 
     if let Some(bytes) = chunk_info.1.chunk {
-        let chunk = Chunk {
+        let chunk = UnpackedChunk {
             data_root,
             data_size,
             data_path,

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use bytes::Buf;
 use irys_types::{
-    Chunk, ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset,
+    UnpackedChunk, ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset,
     TxPath, TxPathHash,
 };
 use reth_db::{
@@ -30,7 +30,7 @@ pub fn write_chunk_data_path<T: DbTxMut + DbTx>(
     // optional path hash, computed from data_path if None
     path_hash: Option<ChunkPathHash>,
 ) -> eyre::Result<()> {
-    let path_hash = path_hash.unwrap_or_else(|| Chunk::hash_data_path(&data_path));
+    let path_hash = path_hash.unwrap_or_else(|| UnpackedChunk::hash_data_path(&data_path));
     add_offset_for_path_hash(tx, offset, path_hash)?;
 
     Ok(add_data_path_hash_to_offset_index(

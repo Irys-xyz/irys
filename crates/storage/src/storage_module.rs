@@ -10,7 +10,7 @@ use irys_packing::xor_vec_u8_arrays_in_place;
 use irys_types::{
     app_state::DatabaseProvider,
     partition::{PartitionAssignment, PartitionHash},
-    Chunk, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset, LedgerChunkRange,
+    UnpackedChunk, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset, LedgerChunkRange,
     PartitionChunkOffset, PartitionChunkRange, RelativeChunkOffset, StorageConfig, TxPath,
     TxPathHash, H256,
 };
@@ -479,7 +479,7 @@ impl StorageModule {
     }
 
     /// Gets the list of partition-relative offsets in this partition that the chunk should be written to
-    pub fn get_write_offsets(&self, chunk: &Chunk) -> eyre::Result<Vec<PartitionChunkOffset>> {
+    pub fn get_write_offsets(&self, chunk: &UnpackedChunk) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let start_offsets = self.collect_start_offsets(chunk.data_root)?;
 
         if start_offsets.0.len() == 0 {
@@ -506,9 +506,9 @@ impl StorageModule {
     }
 
     /// Writes chunk data and its data_path to relevant storage locations
-    pub fn write_data_chunk(&self, chunk: &Chunk) -> eyre::Result<()> {
+    pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> eyre::Result<()> {
         let data_path = &chunk.data_path.0;
-        let data_path_hash = Chunk::hash_data_path(&data_path);
+        let data_path_hash = UnpackedChunk::hash_data_path(&data_path);
 
         for partition_offset in self.get_write_offsets(&chunk)? {
             // read entropy from the storage module
@@ -953,7 +953,7 @@ mod tests {
         let _ =
             storage_module.index_transaction_data(tx_path, data_root, LedgerChunkRange(ii(0, 0)));
 
-        let chunk = Chunk {
+        let chunk = UnpackedChunk {
             data_root: H256::zero(),
             data_size: chunk_data.len() as u64,
             data_path: data_path.clone().into(),
