@@ -26,6 +26,7 @@ pub use storage::*;
 pub use transaction::*;
 
 pub use alloy_primitives::{Address, Signature};
+pub use app_state::*;
 pub use arbitrary::Arbitrary;
 pub use chunk::*;
 pub use merkle::*;

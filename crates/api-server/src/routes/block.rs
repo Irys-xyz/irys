@@ -36,7 +36,7 @@ mod tests {
     use actix_web::{middleware::Logger, test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
-    use irys_actors::mempool::MempoolActor;
+    use irys_actors::{chunk_provider::ChunkProviderActor, mempool::MempoolActor};
     use irys_database::tables::IrysTables;
     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
     use log::{debug, error, info, log_enabled, Level};
@@ -72,19 +72,27 @@ mod tests {
             irys_types::app_state::DatabaseProvider(db_arc.clone()),
             task_manager.executor(),
             IrysSigner::random_signer(),
-            storage_config,
+            storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
         let mempool_actor_addr = mempool_actor.start();
-        let state = ApiState {
-            db: DatabaseProvider(db_arc),
+        let chunk_provider_actor = ChunkProviderActor::new(
+            storage_config.clone(),
+            Arc::new(Vec::new()).to_vec(),
+            DatabaseProvider(db_arc.clone()),
+        );
+        let chunk_provider_addr = chunk_provider_actor.start();
+
+        let app_state = ApiState {
+            db: DatabaseProvider(db_arc.clone()),
             mempool: mempool_actor_addr,
+            chunk_provider: chunk_provider_addr,
         };
 
         let app = test::init_service(
             App::new()
                 .wrap(Logger::default())
-                .app_data(web::Data::new(state))
+                .app_data(web::Data::new(app_state))
                 .service(web::scope("/v1").route("/block/{block_hash}", web::get().to(get_block))),
         )
         .await;
@@ -116,18 +124,26 @@ mod tests {
             irys_types::app_state::DatabaseProvider(db_arc.clone()),
             task_manager.executor(),
             IrysSigner::random_signer(),
-            storage_config,
+            storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
         let mempool_actor_addr = mempool_actor.start();
-        let state = ApiState {
-            db: DatabaseProvider(db_arc),
+        let chunk_provider_actor = ChunkProviderActor::new(
+            storage_config.clone(),
+            Arc::new(Vec::new()).to_vec(),
+            DatabaseProvider(db_arc.clone()),
+        );
+        let chunk_provider_addr = chunk_provider_actor.start();
+
+        let app_state = ApiState {
+            db: DatabaseProvider(db_arc.clone()),
             mempool: mempool_actor_addr,
+            chunk_provider: chunk_provider_addr,
         };
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(state))
+                .app_data(web::Data::new(app_state))
                 .service(web::scope("/v1").route("/block/{block_hash}", web::get().to(get_block))),
         )
         .await;

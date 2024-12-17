@@ -9,13 +9,14 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 
-use irys_actors::mempool::MempoolActor;
+use irys_actors::{chunk_provider::ChunkProviderActor, mempool::MempoolActor};
 use irys_types::app_state::DatabaseProvider;
-use routes::{block, chunks, index, price, proxy::proxy, tx};
+use routes::{block, get_chunk, index, post_chunk, price, proxy::proxy, tx};
 
 #[derive(Clone)]
 pub struct ApiState {
     pub mempool: Addr<MempoolActor>,
+    pub chunk_provider: Addr<ChunkProviderActor>,
     pub db: DatabaseProvider,
 }
 
@@ -38,7 +39,11 @@ pub async fn run_server(app_state: ApiState) {
                 web::scope("v1")
                     .route("/info", web::get().to(index::info_route))
                     .route("/block/{block_hash}", web::get().to(block::get_block))
-                    .route("/chunk", web::post().to(chunks::post_chunk))
+                    .route(
+                        "/chunk/{ledger_num}/{ledger_offset}",
+                        web::get().to(get_chunk::get_chunk),
+                    )
+                    .route("/chunk", web::post().to(post_chunk::post_chunk))
                     .route("/tx/{tx_id}", web::get().to(tx::get_tx))
                     .route("/tx", web::post().to(tx::post_tx))
                     .route("/price/{size}", web::get().to(price::get_price)),
@@ -86,14 +91,22 @@ async fn post_tx_and_chunks_golden_path() {
         irys_types::app_state::DatabaseProvider(arc_db.clone()),
         task_manager.executor(),
         IrysSigner::random_signer(),
-        storage_config,
+        storage_config.clone(),
         Arc::new(Vec::new()).to_vec(),
     );
     let mempool_actor_addr = mempool_actor.start();
 
+    let chunk_provider_actor = ChunkProviderActor::new(
+        storage_config.clone(),
+        Arc::new(Vec::new()).to_vec(),
+        DatabaseProvider(arc_db.clone()),
+    );
+    let chunk_provider_addr = chunk_provider_actor.start();
+
     let app_state = ApiState {
         db: DatabaseProvider(arc_db.clone()),
         mempool: mempool_actor_addr,
+        chunk_provider: chunk_provider_addr,
     };
 
     // Initialize the app
@@ -105,7 +118,7 @@ async fn post_tx_and_chunks_golden_path() {
             .service(
                 web::scope("v1")
                     .route("/tx", web::post().to(tx::post_tx))
-                    .route("/chunk", web::post().to(chunks::post_chunk)),
+                    .route("/chunk", web::post().to(post_chunk::post_chunk)),
             ),
     )
     .await;

@@ -217,6 +217,18 @@ impl Ledger {
     }
 }
 
+impl TryFrom<u64> for Ledger {
+    type Error = &'static str;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Ledger::Publish),
+            1 => Ok(Ledger::Submit),
+            _ => Err("Invalid ledger number"),
+        }
+    }
+}
+
 /// Provides a way to enforce accessing ledgers by their [Ledger] enum.
 #[derive(Debug, Clone)]
 pub struct Ledgers {
