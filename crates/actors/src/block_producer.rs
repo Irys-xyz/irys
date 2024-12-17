@@ -161,6 +161,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         
                 let chunks_added = bytes_added / chunk_size;
 
+                // TODO: Eventually we'll need a more robust solution for growing the Ledgers
+                // when we add promotion we'll solve both at that time. This was just to
+                // fix a bug where the ledger size would cause an inverted interval to be 
+                // created, e.g.g (3..0) and the node would panic. 
                 let max_chunk_offset = prev_block_header.ledgers[Ledger::Submit].max_chunk_offset + chunks_added;
 
                 let data_tx_ids = data_txs.iter().map(|h| h.id.clone()).collect::<Vec<H256>>();
