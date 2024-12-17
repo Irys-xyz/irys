@@ -6,9 +6,8 @@ use irys_database::{
 };
 use irys_storage::{ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    app_state::DatabaseProvider, chunk, Base64, Chunk, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig,
-    TransactionLedger,
+    app_state::DatabaseProvider, Base64, Chunk, DataRoot, IrysBlockHeader, IrysTransactionHeader,
+    LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, TransactionLedger,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
@@ -89,8 +88,11 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                 ));
 
                 // Retrieve the storage modules that are overlapped by this range
-                let overlapped_modules =
-                    get_overlapped_storage_modules(&storage_modules, &tx_chunk_range);
+                let overlapped_modules = get_overlapped_storage_modules(
+                    &storage_modules,
+                    Ledger::Submit,
+                    &tx_chunk_range,
+                );
 
                 // Update the transaction indexes of the overlapped StorageModules
                 update_storage_module_indexes(
@@ -110,6 +112,10 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                     &storage_modules,
                     &db,
                 )?;
+
+                for module in storage_modules.iter() {
+                    let _ = module.sync_pending_chunks();
+                }
 
                 prev_chunk_offset += num_chunks_in_tx as u64;
             }
@@ -136,7 +142,7 @@ fn process_transaction_chunks(
 
         // Find which storage module intersects this chunk
         let ledger_offset = chunk_index as u64 + tx_chunk_range.start();
-        let storage_module = find_storage_module(storage_modules, ledger_offset);
+        let storage_module = find_storage_module(storage_modules, Ledger::Submit, ledger_offset);
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
@@ -163,6 +169,13 @@ fn get_block_range(
         0
     };
 
+    println!(
+        "block_offsets: {}..{} {} {:?}",
+        start_chunk_offset,
+        block_header.ledgers[ledger].max_chunk_offset,
+        block_header.height,
+        ledger
+    );
     let block_offsets = LedgerChunkRange(ii(
         start_chunk_offset,
         block_header.ledgers[ledger].max_chunk_offset,
@@ -188,6 +201,7 @@ fn get_tx_path_pairs(
 
 fn get_overlapped_storage_modules(
     storage_modules: &[Arc<StorageModule>],
+    ledger: Ledger,
     tx_chunk_range: &LedgerChunkRange,
 ) -> Vec<Arc<StorageModule>> {
     storage_modules
@@ -196,13 +210,34 @@ fn get_overlapped_storage_modules(
             module
                 .partition_assignment
                 .and_then(|pa| pa.ledger_num)
-                .map_or(false, |num| num == Ledger::Submit as u64)
+                .map_or(false, |num| num == ledger as u64)
                 && module
                     .get_storage_module_range()
                     .map_or(false, |range| range.overlaps(tx_chunk_range))
         })
         .cloned() // Clone the Arc, which is cheap
         .collect()
+}
+
+/// For a given ledger and ledger offset this function attempts to find
+/// a storage module that overlaps the offset
+pub fn get_overlapped_storage_module(
+    storage_modules: &[Arc<StorageModule>],
+    ledger: Ledger,
+    chunk_offset: LedgerChunkOffset,
+) -> Option<Arc<StorageModule>> {
+    storage_modules
+        .iter()
+        .find(|module| {
+            module
+                .partition_assignment
+                .and_then(|pa| pa.ledger_num)
+                .map_or(false, |num| num == ledger as u64)
+                && module
+                    .get_storage_module_range()
+                    .map_or(false, |range| range.contains_point(chunk_offset))
+        })
+        .cloned()
 }
 
 fn update_storage_module_indexes(
@@ -212,6 +247,7 @@ fn update_storage_module_indexes(
     tx_chunk_range: LedgerChunkRange,
 ) -> Result<(), ()> {
     for storage_module in matching_modules {
+        println!("adding data root to module {}", storage_module.id);
         storage_module
             .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range)
             .map_err(|e| {
@@ -234,12 +270,18 @@ fn get_cached_chunk(
 
 fn find_storage_module(
     storage_modules: &[Arc<StorageModule>],
+    ledger: Ledger,
     ledger_offset: u64,
 ) -> Option<&Arc<StorageModule>> {
     storage_modules.iter().find_map(|module| {
+        // First check ledger
         module
-            .get_storage_module_range()
-            .ok()
+            .partition_assignment
+            .as_ref()
+            .and_then(|pa| pa.ledger_num)
+            .filter(|&num| num == ledger as u64)
+            // Then check offset range
+            .and_then(|_| module.get_storage_module_range().ok())
             .filter(|range| range.contains_point(ledger_offset))
             .map(|_| module)
     })
