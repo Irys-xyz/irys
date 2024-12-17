@@ -3,7 +3,7 @@ use std::sync::Arc;
 use irys_database::Ledger;
 use irys_types::{Chunk, DatabaseProvider, LedgerChunkOffset, StorageConfig};
 
-use crate::{get_overlapped_storage_module, ChunkType, StorageModule};
+use crate::{get_storage_module_at_offset, ChunkType, StorageModule};
 
 /// Provides chunks to actix::web front end (mostly)
 #[derive(Debug)]
@@ -33,7 +33,7 @@ impl ChunkProvider {
     /// Retrieves a chunk from a ledger
     pub fn get_chunk(&self, ledger: Ledger, ledger_offset: LedgerChunkOffset) -> Option<Chunk> {
         // Get basic chunk info
-        let module = get_overlapped_storage_module(&self.storage_modules, ledger, ledger_offset)?;
+        let module = get_storage_module_at_offset(&self.storage_modules, ledger, ledger_offset)?;
         module.get_wrapped_chunk(ledger_offset)
     }
 }

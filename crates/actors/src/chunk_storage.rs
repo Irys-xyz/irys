@@ -169,13 +169,6 @@ fn get_block_range(
         0
     };
 
-    println!(
-        "block_offsets: {}..{} {} {:?}",
-        start_chunk_offset,
-        block_header.ledgers[ledger].max_chunk_offset,
-        block_header.height,
-        ledger
-    );
     let block_offsets = LedgerChunkRange(ii(
         start_chunk_offset,
         block_header.ledgers[ledger].max_chunk_offset,
@@ -206,7 +199,6 @@ fn update_storage_module_indexes(
     tx_chunk_range: LedgerChunkRange,
 ) -> Result<(), ()> {
     for storage_module in matching_modules {
-        println!("adding data root to module {}", storage_module.id);
         storage_module
             .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range)
             .map_err(|e| {

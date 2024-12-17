@@ -543,7 +543,16 @@ impl StorageModule {
         Ok(offsets)
     }
 
-    /// Returns an initialize Chunk struct if successful, None otherwise
+    /// Constructs a Chunk struct for the given ledger offset
+    ///
+    /// This function:
+    /// 1. Retrieves and validates tx and data paths
+    /// 2. Extracts data_root and size from merkle proofs
+    /// 3. Calculates chunk position within its parent transaction
+    /// 4. Returns None if any step fails or chunk not found
+    ///
+    /// Note: Handles cases where data spans partition boundaries by supporting
+    /// negative offsets in the calculation of chunk position
     pub fn get_wrapped_chunk(&self, ledger_offset: LedgerChunkOffset) -> Option<Chunk> {
         // Get paths and process them
         let (tx_path, data_path) = self.read_tx_data_path(ledger_offset).ok()?;
@@ -573,7 +582,7 @@ impl StorageModule {
             "module id: {} data_root: {}, offsets: {:#?}",
             self.id, data_root, closest_offsets
         );
-        let closest_offset = closest_offsets
+        let nearest_start_offset = closest_offsets
             .0
             .iter()
             .filter(|&&offset| offset <= partition_offset as i32)
@@ -585,13 +594,23 @@ impl StorageModule {
             .ok()?;
         let chunk_info = chunks.get(&partition_offset)?;
 
+        // Because nearest_start_offset can be negative (for data_roots that
+        // overlap partition boundaries) we do our calculations with i64s to
+        // account for negative nearest_start_offset
+        let data_root_start_offset: LedgerChunkOffset =
+            (range.start() as i64 + nearest_start_offset as i64) as u64;
+
+        // Finally the index of the chunk in the transaction can be calculated
+        // using the ledger relative start_offset of the data_root and the
+        // ledger_offset provided by the caller
+        let chunk_index = (ledger_offset - data_root_start_offset) as u32;
+
         Some(Chunk {
             data_root,
             data_size,
             data_path,
             bytes: Base64::from(chunk_info.0.clone()),
-            chunk_index: (ledger_offset - (range.start() as i128 + closest_offset as i128) as u64)
-                as u32,
+            chunk_index,
         })
     }
 
@@ -850,7 +869,7 @@ pub fn get_overlapped_storage_modules(
 
 /// For a given ledger and ledger offset this function attempts to find
 /// a storage module that overlaps the offset
-pub fn get_overlapped_storage_module(
+pub fn get_storage_module_at_offset(
     storage_modules: &[Arc<StorageModule>],
     ledger: Ledger,
     chunk_offset: LedgerChunkOffset,

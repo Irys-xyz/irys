@@ -155,10 +155,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let data_txs: Vec<IrysTransactionHeader> =
                     mempool_addr.send(GetBestMempoolTxs).await.unwrap();
 
-                let bytes_added = data_txs
-                    .iter()
-                    .map(|tx| ((tx.data_size + chunk_size - 1) / chunk_size) * chunk_size)
-                    .sum::<u64>();
+                let bytes_added = data_txs.iter().fold(0, |acc, tx| {
+                    acc + tx.data_size.div_ceil(chunk_size) * chunk_size
+                });
         
                 let chunks_added = bytes_added / chunk_size;
 
