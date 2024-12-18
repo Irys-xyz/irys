@@ -566,20 +566,19 @@ impl StorageModule {
         let data_root = match tx_path {
             Some(bytes) => {
                 let proof = get_leaf_proof(&Base64::from(bytes))?;
-                proof.hash().map(H256::from).unwrap_or_default()
+                proof
+                    .hash()
+                    .map(H256::from)
+                    .ok_or_eyre("Unable to parse data_root from tx_path ")?
             }
-            None => H256::default(),
+            None => return Err(eyre::eyre!("Unable to find a chunk with that tx_path")),
         };
-
-        if data_root == H256::default() {
-            return Err(eyre::eyre!("Unable to find a chunk with that tx_path"));
-        }
 
         let (data_path, data_size) = match data_path {
             Some(dp) => {
-                let path_buff = Base64::from(dp.clone());
+                let path_buff = Base64::from(dp);
                 let proof = get_leaf_proof(&path_buff)?;
-                (Base64::from(dp), proof.offset() as u64)
+                (path_buff, proof.offset() as u64)
             }
             None => return Err(eyre::eyre!("Unable to find a chunk for that data_path")),
         };
