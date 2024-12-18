@@ -513,7 +513,7 @@ impl Base64 {
 
 impl Serialize for Base64 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(&format!("{}", &self))
+        serializer.collect_str(&base64_url::encode(&self.0))
     }
 }
 

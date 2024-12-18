@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use eyre::OptionExt;
 use irys_database::Ledger;
-use irys_types::{Chunk, DatabaseProvider, LedgerChunkOffset, StorageConfig};
+use irys_types::{DatabaseProvider, LedgerChunkOffset, PackedChunk, StorageConfig};
 
-use crate::{get_storage_module_at_offset, ChunkType, StorageModule};
+use crate::{get_storage_module_at_offset, StorageModule};
 
 /// Provides chunks to actix::web front end (mostly)
 #[derive(Debug)]
@@ -36,7 +36,7 @@ impl ChunkProvider {
         &self,
         ledger: Ledger,
         ledger_offset: LedgerChunkOffset,
-    ) -> eyre::Result<Option<Chunk>> {
+    ) -> eyre::Result<Option<PackedChunk>> {
         // Get basic chunk info
         let module = get_storage_module_at_offset(&self.storage_modules, ledger, ledger_offset)
             .ok_or_eyre("No storage module contains this chunk")?;
