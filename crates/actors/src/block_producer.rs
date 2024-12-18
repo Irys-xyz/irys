@@ -230,6 +230,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     &block_index_addr,
                     &epoch_service_addr,
                     &storage_config,
+                    &solution.mining_address
                 )
                 .await
                 {
@@ -250,7 +251,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     previous_block_hash: prev_block_hash,
                     previous_cumulative_diff: U256::from(4000),
                     poa,
-                    reward_address: Address::ZERO,
+                    reward_address: solution.mining_address,
                     reward_key: Base64::from_str("").unwrap(),
                     signature: IrysSignature {
                         reth_signature: Signature::test_signature(),
