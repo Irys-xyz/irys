@@ -1,0 +1,118 @@
+name: primary
+
+# on:
+#   # Runs on pushes to master
+#   push:
+#     branches:
+#       - master
+  
+#   # Runs on PRs targeting master
+#   pull_request:
+#     branches:
+#       - master
+      
+#   # Manual trigger via commit message
+#   push:
+#     branches-ignore:
+#       - master
+
+#   # manual trigger from GitHub UI
+#   workflow_dispatch:
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    # branches: [main]
+    branches: [feat/basic-ci]
+
+
+env:
+  CARGO_TERM_COLOR: always
+  CACHE_VERSION: v1
+  CARGO_INCREMENTAL: 0
+
+
+jobs:
+
+  compile-test:
+    name: compile-test
+    runs-on: self-hosted
+    timeout-minutes: 30
+    if: |
+      github.ref == 'refs/heads/master' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '#run-ci')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+          token: ${{ secrets.SUBMODULE_PAT }}
+      - uses: maxnowack/local-cache@v2
+        env:
+          cache-name: rust
+        with: 
+          path: |
+            ~/.cargo/bin/
+            ~/.rustup/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      
+      - name: Sweep cache for stale files
+        uses: BD103/cargo-sweep@v2
+
+      - run: cargo test --no-run
+
+      - name: Clean cache
+        run: .github/scripts/clean_cache.sh
+        # env:
+        #   RUSTFLAGS: -D warnings
+        
+  clippy:
+    name: clippy
+    needs: compile-test
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+          token: ${{ secrets.SUBMODULE_PAT }}
+      - uses: maxnowack/local-cache@v2
+        env:
+          cache-name: rust
+        with: 
+          path: |
+            ~/.cargo/bin/
+            ~/.rustup/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}  
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          toolchain: stable
+
+      - name: Sweep cache for stale files
+        uses: BD103/cargo-sweep@v2
+
+      - run: cargo clippy --workspace --lib --examples --tests --benches --all-features --locked
+        # env:
+        #   RUSTFLAGS: -D warnings
+
