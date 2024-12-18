@@ -28,6 +28,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
+    u32,
 };
 use tracing::{debug, info};
 
@@ -121,7 +122,7 @@ impl StorageModule {
         base_path: &PathBuf,
         storage_module_info: &StorageModuleInfo,
         storage_config: StorageConfig,
-    ) -> Self {
+    ) -> eyre::Result<Self> {
         let mut map = NoditMap::new();
         let mut intervals = StorageIntervals::new();
 
@@ -135,17 +136,23 @@ impl StorageModule {
                     .write(true)
                     .create(true) // Optional: creates file if it doesn't exist
                     .open(&path)
-                    .unwrap_or_else(|_| panic!("Failed to open: {}", path.display())),
+                    .map_err(|e| {
+                        eyre!(
+                            "Failed to create or open chunks file: {} - {}",
+                            path.display(),
+                            e
+                        )
+                    })?,
             ));
 
             let submodule_db_path = sub_base_path.join("db");
-            let submodule_db =
-                create_or_open_submodule_db(&submodule_db_path).unwrap_or_else(|_| {
-                    panic!(
-                        "Failed to open submodule database: {}",
-                        submodule_db_path.display()
-                    )
-                });
+            let submodule_db = create_or_open_submodule_db(&submodule_db_path).map_err(|e| {
+                eyre!(
+                    "Failed to open submodule database: {} - {}",
+                    submodule_db_path.display(),
+                    e
+                )
+            })?;
 
             map.insert_strict(
                 interval.clone(),
@@ -154,13 +161,14 @@ impl StorageModule {
                     db: DatabaseProvider(Arc::new(submodule_db)),
                 },
             )
-            .unwrap_or_else(|_| {
-                panic!(
-                    "Failed to insert submodule over interval: {}-{}",
+            .map_err(|e| {
+                eyre!(
+                    "Failed to insert submodule over interval: {}-{}, {:?}",
                     interval.start(),
-                    interval.end()
+                    interval.end(),
+                    e
                 )
-            });
+            })?;
 
             let _ =
                 intervals.insert_merge_touching_if_values_equal(interval, ChunkType::Uninitialized);
@@ -168,17 +176,36 @@ impl StorageModule {
 
         // TODO: if there are any gaps, or the range doesn't cover a full module range panic
 
+        let gaps = intervals
+            .gaps_untrimmed(ii(0, u32::MAX))
+            .collect::<Vec<_>>();
+        let expected = vec![ii(storage_config.num_chunks_in_partition as u32, u32::MAX)];
+        if &gaps != &expected {
+            return Err(eyre!(
+                "Invalid storage module config, expected range {:?}, got range {:?}",
+                &expected,
+                &gaps
+            ));
+        }
+
         let path = base_path.join(format!(
             "StorageModule_{}_intervals.json",
             storage_module_info.id
         ));
+
         let intervals_file = Arc::new(Mutex::new(
             OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true) // Optional: creates file if it doesn't exist
                 .open(&path)
-                .unwrap_or_else(|_| panic!("Failed to open: {}", path.display())),
+                .map_err(|e| {
+                    eyre!(
+                        "Failed to create or open interval file: {} - {}",
+                        path.display(),
+                        e
+                    )
+                })?,
         ));
 
         // Attempt to restore intervals from the intervals file.
@@ -186,7 +213,7 @@ impl StorageModule {
             intervals = ints;
         }
 
-        StorageModule {
+        Ok(StorageModule {
             id: storage_module_info.id,
             partition_assignment: storage_module_info.partition_assignment,
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
@@ -194,7 +221,7 @@ impl StorageModule {
             submodules: map,
             storage_config,
             intervals_file,
-        }
+        })
     }
 
     /// Returns the StorageModules partition_hash if assigned
@@ -768,9 +795,9 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{storage, H256};
     use nodit::interval::ii;
-    use openssl::sha;
+
     #[test]
-    fn storage_module_test() {
+    fn storage_module_test() -> eyre::Result<()> {
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: None,
@@ -793,12 +820,13 @@ mod tests {
         let config = StorageConfig {
             min_writes_before_sync: 1,
             chunk_size: 32,
+            num_chunks_in_partition: 20,
             ..Default::default()
         };
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module = StorageModule::new(&base_path, storage_module_info, config);
+        let storage_module = StorageModule::new(&base_path, storage_module_info, config)?;
 
         // Verify the entire storage module range is uninitialized
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
@@ -885,6 +913,8 @@ mod tests {
         let ints = storage_module.intervals.read().unwrap();
         let module_intervals = ints.clone().into_iter().collect::<Vec<_>>();
         assert_eq!(file_intervals, module_intervals);
+
+        Ok(())
     }
 
     #[test]
@@ -905,12 +935,13 @@ mod tests {
         let config = StorageConfig {
             min_writes_before_sync: 1,
             chunk_size: 5,
+            num_chunks_in_partition: 5,
             ..Default::default()
         };
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let mut storage_module = StorageModule::new(&base_path, storage_module_info, config);
+        let mut storage_module = StorageModule::new(&base_path, storage_module_info, config)?;
         let chunk_data = vec![0, 1, 2, 3, 4];
         let data_path = vec![4, 3, 2, 1];
         let tx_path = vec![5, 6, 7, 8];

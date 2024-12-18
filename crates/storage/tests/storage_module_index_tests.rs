@@ -18,7 +18,7 @@ use reth_db::Database;
 use tracing::{error, info};
 
 #[test]
-fn tx_path_overlap_tests() {
+fn tx_path_overlap_tests() -> eyre::Result<()> {
     // Set up the storage geometry for this test
     let storage_config = StorageConfig {
         chunk_size: 32,
@@ -89,7 +89,7 @@ fn tx_path_overlap_tests() {
             &base_path,
             &info,
             storage_config.clone(),
-        ));
+        )?);
         storage_modules.push(arc_module.clone());
         arc_module.pack_with_zeros();
     }
@@ -467,6 +467,7 @@ fn tx_path_overlap_tests() {
             println!("read[sm1]: {:?}", chunk);
         }
     }
+    Ok(())
 }
 
 fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {

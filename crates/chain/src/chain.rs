@@ -11,7 +11,7 @@ use irys_actors::{
     mempool::MempoolActor,
     mining::PartitionMiningActor,
     mining_broadcaster::{self, BroadcastDifficultyUpdate, MiningBroadcaster},
-    packing::{PackingActor, PackingRequest},
+    packing::{wait_for_packing, PackingActor, PackingRequest},
     ActorAddresses,
 };
 use irys_api_server::{run_server, ApiState};
@@ -94,7 +94,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
         num_partitions_in_slot: 1,
         miner_address: arc_config.mining_signer.address(),
         min_writes_before_sync: 1,
-        entropy_packing_iterations: PACKING_SHA_1_5_S,
+        entropy_packing_iterations: 1_000,
     };
 
     irys_genesis.diff = calculate_initial_difficulty(
@@ -194,13 +194,17 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 // Create a list of storage modules wrapping the storage files
                 for info in storage_module_infos {
-                    let arc_module = Arc::new(StorageModule::new(
-                        &arc_config.storage_module_dir(),
-                        &info,
-                        (*arc_storage_config).clone(),
-                    ));
+                    let arc_module = Arc::new(
+                        StorageModule::new(
+                            &arc_config.storage_module_dir(),
+                            &info,
+                            (*arc_storage_config).clone(),
+                        )
+                        // TODO: remove this unwrap
+                        .unwrap(),
+                    );
                     storage_modules.push(arc_module.clone());
-                    arc_module.pack_with_zeros();
+                    // arc_module.pack_with_zeros();
                 }
 
                 let mempool_actor = MempoolActor::new(
@@ -257,6 +261,27 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
                 tokio::task::yield_now().await;
 
+                let packing_actor_addr =
+                    PackingActor::new(Handle::current(), reth_node.task_executor.clone(), None)
+                        .start();
+                // request packing for uninitialized ranges
+                for sm in &storage_modules {
+                    let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
+                    debug!("ranges to pack: {:?}", &uninitialized);
+                    let _ = uninitialized
+                        .iter()
+                        .map(|interval| {
+                            packing_actor_addr.do_send(PackingRequest {
+                                storage_module: sm.clone(),
+                                chunk_range: (*interval).into(),
+                            })
+                        })
+                        .collect::<Vec<()>>();
+                }
+                let _ = wait_for_packing(packing_actor_addr.clone(), None).await;
+
+                debug!("Packing complete");
+
                 // Let the partition actors know about the genesis difficulty
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(arc_genesis.clone()));
 
@@ -269,24 +294,6 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                         mining_broadcaster_addr.clone(),
                     )
                 });
-
-                let packing_actor_addr =
-                    PackingActor::new(Handle::current(), reth_node.task_executor.clone(), None)
-                        .start();
-
-                // request packing for uninitialized ranges
-                for sm in &storage_modules {
-                    let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
-                    let _ = uninitialized
-                        .iter()
-                        .map(|interval| {
-                            packing_actor_addr.do_send(PackingRequest {
-                                storage_module: sm.clone(),
-                                chunk_range: (*interval).into(),
-                            })
-                        })
-                        .collect::<Vec<()>>();
-                }
 
                 let actor_addresses = ActorAddresses {
                     partitions: part_actors_clone,

@@ -127,7 +127,7 @@ impl PackingActor {
                 let storage_module = storage_module.clone();
                 // wait for the permit before spawning the thread
                 let permit = semaphore.acquire_owned().await.unwrap();
-                debug!(target: "irys::packing", "Packing chunk {} for SM {}", &i, &storage_module.id);
+                debug!(target: "irys::packing", "Packing chunk {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
                 self.task_executor.spawn_blocking(async move {
                     let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
                     compute_entropy_chunk(
@@ -261,6 +261,8 @@ async fn test_packing_actor() -> eyre::Result<()> {
     // Override the default StorageModule config for testing
     let storage_config = StorageConfig {
         min_writes_before_sync: 1,
+        entropy_packing_iterations: 1_000,
+        num_chunks_in_partition: 5,
         ..Default::default()
     };
 
@@ -270,7 +272,7 @@ async fn test_packing_actor() -> eyre::Result<()> {
         &base_path,
         storage_module_info,
         storage_config.clone(),
-    ));
+    )?);
 
     let request = PackingRequest {
         storage_module: storage_module.clone(),
