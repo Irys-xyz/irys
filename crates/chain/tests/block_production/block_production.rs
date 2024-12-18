@@ -32,18 +32,16 @@ pub fn capacity_chunk_solution(miner_addr: Address) -> SolutionContext {
     let vdf_config = VDFStepsConfig::default(); // TODO: take it from test's vdf config
     let chunk_size = 32; // TODO: take it from test's storage config
 
-    // TODO: use this when capacity chunks are packed
-    //let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
-    // compute_entropy_chunk(
-    //     miner_addr,
-    //     0,
-    //     partition_hash.into(),
-    //     vdf_config.vdf_difficulty as u32,
-    //     chunk_size, // take it from storage config
-    //     &mut entropy_chunk,
-    // );
+    let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+    compute_entropy_chunk(
+        miner_addr,
+        0,
+        partition_hash.into(),
+        1_000,
+        chunk_size, // take it from storage config
+        &mut entropy_chunk,
+    );
 
-    let entropy_chunk = vec![0u8; chunk_size as usize];
     SolutionContext {
         partition_hash,
         chunk_offset: 0,

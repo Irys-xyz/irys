@@ -1,7 +1,5 @@
 use actix::prelude::*;
 
-use color_eyre::eyre::eyre;
-use eyre::Result;
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_types::{
@@ -19,9 +17,9 @@ use crate::{
 pub fn block_is_valid(
     block: &IrysBlockHeader,
     prev_block_header: Option<IrysBlockHeader>,
-) -> Result<()> {
+) -> eyre::Result<()> {
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
-        return Err(eyre!(
+        return Err(eyre::eyre!(
             "Invalid block: chunk hash distinct from PoA chunk hash"
         ));
     }
@@ -34,7 +32,7 @@ pub fn block_is_valid(
 
     if let Some(prev_block) = prev_block_header {
         if block.previous_block_hash != prev_block.block_hash {
-            return Err(eyre!(
+            return Err(eyre::eyre!(
                 "Invalid block: previous blocks indep_hash is not the parent block"
             ));
         }
@@ -54,8 +52,7 @@ pub async fn poa_is_valid(
     block_index_addr: &Addr<BlockIndexActor>,
     epoch_service_addr: &Addr<EpochServiceActor>,
     config: &StorageConfig,
-    vdf_config: &VDFStepsConfig,
-) -> Result<()> {
+) -> eyre::Result<()> {
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_num)) =
         (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_num)
@@ -83,7 +80,7 @@ pub async fn poa_is_valid(
         info!("block bounds: {:?}", bb);
 
         if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
-            return Err(eyre!("PoA chunk offset out of block bounds"));
+            return Err(eyre::eyre!("PoA chunk offset out of block bounds"));
         };
 
         let block_chunk_offset = (ledger_chunk_offset - bb.start_chunk_offset) as u128;
@@ -94,7 +91,7 @@ pub async fn poa_is_valid(
 
         // TODO: check if bounds are byte or chunk relative
         if !(tx_path_result.left_bound..=tx_path_result.right_bound).contains(&block_chunk_offset) {
-            return Err(eyre!("PoA chunk offset out of tx bounds"));
+            return Err(eyre::eyre!("PoA chunk offset out of tx bounds"));
         }
 
         let tx_chunk_offset = block_chunk_offset - tx_path_result.left_bound;
@@ -105,7 +102,7 @@ pub async fn poa_is_valid(
 
         if !(data_path_result.left_bound..=data_path_result.right_bound).contains(&tx_chunk_offset)
         {
-            return Err(eyre!("PoA chunk offset out of tx's data chunks bounds"));
+            return Err(eyre::eyre!("PoA chunk offset out of tx's data chunks bounds"));
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -113,7 +110,7 @@ pub async fn poa_is_valid(
             config.miner_address,
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
-            vdf_config.vdf_difficulty as u32,
+            config.entropy_packing_iterations,
             config.chunk_size as usize,
             &mut entropy_chunk,
         );
@@ -134,23 +131,21 @@ pub async fn poa_is_valid(
         let poa_chunk_hash = sha::sha256(&poa_chunk_padd_trimmed);
 
         if !(poa_chunk_hash == data_path_result.leaf_hash) {
-            return Err(eyre!("PoA chunk hash missmatch"));
+            return Err(eyre::eyre!("PoA chunk hash missmatch"));
         }
     } else {
-        // Capacity chunk TODO: uncomment this when capacity solutions chunks come packed
-        // let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
-        // compute_entropy_chunk(
-        //     config.miner_address,
-        //     poa.partition_chunk_offset,
-        //     poa.partition_hash.into(),
-        //     vdf_config.vdf_difficulty as u32,
-        //     config.chunk_size as usize,
-        //     &mut entropy_chunk,
-        // );
-        let entropy_chunk = vec![0u8; config.chunk_size as usize];
+        let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
+        compute_entropy_chunk(
+            config.miner_address,
+            poa.partition_chunk_offset,
+            poa.partition_hash.into(),
+            config.entropy_packing_iterations,            
+            config.chunk_size as usize,
+            &mut entropy_chunk,
+        );
 
-        if !(entropy_chunk == poa.chunk.0) {
-            return Err(eyre!("PoA capacity chunk missmatch"));
+        if entropy_chunk != poa.chunk.0 {
+            return Err(eyre::eyre!("PoA capacity chunk missmatch"));
         }
     }
 
@@ -197,12 +192,29 @@ mod tests {
         genesis_block.height = 0;
         let arc_genesis = Arc::new(genesis_block);
 
+        let chunk_size = 32;
+        let miner_address = Address::random();
+
         // Create epoch service with random miner address
-        let config = EpochServiceConfig::default();
+        let storage_config = StorageConfig {
+            chunk_size,
+            num_chunks_in_partition: 10,
+            num_chunks_in_recall_range: 2,
+            num_partitions_in_slot: 1,
+            miner_address,
+            min_writes_before_sync: 1,
+            entropy_packing_iterations: 1_000,
+        };
+
+        let config = EpochServiceConfig {
+            storage_config: Arc::new(storage_config.clone()),
+            ..Default::default()
+        };
+
         let mut epoch_service = EpochServiceActor::new(Some(config.clone()));
         let epoch_service_addr = epoch_service.start();
 
-        let miner_address = config.storage_config.miner_address;
+
 
         // Tell the epoch service to initialize the ledgers
         let msg = NewEpochMessage(arc_genesis.clone());
@@ -220,17 +232,6 @@ mod tests {
 
         let partition_hash = sub_slots[0].partitions[0];
 
-        let chunk_size = 32;
-        let storage_config = StorageConfig {
-            chunk_size,
-            num_chunks_in_partition: 10,
-            num_chunks_in_recall_range: 2,
-            num_partitions_in_slot: 1,
-            miner_address,
-            min_writes_before_sync: 1,
-            entropy_packing_iterations: PACKING_SHA_1_5_S,
-        };
-        let vdf_config = VDFStepsConfig::default();
 
         let arc_config = Arc::new(IrysNodeConfig::default());
         let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
@@ -305,7 +306,7 @@ mod tests {
             miner_address,
             poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num,
             partition_hash.into(),
-            vdf_config.vdf_difficulty as u32,
+            config.storage_config.entropy_packing_iterations,
             chunk_size as usize,
             &mut entropy_chunk,
         );
@@ -399,7 +400,6 @@ mod tests {
             &block_index_addr,
             &epoch_service_addr,
             &storage_config,
-            &vdf_config,
         )
         .await
         {

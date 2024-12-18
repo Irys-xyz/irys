@@ -89,8 +89,8 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
     };
     let storage_config_for_testing = StorageConfig {
         chunk_size: 32,
-        num_chunks_in_partition: 400,
-        num_chunks_in_recall_range: 80,
+        num_chunks_in_partition: 4,
+        num_chunks_in_recall_range: 2,
         num_partitions_in_slot: 1,
         miner_address: arc_config.mining_signer.address(),
         min_writes_before_sync: 1,

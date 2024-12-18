@@ -7,8 +7,6 @@ use std::{
 use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
-use color_eyre::eyre::eyre;
-use eyre::Result;
 use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
@@ -124,8 +122,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let epoch_service_addr = self.epoch_service.clone();
         let chunk_storage_addr = self.chunk_storage_addr.clone();
         let mining_broadcaster_addr = self.mining_broadcaster_addr.clone();
-        info!("After");
-
+        
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
         let self_addr = ctx.address();
@@ -219,7 +216,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     &block_index_addr,
                     &epoch_service_addr,
                     &storage_config,
-                    &vdf_config,
                 )
                 .await
                 {
