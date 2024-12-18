@@ -77,25 +77,23 @@ pub async fn poa_is_valid(
             .await
             .unwrap()
             .unwrap();
-        info!("block bounds: {:?}", bb);
 
         if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(eyre::eyre!("PoA chunk offset out of block bounds"));
         };
 
         let block_chunk_offset = (ledger_chunk_offset - bb.start_chunk_offset) as u128;
-        info!("block chunk offset {}", block_chunk_offset);
 
         // tx_path validation
-        let tx_path_result = validate_path(bb.tx_root.0, &tx_path, block_chunk_offset)?;
+        let tx_path_result = validate_path(bb.tx_root.0, &tx_path, block_chunk_offset*(config.chunk_size as u128))?;
 
         // TODO: check if bounds are byte or chunk relative
-        if !(tx_path_result.left_bound..=tx_path_result.right_bound).contains(&block_chunk_offset) {
+        if !(tx_path_result.left_bound..=tx_path_result.right_bound).contains(&(block_chunk_offset*(config.chunk_size as u128))) {
             return Err(eyre::eyre!("PoA chunk offset out of tx bounds"));
         }
 
-        let tx_chunk_offset = block_chunk_offset - tx_path_result.left_bound;
-        info!("tx chunk offset {}", tx_chunk_offset);
+        let tx_chunk_offset = block_chunk_offset*(config.chunk_size as u128) - tx_path_result.left_bound;
+
         // data_path validation
         let data_path_result =
             validate_path(tx_path_result.leaf_hash, &data_path, tx_chunk_offset)?;
@@ -267,7 +265,7 @@ mod tests {
         }
 
         // Create a bunch of TX chunks
-        let data_chunks = vec![
+        let mut data_chunks = vec![
             vec![[0; 32], [1; 32], [2; 32]], // tx0 TODO: test last not complete chunk
             vec![[3; 32], [4; 32], [5; 32]], // tx1
             vec![[6; 32], [7; 32], [8; 32]], // tx2
@@ -318,9 +316,9 @@ mod tests {
         let (tx_root, tx_path) = TransactionLedger::merklize_tx_root(&tx_headers);
 
         let poa = PoaData {
-            tx_path: Some(Base64(tx_path[0].proof.clone())),
-            data_path: Some(Base64(txs[0].proofs[0].proof.clone())),
-            chunk: Base64(entropy_chunk),
+            tx_path: Some(Base64(tx_path[poa_tx_num as usize].proof.clone())),
+            data_path: Some(Base64(txs[poa_tx_num as usize].proofs[poa_chunk_num as usize].proof.clone())),
+            chunk: Base64(poa_chunk),
             ledger_num: Some(1),
             partition_chunk_offset: poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num,
             partition_hash,
