@@ -18,7 +18,7 @@ use reth_db::{Database, DatabaseEnv};
 use serde::{Deserialize, Serialize};
 use serde_json;
 
-/// Handles the HTTP POST request for adding a chunk to the mempool.
+/// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `IrysTransactionHeader` type,
 /// encapsulates it into a `TxIngressMessage` for further processing by the
 /// mempool actor, and manages error handling based on the results of message
@@ -87,6 +87,7 @@ mod tests {
     use eyre::eyre;
     use irys_actors::mempool::MempoolActor;
     use irys_database::{config::get_data_dir, tables::IrysTables};
+    use irys_storage::ChunkProvider;
     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
     use log::{debug, error, info, log_enabled, Level};
     use reth::tasks::TaskManager;
@@ -119,20 +120,27 @@ mod tests {
             irys_types::app_state::DatabaseProvider(arc_db.clone()),
             task_manager.executor(),
             IrysSigner::random_signer(),
-            storage_config,
+            storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
         let mempool_actor_addr = mempool_actor.start();
 
-        let state = ApiState {
+        let chunk_provider = ChunkProvider::new(
+            storage_config.clone(),
+            Arc::new(Vec::new()).to_vec(),
+            DatabaseProvider(arc_db.clone()),
+        );
+
+        let app_state = ApiState {
             db: DatabaseProvider(arc_db.clone()),
             mempool: mempool_actor_addr,
+            chunk_provider: Arc::new(chunk_provider),
         };
 
         let app = test::init_service(
             App::new()
                 .wrap(Logger::default())
-                .app_data(web::Data::new(state))
+                .app_data(web::Data::new(app_state))
                 .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx))),
         )
         .await;
@@ -167,18 +175,25 @@ mod tests {
             irys_types::app_state::DatabaseProvider(db_arc.clone()),
             task_manager.executor(),
             IrysSigner::random_signer(),
-            storage_config,
+            storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
         let mempool_actor_addr = mempool_actor.start();
-        let state = ApiState {
-            db: DatabaseProvider(db_arc),
+        let chunk_provider = ChunkProvider::new(
+            storage_config.clone(),
+            Arc::new(Vec::new()).to_vec(),
+            DatabaseProvider(db_arc.clone()),
+        );
+
+        let app_state = ApiState {
+            db: DatabaseProvider(db_arc.clone()),
             mempool: mempool_actor_addr,
+            chunk_provider: Arc::new(chunk_provider),
         };
 
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(state))
+                .app_data(web::Data::new(app_state))
                 .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx))),
         )
         .await;

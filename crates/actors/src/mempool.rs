@@ -6,7 +6,7 @@ use irys_storage::StorageModuleVec;
 use irys_types::ingress::generate_ingress_proof_tree;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    app_state::DatabaseProvider, chunk::Chunk, hash_sha256, validate_path, IrysTransactionHeader,
+    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, IrysTransactionHeader,
     CHUNK_SIZE, H256,
 };
 use irys_types::{Address, DataChunks};
@@ -94,10 +94,10 @@ pub enum TxIngressError {
 /// synchronization with peers, or by a user posting the chunk.
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(),ChunkIngressError>")]
-pub struct ChunkIngressMessage(pub Chunk);
+pub struct ChunkIngressMessage(pub UnpackedChunk);
 
 impl ChunkIngressMessage {
-    fn into_inner(self) -> Chunk {
+    fn into_inner(self) -> UnpackedChunk {
         self.0
     }
 }
@@ -155,9 +155,11 @@ impl Handler<TxIngressMessage> for MempoolActor {
         //return Err(TxIngressError::Unfunded);
 
         // Cache the data_root in the database
-        let _ = self
-            .db
-            .update_eyre(|db_tx| irys_database::cache_data_root(db_tx, &tx));
+        let _ = self.db.update_eyre(|db_tx| {
+            irys_database::cache_data_root(db_tx, &tx)?;
+            irys_database::insert_tx_header(db_tx, &tx)?;
+            Ok(())
+        });
 
         Ok(())
     }
@@ -168,7 +170,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
 
     fn handle(&mut self, chunk_msg: ChunkIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // TODO: maintain a shared read transaction so we have read isolation
-        let chunk: Chunk = chunk_msg.0;
+        let chunk: UnpackedChunk = chunk_msg.0;
 
         // Check to see if we have a cached data_root for this chunk
         let read_tx = self.db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
@@ -541,7 +543,7 @@ mod tests {
             let chunk_bytes = Base64(data_bytes[min..max].to_vec());
             // Create a ChunkIngressMessage for each chunk
             let chunk_ingress_msg = ChunkIngressMessage {
-                0: Chunk {
+                0: UnpackedChunk {
                     data_root,
                     data_size,
                     data_path: data_path.clone(),

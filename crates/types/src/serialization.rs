@@ -446,8 +446,18 @@ pub struct Base64(pub Vec<u8>);
 
 impl std::fmt::Display for Base64 {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let string = base64_url::encode(&self.0);
-        write!(f, "{}", string)
+        // format larger (>8 bytes) Base64 strings as <abcd>...<wxyz>
+        let trunc_len = 4;
+        if self.0.len() <= 2 * trunc_len {
+            write!(f, "{}", base64_url::encode(&self.0))
+        } else {
+            write!(
+                f,
+                "{}...{}",
+                base64_url::encode(&self.0[..trunc_len]),
+                base64_url::encode(&self.0[self.0.len() - trunc_len..])
+            )
+        }
     }
 }
 
@@ -503,7 +513,7 @@ impl Base64 {
 
 impl Serialize for Base64 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(&format!("{}", &self))
+        serializer.collect_str(&base64_url::encode(&self.0))
     }
 }
 

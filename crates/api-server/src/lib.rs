@@ -1,6 +1,8 @@
 mod error;
 mod routes;
 
+use std::sync::Arc;
+
 use actix::Addr;
 use actix_cors::Cors;
 use actix_web::{
@@ -10,12 +12,14 @@ use actix_web::{
 };
 
 use irys_actors::mempool::MempoolActor;
+use irys_storage::ChunkProvider;
 use irys_types::app_state::DatabaseProvider;
-use routes::{block, chunks, index, price, proxy::proxy, tx};
+use routes::{block, get_chunk, index, post_chunk, price, proxy::proxy, tx};
 
 #[derive(Clone)]
 pub struct ApiState {
     pub mempool: Addr<MempoolActor>,
+    pub chunk_provider: Arc<ChunkProvider>,
     pub db: DatabaseProvider,
 }
 
@@ -38,7 +42,11 @@ pub async fn run_server(app_state: ApiState) {
                 web::scope("v1")
                     .route("/info", web::get().to(index::info_route))
                     .route("/block/{block_hash}", web::get().to(block::get_block))
-                    .route("/chunk", web::post().to(chunks::post_chunk))
+                    .route(
+                        "/chunk/{ledger_num}/{ledger_offset}",
+                        web::get().to(get_chunk::get_chunk),
+                    )
+                    .route("/chunk", web::post().to(post_chunk::post_chunk))
                     .route("/tx/{tx_id}", web::get().to(tx::get_tx))
                     .route("/tx", web::post().to(tx::post_tx))
                     .route("/price/{size}", web::get().to(price::get_price)),
@@ -70,7 +78,7 @@ async fn post_tx_and_chunks_golden_path() {
     use actix_web::{middleware::Logger, test};
     use awc::http::StatusCode;
     use irys_actors::mempool::MempoolActor;
-    use irys_types::{irys::IrysSigner, Base64, Chunk, StorageConfig, MAX_CHUNK_SIZE};
+    use irys_types::{irys::IrysSigner, Base64, UnpackedChunk, StorageConfig, MAX_CHUNK_SIZE};
 
     use rand::Rng;
 
@@ -86,14 +94,21 @@ async fn post_tx_and_chunks_golden_path() {
         irys_types::app_state::DatabaseProvider(arc_db.clone()),
         task_manager.executor(),
         IrysSigner::random_signer(),
-        storage_config,
+        storage_config.clone(),
         Arc::new(Vec::new()).to_vec(),
     );
     let mempool_actor_addr = mempool_actor.start();
 
+    let chunk_provider = ChunkProvider::new(
+        storage_config.clone(),
+        Arc::new(Vec::new()).to_vec(),
+        DatabaseProvider(arc_db.clone()),
+    );
+
     let app_state = ApiState {
         db: DatabaseProvider(arc_db.clone()),
         mempool: mempool_actor_addr,
+        chunk_provider: Arc::new(chunk_provider),
     };
 
     // Initialize the app
@@ -105,7 +120,7 @@ async fn post_tx_and_chunks_golden_path() {
             .service(
                 web::scope("v1")
                     .route("/tx", web::post().to(tx::post_tx))
-                    .route("/chunk", web::post().to(chunks::post_chunk)),
+                    .route("/chunk", web::post().to(post_chunk::post_chunk)),
             ),
     )
     .await;
@@ -140,7 +155,7 @@ async fn post_tx_and_chunks_golden_path() {
         let max = chunk_node.max_byte_range;
         let data_path = Base64(tx.proofs[index].proof.to_vec());
 
-        let chunk = Chunk {
+        let chunk = UnpackedChunk {
             data_root,
             data_size,
             data_path,

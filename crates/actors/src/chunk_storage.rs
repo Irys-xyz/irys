@@ -4,11 +4,10 @@ use irys_database::{
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
     BlockIndex, Initialized, Ledger,
 };
-use irys_storage::{ie, ii, InclusiveInterval, StorageModule};
+use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    app_state::DatabaseProvider, chunk, Base64, Chunk, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig,
-    TransactionLedger,
+    app_state::DatabaseProvider, chunk, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
+    LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, TransactionLedger, UnpackedChunk,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
@@ -89,8 +88,11 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                 ));
 
                 // Retrieve the storage modules that are overlapped by this range
-                let overlapped_modules =
-                    get_overlapped_storage_modules(&storage_modules, &tx_chunk_range);
+                let overlapped_modules = get_overlapped_storage_modules(
+                    &storage_modules,
+                    Ledger::Submit,
+                    &tx_chunk_range,
+                );
 
                 // Update the transaction indexes of the overlapped StorageModules
                 update_storage_module_indexes(
@@ -110,6 +112,10 @@ impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
                     &storage_modules,
                     &db,
                 )?;
+
+                for module in storage_modules.iter() {
+                    let _ = module.sync_pending_chunks();
+                }
 
                 prev_chunk_offset += num_chunks_in_tx as u64;
             }
@@ -136,7 +142,7 @@ fn process_transaction_chunks(
 
         // Find which storage module intersects this chunk
         let ledger_offset = chunk_index as u64 + tx_chunk_range.start();
-        let storage_module = find_storage_module(storage_modules, ledger_offset);
+        let storage_module = find_storage_module(storage_modules, Ledger::Submit, ledger_offset);
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
@@ -186,25 +192,6 @@ fn get_tx_path_pairs(
         .collect())
 }
 
-fn get_overlapped_storage_modules(
-    storage_modules: &[Arc<StorageModule>],
-    tx_chunk_range: &LedgerChunkRange,
-) -> Vec<Arc<StorageModule>> {
-    storage_modules
-        .iter()
-        .filter(|module| {
-            module
-                .partition_assignment
-                .and_then(|pa| pa.ledger_num)
-                .map_or(false, |num| num == Ledger::Submit as u64)
-                && module
-                    .get_storage_module_range()
-                    .map_or(false, |range| range.overlaps(tx_chunk_range))
-        })
-        .cloned() // Clone the Arc, which is cheap
-        .collect()
-}
-
 fn update_storage_module_indexes(
     matching_modules: &[Arc<StorageModule>],
     proof: &[u8],
@@ -234,12 +221,18 @@ fn get_cached_chunk(
 
 fn find_storage_module(
     storage_modules: &[Arc<StorageModule>],
+    ledger: Ledger,
     ledger_offset: u64,
 ) -> Option<&Arc<StorageModule>> {
     storage_modules.iter().find_map(|module| {
+        // First check ledger
         module
-            .get_storage_module_range()
-            .ok()
+            .partition_assignment
+            .as_ref()
+            .and_then(|pa| pa.ledger_num)
+            .filter(|&num| num == ledger as u64)
+            // Then check offset range
+            .and_then(|_| module.get_storage_module_range().ok())
             .filter(|range| range.contains_point(ledger_offset))
             .map(|_| module)
     })
@@ -255,7 +248,7 @@ fn write_chunk_to_module(
     let data_path = Base64::from(chunk_info.1.data_path.0.clone());
 
     if let Some(bytes) = chunk_info.1.chunk {
-        let chunk = Chunk {
+        let chunk = UnpackedChunk {
             data_root,
             data_size,
             data_path,

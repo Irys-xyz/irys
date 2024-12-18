@@ -1,18 +1,22 @@
 use derive_more::derive::{Deref, DerefMut};
-use eyre::{eyre, Result};
-use irys_database::submodule::{
-    self, add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
-    add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
-    create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
-    get_tx_path_by_offset, tables::RelativeStartOffsets, write_chunk_data_path,
+use eyre::{eyre, OptionExt, Result};
+use irys_database::{
+    submodule::{
+        self, add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
+        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
+        create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
+        get_tx_path_by_offset, tables::RelativeStartOffsets,
+    },
+    Ledger,
 };
 use irys_packing::xor_vec_u8_arrays_in_place;
 use irys_types::{
     app_state::DatabaseProvider,
+    get_leaf_proof,
     partition::{PartitionAssignment, PartitionHash},
-    Chunk, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset, LedgerChunkRange,
-    PartitionChunkOffset, PartitionChunkRange, RelativeChunkOffset, StorageConfig, TxPath,
-    TxPathHash, H256,
+    Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset,
+    LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize,
+    StorageConfig, TxPath, UnpackedChunk, H256,
 };
 use nodit::{
     interval::{ie, ii},
@@ -479,7 +483,10 @@ impl StorageModule {
     }
 
     /// Gets the list of partition-relative offsets in this partition that the chunk should be written to
-    pub fn get_write_offsets(&self, chunk: &Chunk) -> eyre::Result<Vec<PartitionChunkOffset>> {
+    pub fn get_write_offsets(
+        &self,
+        chunk: &UnpackedChunk,
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let start_offsets = self.collect_start_offsets(chunk.data_root)?;
 
         if start_offsets.0.len() == 0 {
@@ -506,9 +513,9 @@ impl StorageModule {
     }
 
     /// Writes chunk data and its data_path to relevant storage locations
-    pub fn write_data_chunk(&self, chunk: &Chunk) -> eyre::Result<()> {
+    pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> eyre::Result<()> {
         let data_path = &chunk.data_path.0;
-        let data_path_hash = Chunk::hash_data_path(&data_path);
+        let data_path_hash = UnpackedChunk::hash_data_path(&data_path);
 
         for partition_offset in self.get_write_offsets(&chunk)? {
             // read entropy from the storage module
@@ -526,7 +533,7 @@ impl StorageModule {
 
     /// Internal helper function to find all the RelativeStartOffsets for a data_root
     /// in this StorageModule
-    fn collect_start_offsets(&self, data_root: DataRoot) -> eyre::Result<RelativeStartOffsets> {
+    pub fn collect_start_offsets(&self, data_root: DataRoot) -> eyre::Result<RelativeStartOffsets> {
         let mut offsets = RelativeStartOffsets::default();
         for (_, submodule) in self.submodules.iter() {
             if let Some(rel_offsets) = submodule
@@ -539,22 +546,83 @@ impl StorageModule {
         Ok(offsets)
     }
 
-    pub fn read_data_path(
-        &mut self,
+    /// Constructs a Chunk struct for the given ledger offset
+    ///
+    /// This function:
+    /// 1. Retrieves and validates tx and data paths
+    /// 2. Extracts data_root and size from merkle proofs
+    /// 3. Calculates chunk position within its parent transaction
+    /// 4. Returns None if any step fails or chunk not found
+    ///
+    /// Note: Handles cases where data spans partition boundaries by supporting
+    /// negative offsets in the calculation of chunk position
+    pub fn generate_full_chunk(
+        &self,
         ledger_offset: LedgerChunkOffset,
-    ) -> eyre::Result<Option<ChunkDataPath>> {
-        let partition_offset = self.make_offset_partition_relative_guarded(ledger_offset)?;
+    ) -> Result<Option<PackedChunk>> {
+        // Get paths and process them
+        let (tx_path, data_path) = self.read_tx_data_path(ledger_offset)?;
 
-        let (_interval, submodule) = self
-            .submodules
-            .get_key_value_at_point(partition_offset)
-            .unwrap();
+        let data_root = match tx_path {
+            Some(bytes) => {
+                let proof = get_leaf_proof(&Base64::from(bytes))?;
+                proof
+                    .hash()
+                    .map(H256::from)
+                    .ok_or_eyre("Unable to parse data_root from tx_path ")?
+            }
+            None => return Err(eyre::eyre!("Unable to find a chunk with that tx_path")),
+        };
 
-        submodule
-            .db
-            .view(|tx| get_data_path_by_offset(tx, partition_offset))?
+        let (data_path, data_size) = match data_path {
+            Some(dp) => {
+                let path_buff = Base64::from(dp);
+                let proof = get_leaf_proof(&path_buff)?;
+                (path_buff, proof.offset() as u64)
+            }
+            None => return Err(eyre::eyre!("Unable to find a chunk for that data_path")),
+        };
+
+        // Get chunk info and calculate index
+        let range = self.get_storage_module_range()?;
+        let partition_offset = (ledger_offset - range.start()) as u32;
+        let closest_offsets = self.collect_start_offsets(data_root)?;
+
+        let nearest_start_offset = closest_offsets
+            .0
+            .iter()
+            .filter(|&&offset| offset <= partition_offset as i32)
+            .max()
+            .copied()
+            .ok_or_eyre("Could not find nearest_start_offset")?;
+
+        let chunks = self.read_chunks(ii(partition_offset, partition_offset))?;
+        let chunk_info = chunks
+            .get(&partition_offset)
+            .ok_or_eyre("Could not find chunk bytes on disk")?;
+
+        // Because nearest_start_offset can be negative (for data_roots that
+        // overlap partition boundaries) we do our calculations with i64s to
+        // account for negative nearest_start_offset
+        let data_root_start_offset: LedgerChunkOffset =
+            (range.start() as i64 + nearest_start_offset as i64) as u64;
+
+        // Finally the index of the chunk in the transaction can be calculated
+        // using the ledger relative start_offset of the data_root and the
+        // ledger_offset provided by the caller
+        let chunk_index = (ledger_offset - data_root_start_offset) as u32;
+
+        Ok(Some(PackedChunk {
+            data_root,
+            data_size,
+            data_path,
+            bytes: Base64::from(chunk_info.0.clone()),
+            chunk_index,
+            packing_address: self.storage_config.miner_address,
+        }))
     }
 
+    /// Gets the tx_path and data_path for a chunk using its ledger relative offset
     pub fn read_tx_data_path(
         &self,
         chunk_offset: LedgerChunkOffset,
@@ -786,6 +854,48 @@ fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {
     Ok(result)
 }
 
+/// Retrieves all the storage modules overlapped by a range in a given ledger
+pub fn get_overlapped_storage_modules(
+    storage_modules: &[Arc<StorageModule>],
+    ledger: Ledger,
+    tx_chunk_range: &LedgerChunkRange,
+) -> Vec<Arc<StorageModule>> {
+    storage_modules
+        .iter()
+        .filter(|module| {
+            module
+                .partition_assignment
+                .and_then(|pa| pa.ledger_num)
+                .map_or(false, |num| num == ledger as u64)
+                && module
+                    .get_storage_module_range()
+                    .map_or(false, |range| range.overlaps(tx_chunk_range))
+        })
+        .cloned() // Clone the Arc, which is cheap
+        .collect()
+}
+
+/// For a given ledger and ledger offset this function attempts to find
+/// a storage module that overlaps the offset
+pub fn get_storage_module_at_offset(
+    storage_modules: &[Arc<StorageModule>],
+    ledger: Ledger,
+    chunk_offset: LedgerChunkOffset,
+) -> Option<Arc<StorageModule>> {
+    storage_modules
+        .iter()
+        .find(|module| {
+            module
+                .partition_assignment
+                .and_then(|pa| pa.ledger_num)
+                .map_or(false, |num| num == ledger as u64)
+                && module
+                    .get_storage_module_range()
+                    .map_or(false, |range| range.contains_point(chunk_offset))
+        })
+        .cloned()
+}
+
 //==============================================================================
 // Tests
 //------------------------------------------------------------------------------
@@ -953,7 +1063,7 @@ mod tests {
         let _ =
             storage_module.index_transaction_data(tx_path, data_root, LedgerChunkRange(ii(0, 0)));
 
-        let chunk = Chunk {
+        let chunk = UnpackedChunk {
             data_root: H256::zero(),
             data_size: chunk_data.len() as u64,
             data_path: data_path.clone().into(),
@@ -963,7 +1073,7 @@ mod tests {
 
         storage_module.write_data_chunk(&chunk)?;
 
-        let ret_path = storage_module.read_data_path(0)?;
+        let (_, ret_path) = storage_module.read_tx_data_path(0)?;
 
         assert_eq!(ret_path, Some(data_path));
 

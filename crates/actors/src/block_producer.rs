@@ -55,9 +55,10 @@ pub struct BlockProducerActor {
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
+    /// Storage config 
+    pub storage_config: StorageConfig,
     /// Difficulty adjustment parameters for the Irys Protocol
     pub difficulty_config: DifficultyAdjustmentConfig,
-    pub storage_config: StorageConfig,
     pub vdf_config: VDFStepsConfig,
 }
 
@@ -71,8 +72,8 @@ impl BlockProducerActor {
         mining_broadcaster_addr: Addr<MiningBroadcaster>,
         epoch_service: Addr<EpochServiceActor>,
         reth_provider: RethNodeProvider,
-        difficulty_config: DifficultyAdjustmentConfig,
         storage_config: StorageConfig,
+        difficulty_config: DifficultyAdjustmentConfig,
         vdf_config: VDFStepsConfig,
     ) -> Self {
         Self {
@@ -83,8 +84,8 @@ impl BlockProducerActor {
             mining_broadcaster_addr,
             epoch_service,
             reth_provider,
-            difficulty_config,
             storage_config,
+            difficulty_config,
             vdf_config,
         }
     }
@@ -127,6 +128,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let db = self.db.clone();
         let self_addr = ctx.address();
         let difficulty_config = self.difficulty_config.clone();
+        let chunk_size = self.storage_config.chunk_size;
 
         let storage_config = self.storage_config.clone();
         let vdf_config = self.vdf_config.clone();
@@ -172,6 +174,18 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
                 let data_txs: Vec<IrysTransactionHeader> =
                     mempool_addr.send(GetBestMempoolTxs).await.unwrap();
+
+                let bytes_added = data_txs.iter().fold(0, |acc, tx| {
+                    acc + tx.data_size.div_ceil(chunk_size) * chunk_size
+                });
+        
+                let chunks_added = bytes_added / chunk_size;
+
+                // TODO: Eventually we'll need a more robust solution for growing the Ledgers
+                // when we add promotion we'll solve both at that time. This was just to
+                // fix a bug where the ledger size would cause an inverted interval to be 
+                // created, e.g.g (3..0) and the node would panic. 
+                let max_chunk_offset = prev_block_header.ledgers[Ledger::Submit].max_chunk_offset + chunks_added;
 
                 let data_tx_ids = data_txs.iter().map(|h| h.id.clone()).collect::<Vec<H256>>();
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -254,7 +268,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         TransactionLedger {
                             tx_root: TransactionLedger::merklize_tx_root(&data_txs).0,
                             txids: H256List(data_tx_ids.clone()),
-                            max_chunk_offset: 0,
+                            max_chunk_offset,
                             expires: Some(1622543200),
                         },
                     ],
@@ -348,7 +362,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         db.view_eyre(|tx| tx_header_by_txid(tx, txid))
                             .and_then(|opt| {
                                 opt.ok_or_else(|| {
-                                    eyre::eyre!("No tx header found for txid {}", txid)
+                                    eyre::eyre!("No tx header found for txid {:?}", txid)
                                 })
                             })
                     })

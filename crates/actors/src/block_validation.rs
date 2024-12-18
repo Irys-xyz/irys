@@ -207,7 +207,7 @@ mod tests {
         };
 
         let config = EpochServiceConfig {
-            storage_config: Arc::new(storage_config.clone()),
+            storage_config: storage_config.clone(),
             ..Default::default()
         };
 

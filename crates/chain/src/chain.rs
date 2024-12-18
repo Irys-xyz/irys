@@ -20,7 +20,9 @@ pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
-use irys_storage::{initialize_storage_files, ChunkType, StorageModule, StorageModuleVec};
+use irys_storage::{
+    initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
+};
 use irys_types::{
     app_state::DatabaseProvider, block_production::PartitionId, calculate_initial_difficulty,
     difficulty_adjustment_config, partition::PartitionHash, storage_config,
@@ -87,7 +89,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
         min_difficulty: U256::one(),
         max_difficulty: U256::MAX,
     };
-    let storage_config_for_testing = StorageConfig {
+    let storage_config = StorageConfig {
         chunk_size: 32,
         num_chunks_in_partition: 4,
         num_chunks_in_recall_range: 2,
@@ -97,12 +99,10 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
         entropy_packing_iterations: 1_000,
     };
 
-    irys_genesis.diff = calculate_initial_difficulty(
-        &difficulty_adjustment_config,
-        &storage_config_for_testing,
-        3,
-    )
-    .unwrap();
+    // TODO: Hard coding 3 for storage module count isn't great here,
+    // eventually we'll want to relate this to the genesis config
+    irys_genesis.diff =
+        calculate_initial_difficulty(&difficulty_adjustment_config, &storage_config, 3).unwrap();
 
     difficulty_adjustment_config.target_block_time = 5;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -110,7 +110,6 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
     irys_genesis.last_diff_timestamp = irys_genesis.timestamp;
     let arc_genesis = Arc::new(irys_genesis);
 
-    let arc_storage_config = Arc::new(storage_config_for_testing.clone());
     let mut storage_modules: StorageModuleVec = Vec::new();
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
         BlockIndex::default()
@@ -144,7 +143,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 // Initialize the epoch_service actor to handle partition ledger assignments
                 let config = EpochServiceConfig {
-                    storage_config: arc_storage_config.clone(),
+                    storage_config: storage_config.clone(),
                     ..Default::default()
                 };
 
@@ -154,7 +153,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 // Initialize the block_index actor and tell it about the genesis block
                 let block_index_actor =
-                    BlockIndexActor::new(block_index.clone(), storage_config_for_testing.clone());
+                    BlockIndexActor::new(block_index.clone(), storage_config.clone());
                 let block_index_actor_addr = block_index_actor.start();
                 let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
                 db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
@@ -198,7 +197,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                         StorageModule::new(
                             &arc_config.storage_module_dir(),
                             &info,
-                            (*arc_storage_config).clone(),
+                            storage_config.clone(),
                         )
                         // TODO: remove this unwrap
                         .unwrap(),
@@ -211,7 +210,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     db.clone(),
                     reth_node.task_executor.clone(),
                     node_config.mining_signer.clone(),
-                    (*arc_storage_config).clone(),
+                    storage_config.clone(),
                     storage_modules.clone(),
                 );
 
@@ -219,7 +218,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 let chunk_storage_actor = ChunkStorageActor::new(
                     block_index.clone(),
-                    (*arc_storage_config).clone(),
+                    storage_config.clone(),
                     storage_modules.clone(),
                     db.clone(),
                 );
@@ -238,8 +237,8 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     mining_broadcaster_addr.clone(),
                     epoch_service_actor_addr.clone(),
                     reth_node.clone(),
+                    storage_config.clone(),
                     difficulty_adjustment_config.clone(),
-                    (*arc_storage_config).clone(),
                     VDFStepsConfig::default(),
                 );
                 let block_producer_addr = block_producer_actor.start();
@@ -311,9 +310,13 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     config: arc_config.clone(),
                 });
 
+                let chunk_provider =
+                    ChunkProvider::new(storage_config.clone(), storage_modules.clone(), db.clone());
+
                 run_server(ApiState {
-                    db,
                     mempool: mempool_actor_addr,
+                    chunk_provider: Arc::new(chunk_provider),
+                    db,
                 })
                 .await;
             });
