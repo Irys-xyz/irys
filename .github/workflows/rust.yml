@@ -148,6 +148,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+          components: rustfmt
       
       - name: cargo fmt
         run: cargo fmt -- --check
