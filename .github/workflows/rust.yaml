@@ -9,16 +9,11 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Configure Git for GITHUB_TOKEN
-        run: |
-          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
-
-      - name: Initialize and Update Submodules
-        run: |
-          git submodule sync
-          git submodule update --init --recursive
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: true
       - name: cargo test
         run: cargo test --workspace --all-features
 
@@ -26,16 +21,11 @@ jobs:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Configure Git for GITHUB_TOKEN
-        run: |
-          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
-
-      - name: Initialize and Update Submodules
-        run: |
-          git submodule sync
-          git submodule update --init --recursive
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: true
       - name: cargo fmt
         run: cargo fmt -- --check
 
@@ -43,16 +33,11 @@ jobs:
     name: cargo doc
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Configure Git for GITHUB_TOKEN
-        run: |
-          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
-
-      - name: Initialize and Update Submodules
-        run: |
-          git submodule sync
-          git submodule update --init --recursive
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: true
       - name: cargo doc
         run: cargo doc --workspace --all-features
 
@@ -60,16 +45,11 @@ jobs:
     name: cargo clippy
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Configure Git for GITHUB_TOKEN
-        run: |
-          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
-
-      - name: Initialize and Update Submodules
-        run: |
-          git submodule sync
-          git submodule update --init --recursive
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: true
       - name: cargo clippy
         run: cargo clippy --workspace --all-features
 
@@ -77,16 +57,11 @@ jobs:
     name: cargo fix
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Configure Git for GITHUB_TOKEN
-        run: |
-          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
-
-      - name: Initialize and Update Submodules
-        run: |
-          git submodule sync
-          git submodule update --init --recursive
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: true
       - name: cargo fix
         run: |
           cargo fix --workspace --all-features
