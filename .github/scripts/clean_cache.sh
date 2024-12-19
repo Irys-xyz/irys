@@ -7,30 +7,30 @@ set -eo pipefail
 # The clearing threshold decreases as the total directory size increases - default is 7 days, but the time decreases until a minimum of 4 days at 30GB of cache.
 
 if [ -n "$1" ]; then
-    dir="$1"
+    cache_root_dir="$1"
 else
     # Check if both env vars are set
     if [ -z "$GITHUB_REPOSITORY" ] || [ -z "$RUNNER_TOOL_CACHE" ]; then
         echo "Error: GITHUB_REPOSITORY and RUNNER_TOOL_CACHE must be set if no directory argument is provided"
         exit 1
     fi
-    dir="$RUNNER_TOOL_CACHE/$GITHUB_REPOSITORY"
+    cache_root_dir="$RUNNER_TOOL_CACHE/$GITHUB_REPOSITORY"
 fi
 
 # Set prefix
 prefix="${2:-ci-cache-}"
 
-echo "using directory: $dir, prefix $prefix"
+echo "using directory: $cache_root_dir, prefix $prefix"
 
 
 # Check if provided path exists and is a directory
-if [ ! -d "$dir" ]; then
-    echo "Error: '$dir' is not a directory or doesn't exist"
+if [ ! -d "$cache_root_dir" ]; then
+    echo "Error: '$cache_root_dir' is not a directory or doesn't exist"
     exit 0
 fi
 
 # Get total size of directory in GB
-total_size_kb=$(du -s "$dir" | cut -f1)
+total_size_kb=$(du -s "$cache_root_dir" | cut -f1)
 total_size_gb=$(echo "scale=2; $total_size_kb/1024/1024" | bc)
 
 # Calculate cutoff time based on directory size
@@ -45,17 +45,11 @@ size_threshold=30                       # Size in GB where we want minimum time
 if (( $(echo "$total_size_gb >= $size_threshold" | bc -l) )); then
     cutoff_seconds=$min_seconds
 else
-    # Linear interpolation
-    reduction_factor=$(echo "scale=4; $total_size_gb/$size_threshold" | bc)
-    seconds_range=$((base_seconds - min_seconds))
-    reduction=$(echo "scale=0; $seconds_range * $reduction_factor" | bc)
-    cutoff_seconds=$((base_seconds - reduction))
+    # Linear interpolation using bc for floating point arithmetic
+    reduction=$(echo "scale=0; ($total_size_gb/$size_threshold) * ($base_seconds - $min_seconds)" | bc)
+    cutoff_seconds=$(echo "$base_seconds - $reduction" | bc)
 fi
 
-# Get current time in seconds since epoch
-current_time=$(date +%s)
-
-# Counter for deleted directories
 deleted_count=0
 skipped_count=0
 
@@ -64,7 +58,7 @@ echo "Using cutoff time of $(echo "scale=1; $cutoff_seconds/86400" | bc) days"
 echo "Looking for directories with prefix: $prefix"
 
 # Process each subdirectory
-for dir in "$dir"/*/; do
+for dir in "$cache_root_dir"/*/; do
     if [ ! -d "$dir" ]; then
         continue
     fi
@@ -78,23 +72,24 @@ for dir in "$dir"/*/; do
         continue
     fi
 
-    cache_file="$dir/cache.tgz"
+    # Find the most recently modified cache file in the directory
+    latest_mtime=$(find "$dir" -type f -name "cache*" -printf '%T@\n' 2>/dev/null | sort -nr | head -1)
     
-    # Check if cache.tgz exists
-    if [ ! -f "$cache_file" ]; then
-        echo "Warning: $dir does not contain cache.tgz, skipping..."
+    # If no cache files found, skip this directory
+    if [ -z "$latest_mtime" ]; then
+        echo "Warning: $dir does not contain any cache files, skipping..."
         continue
     fi
 
-    # Get last access time of cache.tgz
-    last_access=$(stat -c %X "$cache_file")
+    # Remove decimal part from timestamp for integer comparison
+    latest_mtime=${latest_mtime%.*}
     
     # Calculate time difference
-    time_diff=$((current_time - last_access))
+    time_diff=$((current_time - latest_mtime))
     
-    # If file hasn't been accessed within cutoff time, remove the directory
+    # If no cache files have been modified within cutoff time, remove the directory
     if [ $time_diff -gt $cutoff_seconds ]; then
-        echo "Removing $dir (last accessed $(date -d "@$last_access"))"
+        echo "Removing $dir (last modified $(date -d "@$latest_mtime"))"
         rm -rf "$dir"
         deleted_count=$((deleted_count + 1))
     fi
