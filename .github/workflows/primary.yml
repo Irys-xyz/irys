@@ -73,7 +73,6 @@ jobs:
           key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
             ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-
-            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -113,7 +112,7 @@ jobs:
           key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
             ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-
-            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}  
+ 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
