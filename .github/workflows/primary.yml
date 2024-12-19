@@ -69,8 +69,8 @@ jobs:
         with:
           toolchain: stable
       
-      - name: Sweep cache for stale files
-        uses: BD103/cargo-sweep@v2
+      # - name: Sweep cache for stale files
+      #   uses: BD103/cargo-sweep@v2
 
       - run: cargo test --no-run
 
@@ -109,8 +109,8 @@ jobs:
           components: clippy
           toolchain: stable
 
-      - name: Sweep cache for stale files
-        uses: BD103/cargo-sweep@v2
+      # - name: Sweep cache for stale files
+      #   uses: BD103/cargo-sweep@v2
 
       - run: cargo clippy --workspace --lib --examples --tests --benches --all-features --locked
         # env:
