@@ -8,7 +8,7 @@ use reth_chainspec::EthereumHardfork::{
     Istanbul, London, MuirGlacier, Paris, Petersburg, Shanghai, SpuriousDragon, Tangerine,
 };
 use reth_chainspec::{
-    BaseFeeParams, BaseFeeParamsKind, Chain, ChainSpec, EthereumHardfork, ForkCondition,
+    BaseFeeParams, BaseFeeParamsKind, Chain, ChainSpec, ForkCondition,
 };
 use reth_cli::chainspec::{parse_genesis, ChainSpecParser};
 use reth_primitives::constants::ETHEREUM_BLOCK_GAS_LIMIT;

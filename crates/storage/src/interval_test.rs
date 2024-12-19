@@ -1,5 +1,3 @@
-use irys_types::{ChunkState, IntervalState, IntervalStateWrapped};
-use nodit::{interval::ii, Interval, NoditMap};
 
 #[test]
 fn interval_overwrite_test() -> eyre::Result<()> {

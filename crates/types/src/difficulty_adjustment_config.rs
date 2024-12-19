@@ -1,4 +1,4 @@
-use std::{thread::current, time::Duration};
+use std::time::Duration;
 
 use crate::{
     StorageConfig, BLOCK_TIME, DIFFICULTY_ADJUSTMENT_INTERVAL, MAX_DIFFICULTY_ADJUSTMENT_FACTOR,

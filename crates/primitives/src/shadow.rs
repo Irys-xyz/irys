@@ -15,7 +15,7 @@ use alloy_rlp::{
 
 pub use alloy_primitives::{Address, U256};
 
-use crate::{commitment::IrysTxId, DestHash, DestHash::PartitionHash};
+use crate::commitment::IrysTxId;
 
 use super::new_account::NewAccountState;
 

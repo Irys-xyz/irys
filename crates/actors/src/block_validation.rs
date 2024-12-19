@@ -3,11 +3,10 @@ use actix::prelude::*;
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_types::{
-    storage_config::StorageConfig, validate_path, vdf_config::VDFStepsConfig, IrysBlockHeader,
-    PoaData, VDFLimiterInfo, H256,
+    storage_config::StorageConfig, validate_path, IrysBlockHeader,
+    PoaData,
 };
 use openssl::sha;
-use tracing::{debug, error, info};
 
 use crate::{
     block_index::{BlockIndexActor, GetBlockBoundsMessage},

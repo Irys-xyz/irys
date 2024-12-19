@@ -4,18 +4,13 @@ use irys_types::{
 };
 use reth_codecs::Compact;
 use reth_db::{
-    table::{DupSort, Table},
-    tables, Database, DatabaseError,
+    tables, Database,
 };
 use reth_db::{HasName, HasTableType, TableType, TableViewer};
-use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::{
-    db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
-    open_or_create_db,
-};
+use crate::open_or_create_db;
 
 /// Per-submodule database tables
 tables! {

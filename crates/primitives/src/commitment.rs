@@ -1,4 +1,3 @@
-use core::ops::{Deref, DerefMut};
 
 use alloy_primitives::{wrap_fixed_bytes, U256};
 use alloy_rlp::{
@@ -7,7 +6,6 @@ use alloy_rlp::{
 };
 use arbitrary::Arbitrary as PledgeArbitrary;
 use bytes::Buf;
-use proptest_derive::Arbitrary as PledgePropTestArbitrary;
 use reth_codecs::Compact;
 
 use super::DestHash;

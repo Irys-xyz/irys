@@ -1,16 +1,14 @@
 //! Crate dedicated to the IrysNodeConfig to avoid depdendency cycles
 use std::{
     env,
-    path::{absolute, PathBuf},
-    str::FromStr as _,
+    path::PathBuf,
     fs,
 };
 
 use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;
 use irys_types::{
-    block_production::Partition, irys::IrysSigner, Address, PartitionStorageProviderConfig,
-    StorageModuleConfig, CHUNK_SIZE,
+    irys::IrysSigner, Address,
 };
 use tracing::info;
 

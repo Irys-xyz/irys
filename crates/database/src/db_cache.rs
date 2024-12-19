@@ -1,4 +1,3 @@
-use std::ops::Deref;
 
 use arbitrary::Arbitrary;
 use irys_types::{Base64, UnpackedChunk, ChunkPathHash, Compact, TxRelativeChunkIndex, H256};

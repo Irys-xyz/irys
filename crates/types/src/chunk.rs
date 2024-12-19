@@ -2,7 +2,7 @@ use alloy_primitives::Address;
 use eyre::eyre;
 use serde::{Deserialize, Serialize};
 
-use crate::{hash_sha256, Base64, CHUNK_SIZE, H256};
+use crate::{hash_sha256, Base64, H256};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ChunkFormat {

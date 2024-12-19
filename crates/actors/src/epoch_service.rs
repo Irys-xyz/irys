@@ -1,18 +1,17 @@
 use actix::{Actor, Context, Handler, Message, MessageResponse};
 use eyre::{Error, Result};
 use irys_database::data_ledger::*;
-use irys_storage::{ie, ii, InclusiveInterval, StorageModuleInfo};
+use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    IrysBlockHeader, LedgerChunkRange, SimpleRNG, StorageConfig, CAPACITY_SCALAR, H256,
+    IrysBlockHeader, SimpleRNG, StorageConfig, CAPACITY_SCALAR, H256,
     NUM_BLOCKS_IN_EPOCH,
 };
 use openssl::sha;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
-use tracing::info;
 
 /// Allows for overriding of the consensus parameters for ledgers and partitions
 #[derive(Debug, Clone)]

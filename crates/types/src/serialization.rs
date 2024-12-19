@@ -625,7 +625,7 @@ impl<'de> Deserialize<'de> for H256List {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::{BufMut, BytesMut};
+    use bytes::BytesMut;
 
     #[test]
     fn test_u256_to_compact() {

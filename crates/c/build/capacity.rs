@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf};
 
-pub fn build_capacity(c_src: &PathBuf, ssl_inc_dir: &PathBuf) {
+pub(crate) fn build_capacity(c_src: &PathBuf, ssl_inc_dir: &PathBuf) {
     let mut cc = cc::Build::new();
     cc.flag("-O3");
     // TODO: enable below for debug
@@ -28,7 +28,7 @@ pub fn build_capacity(c_src: &PathBuf, ssl_inc_dir: &PathBuf) {
     cc.compile("capacity_single");
 }
 
-pub fn bind_capacity(c_src: &PathBuf) {
+pub(crate) fn bind_capacity(c_src: &PathBuf) {
     let bindings = bindgen::Builder::default()
         .header(c_src.join("capacity.h").to_string_lossy())
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
