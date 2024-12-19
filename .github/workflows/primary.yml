@@ -35,15 +35,25 @@ env:
 
 jobs:
 
-  compile-test:
-    name: compile-test
-    runs-on: self-hosted
-    timeout-minutes: 30
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
     if: |
       github.ref == 'refs/heads/master' ||
       github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.head_commit.message, '#run-ci')
+    steps:
+      - name: No-op gate
+        run: |
+          echo "Gate conditions met"
+          true
+
+  compile-test:
+    name: compile-test
+    runs-on: self-hosted
+    needs: gate
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,6 +92,7 @@ jobs:
   clippy:
     name: clippy
     runs-on: self-hosted
+    needs: gate
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
