@@ -8,24 +8,19 @@ use crate::tables::{
     PartitionHashes, PartitionHashesByDataRoot,
 };
 
-use crate::Ledger;
-use eyre::eyre;
 use irys_types::partition::PartitionHash;
 use irys_types::{
-    hash_sha256, BlockHash, BlockRelativeChunkOffset, ChunkPathHash, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, IrysTransactionId, TxPath, TxRelativeChunkIndex, TxRoot, UnpackedChunk,
-    H256, MEGABYTE,
+    BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
+    TxRelativeChunkIndex, UnpackedChunk, MEGABYTE,
 };
 use reth::prometheus_exporter::install_prometheus_recorder;
-use reth_db::cursor::{DbDupCursorRO, DupWalker};
-use reth_db::mdbx::tx::Tx;
-use reth_db::mdbx::{Geometry, RO};
+use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::{
     create_db as reth_create_db,
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
-    ClientVersion, Database, DatabaseEnv, DatabaseError,
+    ClientVersion, DatabaseEnv, DatabaseError,
 };
 use reth_db::{HasName, HasTableType};
 use std::time::{SystemTime, UNIX_EPOCH};

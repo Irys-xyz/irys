@@ -1,6 +1,5 @@
 use std::ffi::c_ulong;
 
-use irys_primitives::{Address, IrysTxId};
 use irys_types::PACKING_SHA_1_5_S;
 
 #[allow(non_upper_case_globals)]

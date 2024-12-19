@@ -1,6 +1,3 @@
-use irys_types::{ChunkState, IntervalState, IntervalStateWrapped};
-use nodit::{interval::ii, Interval, NoditMap};
-
 #[test]
 fn interval_overwrite_test() -> eyre::Result<()> {
     let mut map = NoditMap::<u32, Interval<u32>, IntervalStateWrapped>::new();

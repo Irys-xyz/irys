@@ -4,10 +4,9 @@ use actix_web::{
     web::{self, Json},
     Result,
 };
-use awc::http::StatusCode;
 use irys_database::database;
 use irys_types::{IrysBlockHeader, H256};
-use reth_db::{Database, DatabaseEnv};
+use reth_db::Database;
 
 pub async fn get_block(
     state: web::Data<ApiState>,

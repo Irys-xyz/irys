@@ -2,12 +2,8 @@ use actix::prelude::*;
 
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
-use irys_types::{
-    storage_config::StorageConfig, validate_path, vdf_config::VDFStepsConfig, IrysBlockHeader,
-    PoaData, VDFLimiterInfo, H256,
-};
+use irys_types::{storage_config::StorageConfig, validate_path, IrysBlockHeader, PoaData};
 use openssl::sha;
-use tracing::{debug, error, info};
 
 use crate::{
     block_index::{BlockIndexActor, GetBlockBoundsMessage},
@@ -85,14 +81,21 @@ pub async fn poa_is_valid(
         let block_chunk_offset = (ledger_chunk_offset - bb.start_chunk_offset) as u128;
 
         // tx_path validation
-        let tx_path_result = validate_path(bb.tx_root.0, &tx_path, block_chunk_offset*(config.chunk_size as u128))?;
+        let tx_path_result = validate_path(
+            bb.tx_root.0,
+            &tx_path,
+            block_chunk_offset * (config.chunk_size as u128),
+        )?;
 
         // TODO: check if bounds are byte or chunk relative
-        if !(tx_path_result.left_bound..=tx_path_result.right_bound).contains(&(block_chunk_offset*(config.chunk_size as u128))) {
+        if !(tx_path_result.left_bound..=tx_path_result.right_bound)
+            .contains(&(block_chunk_offset * (config.chunk_size as u128)))
+        {
             return Err(eyre::eyre!("PoA chunk offset out of tx bounds"));
         }
 
-        let tx_chunk_offset = block_chunk_offset*(config.chunk_size as u128) - tx_path_result.left_bound;
+        let tx_chunk_offset =
+            block_chunk_offset * (config.chunk_size as u128) - tx_path_result.left_bound;
 
         // data_path validation
         let data_path_result =
@@ -100,7 +103,9 @@ pub async fn poa_is_valid(
 
         if !(data_path_result.left_bound..=data_path_result.right_bound).contains(&tx_chunk_offset)
         {
-            return Err(eyre::eyre!("PoA chunk offset out of tx's data chunks bounds"));
+            return Err(eyre::eyre!(
+                "PoA chunk offset out of tx's data chunks bounds"
+            ));
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -137,7 +142,7 @@ pub async fn poa_is_valid(
             config.miner_address,
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
-            config.entropy_packing_iterations,            
+            config.entropy_packing_iterations,
             config.chunk_size as usize,
             &mut entropy_chunk,
         );
@@ -212,8 +217,6 @@ mod tests {
         let mut epoch_service = EpochServiceActor::new(Some(config.clone()));
         let epoch_service_addr = epoch_service.start();
 
-
-
         // Tell the epoch service to initialize the ledgers
         let msg = NewEpochMessage(arc_genesis.clone());
         match epoch_service_addr.send(msg).await {
@@ -229,7 +232,6 @@ mod tests {
         let sub_slots = ledgers.get_slots(Ledger::Submit);
 
         let partition_hash = sub_slots[0].partitions[0];
-
 
         let arc_config = Arc::new(IrysNodeConfig::default());
         let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
@@ -317,7 +319,11 @@ mod tests {
 
         let poa = PoaData {
             tx_path: Some(Base64(tx_path[poa_tx_num as usize].proof.clone())),
-            data_path: Some(Base64(txs[poa_tx_num as usize].proofs[poa_chunk_num as usize].proof.clone())),
+            data_path: Some(Base64(
+                txs[poa_tx_num as usize].proofs[poa_chunk_num as usize]
+                    .proof
+                    .clone(),
+            )),
             chunk: Base64(poa_chunk),
             ledger_num: Some(1),
             partition_chunk_offset: poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num,

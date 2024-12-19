@@ -3,7 +3,7 @@ use reth::api::{BuiltPayload, EngineTypes, PayloadBuilderAttributes};
 use reth_payload_builder::{PayloadBuilderHandle, PayloadId};
 use reth_payload_primitives::{Events, PayloadBuilder};
 use tokio_stream::wrappers::BroadcastStream;
-use tracing::{error, info, trace};
+use tracing::{error, trace};
 
 /// Helper for payload operations
 #[derive(Debug)]

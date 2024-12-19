@@ -9,13 +9,13 @@ use irys_database::{
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    irys::IrysSigner, partition::PartitionAssignment, Address, Base64, UnpackedChunk, IrysTransaction,
+    irys::IrysSigner, partition::PartitionAssignment, Address, Base64, IrysTransaction,
     IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PartitionChunkRange, StorageConfig,
-    TransactionLedger, H256,
+    TransactionLedger, UnpackedChunk, H256,
 };
 use openssl::sha;
 use reth_db::Database;
-use tracing::{error, info};
+use tracing::info;
 
 #[test]
 fn tx_path_overlap_tests() -> eyre::Result<()> {
@@ -534,7 +534,7 @@ fn calculate_tx_ranges(
         start_chunk_offset + num_chunks_in_tx,
     ));
 
-    let partition_start = (start_chunk_offset as i64 - partition_range.start() as i64);
+    let partition_start = start_chunk_offset as i64 - partition_range.start() as i64;
     if partition_start < 0 {
         num_chunks_in_tx = (num_chunks_in_tx as i64 + partition_start) as u64;
     }

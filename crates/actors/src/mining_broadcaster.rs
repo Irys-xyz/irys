@@ -1,6 +1,5 @@
 use crate::mining::{PartitionMiningActor, Seed};
 use actix::prelude::*;
-use dev::ToEnvelope;
 use irys_types::IrysBlockHeader;
 use std::sync::Arc;
 use tracing::info;

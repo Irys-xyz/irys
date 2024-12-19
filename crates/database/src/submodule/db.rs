@@ -1,13 +1,12 @@
 use std::path::Path;
 
-use bytes::Buf;
 use irys_types::{
-    UnpackedChunk, ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset,
-    TxPath, TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset, TxPath,
+    TxPathHash, UnpackedChunk,
 };
 use reth_db::{
     transaction::{DbTx, DbTxMut},
-    Database, DatabaseEnv,
+    DatabaseEnv,
 };
 
 use crate::open_or_create_db;

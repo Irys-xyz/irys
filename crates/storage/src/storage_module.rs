@@ -2,7 +2,7 @@ use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, OptionExt, Result};
 use irys_database::{
     submodule::{
-        self, add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
+        add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
         add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
         create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
         get_tx_path_by_offset, tables::RelativeStartOffsets,
@@ -23,10 +23,9 @@ use nodit::{
     InclusiveInterval, Interval, NoditMap, NoditSet,
 };
 use openssl::sha;
-use reth_db::{Database, DatabaseEnv};
+use reth_db::Database;
 use serde::{Deserialize, Serialize};
 use std::{
-    cmp,
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -903,7 +902,7 @@ pub fn get_storage_module_at_offset(
 mod tests {
     use super::*;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{storage, H256};
+    use irys_types::H256;
     use nodit::interval::ii;
 
     #[test]
@@ -1051,7 +1050,7 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let mut storage_module = StorageModule::new(&base_path, storage_module_info, config)?;
+        let storage_module = StorageModule::new(&base_path, storage_module_info, config)?;
         let chunk_data = vec![0, 1, 2, 3, 4];
         let data_path = vec![4, 3, 2, 1];
         let tx_path = vec![5, 6, 7, 8];

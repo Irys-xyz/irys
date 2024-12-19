@@ -1,5 +1,3 @@
-use core::ops::{Deref, DerefMut};
-
 use alloy_primitives::{wrap_fixed_bytes, U256};
 use alloy_rlp::{
     Decodable, Encodable, Error as RlpError, RlpDecodable, RlpDecodableWrapper, RlpEncodable,
@@ -7,7 +5,6 @@ use alloy_rlp::{
 };
 use arbitrary::Arbitrary as PledgeArbitrary;
 use bytes::Buf;
-use proptest_derive::Arbitrary as PledgePropTestArbitrary;
 use reth_codecs::Compact;
 
 use super::DestHash;
@@ -112,7 +109,7 @@ impl Decodable for CommitmentStatus {
         let id = CommitmentStatus::try_from(enc_stake_status)
             .or(Err(RlpError::Custom("unknown stake status id")))?;
         let _v2 = buf.to_vec();
-        return Ok(id);
+        Ok(id)
     }
 }
 
@@ -181,7 +178,7 @@ impl Decodable for CommitmentType {
             .or(Err(RlpError::Custom("unknown commitment status")))?;
 
         buf.advance(1);
-        return Ok(commitment_type);
+        Ok(commitment_type)
     }
 }
 

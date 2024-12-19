@@ -1,18 +1,16 @@
 use actix::{Actor, Context, Handler, Message};
 use eyre::eyre;
-use irys_database::db_cache::{data_size_to_chunk_count, CachedChunk};
+use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_storage::StorageModuleVec;
-use irys_types::ingress::generate_ingress_proof_tree;
 use irys_types::irys::IrysSigner;
+use irys_types::DataChunks;
 use irys_types::{
-    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, IrysTransactionHeader,
-    CHUNK_SIZE, H256,
+    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
+    IrysTransactionHeader, H256,
 };
-use irys_types::{Address, DataChunks};
 use irys_types::{DataRoot, StorageConfig};
 use reth::tasks::TaskExecutor;
-use reth::tasks::TaskManager;
 use reth_db::cursor::DbCursorRO;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
@@ -21,7 +19,6 @@ use reth_db::Database;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::fmt::Display;
-use std::sync::Arc;
 use tracing::{error, info};
 
 use crate::block_producer::BlockConfirmedMessage;

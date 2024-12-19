@@ -1,10 +1,9 @@
 use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
-    sync::Arc,
 };
 
-use nodit::{InclusiveInterval, Interval, IntervalType, NoditMap};
+use nodit::{InclusiveInterval, Interval};
 use serde::{Deserialize, Serialize};
 
 use crate::CHUNK_SIZE;

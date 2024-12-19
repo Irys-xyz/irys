@@ -28,16 +28,16 @@ use reth_provider::{BlockIdReader, StateProviderFactory};
 use revm::db::State;
 use revm::JournaledState;
 
-use irys_primitives::shadow::{ShadowTx, Shadows};
+use irys_primitives::shadow::ShadowTx;
 use revm_primitives::hex::ToHexExt;
-use revm_primitives::{AccountInfo, Bytecode, Bytes, FixedBytes, HashSet, SpecId, B256};
-use std::collections::{BTreeMap, HashMap};
+use revm_primitives::{Bytes, HashSet, SpecId, B256};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use strum::IntoEnumIterator;
 
-use tracing::{debug, error};
+use tracing::debug;
 
 use crate::genesis::GenesisInfo;
 

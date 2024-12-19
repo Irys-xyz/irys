@@ -8,15 +8,9 @@ use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
 
 use eyre::eyre;
 use irys_packing::capacity_single::compute_entropy_chunk;
-use irys_storage::{
-    ii, initialize_storage_files, ChunkType, InclusiveInterval, StorageModule, StorageModuleInfo,
-};
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{
-    partition::{PartitionAssignment, PartitionHash},
-    Address, PartitionChunkRange, StorageConfig,
-};
-use reth::tasks::{TaskExecutor, TaskManager};
+use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
+use irys_types::{PartitionChunkRange, StorageConfig};
+use reth::tasks::TaskExecutor;
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
 

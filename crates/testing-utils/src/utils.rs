@@ -1,11 +1,7 @@
-use std::{
-    fs::create_dir_all,
-    path::{absolute, PathBuf},
-    str::FromStr as _,
-};
+use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _};
 use tempfile::TempDir;
 use tracing::{debug, level_filters::LevelFilter};
-use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt, FmtSubscriber};
+use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
 
 /// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<project_dir>/.tmp.  
 /// The temp directory is prefixed by <name> (default: "irys-test-"), and automatically deletes itself on test completion -

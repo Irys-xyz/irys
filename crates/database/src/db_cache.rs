@@ -1,7 +1,5 @@
-use std::ops::Deref;
-
 use arbitrary::Arbitrary;
-use irys_types::{Base64, UnpackedChunk, ChunkPathHash, Compact, TxRelativeChunkIndex, H256};
+use irys_types::{Base64, ChunkPathHash, Compact, TxRelativeChunkIndex, UnpackedChunk, H256};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]

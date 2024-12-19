@@ -1,6 +1,6 @@
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysSignature,
-    IrysTransaction, IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID, MAX_CHUNK_SIZE,
+    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysTransaction,
+    IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID, MAX_CHUNK_SIZE,
 };
 use alloy_core::primitives::keccak256;
 
@@ -76,7 +76,7 @@ impl IrysSigner {
 
         // Create the signature hash and sign it
         let prehash = transaction.signature_hash();
-        let mut signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
+        let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
         transaction.header.signature.reth_signature = signature.with_chain_id(self.chain_id);
 

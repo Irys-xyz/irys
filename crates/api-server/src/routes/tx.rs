@@ -1,22 +1,15 @@
 use crate::error::ApiError;
 use crate::ApiState;
 use actix_web::{
-    body::BoxBody,
-    http::header::ContentType,
     web::{self, Json},
-    HttpRequest, HttpResponse, Responder, ResponseError, Result,
+    HttpResponse, Result,
 };
 use awc::http::StatusCode;
-use irys_actors::{
-    mempool::{TxIngressError, TxIngressMessage},
-    ActorAddresses,
-};
+use irys_actors::mempool::{TxIngressError, TxIngressMessage};
 use irys_database::database;
 use irys_types::{IrysTransactionHeader, H256};
 use log::info;
-use reth_db::{Database, DatabaseEnv};
-use serde::{Deserialize, Serialize};
-use serde_json;
+use reth_db::Database;
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `IrysTransactionHeader` type,
