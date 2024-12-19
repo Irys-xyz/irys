@@ -15,7 +15,7 @@ use assert_matches::assert_matches;
 
 use actix::prelude::*;
 use chunk::TxRelativeChunkIndex;
-use irys_actors::{block_producer::BlockFinalizedMessage, chunk_storage::ChunkStorageActor};
+use irys_actors::{block_producer::BlockFinalizedMessage, chunk_migration::ChunkMigrationActor};
 use irys_config::IrysNodeConfig;
 use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized};
 use irys_storage::*;
@@ -75,7 +75,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
         },
     ];
 
-    let tmp_dir = setup_tracing_and_temp_dir(Some("chunk_storage_test"), false);
+    let tmp_dir = setup_tracing_and_temp_dir(Some("chunk_migration_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
     info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
     let _ = initialize_storage_files(&base_path, &storage_module_infos);
@@ -238,18 +238,18 @@ async fn finalize_block_test() -> eyre::Result<()> {
     block_index_addr.do_send(block_confirm_message.clone());
 
     // Send the block finalized message
-    let chunk_storage_actor = ChunkStorageActor::new(
+    let chunk_migration_actor = ChunkMigrationActor::new(
         block_index.clone(),
         storage_config.clone(),
         storage_modules.clone(),
         arc_db1.clone(),
     );
-    let chunk_storage_addr = chunk_storage_actor.start();
+    let chunk_migration_addr = chunk_migration_actor.start();
     let block_finalized_message = BlockFinalizedMessage {
         block_header: block.clone(),
         txs: txs.clone(),
     };
-    let _res = chunk_storage_addr.send(block_finalized_message).await?;
+    let _res = chunk_migration_addr.send(block_finalized_message).await?;
 
     // Check to see if the chunks are in the StorageModules
     for sm in storage_modules.iter() {

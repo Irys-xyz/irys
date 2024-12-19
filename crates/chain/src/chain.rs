@@ -3,7 +3,7 @@ use actix::Actor;
 use irys_actors::{
     block_index::BlockIndexActor,
     block_producer::{BlockConfirmedMessage, BlockProducerActor},
-    chunk_storage::ChunkStorageActor,
+    chunk_migration::ChunkMigrationActor,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage, GetLedgersMessage,
         NewEpochMessage,
@@ -216,13 +216,13 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 let mempool_actor_addr = mempool_actor.start();
 
-                let chunk_storage_actor = ChunkStorageActor::new(
+                let chunk_migration_actor = ChunkMigrationActor::new(
                     block_index.clone(),
                     storage_config.clone(),
                     storage_modules.clone(),
                     db.clone(),
                 );
-                let chunk_storage_addr = chunk_storage_actor.start();
+                let chunk_migration_addr = chunk_migration_actor.start();
 
                 let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
@@ -232,7 +232,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
                     mempool_actor_addr.clone(),
-                    chunk_storage_addr.clone(),
+                    chunk_migration_addr.clone(),
                     block_index_actor_addr.clone(),
                     mining_broadcaster_addr.clone(),
                     epoch_service_actor_addr.clone(),

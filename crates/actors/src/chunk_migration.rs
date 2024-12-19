@@ -23,7 +23,7 @@ use crate::block_producer::BlockFinalizedMessage;
 /// - Coordinates chunk reads/writes
 /// - Manages storage state transitions
 #[derive(Debug)]
-pub struct ChunkStorageActor {
+pub struct ChunkMigrationActor {
     /// Tracks block boundaries and offsets for locating chunks in ledgers
     pub block_index: Arc<RwLock<BlockIndex<Initialized>>>,
     /// Configuration parameters for storage system
@@ -34,11 +34,11 @@ pub struct ChunkStorageActor {
     pub db: DatabaseProvider,
 }
 
-impl Actor for ChunkStorageActor {
+impl Actor for ChunkMigrationActor {
     type Context = Context<Self>;
 }
 
-impl ChunkStorageActor {
+impl ChunkMigrationActor {
     /// Creates a new chunk storage actor
     pub fn new(
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
@@ -55,7 +55,7 @@ impl ChunkStorageActor {
     }
 }
 
-impl Handler<BlockFinalizedMessage> for ChunkStorageActor {
+impl Handler<BlockFinalizedMessage> for ChunkMigrationActor {
     type Result = ResponseFuture<Result<(), ()>>;
 
     fn handle(&mut self, msg: BlockFinalizedMessage, _: &mut Context<Self>) -> Self::Result {

@@ -25,7 +25,7 @@ use tracing::{error, info};
 use crate::{
     block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
     block_validation::poa_is_valid,
-    chunk_storage::ChunkStorageActor,
+    chunk_migration::ChunkMigrationActor,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool::{GetBestMempoolTxs, MempoolActor},
     mining_broadcaster::{self, BroadcastDifficultyUpdate, MiningBroadcaster},
@@ -45,8 +45,8 @@ pub struct BlockProducerActor {
     pub db: DatabaseProvider,
     /// Address of the mempool actor
     pub mempool_addr: Addr<MempoolActor>,
-    /// Address of the chunk storage actor
-    pub chunk_storage_addr: Addr<ChunkStorageActor>,
+    /// Address of the chunk migration actor
+    pub chunk_migration_addr: Addr<ChunkMigrationActor>,
     /// Address of the bock_index actor
     pub block_index_addr: Addr<BlockIndexActor>,
     /// Enables broadcast messages to partition mining actors
@@ -67,7 +67,7 @@ impl BlockProducerActor {
     pub fn new(
         db: DatabaseProvider,
         mempool_addr: Addr<MempoolActor>,
-        chunk_storage_addr: Addr<ChunkStorageActor>,
+        chunk_migration_addr: Addr<ChunkMigrationActor>,
         block_index_addr: Addr<BlockIndexActor>,
         mining_broadcaster_addr: Addr<MiningBroadcaster>,
         epoch_service: Addr<EpochServiceActor>,
@@ -79,7 +79,7 @@ impl BlockProducerActor {
         Self {
             db,
             mempool_addr,
-            chunk_storage_addr,
+            chunk_migration_addr,
             block_index_addr,
             mining_broadcaster_addr,
             epoch_service,
@@ -121,7 +121,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let mempool_addr = self.mempool_addr.clone();
         let block_index_addr = self.block_index_addr.clone();
         let epoch_service_addr = self.epoch_service.clone();
-        let chunk_storage_addr = self.chunk_storage_addr.clone();
+        let chunk_migration_addr = self.chunk_migration_addr.clone();
         let mining_broadcaster_addr = self.mining_broadcaster_addr.clone();
         
         let reth = self.reth_provider.clone();
@@ -380,7 +380,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
                 }
 
-                chunk_storage_addr.do_send(BlockFinalizedMessage {
+                chunk_migration_addr.do_send(BlockFinalizedMessage {
                     block_header: Arc::new(prev_block_header),
                     txs: Arc::new(txs),
                 });
