@@ -54,7 +54,7 @@ pub struct BlockProducerActor {
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
-    /// Storage config 
+    /// Storage config
     pub storage_config: StorageConfig,
     /// Difficulty adjustment parameters for the Irys Protocol
     pub difficulty_config: DifficultyAdjustmentConfig,
@@ -122,7 +122,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let epoch_service_addr = self.epoch_service.clone();
         let chunk_migration_addr = self.chunk_migration_addr.clone();
         let mining_broadcaster_addr = self.mining_broadcaster_addr.clone();
-        
+
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
         let self_addr = ctx.address();
@@ -177,7 +177,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let bytes_added = data_txs.iter().fold(0, |acc, tx| {
                     acc + tx.data_size.div_ceil(chunk_size) * chunk_size
                 });
-        
+
                 let chunks_added = bytes_added / chunk_size;
 
                 // TODO: Eventually we'll need a more robust solution for growing the Ledgers

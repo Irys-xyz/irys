@@ -1,4 +1,3 @@
-
 #[test]
 fn interval_overwrite_test() -> eyre::Result<()> {
     let mut map = NoditMap::<u32, Interval<u32>, IntervalStateWrapped>::new();

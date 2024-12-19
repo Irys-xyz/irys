@@ -7,9 +7,7 @@ use reth_chainspec::EthereumHardfork::{
     ArrowGlacier, Berlin, Byzantium, Cancun, Constantinople, Dao, Frontier, GrayGlacier, Homestead,
     Istanbul, London, MuirGlacier, Paris, Petersburg, Shanghai, SpuriousDragon, Tangerine,
 };
-use reth_chainspec::{
-    BaseFeeParams, BaseFeeParamsKind, Chain, ChainSpec, ForkCondition,
-};
+use reth_chainspec::{BaseFeeParams, BaseFeeParamsKind, Chain, ChainSpec, ForkCondition};
 use reth_cli::chainspec::{parse_genesis, ChainSpecParser};
 use reth_primitives::constants::ETHEREUM_BLOCK_GAS_LIMIT;
 use std::sync::Arc;

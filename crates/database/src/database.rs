@@ -10,8 +10,8 @@ use crate::tables::{
 
 use irys_types::partition::PartitionHash;
 use irys_types::{
-    BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, IrysTransactionId, TxRelativeChunkIndex, UnpackedChunk, MEGABYTE,
+    BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
+    TxRelativeChunkIndex, UnpackedChunk, MEGABYTE,
 };
 use reth::prometheus_exporter::install_prometheus_recorder;
 use reth_db::cursor::DbDupCursorRO;

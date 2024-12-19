@@ -3,9 +3,7 @@ use irys_types::{
     TxPathHash, H256,
 };
 use reth_codecs::Compact;
-use reth_db::{
-    tables, Database,
-};
+use reth_db::{tables, Database};
 use reth_db::{HasName, HasTableType, TableType, TableViewer};
 use serde::{Deserialize, Serialize};
 use std::fmt;

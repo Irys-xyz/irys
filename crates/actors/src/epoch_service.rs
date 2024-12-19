@@ -4,8 +4,7 @@ use irys_database::data_ledger::*;
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    IrysBlockHeader, SimpleRNG, StorageConfig, CAPACITY_SCALAR, H256,
-    NUM_BLOCKS_IN_EPOCH,
+    IrysBlockHeader, SimpleRNG, StorageConfig, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
 };
 use openssl::sha;
 use std::{

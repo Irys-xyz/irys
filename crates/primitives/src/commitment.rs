@@ -1,4 +1,3 @@
-
 use alloy_primitives::{wrap_fixed_bytes, U256};
 use alloy_rlp::{
     Decodable, Encodable, Error as RlpError, RlpDecodable, RlpDecodableWrapper, RlpEncodable,

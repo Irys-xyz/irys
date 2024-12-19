@@ -4,10 +4,11 @@ use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
-use irys_types::{
-    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, IrysTransactionHeader, H256,
-};
 use irys_types::DataChunks;
+use irys_types::{
+    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
+    IrysTransactionHeader, H256,
+};
 use irys_types::{DataRoot, StorageConfig};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbCursorRO;

@@ -1,4 +1,3 @@
-
 use alloy_rlp::{Decodable, Encodable, Error as RlpError};
 use arbitrary::Arbitrary as PledgeArbitrary;
 use bytes::Buf;

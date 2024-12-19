@@ -1,6 +1,6 @@
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, Address, Base64,
-    IrysTransaction, IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID, MAX_CHUNK_SIZE,
+    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysTransaction,
+    IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID, MAX_CHUNK_SIZE,
 };
 use alloy_core::primitives::keccak256;
 

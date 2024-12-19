@@ -144,7 +144,7 @@ impl PartitionMiningActor {
                 // Once solution is sent stop mining and let all other partitions know
                 return Ok(Some(solution));
             } else {
-              //  info!("NO SOLUTION!!!!")
+                //  info!("NO SOLUTION!!!!")
             }
         }
 
@@ -195,7 +195,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         match self.mine_partition_with_seed(seed.into_inner()) {
             Ok(Some(s)) => match self.block_producer_actor.try_send(SolutionFoundMessage(s)) {
                 Ok(_) => {
-                   // debug!("Solution sent!");
+                    // debug!("Solution sent!");
                 }
                 Err(err) => error!("Error submitting solution to block producer {:?}", err),
             },
