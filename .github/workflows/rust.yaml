@@ -15,6 +15,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: true
           fetch-depth: 0
+      - name: Sync and Update Submodules
+        run: |
+          git submodule sync
+          git submodule update --init --recursive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: cargo test
         run: cargo test --workspace --all-features
 
@@ -28,6 +34,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: true
           fetch-depth: 0
+      - name: Sync and Update Submodules
+        run: |
+          git submodule sync
+          git submodule update --init --recursive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: cargo fmt
         run: cargo fmt -- --check
 
@@ -41,6 +53,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: true
           fetch-depth: 0
+      - name: Sync and Update Submodules
+        run: |
+          git submodule sync
+          git submodule update --init --recursive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: cargo doc
         run: cargo doc --workspace --all-features
 
@@ -54,6 +72,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: true
           fetch-depth: 0
+      - name: Sync and Update Submodules
+        run: |
+          git submodule sync
+          git submodule update --init --recursive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: cargo clippy
         run: cargo clippy --workspace --all-features
 
@@ -67,6 +91,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: true
           fetch-depth: 0
+      - name: Sync and Update Submodules
+        run: |
+          git submodule sync
+          git submodule update --init --recursive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: cargo fix
         run: |
           cargo fix --workspace --all-features
