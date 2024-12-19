@@ -53,7 +53,9 @@ pub struct ShadowTx {
     serde::Deserialize,
     arbitrary::Arbitrary,
 )]
+#[derive(Default)]
 pub enum ShadowTxType {
+    #[default]
     Null, // because default is a required derive TODO: replace with a null TransferShadow or some other no-op
     Transfer(TransferShadow),
     Data(DataShadow),
@@ -186,11 +188,6 @@ impl Decodable for ShadowTxType {
     }
 }
 
-impl Default for ShadowTxType {
-    fn default() -> Self {
-        ShadowTxType::Null
-    }
-}
 
 #[derive(
     Debug,

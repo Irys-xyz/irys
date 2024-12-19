@@ -110,7 +110,7 @@ impl Decodable for CommitmentStatus {
         let id = CommitmentStatus::try_from(enc_stake_status)
             .or(Err(RlpError::Custom("unknown stake status id")))?;
         let _v2 = buf.to_vec();
-        return Ok(id);
+        Ok(id)
     }
 }
 
@@ -179,7 +179,7 @@ impl Decodable for CommitmentType {
             .or(Err(RlpError::Custom("unknown commitment status")))?;
 
         buf.advance(1);
-        return Ok(commitment_type);
+        Ok(commitment_type)
     }
 }
 
