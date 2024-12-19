@@ -11,64 +11,66 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Initialize Submodules
-        run: git submodule update --init --recursive --remote && \
-          git reset --hard HEAD && \
-          git submodule update
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: true
+          fetch-depth: 0
       - name: cargo test
         run: cargo test --workspace --all-features
+
   cargo-fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Initialize Submodules
-        run: git submodule update --init --recursive --remote && \
-          git reset --hard HEAD && \
-          git submodule update
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: true
+          fetch-depth: 0
       - name: cargo fmt
         run: cargo fmt -- --check
+
   cargo-doc:
     name: cargo doc
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Initialize Submodules
-        run: git submodule update --init --recursive --remote && \
-          git reset --hard HEAD && \
-          git submodule update
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: true
+          fetch-depth: 0
       - name: cargo doc
         run: cargo doc --workspace --all-features
+
   cargo-clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Initialize Submodules
-        run: git submodule update --init --recursive --remote && \
-          git reset --hard HEAD && \
-          git submodule update
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: true
+          fetch-depth: 0
       - name: cargo clippy
         run: cargo clippy --workspace --all-features
+
   cargo-fix:
     name: cargo fix
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Initialize Submodules
-        run: git submodule update --init --recursive --remote && \
-          git reset --hard HEAD && \
-          git submodule update
-      - name: cargo fix --workspace --all-features
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: true
+          fetch-depth: 0
+      - name: cargo fix
         run: |
-          # Run cargo fix on the project
           cargo fix --workspace --all-features
 
-          # Check for local git changes
           if ! git diff --exit-code; then
               echo "There are local changes after running 'cargo fix --workspace --all-features' ❌"
               exit 1
