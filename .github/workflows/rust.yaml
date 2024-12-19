@@ -11,12 +11,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Sync and Update Submodules
+      - name: Configure Git for GITHUB_TOKEN
+        run: |
+          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Initialize and Update Submodules
         run: |
           git submodule sync
           git submodule update --init --recursive
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: cargo test
         run: cargo test --workspace --all-features
 
@@ -26,12 +28,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Sync and Update Submodules
+      - name: Configure Git for GITHUB_TOKEN
+        run: |
+          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Initialize and Update Submodules
         run: |
           git submodule sync
           git submodule update --init --recursive
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: cargo fmt
         run: cargo fmt -- --check
 
@@ -41,12 +45,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Sync and Update Submodules
+      - name: Configure Git for GITHUB_TOKEN
+        run: |
+          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Initialize and Update Submodules
         run: |
           git submodule sync
           git submodule update --init --recursive
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: cargo doc
         run: cargo doc --workspace --all-features
 
@@ -56,12 +62,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Sync and Update Submodules
+      - name: Configure Git for GITHUB_TOKEN
+        run: |
+          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Initialize and Update Submodules
         run: |
           git submodule sync
           git submodule update --init --recursive
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: cargo clippy
         run: cargo clippy --workspace --all-features
 
@@ -71,12 +79,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Sync and Update Submodules
+      - name: Configure Git for GITHUB_TOKEN
+        run: |
+          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Initialize and Update Submodules
         run: |
           git submodule sync
           git submodule update --init --recursive
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: cargo fix
         run: |
           cargo fix --workspace --all-features
