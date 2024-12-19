@@ -12,7 +12,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Initialize Submodules
-        run: git submodule update --init --recursive --remote
+        run: git submodule update --init --recursive --remote && \
+          git reset --hard HEAD && \
+          git submodule update
       - name: cargo test
         run: cargo test --workspace --all-features
   cargo-fmt:
@@ -22,7 +24,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Initialize Submodules
-        run: git submodule update --init --recursive --remote
+        run: git submodule update --init --recursive --remote && \
+          git reset --hard HEAD && \
+          git submodule update
       - name: cargo fmt
         run: cargo fmt -- --check
   cargo-doc:
@@ -32,7 +36,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Initialize Submodules
-        run: git submodule update --init --recursive --remote
+        run: git submodule update --init --recursive --remote && \
+          git reset --hard HEAD && \
+          git submodule update
       - name: cargo doc
         run: cargo doc --workspace --all-features
   cargo-clippy:
@@ -42,7 +48,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Initialize Submodules
-        run: git submodule update --init --recursive --remote
+        run: git submodule update --init --recursive --remote && \
+          git reset --hard HEAD && \
+          git submodule update
       - name: cargo clippy
         run: cargo clippy --workspace --all-features
   cargo-fix:
@@ -52,7 +60,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Initialize Submodules
-        run: git submodule update --init --recursive --remote
+        run: git submodule update --init --recursive --remote && \
+          git reset --hard HEAD && \
+          git submodule update
       - name: cargo fix --workspace --all-features
         run: |
           # Run cargo fix on the project
