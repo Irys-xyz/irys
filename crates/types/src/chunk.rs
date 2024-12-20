@@ -76,7 +76,7 @@ pub struct PackedChunk {
     pub partition_offset: PartitionChunkOffset,
     /// Index of the chunk in the transaction starting with 0
     pub tx_offset: TxRelativeChunkOffset,
-    /// The containing partition's hash
+    /// The hash of the partition containing this chunk
     pub partition_hash: PartitionHash,
 }
 
@@ -104,7 +104,7 @@ pub struct PartialChunk {
     pub packing_address: Option<Address>,
     // Index of the chunk in the transaction starting with 0
     pub tx_offset: Option<TxRelativeChunkOffset>,
-    /// The containing partition's hash
+    /// The hash of the partition containing this chunk
     pub partition_hash: Option<PartitionHash>,
 }
 
