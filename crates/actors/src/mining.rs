@@ -272,7 +272,7 @@ mod tests {
     async fn test_solution() {
         let partition_hash = H256::random();
         let mining_address = Address::random();
-        let chunks_number = 4;
+        let chunk_count = 4;
         let chunk_size = 32;
         let chunk_data = [0; 32];
         let data_path = [4, 3, 2, 1];
@@ -304,7 +304,7 @@ mod tests {
         // Set up the storage geometry for this test
         let storage_config = StorageConfig {
             chunk_size,
-            num_chunks_in_partition: chunks_number.try_into().unwrap(),
+            num_chunks_in_partition: chunk_count.try_into().unwrap(),
             num_chunks_in_recall_range: 2,
             num_partitions_in_slot: 1,
             miner_address: mining_address,
@@ -321,7 +321,7 @@ mod tests {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ie(0, chunks_number), "hdd0".to_string()), // 0 to 3 inclusive, 4 chunks
+                (ie(0, chunk_count), "hdd0".to_string()), // 0 to 3 inclusive, 4 chunks
             ],
         }];
 
@@ -351,10 +351,10 @@ mod tests {
         let _ = storage_module.index_transaction_data(
             tx_path.to_vec(),
             data_root,
-            LedgerChunkRange(ie(0, chunks_number as u64)),
+            LedgerChunkRange(ie(0, chunk_count as u64)),
         );
 
-        for tx_chunk_offset in 0..chunks_number {
+        for tx_chunk_offset in 0..chunk_count {
             let chunk = UnpackedChunk {
                 data_root: data_root,
                 data_size: chunk_size as u64,
@@ -409,7 +409,7 @@ mod tests {
         );
 
         assert!(
-            solution.chunk_offset < chunks_number * 2,
+            solution.chunk_offset < chunk_count * 2,
             "Not expected offset"
         );
 
