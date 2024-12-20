@@ -4,8 +4,8 @@ use irys_actors::{
     mining_broadcaster::{BroadcastMiningSeed, MiningBroadcaster},
 };
 use irys_types::{
-    vdf_config::VDFStepsConfig, H256, NONCE_LIMITER_RESET_FREQUENCY, NUM_CHECKPOINTS_IN_VDF_STEP,
-    U256, VDF_SHA_1S,
+    vdf_config::VDFStepsConfig, H256,
+    U256,
 };
 use openssl::sha;
 use sha2::{Digest, Sha256};

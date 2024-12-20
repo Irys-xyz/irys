@@ -425,14 +425,13 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use assert_matches::assert_matches;
-    use irys_database::{config::get_data_dir, open_or_create_db, tables::IrysTables};
+    use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_packing::xor_vec_u8_arrays_in_place;
     use irys_storage::{ii, initialize_storage_files, ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         irys::IrysSigner,
-        partition::{PartitionAssignment, PartitionHash},
-        storage_config, Address, Base64, MAX_CHUNK_SIZE,
+        partition::{PartitionAssignment, PartitionHash}, Address, Base64, MAX_CHUNK_SIZE,
     };
     use rand::Rng;
     use reth::tasks::TaskManager;

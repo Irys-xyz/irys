@@ -1,4 +1,4 @@
-use std::{fs::remove_dir_all, future::Future, time::Duration};
+use std::{future::Future, time::Duration};
 
 use alloy_core::primitives::{aliases::U208, U256};
 use alloy_eips::eip2930::AccessListItem;

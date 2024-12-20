@@ -1,4 +1,4 @@
-use std::{fs::remove_dir_all, time::Duration};
+use std::time::Duration;
 
 use alloy_core::primitives::{TxHash, U256};
 use irys_actors::block_producer::SolutionFoundMessage;

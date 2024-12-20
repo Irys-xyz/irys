@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::remove_dir_all, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use alloy_consensus::TxEnvelope;
 use alloy_core::primitives::{Bytes, TxKind, B256, U256};

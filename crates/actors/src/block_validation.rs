@@ -168,8 +168,7 @@ mod tests {
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
         irys::IrysSigner, Address, Base64, H256List, IrysSignature, IrysTransaction,
-        IrysTransactionHeader, Signature, TransactionLedger, VDFLimiterInfo, H256,
-        PACKING_SHA_1_5_S, U256,
+        IrysTransactionHeader, Signature, TransactionLedger, VDFLimiterInfo, H256, U256,
     };
     use reth::revm::primitives::B256;
     use std::str::FromStr;
@@ -215,7 +214,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut epoch_service = EpochServiceActor::new(Some(config.clone()));
+        let epoch_service = EpochServiceActor::new(Some(config.clone()));
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers
@@ -268,7 +267,7 @@ mod tests {
         }
 
         // Create a bunch of TX chunks
-        let mut data_chunks = vec![
+        let data_chunks = vec![
             vec![[0; 32], [1; 32], [2; 32]], // tx0 TODO: test last not complete chunk
             vec![[3; 32], [4; 32], [5; 32]], // tx1
             vec![[6; 32], [7; 32], [8; 32]], // tx2

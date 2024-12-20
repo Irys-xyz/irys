@@ -40,7 +40,7 @@ mod tests {
     use irys_database::tables::IrysTables;
     use irys_storage::ChunkProvider;
     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
-    use log::{debug, error, info, log_enabled, Level};
+    use log::{error, info};
     use reth::tasks::TaskManager;
     use std::sync::Arc;
     use tempfile::tempdir;

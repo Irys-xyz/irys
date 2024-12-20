@@ -1,4 +1,4 @@
-use std::{fs::remove_dir_all, future::Future, time::Duration};
+use std::{future::Future, time::Duration};
 
 use crate::block_production::capacity_chunk_solution;
 use alloy_core::primitives::U256;
@@ -11,7 +11,7 @@ use irys_actors::block_producer::SolutionFoundMessage;
 use irys_chain::{chain::start_for_testing, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, Address, H256};
+use irys_types::irys::IrysSigner;
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
 use tracing::info;

@@ -10,7 +10,7 @@ use irys_actors::{
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
-    mining_broadcaster::{self, BroadcastDifficultyUpdate, MiningBroadcaster},
+    mining_broadcaster::{BroadcastDifficultyUpdate, MiningBroadcaster},
     packing::{wait_for_packing, PackingActor, PackingRequest},
     ActorAddresses,
 };
@@ -24,9 +24,8 @@ use irys_storage::{
     initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
-    app_state::DatabaseProvider, block_production::PartitionId, calculate_initial_difficulty,
-    difficulty_adjustment_config, partition::PartitionHash, storage_config,
-    vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256, PACKING_SHA_1_5_S,
+    app_state::DatabaseProvider, calculate_initial_difficulty,
+    vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256,
     U256,
 };
 use reth::{
