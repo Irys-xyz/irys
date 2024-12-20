@@ -3,10 +3,7 @@ use irys_actors::{
     mining::Seed,
     mining_broadcaster::{BroadcastMiningSeed, MiningBroadcaster},
 };
-use irys_types::{
-    vdf_config::VDFStepsConfig, H256,
-    U256,
-};
+use irys_types::{vdf_config::VDFStepsConfig, H256, U256};
 use openssl::sha;
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::Receiver;
@@ -169,6 +166,7 @@ pub fn vdf_sha_verification(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_types::NUM_CHECKPOINTS_IN_VDF_STEP;
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
 
