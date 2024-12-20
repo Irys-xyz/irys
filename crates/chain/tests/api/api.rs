@@ -164,10 +164,6 @@ async fn api_end_to_end_test(chunk_size: usize) {
         if resp.status() == StatusCode::OK {
             let packed_chunk: PackedChunk = test::read_body_json(resp).await;
             assert_eq!(chunk, packed_chunk.tx_offset as usize, "Got different chunk index");
-            // TODO: unpack the chunk and compare the data, now is missing partition chunk offset to unpack            
-            // assert_eq!(Base64(data_bytes[chunk * chunk_size..(chunk + 1) * chunk_size].to_vec()), result.bytes, "Got different chunk data");
-
-            // TODO: fix unpacking we are not packing using 2D, just xoring the data with the entropy
             let unpacked_chunk = unpack(packed_chunk, storage_config.entropy_packing_iterations, chunk_size);
             assert_eq!(unpacked_chunk.bytes.0, data_bytes[chunk * chunk_size..(chunk + 1) * chunk_size], "Got different chunk data");
             info!("Chunk {} was retrived ok after {} attempts", chunk, attempts);            
