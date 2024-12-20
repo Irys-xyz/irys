@@ -2,9 +2,11 @@ use alloy_primitives::Address;
 use eyre::eyre;
 use serde::{Deserialize, Serialize};
 
-use crate::{hash_sha256, Base64, CHUNK_SIZE, H256};
+use crate::{hash_sha256, Base64, PartitionChunkOffset, H256};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+// tag is to produce better JSON serialization, it flattens { "Packed": {...}} to {type: "packed", ... }
+#[serde(tag = "type")]
 pub enum ChunkFormat {
     Unpacked(UnpackedChunk),
     Packed(PackedChunk),
@@ -70,6 +72,8 @@ pub struct PackedChunk {
     pub bytes: Base64,
     /// the Address used to pack this chunk
     pub packing_address: Address,
+    /// the partiton relative chunk offset
+    pub partition_offset: PartitionChunkOffset,
     // Index of the chunk in the transaction starting with 0
     pub chunk_index: TxRelativeChunkIndex,
 }
@@ -92,6 +96,8 @@ pub struct PartialChunk {
     /// Raw bytes to be stored, should be CHUNK_SIZE in length unless it is the
     /// last chunk in the transaction
     pub bytes: Option<Base64>,
+    /// the partiton relative chunk offset
+    pub partition_relative_offset: Option<PartitionChunkOffset>,
     /// the Address used to pack this chunk
     pub packing_address: Option<Address>,
     // Index of the chunk in the transaction starting with 0
@@ -109,7 +115,9 @@ impl PartialChunk {
     }
 
     pub fn is_full_packed_chunk(&self) -> bool {
-        self.is_full_unpacked_chunk() && self.packing_address.is_some()
+        self.is_full_unpacked_chunk()
+            && self.packing_address.is_some()
+            && self.partition_relative_offset.is_some()
     }
 }
 
@@ -152,9 +160,20 @@ impl TryInto<PackedChunk> for PartialChunk {
             bytes: self.bytes.ok_or(err_fn("bytes"))?,
             chunk_index: self.chunk_index.ok_or(err_fn("chunk_index"))?,
             packing_address: self.packing_address.ok_or(err_fn("packing_address"))?,
+            partition_offset: self
+                .partition_relative_offset
+                .ok_or(err_fn("partition_relative_offset"))?,
         })
     }
 }
+
+// #[test]
+// fn chunk_json() {
+//     let chunk = PackedChunk::default();
+//     println!("{:?}", serde_json::to_string_pretty(&chunk));
+//     let wrapped = ChunkFormat::Packed(chunk);
+//     println!("{:?}", serde_json::to_string_pretty(&wrapped));
+// }
 
 /// a chunk binary
 /// this type is unsized (i.e not a [u8; N]) as chunks can have variable sizes

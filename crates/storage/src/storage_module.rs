@@ -617,6 +617,7 @@ impl StorageModule {
             data_size,
             data_path,
             bytes: Base64::from(chunk_info.0.clone()),
+            partition_offset,
             chunk_index,
             packing_address: self.storage_config.miner_address,
         }))
