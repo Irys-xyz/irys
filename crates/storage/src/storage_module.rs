@@ -672,7 +672,7 @@ impl StorageModule {
             match result {
                 // TODO: better logging
                 Ok(bytes_written) => {
-                    info!("write_chunk_internal() -> bytes_written: {}", bytes_written)
+                    //info!("write_chunk_internal() -> bytes_written: {}", bytes_written)
                 }
                 Err(err) => info!("{:?}", err),
             }

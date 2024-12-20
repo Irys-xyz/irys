@@ -220,11 +220,19 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
         if (chunk.chunk_index as u64) < num_chunks_in_tx - 1 {
             // Ensure prefix chunks are all exactly chunk_size
             if chunk_len != chunk_size {
+                error!(
+                    "InvalidChunkSize: incomplete not last chunk, chunk index: {} chunklen {}",
+                    chunk.chunk_index, chunk_len
+                );
                 return Err(ChunkIngressError::InvalidChunkSize);
             }
         } else {
             // Ensure the last chunk is no larger than chunk_size
             if chunk_len > chunk_size {
+                error!(
+                    "InvalidChunkSize: chunk bigger than max. chunk size, chunk index: {} chunklen {}",
+                    chunk.chunk_index, chunk_len
+                );
                 return Err(ChunkIngressError::InvalidChunkSize);
             }
         }

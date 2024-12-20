@@ -1,5 +1,7 @@
 use clap::{command, Parser};
-use irys_chain::chain::start_irys_node;
+use irys_chain::chain::start_for_testing;
+use irys_config::IrysNodeConfig;
+use irys_types::StorageConfig;
 use reth_tracing::tracing_subscriber::fmt::SubscriberBuilder;
 use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
 use tracing::level_filters::LevelFilter;
@@ -21,7 +23,7 @@ async fn main() -> eyre::Result<()> {
         .finish()
         .try_init();
 
-    let handle = start_irys_node(Default::default()).await?;
+    let handle = start_for_testing(Default::default()).await?;
     handle.actor_addresses.start_mining()?;
     std::thread::park();
 
