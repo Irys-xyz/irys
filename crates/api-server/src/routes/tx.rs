@@ -79,6 +79,8 @@ pub async fn get_tx(
 
 #[cfg(test)]
 mod tests {
+    use crate::routes;
+
     use super::*;
     use actix::Actor;
     use actix_web::{middleware::Logger, test, App, Error};
@@ -140,7 +142,7 @@ mod tests {
             App::new()
                 .wrap(Logger::default())
                 .app_data(web::Data::new(app_state))
-                .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx))),
+                .service(routes()),
         )
         .await;
 
