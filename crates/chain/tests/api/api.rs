@@ -1,4 +1,4 @@
-use irys_api_server::{error::ApiError, routes, ApiState};
+use irys_api_server::{routes, ApiState};
 use irys_chain::chain::start_for_testing_default;
 use irys_packing::unpack; 
 
