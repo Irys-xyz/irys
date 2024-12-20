@@ -78,7 +78,11 @@ async fn post_tx_and_chunks_golden_path() {
     use actix_web::{middleware::Logger, test};
     use awc::http::StatusCode;
     use irys_actors::mempool::MempoolActor;
+<<<<<<< HEAD
     use irys_types::{irys::IrysSigner, Base64, IrysTransactionHeader, StorageConfig, UnpackedChunk, MAX_CHUNK_SIZE};
+=======
+    use irys_types::{irys::IrysSigner, Base64, StorageConfig, UnpackedChunk, MAX_CHUNK_SIZE};
+>>>>>>> master
 
     use rand::Rng;
 use tokio::time::{sleep, Duration};
