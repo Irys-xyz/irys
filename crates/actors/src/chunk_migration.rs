@@ -169,8 +169,6 @@ fn get_block_range(
         0
     };
 
-    
-
     LedgerChunkRange(ii(
         start_chunk_offset,
         block_header.ledgers[ledger].max_chunk_offset,
@@ -206,7 +204,6 @@ fn update_storage_module_indexes(
                     "Failed to add tx path + data_root + start_offset to index: {}",
                     e
                 );
-                
             })?;
     }
     Ok(())
@@ -258,7 +255,6 @@ fn write_chunk_to_module(
 
         storage_module.write_data_chunk(&chunk).map_err(|e| {
             error!("Failed to write data chunk: {}", e);
-            
         })?;
     }
     Ok(())

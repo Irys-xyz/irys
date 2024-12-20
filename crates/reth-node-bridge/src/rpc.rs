@@ -169,7 +169,6 @@ impl AccountStateExtApiServer for AccountStateExt {
             )
         })?;
         // TODO: replace with proper errors/error codes
-        
 
         state.basic_account(address).map_err(|e| {
             ErrorObjectOwned::owned::<String>(

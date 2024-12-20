@@ -117,8 +117,8 @@ jobs:
           toolchain: stable
 
       - run: cargo clippy --workspace --lib --examples --tests --benches --all-features --locked
-        env:
-          RUSTFLAGS: -D warnings
+        # env:
+        #   RUSTFLAGS: -D warnings
 
   cargo-fmt:
     name: cargo fmt

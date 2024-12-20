@@ -116,10 +116,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
 
     // Create vectors of tx headers and txids
     let tx_headers: Vec<IrysTransactionHeader> = txs.iter().map(|tx| tx.header.clone()).collect();
-    let data_tx_ids = tx_headers
-        .iter()
-        .map(|h| h.id)
-        .collect::<Vec<H256>>();
+    let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
     // Create a block_index

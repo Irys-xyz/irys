@@ -79,10 +79,7 @@ impl BlockIndex<Uninitialized> {
     }
 
     /// Deletes the block index file
-    pub fn reset(
-        &mut self,
-        config: &Arc<IrysNodeConfig>,
-    ) -> eyre::Result<Self> {
+    pub fn reset(&mut self, config: &Arc<IrysNodeConfig>) -> eyre::Result<Self> {
         let path = config.block_index_dir().join(FILE_NAME);
         self.config = Some(config.clone());
         if path.exists() {

@@ -32,11 +32,7 @@ pub fn write_chunk_data_path<T: DbTxMut + DbTx>(
     let path_hash = path_hash.unwrap_or_else(|| UnpackedChunk::hash_data_path(&data_path));
     add_offset_for_path_hash(tx, offset, path_hash)?;
 
-    add_data_path_hash_to_offset_index(
-        tx,
-        offset,
-        Some(path_hash),
-    )
+    add_data_path_hash_to_offset_index(tx, offset, Some(path_hash))
 }
 
 /// writes a chunk's data path to the database using the provided transaction

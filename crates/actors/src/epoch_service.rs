@@ -335,7 +335,7 @@ impl EpochServiceActor {
         let log_10 = (base_count as f64).log10();
         let trunc = truncate_to_3_decimals(log_10);
         let scaled = truncate_to_3_decimals(trunc * config.capacity_scalar as f64);
-        
+
         // println!(
         //     "- base_count: {}, log_10: {}, trunc: {}, scaled: {}, rounded: {}",
         //     base_count, log_10, trunc, scaled, rounded
