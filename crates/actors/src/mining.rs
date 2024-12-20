@@ -354,13 +354,13 @@ mod tests {
             LedgerChunkRange(ie(0, chunks_number as u64)),
         );
 
-        for i in 0..chunks_number {
+        for tx_chunk_offset in 0..chunks_number {
             let chunk = UnpackedChunk {
                 data_root: data_root,
                 data_size: chunk_size as u64,
                 data_path: data_path.to_vec().into(),
                 bytes: chunk_data.to_vec().into(),
-                tx_offset: i,
+                tx_offset: tx_chunk_offset,
             };
             storage_module.write_data_chunk(&chunk).unwrap();
         }
