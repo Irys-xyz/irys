@@ -145,19 +145,19 @@ use tokio::time::{sleep, Duration};
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Loop though each of the transaction chunks
-    for (index, chunk_node) in tx.chunks.iter().enumerate() {
+    for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
         let data_root = tx.header.data_root;
         let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[index].proof.to_vec());
+        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
 
         let chunk = UnpackedChunk {
             data_root,
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: index as u32,
+            tx_offset: tx_chunk_offset as u32,
         };
 
         // Make a POST request with JSON payload

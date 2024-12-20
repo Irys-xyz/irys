@@ -16,7 +16,7 @@ use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset,
     LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize,
-    StorageConfig, TxPath, UnpackedChunk, H256,
+    StorageConfig, TxPath, TxRelativeChunkOffset, UnpackedChunk, H256,
 };
 use nodit::{
     interval::{ie, ii},
@@ -610,7 +610,7 @@ impl StorageModule {
         // Finally the index of the chunk in the transaction can be calculated
         // using the ledger relative start_offset of the data_root and the
         // ledger_offset provided by the caller
-        let chunk_offset = (ledger_offset - data_root_start_offset) as u32;
+        let chunk_offset = (ledger_offset - data_root_start_offset) as TxRelativeChunkOffset;
 
         Ok(Some(PackedChunk {
             data_root,

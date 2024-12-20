@@ -1,6 +1,5 @@
 use crate::mining::{PartitionMiningActor, Seed};
 use actix::prelude::*;
-use dev::ToEnvelope;
 use irys_types::IrysBlockHeader;
 use std::sync::Arc;
 use tracing::info;
@@ -28,13 +27,13 @@ pub struct BroadcastMiningSeed(pub Seed);
 pub struct BroadcastDifficultyUpdate(pub Arc<IrysBlockHeader>);
 
 /// Broadcaster actor
-#[derive(Debug)]
-pub struct MiningBroadcaster {
+#[derive(Debug, Default)]
+pub struct BroadcastMiningService {
     subscribers: Vec<Addr<PartitionMiningActor>>,
 }
 // Actor Definition
 
-impl MiningBroadcaster {
+impl BroadcastMiningService {
     /// Initialize a new MiningBroadcaster
     pub fn new() -> Self {
         Self {
@@ -43,12 +42,21 @@ impl MiningBroadcaster {
     }
 }
 
-impl Actor for MiningBroadcaster {
+impl Actor for BroadcastMiningService {
     type Context = Context<Self>;
 }
 
+/// Adds this actor the the local service registry
+impl Supervised for BroadcastMiningService {}
+
+impl ArbiterService for BroadcastMiningService {
+    fn service_started(&mut self, ctx: &mut Context<Self>) {
+        println!("broadcast_mining service started");
+    }
+}
+
 // Handle subscriptions
-impl Handler<Subscribe> for MiningBroadcaster {
+impl Handler<Subscribe> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: Subscribe, _: &mut Context<Self>) {
@@ -57,7 +65,7 @@ impl Handler<Subscribe> for MiningBroadcaster {
 }
 
 // Handle unsubscribe
-impl Handler<Unsubscribe> for MiningBroadcaster {
+impl Handler<Unsubscribe> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: Unsubscribe, _: &mut Context<Self>) {
@@ -66,7 +74,7 @@ impl Handler<Unsubscribe> for MiningBroadcaster {
 }
 
 // Handle broadcasts
-impl Handler<BroadcastMiningSeed> for MiningBroadcaster {
+impl Handler<BroadcastMiningSeed> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
@@ -78,7 +86,7 @@ impl Handler<BroadcastMiningSeed> for MiningBroadcaster {
     }
 }
 
-impl Handler<BroadcastDifficultyUpdate> for MiningBroadcaster {
+impl Handler<BroadcastDifficultyUpdate> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {

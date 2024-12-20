@@ -1,8 +1,11 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::Actor;
+use actix::{Actor, ArbiterService};
 use irys_actors::{
+    block_discovery::BlockDiscoveryActor,
     block_index::BlockIndexActor,
-    block_producer::{BlockConfirmedMessage, BlockProducerActor},
+    block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
+    block_tree::BlockTreeActor,
+    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration::ChunkMigrationActor,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage, GetLedgersMessage,
@@ -10,7 +13,6 @@ use irys_actors::{
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
-    mining_broadcaster::{self, BroadcastDifficultyUpdate, MiningBroadcaster},
     packing::{wait_for_packing, PackingActor, PackingRequest},
     ActorAddresses,
 };
@@ -235,15 +237,25 @@ pub async fn start_irys_node(node_config: IrysNodeConfig, storage_config: Storag
 
                 let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
-                let mining_broadcaster = MiningBroadcaster::new();
-                let mining_broadcaster_addr = mining_broadcaster.start();
+                let block_tree_actor =
+                    BlockTreeActor::new(block_index_actor_addr.clone(), mempool_actor_addr.clone());
+                let block_tree = block_tree_actor.start();
+
+                let block_discovery_actor = BlockDiscoveryActor {
+                    block_index,
+                    block_tree: block_tree.clone(),
+                    epoch_service: epoch_service_actor_addr.clone(),
+                    mempool: mempool_actor_addr.clone(),
+                    db: db.clone(),
+                };
+                let block_discovery_addr = block_discovery_actor.start();
 
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
                     mempool_actor_addr.clone(),
                     chunk_migration_addr.clone(),
                     block_index_actor_addr.clone(),
-                    mining_broadcaster_addr.clone(),
+                    block_discovery_addr.clone(),
                     epoch_service_actor_addr.clone(),
                     reth_node.clone(),
                     storage_config.clone(),
@@ -251,6 +263,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig, storage_config: Storag
                     VDFStepsConfig::default(),
                 );
                 let block_producer_addr = block_producer_actor.start();
+                block_tree.do_send(RegisterBlockProducerMessage(block_producer_addr.clone()));
 
                 let mut part_actors = Vec::new();
 
@@ -259,7 +272,6 @@ pub async fn start_irys_node(node_config: IrysNodeConfig, storage_config: Storag
                         miner_address,
                         db.clone(),
                         block_producer_addr.clone().recipient(),
-                        mining_broadcaster_addr.clone(),
                         sm.clone(),
                         false, // do not start mining automatically
                     );
@@ -291,7 +303,8 @@ pub async fn start_irys_node(node_config: IrysNodeConfig, storage_config: Storag
                 debug!("Packing complete");
 
                 // Let the partition actors know about the genesis difficulty
-                mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(arc_genesis.clone()));
+                let broadcast_mining_service = BroadcastMiningService::from_registry();
+                broadcast_mining_service.do_send(BroadcastDifficultyUpdate(arc_genesis.clone()));
 
                 let part_actors_clone = part_actors.clone();
                 let vdf_thread_handler = std::thread::spawn(move || {
@@ -299,7 +312,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig, storage_config: Storag
                         VDFStepsConfig::default(),
                         H256::random(),
                         new_seed_rx,
-                        mining_broadcaster_addr.clone(),
+                        broadcast_mining_service.clone(),
                     )
                 });
 

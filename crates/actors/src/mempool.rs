@@ -542,11 +542,11 @@ mod tests {
         assert_matches!(result, Some(_));
         let last_index = tx.chunks.len() - 1;
         // Loop though each of the transaction chunks
-        for (chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
+        for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
             let min = chunk_node.min_byte_range;
             let max = chunk_node.max_byte_range;
-            let offset = tx.proofs[chunk_offset].offset as u32;
-            let data_path = Base64(tx.proofs[chunk_offset].proof.to_vec());
+            let offset = tx.proofs[tx_chunk_offset].offset as u32;
+            let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
             let key: H256 = hash_sha256(&data_path.0).unwrap().into();
             let chunk_bytes = Base64(data_bytes[min..max].to_vec());
             // Create a ChunkIngressMessage for each chunk
@@ -556,11 +556,11 @@ mod tests {
                     data_size,
                     data_path: data_path.clone(),
                     bytes: chunk_bytes.clone(),
-                    tx_offset: chunk_offset as u32,
+                    tx_offset: tx_chunk_offset as u32,
                 },
             };
 
-            let is_last_chunk = chunk_offset == last_index;
+            let is_last_chunk = tx_chunk_offset == last_index;
             let interval = ii(0, last_index as u64);
             if is_last_chunk {
                 // artificially index the chunk with the submodule
@@ -578,10 +578,13 @@ mod tests {
             // use a new read tx so we can see the writes
             let db_tx = arc_db2.tx()?;
 
-            let (meta, chunk) =
-                irys_database::cached_chunk_by_chunk_offset(&db_tx, data_root, chunk_offset as u32)
-                    .unwrap()
-                    .unwrap();
+            let (meta, chunk) = irys_database::cached_chunk_by_chunk_offset(
+                &db_tx,
+                data_root,
+                tx_chunk_offset as u32,
+            )
+            .unwrap()
+            .unwrap();
             assert_eq!(meta.chunk_path_hash, key);
             assert_eq!(chunk.data_path, data_path);
             assert_eq!(chunk.chunk, Some(chunk_bytes.clone()));
