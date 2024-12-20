@@ -1,6 +1,6 @@
 use actix::prelude::*;
 use irys_database::{
-    cached_chunk_by_chunk_index,
+    cached_chunk_by_chunk_offset,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
     BlockIndex, Initialized, Ledger,
 };
@@ -133,20 +133,20 @@ fn process_transaction_chunks(
     storage_modules: &[Arc<StorageModule>],
     db: &DatabaseProvider,
 ) -> Result<(), ()> {
-    for chunk_index in 0..num_chunks_in_tx {
+    for chunk_offset in 0..num_chunks_in_tx {
         // Attempt to retrieve the cached chunk from the mempool
-        let chunk_info = match get_cached_chunk(db, data_root, chunk_index) {
+        let chunk_info = match get_cached_chunk(db, data_root, chunk_offset) {
             Ok(Some(info)) => info,
             _ => continue,
         };
 
         // Find which storage module intersects this chunk
-        let ledger_offset = chunk_index as u64 + tx_chunk_range.start();
+        let ledger_offset = chunk_offset as u64 + tx_chunk_range.start();
         let storage_module = find_storage_module(storage_modules, Ledger::Submit, ledger_offset);
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
-            write_chunk_to_module(module, chunk_info, data_root, data_size, chunk_index)?;
+            write_chunk_to_module(module, chunk_info, data_root, data_size, chunk_offset)?;
         }
     }
     Ok(())
@@ -214,9 +214,9 @@ fn update_storage_module_indexes(
 fn get_cached_chunk(
     db: &DatabaseProvider,
     data_root: DataRoot,
-    chunk_index: u32,
+    chunk_offset: u32,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
-    db.view_eyre(|tx| cached_chunk_by_chunk_index(tx, data_root, chunk_index))
+    db.view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
 }
 
 fn find_storage_module(
@@ -243,7 +243,7 @@ fn write_chunk_to_module(
     chunk_info: (CachedChunkIndexMetadata, CachedChunk),
     data_root: DataRoot,
     data_size: u64,
-    chunk_index: u32,
+    chunk_offset: u32,
 ) -> Result<(), ()> {
     let data_path = Base64::from(chunk_info.1.data_path.0.clone());
 
@@ -253,7 +253,7 @@ fn write_chunk_to_module(
             data_size,
             data_path,
             bytes,
-            chunk_index,
+            tx_offset: chunk_offset,
         };
 
         storage_module.write_data_chunk(&chunk).map_err(|e| {

@@ -157,7 +157,7 @@ use tokio::time::{sleep, Duration};
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            chunk_index: index as u32,
+            tx_offset: index as u32,
         };
 
         // Make a POST request with JSON payload

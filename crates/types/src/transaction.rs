@@ -44,15 +44,18 @@ pub struct IrysTransactionHeader {
     /// Funds the storage of the transaction data during the storage term
     pub term_fee: u64,
 
-    /// Bundles are critical for how data items are indexed and settled, different
-    /// bundle formats enable different levels of indexing and verification.
-    pub bundle_format: u64,
+    /// The transaction's version
+    pub version: u8,
+
+    /// Transaction signature bytes
+    pub signature: IrysSignature,
 
     /// Indicating the type of transaction, pledge, data, schema, etc.
     pub tx_type: u64,
 
-    /// Transaction signature bytes
-    pub signature: IrysSignature,
+    /// Bundles are critical for how data items are indexed and settled, different
+    /// bundle formats enable different levels of indexing and verification.
+    pub bundle_format: Option<u64>,
 
     /// Funds the storage of the transaction for the next 200+ years
     pub perm_fee: Option<u64>,
@@ -81,16 +84,21 @@ impl IrysTransactionHeader {
     /// This method ensures that the transaction signature reflects only the
     /// essential data needed for validation and security purposes.
     pub fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
+        out.put_u8(self.version);
         out.put_u8(self.tx_type as u8);
         self.anchor.encode(out);
         self.signer.encode(out);
         self.data_root.encode(out);
         self.data_size.encode(out);
         self.term_fee.encode(out);
-        self.bundle_format.encode(out);
         self.tx_type.encode(out);
 
         // Encode the optional fields if they are provided
+
+        if let Some(bundle_format) = self.bundle_format {
+            bundle_format.encode(out);
+        }
+
         if let Some(perm_fee) = self.perm_fee {
             perm_fee.encode(out);
         }
@@ -149,7 +157,8 @@ impl Default for IrysTransactionHeader {
             term_fee: 0,
             perm_fee: None,
             ledger_num: None,
-            bundle_format: 0,
+            bundle_format: None,
+            version: 0,
             tx_type: 0,
             signature: IrysSignature {
                 reth_signature: Signature::test_signature(),
@@ -183,8 +192,9 @@ mod tests {
             term_fee: 100,
             perm_fee: Some(200),
             ledger_num: Some(1),
-            bundle_format: 0,
+            bundle_format: None,
             tx_type: 1,
+            version: 0,
             signature: IrysSignature {
                 reth_signature: Signature::test_signature(),
             },

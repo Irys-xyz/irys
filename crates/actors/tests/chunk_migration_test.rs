@@ -14,7 +14,7 @@ use {
 use assert_matches::assert_matches;
 
 use actix::prelude::*;
-use chunk::TxRelativeChunkIndex;
+use chunk::TxRelativeChunkOffset;
 use irys_actors::{block_producer::BlockFinalizedMessage, chunk_migration::ChunkMigrationActor};
 use irys_config::IrysNodeConfig;
 use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized};
@@ -158,7 +158,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
                 data_size: tx.header.data_size,
                 data_path: Base64::from(proof.proof.clone()),
                 bytes: Base64(tx.data.0[chunk.min_byte_range..chunk.max_byte_range].to_vec()),
-                chunk_index: i as TxRelativeChunkIndex,
+                tx_offset: i as TxRelativeChunkOffset,
             };
 
             let res = mempool_addr

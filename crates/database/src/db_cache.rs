@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
 use arbitrary::Arbitrary;
-use irys_types::{Base64, UnpackedChunk, ChunkPathHash, Compact, TxRelativeChunkIndex, H256};
+use irys_types::{Base64, ChunkPathHash, Compact, TxRelativeChunkOffset, UnpackedChunk, H256};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
@@ -47,7 +47,7 @@ impl From<&UnpackedChunk> for CachedChunk {
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary)]
 pub struct CachedChunkIndexEntry {
-    pub index: TxRelativeChunkIndex, // subkey
+    pub index: TxRelativeChunkOffset, // subkey
     pub meta: CachedChunkIndexMetadata,
 }
 
@@ -67,7 +67,7 @@ impl From<CachedChunkIndexEntry> for CachedChunkIndexMetadata {
 const _: () = assert!(std::mem::size_of::<CachedChunkIndexEntry>() <= 2022);
 
 // used for the Compact impl
-const KEY_BYTES: usize = std::mem::size_of::<TxRelativeChunkIndex>();
+const KEY_BYTES: usize = std::mem::size_of::<TxRelativeChunkOffset>();
 
 // NOTE: Removing reth_codec and manually encode subkey
 // and compress second part of the value. If we have compression
@@ -86,7 +86,7 @@ impl Compact for CachedChunkIndexEntry {
     }
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let index = TxRelativeChunkIndex::from_be_bytes(buf[..KEY_BYTES].try_into().unwrap());
+        let index = TxRelativeChunkOffset::from_be_bytes(buf[..KEY_BYTES].try_into().unwrap());
         let (meta, out) =
             CachedChunkIndexMetadata::from_compact(&buf[KEY_BYTES..], len - KEY_BYTES);
         (Self { index, meta }, out)
