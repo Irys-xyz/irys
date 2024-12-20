@@ -431,7 +431,8 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         irys::IrysSigner,
-        partition::{PartitionAssignment, PartitionHash}, Address, Base64, MAX_CHUNK_SIZE,
+        partition::{PartitionAssignment, PartitionHash},
+        Address, Base64, MAX_CHUNK_SIZE,
     };
     use rand::Rng;
     use reth::tasks::TaskManager;
