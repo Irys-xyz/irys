@@ -166,13 +166,13 @@ async fn api_end_to_end_test(chunk_size: usize) {
             assert_eq!(chunk, packed_chunk.tx_offset as usize, "Got different chunk index");
             let unpacked_chunk = unpack(packed_chunk, storage_config.entropy_packing_iterations, chunk_size);
             assert_eq!(unpacked_chunk.bytes.0, data_bytes[chunk * chunk_size..(chunk + 1) * chunk_size], "Got different chunk data");
-            info!("Chunk {} was retrived ok after {} attempts", chunk, attempts);            
+            info!("Chunk {} was retrived ok after {} attempts", chunk, attempts);     
+            attempts = 0;       
             if missing_chunks.is_empty() {
                 break;
             }
         } else {
             missing_chunks.push(chunk);
-            attempts = 0;
         }
 
         attempts += 1;
