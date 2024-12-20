@@ -101,9 +101,9 @@ jobs:
         env:
           cache-name: rust
         with: 
+            # ~/.cargo/bin/
+            # ~/.rustup/
           path: |
-            ~/.cargo/bin/
-            ~/.rustup/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
@@ -135,8 +135,6 @@ jobs:
           cache-name: rust
         with: 
           path: |
-            ~/.cargo/bin/
-            ~/.rustup/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
@@ -168,8 +166,6 @@ jobs:
           cache-name: rust
         with: 
           path: |
-            ~/.cargo/bin/
-            ~/.rustup/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
@@ -200,8 +196,6 @@ jobs:
           cache-name: rust
         with: 
           path: |
-            ~/.cargo/bin/
-            ~/.rustup/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
