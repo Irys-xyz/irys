@@ -1,6 +1,6 @@
 use crate::block_producer::SolutionFoundMessage;
-use crate::mining_broadcaster::{
-    BroadcastDifficultyUpdate, BroadcastMiningSeed, MiningBroadcaster, Subscribe, Unsubscribe,
+use crate::broadcast_mining_service::{
+    BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe,
 };
 use actix::prelude::*;
 use actix::{Actor, Addr, Context, Handler, Message};
@@ -16,7 +16,6 @@ pub struct PartitionMiningActor {
     mining_address: Address,
     database_provider: DatabaseProvider,
     block_producer_actor: Recipient<SolutionFoundMessage>,
-    mining_broadcaster_addr: Addr<MiningBroadcaster>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
     difficulty: U256,
@@ -27,7 +26,6 @@ impl PartitionMiningActor {
         mining_address: Address,
         database_provider: DatabaseProvider,
         block_producer_addr: Recipient<SolutionFoundMessage>,
-        mining_broadcaster_addr: Addr<MiningBroadcaster>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
     ) -> Self {
@@ -35,7 +33,6 @@ impl PartitionMiningActor {
             mining_address,
             database_provider,
             block_producer_actor: block_producer_addr,
-            mining_broadcaster_addr,
             storage_module,
             should_mine: start_mining,
             difficulty: U256::zero(),
@@ -144,7 +141,7 @@ impl PartitionMiningActor {
                 // Once solution is sent stop mining and let all other partitions know
                 return Ok(Some(solution));
             } else {
-              //  info!("NO SOLUTION!!!!")
+                //  info!("NO SOLUTION!!!!")
             }
         }
 
@@ -156,12 +153,12 @@ impl Actor for PartitionMiningActor {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Context<Self>) {
-        let broadcaster = &self.mining_broadcaster_addr;
+        let broadcaster = BroadcastMiningService::from_registry();
         broadcaster.do_send(Subscribe(ctx.address()));
     }
 
     fn stopping(&mut self, ctx: &mut Context<Self>) -> Running {
-        let broadcaster = &self.mining_broadcaster_addr;
+        let broadcaster = BroadcastMiningService::from_registry();
         broadcaster.do_send(Unsubscribe(ctx.address()));
         Running::Stop
     }
@@ -195,7 +192,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         match self.mine_partition_with_seed(seed.into_inner()) {
             Ok(Some(s)) => match self.block_producer_actor.try_send(SolutionFoundMessage(s)) {
                 Ok(_) => {
-                   // debug!("Solution sent!");
+                    // debug!("Solution sent!");
                 }
                 Err(err) => error!("Error submitting solution to block producer {:?}", err),
             },
@@ -249,8 +246,8 @@ mod tests {
     use crate::block_producer::{
         BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
     };
+    use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
     use crate::mining::{PartitionMiningActor, Seed};
-    use crate::mining_broadcaster::{BroadcastMiningSeed, MiningBroadcaster};
     use actix::{Actor, Addr, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
@@ -367,14 +364,13 @@ mod tests {
 
         let _ = storage_module.sync_pending_chunks();
 
-        let mining_broadcaster = MiningBroadcaster::new();
+        let mining_broadcaster = BroadcastMiningService::new();
         let mining_broadcaster_addr = mining_broadcaster.start();
 
         let partition_mining_actor = PartitionMiningActor::new(
             mining_address,
             database_provider.clone(),
             mocked_addr.0,
-            mining_broadcaster_addr,
             storage_module,
             true,
         );
