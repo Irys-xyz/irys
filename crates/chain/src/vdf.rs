@@ -78,7 +78,7 @@ pub fn run_vdf(
         debug!("Vdf step duration: {:.2?}", elapsed);
 
         debug!("Seed created {}", hash.clone());
-        mining_broadcaster.do_send(BroadcastMiningSeed(Seed(hash)));
+        broadcast_mining_service.do_send(BroadcastMiningSeed(Seed(hash)));
 
         if let Ok(h) = new_seed_listener.try_recv() {
             debug!("New Send Seed {}", h); // TODO: wire new seed injections from chain accepted blocks message BlockConfirmedMessage
