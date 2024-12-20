@@ -217,3 +217,4 @@ jobs:
               exit 1
           else
               echo "No changes detected after running 'cargo fix --workspace --all-features' ✅"
+          fi
