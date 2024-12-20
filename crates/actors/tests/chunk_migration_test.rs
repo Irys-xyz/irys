@@ -118,7 +118,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let tx_headers: Vec<IrysTransactionHeader> = txs.iter().map(|tx| tx.header.clone()).collect();
     let data_tx_ids = tx_headers
         .iter()
-        .map(|h| h.id.clone())
+        .map(|h| h.id)
         .collect::<Vec<H256>>();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
@@ -146,9 +146,9 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let mempool_addr = mempool_actor.start();
 
     // Send tx headers to mempool
-    tx_headers.iter().for_each(|header| {
+    for header in tx_headers.iter() {
         mempool_addr.do_send(TxIngressMessage(header.clone()));
-    });
+    }
 
     // Send chunks to mempool
     for tx in &txs {
@@ -179,7 +179,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
         height = block_index.read().unwrap().num_blocks().max(1) - 1;
     }
 
-    for tx in txs.iter() {
+    for tx in &txs {
         println!("data_root: {:?}", tx.header.data_root.0);
     }
 
@@ -252,7 +252,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let _res = chunk_migration_addr.send(block_finalized_message).await?;
 
     // Check to see if the chunks are in the StorageModules
-    for sm in storage_modules.iter() {
+    for sm in &storage_modules {
         let _ = sm.sync_pending_chunks();
     }
 

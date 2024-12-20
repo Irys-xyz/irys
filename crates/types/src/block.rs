@@ -204,7 +204,7 @@ impl TransactionLedger {
         //txs_data_roots.push(&[]); // TODO: check this ? mimics merkle::generate_leaves's push as last chunk has max. capacity 32
         let data_root_leaves = generate_leaves_from_data_roots(&txs_data_roots).unwrap();
         let root = generate_data_root(data_root_leaves.clone()).unwrap();
-        let root_id = root.id.clone();
+        let root_id = root.id;
         let proofs = resolve_proofs(root, None).unwrap();
         (H256(root_id), proofs)
     }

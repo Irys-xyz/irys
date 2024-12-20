@@ -36,9 +36,15 @@ pub struct TermLedger {
     pub epoch_length: u64,
 }
 
+impl Default for PermanentLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PermanentLedger {
-    /// Constructs a permanent ledger, always with ledger_num: 0
-    pub fn new() -> Self {
+    /// Constructs a permanent ledger, always with `ledger_num`: 0
+    pub const fn new() -> Self {
         Self {
             slots: Vec::new(),
             ledger_num: 0,
@@ -48,7 +54,7 @@ impl PermanentLedger {
 
 impl TermLedger {
     /// Creates a term ledger with specified index and duration
-    pub fn new(ledger_num: usize, epoch_length: u64) -> Self {
+    pub const fn new(ledger_num: usize, epoch_length: u64) -> Self {
         Self {
             slots: Vec::new(),
             ledger_num,
@@ -57,7 +63,7 @@ impl TermLedger {
     }
 
     /// Returns a slice of the ledgers slots
-    pub fn get_slots(&self) -> &Vec<LedgerSlot> {
+    pub const fn get_slots(&self) -> &Vec<LedgerSlot> {
         &self.slots
     }
 
@@ -186,7 +192,7 @@ impl LedgerCore for TermLedger {
     }
 }
 
-/// Names for each of the ledgers as well as their ledger_num discriminant
+/// Names for each of the ledgers as well as their `ledger_num` discriminant
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Ledger {
@@ -199,20 +205,20 @@ pub enum Ledger {
 
 impl Default for Ledger {
     fn default() -> Self {
-        Ledger::Publish
+        Self::Publish
     }
 }
 
 impl Ledger {
     /// An array of all the Ledger numbers in order
-    pub const ALL: [Ledger; 2] = [Ledger::Publish, Ledger::Submit];
+    pub const ALL: [Self; 2] = [Self::Publish, Self::Submit];
 
-    /// Make it possible to iterate over all the LedgerNums in order
-    pub fn iter() -> impl Iterator<Item = Ledger> {
+    /// Make it possible to iterate over all the `LedgerNums` in order
+    pub fn iter() -> impl Iterator<Item = Self> {
         Self::ALL.iter().copied()
     }
     /// get the associated numeric ID
-    pub fn get_id(&self) -> u32 {
+    pub const fn get_id(&self) -> u32 {
         *self as u32
     }
 }
@@ -222,8 +228,8 @@ impl TryFrom<u64> for Ledger {
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(Ledger::Publish),
-            1 => Ok(Ledger::Submit),
+            0 => Ok(Self::Publish),
+            1 => Ok(Self::Submit),
             _ => Err("Invalid ledger number"),
         }
     }
@@ -234,6 +240,12 @@ impl TryFrom<u64> for Ledger {
 pub struct Ledgers {
     perm: PermanentLedger,
     term: Vec<TermLedger>,
+}
+
+impl Default for Ledgers {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Ledgers {

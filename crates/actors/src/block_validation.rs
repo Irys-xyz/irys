@@ -131,9 +131,9 @@ pub async fn poa_is_valid(
                 as usize,
         );
 
-        let poa_chunk_hash = sha::sha256(&poa_chunk_padd_trimmed);
+        let poa_chunk_hash = sha::sha256(poa_chunk_padd_trimmed);
 
-        if !(poa_chunk_hash == data_path_result.leaf_hash) {
+        if poa_chunk_hash != data_path_result.leaf_hash {
             return Err(eyre::eyre!("PoA chunk hash missmatch"));
         }
     } else {
@@ -168,12 +168,13 @@ mod tests {
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
         irys::IrysSigner, Address, Base64, H256List, IrysSignature, IrysTransaction,
-        IrysTransactionHeader, Signature, TransactionLedger, PACKING_SHA_1_5_S, U256,
+        IrysTransactionHeader, Signature, TransactionLedger, VDFLimiterInfo, H256,
+        PACKING_SHA_1_5_S, U256,
     };
     use reth::revm::primitives::B256;
     use std::str::FromStr;
     use std::sync::{Arc, RwLock};
-    use tracing::log::LevelFilter;
+    use tracing::{debug, info, log::LevelFilter};
 
     use super::*;
 

@@ -10,11 +10,11 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 
-/// This struct represents the `Uninitialized` block_index type state.
+/// This struct represents the `Uninitialized` `block_index` type state.
 #[derive(Debug)]
 pub struct Uninitialized;
 
-/// This struct represents the `Initialized`  block_index type state.
+/// This struct represents the `Initialized`  `block_index` type state.
 #[derive(Debug)]
 pub struct Initialized;
 
@@ -34,11 +34,11 @@ pub struct BlockIndex<State = Uninitialized> {
 
 const FILE_NAME: &str = "index.dat";
 
-/// Use a Type State pattern for BlockIndex with two states, Uninitialized and Initialized
+/// Use a Type State pattern for `BlockIndex` with two states, Uninitialized and Initialized
 impl BlockIndex {
     /// Constructs a new uninitialized block index.
     pub fn new() -> Self {
-        BlockIndex {
+        Self {
             items: Arc::new([]),
             state: Uninitialized,
             config: None,
@@ -52,7 +52,7 @@ impl BlockIndex {
 
 impl Default for BlockIndex<Uninitialized> {
     fn default() -> Self {
-        BlockIndex::new()
+        Self::new()
     }
 }
 
@@ -82,14 +82,14 @@ impl BlockIndex<Uninitialized> {
     pub fn reset(
         &mut self,
         config: &Arc<IrysNodeConfig>,
-    ) -> eyre::Result<BlockIndex<Uninitialized>> {
+    ) -> eyre::Result<Self> {
         let path = config.block_index_dir().join(FILE_NAME);
         self.config = Some(config.clone());
         if path.exists() {
             remove_file(path)?;
         }
         self.ensure_path_exists()?;
-        Ok(BlockIndex::new())
+        Ok(Self::new())
     }
 
     fn ensure_path_exists(&self) -> eyre::Result<()> {
@@ -110,12 +110,12 @@ impl BlockIndex<Initialized> {
         self.items.len() as u64
     }
 
-    /// Retrieves a [BlockIndexItem] from the block index by block height
+    /// Retrieves a [`BlockIndexItem`] from the block index by block height
     pub fn get_item(&self, block_height: usize) -> Option<&BlockIndexItem> {
         self.items.get(block_height)
     }
 
-    /// Pushes a new [BlockIndexItem] onto the items array
+    /// Pushes a new [`BlockIndexItem`] onto the items array
     pub fn push_item(&mut self, block_index_item: &BlockIndexItem) {
         let mut items_vec = self.items.to_vec();
         items_vec.push(block_index_item.clone());
@@ -165,9 +165,9 @@ impl BlockIndex<Initialized> {
     }
 }
 
-/// BlockBounds describe the size of a ledger at the start of a block
+/// `BlockBounds` describe the size of a ledger at the start of a block
 /// and then after the blocks transactions were applied to the ledger
-#[derive(Debug, Default, Clone, PartialEq, MessageResponse)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, MessageResponse)]
 pub struct BlockBounds {
     /// Block height where these bounds apply
     pub height: u128,
@@ -177,13 +177,13 @@ pub struct BlockBounds {
     pub start_chunk_offset: u64,
     /// Final chunk offset after processing block transactions
     pub end_chunk_offset: u64,
-    /// Merkle root (tx_root) of all transactions this block applied to the ledger
+    /// Merkle root (`tx_root`) of all transactions this block applied to the ledger
     pub tx_root: H256,
 }
 
-/// A [BlockIndexItem] contains a vec of [LedgerIndexItem]s which store the size
-/// and and the tx_root of the ledger in that block.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// A [`BlockIndexItem`] contains a vec of [`LedgerIndexItem`]s which store the size
+/// and and the `tx_root` of the ledger in that block.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LedgerIndexItem {
     /// Size in bytes of the ledger
     pub max_chunk_offset: u64, // 8 bytes
@@ -201,7 +201,7 @@ impl LedgerIndexItem {
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
-        let mut item = LedgerIndexItem::default();
+        let mut item = Self::default();
 
         // Read ledger size (first 8 bytes)
         let mut size_bytes = [0u8; 8];
@@ -229,10 +229,10 @@ impl IndexMut<Ledger> for Vec<LedgerIndexItem> {
     }
 }
 
-/// Core metadata of the [BlockIndex] this struct tracks the ledger size and
-/// tx root for each ledger per block. Enabling lookups to that find the tx_root
+/// Core metadata of the [`BlockIndex`] this struct tracks the ledger size and
+/// tx root for each ledger per block. Enabling lookups to that find the `tx_root`
 /// for a ledger at a particular byte offset in the ledger.
-#[derive(Debug, Clone, Default, PartialEq, MessageResponse)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, MessageResponse)]
 pub struct BlockIndexItem {
     /// The hash of the block
     pub block_hash: H256, // 32 bytes
@@ -261,7 +261,7 @@ impl BlockIndexItem {
 
     // Deserialize bytes to BlockIndexItem
     fn from_bytes(bytes: &[u8]) -> Self {
-        let mut item = BlockIndexItem::default();
+        let mut item = Self::default();
 
         // Read fixed fields
         item.block_hash = H256::from_slice(&bytes[0..32]);

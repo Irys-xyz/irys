@@ -60,16 +60,16 @@ pub fn capacity_pack_range_with_data(
     match PACKING_TYPE {
         PackingType::CPU => {
             let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
-            data.iter_mut().enumerate().for_each(|(pos, mut chunk)| {
+            data.iter_mut().enumerate().for_each(|(pos, chunk)| {
                 capacity_single::compute_entropy_chunk(
                     mining_address,
                     chunk_offset + pos as u64 * chunk_size as u64,
-                    partition_hash.0.into(),
+                    partition_hash.0,
                     iterations,
                     chunk_size,
                     &mut entropy_chunk,
                 );
-                xor_vec_u8_arrays_in_place(&mut chunk, &entropy_chunk);
+                xor_vec_u8_arrays_in_place(chunk, &entropy_chunk);
             })
         }
         _ => unimplemented!(),
@@ -87,15 +87,15 @@ pub fn capacity_pack_range_with_data_c(
     match PACKING_TYPE {
         PackingType::CPU => {
             let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
-            data.iter_mut().enumerate().for_each(|(pos, mut chunk)| {
+            data.iter_mut().enumerate().for_each(|(pos, chunk)| {
                 capacity_pack_range_c(
                     mining_address,
-                    chunk_offset + pos as u64 * CHUNK_SIZE as u64,
+                    chunk_offset + pos as u64 * CHUNK_SIZE,
                     partition_hash,
                     iterations,
                     &mut entropy_chunk,
                 );
-                xor_vec_u8_arrays_in_place(&mut chunk, &entropy_chunk);
+                xor_vec_u8_arrays_in_place(chunk, &entropy_chunk);
             })
         }
         _ => unimplemented!(),
@@ -219,7 +219,7 @@ fn test_chunks_packing() {
     let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
     capacity_pack_range_c(
         mining_address,
-        chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE as u64,
+        chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE,
         partition_hash.into(),
         Some(2 * CHUNK_SIZE as u32),
         &mut entropy_chunk,

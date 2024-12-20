@@ -1,4 +1,4 @@
-//! Crate dedicated to the IrysNodeConfig to avoid depdendency cycles
+//! Crate dedicated to the `IrysNodeConfig` to avoid depdendency cycles
 use std::{env, fs, path::PathBuf};
 
 use chain::chainspec::IrysChainSpecBuilder;
@@ -21,7 +21,7 @@ pub struct IrysNodeConfig {
     /// base data directory, i.e `./.tmp`
     /// should not be used directly, instead use the appropriate methods, i.e `instance_directory`
     pub base_directory: PathBuf,
-    /// ChainSpec builder - used to generate ChainSpec, which defines most of the chain-related parameters
+    /// `ChainSpec` builder - used to generate `ChainSpec`, which defines most of the chain-related parameters
     pub chainspec_builder: IrysChainSpecBuilder,
 }
 
@@ -61,7 +61,7 @@ impl IrysNodeConfig {
     pub fn reth_log_dir(&self) -> PathBuf {
         self.reth_data_dir().join("logs")
     }
-    /// get the instance-specific block_index directory path  
+    /// get the instance-specific `block_index` directory path  
     pub fn block_index_dir(&self) -> PathBuf {
         self.instance_directory().join("block_index")
     }

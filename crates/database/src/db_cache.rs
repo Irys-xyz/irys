@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
 pub struct CachedDataRoot {
     /// Unlike a unix timestamp which stores the number of seconds since
-    /// UNIX_EPOCH, this timestamp stores the number of milliseconds. Similar
+    /// `UNIX_EPOCH`, this timestamp stores the number of milliseconds. Similar
     /// to javascript timestamps.
     pub timestamp: u128,
 
-    /// Total size (in bytes) of the data represented by the data_root
+    /// Total size (in bytes) of the data represented by the `data_root`
     pub data_size: u64,
 
-    /// The set of all tx.ids' that contain this data_root
+    /// The set of all tx.ids' that contain this `data_root`
     pub txid_set: Vec<H256>,
 }
 
@@ -50,7 +50,7 @@ pub struct CachedChunkIndexEntry {
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
-/// structure containing any chunk cache index metadata, like the chunk_path_hash for chunk data lookups
+/// structure containing any chunk cache index metadata, like the `chunk_path_hash` for chunk data lookups
 pub struct CachedChunkIndexMetadata {
     pub chunk_path_hash: ChunkPathHash,
 }
@@ -61,7 +61,7 @@ impl From<CachedChunkIndexEntry> for CachedChunkIndexMetadata {
     }
 }
 
-/// note: the total size + the subkey must be < 2022 bytes (half a 4k DB page size - see MDBX .set_geometry)
+/// note: the total size + the subkey must be < 2022 bytes (half a 4k DB page size - see MDBX .`set_geometry`)
 const _: () = assert!(std::mem::size_of::<CachedChunkIndexEntry>() <= 2022);
 
 // used for the Compact impl

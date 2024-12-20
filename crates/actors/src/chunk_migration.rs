@@ -40,7 +40,7 @@ impl Actor for ChunkMigrationActor {
 
 impl ChunkMigrationActor {
     /// Creates a new chunk storage actor
-    pub fn new(
+    pub const fn new(
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         storage_config: StorageConfig,
         storage_modules: Vec<Arc<StorageModule>>,
@@ -113,7 +113,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationActor {
                     &db,
                 )?;
 
-                for module in storage_modules.iter() {
+                for module in &storage_modules {
                     let _ = module.sync_pending_chunks();
                 }
 
@@ -169,12 +169,12 @@ fn get_block_range(
         0
     };
 
-    let block_offsets = LedgerChunkRange(ii(
+    
+
+    LedgerChunkRange(ii(
         start_chunk_offset,
         block_header.ledgers[ledger].max_chunk_offset,
-    ));
-
-    block_offsets
+    ))
 }
 fn get_tx_path_pairs(
     block_header: &IrysBlockHeader,
@@ -206,7 +206,7 @@ fn update_storage_module_indexes(
                     "Failed to add tx path + data_root + start_offset to index: {}",
                     e
                 );
-                ()
+                
             })?;
     }
     Ok(())
@@ -258,7 +258,7 @@ fn write_chunk_to_module(
 
         storage_module.write_data_chunk(&chunk).map_err(|e| {
             error!("Failed to write data chunk: {}", e);
-            ()
+            
         })?;
     }
     Ok(())

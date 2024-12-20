@@ -52,7 +52,10 @@ impl RangeSpecifier {
     }
 }
 
+#[cfg(test)]
 mod tests {
+    use crate::range_specifier::RangeSpecifier;
+    use alloy_primitives::aliases::U208;
 
     #[test]
     fn rangespec_test() -> eyre::Result<()> {

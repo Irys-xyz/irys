@@ -23,7 +23,7 @@ pub async fn post_tx(
     let tx = body.into_inner();
 
     // Validate transaction is valid. Check balances etc etc.
-    let tx_ingress_msg = TxIngressMessage { 0: tx };
+    let tx_ingress_msg = TxIngressMessage(tx);
     let msg_result = state.mempool.send(tx_ingress_msg).await;
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
@@ -77,12 +77,11 @@ mod tests {
     use actix_web::{middleware::Logger, test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
-    use eyre::eyre;
     use irys_actors::mempool::MempoolActor;
-    use irys_database::{config::get_data_dir, tables::IrysTables};
+    use irys_database::tables::IrysTables;
     use irys_storage::ChunkProvider;
     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
-    use log::{debug, error, info, log_enabled, Level};
+    use log::{error, info};
     use reth::tasks::TaskManager;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -97,11 +96,12 @@ mod tests {
         let tx_header = IrysTransactionHeader::default();
         info!("Generated tx_id: {}", tx_header.id);
 
-        db.update(|tx| -> eyre::Result<()> { database::insert_tx_header(tx, &tx_header) })?;
+        let _ =
+            db.update(|tx| -> eyre::Result<()> { database::insert_tx_header(tx, &tx_header) })?;
 
         match db.view_eyre(|tx| database::tx_header_by_txid(tx, &tx_header.id))? {
             None => error!("tx not found, test db error!"),
-            Some(tx_header) => info!("tx found!"),
+            Some(_tx_header) => info!("tx found!"),
         };
 
         let arc_db = Arc::new(db);

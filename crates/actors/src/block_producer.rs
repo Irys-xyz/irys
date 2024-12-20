@@ -30,14 +30,14 @@ use crate::{
     mining_broadcaster::{BroadcastDifficultyUpdate, MiningBroadcaster},
 };
 
-/// Used to mock up a BlockProducerActor
+/// Used to mock up a `BlockProducerActor`
 pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
 
-/// A mocked BlockProducerActor only needs to implement SolutionFoundMessage
+/// A mocked [`BlockProducerActor`] only needs to implement [`SolutionFoundMessage`]
 #[derive(Debug)]
 pub struct MockedBlockProducerAddr(pub Recipient<SolutionFoundMessage>);
 
-/// BlockProducerActor creates blocks from mining solutions
+/// `BlockProducerActor` creates blocks from mining solutions
 #[derive(Debug)]
 pub struct BlockProducerActor {
     /// Reference to the global database
@@ -46,7 +46,7 @@ pub struct BlockProducerActor {
     pub mempool_addr: Addr<MempoolActor>,
     /// Address of the chunk migration actor
     pub chunk_migration_addr: Addr<ChunkMigrationActor>,
-    /// Address of the bock_index actor
+    /// Address of the `bock_index` actor
     pub block_index_addr: Addr<BlockIndexActor>,
     /// Enables broadcast messages to partition mining actors
     pub mining_broadcaster_addr: Addr<MiningBroadcaster>,
@@ -62,8 +62,8 @@ pub struct BlockProducerActor {
 }
 
 impl BlockProducerActor {
-    /// Initializes a new BlockProducerActor
-    pub fn new(
+    /// Initializes a new `BlockProducerActor`
+    pub const fn new(
         db: DatabaseProvider,
         mempool_addr: Addr<MempoolActor>,
         chunk_migration_addr: Addr<ChunkMigrationActor>,
@@ -168,8 +168,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     .send(GetPartitionAssignmentMessage(solution.partition_hash))
                     .await
                     .unwrap()
-                    .map(|pa| pa.ledger_num)
-                    .flatten();
+                    .and_then(|pa| pa.ledger_num);
 
                 let data_txs: Vec<IrysTransactionHeader> =
                     mempool_addr.send(GetBestMempoolTxs).await.unwrap();
@@ -186,7 +185,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 // created, e.g.g (3..0) and the node would panic. 
                 let max_chunk_offset = prev_block_header.ledgers[Ledger::Submit].max_chunk_offset + chunks_added;
 
-                let data_tx_ids = data_txs.iter().map(|h| h.id.clone()).collect::<Vec<H256>>();
+                let data_tx_ids = data_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
                 // Difficulty adjustment logic
@@ -216,8 +215,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let block_hash = hash_sha256(&current_timestamp.to_le_bytes());
 
                 let poa = PoaData {
-                    tx_path: solution.tx_path.map(|tx_path| Base64(tx_path)),
-                    data_path: solution.data_path.map(|data_path| Base64(data_path)),
+                    tx_path: solution.tx_path.map(Base64),
+                    data_path: solution.data_path.map(Base64),
                     chunk: Base64(solution.chunk),
                     ledger_num,
                     partition_chunk_offset: solution.chunk_offset as u64,
@@ -239,9 +238,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let mut irys_block = IrysBlockHeader {
                     block_hash,
                     height: block_height,
-                    diff: diff,
+                    diff,
                     cumulative_diff: U256::from(5000),
-                    last_diff_timestamp: last_diff_timestamp,
+                    last_diff_timestamp,
                     solution_hash: H256::zero(),
                     previous_solution_hash: H256::zero(),
                     last_epoch_hash: H256::random(),
@@ -351,7 +350,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 // Broadcast BLockConfirmedMessage
                 self_addr.do_send(block_confirm_message.clone());
                 block_index_addr.do_send(block_confirm_message.clone());
-                mempool_addr.do_send(block_confirm_message.clone());
+                mempool_addr.do_send(block_confirm_message);
 
                 // Get all the transactions for the previous block, error if not found
                 let txs = match prev_block_header.ledgers[Ledger::Submit]
@@ -383,7 +382,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     txs: Arc::new(txs),
                 });
 
-                Some((block.clone(), exec_payload))
+                Some((block, exec_payload))
             }
             .into_actor(self),
         ))
@@ -413,7 +412,7 @@ impl Handler<BlockConfirmedMessage> for BlockProducerActor {
     }
 }
 
-/// Similar to [BlockConfirmedMessage] (but takes ownership of parameters) and
+/// Similar to [`BlockConfirmedMessage`] (but takes ownership of parameters) and
 /// acts as a placeholder for when the node will maintain a block tree of
 /// confirmed blocks and produce finalized blocks for the canonical chain when
 ///  enough confirmations have occurred. Chunks are moved from the in-memory

@@ -23,7 +23,7 @@ pub struct PartitionMiningActor {
 }
 
 impl PartitionMiningActor {
-    pub fn new(
+    pub const fn new(
         mining_address: Address,
         database_provider: DatabaseProvider,
         block_producer_addr: Recipient<SolutionFoundMessage>,
@@ -91,7 +91,7 @@ impl PartitionMiningActor {
         //     &read_range
         // );
 
-        if chunks.len() == 0 {
+        if chunks.is_empty() {
             warn!(
                 "No chunks found - storage_module_id:{}",
                 self.storage_module.id
@@ -171,7 +171,7 @@ impl Actor for PartitionMiningActor {
 pub struct Seed(pub H256);
 
 impl Seed {
-    fn into_inner(self) -> H256 {
+    const fn into_inner(self) -> H256 {
         self.0
     }
 }
@@ -183,7 +183,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         let seed = msg.0;
         if !self.should_mine {
             debug!("Mining disabled, skipping seed {:?}", seed);
-            return ();
+            return;
         }
 
         debug!(
@@ -222,7 +222,7 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
 pub struct MiningControl(pub bool);
 
 impl MiningControl {
-    fn into_inner(self) -> bool {
+    const fn into_inner(self) -> bool {
         self.0
     }
 }
@@ -246,12 +246,11 @@ fn hash_to_number(hash: &[u8]) -> U256 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::block_producer::{
         BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
     };
     use crate::mining::{PartitionMiningActor, Seed};
-    use crate::mining_broadcaster::{BroadcastMiningSeed, MiningBroadcaster};
-    use actix::{Actor, Addr, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::{
@@ -264,7 +263,7 @@ mod tests {
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
     use std::any::Any;
-    use std::sync::{Arc, RwLock};
+    use std::sync::RwLock;
     use std::time::Duration;
     use tokio::time::sleep;
 

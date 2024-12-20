@@ -43,11 +43,11 @@ impl UnpackedChunk {
     /// due to legacy weirdness, the offset is of the end of the chunk, not the start
     /// i.e for the first chunk, the offset is chunk_size instead of 0
     pub fn byte_offset(&self, chunk_size: u64) -> u64 {
-        let last_index = self.data_size.div_ceil(chunk_size as u64);
+        let last_index = self.data_size.div_ceil(chunk_size);
         if self.chunk_index as u64 == last_index {
-            return self.data_size;
+            self.data_size
         } else {
-            return (self.chunk_index + 1) as u64 * chunk_size - 1;
+            (self.chunk_index + 1) as u64 * chunk_size - 1
         }
     }
 }

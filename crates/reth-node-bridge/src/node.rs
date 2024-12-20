@@ -124,9 +124,9 @@ impl Deref for RethNodeProvider {
     }
 }
 
-impl Into<RethNodeHandle> for RethNodeProvider {
-    fn into(self) -> RethNodeHandle {
-        self.0.as_ref().clone()
+impl From<RethNodeProvider> for RethNodeHandle {
+    fn from(val: RethNodeProvider) -> Self {
+        val.0.as_ref().clone()
     }
 }
 

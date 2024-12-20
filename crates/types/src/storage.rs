@@ -141,13 +141,13 @@ impl Deref for IntervalStateWrapped {
     type Target = IntervalState;
 
     fn deref(&self) -> &Self::Target {
-        return &self.inner;
+        &self.inner
     }
 }
 
 impl DerefMut for IntervalStateWrapped {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        return &mut self.inner;
+        &mut self.inner
     }
 }
 

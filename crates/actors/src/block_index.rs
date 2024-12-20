@@ -35,8 +35,8 @@ impl Actor for BlockIndexActor {
 
 impl BlockIndexActor {
     /// Create a new instance of the mempool actor passing in a reference
-    /// counted reference to a DatabaseEnv
-    pub fn new(
+    /// counted reference to a `DatabaseEnv`
+    pub const fn new(
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         storage_config: StorageConfig,
     ) -> Self {
@@ -116,7 +116,7 @@ impl BlockIndexActor {
             let mut prev_entry: Option<&BlockLogEntry> = None;
             println!("block_height, block_time(ms), difficulty");
             for entry in &self.block_log {
-                let duration = if let Some(ref pe) = prev_entry {
+                let duration = if let Some(pe) = prev_entry {
                     Duration::from_millis((entry.timestamp - pe.timestamp) as u64)
                 } else {
                     Duration::from_millis(0)
@@ -140,7 +140,7 @@ impl Handler<BlockConfirmedMessage> for BlockIndexActor {
         let data_txs = &msg.1;
 
         // Do something with the block
-        self.add_finalized_block(&irys_block_header, &data_txs);
+        self.add_finalized_block(irys_block_header, data_txs);
     }
 }
 

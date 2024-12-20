@@ -75,6 +75,7 @@ pub fn verify_ingress_proof(proof: IngressProof, chunks: DataChunks) -> eyre::Re
     Ok(recomputed.id == prehash)
 }
 
+#[cfg(test)]
 mod tests {
     use rand::Rng;
 

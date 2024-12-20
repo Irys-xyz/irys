@@ -169,7 +169,6 @@ pub fn vdf_sha_verification(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix::Actor;
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
 

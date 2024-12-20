@@ -282,7 +282,7 @@ mod tests {
     fn assert_expected_with_tolerance(expected: f64, actual: f64, tolerance: f64) {
         let abs_difference = (expected - actual).abs();
         assert!(
-            abs_difference <= tolerance as f64,
+            abs_difference <= tolerance,
             "Difference {} exceeds tolerance {}",
             abs_difference,
             tolerance

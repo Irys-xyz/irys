@@ -9,16 +9,12 @@ include!(concat!(env!("OUT_DIR"), "/capacity_bindings.rs"));
 
 fn capacity_single_test() {
     // 20 bytes - evm
-    let mining_address = vec![
-        46, 6, 63, 55, 199, 241, 63, 198, 140, 201, 68, 178, 74, 212, 59, 13, 150, 185, 126, 37,
-    ];
+    let mining_address = [46, 6, 63, 55, 199, 241, 63, 198, 140, 201, 68, 178, 74, 212, 59, 13, 150, 185, 126, 37];
 
     let chunk_offset: c_ulong = 0;
     // 32 bytes
-    let partition_hash = vec![
-        76, 64, 86, 6, 191, 79, 136, 60, 155, 21, 146, 95, 199, 64, 10, 144, 248, 11, 6, 144, 135,
-        179, 149, 173, 126, 18, 174, 58, 214, 83, 89, 74,
-    ];
+    let partition_hash = [76, 64, 86, 6, 191, 79, 136, 60, 155, 21, 146, 95, 199, 64, 10, 144, 248, 11, 6, 144, 135,
+        179, 149, 173, 126, 18, 174, 58, 214, 83, 89, 74];
     // alloc space for the C fn to write into
     let mut entropy_chunk = Vec::<u8>::with_capacity(DATA_CHUNK_SIZE.try_into().unwrap());
     let mining_addr_len = mining_address.len(); // note: might not line up with capacity? that should be fine...

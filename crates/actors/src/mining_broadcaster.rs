@@ -6,22 +6,22 @@ use tracing::info;
 
 // Message types
 
-/// Subscribes a PartitionMiningActor so the broadcaster to receive broadcast messages
+/// Subscribes a `PartitionMiningActor` so the broadcaster to receive broadcast messages
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub struct Subscribe(pub Addr<PartitionMiningActor>);
 
-/// Unsubscribes a PartitionMiningActor so from the broadcaster
+/// Unsubscribes a `PartitionMiningActor` so from the broadcaster
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub struct Unsubscribe(pub Addr<PartitionMiningActor>);
 
-/// Send the most recent mining step to all the PartitionMiningActors
+/// Send the most recent mining step to all the `PartitionMiningActors`
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
 pub struct BroadcastMiningSeed(pub Seed);
 
-/// Send the latest difficulty update to all the PartitionMiningActors
+/// Send the latest difficulty update to all the `PartitionMiningActors`
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
 pub struct BroadcastDifficultyUpdate(pub Arc<IrysBlockHeader>);
@@ -33,9 +33,15 @@ pub struct MiningBroadcaster {
 }
 // Actor Definition
 
+impl Default for MiningBroadcaster {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MiningBroadcaster {
-    /// Initialize a new MiningBroadcaster
-    pub fn new() -> Self {
+    /// Initialize a new `MiningBroadcaster`
+    pub const fn new() -> Self {
         Self {
             subscribers: Vec::new(),
         }

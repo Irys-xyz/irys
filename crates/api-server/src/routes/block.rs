@@ -33,6 +33,7 @@ mod tests {
     use super::*;
     use actix::Actor;
     use actix_web::{middleware::Logger, test, App, Error};
+    use awc::http::StatusCode;
     use base58::ToBase58;
     use database::open_or_create_db;
     use irys_actors::mempool::MempoolActor;

@@ -145,7 +145,7 @@ impl AccountStateExtApiServer for AccountStateExt {
     }
 
     fn get_peer_id(&self) -> RpcResult<PeerId> {
-        Ok(self.network.peer_id().clone())
+        Ok(*self.network.peer_id())
     }
 
     fn get_account(
@@ -169,15 +169,15 @@ impl AccountStateExtApiServer for AccountStateExt {
             )
         })?;
         // TODO: replace with proper errors/error codes
-        let r2 = state.basic_account(address).map_err(|e| {
+        
+
+        state.basic_account(address).map_err(|e| {
             ErrorObjectOwned::owned::<String>(
                 -32072,
                 "error getting account info",
                 Some(e.to_string()),
             )
-        });
-
-        return r2;
+        })
     }
 
     // fn get_account2(
@@ -250,8 +250,8 @@ impl AccountStateExtApiServer for AccountStateExt {
         let mut hm = HashMap::new();
         for address in addresses.iter() {
             hm.insert(
-                address.clone(),
-                state.basic_account(address.clone()).map_err(|e| {
+                *address,
+                state.basic_account(*address).map_err(|e| {
                     ErrorObjectOwned::owned::<String>(
                         -32072,
                         "error getting account info",
@@ -376,9 +376,9 @@ impl AccountStateExtApiServer for AccountStateExt {
         );
         // let res = apply_shadow(shadow, &mut journaled_state, &mut db);
         let res = simulate_apply_shadow_thin(shadow, &mut journaled_state, &mut db);
-        return Ok(res.map_err(|e| {
+        res.map_err(|e| {
             ErrorObjectOwned::owned::<String>(-32091, "error executing shadow", Some(e.to_string()))
-        })?);
+        })
         // OLD - used to build a full EVM env (lol) to execute the shadow //
 
         // let block_hash = parent
@@ -454,7 +454,7 @@ impl AccountStateExtApiServer for AccountStateExt {
                 Some(e.to_string()),
             )
         })?;
-        return Ok(wallet.address());
+        Ok(wallet.address())
     }
 }
 

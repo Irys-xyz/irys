@@ -91,7 +91,7 @@ impl IrysSigner {
     fn merklize(&self, data: Vec<u8>, chunk_size: usize) -> Result<IrysTransaction> {
         let mut chunks = generate_leaves(data.clone(), chunk_size)?;
         let root = generate_data_root(chunks.clone())?;
-        let data_root = H256(root.id.clone());
+        let data_root = H256(root.id);
         let mut proofs = resolve_proofs(root, None)?;
 
         // Discard the last chunk & proof if it's zero length.
@@ -115,9 +115,9 @@ impl IrysSigner {
     }
 }
 
-impl Into<LocalSigner<SigningKey>> for IrysSigner {
-    fn into(self) -> LocalSigner<SigningKey> {
-        LocalSigner::from_signing_key(self.signer)
+impl From<IrysSigner> for LocalSigner<SigningKey> {
+    fn from(val: IrysSigner) -> Self {
+        LocalSigner::from_signing_key(val.signer)
     }
 }
 
@@ -155,7 +155,7 @@ mod tests {
             );
         }
 
-        print!("{}\n", serde_json::to_string_pretty(&tx.header).unwrap());
+        println!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
 
         // Make sure the size of the last chunk is just whatever is left over
         // after chunking the rest of the data at MAX_CHUNK_SIZE intervals.
@@ -178,12 +178,12 @@ mod tests {
             // Ensure every chunk proof (data_path) is valid
             let root_id = tx.header.data_root.0;
             let proof = tx.proofs[index].clone();
-            let proof_result = validate_chunk(root_id, &chunk_node, &proof);
+            let proof_result = validate_chunk(root_id, chunk_node, &proof);
             assert_matches!(proof_result, Ok(_));
 
             // Ensure the data_hash is valid by hashing the chunk data
             let chunk_bytes: &[u8] = &data_bytes[min..max];
-            let computed_hash = hash_sha256(&chunk_bytes).unwrap();
+            let computed_hash = hash_sha256(chunk_bytes).unwrap();
             let data_hash = chunk_node.data_hash.unwrap();
 
             assert_eq!(data_hash, computed_hash);

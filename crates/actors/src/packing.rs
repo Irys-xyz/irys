@@ -8,8 +8,12 @@ use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
 
 use eyre::eyre;
 use irys_packing::capacity_single::compute_entropy_chunk;
-use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
-use irys_types::{PartitionChunkRange, StorageConfig};
+use irys_storage::{
+    ChunkType, InclusiveInterval, StorageModule,
+};
+use irys_types::{
+    PartitionChunkRange, StorageConfig,
+};
 use reth::tasks::TaskExecutor;
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
@@ -231,91 +235,111 @@ pub async fn wait_for_packing(
     .ok_or_else(|| eyre!("timed out waiting for packing to complete"))
 }
 
-#[actix::test]
-async fn test_packing_actor() -> eyre::Result<()> {
-    let mining_address = Address::random();
-    let partition_hash = PartitionHash::zero();
-    let infos = vec![StorageModuleInfo {
-        id: 0,
-        partition_assignment: Some(PartitionAssignment {
-            partition_hash,
-            miner_address: mining_address,
-            ledger_num: None,
-            slot_index: None,
-        }),
-        submodules: vec![
-            (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
-        ],
-    }];
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
 
-    let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
-    let base_path = tmp_dir.path().to_path_buf();
-    initialize_storage_files(&base_path, &infos)?;
+    use actix::Actor as _;
+    use irys_packing::capacity_single::compute_entropy_chunk;
+    use irys_storage::{ii, initialize_storage_files, ChunkType, StorageModule, StorageModuleInfo};
+    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_types::{
+        partition::{PartitionAssignment, PartitionHash},
+        Address, StorageConfig,
+    };
+    use reth::tasks::TaskManager;
+    use tokio::runtime::Handle;
 
-    // Override the default StorageModule config for testing
-    let storage_config = StorageConfig {
-        min_writes_before_sync: 1,
-        entropy_packing_iterations: 1_000,
-        num_chunks_in_partition: 5,
-        ..Default::default()
+    use crate::packing::{
+        cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingRequest,
     };
 
-    // Create a StorageModule with the specified submodules and config
-    let storage_module_info = &infos[0];
-    let storage_module = Arc::new(StorageModule::new(
-        &base_path,
-        storage_module_info,
-        storage_config.clone(),
-    )?);
+    #[actix::test]
+    async fn test_packing_actor() -> eyre::Result<()> {
+        let mining_address = Address::random();
+        let partition_hash = PartitionHash::zero();
+        let infos = vec![StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: mining_address,
+                ledger_num: None,
+                slot_index: None,
+            }),
+            submodules: vec![
+                (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
+            ],
+        }];
 
-    let request = PackingRequest {
-        storage_module: storage_module.clone(),
-        chunk_range: ii(0, 3).into(),
-    };
-    // Create an instance of the mempool actor
-    let task_manager = TaskManager::current();
+        let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        initialize_storage_files(&base_path, &infos)?;
 
-    let packing = PackingActor::new(Handle::current(), task_manager.executor(), None);
+        // Override the default StorageModule config for testing
+        let storage_config = StorageConfig {
+            min_writes_before_sync: 1,
+            entropy_packing_iterations: 1_000,
+            num_chunks_in_partition: 5,
+            ..Default::default()
+        };
 
-    let packing_addr = packing.start();
+        // Create a StorageModule with the specified submodules and config
+        let storage_module_info = &infos[0];
+        let storage_module = Arc::new(StorageModule::new(
+            &base_path,
+            storage_module_info,
+            storage_config.clone(),
+        )?);
 
-    packing_addr.send(request).await?;
+        let request = PackingRequest {
+            storage_module: storage_module.clone(),
+            chunk_range: ii(0, 3).into(),
+        };
+        // Create an instance of the mempool actor
+        let task_manager = TaskManager::current();
 
-    wait_for_packing(packing_addr, None).await?;
+        let packing = PackingActor::new(Handle::current(), task_manager.executor(), None);
 
-    storage_module.sync_pending_chunks()?;
-    // check that the chunks are marked as packed
-    let intervals = storage_module.get_intervals(ChunkType::Entropy);
-    assert_eq!(intervals, vec![ii(0, 3)]);
-    let stored_entropy = storage_module.read_chunks(ii(0, 3))?;
-    // verify the packing
-    let chunk = stored_entropy.get(&0).unwrap();
+        let packing_addr = packing.start();
 
-    let mut out = Vec::with_capacity(storage_config.chunk_size.try_into().unwrap());
-    compute_entropy_chunk(
-        mining_address,
-        0 as u64,
-        partition_hash.0,
-        storage_config.entropy_packing_iterations,
-        storage_config.chunk_size.try_into().unwrap(),
-        &mut out,
-    );
-    assert_eq!(chunk.0, out);
+        packing_addr.send(request).await?;
 
-    Ok(())
-}
+        wait_for_packing(packing_addr, None).await?;
 
-#[test]
-fn test_casting() {
-    let v: Vec<u8> = (1..=9).collect();
-    let c2 = cast_vec_u8_to_vec_u8_array::<3>(v);
+        storage_module.sync_pending_chunks()?;
+        // check that the chunks are marked as packed
+        let intervals = storage_module.get_intervals(ChunkType::Entropy);
+        assert_eq!(intervals, vec![ii(0, 3)]);
+        let stored_entropy = storage_module.read_chunks(ii(0, 3))?;
+        // verify the packing
+        let chunk = stored_entropy.get(&0).unwrap();
 
-    assert_eq!(c2, vec![[1, 2, 3], [4, 5, 6], [7, 8, 9]])
-}
+        let mut out = Vec::with_capacity(storage_config.chunk_size.try_into().unwrap());
+        compute_entropy_chunk(
+            mining_address,
+            0 as u64,
+            partition_hash.0,
+            storage_config.entropy_packing_iterations,
+            storage_config.chunk_size.try_into().unwrap(),
+            &mut out,
+        );
+        assert_eq!(chunk.0, out);
 
-#[test]
-#[should_panic(expected = "wrong input N 3")]
-fn test_casting_error() {
-    let v: Vec<u8> = (1..=10).collect();
-    let c2 = cast_vec_u8_to_vec_u8_array::<3>(v);
+        Ok(())
+    }
+
+    #[test]
+    fn test_casting() {
+        let v: Vec<u8> = (1..=9).collect();
+        let c2 = cast_vec_u8_to_vec_u8_array::<3>(v);
+
+        assert_eq!(c2, vec![[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong input N 3")]
+    fn test_casting_error() {
+        let v: Vec<u8> = (1..=10).collect();
+        let c2 = cast_vec_u8_to_vec_u8_array::<3>(v);
+    }
 }
