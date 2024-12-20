@@ -2,7 +2,7 @@ use alloy_primitives::Address;
 use eyre::eyre;
 use serde::{Deserialize, Serialize};
 
-use crate::{hash_sha256, Base64, PartitionChunkOffset, H256};
+use crate::{hash_sha256, partition::PartitionHash, Base64, PartitionChunkOffset, H256};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 // tag is to produce better JSON serialization, it flattens { "Packed": {...}} to {type: "packed", ... }
@@ -74,8 +74,10 @@ pub struct PackedChunk {
     pub packing_address: Address,
     /// the partiton relative chunk offset
     pub partition_offset: PartitionChunkOffset,
-    // Index of the chunk in the transaction starting with 0
+    /// Index of the chunk in the transaction starting with 0
     pub tx_offset: TxRelativeChunkOffset,
+    /// The containing partition's hash
+    pub partition_hash: PartitionHash,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -102,6 +104,8 @@ pub struct PartialChunk {
     pub packing_address: Option<Address>,
     // Index of the chunk in the transaction starting with 0
     pub tx_offset: Option<TxRelativeChunkOffset>,
+    /// The containing partition's hash
+    pub partition_hash: Option<PartitionHash>,
 }
 
 impl PartialChunk {
@@ -118,6 +122,7 @@ impl PartialChunk {
         self.is_full_unpacked_chunk()
             && self.packing_address.is_some()
             && self.partition_relative_offset.is_some()
+            && self.partition_hash.is_some()
     }
 }
 
@@ -163,6 +168,7 @@ impl TryInto<PackedChunk> for PartialChunk {
             partition_offset: self
                 .partition_relative_offset
                 .ok_or(err_fn("partition_relative_offset"))?,
+            partition_hash: self.partition_hash.ok_or(err_fn("partition_hash"))?,
         })
     }
 }
