@@ -1,5 +1,6 @@
 use irys_api_server::{error::ApiError, routes, ApiState};
 use irys_chain::chain::start_for_testing_default;
+use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 
 use actix_web::{
     middleware::Logger,
@@ -9,7 +10,6 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use base58::ToBase58;
-use serde::Serialize;
 
 
 #[cfg(test)]
@@ -93,7 +93,7 @@ async fn api_end_to_end_test() {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            chunk_index: index as u32,
+            tx_offset: index as u32,
         };
 
         // Make a POST request with JSON payload
@@ -154,9 +154,13 @@ async fn api_end_to_end_test() {
 
         if resp.status() == StatusCode::OK {
             let result: PackedChunk = test::read_body_json(resp).await;
-            assert_eq!(chunk, result.chunk_index as usize, "Got different chunk index");
+            assert_eq!(chunk, result.tx_offset as usize, "Got different chunk index");
             // TODO: unpack the chunk and compare the data, now is missing partition chunk offset to unpack            
             // assert_eq!(Base64(data_bytes[chunk * chunk_size..(chunk + 1) * chunk_size].to_vec()), result.bytes, "Got different chunk data");
+            let mut out: Vec<u8> = Vec::with_capacity(chunk_size.try_into().unwrap());
+            compute_entropy_chunk(result.packing_address, result.tx_offset as u64, [0; 32], 1_000, chunk_size, &mut out);
+            xor_vec_u8_arrays_in_place(&mut out, &(result.bytes.0));
+            assert_eq!(out, data_bytes[chunk * chunk_size..(chunk + 1) * chunk_size], "Got different chunk data");
             info!("Chunk {} was retrived ok after {} attempts", chunk, attempts);            
             if missing_chunks.is_empty() {
                 break;
