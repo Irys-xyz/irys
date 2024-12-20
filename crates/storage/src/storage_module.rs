@@ -620,6 +620,7 @@ impl StorageModule {
             partition_offset,
             tx_offset: chunk_offset,
             packing_address: self.storage_config.miner_address,
+            partition_hash: self.partition_hash().unwrap(),
         }))
     }
 
