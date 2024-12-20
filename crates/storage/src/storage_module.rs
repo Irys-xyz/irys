@@ -495,9 +495,9 @@ impl StorageModule {
 
         let mut write_offsets = vec![];
         for start_offset in start_offsets.0 {
-            let partition_offset = (start_offset + chunk.chunk_index as i32)
+            let partition_offset = (start_offset + chunk.tx_offset as i32)
                 .try_into()
-                .map_err(|_| eyre::eyre!("Invalid negative offset: {}", chunk.chunk_index))?;
+                .map_err(|_| eyre::eyre!("Invalid negative offset: {}", chunk.tx_offset))?;
 
             {
                 // read the metadata in a block so the read guard expires quickly
@@ -610,7 +610,7 @@ impl StorageModule {
         // Finally the index of the chunk in the transaction can be calculated
         // using the ledger relative start_offset of the data_root and the
         // ledger_offset provided by the caller
-        let chunk_index = (ledger_offset - data_root_start_offset) as u32;
+        let chunk_offset = (ledger_offset - data_root_start_offset) as u32;
 
         Ok(Some(PackedChunk {
             data_root,
@@ -618,7 +618,7 @@ impl StorageModule {
             data_path,
             bytes: Base64::from(chunk_info.0.clone()),
             partition_offset,
-            chunk_index,
+            tx_offset: chunk_offset,
             packing_address: self.storage_config.miner_address,
         }))
     }
@@ -1069,7 +1069,7 @@ mod tests {
             data_size: chunk_data.len() as u64,
             data_path: data_path.clone().into(),
             bytes: chunk_data.into(),
-            chunk_index: 0,
+            tx_offset: 0,
         };
 
         storage_module.write_data_chunk(&chunk)?;

@@ -78,7 +78,7 @@ async fn post_tx_and_chunks_golden_path() {
     use actix_web::{middleware::Logger, test};
     use awc::http::StatusCode;
     use irys_actors::mempool::MempoolActor;
-    use irys_types::{irys::IrysSigner, Base64, UnpackedChunk, StorageConfig, MAX_CHUNK_SIZE};
+    use irys_types::{irys::IrysSigner, Base64, StorageConfig, UnpackedChunk, MAX_CHUNK_SIZE};
 
     use rand::Rng;
 
@@ -160,7 +160,7 @@ async fn post_tx_and_chunks_golden_path() {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            chunk_index: index as u32,
+            tx_offset: index as u32,
         };
 
         // Make a POST request with JSON payload

@@ -71,16 +71,16 @@ impl PartitionMiningActor {
             rng.next() % (num_chunks_in_partition / num_chunks_in_recall_range);
 
         // Starting chunk index within partition
-        let start_chunk_index = (recall_range_index * num_chunks_in_recall_range) as usize;
+        let start_chunk_offset = (recall_range_index * num_chunks_in_recall_range) as usize;
 
         // info!(
         //     "Recall range index {} start chunk index {}",
-        //     recall_range_index, start_chunk_index
+        //     recall_range_index, start_chunk_offset
         // );
 
         let read_range = ie(
-            start_chunk_index as u32,
-            start_chunk_index as u32 + config.num_chunks_in_recall_range as u32,
+            start_chunk_offset as u32,
+            start_chunk_offset as u32 + config.num_chunks_in_recall_range as u32,
         );
 
         // haven't tested this, but it looks correct
@@ -100,7 +100,7 @@ impl PartitionMiningActor {
 
         for (index, (chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
-            let partition_chunk_offset = (start_chunk_index + index) as PartitionChunkOffset;
+            let partition_chunk_offset = (start_chunk_offset + index) as PartitionChunkOffset;
             let (tx_path, data_path) = self
                 .storage_module
                 .read_tx_data_path(partition_chunk_offset as u64)?;
@@ -144,7 +144,7 @@ impl PartitionMiningActor {
                 // Once solution is sent stop mining and let all other partitions know
                 return Ok(Some(solution));
             } else {
-              //  info!("NO SOLUTION!!!!")
+                //  info!("NO SOLUTION!!!!")
             }
         }
 
@@ -195,7 +195,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         match self.mine_partition_with_seed(seed.into_inner()) {
             Ok(Some(s)) => match self.block_producer_actor.try_send(SolutionFoundMessage(s)) {
                 Ok(_) => {
-                   // debug!("Solution sent!");
+                    // debug!("Solution sent!");
                 }
                 Err(err) => error!("Error submitting solution to block producer {:?}", err),
             },
@@ -360,7 +360,7 @@ mod tests {
                 data_size: chunk_size as u64,
                 data_path: data_path.to_vec().into(),
                 bytes: chunk_data.to_vec().into(),
-                chunk_index: i,
+                tx_offset: i,
             };
             storage_module.write_data_chunk(&chunk).unwrap();
         }
