@@ -198,9 +198,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-${{ hashFiles('**/Cargo.toml') }}
+          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
-            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-
 
       - uses: dtolnay/rust-toolchain@stable
         with:
