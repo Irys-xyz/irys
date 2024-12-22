@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockReadGuard},
     time::Duration,
 };
 
@@ -12,7 +12,64 @@ use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U2
 
 use crate::block_producer::BlockConfirmedMessage;
 
+//==============================================================================
+// Read only view of BlockIndex State
+//------------------------------------------------------------------------------
+
+/// Retrieve a read only reference to the ledger partition assignments
+#[derive(Message, Debug)]
+#[rtype(result = "BlockIndexView")] // Remove MessageResult wrapper since type implements MessageResponse
+pub struct GetBlockIndexViewMessage;
+
+/// A read only view of Block Index state (stores a reference to original block_index)
+#[derive(Debug, Clone, MessageResponse)]
+pub struct BlockIndexView {
+    inner: Arc<RwLock<BlockIndex<Initialized>>>,
+}
+
+impl BlockIndexView {
+    /// Create a new read only view from the block index
+    pub fn new(block_index: Arc<RwLock<BlockIndex<Initialized>>>) -> Self {
+        Self { inner: block_index }
+    }
+
+    /// Retrieve the number of blocks in the index
+    pub fn num_blocks(&self) -> u64 {
+        self.inner.read().unwrap().num_blocks()
+    }
+
+    /// Retrieve a block index item based on its height (offset from the 0 based start of the index)
+    pub fn get_item(&self, block_height: usize) -> Option<BlockIndexItem> {
+        let guard = self.inner.read().unwrap();
+        guard.get_item(block_height).cloned()
+    }
+
+    /// Given a specific ledger and chunk offset, where did the block containing
+    /// that ledger offset that offset start and end, in ledger relative chunk
+    /// offsets
+    pub fn get_block_bounds(&self, ledger: Ledger, chunk_offset: u64) -> BlockBounds {
+        self.inner
+            .read()
+            .unwrap()
+            .get_block_bounds(ledger, chunk_offset)
+    }
+
+    /// For a given ledger relative chunk offset, retrieve the block index data
+    /// for the block responsible for adding it to the ledger.
+    pub fn get_block_index_item(
+        &self,
+        ledger: Ledger,
+        chunk_offset: u64,
+    ) -> eyre::Result<(usize, BlockIndexItem)> {
+        let guard = self.inner.read().unwrap();
+        let (idx, item) = guard.get_block_index_item(ledger, chunk_offset)?;
+        Ok((idx, item.clone()))
+    }
+}
+
 /// The Mempool oversees pending transactions and validation of incoming tx.
+/// This actor primarily serves as a wrapper for nested block_index_data struct
+/// allowing it to receive to actix messages and update its state.
 #[derive(Debug)]
 pub struct BlockIndexActor {
     block_index: Arc<RwLock<BlockIndex<Initialized>>>,
@@ -144,6 +201,14 @@ impl Handler<BlockConfirmedMessage> for BlockIndexActor {
     }
 }
 
+impl Handler<GetBlockIndexViewMessage> for BlockIndexActor {
+    type Result = BlockIndexView;
+
+    fn handle(&mut self, _msg: GetBlockIndexViewMessage, _ctx: &mut Self::Context) -> Self::Result {
+        BlockIndexView::new(self.block_index.clone())
+    }
+}
+
 /// Returns the current block height in the index
 #[derive(Message, Clone, Debug)]
 #[rtype(result = "Option<BlockIndexItem>")]
@@ -158,21 +223,5 @@ impl Handler<GetLatestBlockIndexMessage> for BlockIndexActor {
         let bi = self.block_index.read().unwrap();
         let block_height = bi.num_blocks().max(1) as usize - 1;
         Some(bi.get_item(block_height)?.clone())
-    }
-}
-
-/// Returns the block bounds containing ledger offset
-#[derive(Message, Clone, Debug)]
-#[rtype(result = "Option<BlockBounds>")]
-pub struct GetBlockBoundsMessage {
-    pub ledger: Ledger,
-    pub chunk_offset: u64,
-}
-
-impl Handler<GetBlockBoundsMessage> for BlockIndexActor {
-    type Result = Option<BlockBounds>;
-    fn handle(&mut self, msg: GetBlockBoundsMessage, _ctx: &mut Self::Context) -> Self::Result {
-        let bi = self.block_index.read().unwrap();
-        Some(bi.get_block_bounds(msg.ledger, msg.chunk_offset))
     }
 }
