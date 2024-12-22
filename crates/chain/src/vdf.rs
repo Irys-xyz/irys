@@ -1,7 +1,7 @@
 use actix::Addr;
 use irys_actors::{
+    broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     mining::Seed,
-    mining_broadcaster::{BroadcastMiningSeed, MiningBroadcaster},
 };
 use irys_types::{
     vdf_config::VDFStepsConfig, H256, NONCE_LIMITER_RESET_FREQUENCY, NUM_CHECKPOINTS_IN_VDF_STEP,
@@ -51,7 +51,7 @@ pub fn run_vdf(
     config: VDFStepsConfig,
     seed: H256,
     new_seed_listener: Receiver<H256>,
-    mining_broadcaster: Addr<MiningBroadcaster>,
+    broadcast_mining_service: Addr<BroadcastMiningService>,
 ) {
     let mut hasher = Sha256::new();
     let mut hash: H256 = H256::from_slice(seed.as_bytes());
@@ -78,7 +78,7 @@ pub fn run_vdf(
         debug!("Vdf step duration: {:.2?}", elapsed);
 
         debug!("Seed created {}", hash.clone());
-        mining_broadcaster.do_send(BroadcastMiningSeed(Seed(hash)));
+        broadcast_mining_service.do_send(BroadcastMiningSeed(Seed(hash)));
 
         if let Ok(h) = new_seed_listener.try_recv() {
             debug!("New Send Seed {}", h); // TODO: wire new seed injections from chain accepted blocks message BlockConfirmedMessage

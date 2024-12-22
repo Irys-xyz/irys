@@ -79,17 +79,18 @@ pub async fn get_tx(
 
 #[cfg(test)]
 mod tests {
+    use crate::routes;
+
     use super::*;
     use actix::Actor;
     use actix_web::{middleware::Logger, test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
-    use eyre::eyre;
     use irys_actors::mempool::MempoolActor;
     use irys_database::{config::get_data_dir, tables::IrysTables};
     use irys_storage::ChunkProvider;
     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
-    use log::{debug, error, info, log_enabled, Level};
+    use tracing::{debug, error, info, Level};
     use reth::tasks::TaskManager;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -141,7 +142,7 @@ mod tests {
             App::new()
                 .wrap(Logger::default())
                 .app_data(web::Data::new(app_state))
-                .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx))),
+                .service(routes()),
         )
         .await;
 

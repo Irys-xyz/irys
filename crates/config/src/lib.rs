@@ -3,6 +3,7 @@ use std::{
     env,
     path::{absolute, PathBuf},
     str::FromStr as _,
+    fs,
 };
 
 use chain::chainspec::IrysChainSpecBuilder;
@@ -11,6 +12,7 @@ use irys_types::{
     block_production::Partition, irys::IrysSigner, Address, PartitionStorageProviderConfig,
     StorageModuleConfig, CHUNK_SIZE,
 };
+use tracing::info;
 
 pub mod chain;
 
@@ -38,6 +40,12 @@ impl Default for IrysNodeConfig {
             .expect("Unable to determine working dir, aborting")
             .join(".irys");
 
+        // remove existing data directory as storage modules are packed with a different miner_signer generated next
+        info!("Removing .irys folder {:?}", &base_dir);
+        if fs::exists(&base_dir).unwrap_or(false) {
+            fs::remove_dir_all(&base_dir).expect("Unable to remove .irys folder");
+        }
+        
         Self {
             chainspec_builder: IrysChainSpecBuilder::mainnet(),
             mining_signer: IrysSigner::random_signer(),

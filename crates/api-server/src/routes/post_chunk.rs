@@ -5,6 +5,7 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_actors::mempool::{ChunkIngressError, ChunkIngressMessage};
 use irys_types::UnpackedChunk;
+use log::info;
 
 use crate::ApiState;
 
@@ -16,6 +17,7 @@ pub async fn post_chunk(
     state: web::Data<ApiState>,
     body: Json<UnpackedChunk>,
 ) -> actix_web::Result<HttpResponse> {
+    info!("Received chunk");
     let chunk = body.into_inner();
 
     // Create an actor message and send it

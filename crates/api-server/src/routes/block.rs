@@ -31,6 +31,8 @@ pub async fn get_block(
 
 #[cfg(test)]
 mod tests {
+    use crate::routes;
+
     use super::*;
     use actix::Actor;
     use actix_web::{middleware::Logger, test, App, Error};
@@ -93,7 +95,7 @@ mod tests {
             App::new()
                 .wrap(Logger::default())
                 .app_data(web::Data::new(app_state))
-                .service(web::scope("/v1").route("/block/{block_hash}", web::get().to(get_block))),
+                .service(routes()),
         )
         .await;
 
@@ -143,7 +145,7 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(app_state))
-                .service(web::scope("/v1").route("/block/{block_hash}", web::get().to(get_block))),
+                .service(routes()),
         )
         .await;
 

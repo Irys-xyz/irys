@@ -1,8 +1,11 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::Actor;
+use actix::{Actor, ArbiterService};
 use irys_actors::{
+    block_discovery::BlockDiscoveryActor,
     block_index::BlockIndexActor,
-    block_producer::{BlockConfirmedMessage, BlockProducerActor},
+    block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
+    block_tree::BlockTreeActor,
+    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration::ChunkMigrationActor,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage, GetLedgersMessage,
@@ -10,7 +13,6 @@ use irys_actors::{
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
-    mining_broadcaster::{self, BroadcastDifficultyUpdate, MiningBroadcaster},
     packing::{wait_for_packing, PackingActor, PackingRequest},
     ActorAddresses,
 };
@@ -24,10 +26,7 @@ use irys_storage::{
     initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
-    app_state::DatabaseProvider, block_production::PartitionId, calculate_initial_difficulty,
-    difficulty_adjustment_config, partition::PartitionHash, storage_config,
-    vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256, PACKING_SHA_1_5_S,
-    U256,
+    app_state::DatabaseProvider, block_production::PartitionId, calculate_initial_difficulty, difficulty_adjustment_config, irys::IrysSigner, partition::PartitionHash, storage_config, vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256, PACKING_SHA_1_5_S, U256
 };
 use reth::{
     builder::FullNode,
@@ -52,18 +51,38 @@ use crate::vdf::run_vdf;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 
 pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
-    start_irys_node(config).await
+
+    let storage_config = StorageConfig {
+        chunk_size: 32, 
+        num_chunks_in_partition: 400,
+        num_chunks_in_recall_range: 80,
+        num_partitions_in_slot: 1,
+        miner_address: config.mining_signer.address(),
+        min_writes_before_sync: 1,
+        entropy_packing_iterations: 1_000,
+        };
+
+    start_irys_node(config, storage_config).await
 }
 
 pub async fn start_for_testing_default(
     name: Option<&str>,
     keep: bool,
+    miner_signer: IrysSigner,
+    storage_config: StorageConfig,
 ) -> eyre::Result<IrysNodeCtx> {
     let config = IrysNodeConfig {
         base_directory: setup_tracing_and_temp_dir(name, keep).into_path(),
+        mining_signer: miner_signer.clone(),
         ..Default::default()
     };
-    start_irys_node(config).await
+
+    let storage_config = StorageConfig {
+        miner_address: miner_signer.address(), // just in case to keep the same miner address
+        ..storage_config
+        };
+
+    start_irys_node(config, storage_config).await
 }
 
 #[derive(Debug, Clone)]
@@ -72,9 +91,10 @@ pub struct IrysNodeCtx {
     pub actor_addresses: ActorAddresses,
     pub db: DatabaseProvider,
     pub config: Arc<IrysNodeConfig>,
+    pub chunk_provider: ChunkProvider,
 }
 
-pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
+pub async fn start_irys_node(node_config: IrysNodeConfig, storage_config: StorageConfig) -> eyre::Result<IrysNodeCtx> {
     info!("Using directory {:?}", &node_config.base_directory);
     let (reth_handle_sender, reth_handle_receiver) =
         oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
@@ -88,15 +108,6 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
         min_adjustment_factor: 0.25, // a minimum 25% adjustment threshold
         min_difficulty: U256::one(),
         max_difficulty: U256::MAX,
-    };
-    let storage_config = StorageConfig {
-        chunk_size: 32,
-        num_chunks_in_partition: 400,
-        num_chunks_in_recall_range: 80,
-        num_partitions_in_slot: 1,
-        miner_address: arc_config.mining_signer.address(),
-        min_writes_before_sync: 1,
-        entropy_packing_iterations: 1_000,
     };
 
     // TODO: Hard coding 3 for storage module count isn't great here,
@@ -226,15 +237,25 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
 
                 let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
-                let mining_broadcaster = MiningBroadcaster::new();
-                let mining_broadcaster_addr = mining_broadcaster.start();
+                let block_tree_actor =
+                    BlockTreeActor::new(block_index_actor_addr.clone(), mempool_actor_addr.clone());
+                let block_tree = block_tree_actor.start();
+
+                let block_discovery_actor = BlockDiscoveryActor {
+                    block_index,
+                    block_tree: block_tree.clone(),
+                    epoch_service: epoch_service_actor_addr.clone(),
+                    mempool: mempool_actor_addr.clone(),
+                    db: db.clone(),
+                };
+                let block_discovery_addr = block_discovery_actor.start();
 
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
                     mempool_actor_addr.clone(),
                     chunk_migration_addr.clone(),
                     block_index_actor_addr.clone(),
-                    mining_broadcaster_addr.clone(),
+                    block_discovery_addr.clone(),
                     epoch_service_actor_addr.clone(),
                     reth_node.clone(),
                     storage_config.clone(),
@@ -242,6 +263,7 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     VDFStepsConfig::default(),
                 );
                 let block_producer_addr = block_producer_actor.start();
+                block_tree.do_send(RegisterBlockProducerMessage(block_producer_addr.clone()));
 
                 let mut part_actors = Vec::new();
 
@@ -250,7 +272,6 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                         miner_address,
                         db.clone(),
                         block_producer_addr.clone().recipient(),
-                        mining_broadcaster_addr.clone(),
                         sm.clone(),
                         false, // do not start mining automatically
                     );
@@ -282,15 +303,16 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                 debug!("Packing complete");
 
                 // Let the partition actors know about the genesis difficulty
-                mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(arc_genesis.clone()));
+                let broadcast_mining_service = BroadcastMiningService::from_registry();
+                broadcast_mining_service.do_send(BroadcastDifficultyUpdate(arc_genesis.clone()));
 
                 let part_actors_clone = part_actors.clone();
-                std::thread::spawn(move || {
+                let vdf_thread_handler = std::thread::spawn(move || {
                     run_vdf(
                         VDFStepsConfig::default(),
                         H256::random(),
                         new_seed_rx,
-                        mining_broadcaster_addr.clone(),
+                        broadcast_mining_service.clone(),
                     )
                 });
 
@@ -303,15 +325,16 @@ pub async fn start_irys_node(node_config: IrysNodeConfig) -> eyre::Result<IrysNo
                     epoch_service: epoch_service_actor_addr,
                 };
 
+                let chunk_provider =
+                    ChunkProvider::new(storage_config.clone(), storage_modules.clone(), db.clone());
+
                 let _ = irys_node_handle_sender.send(IrysNodeCtx {
                     actor_addresses: actor_addresses.clone(),
                     reth_handle: reth_node,
                     db: db.clone(),
                     config: arc_config.clone(),
+                    chunk_provider: chunk_provider.clone(),
                 });
-
-                let chunk_provider =
-                    ChunkProvider::new(storage_config.clone(), storage_modules.clone(), db.clone());
 
                 run_server(ApiState {
                     mempool: mempool_actor_addr,
