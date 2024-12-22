@@ -16,9 +16,9 @@ use crate::block_producer::BlockConfirmedMessage;
 // Read only view of BlockIndex State
 //------------------------------------------------------------------------------
 
-/// Retrieve a read only reference to the ledger partition assignments
+/// Retrieve a read only view of the block_index_data
 #[derive(Message, Debug)]
-#[rtype(result = "BlockIndexView")] // Remove MessageResult wrapper since type implements MessageResponse
+#[rtype(result = "BlockIndexView")]
 pub struct GetBlockIndexViewMessage;
 
 /// A read only view of Block Index state (stores a reference to original block_index)
