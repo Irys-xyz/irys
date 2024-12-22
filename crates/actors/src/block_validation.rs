@@ -2,17 +2,11 @@ use actix::prelude::*;
 
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
-use irys_types::{
-    storage_config::StorageConfig, validate_path, vdf_config::VDFStepsConfig, IrysBlockHeader,
-    PoaData, VDFLimiterInfo, H256,
-};
+use irys_types::{storage_config::StorageConfig, validate_path, IrysBlockHeader, PoaData};
 use openssl::sha;
 use tracing::{debug, error, info};
 
-use crate::{
-    block_index::{BlockIndexActor, GetBlockBoundsMessage},
-    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
-};
+use crate::{block_index::BlockIndexView, epoch_service::PartitionAssignmentsReadGuard};
 
 pub fn block_is_valid(
     block: &IrysBlockHeader,
@@ -47,10 +41,11 @@ pub fn block_is_valid(
     Ok(())
 }
 
-pub async fn poa_is_valid(
+/// Returns Ok if the provided PoA is valid, Err otherwise
+pub fn poa_is_valid(
     poa: &PoaData,
-    block_index_addr: &Addr<BlockIndexActor>,
-    epoch_service_addr: &Addr<EpochServiceActor>,
+    block_index_view: &BlockIndexView,
+    partitions_view: &PartitionAssignmentsReadGuard,
     config: &StorageConfig,
 ) -> eyre::Result<()> {
     // data chunk
@@ -58,9 +53,9 @@ pub async fn poa_is_valid(
         (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_num)
     {
         // partition data -> ledger data
-        let partition_assignment = epoch_service_addr
-            .send(GetPartitionAssignmentMessage(poa.partition_hash))
-            .await?
+        let partition_assignment = partitions_view
+            .read()
+            .get_assignment(poa.partition_hash)
             .unwrap();
 
         let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
@@ -69,15 +64,8 @@ pub async fn poa_is_valid(
             + poa.partition_chunk_offset;
 
         // ledger data -> block
-        let bb = block_index_addr
-            .send(GetBlockBoundsMessage {
-                ledger: Ledger::ALL[ledger_num as usize],
-                chunk_offset: ledger_chunk_offset,
-            })
-            .await
-            .unwrap()
-            .unwrap();
-
+        let ledger = Ledger::try_from(ledger_num).unwrap();
+        let bb = block_index_view.get_block_bounds(ledger, ledger_chunk_offset);
         if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(eyre::eyre!("PoA chunk offset out of block bounds"));
         };
@@ -85,14 +73,21 @@ pub async fn poa_is_valid(
         let block_chunk_offset = (ledger_chunk_offset - bb.start_chunk_offset) as u128;
 
         // tx_path validation
-        let tx_path_result = validate_path(bb.tx_root.0, &tx_path, block_chunk_offset*(config.chunk_size as u128))?;
+        let tx_path_result = validate_path(
+            bb.tx_root.0,
+            &tx_path,
+            block_chunk_offset * (config.chunk_size as u128),
+        )?;
 
         // TODO: check if bounds are byte or chunk relative
-        if !(tx_path_result.left_bound..=tx_path_result.right_bound).contains(&(block_chunk_offset*(config.chunk_size as u128))) {
+        if !(tx_path_result.left_bound..=tx_path_result.right_bound)
+            .contains(&(block_chunk_offset * (config.chunk_size as u128)))
+        {
             return Err(eyre::eyre!("PoA chunk offset out of tx bounds"));
         }
 
-        let tx_chunk_offset = block_chunk_offset*(config.chunk_size as u128) - tx_path_result.left_bound;
+        let tx_chunk_offset =
+            block_chunk_offset * (config.chunk_size as u128) - tx_path_result.left_bound;
 
         // data_path validation
         let data_path_result =
@@ -100,7 +95,9 @@ pub async fn poa_is_valid(
 
         if !(data_path_result.left_bound..=data_path_result.right_bound).contains(&tx_chunk_offset)
         {
-            return Err(eyre::eyre!("PoA chunk offset out of tx's data chunks bounds"));
+            return Err(eyre::eyre!(
+                "PoA chunk offset out of tx's data chunks bounds"
+            ));
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -137,7 +134,7 @@ pub async fn poa_is_valid(
             config.miner_address,
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
-            config.entropy_packing_iterations,            
+            config.entropy_packing_iterations,
             config.chunk_size as usize,
             &mut entropy_chunk,
         );
@@ -156,8 +153,11 @@ pub async fn poa_is_valid(
 #[cfg(test)]
 mod tests {
     use crate::{
+        block_index::GetBlockIndexViewMessage,
         block_producer::BlockConfirmedMessage,
-        epoch_service::{EpochServiceConfig, GetLedgersMessage, NewEpochMessage},
+        epoch_service::{
+            EpochServiceConfig, GetLedgersMessage, GetPartitionAssignmentsMessage, NewEpochMessage,
+        },
     };
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
@@ -212,8 +212,6 @@ mod tests {
         let mut epoch_service = EpochServiceActor::new(Some(config.clone()));
         let epoch_service_addr = epoch_service.start();
 
-
-
         // Tell the epoch service to initialize the ledgers
         let msg = NewEpochMessage(arc_genesis.clone());
         match epoch_service_addr.send(msg).await {
@@ -222,6 +220,10 @@ mod tests {
         }
 
         let ledgers_guard = epoch_service_addr.send(GetLedgersMessage).await.unwrap();
+        let partitions_view = epoch_service_addr
+            .send(GetPartitionAssignmentsMessage)
+            .await
+            .unwrap();
 
         let ledgers = ledgers_guard.read();
         debug!("ledgers: {:?}", ledgers);
@@ -229,7 +231,6 @@ mod tests {
         let sub_slots = ledgers.get_slots(Ledger::Submit);
 
         let partition_hash = sub_slots[0].partitions[0];
-
 
         let arc_config = Arc::new(IrysNodeConfig::default());
         let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
@@ -251,10 +252,9 @@ mod tests {
             Err(_) => panic!("Failed to index genesis block"),
         }
 
-        let partition_assignment = epoch_service_addr
-            .send(GetPartitionAssignmentMessage(partition_hash))
-            .await
-            .unwrap()
+        let partition_assignment = partitions_view
+            .read()
+            .get_assignment(partition_hash)
             .unwrap();
 
         debug!("Partition assignment {:?}", partition_assignment);
@@ -317,7 +317,11 @@ mod tests {
 
         let poa = PoaData {
             tx_path: Some(Base64(tx_path[poa_tx_num as usize].proof.clone())),
-            data_path: Some(Base64(txs[poa_tx_num as usize].proofs[poa_chunk_num as usize].proof.clone())),
+            data_path: Some(Base64(
+                txs[poa_tx_num as usize].proofs[poa_chunk_num as usize]
+                    .proof
+                    .clone(),
+            )),
             chunk: Base64(poa_chunk),
             ledger_num: Some(1),
             partition_chunk_offset: poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num,
@@ -374,6 +378,11 @@ mod tests {
             Err(_) => panic!("Failed to index second block"),
         };
 
+        let block_index_view = block_index_addr
+            .send(GetBlockIndexViewMessage)
+            .await
+            .unwrap();
+
         let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
             * storage_config.num_partitions_in_slot
             * storage_config.num_chunks_in_partition
@@ -382,25 +391,10 @@ mod tests {
         info!("ledger chunk offset: {:?}", ledger_chunk_offset);
 
         // ledger data -> block
-        let bb = block_index_addr
-            .send(GetBlockBoundsMessage {
-                ledger: Ledger::ALL[1],
-                chunk_offset: ledger_chunk_offset,
-            })
-            .await
-            .unwrap()
-            .unwrap();
-
+        let bb = block_index_view.get_block_bounds(Ledger::Submit, ledger_chunk_offset);
         info!("block bounds: {:?}", bb);
 
-        if let Err(err) = poa_is_valid(
-            &poa,
-            &block_index_addr,
-            &epoch_service_addr,
-            &storage_config,
-        )
-        .await
-        {
+        if let Err(err) = poa_is_valid(&poa, &block_index_view, &partitions_view, &storage_config) {
             panic!("PoA error {:?}", err);
         }
     }

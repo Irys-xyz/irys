@@ -2,14 +2,14 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, ArbiterService};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
-    block_index::BlockIndexActor,
+    block_index::{BlockIndexActor, GetBlockIndexViewMessage},
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
     block_tree::BlockTreeActor,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration::ChunkMigrationActor,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage, GetLedgersMessage,
-        NewEpochMessage,
+        GetPartitionAssignmentsMessage, NewEpochMessage,
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
@@ -26,7 +26,8 @@ use irys_storage::{
     initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
-    app_state::DatabaseProvider, block_production::PartitionId, calculate_initial_difficulty, difficulty_adjustment_config, irys::IrysSigner, partition::PartitionHash, storage_config, vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256, PACKING_SHA_1_5_S, U256
+    app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
+    vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256, U256,
 };
 use reth::{
     builder::FullNode,
@@ -51,16 +52,15 @@ use crate::vdf::run_vdf;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 
 pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
-
     let storage_config = StorageConfig {
-        chunk_size: 32, 
+        chunk_size: 32,
         num_chunks_in_partition: 400,
         num_chunks_in_recall_range: 80,
         num_partitions_in_slot: 1,
         miner_address: config.mining_signer.address(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
-        };
+    };
 
     start_irys_node(config, storage_config).await
 }
@@ -80,7 +80,7 @@ pub async fn start_for_testing_default(
     let storage_config = StorageConfig {
         miner_address: miner_signer.address(), // just in case to keep the same miner address
         ..storage_config
-        };
+    };
 
     start_irys_node(config, storage_config).await
 }
@@ -94,7 +94,10 @@ pub struct IrysNodeCtx {
     pub chunk_provider: ChunkProvider,
 }
 
-pub async fn start_irys_node(node_config: IrysNodeConfig, storage_config: StorageConfig) -> eyre::Result<IrysNodeCtx> {
+pub async fn start_irys_node(
+    node_config: IrysNodeConfig,
+    storage_config: StorageConfig,
+) -> eyre::Result<IrysNodeCtx> {
     info!("Using directory {:?}", &node_config.base_directory);
     let (reth_handle_sender, reth_handle_receiver) =
         oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
@@ -192,6 +195,16 @@ pub async fn start_irys_node(node_config: IrysNodeConfig, storage_config: Storag
                     debug!("ledgers: {:?}", ledgers);
                 }
 
+                let partition_assignments_view = epoch_service_actor_addr
+                    .send(GetPartitionAssignmentsMessage)
+                    .await
+                    .unwrap();
+
+                let block_index_view = block_index_actor_addr
+                    .send(GetBlockIndexViewMessage)
+                    .await
+                    .unwrap();
+
                 // Get the genesis storage modules and their assigned partitions
                 let storage_module_infos = epoch_service_actor_addr
                     .send(GetGenesisStorageModulesMessage)
@@ -242,10 +255,11 @@ pub async fn start_irys_node(node_config: IrysNodeConfig, storage_config: Storag
                 let block_tree = block_tree_actor.start();
 
                 let block_discovery_actor = BlockDiscoveryActor {
-                    block_index,
+                    block_index_view: block_index_view.clone(),
+                    partition_assignments_view: partition_assignments_view.clone(),
                     block_tree: block_tree.clone(),
-                    epoch_service: epoch_service_actor_addr.clone(),
                     mempool: mempool_actor_addr.clone(),
+                    storage_config: storage_config.clone(),
                     db: db.clone(),
                 };
                 let block_discovery_addr = block_discovery_actor.start();
