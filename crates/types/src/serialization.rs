@@ -144,6 +144,27 @@ impl Decodable for H256 {
 }
 
 //==============================================================================
+// TxIngressProof
+//------------------------------------------------------------------------------
+#[derive(
+    Clone,
+    Default,
+    Compact,
+    Eq,
+    PartialEq,
+    Debug,
+    Arbitrary,
+    RlpEncodable,
+    RlpDecodable,
+    Serialize,
+    Deserialize,
+)]
+pub struct TxIngressProof {
+    pub proof: H256,
+    pub signature: IrysSignature,
+}
+
+//==============================================================================
 // Address Base58
 //------------------------------------------------------------------------------
 pub mod address_base58_stringify {
