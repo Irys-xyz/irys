@@ -153,17 +153,16 @@ pub fn poa_is_valid(
 #[cfg(test)]
 mod tests {
     use crate::{
-        block_index::GetBlockIndexViewMessage,
+        block_index::{BlockIndexActor, GetBlockIndexViewMessage},
         block_producer::BlockConfirmedMessage,
         epoch_service::{
-            EpochServiceConfig, GetLedgersMessage, GetPartitionAssignmentsMessage, NewEpochMessage,
+            EpochServiceActor, EpochServiceConfig, GetLedgersMessage, GetPartitionAssignmentsMessage, NewEpochMessage
         },
     };
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
-        irys::IrysSigner, Address, Base64, H256List, IrysSignature, IrysTransaction,
-        IrysTransactionHeader, Signature, TransactionLedger, PACKING_SHA_1_5_S, U256,
+        irys::IrysSigner, Address, Base64, H256List, IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, TransactionLedger, VDFLimiterInfo, H256, PACKING_SHA_1_5_S, U256
     };
     use reth::revm::primitives::B256;
     use std::str::FromStr;
