@@ -1,24 +1,20 @@
 use std::{
-    str::FromStr,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    collections::HashMap, str::FromStr, sync::Arc, time::{SystemTime, UNIX_EPOCH}
 };
 
 use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
-use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
+use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid, Ledger};
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64,
-    DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysSignature, IrysTransactionHeader,
-    PoaData, Signature, TransactionLedger, VDFLimiterInfo, H256, U256,
+    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, ingress::IngressProof, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64, DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysSignature, IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256
 };
 use openssl::sha;
 use reth::revm::primitives::B256;
 use reth_db::Database;
+use reth_db::cursor::*;
 use tracing::{error, info};
 
 use crate::{
@@ -53,6 +49,7 @@ pub struct BlockProducerActor {
     pub storage_config: StorageConfig,
     /// Difficulty adjustment parameters for the Irys Protocol
     pub difficulty_config: DifficultyAdjustmentConfig,
+    /// VDF configuration parameters
     pub vdf_config: VDFStepsConfig,
 }
 
@@ -103,7 +100,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
     type Result =
         AtomicResponse<Self, Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>>;
 
-    fn handle(&mut self, msg: SolutionFoundMessage, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
         let solution = msg.0;
         info!(
             "BlockProducerActor solution received partition_hash:{:?} offset:{} capacity:{} chunk_length:{}",
@@ -126,252 +123,313 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
-        let self_addr = ctx.address();
         let difficulty_config = self.difficulty_config.clone();
         let chunk_size = self.storage_config.chunk_size;
+        
+        // let self_addr = ctx.address();
+        // let storage_config = self.storage_config.clone();
+        // let vdf_config = self.vdf_config.clone();
 
-        let storage_config = self.storage_config.clone();
-        let vdf_config = self.vdf_config.clone();
+        AtomicResponse::new(Box::pin( async move {
+            // Acquire lock and check that the height hasn't changed identifying a race condition
+            // TEMP: This demonstrates how to get the block height from the block_index_actor
+            let latest_block = block_index_addr
+                .send(GetLatestBlockIndexMessage {})
+                .await
+                .unwrap();
 
-        AtomicResponse::new(Box::pin(
-            async move {
-                // Acquire lock and check that the height hasn't changed identifying a race condition
-                // TEMP: This demonstrates how to get the block height from the block_index_actor
-                let latest_block = block_index_addr
-                    .send(GetLatestBlockIndexMessage {})
-                    .await
-                    .unwrap();
+            // Retrieve the previous block header and hash
+            let prev_block_header: IrysBlockHeader;
+            let prev_block_hash: H256;
 
-                let prev_block_header: Option<IrysBlockHeader>;
-                let prev_block_hash: H256;
-
-                if let Some(block_item) = latest_block {
-                    prev_block_hash = block_item.block_hash;
-                    prev_block_header = db
-                        .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash))
-                        .unwrap();
-                } else {
-                    prev_block_hash = H256::default();
-                    prev_block_header = None;
-                }
-
-                // Retrieve all the transaction headers for the previous block
-                let prev_block_header = match prev_block_header {
-                    Some(header) => header,
-                    None => {
-                        error!("No previous block header found");
+            if let Some(block_item) = latest_block {
+                prev_block_hash = block_item.block_hash;
+                prev_block_header = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash)) {
+                    Ok(Some(header)) => header,
+                    Ok(None) => {
+                        error!("No block header found for hash {}", prev_block_hash);
+                        return None;
+                    },
+                    Err(e) => {
+                        error!("Failed to get previous block header: {}", e);
                         return None;
                     }
                 };
+            } else {
+                error!("No previous block header found");
+                return None;
+            }
 
-                // Translate partition hash, chunk offset -> ledger, ledger chunk offset
-                let ledger_num = epoch_service_addr
-                    .send(GetPartitionAssignmentMessage(solution.partition_hash))
-                    .await
-                    .unwrap()
-                    .map(|pa| pa.ledger_num)
-                    .flatten();
+            // Retrieve all the transaction headers for the previous block
+            // Translate partition hash, chunk offset -> ledger, ledger chunk offset
+            let ledger_num = epoch_service_addr
+                .send(GetPartitionAssignmentMessage(solution.partition_hash))
+                .await
+                .unwrap()
+                .map(|pa| pa.ledger_num)
+                .flatten();
 
-                let data_txs: Vec<IrysTransactionHeader> =
-                    mempool_addr.send(GetBestMempoolTxs).await.unwrap();
+            // Get all the ingress proofs for data promotion
+            let mut promotions: Vec<IrysTransactionHeader> = Vec::new();
+            let mut publish_txids: Vec<H256> = Vec::new();
+            {
+                let read_tx = db.tx().map_err(|e| {
+                    error!("Failed to create transaction: {}", e);
+                }).ok()?;
 
-                let bytes_added = data_txs.iter().fold(0, |acc, tx| {
-                    acc + tx.data_size.div_ceil(chunk_size) * chunk_size
-                });
-        
-                let chunks_added = bytes_added / chunk_size;
+                let mut read_cursor = read_tx.new_cursor::<IngressProofs>().map_err(|e| {
+                    error!("Failed to create cursor: {}", e);
+                }).ok()?;
 
-                // TODO: Eventually we'll need a more robust solution for growing the Ledgers
-                // when we add promotion we'll solve both at that time. This was just to
-                // fix a bug where the ledger size would cause an inverted interval to be 
-                // created, e.g.g (3..0) and the node would panic. 
-                let max_chunk_offset = prev_block_header.ledgers[Ledger::Submit].max_chunk_offset + chunks_added;
+                let walker = read_cursor.walk(None).map_err(|e| {
+                    error!("Failed to create walker: {}", e);
+                }).ok()?;
 
-                let data_tx_ids = data_txs.iter().map(|h| h.id.clone()).collect::<Vec<H256>>();
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                let ingress_proofs = walker.collect::<Result<HashMap<_, _>, _>>().map_err(|e| {
+                    error!("Failed to collect results: {}", e);
+                }).ok()?;
 
-                // Difficulty adjustment logic
-                let current_timestamp = now.as_millis();
-                let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
-                let current_difficulty = prev_block_header.diff;
-                let mut is_difficulty_updated = false;
-                let block_height = prev_block_header.height + 1;
-
-                let (diff, stats) = calculate_difficulty(block_height, last_diff_timestamp, current_timestamp, current_difficulty, &difficulty_config);
-
-                // Did an adjustment happen?
-                if let Some(stats) = stats {
-                    if stats.is_adjusted {
-                        println!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
-                        println!(" max: {}\nlast: {}\nnext: {}", U256::MAX, current_difficulty, diff);
-                        is_difficulty_updated = true;
-                    } else {
-                        println!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
+                for (data_root, _proof) in &ingress_proofs {
+                    let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
+                    if let Some(cached_data_root) = cached_data_root {
+                        publish_txids.extend(cached_data_root.txid_set);
                     }
-                    last_diff_timestamp = current_timestamp;
                 }
 
-                // TODO: Hash the block signature to create a block_hash
-                // Generate a very stupid block_hash right now which is just
-                // the hash of the timestamp
-                let block_hash = hash_sha256(&current_timestamp.to_le_bytes());
+                // Loop though all the pending tx to see which haven't been promoted 
+                for txid in &publish_txids {
+                    let tx_header = tx_header_by_txid(&read_tx, &txid).unwrap();
+                    if let Some(mut tx_header) = tx_header {
+                        if let None = tx_header.ingress_proofs {
+                            // Get the proof
+                            let proof = ingress_proofs.get(&txid).unwrap();
+                            tx_header.ingress_proofs = Some(TxIngressProof{ 
+                                proof: proof.proof, 
+                                signature: IrysSignature{reth_signature: proof.signature} 
+                            });
+                            promotions.push(tx_header);
+                        }
+                    }
+                }
+            }
 
-                let poa = PoaData {
-                    tx_path: solution.tx_path.map(|tx_path| Base64(tx_path)),
-                    data_path: solution.data_path.map(|data_path| Base64(data_path)),
-                    chunk: Base64(solution.chunk),
-                    ledger_num,
-                    partition_chunk_offset: solution.chunk_offset as u64,
-                    partition_hash: solution.partition_hash,
-                };
+            // Publish Ledger Transactions
+            let publish_chunks_added = calculate_chunks_added(&promotions, chunk_size);
+            let publish_max_chunk_offset =  prev_block_header.ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
+                        
 
-                let mut irys_block = IrysBlockHeader {
-                    block_hash,
-                    height: block_height,
-                    diff: diff,
-                    cumulative_diff: U256::from(5000),
-                    last_diff_timestamp: last_diff_timestamp,
-                    solution_hash: H256::zero(),
-                    previous_solution_hash: H256::zero(),
-                    last_epoch_hash: H256::random(),
-                    chunk_hash: H256::zero(),
-                    previous_block_hash: prev_block_hash,
-                    previous_cumulative_diff: U256::from(4000),
-                    poa,
-                    reward_address: Address::ZERO,
-                    reward_key: Base64::from_str("").unwrap(),
-                    signature: Signature::test_signature().into(),
-                    timestamp: current_timestamp,
-                    ledgers: vec![
-                        // Permanent Publish Ledger
-                        TransactionLedger {
-                            tx_root: H256::zero(),
-                            txids: H256List::new(),
-                            max_chunk_offset: 0,
-                            expires: None,
-                        },
-                        // Term Submit Ledger
-                        TransactionLedger {
-                            tx_root: TransactionLedger::merklize_tx_root(&data_txs).0,
-                            txids: H256List(data_tx_ids.clone()),
-                            max_chunk_offset,
-                            expires: Some(1622543200),
-                        },
-                    ],
-                    evm_block_hash: B256::ZERO,
-                    vdf_limiter_info: VDFLimiterInfo::default(),
-                };
+            // Submit Ledger Transactions    
+            let data_txs: Vec<IrysTransactionHeader> =
+                mempool_addr.send(GetBestMempoolTxs).await.unwrap();
 
-                // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
-                let context = RethNodeContext::new(reth.into()).await.unwrap();
+            let submit_chunks_added = calculate_chunks_added(&data_txs, chunk_size);
+            let submit_max_chunk_offset = prev_block_header.ledgers[Ledger::Submit].max_chunk_offset + submit_chunks_added;
 
-                let shadows = Shadows::new(
-                    data_txs
-                        .iter()
-                        .map(|header| ShadowTx {
-                            tx_id: IrysTxId::from_slice(header.id.as_bytes()),
+            let data_tx_ids = data_txs.iter().map(|h| h.id.clone()).collect::<Vec<H256>>();
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+            // Difficulty adjustment logic
+            let current_timestamp = now.as_millis();
+            let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
+            let current_difficulty = prev_block_header.diff;
+            let mut is_difficulty_updated = false;
+            let block_height = prev_block_header.height + 1;
+
+            let (diff, stats) = calculate_difficulty(block_height, last_diff_timestamp, current_timestamp, current_difficulty, &difficulty_config);
+
+            // Did an adjustment happen?
+            if let Some(stats) = stats {
+                if stats.is_adjusted {
+                    println!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                    println!(" max: {}\nlast: {}\nnext: {}", U256::MAX, current_difficulty, diff);
+                    is_difficulty_updated = true;
+                } else {
+                    println!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                }
+                last_diff_timestamp = current_timestamp;
+            }
+
+            // TODO: Hash the block signature to create a block_hash
+            // Generate a very stupid block_hash right now which is just
+            // the hash of the timestamp
+            let block_hash = hash_sha256(&current_timestamp.to_le_bytes());
+
+            let poa = PoaData {
+                tx_path: solution.tx_path.map(|tx_path| Base64(tx_path)),
+                data_path: solution.data_path.map(|data_path| Base64(data_path)),
+                chunk: Base64(solution.chunk),
+                ledger_num,
+                partition_chunk_offset: solution.chunk_offset as u64,
+                partition_hash: solution.partition_hash,
+            };
+
+            let mut irys_block = IrysBlockHeader {
+                block_hash,
+                height: block_height,
+                diff: diff,
+                cumulative_diff: U256::from(5000),
+                last_diff_timestamp: last_diff_timestamp,
+                solution_hash: H256::zero(),
+                previous_solution_hash: H256::zero(),
+                last_epoch_hash: H256::random(),
+                chunk_hash: H256::zero(),
+                previous_block_hash: prev_block_hash,
+                previous_cumulative_diff: U256::from(4000),
+                poa,
+                reward_address: Address::ZERO,
+                reward_key: Base64::from_str("").unwrap(),
+                signature: IrysSignature {
+                    reth_signature: Signature::test_signature(),
+                },
+                timestamp: current_timestamp,
+                ledgers: vec![
+                    // Permanent Publish Ledger
+                    TransactionLedger {
+                        tx_root: TransactionLedger::merklize_tx_root(&promotions).0,
+                        txids: H256List(publish_txids.clone()),
+                        max_chunk_offset: publish_max_chunk_offset,
+                        expires: None,
+                    },
+                    // Term Submit Ledger
+                    TransactionLedger {
+                        tx_root: TransactionLedger::merklize_tx_root(&data_txs).0,
+                        txids: H256List(data_tx_ids.clone()),
+                        max_chunk_offset: submit_max_chunk_offset,
+                        expires: Some(1622543200),
+                    },
+                ],
+                evm_block_hash: B256::ZERO,
+                vdf_limiter_info: VDFLimiterInfo::default(),
+            };
+
+            // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
+            let context = RethNodeContext::new(reth.into()).await.unwrap();
+
+            let shadows = Shadows::new(
+                data_txs
+                    .iter()
+                    .map(|header| ShadowTx {
+                        tx_id: IrysTxId::from_slice(header.id.as_bytes()),
+                        fee: irys_primitives::U256::from(
+                            header.term_fee + header.perm_fee.unwrap_or(0),
+                        ),
+                        address: header.signer,
+                        tx: ShadowTxType::Data(DataShadow {
                             fee: irys_primitives::U256::from(
                                 header.term_fee + header.perm_fee.unwrap_or(0),
                             ),
-                            address: header.signer,
-                            tx: ShadowTxType::Data(DataShadow {
-                                fee: irys_primitives::U256::from(
-                                    header.term_fee + header.perm_fee.unwrap_or(0),
-                                ),
-                            }),
-                        })
-                        .collect(),
-                );
-
-                // create a new reth payload
-
-                // generate payload attributes
-                // TODO: we need previous block metadata to fill in parent & prev_randao
-                let payload_attrs = PayloadAttributes {
-                    timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
-                    prev_randao: B256::ZERO,
-                    suggested_fee_recipient: irys_block.reward_address,
-                    withdrawals: None,
-                    parent_beacon_block_root: None,
-                    shadows: Some(shadows),
-                };
-
-                let exec_payload = context
-                    .engine_api
-                    .build_payload_v1_irys(B256::ZERO, payload_attrs)
-                    .await
-                    .unwrap();
-
-                // we can examine the execution status of generated shadow txs
-                // let shadow_receipts = exec_payload.shadow_receipts;
-
-                let v1_payload = exec_payload
-                    .clone()
-                    .execution_payload
-                    .payload_inner
-                    .payload_inner
-                    .payload_inner;
-                // TODO @JesseTheRobot create a deref(?) trait so this isn't as bad
-                let block_hash = v1_payload.block_hash;
-
-                irys_block.evm_block_hash = block_hash;
-
-                // TODO: Irys block header building logic
-
-                // TODO: Commit block to DB and send to networking layer
-
-                // make the built evm payload canonical
-                context
-                    .engine_api
-                    .update_forkchoice(v1_payload.parent_hash, v1_payload.block_hash)
-                    .await
-                    .unwrap();
-
-                db.update_eyre(|tx| irys_database::insert_block_header(tx, &irys_block))
-                    .unwrap();
-
-                let block = Arc::new(irys_block);
-
-                block_discovery_addr.do_send(BlockDiscoveredMessage(block.clone()));
-
-
-                // Get all the transactions for the previous block, error if not found
-                let txs = match prev_block_header.ledgers[Ledger::Submit]
-                    .txids
-                    .iter()
-                    .map(|txid| {
-                        db.view_eyre(|tx| tx_header_by_txid(tx, txid))
-                            .and_then(|opt| {
-                                opt.ok_or_else(|| {
-                                    eyre::eyre!("No tx header found for txid {:?}", txid)
-                                })
-                            })
+                        }),
                     })
-                    .collect::<Result<Vec<_>, _>>()
-                {
-                    Ok(txs) => txs,
-                    Err(e) => {
-                        error!("Failed to collect tx headers: {}", e);
-                        return None;
-                    }
-                };
+                    .collect(),
+            );
 
-                if is_difficulty_updated {
-                    mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
+            // create a new reth payload
+
+            // generate payload attributes
+            // TODO: we need previous block metadata to fill in parent & prev_randao
+            let payload_attrs = PayloadAttributes {
+                timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
+                prev_randao: B256::ZERO,
+                suggested_fee_recipient: irys_block.reward_address,
+                withdrawals: None,
+                parent_beacon_block_root: None,
+                shadows: Some(shadows),
+            };
+
+            let exec_payload = context
+                .engine_api
+                .build_payload_v1_irys(B256::ZERO, payload_attrs)
+                .await
+                .unwrap();
+
+            // we can examine the execution status of generated shadow txs
+            // let shadow_receipts = exec_payload.shadow_receipts;
+
+            let v1_payload = exec_payload
+                .clone()
+                .execution_payload
+                .payload_inner
+                .payload_inner
+                .payload_inner;
+            // TODO @JesseTheRobot create a deref(?) trait so this isn't as bad
+            let block_hash = v1_payload.block_hash;
+
+            irys_block.evm_block_hash = block_hash;
+
+            // TODO: Irys block header building logic
+
+            // TODO: Commit block to DB and send to networking layer
+
+            // make the built evm payload canonical
+            context
+                .engine_api
+                .update_forkchoice(v1_payload.parent_hash, v1_payload.block_hash)
+                .await
+                .unwrap();
+
+            db.update_eyre(|tx| irys_database::insert_block_header(tx, &irys_block))
+                .unwrap();
+
+            let block = Arc::new(irys_block);
+
+            block_discovery_addr.do_send(BlockDiscoveredMessage(block.clone()));
+
+
+            // Get all the transactions for the previous block, error if not found
+            let txs = match prev_block_header.ledgers[Ledger::Submit]
+                .txids
+                .iter()
+                .map(|txid| {
+                    db.view_eyre(|tx| tx_header_by_txid(tx, txid))
+                        .and_then(|opt| {
+                            opt.ok_or_else(|| {
+                                eyre::eyre!("No tx header found for txid {:?}", txid)
+                            })
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(txs) => txs,
+                Err(e) => {
+                    error!("Failed to collect tx headers: {}", e);
+                    return None;
                 }
+            };
 
-                chunk_migration_addr.do_send(BlockFinalizedMessage {
-                    block_header: Arc::new(prev_block_header),
-                    txs: Arc::new(txs),
-                });
-
-                Some((block.clone(), exec_payload))
+            if is_difficulty_updated {
+                mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
-            .into_actor(self),
+
+            chunk_migration_addr.do_send(BlockFinalizedMessage {
+                block_header: Arc::new(prev_block_header),
+                txs: Arc::new(txs),
+            });
+
+            Some((block.clone(), exec_payload))
+        }
+        .into_actor(self),
         ))
     }
 }
 
+/// Calculates the total number of full chunks needed to store a list of transactions,
+/// taking into account padding for partial chunks. Each transaction's data is padded 
+/// to the next full chunk boundary if it doesn't align perfectly with the chunk size.
+///
+/// # Arguments
+/// * `txs` - Vector of transaction headers containing data size information
+/// * `chunk_size` - Size of each chunk in bytes
+///
+/// # Returns
+/// Total number of chunks needed, including padding for partial chunks
+pub fn calculate_chunks_added(txs: &Vec<IrysTransactionHeader>, chunk_size: u64) -> u64 {
+    let bytes_added = txs.iter().fold(0, |acc, tx| {
+        acc + tx.data_size.div_ceil(chunk_size) * chunk_size
+    });
+    let chunks_added = bytes_added / chunk_size;
+    chunks_added
+}
 /// When a block is confirmed, this message broadcasts the block header and the
 /// submit ledger TX that were added as part of this block.
 /// This works for bootstrap node mining, but eventually blocks will be received

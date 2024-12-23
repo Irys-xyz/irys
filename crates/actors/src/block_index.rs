@@ -1,9 +1,11 @@
-use crate::block_producer::BlockConfirmedMessage;
+use crate::{calculate_chunks_added, BlockConfirmedMessage};
 use actix::prelude::*;
-use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
+use irys_database::{
+    BlockBounds, BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem,
+};
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
 use std::{
-    sync::{Arc, RwLock, RwLockReadGuard},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -93,15 +95,7 @@ impl BlockIndexActor {
     ) {
         let chunk_size = self.storage_config.chunk_size;
 
-        // Calculate total bytes needed, rounding each tx up to nearest chunk_size
-        // Example: data_size 300KB with 256KiB chunks:
-        // (300KB + 256KB - 1) / 256KB = 2 chunks -> 2 * 256KB = 512KB total
-        let bytes_added = data_txs
-            .iter()
-            .map(|tx| ((tx.data_size + chunk_size - 1) / chunk_size) * chunk_size)
-            .sum::<u64>();
-
-        let chunks_added = bytes_added / chunk_size;
+        let chunks_added = calculate_chunks_added(&data_txs, chunk_size);
 
         let mut index = self.block_index.write().unwrap();
 
