@@ -12,3 +12,4 @@ pub mod mining;
 pub mod packing;
 
 pub use addresses::*;
+pub use block_producer::*;
