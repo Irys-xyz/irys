@@ -133,12 +133,12 @@ impl LedgersReadGuard {
 /// Retrieve a read only reference to the ledger partition assignments
 #[derive(Message, Debug)]
 #[rtype(result = "LedgersReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
-pub struct GetLedgersMessage;
+pub struct GetLedgersGuardMessage;
 
-impl Handler<GetLedgersMessage> for EpochServiceActor {
+impl Handler<GetLedgersGuardMessage> for EpochServiceActor {
     type Result = LedgersReadGuard; // Return guard directly
 
-    fn handle(&mut self, _msg: GetLedgersMessage, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, _msg: GetLedgersGuardMessage, _ctx: &mut Self::Context) -> Self::Result {
         LedgersReadGuard::new(Arc::clone(&self.ledgers))
     }
 }
@@ -169,14 +169,14 @@ impl PartitionAssignmentsReadGuard {
 /// Retrieve a read only reference to the ledger partition assignments
 #[derive(Message, Debug)]
 #[rtype(result = "PartitionAssignmentsReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
-pub struct GetPartitionAssignmentsMessage;
+pub struct GetPartitionAssignmentsGuardMessage;
 
-impl Handler<GetPartitionAssignmentsMessage> for EpochServiceActor {
+impl Handler<GetPartitionAssignmentsGuardMessage> for EpochServiceActor {
     type Result = PartitionAssignmentsReadGuard; // Return guard directly
 
     fn handle(
         &mut self,
-        _msg: GetPartitionAssignmentsMessage,
+        _msg: GetPartitionAssignmentsGuardMessage,
         _ctx: &mut Self::Context,
     ) -> Self::Result {
         PartitionAssignmentsReadGuard::new(self.partition_assignments.clone())
@@ -731,7 +731,7 @@ mod tests {
         // println!("Data Partitions: {:#?}", epoch_service.capacity_partitions);
         println!("Ledger State: {:#?}", epoch_service.ledgers);
 
-        let ledgers = epoch_service.handle(GetLedgersMessage, &mut Context::new());
+        let ledgers = epoch_service.handle(GetLedgersGuardMessage, &mut Context::new());
 
         println!("{:?}", ledgers.read());
 

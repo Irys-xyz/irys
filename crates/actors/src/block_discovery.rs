@@ -1,5 +1,5 @@
 use crate::{
-    block_index::BlockIndexView, block_tree::BlockTreeActor, block_validation::poa_is_valid,
+    block_index::BlockIndexReadGuard, block_tree::BlockTreeActor, block_validation::poa_is_valid,
     epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor,
 };
 use actix::prelude::*;
@@ -13,9 +13,9 @@ use tracing::error;
 #[derive(Debug)]
 pub struct BlockDiscoveryActor {
     /// Read only view of the block index
-    pub block_index_view: BlockIndexView,
+    pub block_index_guard: BlockIndexReadGuard,
     /// PartitionAssignmentsReadGuard for looking up ledger info
-    pub partition_assignments_view: PartitionAssignmentsReadGuard,
+    pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Manages forks at the head of the chain before finalization
     pub block_tree: Addr<BlockTreeActor>,
     /// Reference to the mempool actor, which maintains the validity of pending transactions.
@@ -47,16 +47,16 @@ impl Actor for BlockDiscoveryActor {
 impl BlockDiscoveryActor {
     /// Initializes a new BlockDiscoveryActor
     pub fn new(
-        block_index_view: BlockIndexView,
-        partition_assignments_view: PartitionAssignmentsReadGuard,
+        block_index_guard: BlockIndexReadGuard,
+        partition_assignments_guard: PartitionAssignmentsReadGuard,
         block_tree: Addr<BlockTreeActor>,
         mempool: Addr<MempoolActor>,
         storage_config: StorageConfig,
         db: DatabaseProvider,
     ) -> Self {
         Self {
-            block_index_view,
-            partition_assignments_view,
+            block_index_guard,
+            partition_assignments_guard,
             block_tree,
             mempool,
             storage_config,
@@ -94,12 +94,12 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         };
 
         let poa = new_block_header.poa.clone();
-        let block_index_view = self.block_index_view.clone();
-        let partitions_view = self.partition_assignments_view.clone();
+        let block_index_guard = self.block_index_guard.clone();
+        let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = self.block_tree.clone();
         let storage_config = &self.storage_config;
 
-        match poa_is_valid(&poa, &block_index_view, &partitions_view, storage_config) {
+        match poa_is_valid(&poa, &block_index_guard, &partitions_guard, storage_config) {
             Ok(_) => {
                 block_tree_addr.do_send(BlockPreValidatedMessage(
                     new_block_header,

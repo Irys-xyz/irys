@@ -2,14 +2,14 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, ArbiterService};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
-    block_index::{BlockIndexActor, GetBlockIndexViewMessage},
+    block_index::{BlockIndexActor, GetBlockIndexGuardMessage},
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
     block_tree::BlockTreeActor,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration::ChunkMigrationActor,
     epoch_service::{
-        EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage, GetLedgersMessage,
-        GetPartitionAssignmentsMessage, NewEpochMessage,
+        EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
+        GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage, NewEpochMessage,
     },
     mempool::MempoolActor,
     mining::PartitionMiningActor,
@@ -186,7 +186,7 @@ pub async fn start_irys_node(
 
                 // Retrieve ledger assignments
                 let ledgers_guard = epoch_service_actor_addr
-                    .send(GetLedgersMessage)
+                    .send(GetLedgersGuardMessage)
                     .await
                     .unwrap();
 
@@ -195,13 +195,13 @@ pub async fn start_irys_node(
                     debug!("ledgers: {:?}", ledgers);
                 }
 
-                let partition_assignments_view = epoch_service_actor_addr
-                    .send(GetPartitionAssignmentsMessage)
+                let partition_assignments_guard = epoch_service_actor_addr
+                    .send(GetPartitionAssignmentsGuardMessage)
                     .await
                     .unwrap();
 
-                let block_index_view = block_index_actor_addr
-                    .send(GetBlockIndexViewMessage)
+                let block_index_guard = block_index_actor_addr
+                    .send(GetBlockIndexGuardMessage)
                     .await
                     .unwrap();
 
@@ -255,8 +255,8 @@ pub async fn start_irys_node(
                 let block_tree = block_tree_actor.start();
 
                 let block_discovery_actor = BlockDiscoveryActor {
-                    block_index_view: block_index_view.clone(),
-                    partition_assignments_view: partition_assignments_view.clone(),
+                    block_index_guard: block_index_guard.clone(),
+                    partition_assignments_guard: partition_assignments_guard.clone(),
                     block_tree: block_tree.clone(),
                     mempool: mempool_actor_addr.clone(),
                     storage_config: storage_config.clone(),
