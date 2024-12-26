@@ -76,11 +76,11 @@ impl IrysSigner {
 
         // Create the signature hash and sign it
         let prehash = transaction.signature_hash();
-        let mut signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
-        transaction.header.signature.reth_signature = signature.with_chain_id(self.chain_id);
+        let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
-        // Drives the the txid by hashing the signature
+        transaction.header.signature = IrysSignature::new(signature);
+        // Derive the txid by hashing the signature
         let id: [u8; 32] = keccak256(signature.as_bytes()).into();
         transaction.header.id = H256::from(id);
         Ok(transaction)
@@ -126,7 +126,7 @@ mod tests {
     use crate::{hash_sha256, validate_chunk, MAX_CHUNK_SIZE};
     use assert_matches::assert_matches;
     use rand::Rng;
-    use reth_primitives::recover_signer_unchecked;
+    use reth_primitives::{recover_signer_unchecked, transaction::recover_signer};
 
     use super::IrysSigner;
 
@@ -192,8 +192,9 @@ mod tests {
         // Recover the signer as a way to verify the signature
         let prehash = tx.header.signature_hash();
         let sig = tx.header.signature.as_bytes();
-        let signer = recover_signer_unchecked(&sig, &prehash).ok();
 
-        assert_eq!(signer.unwrap(), tx.header.signer);
+        let signer = recover_signer(&sig[..].try_into().unwrap(), prehash).unwrap();
+
+        assert_eq!(signer, tx.header.signer);
     }
 }

@@ -1,19 +1,16 @@
 use actix::{Actor, Context, Handler, Message};
 use eyre::eyre;
-use irys_database::db_cache::{data_size_to_chunk_count, CachedChunk};
+use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_storage::StorageModuleVec;
-use irys_types::ingress::generate_ingress_proof_tree;
 use irys_types::irys::IrysSigner;
+use irys_types::DataChunks;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
-    IrysTransactionHeader, CHUNK_SIZE, H256,
+    IrysTransactionHeader, H256,
 };
-use irys_types::{Address, DataChunks};
 use irys_types::{DataRoot, StorageConfig};
 use reth::tasks::TaskExecutor;
-use reth::tasks::TaskManager;
-use reth_db::cursor::DbCursorRO;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
@@ -21,8 +18,7 @@ use reth_db::Database;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::fmt::Display;
-use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::block_producer::BlockConfirmedMessage;
 /// The Mempool oversees pending transactions and validation of incoming tx.
@@ -133,7 +129,7 @@ impl Handler<TxIngressMessage> for MempoolActor {
 
     fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
         let tx = &tx_msg.0;
-
+        debug!("received tx {}", &tx.id);
         // Early out if we already know about this transaction
         if self.invalid_tx.contains(&tx.id) || self.valid_tx.contains_key(&tx.id) {
             // Skip tx reprocessing if already verified (valid or invalid) to prevent
@@ -444,9 +440,10 @@ mod tests {
     use irys_types::{
         irys::IrysSigner,
         partition::{PartitionAssignment, PartitionHash},
-        storage_config, Base64, MAX_CHUNK_SIZE,
+        storage_config, Address, Base64, MAX_CHUNK_SIZE,
     };
     use rand::Rng;
+    use reth::tasks::TaskManager;
     use tokio::time::{sleep, timeout};
 
     use super::*;

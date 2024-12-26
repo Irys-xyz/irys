@@ -1,10 +1,10 @@
-use crate::{address_base58_stringify, Address, Arbitrary, Compact, Node, Proof, Signature};
+use crate::{
+    address_base58_stringify, string_or_number_to_optional_u64, string_or_number_to_u64, Address,
+    Arbitrary, Base64, Compact, IrysSignature, Node, Proof, Signature, H256, IRYS_CHAIN_ID,
+};
 use alloy_primitives::{keccak256, FixedBytes};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
-use reth_primitives::recover_signer_unchecked;
 use serde::{Deserialize, Serialize};
-
-use crate::{Base64, IrysSignature, H256};
 
 pub type IrysTransactionId = H256;
 
@@ -22,10 +22,18 @@ pub type IrysTransactionId = H256;
 )]
 #[rlp(trailing)]
 /// Stores deserialized fields from a JSON formatted Irys transaction header.
+/// will decode from strings or numeric literals for u64 fields, due to JS's max safe int being 2^53-1 instead of 2^64
 /// We include the Irys prefix to differentiate from EVM transactions.
+
 pub struct IrysTransactionHeader {
     /// A SHA-256 hash of the transaction signature.
+    #[rlp(skip)]
+    #[rlp(default)]
+    // NOTE: both rlp skip AND rlp default must be present in order for field skipping to work
     pub id: H256,
+
+    /// The transaction's version
+    pub version: u8,
 
     /// block_hash of a recent (last 50) blocks or the a recent transaction id
     /// from the signer. Multiple transactions can share the same anchor.
@@ -36,32 +44,38 @@ pub struct IrysTransactionHeader {
     pub signer: Address,
 
     /// The merkle root of the transactions data chunks
+    // #[serde(default, with = "address_base58_stringify")]
     pub data_root: H256,
 
     /// Size of the transaction data in bytes
+    #[serde(deserialize_with = "string_or_number_to_u64")]
     pub data_size: u64,
 
     /// Funds the storage of the transaction data during the storage term
+    #[serde(deserialize_with = "string_or_number_to_u64")]
     pub term_fee: u64,
 
-    /// The transaction's version
-    pub version: u8,
+    /// Destination ledger for the transaction, default is 0 - Permanent Ledger
+    #[serde(deserialize_with = "string_or_number_to_u64")]
+    pub ledger_num: u64,
+
+    /// EVM chain ID - used to prevent cross-chain replays
+    #[serde(deserialize_with = "string_or_number_to_u64")]
+    pub chain_id: u64,
 
     /// Transaction signature bytes
+    #[rlp(skip)]
+    #[rlp(default)]
     pub signature: IrysSignature,
-
-    /// Indicating the type of transaction, pledge, data, schema, etc.
-    pub tx_type: u64,
 
     /// Bundles are critical for how data items are indexed and settled, different
     /// bundle formats enable different levels of indexing and verification.
+    #[serde(default, deserialize_with = "string_or_number_to_optional_u64")]
     pub bundle_format: Option<u64>,
 
     /// Funds the storage of the transaction for the next 200+ years
+    #[serde(default, deserialize_with = "string_or_number_to_optional_u64")]
     pub perm_fee: Option<u64>,
-
-    /// Destination ledger for the transaction, default is 0 - Permanent Ledger
-    pub ledger_num: Option<u64>,
 }
 
 impl IrysTransactionHeader {
@@ -84,28 +98,7 @@ impl IrysTransactionHeader {
     /// This method ensures that the transaction signature reflects only the
     /// essential data needed for validation and security purposes.
     pub fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
-        out.put_u8(self.version);
-        out.put_u8(self.tx_type as u8);
-        self.anchor.encode(out);
-        self.signer.encode(out);
-        self.data_root.encode(out);
-        self.data_size.encode(out);
-        self.term_fee.encode(out);
-        self.tx_type.encode(out);
-
-        // Encode the optional fields if they are provided
-
-        if let Some(bundle_format) = self.bundle_format {
-            bundle_format.encode(out);
-        }
-
-        if let Some(perm_fee) = self.perm_fee {
-            perm_fee.encode(out);
-        }
-
-        if let Some(ledger_num) = self.ledger_num {
-            ledger_num.encode(out);
-        }
+        self.encode(out)
     }
 
     pub fn signature_hash(&self) -> FixedBytes<32> {
@@ -115,15 +108,12 @@ impl IrysTransactionHeader {
         prehash
     }
 
-    /// Validate the transaction signature, comparing it to the signer and
-    /// recovers the address from the signature.
+    /// Validates the transaction signature by:
+    /// 1.) generating the prehash
+    /// 2.) recovering the sender address, and comparing it to the tx's sender (sender MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> bool {
-        let prehash = self.signature_hash();
-        let sig = self.signature.as_bytes();
-
-        // We don't need to compare the recovered signer with the singer in the
-        // tx because it is included in the signature_hash
-        recover_signer_unchecked(&sig, &prehash).is_ok()
+        self.signature
+            .validate_signature(self.signature_hash(), self.signer)
     }
 }
 
@@ -156,13 +146,11 @@ impl Default for IrysTransactionHeader {
             data_size: 0,
             term_fee: 0,
             perm_fee: None,
-            ledger_num: None,
+            ledger_num: 0,
             bundle_format: None,
             version: 0,
-            tx_type: 0,
-            signature: IrysSignature {
-                reth_signature: Signature::test_signature(),
-            },
+            chain_id: IRYS_CHAIN_ID,
+            signature: Signature::test_signature().into(),
         }
     }
 }
@@ -177,42 +165,91 @@ pub type TxPathHash = H256;
 //------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    use crate::{irys::IrysSigner, IRYS_CHAIN_ID, MAX_CHUNK_SIZE};
+
     use super::*;
+    use alloy_core::hex::{self, ToHexExt};
+    use alloy_rlp::Decodable;
+    use base58::ToBase58;
+    use k256::ecdsa::SigningKey;
     use serde_json;
 
     #[test]
     fn test_irys_transaction_header_serde() {
         // Create a sample IrysTransactionHeader
         let original_header = IrysTransactionHeader {
-            id: H256::from([0u8; 32]),
+            id: H256::from([255u8; 32]),
             anchor: H256::from([1u8; 32]),
             signer: Address::default(),
             data_root: H256::from([3u8; 32]),
             data_size: 1024,
             term_fee: 100,
             perm_fee: Some(200),
-            ledger_num: Some(1),
+            ledger_num: 1,
             bundle_format: None,
-            tx_type: 1,
+            chain_id: IRYS_CHAIN_ID,
             version: 0,
-            signature: IrysSignature {
-                reth_signature: Signature::test_signature(),
-            },
+            signature: Signature::test_signature().into(),
         };
 
         // Serialize the IrysTransactionHeader to JSON
         let serialized = serde_json::to_string(&original_header).expect("Failed to serialize");
 
-        //println!("\n{}\n", serialized);
-
         // Deserialize the JSON back to IrysTransactionHeader
         let deserialized: IrysTransactionHeader =
             serde_json::from_str(&serialized).expect("Failed to deserialize");
 
-        // println!("\n original_header: {:?}\n", original_header);
-        // println!("\n deserialized: {:?}\n", deserialized);
-
         // Ensure the deserialized struct matches the original
         assert_eq!(original_header, deserialized);
+    }
+
+    const DEV_PRIVATE_KEY: &str =
+        "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
+    const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
+
+    #[test]
+    fn test_tx_encode_and_signing() {
+        // Create a sample IrysTransactionHeader
+        // commented out fields are defaulted by the RLP decoder
+        let original_header = IrysTransactionHeader {
+            // id: H256::from([255u8; 32]),
+            id: Default::default(),
+            anchor: H256::from([1u8; 32]),
+            signer: Address::ZERO,
+            data_root: H256::from([3u8; 32]),
+            data_size: 1024,
+            term_fee: 100,
+            // perm_fee: Some(200),
+            perm_fee: None,
+            ledger_num: 0,
+            chain_id: IRYS_CHAIN_ID,
+            bundle_format: None,
+            version: 0,
+            signature: Default::default(),
+        };
+
+        let mut sig_data = Vec::new();
+
+        original_header.encode(&mut sig_data);
+
+        let dec: IrysTransactionHeader =
+            IrysTransactionHeader::decode(&mut sig_data.as_slice()).unwrap();
+        assert_eq!(&dec, &original_header);
+
+        let signer = IrysSigner {
+            signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
+                .unwrap(),
+            chain_id: IRYS_CHAIN_ID,
+            chunk_size: MAX_CHUNK_SIZE,
+        };
+
+        let tx = IrysTransaction {
+            header: dec,
+            ..Default::default()
+        };
+
+        let signed_tx = signer.sign_transaction(tx.clone()).unwrap();
+
+        assert!(signed_tx.header.is_signature_valid());
     }
 }

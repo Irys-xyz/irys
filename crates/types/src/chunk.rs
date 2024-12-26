@@ -1,3 +1,4 @@
+use crate::{string_or_number_to_u32, string_or_number_to_u64};
 use alloy_primitives::Address;
 use eyre::eyre;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,7 @@ pub struct UnpackedChunk {
     /// Total size of the data stored by this data_root. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
+    #[serde(deserialize_with = "string_or_number_to_u64")]
     pub data_size: u64,
     /// Raw bytes of the merkle proof that connects the data_root and the
     /// chunk hash
@@ -29,6 +31,7 @@ pub struct UnpackedChunk {
     /// last chunk in the transaction
     pub bytes: Base64,
     // Index of the chunk in the transaction starting with 0
+    #[serde(deserialize_with = "string_or_number_to_u32")]
     pub tx_offset: TxRelativeChunkOffset,
 }
 

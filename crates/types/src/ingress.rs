@@ -1,19 +1,20 @@
 use alloy_primitives::{Address, Parity, U256};
 use alloy_signer::Signature;
+use eyre::OptionExt as _;
 use reth_codecs::Compact;
 use reth_db::DatabaseError;
 use reth_db_api::table::{Compress, Decompress};
-use reth_primitives::recover_signer_unchecked;
+use reth_primitives::transaction::recover_signer;
 use serde::{Deserialize, Serialize};
 
 use crate::irys::IrysSigner;
 
 use crate::{
-    generate_data_root, generate_ingress_leaves, DataChunks, DataRoot, Node, H256, IRYS_CHAIN_ID,
+    generate_data_root, generate_ingress_leaves, DataChunks, DataRoot, IrysSignature, Node, H256,
 };
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Compact)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact)]
 pub struct IngressProof {
-    pub signature: Signature,
+    pub signature: IrysSignature,
     pub data_root: H256,
     pub proof: H256,
 }
@@ -31,16 +32,6 @@ impl Decompress for IngressProof {
     }
 }
 
-impl Default for IngressProof {
-    fn default() -> Self {
-        Self {
-            signature: Signature::new(U256::ZERO, U256::ZERO, Parity::Parity(false)),
-            data_root: Default::default(),
-            proof: Default::default(),
-        }
-    }
-}
-
 pub fn generate_ingress_proof_tree(chunks: DataChunks, address: Address) -> eyre::Result<Node> {
     let chunks = generate_ingress_leaves(chunks.clone(), address)?;
     let root = generate_data_root(chunks.clone())?;
@@ -54,10 +45,9 @@ pub fn generate_ingress_proof(
 ) -> eyre::Result<IngressProof> {
     let root = generate_ingress_proof_tree(chunks, signer.address())?;
     let proof: [u8; 32] = root.id;
-    let mut signature: Signature = signer.signer.sign_prehash_recoverable(&proof)?.into();
-    signature = signature.with_chain_id(IRYS_CHAIN_ID);
+    let signature: Signature = signer.signer.sign_prehash_recoverable(&proof)?.into();
     Ok(IngressProof {
-        signature,
+        signature: signature.into(),
         data_root,
         proof: H256(root.id),
     })
@@ -67,7 +57,8 @@ pub fn verify_ingress_proof(proof: IngressProof, chunks: DataChunks) -> eyre::Re
     let prehash = proof.proof.0;
     let sig = proof.signature.as_bytes();
 
-    let recovered_address = recover_signer_unchecked(&sig, &prehash)?;
+    let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())
+        .ok_or_eyre("Unable to recover signer")?;
 
     // re-compute the proof
     let recomputed = generate_ingress_proof_tree(chunks, recovered_address)?;

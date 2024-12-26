@@ -3,9 +3,6 @@ edition = "2021"
 name = "irys-reth-node-bridge"
 version = "0.1.0"
 
-# for linking speed - remove if it causes problems
-crate-type = ["dylib"]
-
 [dependencies]
 irys-database.workspace = true
 alloy-eips.workspace = true
