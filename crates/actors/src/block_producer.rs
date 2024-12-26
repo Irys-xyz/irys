@@ -8,7 +8,6 @@ use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
 use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
-use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
@@ -23,7 +22,7 @@ use reth_db::Database;
 use tracing::{error, info};
 
 use crate::{
-    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor}, block_index::{BlockIndexActor, GetLatestBlockIndexMessage}, block_validation::poa_is_valid, chunk_migration::ChunkMigrationActor, epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage}, mempool::{GetBestMempoolTxs, MempoolActor}, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor}, block_index::{BlockIndexActor, GetLatestBlockIndexMessage}, chunk_migration::ChunkMigrationActor, epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage}, mempool::{GetBestMempoolTxs, MempoolActor}, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}
 };
 
 /// Used to mock up a BlockProducerActor
@@ -225,18 +224,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     partition_chunk_offset: solution.chunk_offset as u64,
                     partition_hash: solution.partition_hash,
                 };
-
-                if let Err(err) = poa_is_valid(
-                    &poa,
-                    &block_index_addr,
-                    &epoch_service_addr,
-                    &storage_config,
-                )
-                .await
-                {
-                    error!("PoA error {:?}", err);
-                    return None;
-                }
 
                 let mut irys_block = IrysBlockHeader {
                     block_hash,
