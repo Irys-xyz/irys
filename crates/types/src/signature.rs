@@ -112,7 +112,7 @@ impl Serialize for IrysSignature {
     }
 }
 
-// Implement Deserialize for H256
+// Implement Deserialize for IrysSignature
 impl<'de> Deserialize<'de> for IrysSignature {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

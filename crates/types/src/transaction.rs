@@ -68,14 +68,10 @@ pub struct IrysTransactionHeader {
     #[rlp(default)]
     pub signature: IrysSignature,
 
-    /// Bundles are critical for how data items are indexed and settled, different
-    /// bundle formats enable different levels of indexing and verification.
-    // #[serde(default, deserialize_with = "string_or_number_to_optional_u64")]
     #[serde(default, with = "optional_string_u64")]
     pub bundle_format: Option<u64>,
 
     /// Funds the storage of the transaction for the next 200+ years
-    // #[serde(default, deserialize_with = "string_or_number_to_optional_u64")]
     #[serde(default, with = "optional_string_u64")]
     pub perm_fee: Option<u64>,
 }
