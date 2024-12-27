@@ -43,12 +43,16 @@ impl Default for StorageConfig {
 /// once we parameterize that we'll put it in here.
 pub struct PublicStorageConfig {
     /// Size of each chunk in bytes
+    #[serde(with = "string_u64")]
     pub chunk_size: u64,
     /// Number of chunks in a partition
+    #[serde(with = "string_u64")]
     pub num_chunks_in_partition: u64,
     /// Number of chunks in a recall range
+    #[serde(with = "string_u64")]
     pub num_chunks_in_recall_range: u64,
     /// Number of partition replicas in a ledger slot
+    #[serde(with = "string_u64")]
     pub num_partitions_in_slot: u64,
     /// Number of sha256 iterations required to pack a chunk
     pub entropy_packing_iterations: u32,

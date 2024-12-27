@@ -1,6 +1,6 @@
 use crate::{
-    address_base58_stringify, string_or_number_to_optional_u64, string_or_number_to_u64, Address,
-    Arbitrary, Base64, Compact, IrysSignature, Node, Proof, Signature, H256, IRYS_CHAIN_ID,
+    address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
+    IrysSignature, Node, Proof, Signature, H256, IRYS_CHAIN_ID,
 };
 use alloy_primitives::{keccak256, FixedBytes};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -48,19 +48,19 @@ pub struct IrysTransactionHeader {
     pub data_root: H256,
 
     /// Size of the transaction data in bytes
-    #[serde(deserialize_with = "string_or_number_to_u64")]
+    #[serde(with = "string_u64")]
     pub data_size: u64,
 
     /// Funds the storage of the transaction data during the storage term
-    #[serde(deserialize_with = "string_or_number_to_u64")]
+    #[serde(with = "string_u64")]
     pub term_fee: u64,
 
     /// Destination ledger for the transaction, default is 0 - Permanent Ledger
-    #[serde(deserialize_with = "string_or_number_to_u64")]
+    #[serde(with = "string_u64")]
     pub ledger_num: u64,
 
     /// EVM chain ID - used to prevent cross-chain replays
-    #[serde(deserialize_with = "string_or_number_to_u64")]
+    #[serde(with = "string_u64")]
     pub chain_id: u64,
 
     /// Transaction signature bytes
@@ -70,11 +70,13 @@ pub struct IrysTransactionHeader {
 
     /// Bundles are critical for how data items are indexed and settled, different
     /// bundle formats enable different levels of indexing and verification.
-    #[serde(default, deserialize_with = "string_or_number_to_optional_u64")]
+    // #[serde(default, deserialize_with = "string_or_number_to_optional_u64")]
+    #[serde(default, with = "optional_string_u64")]
     pub bundle_format: Option<u64>,
 
     /// Funds the storage of the transaction for the next 200+ years
-    #[serde(default, deserialize_with = "string_or_number_to_optional_u64")]
+    // #[serde(default, deserialize_with = "string_or_number_to_optional_u64")]
+    #[serde(default, with = "optional_string_u64")]
     pub perm_fee: Option<u64>,
 }
 
@@ -195,6 +197,7 @@ mod tests {
         // Serialize the IrysTransactionHeader to JSON
         let serialized = serde_json::to_string(&original_header).expect("Failed to serialize");
 
+        println!("{}", &serialized);
         // Deserialize the JSON back to IrysTransactionHeader
         let deserialized: IrysTransactionHeader =
             serde_json::from_str(&serialized).expect("Failed to deserialize");

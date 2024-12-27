@@ -514,8 +514,52 @@ impl<'de> Deserialize<'de> for H256List {
     }
 }
 
-/// Generic function to deserialize a string or number into any integer type
-pub fn string_or_number_to_int<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+//==============================================================================
+// Uint <-> string HTTP/JSON serialization/deserialization
+//------------------------------------------------------------------------------
+
+/// Module containing serialization/deserialization for u64 to/from a string
+pub mod string_u64 {
+    use super::*;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string_or_number_to_int(deserializer)
+    }
+
+    pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+}
+
+/// Module containing serialization/deserialization for Option<u64> to/from a string
+pub mod optional_string_u64 {
+    use super::*;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string_or_number_to_optional_int(deserializer)
+    }
+
+    pub fn serialize<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(v) => serializer.serialize_str(&v.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+fn string_or_number_to_int<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: FromStr + serde::Deserialize<'de>,
@@ -534,8 +578,7 @@ where
     }
 }
 
-/// Generic function to deserialize an optional string or number into any integer type
-pub fn string_or_number_to_optional_int<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+fn string_or_number_to_optional_int<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: FromStr + serde::Deserialize<'de>,
@@ -560,28 +603,6 @@ where
         StringOrNumber::Number(n) => Ok(Some(n)),
         StringOrNumber::Null => Ok(None),
     }
-}
-
-// Specific type aliases for common use cases
-pub fn string_or_number_to_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    string_or_number_to_int(deserializer)
-}
-
-pub fn string_or_number_to_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    string_or_number_to_int(deserializer)
-}
-
-pub fn string_or_number_to_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    string_or_number_to_optional_int(deserializer)
 }
 
 #[cfg(test)]
@@ -633,9 +654,9 @@ mod tests {
         let json_string: serde_json::Value = json!("42");
 
         let number: Result<Result<u64, _>, _> = serde_json::from_value(json_number)
-            .map(|v: serde_json::Value| string_or_number_to_u64(v));
+            .map(|v: serde_json::Value| string_or_number_to_int(v));
         let string: Result<Result<u64, _>, _> = serde_json::from_value(json_string)
-            .map(|v: serde_json::Value| string_or_number_to_u64(v));
+            .map(|v: serde_json::Value| string_or_number_to_int(v));
 
         assert_eq!(number.unwrap().unwrap(), 42);
         assert_eq!(string.unwrap().unwrap(), 42);
@@ -649,13 +670,13 @@ mod tests {
         let json_empty: serde_json::Value = json!("");
 
         let number: Result<Result<Option<u64>, _>, _> = serde_json::from_value(json_number)
-            .map(|v: serde_json::Value| string_or_number_to_optional_u64(v));
+            .map(|v: serde_json::Value| string_or_number_to_optional_int(v));
         let string: Result<Result<Option<u64>, _>, _> = serde_json::from_value(json_string)
-            .map(|v: serde_json::Value| string_or_number_to_optional_u64(v));
+            .map(|v: serde_json::Value| string_or_number_to_optional_int(v));
         let null: Result<Result<Option<u64>, _>, _> = serde_json::from_value(json_null)
-            .map(|v: serde_json::Value| string_or_number_to_optional_u64(v));
+            .map(|v: serde_json::Value| string_or_number_to_optional_int(v));
         let empty: Result<Result<Option<u64>, _>, _> = serde_json::from_value(json_empty)
-            .map(|v: serde_json::Value| string_or_number_to_optional_u64(v));
+            .map(|v: serde_json::Value| string_or_number_to_optional_int(v));
 
         assert_eq!(number.unwrap().unwrap(), Some(42));
         assert_eq!(string.unwrap().unwrap(), Some(42));
