@@ -197,8 +197,6 @@ pub type DataRoot = H256;
 /// The offset of the chunk relative to the first (0th) chunk of the tx's data tree
 pub type TxRelativeChunkOffset = u32;
 
-pub type DataChunks = Vec<Vec<u8>>;
-
 /// the Block relative chunk offset
 pub type BlockRelativeChunkOffset = u64;
 

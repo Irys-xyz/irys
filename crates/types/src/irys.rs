@@ -89,16 +89,15 @@ impl IrysSigner {
     /// Builds a merkle tree, with a root, including all the proofs for each
     /// chunk.
     fn merklize(&self, data: Vec<u8>, chunk_size: usize) -> Result<IrysTransaction> {
-        let mut chunks = generate_leaves(data.clone(), chunk_size)?;
+        let chunks = generate_leaves(&data, chunk_size)?;
         let root = generate_data_root(chunks.clone())?;
         let data_root = H256(root.id.clone());
-        let mut proofs = resolve_proofs(root, None)?;
+        let proofs = resolve_proofs(root, None)?;
 
-        // Discard the last chunk & proof if it's zero length.
+        // Error if the last chunk or proof is zero length.
         let last_chunk = chunks.last().unwrap();
         if last_chunk.max_byte_range == last_chunk.min_byte_range {
-            chunks.pop();
-            proofs.pop();
+            return Err(eyre::eyre!("Last chunk cannot be zero length"));
         }
 
         Ok(IrysTransaction {
