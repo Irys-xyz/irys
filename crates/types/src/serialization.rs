@@ -1,6 +1,8 @@
 use crate::{Arbitrary, Signature, IRYS_CHAIN_ID};
 use alloy_primitives::{bytes, Parity, U256 as RethU256};
-use alloy_rlp::{Decodable, Encodable, Error as RlpError, RlpDecodable, RlpEncodable};
+use alloy_rlp::{
+    Decodable, Encodable, Error as RlpError, RlpDecodable, RlpEncodable, EMPTY_STRING_CODE,
+};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
 use bytes::Buf;
@@ -93,6 +95,44 @@ impl Compact for U256 {
         (Self::from_big_endian(&slice), buf)
     }
 }
+
+// impl Encodable for U256 {
+//     fn encode(&self, out: &mut dyn bytes::BufMut) {
+//         // self.to_big_endian(out);
+//         // // self.bits()
+//         match self.bits() {
+//             0 => out.put_u8(EMPTY_STRING_CODE),
+//             1..=7 => {
+//                 #[allow(clippy::cast_possible_truncation)] // self < 128
+//                 out.put_u8(self.0[0] as u8);
+//             }
+//             bits => {
+//                 self.by
+//                 // // avoid heap allocation in `to_be_bytes_vec`
+//                 // // SAFETY: we don't re-use `copy`
+//                 // #[cfg(target_endian = "little")]
+//                 // let mut copy = *self;
+//                 // #[cfg(target_endian = "little")]
+//                 // let bytes = unsafe { copy.as_le_slice_mut() };
+//                 // #[cfg(target_endian = "little")]
+//                 // bytes.reverse();
+
+//                 // #[cfg(target_endian = "big")]
+//                 // let bytes = self.to_be_bytes_vec();
+
+//                 let leading_zero_bytes = Self::BYTES - (bits + 7) / 8;
+//                 let trimmed = &bytes[leading_zero_bytes..];
+//                 if bits > MAX_BITS {
+//                     trimmed.encode(out);
+//                 } else {
+//                     #[allow(clippy::cast_possible_truncation)] // bytes.len() < 56 < 256
+//                     out.put_u8(EMPTY_STRING_CODE + trimmed.len() as u8);
+//                     out.put_slice(trimmed);
+//                 }
+//             }
+//         }
+//     }
+// }
 
 //==============================================================================
 // H256 Type
@@ -371,6 +411,12 @@ impl From<Vec<u8>> for Base64 {
 impl From<Base64> for Vec<u8> {
     fn from(value: Base64) -> Self {
         value.0
+    }
+}
+
+impl AsRef<[u8]> for Base64 {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }
 

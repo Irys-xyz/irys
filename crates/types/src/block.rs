@@ -14,8 +14,10 @@ use crate::{
     DataRootLeave, H256List, IrysSignature, IrysTransactionHeader, Proof, Signature, H256, U256,
 };
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{keccak256, Address, FixedBytes, B256};
 use serde::{Deserialize, Serialize};
+
+use crate::hash_sha256;
 
 pub type BlockHash = H256;
 
@@ -91,10 +93,6 @@ pub struct IrysBlockHeader {
     /// of the poa chunks as the packing key.
     pub reward_address: Address,
 
-    /// {KeyType, PubKey} - the public key the block was signed with. The only
-    // supported KeyType is currently {rsa, 65537}.
-    pub reward_key: Base64,
-
     /// The block signature
     pub signature: IrysSignature,
 
@@ -138,7 +136,6 @@ impl IrysBlockHeader {
                 ledger_num: None,
             },
             reward_address: Address::ZERO,
-            reward_key: Base64::from_str("").unwrap(),
             signature: Signature::test_signature().into(),
             timestamp: now.as_millis(),
             ledgers: vec![
@@ -160,6 +157,118 @@ impl IrysBlockHeader {
             evm_block_hash: B256::ZERO,
             vdf_limiter_info: VDFLimiterInfo::default(),
         }
+    }
+
+    pub fn encode_for_signing(&self, buf: &mut Vec<u8>) -> eyre::Result<()> {
+        buf.extend_from_slice(&self.height.to_le_bytes());
+        let _ = &self.diff.to_little_endian(buf);
+        let _ = &self.cumulative_diff.to_little_endian(buf);
+        buf.extend_from_slice(&self.last_diff_timestamp.to_le_bytes());
+        buf.extend_from_slice(&self.solution_hash.as_bytes());
+        buf.extend_from_slice(&self.previous_solution_hash.as_bytes());
+        buf.extend_from_slice(&self.last_epoch_hash.as_bytes());
+        buf.extend_from_slice(&self.chunk_hash.as_bytes());
+        buf.extend_from_slice(&self.previous_block_hash.as_bytes());
+        let _ = &self.previous_cumulative_diff.to_little_endian(buf);
+
+        // poa data
+        write_optional_ref(buf, &self.poa.tx_path);
+        write_optional_ref(buf, &self.poa.data_path);
+        // we use the chunk hash instead of the data
+        buf.extend_from_slice(&hash_sha256(&self.poa.chunk.0)?);
+        write_optional(buf, &self.poa.ledger_num);
+        buf.extend_from_slice(&self.poa.partition_chunk_offset.to_le_bytes());
+        buf.extend_from_slice(&self.poa.partition_hash.as_bytes());
+        //
+
+        buf.extend_from_slice(&self.reward_address.0 .0);
+        buf.extend_from_slice(&self.timestamp.to_le_bytes());
+        buf.extend_from_slice(&self.evm_block_hash.0);
+        buf.extend_from_slice(&self.evm_block_hash.0);
+
+        // VDFLimiterInfo
+        buf.extend_from_slice(&self.vdf_limiter_info.output.0);
+        buf.extend_from_slice(&self.vdf_limiter_info.global_step_number.to_le_bytes());
+        buf.extend_from_slice(&self.vdf_limiter_info.seed.0);
+        buf.extend_from_slice(&self.vdf_limiter_info.next_seed.0);
+        buf.extend_from_slice(&self.vdf_limiter_info.prev_output.0);
+        buf.extend_from_slice(&self.vdf_limiter_info.prev_output.0);
+
+        let _ = &self
+            .vdf_limiter_info
+            .last_step_checkpoints
+            .iter()
+            .for_each(|c| buf.extend_from_slice(&c.0));
+
+        let _ = &self
+            .vdf_limiter_info
+            .checkpoints
+            .iter()
+            .for_each(|c| buf.extend_from_slice(&c.0));
+
+        write_optional(buf, &self.vdf_limiter_info.vdf_difficulty);
+        write_optional(buf, &self.vdf_limiter_info.next_vdf_difficulty);
+        //
+        Ok(())
+    }
+
+    pub fn signature_hash(&self) -> eyre::Result<FixedBytes<32>> {
+        let mut bytes = Vec::new();
+        self.encode_for_signing(&mut bytes)?;
+        let prehash = keccak256(&bytes);
+        Ok(prehash)
+    }
+
+    /// Validates the block hash signature by:
+    /// 1.) generating the prehash
+    /// 2.) recovering the sender address, and comparing it to the block header's reward_address (reward_address MUST be part of the prehash)
+    pub fn is_signature_valid(&self) -> eyre::Result<bool> {
+        Ok(self
+            .signature
+            .validate_signature(self.signature_hash()?, self.reward_address))
+    }
+}
+
+fn write_optional<'a, T>(buf: &mut Vec<u8>, value: &'a Option<T>) -> ()
+where
+    &'a T: WriteBytes,
+{
+    match value {
+        Some(v) => v.write_bytes(buf),
+        None => todo!(),
+    }
+}
+
+fn write_optional_ref<'a, T>(buf: &mut Vec<u8>, value: &'a Option<T>) -> ()
+where
+    T: AsRef<[u8]>,
+{
+    match value {
+        Some(v) => buf.extend_from_slice(v.as_ref()),
+        None => todo!(),
+    }
+}
+
+trait WriteBytes {
+    fn write_bytes(&self, buf: &mut Vec<u8>);
+}
+
+// Implementation for integer types
+impl WriteBytes for u64 {
+    fn write_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.to_le_bytes());
+    }
+}
+
+impl WriteBytes for &u64 {
+    fn write_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&(**self).to_le_bytes());
+    }
+}
+
+impl WriteBytes for Base64 {
+    fn write_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.0);
     }
 }
 
@@ -259,7 +368,6 @@ mod tests {
                 ledger_num: None,
             },
             reward_address: Address::ZERO,
-            reward_key: Base64::from_str("").unwrap(),
             signature: Signature::test_signature().into(),
             timestamp: 1622543200,
             ledgers: vec![TransactionLedger {
