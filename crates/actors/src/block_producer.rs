@@ -199,16 +199,33 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
                 // Loop though all the pending tx to see which haven't been promoted 
                 for txid in &publish_txids {
-                    let tx_header = tx_header_by_txid(&read_tx, &txid).unwrap();
-                    if let Some(mut tx_header) = tx_header {
-                        if let None = tx_header.ingress_proofs {
-                            // Get the proof
-                            let proof = ingress_proofs.get(&txid).unwrap();
-                            tx_header.ingress_proofs = Some(TxIngressProof{ 
-                                proof: proof.proof, 
-                                signature: IrysSignature{reth_signature: proof.signature} 
-                            });
-                            promotions.push(tx_header);
+                    let tx_header = match tx_header_by_txid(&read_tx, &txid) {
+                        Ok(Some(header)) => header,
+                        Ok(None) => {
+                            error!("No transaction header found for txid: {}", txid);
+                            continue;
+                        },
+                        Err(e) => {
+                            error!("Error fetching transaction header for txid {}: {}", txid, e);
+                            continue;
+                        }
+                    };
+                
+                    if tx_header.ingress_proofs.is_none() {
+                        // Get the proof
+                        match ingress_proofs.get(&tx_header.data_root) {
+                            Some(proof) => {
+                                let mut tx_header = tx_header.clone();
+                                tx_header.ingress_proofs = Some(TxIngressProof { 
+                                    proof: proof.proof,
+                                    signature: IrysSignature { reth_signature: proof.signature }
+                                });
+                                promotions.push(tx_header);
+                            },
+                            None => {
+                                error!("No ingress proof found for data_root: {}", tx_header.data_root);
+                                continue;
+                            }
                         }
                     }
                 }
