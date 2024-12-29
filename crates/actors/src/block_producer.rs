@@ -360,11 +360,11 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
                 }
 
-                chunk_migration_addr.do_send(BlockFinalizedMessage {
+                let _ = chunk_migration_addr.send(BlockFinalizedMessage {
                     block_header: Arc::new(prev_block_header),
                     txs: Arc::new(txs),
-                });
-
+                }).await.unwrap();
+                info!("Finished producing block height: {}, hash: {}", &block_height, &block_hash);
                 Some((block.clone(), exec_payload))
             }
             .into_actor(self),
