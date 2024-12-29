@@ -89,9 +89,12 @@ pub struct IrysBlockHeader {
     /// The recall chunk proof
     pub poa: PoaData,
 
-    /// Address of the miner claiming the block reward, also used in validation
-    /// of the poa chunks as the packing key.
+    /// The address that the block reward should be sent to
     pub reward_address: Address,
+
+    /// The address of the block producer - used to validate the block hash/signature & the PoA chunk (as the packing key)
+    /// We allow for miners to send rewards to a separate address
+    pub miner_address: Address,
 
     /// The block signature
     pub signature: IrysSignature,
@@ -156,6 +159,7 @@ impl IrysBlockHeader {
             ],
             evm_block_hash: B256::ZERO,
             vdf_limiter_info: VDFLimiterInfo::default(),
+            miner_address: Address::ZERO,
         }
     }
 
@@ -182,6 +186,8 @@ impl IrysBlockHeader {
         //
 
         buf.extend_from_slice(&self.reward_address.0 .0);
+        buf.extend_from_slice(&self.miner_address.0 .0);
+
         buf.extend_from_slice(&self.timestamp.to_le_bytes());
         buf.extend_from_slice(&self.evm_block_hash.0);
         buf.extend_from_slice(&self.evm_block_hash.0);
@@ -221,11 +227,11 @@ impl IrysBlockHeader {
 
     /// Validates the block hash signature by:
     /// 1.) generating the prehash
-    /// 2.) recovering the sender address, and comparing it to the block header's reward_address (reward_address MUST be part of the prehash)
+    /// 2.) recovering the sender address, and comparing it to the block header's miner_address (miner_address MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> eyre::Result<bool> {
         Ok(self
             .signature
-            .validate_signature(self.signature_hash()?, self.reward_address))
+            .validate_signature(self.signature_hash()?, self.miner_address))
     }
 }
 
@@ -378,6 +384,7 @@ mod tests {
             }],
             evm_block_hash: B256::ZERO,
             vdf_limiter_info: VDFLimiterInfo::default(),
+            miner_address: Address::ZERO,
         };
 
         // Use a specific seed
