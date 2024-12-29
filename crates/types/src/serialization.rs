@@ -96,44 +96,6 @@ impl Compact for U256 {
     }
 }
 
-// impl Encodable for U256 {
-//     fn encode(&self, out: &mut dyn bytes::BufMut) {
-//         // self.to_big_endian(out);
-//         // // self.bits()
-//         match self.bits() {
-//             0 => out.put_u8(EMPTY_STRING_CODE),
-//             1..=7 => {
-//                 #[allow(clippy::cast_possible_truncation)] // self < 128
-//                 out.put_u8(self.0[0] as u8);
-//             }
-//             bits => {
-//                 self.by
-//                 // // avoid heap allocation in `to_be_bytes_vec`
-//                 // // SAFETY: we don't re-use `copy`
-//                 // #[cfg(target_endian = "little")]
-//                 // let mut copy = *self;
-//                 // #[cfg(target_endian = "little")]
-//                 // let bytes = unsafe { copy.as_le_slice_mut() };
-//                 // #[cfg(target_endian = "little")]
-//                 // bytes.reverse();
-
-//                 // #[cfg(target_endian = "big")]
-//                 // let bytes = self.to_be_bytes_vec();
-
-//                 let leading_zero_bytes = Self::BYTES - (bits + 7) / 8;
-//                 let trimmed = &bytes[leading_zero_bytes..];
-//                 if bits > MAX_BITS {
-//                     trimmed.encode(out);
-//                 } else {
-//                     #[allow(clippy::cast_possible_truncation)] // bytes.len() < 56 < 256
-//                     out.put_u8(EMPTY_STRING_CODE + trimmed.len() as u8);
-//                     out.put_slice(trimmed);
-//                 }
-//             }
-//         }
-//     }
-// }
-
 //==============================================================================
 // H256 Type
 //------------------------------------------------------------------------------
