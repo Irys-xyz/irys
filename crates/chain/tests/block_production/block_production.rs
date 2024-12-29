@@ -5,7 +5,7 @@ use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
-use irys_actors::{block_producer::SolutionFoundMessage, mempool::TxIngressMessage};
+use irys_actors::{block_producer::SolutionFoundMessage, mempool::TxIngressMessage, vdf::{self, GetVdfStateMessage, VdfService, VdfStepsReadGuard}};
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_packing::capacity_single::compute_entropy_chunk;
@@ -28,6 +28,8 @@ use tracing::info;
 /// Create a valid capacity PoA
 #[cfg(test)]
 pub fn capacity_chunk_solution(miner_addr: Address) -> SolutionContext {
+    use irys_types::{block_production::Seed, H256List};
+
     let partition_hash = H256::zero();
     let vdf_config = VDFStepsConfig::default(); // TODO: take it from test's vdf config
     let chunk_size = 32; // TODO: take it from test's storage config
@@ -37,7 +39,7 @@ pub fn capacity_chunk_solution(miner_addr: Address) -> SolutionContext {
         miner_addr,
         0,
         partition_hash.into(),
-        1_000,
+        vdf_config.vdf_difficulty as u32,
         chunk_size, // take it from storage config
         &mut entropy_chunk,
     );
@@ -46,9 +48,11 @@ pub fn capacity_chunk_solution(miner_addr: Address) -> SolutionContext {
         partition_hash,
         chunk_offset: 0,
         mining_address: miner_addr,
-        tx_path: None,
-        data_path: None,
         chunk: entropy_chunk,
+        vdf_step: 1,
+        checkpoints: H256List(vec![]),                
+        seed: Seed(H256::zero()),
+        ..Default::default()
     }
 }
 
@@ -155,37 +159,37 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
     config.base_directory = temp_dir.path().to_path_buf();
 
     let node = start_for_testing(config).await?;
+    node.actor_addresses.start_mining()?;
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
-
-    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address());
-
+    
     for i in 1..10 {
-        info!("mining block {}", i);
-        let fut = node
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()));
-        let (block, reth_exec_env) = fut.await?.unwrap();
+        info!("waiting block {}", i);
 
+        let mut retries = 0;
+        while node.block_index_view.num_blocks() < i + 1 && retries < 10 as u64 {
+            sleep(Duration::from_millis(1000)).await;
+            retries += 1;
+        }
+
+        let block = node.block_index_view.get_item(i as usize).unwrap();
+        
         //check reth for built block
         let reth_block = reth_context
             .inner
             .provider
-            .block_by_hash(block.evm_block_hash)?
+            .block_by_number(i)?
             .unwrap();
-        assert_eq!(i, reth_block.header.number as u32);
-        // height is hardcoded at 42 right now
-        // assert_eq!(reth_block.number, block.height);
+        assert_eq!(i, reth_block.header.number);
+        assert_eq!(i, reth_block.number);
 
         // check irys DB for built block
         let db_irys_block = &node
             .db
             .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
             .unwrap();
+
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-        // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
-        sleep(Duration::from_millis(1500)).await;
     }
     Ok(())
 }

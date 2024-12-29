@@ -1,7 +1,5 @@
 use std::{
-    str::FromStr,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    os::unix::raw::off_t, str::FromStr, sync::Arc, time::{SystemTime, UNIX_EPOCH}
 };
 
 use actix::prelude::*;
@@ -19,10 +17,10 @@ use irys_types::{
 use openssl::sha;
 use reth::revm::primitives::B256;
 use reth_db::Database;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{
-    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor}, block_index::{BlockIndexActor, GetLatestBlockIndexMessage}, chunk_migration::ChunkMigrationActor, epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage}, mempool::{GetBestMempoolTxs, MempoolActor}, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor}, block_index::{BlockIndexActor, GetLatestBlockIndexMessage}, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}, chunk_migration::ChunkMigrationActor, epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage}, mempool::{GetBestMempoolTxs, MempoolActor}, vdf::VdfStepsReadGuard
 };
 
 /// Used to mock up a BlockProducerActor
@@ -54,6 +52,8 @@ pub struct BlockProducerActor {
     /// Difficulty adjustment parameters for the Irys Protocol
     pub difficulty_config: DifficultyAdjustmentConfig,
     pub vdf_config: VDFStepsConfig,
+    /// Store last VDF Steps
+    pub vdf_steps: VdfStepsReadGuard,
 }
 
 /// Actors can handle this message to learn about the block_producer actor at startup
@@ -74,6 +74,7 @@ impl BlockProducerActor {
         storage_config: StorageConfig,
         difficulty_config: DifficultyAdjustmentConfig,
         vdf_config: VDFStepsConfig,
+        vdf_steps: VdfStepsReadGuard
     ) -> Self {
         Self {
             db,
@@ -86,6 +87,7 @@ impl BlockProducerActor {
             storage_config,
             difficulty_config,
             vdf_config,
+            vdf_steps
         }
     }
 }
@@ -126,12 +128,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
-        let self_addr = ctx.address();
         let difficulty_config = self.difficulty_config.clone();
         let chunk_size = self.storage_config.chunk_size;
-
-        let storage_config = self.storage_config.clone();
-        let vdf_config = self.vdf_config.clone();
+        let vdf_steps = self.vdf_steps.clone();
 
         AtomicResponse::new(Box::pin(
             async move {
@@ -163,6 +162,11 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         return None;
                     }
                 };
+
+                if !(solution.vdf_step > prev_block_header.vdf_limiter_info.global_step_number) {
+                    warn!("Solution for old step number {}, previous block step number {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number);
+                    return None;
+                }
 
                 // Translate partition hash, chunk offset -> ledger, ledger chunk offset
                 let ledger_num = epoch_service_addr
@@ -202,11 +206,11 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 // Did an adjustment happen?
                 if let Some(stats) = stats {
                     if stats.is_adjusted {
-                        println!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
-                        println!(" max: {}\nlast: {}\nnext: {}", U256::MAX, current_difficulty, diff);
+                        info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                        info!(" max: {}\nlast: {}\nnext: {}", U256::MAX, current_difficulty, diff);
                         is_difficulty_updated = true;
                     } else {
-                        println!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                        info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
                     }
                     last_diff_timestamp = current_timestamp;
                 }
@@ -225,6 +229,17 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     partition_hash: solution.partition_hash,
                 };
 
+                let checkpoints_result = vdf_steps.read().get_steps(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1);
+                let mut checkpoints = match checkpoints_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!("Error in requested vdf steps while producing block in step:{} error: {}", solution.vdf_step, e);
+                        return None
+                    }
+                };   
+                checkpoints.push(solution.seed.0); 
+                //info!("previous block step {} step {} checkpoints {}", prev_block_header.vdf_limiter_info.global_step_number, solution.vdf_step, checkpoints);
+
                 let mut irys_block = IrysBlockHeader {
                     block_hash,
                     height: block_height,
@@ -234,7 +249,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     solution_hash: H256::zero(),
                     previous_solution_hash: H256::zero(),
                     last_epoch_hash: H256::random(),
-                    chunk_hash: H256::zero(),
+                    chunk_hash: H256(sha::sha256(&poa.chunk.0)),
                     previous_block_hash: prev_block_hash,
                     previous_cumulative_diff: U256::from(4000),
                     poa,
@@ -261,7 +276,15 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         },
                     ],
                     evm_block_hash: B256::ZERO,
-                    vdf_limiter_info: VDFLimiterInfo::default(),
+                    vdf_limiter_info: VDFLimiterInfo {
+                        global_step_number: solution.vdf_step,                        
+                        output: solution.seed.into_inner(),
+                        last_step_checkpoints: solution.checkpoints,
+                        prev_output: prev_block_header.vdf_limiter_info.output,
+                        seed: prev_block_header.vdf_limiter_info.seed,
+                        checkpoints,
+                        ..Default::default()
+                    },                    
                 };
 
                 // RethNodeContext is a type-aware wrapper that lets us interact with the reth node

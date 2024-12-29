@@ -11,6 +11,8 @@ irys-database.workspace = true
 irys-packing.workspace = true
 irys-storage.workspace = true
 irys-config.workspace = true
+irys-vdf.workspace = true
+
 actix.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true

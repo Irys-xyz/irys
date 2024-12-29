@@ -1,13 +1,14 @@
 use crate::{
-    block_index::BlockIndexView, block_tree::BlockTreeActor, block_validation::poa_is_valid,
-    epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor,
+    block_index::BlockIndexView, block_tree::BlockTreeActor, block_validation::block_is_valid,
+    epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor, vdf,
 };
 use actix::prelude::*;
 use irys_database::{tx_header_by_txid, BlockIndex, Initialized, Ledger};
-use irys_types::{DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageConfig};
+use irys_types::{DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageConfig, VDFStepsConfig};
+use reth::network::error;
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
-use tracing::error;
+use tracing::{error, info};
 
 /// BlockDiscoveryActor listens for discovered blocks & validates them.
 #[derive(Debug)]
@@ -24,6 +25,8 @@ pub struct BlockDiscoveryActor {
     pub storage_config: StorageConfig,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
+    /// VDF configuration for the node
+    pub vdf_config: VDFStepsConfig,
 }
 
 /// When a block is discovered, either produced locally or received from
@@ -53,6 +56,7 @@ impl BlockDiscoveryActor {
         mempool: Addr<MempoolActor>,
         storage_config: StorageConfig,
         db: DatabaseProvider,
+        vdf_config: VDFStepsConfig,
     ) -> Self {
         Self {
             block_index_view,
@@ -61,6 +65,7 @@ impl BlockDiscoveryActor {
             mempool,
             storage_config,
             db,
+            vdf_config,
         }
     }
 }
@@ -93,21 +98,22 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             }
         };
 
-        let poa = new_block_header.poa.clone();
         let block_index_view = self.block_index_view.clone();
         let partitions_view = self.partition_assignments_view.clone();
         let block_tree_addr = self.block_tree.clone();
         let storage_config = &self.storage_config;
 
-        match poa_is_valid(&poa, &block_index_view, &partitions_view, storage_config) {
+        info!("Validating block height:{} step:{} output:{} prev output: {}", new_block_header.height, new_block_header.vdf_limiter_info.global_step_number, new_block_header.vdf_limiter_info.output, new_block_header.vdf_limiter_info.prev_output);
+        match block_is_valid(&new_block_header, &block_index_view, &partitions_view, storage_config, &self.vdf_config) {
             Ok(_) => {
+                info!("Block is valid, sending to block tree");
                 block_tree_addr.do_send(BlockPreValidatedMessage(
                     new_block_header,
                     Arc::new(submit_txs),
                 ));
             }
             Err(err) => {
-                error!("PoA error {:?}", err);
+                error!("Block validation error {:?}", err);
             }
         }
     }

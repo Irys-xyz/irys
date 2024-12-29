@@ -2,7 +2,8 @@ use actix::prelude::*;
 
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
-use irys_types::{storage_config::StorageConfig, validate_path, IrysBlockHeader, PoaData};
+use irys_types::{storage_config::StorageConfig, validate_path, IrysBlockHeader, PoaData, VDFStepsConfig};
+use irys_vdf::checkpoints_are_valid;
 use openssl::sha;
 use tracing::{debug, error, info};
 
@@ -10,8 +11,12 @@ use crate::{block_index::BlockIndexView, epoch_service::PartitionAssignmentsRead
 
 pub fn block_is_valid(
     block: &IrysBlockHeader,
-    prev_block_header: Option<IrysBlockHeader>,
+    block_index_view: &BlockIndexView,
+    partitions_view: &PartitionAssignmentsReadGuard,
+    storage_config: &StorageConfig,
+    vdf_config: &VDFStepsConfig,
 ) -> eyre::Result<()> {
+    
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
         return Err(eyre::eyre!(
             "Invalid block: chunk hash distinct from PoA chunk hash"
@@ -20,23 +25,25 @@ pub fn block_is_valid(
 
     //TODO: check block_hash
 
-    //TODO: check vdf steps
+    // check vdf steps
+    checkpoints_are_valid(&block.vdf_limiter_info, &vdf_config)?;
 
-    // check PoA recall range
+    // check PoA 
+    poa_is_valid(&block.poa, &block_index_view, &partitions_view, storage_config)?;
 
-    if let Some(prev_block) = prev_block_header {
-        if block.previous_block_hash != prev_block.block_hash {
-            return Err(eyre::eyre!(
-                "Invalid block: previous blocks indep_hash is not the parent block"
-            ));
-        }
+    // if let Some(prev_block) = prev_block_header {
+    //     if block.previous_block_hash != prev_block.block_hash {
+    //         return Err(eyre::eyre!(
+    //             "Invalid block: previous blocks indep_hash is not the parent block"
+    //         ));
+    //     }
 
-        // check retarget
+    //     // check retarget
 
-        // check difficulty
+    //     // check difficulty
 
-        //
-    } // if there is no previous block error ?
+    //     //
+    // } // if there is no previous block error ?
 
     Ok(())
 }
@@ -116,17 +123,17 @@ pub fn poa_is_valid(
         // TODO: check if bounds are byte or chunk relative, if are chunk how I remove last chunk padding ?
         // Because all chunks are packed as config.chunk_size, if the proof chunk is
         // smaller we need to trim off the excess padding introduced by packing ?
-        let (poa_chunk_padd_trimmed, _) = poa_chunk.split_at(
+        let (poa_chunk_pad_trimmed, _) = poa_chunk.split_at(
             (config
                 .chunk_size
                 .min((data_path_result.right_bound - data_path_result.left_bound) as u64))
                 as usize,
         );
 
-        let poa_chunk_hash = sha::sha256(&poa_chunk_padd_trimmed);
+        let poa_chunk_hash = sha::sha256(&poa_chunk_pad_trimmed);
 
         if !(poa_chunk_hash == data_path_result.leaf_hash) {
-            return Err(eyre::eyre!("PoA chunk hash missmatch"));
+            return Err(eyre::eyre!("PoA chunk hash mismatch"));
         }
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -140,7 +147,7 @@ pub fn poa_is_valid(
         );
 
         if entropy_chunk != poa.chunk.0 {
-            return Err(eyre::eyre!("PoA capacity chunk missmatch"));
+            return Err(eyre::eyre!("PoA capacity chunk mismatch"));
         }
     }
 

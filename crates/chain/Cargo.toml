@@ -19,6 +19,7 @@ irys-config.workspace = true
 irys-testing-utils.workspace = true
 irys-actors.workspace = true
 irys-packing.workspace = true
+irys-vdf.workspace = true
 #
 
 awc = "3.5.1"

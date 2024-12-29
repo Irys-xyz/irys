@@ -24,6 +24,8 @@ pub const NUM_RECALL_RANGES_IN_PARTITION: u64 =
 // Reset the nonce limiter (vdf) once every 1200 steps/seconds or every ~20 min
 pub const NONCE_LIMITER_RESET_FREQUENCY: usize = 10 * 120;
 
+pub const VDF_PARALLEL_VERIFICATION_THREAD_LIMIT: usize = 4;
+
 // 25 checkpoints 40 ms each = 1000 ms
 pub const NUM_CHECKPOINTS_IN_VDF_STEP: usize = 25;
 

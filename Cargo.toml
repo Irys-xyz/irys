@@ -12,6 +12,7 @@ members = [
     "crates/storage",
     "crates/testing-utils",
     "crates/config",
+    "crates/vdf",
 ]
 resolver = "2"
 
@@ -33,6 +34,7 @@ irys-storage = { path = "./crates/storage" }
 irys-testing-utils = { path = "./crates/testing-utils" }
 irys-packing = { path = "./crates/packing" }
 irys-chain = { path = "./crates/chain" }
+irys-vdf = { path = "./crates/vdf" }
 #
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
