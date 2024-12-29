@@ -139,9 +139,7 @@ impl IrysBlockHeader {
             },
             reward_address: Address::ZERO,
             reward_key: Base64::from_str("").unwrap(),
-            signature: IrysSignature {
-                reth_signature: Signature::test_signature(),
-            },
+            signature: Signature::test_signature().into(),
             timestamp: now.as_millis(),
             ledgers: vec![
                 // Permanent Publish Ledger
@@ -201,7 +199,6 @@ impl TransactionLedger {
                 tx_size: h.data_size as usize, // TODO: check this
             })
             .collect::<Vec<DataRootLeave>>();
-        //txs_data_roots.push(&[]); // TODO: check this ? mimics merkle::generate_leaves's push as last chunk has max. capacity 32
         let data_root_leaves = generate_leaves_from_data_roots(&txs_data_roots).unwrap();
         let root = generate_data_root(data_root_leaves.clone()).unwrap();
         let root_id = root.id.clone();
@@ -262,9 +259,7 @@ mod tests {
             },
             reward_address: Address::ZERO,
             reward_key: Base64::from_str("").unwrap(),
-            signature: IrysSignature {
-                reth_signature: Signature::test_signature(),
-            },
+            signature: Signature::test_signature().into(),
             timestamp: 1622543200,
             ledgers: vec![TransactionLedger {
                 tx_root: H256::zero(),
@@ -288,7 +283,7 @@ mod tests {
         rng.fill(&mut header.previous_solution_hash.as_bytes_mut()[..]);
         rng.fill(&mut header.previous_block_hash.as_bytes_mut()[..]);
         rng.fill(&mut header.block_hash.as_bytes_mut()[..]);
-        rng.fill(&mut header.reward_address.as_bytes_mut()[..]);
+        rng.fill(&mut header.reward_address.as_mut_bytes()[..]);
 
         // Serialize the header to a JSON string
         let serialized = serde_json::to_string_pretty(&header).unwrap();

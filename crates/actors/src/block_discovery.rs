@@ -1,7 +1,10 @@
-use crate::{block_tree::BlockTreeActor, epoch_service::EpochServiceActor, mempool::MempoolActor};
+use crate::{
+    block_index::BlockIndexReadGuard, block_tree::BlockTreeActor, block_validation::poa_is_valid,
+    epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor,
+};
 use actix::prelude::*;
 use irys_database::{tx_header_by_txid, BlockIndex, Initialized, Ledger};
-use irys_types::{DatabaseProvider, IrysBlockHeader, IrysTransactionHeader};
+use irys_types::{DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageConfig};
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
 use tracing::error;
@@ -9,14 +12,16 @@ use tracing::error;
 /// BlockDiscoveryActor listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockDiscoveryActor {
-    /// Shared access to the block index used for validation.
-    pub block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+    /// Read only view of the block index
+    pub block_index_guard: BlockIndexReadGuard,
+    /// PartitionAssignmentsReadGuard for looking up ledger info
+    pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Manages forks at the head of the chain before finalization
     pub block_tree: Addr<BlockTreeActor>,
-    /// Address of the EpochServiceActor for managing epoch-related tasks.
-    pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to the mempool actor, which maintains the validity of pending transactions.
     pub mempool: Addr<MempoolActor>,
+    /// Reference to global storage config for node
+    pub storage_config: StorageConfig,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
 }
@@ -42,17 +47,19 @@ impl Actor for BlockDiscoveryActor {
 impl BlockDiscoveryActor {
     /// Initializes a new BlockDiscoveryActor
     pub fn new(
-        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+        block_index_guard: BlockIndexReadGuard,
+        partition_assignments_guard: PartitionAssignmentsReadGuard,
         block_tree: Addr<BlockTreeActor>,
-        epoch_service: Addr<EpochServiceActor>,
         mempool: Addr<MempoolActor>,
+        storage_config: StorageConfig,
         db: DatabaseProvider,
     ) -> Self {
         Self {
-            block_index,
+            block_index_guard,
+            partition_assignments_guard,
             block_tree,
-            epoch_service,
             mempool,
+            storage_config,
             db,
         }
     }
@@ -86,11 +93,22 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             }
         };
 
-        // TODO: Do pre-validation steps here
+        let poa = new_block_header.poa.clone();
+        let block_index_guard = self.block_index_guard.clone();
+        let partitions_guard = self.partition_assignments_guard.clone();
+        let block_tree_addr = self.block_tree.clone();
+        let storage_config = &self.storage_config;
 
-        self.block_tree.do_send(BlockPreValidatedMessage(
-            new_block_header,
-            Arc::new(submit_txs),
-        ));
+        match poa_is_valid(&poa, &block_index_guard, &partitions_guard, storage_config, &new_block_header.reward_address) {
+            Ok(_) => {
+                block_tree_addr.do_send(BlockPreValidatedMessage(
+                    new_block_header,
+                    Arc::new(submit_txs),
+                ));
+            }
+            Err(err) => {
+                error!("PoA error {:?}", err);
+            }
+        }
     }
 }

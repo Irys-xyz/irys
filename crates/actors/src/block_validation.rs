@@ -1,18 +1,12 @@
-use actix::prelude::*;
-
+use crate::{block_index::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard};
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_types::{
     storage_config::StorageConfig, validate_path, vdf_config::VDFStepsConfig, Address, IrysBlockHeader, PoaData, VDFLimiterInfo, H256
 };
 use openssl::sha;
-use tracing::{debug, error, info};
 
-use crate::{
-    block_index::{BlockIndexActor, GetBlockBoundsMessage},
-    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
-};
-
+/// Full pre-validation steps for a block
 pub fn block_is_valid(
     block: &IrysBlockHeader,
     prev_block_header: Option<IrysBlockHeader>,
@@ -46,10 +40,11 @@ pub fn block_is_valid(
     Ok(())
 }
 
-pub async fn poa_is_valid(
+/// Returns Ok if the provided PoA is valid, Err otherwise
+pub fn poa_is_valid(
     poa: &PoaData,
-    block_index_addr: &Addr<BlockIndexActor>,
-    epoch_service_addr: &Addr<EpochServiceActor>,
+    block_index_guard: &BlockIndexReadGuard,
+    partitions_guard: &PartitionAssignmentsReadGuard,
     config: &StorageConfig,
     mining_address: &Address,
 ) -> eyre::Result<()> {
@@ -58,9 +53,9 @@ pub async fn poa_is_valid(
         (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_num)
     {
         // partition data -> ledger data
-        let partition_assignment = epoch_service_addr
-            .send(GetPartitionAssignmentMessage(poa.partition_hash))
-            .await?
+        let partition_assignment = partitions_guard
+            .read()
+            .get_assignment(poa.partition_hash)
             .unwrap();
 
         let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
@@ -69,15 +64,11 @@ pub async fn poa_is_valid(
             + poa.partition_chunk_offset;
 
         // ledger data -> block
-        let bb = block_index_addr
-            .send(GetBlockBoundsMessage {
-                ledger: Ledger::ALL[ledger_num as usize],
-                chunk_offset: ledger_chunk_offset,
-            })
-            .await
-            .unwrap()
-            .unwrap();
+        let ledger = Ledger::try_from(ledger_num).unwrap();
 
+        let bb = block_index_guard
+            .read()
+            .get_block_bounds(ledger, ledger_chunk_offset);
         if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(eyre::eyre!("PoA chunk offset out of block bounds"));
         };
@@ -85,14 +76,21 @@ pub async fn poa_is_valid(
         let block_chunk_offset = (ledger_chunk_offset - bb.start_chunk_offset) as u128;
 
         // tx_path validation
-        let tx_path_result = validate_path(bb.tx_root.0, &tx_path, block_chunk_offset*(config.chunk_size as u128))?;
+        let tx_path_result = validate_path(
+            bb.tx_root.0,
+            &tx_path,
+            block_chunk_offset * (config.chunk_size as u128),
+        )?;
 
         // TODO: check if bounds are byte or chunk relative
-        if !(tx_path_result.left_bound..=tx_path_result.right_bound).contains(&(block_chunk_offset*(config.chunk_size as u128))) {
+        if !(tx_path_result.left_bound..=tx_path_result.right_bound)
+            .contains(&(block_chunk_offset * (config.chunk_size as u128)))
+        {
             return Err(eyre::eyre!("PoA chunk offset out of tx bounds"));
         }
 
-        let tx_chunk_offset = block_chunk_offset*(config.chunk_size as u128) - tx_path_result.left_bound;
+        let tx_chunk_offset =
+            block_chunk_offset * (config.chunk_size as u128) - tx_path_result.left_bound;
 
         // data_path validation
         let data_path_result =
@@ -100,7 +98,9 @@ pub async fn poa_is_valid(
 
         if !(data_path_result.left_bound..=data_path_result.right_bound).contains(&tx_chunk_offset)
         {
-            return Err(eyre::eyre!("PoA chunk offset out of tx's data chunks bounds"));
+            return Err(eyre::eyre!(
+                "PoA chunk offset out of tx's data chunks bounds"
+            ));
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -129,7 +129,7 @@ pub async fn poa_is_valid(
         let poa_chunk_hash = sha::sha256(&poa_chunk_padd_trimmed);
 
         if !(poa_chunk_hash == data_path_result.leaf_hash) {
-            return Err(eyre::eyre!("PoA chunk hash missmatch"));
+            return Err(eyre::eyre!("PoA chunk hash mismatch"));
         }
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -137,13 +137,13 @@ pub async fn poa_is_valid(
             mining_address.clone(),
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
-            config.entropy_packing_iterations,            
+            config.entropy_packing_iterations,
             config.chunk_size as usize,
             &mut entropy_chunk,
         );
 
         if entropy_chunk != poa.chunk.0 {
-            return Err(eyre::eyre!("PoA capacity chunk missmatch"));
+            return Err(eyre::eyre!("PoA capacity chunk mismatch"));
         }
     }
 
@@ -156,9 +156,14 @@ pub async fn poa_is_valid(
 #[cfg(test)]
 mod tests {
     use crate::{
+        block_index::{BlockIndexActor, GetBlockIndexGuardMessage},
         block_producer::BlockConfirmedMessage,
-        epoch_service::{EpochServiceConfig, GetLedgersMessage, NewEpochMessage},
+        epoch_service::{
+            EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
+            GetPartitionAssignmentsGuardMessage, NewEpochMessage,
+        },
     };
+    use actix::prelude::*;
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
@@ -168,6 +173,7 @@ mod tests {
     use std::str::FromStr;
     use std::sync::{Arc, RwLock};
     use tracing::log::LevelFilter;
+    use tracing::{debug, error, info};
 
     use super::*;
 
@@ -270,7 +276,14 @@ mod tests {
             Err(_) => panic!("Failed to perform genesis epoch tasks"),
         }
 
-        let ledgers_guard = epoch_service_addr.send(GetLedgersMessage).await.unwrap();
+        let ledgers_guard = epoch_service_addr
+            .send(GetLedgersGuardMessage)
+            .await
+            .unwrap();
+        let partitions_guard = epoch_service_addr
+            .send(GetPartitionAssignmentsGuardMessage)
+            .await
+            .unwrap();
 
         let ledgers = ledgers_guard.read();
         debug!("ledgers: {:?}", ledgers);
@@ -278,7 +291,6 @@ mod tests {
         let sub_slots = ledgers.get_slots(Ledger::Submit);
 
         let partition_hash = sub_slots[0].partitions[0];
-
 
         let arc_config = Arc::new(IrysNodeConfig::default());
         let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
@@ -300,10 +312,9 @@ mod tests {
             Err(_) => panic!("Failed to index genesis block"),
         }
 
-        let partition_assignment = epoch_service_addr
-            .send(GetPartitionAssignmentMessage(partition_hash))
-            .await
-            .unwrap()
+        let partition_assignment = partitions_guard
+            .read()
+            .get_assignment(partition_hash)
             .unwrap();
 
         debug!("Partition assignment {:?}", partition_assignment);
@@ -340,7 +351,11 @@ mod tests {
 
         let poa = PoaData {
             tx_path: Some(Base64(tx_path[poa_tx_num as usize].proof.clone())),
-            data_path: Some(Base64(txs[poa_tx_num as usize].proofs[poa_chunk_num as usize].proof.clone())),
+            data_path: Some(Base64(
+                txs[poa_tx_num as usize].proofs[poa_chunk_num as usize]
+                    .proof
+                    .clone(),
+            )),
             chunk: Base64(poa_chunk.clone()),
             ledger_num: Some(1),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64,
@@ -351,9 +366,13 @@ mod tests {
         let irys_block = IrysBlockHeader {
             height,
             reward_address: miner_address.clone(),
-            signature: IrysSignature {
-                reth_signature: Signature::test_signature(),
-            },
+            poa: poa.clone(),            
+            block_hash: H256::zero(),
+            previous_block_hash: H256::zero(),
+            previous_cumulative_diff: U256::from(4000),
+            reward_key: Base64::from_str("").unwrap(),
+            signature: Signature::test_signature().into(),
+            timestamp: 1000,
             ledgers: vec![
                 // Permanent Publish Ledger
                 TransactionLedger {
@@ -383,33 +402,34 @@ mod tests {
             Err(_) => panic!("Failed to index second block"),
         };
 
+        let block_index_guard = block_index_addr
+            .send(GetBlockIndexGuardMessage)
+            .await
+            .unwrap();
+
         let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
             * storage_config.num_partitions_in_slot
             * storage_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
 
-        assert_eq!(ledger_chunk_offset, (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64, "ledger_chunk_offset missmatch");
+        assert_eq!(ledger_chunk_offset, (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64, "ledger_chunk_offset mismatch");
 
         // ledger data -> block
-        let bb = block_index_addr
-            .send(GetBlockBoundsMessage {
-                ledger: Ledger::ALL[1],
-                chunk_offset: ledger_chunk_offset,
-            })
-            .await
-            .unwrap()
-            .unwrap();
+        let bb = block_index_guard
+            .read()
+            .get_block_bounds(Ledger::Submit, ledger_chunk_offset);
+        info!("block bounds: {:?}", bb);
 
         assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
         assert_eq!(bb.end_chunk_offset, total_chunks_in_tx as u64, "end_chunk_offset should be 9, tx has 9 chunks");
 
         let poa_valid = poa_is_valid(
             &poa,
-            &block_index_addr,
-            &epoch_service_addr,
+            &block_index_guard,
+            &partitions_guard,
             &storage_config,
             &miner_address,
-        ).await;
+        );
 
         assert!(poa_valid.is_ok(), "PoA should be valid");
     }

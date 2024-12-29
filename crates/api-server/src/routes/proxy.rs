@@ -36,6 +36,7 @@ pub async fn proxy(
     payload: Payload,
     client: Data<Client>,
 ) -> Result<HttpResponse, ProxyError> {
+    // TODO: make this configurable!
     let target_uri = "http://localhost:8545";
 
     // Create a new client request

@@ -206,9 +206,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
         },
         reward_address: Address::ZERO,
         reward_key: Base64::from_str("").unwrap(),
-        signature: IrysSignature {
-            reth_signature: Signature::test_signature(),
-        },
+        signature: Signature::test_signature().into(),
         timestamp: now.as_millis(),
         ledgers: vec![
             // Permanent Publish Ledger

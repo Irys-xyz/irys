@@ -90,10 +90,10 @@ mod tests {
     use irys_database::{config::get_data_dir, tables::IrysTables};
     use irys_storage::ChunkProvider;
     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
-    use tracing::{debug, error, info, Level};
     use reth::tasks::TaskManager;
     use std::sync::Arc;
     use tempfile::tempdir;
+    use tracing::{debug, error, info, Level};
 
     #[actix_web::test]
     async fn test_get_tx() -> eyre::Result<()> {
