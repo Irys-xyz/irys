@@ -492,6 +492,12 @@ mod tests {
         header = signer.sign_block_header(header).unwrap();
 
         assert_eq!(true, header.is_signature_valid().unwrap());
+
+        // validate block hash
+        let id: [u8; 32] = keccak256(header.signature.as_bytes()).into();
+
+        assert_eq!(H256::from(id), header.block_hash);
+
         // fuzz some fields, make sure the signature fails
 
         // Use a specific seed
