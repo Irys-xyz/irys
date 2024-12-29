@@ -6,7 +6,10 @@ use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use irys_storage::{ie, StorageModule};
 use irys_types::app_state::DatabaseProvider;
-use irys_types::{block_production::{SolutionContext, Seed}, H256, U256};
+use irys_types::{
+    block_production::{Seed, SolutionContext},
+    H256, U256,
+};
 use irys_types::{Address, H256List, PartitionChunkOffset, SimpleRNG};
 use openssl::sha;
 use std::sync::Arc;
@@ -251,11 +254,11 @@ mod tests {
         ie, initialize_storage_files, read_info_file, StorageModule, StorageModuleInfo,
     };
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
-    use irys_types::{H256List, IrysBlockHeader};
     use irys_types::{
         app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
+    use irys_types::{H256List, IrysBlockHeader};
     use std::any::Any;
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
@@ -374,7 +377,11 @@ mod tests {
         let seed: Seed = Seed(H256::random());
         let _result = partition_mining_actor
             .start()
-            .send(BroadcastMiningSeed{seed, checkpoints: H256List(vec![]), global_step: 0})
+            .send(BroadcastMiningSeed {
+                seed,
+                checkpoints: H256List(vec![]),
+                global_step: 0,
+            })
             .await
             .unwrap();
 

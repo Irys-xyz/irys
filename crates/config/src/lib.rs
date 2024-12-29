@@ -1,9 +1,8 @@
 //! Crate dedicated to the IrysNodeConfig to avoid depdendency cycles
 use std::{
-    env,
+    env, fs,
     path::{absolute, PathBuf},
     str::FromStr as _,
-    fs,
 };
 
 use chain::chainspec::IrysChainSpecBuilder;
@@ -45,7 +44,7 @@ impl Default for IrysNodeConfig {
         if fs::exists(&base_dir).unwrap_or(false) {
             fs::remove_dir_all(&base_dir).expect("Unable to remove .irys folder");
         }
-        
+
         Self {
             chainspec_builder: IrysChainSpecBuilder::mainnet(),
             mining_signer: IrysSigner::random_signer(),

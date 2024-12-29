@@ -5,7 +5,11 @@ use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
-use irys_actors::{block_producer::SolutionFoundMessage, mempool::TxIngressMessage, vdf::{self, GetVdfStateMessage, VdfService, VdfStepsReadGuard}};
+use irys_actors::{
+    block_producer::SolutionFoundMessage,
+    mempool::TxIngressMessage,
+    vdf::{self, GetVdfStateMessage, VdfService, VdfStepsReadGuard},
+};
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_packing::capacity_single::compute_entropy_chunk;
@@ -50,7 +54,7 @@ pub fn capacity_chunk_solution(miner_addr: Address) -> SolutionContext {
         mining_address: miner_addr,
         chunk: entropy_chunk,
         vdf_step: 1,
-        checkpoints: H256List(vec![]),                
+        checkpoints: H256List(vec![]),
         seed: Seed(H256::zero()),
         ..Default::default()
     }
@@ -162,7 +166,7 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
     node.actor_addresses.start_mining()?;
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
-    
+
     for i in 1..10 {
         info!("waiting block {}", i);
 
@@ -172,14 +176,15 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
             retries += 1;
         }
 
-        let block = node.block_index_guard.read().get_item(i as usize).unwrap().clone();
-        
+        let block = node
+            .block_index_guard
+            .read()
+            .get_item(i as usize)
+            .unwrap()
+            .clone();
+
         //check reth for built block
-        let reth_block = reth_context
-            .inner
-            .provider
-            .block_by_number(i)?
-            .unwrap();
+        let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
         assert_eq!(i, reth_block.header.number);
         assert_eq!(i, reth_block.number);
 

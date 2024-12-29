@@ -1,10 +1,21 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, ArbiterService};
 use irys_actors::{
-    block_discovery::BlockDiscoveryActor, block_index::{BlockIndexActor, BlockIndexReadGuard, GetBlockIndexGuardMessage}, block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage}, block_tree::BlockTreeActor, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}, chunk_migration::ChunkMigrationActor, epoch_service::{
+    block_discovery::BlockDiscoveryActor,
+    block_index::{BlockIndexActor, BlockIndexReadGuard, GetBlockIndexGuardMessage},
+    block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
+    block_tree::BlockTreeActor,
+    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    chunk_migration::ChunkMigrationActor,
+    epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
         GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage, NewEpochMessage,
-    }, mempool::MempoolActor, mining::PartitionMiningActor, packing::{wait_for_packing, PackingActor, PackingRequest}, vdf::{GetVdfStateMessage, VdfService, VdfStepsReadGuard}, ActorAddresses
+    },
+    mempool::MempoolActor,
+    mining::PartitionMiningActor,
+    packing::{wait_for_packing, PackingActor, PackingRequest},
+    vdf::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
+    ActorAddresses,
 };
 use irys_api_server::{run_server, ApiState};
 use irys_config::IrysNodeConfig;
@@ -16,8 +27,11 @@ use irys_storage::{
     initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
-    vdf_config::{self, VDFStepsConfig}, DifficultyAdjustmentConfig, StorageConfig, H256, U256,
+    app_state::DatabaseProvider,
+    calculate_initial_difficulty,
+    irys::IrysSigner,
+    vdf_config::{self, VDFStepsConfig},
+    DifficultyAdjustmentConfig, StorageConfig, H256, U256,
 };
 use reth::{
     builder::FullNode,
@@ -258,10 +272,8 @@ pub async fn start_irys_node(
                 let block_discovery_addr = block_discovery_actor.start();
 
                 let vdf_service = VdfService::from_registry();
-                let vdf_steps_guard: VdfStepsReadGuard = vdf_service
-                    .send(GetVdfStateMessage)
-                    .await
-                    .unwrap();
+                let vdf_steps_guard: VdfStepsReadGuard =
+                    vdf_service.send(GetVdfStateMessage).await.unwrap();
 
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
@@ -322,7 +334,10 @@ pub async fn start_irys_node(
 
                 let part_actors_clone = part_actors.clone();
 
-                info!("Starting VDF thread seed {:?} reset_seed {:?}", arc_genesis.vdf_limiter_info.output, arc_genesis.vdf_limiter_info.seed);
+                info!(
+                    "Starting VDF thread seed {:?} reset_seed {:?}",
+                    arc_genesis.vdf_limiter_info.output, arc_genesis.vdf_limiter_info.seed
+                );
 
                 let vdf_thread_handler = std::thread::spawn(move || {
                     run_vdf(

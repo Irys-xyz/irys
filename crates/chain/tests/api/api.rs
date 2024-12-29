@@ -1,6 +1,6 @@
 use irys_api_server::{routes, ApiState};
 use irys_chain::chain::start_for_testing_default;
-use irys_packing::unpack; 
+use irys_packing::unpack;
 
 use actix_web::{
     middleware::Logger,
@@ -11,7 +11,6 @@ use actix_web::{
 use awc::http::StatusCode;
 use base58::ToBase58;
 
-
 #[cfg(test)]
 #[actix_web::test]
 async fn api_end_to_end_test_32b() {
@@ -21,32 +20,39 @@ async fn api_end_to_end_test_32b() {
 #[cfg(test)]
 #[actix_web::test]
 async fn api_end_to_end_test_256kb() {
-    api_end_to_end_test(256*1024).await;
+    api_end_to_end_test(256 * 1024).await;
 }
 
 async fn api_end_to_end_test(chunk_size: usize) {
-    use std::{sync::Arc, time::Duration};
-    use irys_types::{irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, StorageConfig, UnpackedChunk, CHUNK_SIZE, MAX_CHUNK_SIZE};
+    use irys_types::{
+        irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, StorageConfig, UnpackedChunk,
+        CHUNK_SIZE, MAX_CHUNK_SIZE,
+    };
     use rand::Rng;
+    use std::{sync::Arc, time::Duration};
     use tokio::time::sleep;
-    use tracing::{debug, info};    
+    use tracing::{debug, info};
 
     let miner_signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
 
     let storage_config = StorageConfig {
-        chunk_size: chunk_size as u64, 
+        chunk_size: chunk_size as u64,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
         num_partitions_in_slot: 1,
         miner_address: miner_signer.address(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
-        };
+    };
 
-
-    let handle = start_for_testing_default(Some("api_end_to_end_test"), false, miner_signer, storage_config.clone())
-        .await
-        .unwrap();
+    let handle = start_for_testing_default(
+        Some("api_end_to_end_test"),
+        false,
+        miner_signer,
+        storage_config.clone(),
+    )
+    .await
+    .unwrap();
     handle.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
@@ -133,7 +139,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         if resp.status() == StatusCode::OK {
             let result: IrysTransactionHeader = test::read_body_json(resp).await;
             //assert_eq!(tx.header, result); TODO: uncomment this after fixing IrysSignature serialization issue with chain id Dan described
-            info!("Transaction was retrieved ok after {} attempts", attempts);            
+            info!("Transaction was retrieved ok after {} attempts", attempts);
             break;
         }
 
@@ -143,12 +149,13 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
     assert!(
         attempts < max_attempts,
-        "Transaction was not stored in after {} attempts", attempts
+        "Transaction was not stored in after {} attempts",
+        attempts
     );
 
     attempts = 1;
 
-    let mut missing_chunks = vec![1,0];
+    let mut missing_chunks = vec![1, 0];
     let ledger = 1; // Submit ledger
 
     // pools for chunk being available
@@ -156,18 +163,32 @@ async fn api_end_to_end_test(chunk_size: usize) {
         let chunk = missing_chunks.pop().unwrap();
         info!("Retrieving chunk: {} attempt: {}", chunk, attempts);
         let req = test::TestRequest::get()
-        .uri(&format!("/v1/chunk/{}/{}", ledger, chunk))        
-        .to_request();
+            .uri(&format!("/v1/chunk/{}/{}", ledger, chunk))
+            .to_request();
 
         let resp = test::call_service(&app, req).await;
 
         if resp.status() == StatusCode::OK {
             let packed_chunk: PackedChunk = test::read_body_json(resp).await;
-            assert_eq!(chunk, packed_chunk.tx_offset as usize, "Got different chunk index");
-            let unpacked_chunk = unpack(packed_chunk, storage_config.entropy_packing_iterations, chunk_size);
-            assert_eq!(unpacked_chunk.bytes.0, data_bytes[chunk * chunk_size..(chunk + 1) * chunk_size], "Got different chunk data");
-            info!("Chunk {} was retrieved ok after {} attempts", chunk, attempts);     
-            attempts = 0;       
+            assert_eq!(
+                chunk, packed_chunk.tx_offset as usize,
+                "Got different chunk index"
+            );
+            let unpacked_chunk = unpack(
+                packed_chunk,
+                storage_config.entropy_packing_iterations,
+                chunk_size,
+            );
+            assert_eq!(
+                unpacked_chunk.bytes.0,
+                data_bytes[chunk * chunk_size..(chunk + 1) * chunk_size],
+                "Got different chunk data"
+            );
+            info!(
+                "Chunk {} was retrieved ok after {} attempts",
+                chunk, attempts
+            );
+            attempts = 0;
             if missing_chunks.is_empty() {
                 break;
             }
@@ -183,7 +204,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
     assert!(
         attempts < max_attempts,
-        "Chunk could not be retrieved after {} attempts", attempts
+        "Chunk could not be retrieved after {} attempts",
+        attempts
     );
-
 }

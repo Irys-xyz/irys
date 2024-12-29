@@ -1,5 +1,8 @@
 use std::{
-    os::unix::raw::off_t, str::FromStr, sync::Arc, time::{SystemTime, UNIX_EPOCH}
+    os::unix::raw::off_t,
+    str::FromStr,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use actix::prelude::*;
@@ -20,7 +23,13 @@ use reth_db::Database;
 use tracing::{error, info, warn};
 
 use crate::{
-    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor}, block_index::{BlockIndexActor, GetLatestBlockIndexMessage}, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}, chunk_migration::ChunkMigrationActor, epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage}, mempool::{GetBestMempoolTxs, MempoolActor}, vdf::VdfStepsReadGuard
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
+    block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
+    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    chunk_migration::ChunkMigrationActor,
+    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
+    mempool::{GetBestMempoolTxs, MempoolActor},
+    vdf::VdfStepsReadGuard,
 };
 
 /// Used to mock up a BlockProducerActor
@@ -31,7 +40,7 @@ pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
 pub struct MockedBlockProducerAddr(pub Recipient<SolutionFoundMessage>);
 
 /// BlockProducerActor creates blocks from mining solutions
-#[derive(Debug,)]
+#[derive(Debug)]
 pub struct BlockProducerActor {
     /// Reference to the global database
     pub db: DatabaseProvider,
@@ -47,7 +56,7 @@ pub struct BlockProducerActor {
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
-    /// Storage config 
+    /// Storage config
     pub storage_config: StorageConfig,
     /// Difficulty adjustment parameters for the Irys Protocol
     pub difficulty_config: DifficultyAdjustmentConfig,
@@ -74,7 +83,7 @@ impl BlockProducerActor {
         storage_config: StorageConfig,
         difficulty_config: DifficultyAdjustmentConfig,
         vdf_config: VDFStepsConfig,
-        vdf_steps_guard: VdfStepsReadGuard
+        vdf_steps_guard: VdfStepsReadGuard,
     ) -> Self {
         Self {
             db,
@@ -87,7 +96,7 @@ impl BlockProducerActor {
             storage_config,
             difficulty_config,
             vdf_config,
-            vdf_steps_guard
+            vdf_steps_guard,
         }
     }
 }
@@ -125,7 +134,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let epoch_service_addr = self.epoch_service.clone();
         let chunk_migration_addr = self.chunk_migration_addr.clone();
         let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-        
+
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
         let difficulty_config = self.difficulty_config.clone();
@@ -182,7 +191,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 let bytes_added = data_txs.iter().fold(0, |acc, tx| {
                     acc + tx.data_size.div_ceil(chunk_size) * chunk_size
                 });
-        
+
                 let chunks_added = bytes_added / chunk_size;
 
                 // TODO: Eventually we'll need a more robust solution for growing the Ledgers
@@ -236,8 +245,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         error!("Error in requested vdf steps while producing block in step:{} error: {}", solution.vdf_step, e);
                         return None
                     }
-                };   
-                checkpoints.push(solution.seed.0); 
+                };
+                checkpoints.push(solution.seed.0);
                 //info!("previous block step {} step {} checkpoints {}", prev_block_header.vdf_limiter_info.global_step_number, solution.vdf_step, checkpoints);
 
                 let mut irys_block = IrysBlockHeader {
@@ -275,14 +284,14 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     ],
                     evm_block_hash: B256::ZERO,
                     vdf_limiter_info: VDFLimiterInfo {
-                        global_step_number: solution.vdf_step,                        
+                        global_step_number: solution.vdf_step,
                         output: solution.seed.into_inner(),
                         last_step_checkpoints: solution.checkpoints,
                         prev_output: prev_block_header.vdf_limiter_info.output,
                         seed: prev_block_header.vdf_limiter_info.seed,
                         checkpoints,
                         ..Default::default()
-                    },                    
+                    },
                 };
 
                 // RethNodeContext is a type-aware wrapper that lets us interact with the reth node

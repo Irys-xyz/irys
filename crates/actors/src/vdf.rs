@@ -1,6 +1,9 @@
 use actix::prelude::*;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, RwLock, RwLockReadGuard},
+};
 use tracing::info;
-use std::{collections::VecDeque, sync::{Arc, RwLock, RwLockReadGuard}};
 
 use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService, Subscribe};
 use irys_types::{block_production::Seed, H256List, H256};
@@ -17,39 +20,52 @@ impl VdfState {
     pub fn push_step(&mut self, seed: Seed) {
         if self.seeds.len() >= self.seeds.capacity() {
             self.seeds.pop_front();
-        } 
-        
+        }
+
         self.global_step += 1;
-        self.seeds.push_back(seed);        
-        info!("Received seed: {:?} global step: {}", self.seeds.back().unwrap(), self.global_step);
+        self.seeds.push_back(seed);
+        info!(
+            "Received seed: {:?} global step: {}",
+            self.seeds.back().unwrap(),
+            self.global_step
+        );
     }
 
     /// Get steps in inclusive range (from..=to) using global steps numbers as indices
     pub fn get_steps(&self, from: u64, to: u64) -> eyre::Result<H256List> {
         if from > to {
-            return Ok(H256List(vec![]))
+            return Ok(H256List(vec![]));
         }
-        
+
         let vdf_steps_len = self.seeds.len() as u64;
 
         let last_global_step = self.global_step;
         let first_global_step = last_global_step - vdf_steps_len + 1;
 
         if from < first_global_step || last_global_step < to {
-            return Err(eyre::eyre!("Unavailable requested range ({}..={}). Stored steps range is ({}..={})", from, to, first_global_step, last_global_step));
+            return Err(eyre::eyre!(
+                "Unavailable requested range ({}..={}). Stored steps range is ({}..={})",
+                from,
+                to,
+                first_global_step,
+                last_global_step
+            ));
         }
 
-        let right: usize = (to  - first_global_step).try_into()?;
+        let right: usize = (to - first_global_step).try_into()?;
         let left: usize = (from - first_global_step).try_into()?;
 
-        if right >=
-         left {
-            Ok(H256List(self.seeds.range(left..=right).map(|seed| seed.0.clone()).collect::<Vec<H256>>()))
+        if right >= left {
+            Ok(H256List(
+                self.seeds
+                    .range(left..=right)
+                    .map(|seed| seed.0.clone())
+                    .collect::<Vec<H256>>(),
+            ))
         } else {
             Ok(H256List(vec![]))
         }
     }
-
 }
 
 #[derive(Debug)]
@@ -62,12 +78,12 @@ impl Default for VdfService {
 }
 
 impl VdfService {
-
     /// Creates a new VdfService setting up how many steps are stored in memory
     pub fn new(capacity: usize) -> Self {
-        Self (
-            Arc::new(RwLock::new(VdfState{ global_step: 0, seeds: VecDeque::with_capacity(capacity)})),
-        )
+        Self(Arc::new(RwLock::new(VdfState {
+            global_step: 0,
+            seeds: VecDeque::with_capacity(capacity),
+        })))
     }
 }
 
@@ -91,7 +107,6 @@ impl Actor for VdfService {
 #[rtype(result = "()")]
 pub struct VdfSeed(pub Seed);
 
-
 // Handler for SeedMessage
 impl Handler<VdfSeed> for VdfService {
     type Result = ();
@@ -108,9 +123,9 @@ pub struct VdfStepsReadGuard(Arc<RwLock<VdfState>>);
 impl VdfStepsReadGuard {
     /// Creates a new ReadGard for Ledgers
     pub fn new(state: Arc<RwLock<VdfState>>) -> Self {
-        Self (state)
+        Self(state)
     }
-    
+
     /// Read access to internal steps queue
     pub fn read(&self) -> RwLockReadGuard<'_, VdfState> {
         self.0.read().unwrap()
@@ -125,11 +140,7 @@ pub struct GetVdfStateMessage;
 impl Handler<GetVdfStateMessage> for VdfService {
     type Result = VdfStepsReadGuard; // Return guard directly
 
-    fn handle(
-        &mut self,
-        _msg: GetVdfStateMessage,
-        _ctx: &mut Self::Context,
-    ) -> Self::Result {
+    fn handle(&mut self, _msg: GetVdfStateMessage, _ctx: &mut Self::Context) -> Self::Result {
         VdfStepsReadGuard::new(self.0.clone())
     }
 }
@@ -144,23 +155,29 @@ mod tests {
     #[actix_rt::test]
     async fn test_vdf() {
         let addr = VdfService::new(4).start();
-        
+
         // Send 8 seeds 1,2..,8 (capacity is 4)
-        for i in 0..8
-        {
-            addr.send(VdfSeed(Seed(H256([(i + 1) as u8; 32])))).await.unwrap();                        
+        for i in 0..8 {
+            addr.send(VdfSeed(Seed(H256([(i + 1) as u8; 32]))))
+                .await
+                .unwrap();
         }
 
-        let state = addr.send(GetVdfStateMessage).await.unwrap(); 
+        let state = addr.send(GetVdfStateMessage).await.unwrap();
 
-        let steps = state.read().seeds.iter().map(|seed| seed.clone()).collect::<Vec<_>>();
-        
+        let steps = state
+            .read()
+            .seeds
+            .iter()
+            .map(|seed| seed.clone())
+            .collect::<Vec<_>>();
+
         // Should only contain last 3 messages
         assert_eq!(steps.len(), 4);
 
         // Check last 4 seeds are stored
         for i in 0..4 {
-            assert_eq!(steps[i], Seed(H256([(i + 5) as u8; 32])));        
+            assert_eq!(steps[i], Seed(H256([(i + 5) as u8; 32])));
         }
 
         // range not stored
@@ -173,6 +190,14 @@ mod tests {
 
         // complete stored range
         let get_all = state.read().get_steps(5, 8).unwrap();
-        assert_eq!(H256List(vec![H256([5; 32]),H256([6; 32]), H256([7; 32]), H256([8; 32])]), get_all);
+        assert_eq!(
+            H256List(vec![
+                H256([5; 32]),
+                H256([6; 32]),
+                H256([7; 32]),
+                H256([8; 32])
+            ]),
+            get_all
+        );
     }
 }

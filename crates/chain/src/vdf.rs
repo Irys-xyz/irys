@@ -4,9 +4,10 @@ use irys_actors::{
     vdf::{self, VdfSeed, VdfService},
 };
 use irys_types::{
-    block_production::Seed, vdf_config::VDFStepsConfig, H256List, VDFLimiterInfo, H256, NONCE_LIMITER_RESET_FREQUENCY, NUM_CHECKPOINTS_IN_VDF_STEP, U256, VDF_SHA_1S
+    block_production::Seed, vdf_config::VDFStepsConfig, H256List, VDFLimiterInfo, H256,
+    NONCE_LIMITER_RESET_FREQUENCY, NUM_CHECKPOINTS_IN_VDF_STEP, U256, VDF_SHA_1S,
 };
-use irys_vdf::{vdf_sha, vdf_sha_verification, step_number_to_salt_number, apply_reset_seed};
+use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha, vdf_sha_verification};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
@@ -46,12 +47,23 @@ pub fn run_vdf(
         let elapsed = now.elapsed();
         debug!("Vdf step duration: {:.2?}", elapsed);
 
-        info!("Seed created {} step number {}", hash.clone(), global_step_number);
+        info!(
+            "Seed created {} step number {}",
+            hash.clone(),
+            global_step_number
+        );
         vdf_service.do_send(VdfSeed(Seed(hash)));
-        broadcast_mining_service.do_send(BroadcastMiningSeed{seed:Seed(hash), checkpoints:H256List(checkpoints.clone()), global_step: global_step_number});
+        broadcast_mining_service.do_send(BroadcastMiningSeed {
+            seed: Seed(hash),
+            checkpoints: H256List(checkpoints.clone()),
+            global_step: global_step_number,
+        });
 
         if global_step_number % nonce_limiter_reset_frequency == 0 {
-            info!("Reset seed {:?} applied to step {}", global_step_number, reset_seed);
+            info!(
+                "Reset seed {:?} applied to step {}",
+                global_step_number, reset_seed
+            );
             hash = apply_reset_seed(hash, reset_seed);
         }
 
@@ -73,12 +85,11 @@ mod tests {
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
     use vdf::{GetVdfStateMessage, VdfStepsReadGuard};
 
-    fn init_tracing(){
+    fn init_tracing() {
         let _ = SubscriberBuilder::default()
-        .with_max_level(LevelFilter::DEBUG)
-        .finish()
-        .try_init();
-
+            .with_max_level(LevelFilter::DEBUG)
+            .finish()
+            .try_init();
     }
     #[actix_rt::test]
     async fn test_vdf_step() {
@@ -121,13 +132,12 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf_service() {
-
         let seed = H256::random();
-        let reset_seed = H256::random();        
+        let reset_seed = H256::random();
 
         let vdf_config = VDFStepsConfig {
             nonce_limiter_reset_frequency: 2, // so to validation get into reset point
-            vdf_difficulty:1, // go quicker
+            vdf_difficulty: 1,                // go quicker
             ..VDFStepsConfig::default()
         };
 
@@ -135,20 +145,17 @@ mod tests {
 
         let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
-        let broadcast_mining_service = BroadcastMiningService::from_registry();            
+        let broadcast_mining_service = BroadcastMiningService::from_registry();
         let vdf_service = VdfService::from_registry();
-        let vdf_steps: VdfStepsReadGuard = vdf_service
-            .send(GetVdfStateMessage)
-            .await
-            .unwrap();
+        let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();
 
         let vdf_config2 = vdf_config.clone();
-        
+
         let vdf_thread_handler = std::thread::spawn(move || {
             run_vdf(
                 vdf_config2,
                 seed,
-                reset_seed, 
+                reset_seed,
                 new_seed_rx,
                 broadcast_mining_service,
                 vdf_service,
@@ -160,21 +167,29 @@ mod tests {
 
         let step_num = vdf_steps.read().global_step;
 
-        assert!(step_num > 4,"Should have more than 4 seeds");
+        assert!(step_num > 4, "Should have more than 4 seeds");
 
         // get last 4 steps
-        let steps = vdf_steps.read().get_steps(step_num - 3,step_num).unwrap();
+        let steps = vdf_steps.read().get_steps(step_num - 3, step_num).unwrap();
 
         // calculate last step checkpoints
         let mut hasher = Sha256::new();
         let mut salt = U256::from(step_number_to_salt_number(&vdf_config, step_num - 1 as u64));
         let mut seed = steps[2];
 
-        let mut checkpoints: Vec<H256> = vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
+        let mut checkpoints: Vec<H256> =
+            vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
         if step_num > 0 && (step_num - 1) % vdf_config.nonce_limiter_reset_frequency as u64 == 0 {
             seed = apply_reset_seed(seed, reset_seed);
         }
-        vdf_sha(&mut hasher,&mut salt,&mut seed, vdf_config.num_checkpoints_in_vdf_step, vdf_config.vdf_difficulty, &mut checkpoints);
+        vdf_sha(
+            &mut hasher,
+            &mut salt,
+            &mut seed,
+            vdf_config.num_checkpoints_in_vdf_step,
+            vdf_config.vdf_difficulty,
+            &mut checkpoints,
+        );
 
         let vdf_info = VDFLimiterInfo {
             global_step_number: step_num,
@@ -186,6 +201,9 @@ mod tests {
             ..VDFLimiterInfo::default()
         };
 
-        assert!(checkpoints_are_valid(&vdf_info, &vdf_config).is_ok(),"Invalid VDF");
+        assert!(
+            checkpoints_are_valid(&vdf_info, &vdf_config).is_ok(),
+            "Invalid VDF"
+        );
     }
 }
