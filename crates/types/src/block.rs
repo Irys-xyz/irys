@@ -165,15 +165,15 @@ impl IrysBlockHeader {
 
     pub fn encode_for_signing(&self, buf: &mut Vec<u8>) -> eyre::Result<()> {
         buf.extend_from_slice(&self.height.to_le_bytes());
-        let _ = &self.diff.to_little_endian(buf);
-        let _ = &self.cumulative_diff.to_little_endian(buf);
+        let _ = &self.diff.write_bytes(buf);
+        let _ = &self.cumulative_diff.write_bytes(buf);
         buf.extend_from_slice(&self.last_diff_timestamp.to_le_bytes());
         buf.extend_from_slice(&self.solution_hash.as_bytes());
         buf.extend_from_slice(&self.previous_solution_hash.as_bytes());
         buf.extend_from_slice(&self.last_epoch_hash.as_bytes());
         buf.extend_from_slice(&self.chunk_hash.as_bytes());
         buf.extend_from_slice(&self.previous_block_hash.as_bytes());
-        let _ = &self.previous_cumulative_diff.to_little_endian(buf);
+        let _ = &self.previous_cumulative_diff.write_bytes(buf);
 
         // poa data
         write_optional_ref(buf, &self.poa.tx_path);
@@ -241,7 +241,7 @@ where
 {
     match value {
         Some(v) => v.write_bytes(buf),
-        None => todo!(),
+        None => (),
     }
 }
 
@@ -251,7 +251,7 @@ where
 {
     match value {
         Some(v) => buf.extend_from_slice(v.as_ref()),
-        None => todo!(),
+        None => (),
     }
 }
 
@@ -275,6 +275,14 @@ impl WriteBytes for &u64 {
 impl WriteBytes for Base64 {
     fn write_bytes(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.0);
+    }
+}
+
+impl WriteBytes for U256 {
+    fn write_bytes(&self, buf: &mut Vec<u8>) {
+        let mut le_bytes = [0u8; 32];
+        self.to_little_endian(&mut le_bytes);
+        buf.extend_from_slice(&le_bytes);
     }
 }
 
@@ -339,10 +347,12 @@ impl fmt::Display for IrysBlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::validate_path;
+    use crate::{irys::IrysSigner, validate_path, IRYS_CHAIN_ID, MAX_CHUNK_SIZE};
 
     use super::*;
+    use alloy_core::hex;
     use alloy_primitives::Signature;
+    use k256::ecdsa::SigningKey;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use serde_json;
     use std::str::FromStr;
@@ -426,5 +436,74 @@ mod tests {
             let encoded_proof = Base64(proof.proof.to_vec());
             validate_path(tx_root.0, &encoded_proof, proof.offset as u128).unwrap();
         }
+    }
+
+    const DEV_PRIVATE_KEY: &str =
+        "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
+    const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
+
+    #[test]
+    fn test_irys_block_header_signing() {
+        let txids = H256List::new();
+
+        // Create a sample IrysBlockHeader object with mock data
+        let mut header = IrysBlockHeader {
+            diff: U256::from(1000),
+            cumulative_diff: U256::from(5000),
+            last_diff_timestamp: 1622543200,
+            solution_hash: H256::zero(),
+            previous_solution_hash: H256::zero(),
+            last_epoch_hash: H256::random(),
+            chunk_hash: H256::zero(),
+            height: 42,
+            block_hash: H256::zero(),
+            previous_block_hash: H256::zero(),
+            previous_cumulative_diff: U256::from(4000),
+            poa: PoaData {
+                tx_path: None,
+                data_path: None,
+                chunk: Base64::from_str("").unwrap(),
+                partition_hash: H256::zero(),
+                partition_chunk_offset: 0,
+                ledger_num: None,
+            },
+            reward_address: Address::ZERO,
+            signature: Signature::test_signature().into(),
+            timestamp: 1622543200,
+            ledgers: vec![TransactionLedger {
+                tx_root: H256::zero(),
+                txids,
+                max_chunk_offset: 100,
+                expires: Some(1622543200),
+            }],
+            evm_block_hash: B256::ZERO,
+            vdf_limiter_info: VDFLimiterInfo::default(),
+            miner_address: Address::ZERO,
+        };
+
+        let signer = IrysSigner {
+            signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
+                .unwrap(),
+            chain_id: IRYS_CHAIN_ID,
+            chunk_size: MAX_CHUNK_SIZE,
+        };
+
+        // sign the block header
+        header = signer.sign_block_header(header).unwrap();
+
+        assert_eq!(true, header.is_signature_valid().unwrap());
+        // fuzz some fields, make sure the signature fails
+
+        // Use a specific seed
+        let seed: [u8; 32] = [0; 32];
+        let mut rng = StdRng::from_seed(seed);
+
+        rng.fill(&mut header.chunk_hash.as_bytes_mut()[..]);
+        rng.fill(&mut header.solution_hash.as_bytes_mut()[..]);
+        rng.fill(&mut header.previous_solution_hash.as_bytes_mut()[..]);
+        rng.fill(&mut header.previous_block_hash.as_bytes_mut()[..]);
+        rng.fill(&mut header.block_hash.as_bytes_mut()[..]);
+
+        assert_eq!(false, header.is_signature_valid().unwrap());
     }
 }

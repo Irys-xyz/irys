@@ -89,7 +89,7 @@ impl IrysSigner {
 
     pub fn sign_block_header(&self, mut block_header: IrysBlockHeader) -> Result<IrysBlockHeader> {
         // Store the signer address
-        block_header.reward_address = Address::from_public_key(self.signer.verifying_key());
+        block_header.miner_address = Address::from_public_key(self.signer.verifying_key());
 
         // Create the signature hash and sign it
         let prehash = block_header.signature_hash()?;
