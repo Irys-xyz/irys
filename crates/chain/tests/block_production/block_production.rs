@@ -167,12 +167,12 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
         info!("waiting block {}", i);
 
         let mut retries = 0;
-        while node.block_index_view.num_blocks() < i + 1 && retries < 10 as u64 {
+        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 10 as u64 {
             sleep(Duration::from_millis(1000)).await;
             retries += 1;
         }
 
-        let block = node.block_index_view.get_item(i as usize).unwrap();
+        let block = node.block_index_guard.read().get_item(i as usize).unwrap().clone();
         
         //check reth for built block
         let reth_block = reth_context

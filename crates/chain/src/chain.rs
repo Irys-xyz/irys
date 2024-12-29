@@ -1,21 +1,10 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, ArbiterService};
 use irys_actors::{
-    block_discovery::BlockDiscoveryActor,
-    block_index::{BlockIndexActor, GetBlockIndexGuardMessage},
-    block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
-    block_tree::BlockTreeActor,
-    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    chunk_migration::ChunkMigrationActor,
-    epoch_service::{
+    block_discovery::BlockDiscoveryActor, block_index::{BlockIndexActor, BlockIndexReadGuard, GetBlockIndexGuardMessage}, block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage}, block_tree::BlockTreeActor, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}, chunk_migration::ChunkMigrationActor, epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
         GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage, NewEpochMessage,
-    },
-    mempool::MempoolActor,
-    mining::PartitionMiningActor,
-    packing::{wait_for_packing, PackingActor, PackingRequest},
-    ActorAddresses,
-    vdf::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
+    }, mempool::MempoolActor, mining::PartitionMiningActor, packing::{wait_for_packing, PackingActor, PackingRequest}, vdf::{GetVdfStateMessage, VdfService, VdfStepsReadGuard}, ActorAddresses
 };
 use irys_api_server::{run_server, ApiState};
 use irys_config::IrysNodeConfig;
@@ -93,7 +82,7 @@ pub struct IrysNodeCtx {
     pub db: DatabaseProvider,
     pub config: Arc<IrysNodeConfig>,
     pub chunk_provider: ChunkProvider,
-    pub block_index_view: BlockIndexView,
+    pub block_index_guard: BlockIndexReadGuard,
 }
 
 pub async fn start_irys_node(
@@ -364,7 +353,7 @@ pub async fn start_irys_node(
                     db: db.clone(),
                     config: arc_config.clone(),
                     chunk_provider: chunk_provider.clone(),
-                    block_index_view: block_index_view.clone(),
+                    block_index_guard: block_index_guard.clone(),
                 });
 
                 run_server(ApiState {
