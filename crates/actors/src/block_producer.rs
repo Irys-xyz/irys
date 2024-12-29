@@ -239,6 +239,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     previous_cumulative_diff: U256::from(4000),
                     poa,
                     reward_address: Address::ZERO,
+                    miner_address: Address::ZERO,
                     signature: Signature::test_signature().into(),
                     timestamp: current_timestamp,
                     ledgers: vec![

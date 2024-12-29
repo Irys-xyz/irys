@@ -205,6 +205,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
             partition_hash: PartitionHash::zero(),
         },
         reward_address: Address::ZERO,
+        miner_address: Address::ZERO,
         signature: Signature::test_signature().into(),
         timestamp: now.as_millis(),
         ledgers: vec![

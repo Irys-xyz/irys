@@ -6,10 +6,7 @@ use bytes::Buf as _;
 use eyre::eyre;
 use reth_codecs::Compact;
 use reth_primitives::transaction::recover_signer;
-use secp256k1::{
-    ecdsa::{RecoverableSignature, RecoveryId},
-    Message, PublicKey, SECP256K1,
-};
+
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 //==============================================================================
 // IrysSignature
@@ -47,21 +44,6 @@ impl IrysSignature {
         recover_signer(&self.0, prehash).map_or(false, |recovered_address| {
             expected_address == recovered_address
         })
-    }
-
-    /// Determines the public key for which this signature is valid for [`prehash`](B256)  
-    /// NOTE: you probably should be using [`validate_signature`](IrysSignature::validate_signature)!
-    pub fn recover_signer(&self, prehash: B256) -> eyre::Result<PublicKey> {
-        // manual S check
-        if self.0.s() > SECP256K1N_HALF {
-            return Err(eyre!("Signature S value is high!"));
-        }
-        let sig = self.as_bytes();
-        let sig =
-            RecoverableSignature::from_compact(&sig[0..64], RecoveryId::from_i32(sig[64] as i32)?)?;
-
-        let public = SECP256K1.recover_ecdsa(&Message::from_digest(prehash.0), &sig)?;
-        Ok(public)
     }
 }
 
@@ -162,25 +144,6 @@ impl<'de> Deserialize<'de> for IrysSignature {
         // Return the IrysSignature by wrapping the Signature
         Ok(IrysSignature::new(sig))
     }
-}
-
-// copied from ext/reth/crates/primitives/src/transaction/signature.rs
-
-/// The order of the secp256k1 curve, divided by two. Signatures that should be checked according
-/// to EIP-2 should have an S value less than or equal to this.
-///
-/// `57896044618658097711785492504343953926418782139537452191302581570759080747168`
-const SECP256K1N_HALF: U256 = U256::from_be_bytes([
-    0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D, 0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
-]);
-
-//
-
-// encodes a public key to it's uncompressed, 32 byte, form.
-// note: these 32 bytes are the same bytes that are passed into `keccak256` to derive the address bytes.
-pub fn encode_public_key(key: &PublicKey) -> Vec<u8> {
-    key.serialize_uncompressed()[1..].to_vec()
 }
 
 #[cfg(test)]

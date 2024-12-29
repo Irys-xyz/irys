@@ -349,6 +349,7 @@ mod tests {
             previous_cumulative_diff: U256::from(4000),
             poa: poa.clone(),
             reward_address: Address::ZERO,
+            miner_address: Address::ZERO,
             signature: Signature::test_signature().into(),
             timestamp: 1000,
             ledgers: vec![

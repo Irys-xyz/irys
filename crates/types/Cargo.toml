@@ -41,5 +41,4 @@ nodit.workspace = true
 bytes.workspace = true
 modular-bitfield.workspace = true
 alloy-rlp.workspace = true
-secp256k1.workspace = true
 zerocopy = "0.8.9"
