@@ -1,69 +1,48 @@
+use crate::block_producer::BlockConfirmedMessage;
+use actix::prelude::*;
+use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
+use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
 use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
     time::Duration,
 };
 
-use actix::prelude::*;
-
-use irys_database::{
-    BlockBounds, BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem,
-};
-use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
-
-use crate::block_producer::BlockConfirmedMessage;
-
 //==============================================================================
-// Read only view of BlockIndex State
+// BlockIndexReadGuard
 //------------------------------------------------------------------------------
 
-/// Retrieve a read only view of the block_index_data
-#[derive(Message, Debug)]
-#[rtype(result = "BlockIndexView")]
-pub struct GetBlockIndexViewMessage;
-
-/// A read only view of Block Index state (stores a reference to original block_index)
+/// Wraps the internal Arc<RwLock<>> to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
-pub struct BlockIndexView {
-    inner: Arc<RwLock<BlockIndex<Initialized>>>,
+pub struct BlockIndexReadGuard {
+    block_index_data: Arc<RwLock<BlockIndex<Initialized>>>,
 }
 
-impl BlockIndexView {
-    /// Create a new read only view from the block index
-    pub fn new(block_index: Arc<RwLock<BlockIndex<Initialized>>>) -> Self {
-        Self { inner: block_index }
+impl BlockIndexReadGuard {
+    /// Creates a new ReadGard for Ledgers
+    pub fn new(block_index_data: Arc<RwLock<BlockIndex<Initialized>>>) -> Self {
+        Self { block_index_data }
     }
 
-    /// Retrieve the number of blocks in the index
-    pub fn num_blocks(&self) -> u64 {
-        self.inner.read().unwrap().num_blocks()
+    /// Accessor method to get a read guard for Ledgers
+    pub fn read(&self) -> RwLockReadGuard<'_, BlockIndex<Initialized>> {
+        self.block_index_data.read().unwrap()
     }
+}
 
-    /// Retrieve a block index item based on its height (offset from the 0 based start of the index)
-    pub fn get_item(&self, block_height: usize) -> Option<BlockIndexItem> {
-        let guard = self.inner.read().unwrap();
-        guard.get_item(block_height).cloned()
-    }
+/// Retrieve a read only reference to the ledger partition assignments
+#[derive(Message, Debug)]
+#[rtype(result = "BlockIndexReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
+pub struct GetBlockIndexGuardMessage;
 
-    /// Given a specific ledger and chunk offset, where did the block containing
-    /// that ledger offset that offset start and end, in ledger relative chunk
-    /// offsets
-    pub fn get_block_bounds(&self, ledger: Ledger, chunk_offset: u64) -> BlockBounds {
-        self.inner
-            .read()
-            .unwrap()
-            .get_block_bounds(ledger, chunk_offset)
-    }
+impl Handler<GetBlockIndexGuardMessage> for BlockIndexActor {
+    type Result = BlockIndexReadGuard; // Return guard directly
 
-    /// For a given ledger relative chunk offset, retrieve the block index data
-    /// for the block responsible for adding it to the ledger.
-    pub fn get_block_index_item(
-        &self,
-        ledger: Ledger,
-        chunk_offset: u64,
-    ) -> eyre::Result<(usize, BlockIndexItem)> {
-        let guard = self.inner.read().unwrap();
-        let (idx, item) = guard.get_block_index_item(ledger, chunk_offset)?;
-        Ok((idx, item.clone()))
+    fn handle(
+        &mut self,
+        _msg: GetBlockIndexGuardMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        BlockIndexReadGuard::new(self.block_index.clone())
     }
 }
 
@@ -80,6 +59,7 @@ pub struct BlockIndexActor {
 
 #[derive(Debug)]
 struct BlockLogEntry {
+    #[allow(dead_code)]
     pub block_hash: H256,
     pub height: u64,
     pub timestamp: u128,
@@ -198,14 +178,6 @@ impl Handler<BlockConfirmedMessage> for BlockIndexActor {
 
         // Do something with the block
         self.add_finalized_block(&irys_block_header, &data_txs);
-    }
-}
-
-impl Handler<GetBlockIndexViewMessage> for BlockIndexActor {
-    type Result = BlockIndexView;
-
-    fn handle(&mut self, _msg: GetBlockIndexViewMessage, _ctx: &mut Self::Context) -> Self::Result {
-        BlockIndexView::new(self.block_index.clone())
     }
 }
 

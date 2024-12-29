@@ -1,19 +1,15 @@
 use actix::{Actor, Context, Handler, Message};
 use eyre::eyre;
-use irys_database::db_cache::{data_size_to_chunk_count, CachedChunk};
+use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_storage::StorageModuleVec;
-use irys_types::ingress::generate_ingress_proof_tree;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
-    IrysTransactionHeader, CHUNK_SIZE, H256,
+    IrysTransactionHeader, H256,
 };
-use irys_types::{Address, DataChunks};
 use irys_types::{DataRoot, StorageConfig};
 use reth::tasks::TaskExecutor;
-use reth::tasks::TaskManager;
-use reth_db::cursor::DbCursorRO;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
@@ -21,8 +17,7 @@ use reth_db::Database;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::fmt::Display;
-use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::block_producer::BlockConfirmedMessage;
 /// The Mempool oversees pending transactions and validation of incoming tx.
@@ -133,7 +128,7 @@ impl Handler<TxIngressMessage> for MempoolActor {
 
     fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
         let tx = &tx_msg.0;
-
+        debug!("received tx {}", &tx.id);
         // Early out if we already know about this transaction
         if self.invalid_tx.contains(&tx.id) || self.valid_tx.contains_key(&tx.id) {
             // Skip tx reprocessing if already verified (valid or invalid) to prevent
@@ -371,15 +366,20 @@ pub fn generate_ingress_proof(
     // TODO: allow for "streaming" the tree chunks, instead of having to read them all into memory
     let ro_tx = db.tx()?;
     let mut dup_cursor = ro_tx.cursor_dup_read::<CachedChunksIndex>()?;
+
     // start from first duplicate entry for this root_hash
     let dup_walker = dup_cursor.walk_dup(Some(data_root), None)?;
+
     // we need to validate that the index is valid
     // we do this by constructing a set over the chunk hashes, checking if we've seen this hash before
     // if we have, we *must* error
     let mut set = HashSet::<H256>::new();
     let expected_chunk_count = data_size_to_chunk_count(size, chunk_size).unwrap();
-    let mut data: DataChunks = Vec::with_capacity(expected_chunk_count as usize);
+
+    let mut chunks = Vec::with_capacity(expected_chunk_count as usize);
+    let mut owned_chunks = Vec::with_capacity(expected_chunk_count as usize);
     let mut data_size: u64 = 0;
+
     for entry in dup_walker {
         let (root_hash2, index_entry) = entry?;
         // make sure we haven't traversed into the wrong key
@@ -405,16 +405,19 @@ pub fn generate_ingress_proof(
                 )
                 .as_str(),
             );
-        // TODO validate chunk length
         let chunk_bin = chunk.chunk.unwrap().0;
         data_size += chunk_bin.len() as u64;
-        data.push(chunk_bin);
+        owned_chunks.push(chunk_bin);
     }
-    assert_eq!(data.len() as u32, expected_chunk_count);
+
+    // Now create the slice references
+    chunks.extend(owned_chunks.iter().map(|c| c.as_slice()));
+
+    assert_eq!(chunks.len() as u32, expected_chunk_count);
     assert_eq!(data_size, size);
 
     // generate the ingress proof hash
-    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, data)?;
+    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, &chunks)?;
     info!(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root
@@ -444,9 +447,10 @@ mod tests {
     use irys_types::{
         irys::IrysSigner,
         partition::{PartitionAssignment, PartitionHash},
-        storage_config, Base64, MAX_CHUNK_SIZE,
+        storage_config, Address, Base64, MAX_CHUNK_SIZE,
     };
     use rand::Rng;
+    use reth::tasks::TaskManager;
     use tokio::time::{sleep, timeout};
 
     use super::*;
