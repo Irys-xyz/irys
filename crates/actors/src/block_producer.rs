@@ -53,7 +53,7 @@ pub struct BlockProducerActor {
     pub difficulty_config: DifficultyAdjustmentConfig,
     pub vdf_config: VDFStepsConfig,
     /// Store last VDF Steps
-    pub vdf_steps: VdfStepsReadGuard,
+    pub vdf_steps_guard: VdfStepsReadGuard,
 }
 
 /// Actors can handle this message to learn about the block_producer actor at startup
@@ -74,7 +74,7 @@ impl BlockProducerActor {
         storage_config: StorageConfig,
         difficulty_config: DifficultyAdjustmentConfig,
         vdf_config: VDFStepsConfig,
-        vdf_steps: VdfStepsReadGuard
+        vdf_steps_guard: VdfStepsReadGuard
     ) -> Self {
         Self {
             db,
@@ -87,7 +87,7 @@ impl BlockProducerActor {
             storage_config,
             difficulty_config,
             vdf_config,
-            vdf_steps
+            vdf_steps_guard
         }
     }
 }
@@ -130,7 +130,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let db = self.db.clone();
         let difficulty_config = self.difficulty_config.clone();
         let chunk_size = self.storage_config.chunk_size;
-        let vdf_steps = self.vdf_steps.clone();
+        let vdf_steps = self.vdf_steps_guard.clone();
 
         AtomicResponse::new(Box::pin(
             async move {

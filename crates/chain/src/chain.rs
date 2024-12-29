@@ -258,7 +258,7 @@ pub async fn start_irys_node(
                 let block_discovery_addr = block_discovery_actor.start();
 
                 let vdf_service = VdfService::from_registry();
-                let vdf_steps: VdfStepsReadGuard = vdf_service
+                let vdf_steps_guard: VdfStepsReadGuard = vdf_service
                     .send(GetVdfStateMessage)
                     .await
                     .unwrap();
@@ -274,7 +274,7 @@ pub async fn start_irys_node(
                     storage_config.clone(),
                     difficulty_adjustment_config.clone(),
                     vdf_config.clone(),
-                    vdf_steps.clone(),
+                    vdf_steps_guard.clone(),
                 );
                 let block_producer_addr = block_producer_actor.start();
                 block_tree.do_send(RegisterBlockProducerMessage(block_producer_addr.clone()));
