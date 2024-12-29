@@ -104,7 +104,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let storage_config = &self.storage_config;
 
         info!("Validating block height:{} step:{} output:{} prev output: {}", new_block_header.height, new_block_header.vdf_limiter_info.global_step_number, new_block_header.vdf_limiter_info.output, new_block_header.vdf_limiter_info.prev_output);
-        match block_is_valid(&new_block_header, &block_index_guard, &partitions_guard, storage_config, &self.vdf_config) {
+        match block_is_valid(&new_block_header, &block_index_guard, &partitions_guard, storage_config, &self.vdf_config, &new_block_header.reward_address) {
             Ok(_) => {
                 info!("Block is valid, sending to block tree");
                 block_tree_addr.do_send(BlockPreValidatedMessage(
