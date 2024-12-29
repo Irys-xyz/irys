@@ -106,7 +106,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let storage_config = &self.storage_config;
 
         info!(
-            "Validating block height:{} step:{} output:{} prev output: {}",
+            "Validating block height: {} step: {} output: {} prev output: {}",
             new_block_header.height,
             new_block_header.vdf_limiter_info.global_step_number,
             new_block_header.vdf_limiter_info.output,

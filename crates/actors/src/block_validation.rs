@@ -35,21 +35,6 @@ pub fn block_is_valid(
         storage_config,
         reward_address,
     )?;
-
-    // if let Some(prev_block) = prev_block_header {
-    //     if block.previous_block_hash != prev_block.block_hash {
-    //         return Err(eyre::eyre!(
-    //             "Invalid block: previous blocks indep_hash is not the parent block"
-    //         ));
-    //     }
-
-    //     // check retarget
-
-    //     // check difficulty
-
-    //     //
-    // } // if there is no previous block error ?
-
     Ok(())
 }
 
