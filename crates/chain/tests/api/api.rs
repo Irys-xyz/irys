@@ -133,7 +133,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         if resp.status() == StatusCode::OK {
             let result: IrysTransactionHeader = test::read_body_json(resp).await;
             //assert_eq!(tx.header, result); TODO: uncomment this after fixing IrysSignature serialization issue with chain id Dan described
-            info!("Transaction was retrived ok after {} attempts", attempts);            
+            info!("Transaction was retrieved ok after {} attempts", attempts);            
             break;
         }
 
@@ -166,12 +166,14 @@ async fn api_end_to_end_test(chunk_size: usize) {
             assert_eq!(chunk, packed_chunk.tx_offset as usize, "Got different chunk index");
             let unpacked_chunk = unpack(packed_chunk, storage_config.entropy_packing_iterations, chunk_size);
             assert_eq!(unpacked_chunk.bytes.0, data_bytes[chunk * chunk_size..(chunk + 1) * chunk_size], "Got different chunk data");
-            info!("Chunk {} was retrived ok after {} attempts", chunk, attempts);     
+            info!("Chunk {} was retrieved ok after {} attempts", chunk, attempts);     
             attempts = 0;       
             if missing_chunks.is_empty() {
                 break;
             }
         } else {
+            let body = test::read_body(resp).await;
+            debug!("Chunk not available. Response body: {:#?}", body);
             missing_chunks.push(chunk);
         }
 
