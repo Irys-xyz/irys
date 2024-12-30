@@ -239,14 +239,18 @@ fn write_optional<'a, T>(buf: &mut Vec<u8>, value: &'a Option<T>)
 where
     &'a T: WriteBytes,
 {
-    if let Some(v) = value { v.write_bytes(buf) }
+    if let Some(v) = value {
+        v.write_bytes(buf)
+    }
 }
 
 fn write_optional_ref<T>(buf: &mut Vec<u8>, value: &Option<T>)
 where
     T: AsRef<[u8]>,
 {
-    if let Some(v) = value { buf.extend_from_slice(v.as_ref()) }
+    if let Some(v) = value {
+        buf.extend_from_slice(v.as_ref())
+    }
 }
 
 trait WriteBytes {
