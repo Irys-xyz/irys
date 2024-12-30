@@ -395,7 +395,7 @@ impl Handler<BlockConfirmedMessage> for MempoolActor {
                     error!("DatabaseError deleting ingress proof err: {}", err);
                 }
 
-                println!("Promoted tx:\n{:?}", tx_header);
+                info!("Promoted tx:\n{:?}", tx_header);
             }
 
             let _ = mut_tx.commit();
