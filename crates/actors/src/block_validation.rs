@@ -213,7 +213,7 @@ mod tests {
         for poa_tx_num in 0..3 {
             for poa_chunk_num in 0..3 {
                 let mut poa_chunk: Vec<u8> =
-                    data_chunks[poa_tx_num as usize][poa_chunk_num as usize].into();
+                    data_chunks[poa_tx_num][poa_chunk_num].into();
                 poa_test(
                     &txs,
                     &mut poa_chunk,
@@ -244,7 +244,7 @@ mod tests {
 
         for poa_chunk_num in 0..2 {
             let mut poa_chunk: Vec<u8> = data[poa_chunk_num * chunk_size
-                ..std::cmp::min(((poa_chunk_num + 1) * chunk_size) as usize, data.len())]
+                ..std::cmp::min(((poa_chunk_num + 1) * chunk_size), data.len())]
                 .to_vec();
             poa_test(
                 &txs,
@@ -365,7 +365,7 @@ mod tests {
 
         let data_tx_ids = tx_headers
             .iter()
-            .map(|h| h.id.clone())
+            .map(|h| h.id)
             .collect::<Vec<H256>>();
 
         let (tx_root, tx_path) = TransactionLedger::merklize_tx_root(&tx_headers);
@@ -388,7 +388,7 @@ mod tests {
             block_hash: H256::zero(),
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(4000),
-            miner_address: miner_address.clone(),
+            miner_address: miner_address,
             signature: Signature::test_signature().into(),
             timestamp: 1000,
             ledgers: vec![
