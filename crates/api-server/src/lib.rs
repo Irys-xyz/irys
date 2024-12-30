@@ -1,4 +1,4 @@
-mod error;
+pub mod error;
 mod routes;
 
 use std::sync::Arc;
@@ -6,6 +6,7 @@ use std::sync::Arc;
 use actix::Addr;
 use actix_cors::Cors;
 use actix_web::{
+    dev::HttpServiceFactory,
     error::InternalError,
     web::{self, JsonConfig},
     App, HttpResponse, HttpServer,
@@ -14,7 +15,8 @@ use actix_web::{
 use irys_actors::mempool::MempoolActor;
 use irys_storage::ChunkProvider;
 use irys_types::app_state::DatabaseProvider;
-use routes::{block, get_chunk, index, post_chunk, price, proxy::proxy, tx};
+use routes::{block, get_chunk, index, network_config, post_chunk, price, proxy::proxy, tx};
+use tracing::debug;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -23,34 +25,40 @@ pub struct ApiState {
     pub db: DatabaseProvider,
 }
 
+pub fn routes() -> impl HttpServiceFactory {
+    web::scope("v1")
+        .route("/info", web::get().to(index::info_route))
+        .route(
+            "/network/config",
+            web::get().to(network_config::get_network_config),
+        )
+        .route("/block/{block_hash}", web::get().to(block::get_block))
+        .route(
+            "/chunk/{ledger_num}/{ledger_offset}",
+            web::get().to(get_chunk::get_chunk),
+        )
+        .route("/chunk", web::post().to(post_chunk::post_chunk))
+        .route("/tx/{tx_id}", web::get().to(tx::get_tx))
+        .route("/tx", web::post().to(tx::post_tx))
+        .route("/price/{size}", web::get().to(price::get_price))
+}
+
 pub async fn run_server(app_state: ApiState) {
     HttpServer::new(move || {
         let awc_client = awc::Client::new();
-
         App::new()
             .app_data(web::Data::new(app_state.clone()))
             .app_data(web::Data::new(awc_client))
             .app_data(
                 JsonConfig::default()
                     .limit(1024 * 1024) // Set JSON payload limit to 1MB
-                    .error_handler(|err, _req| {
+                    .error_handler(|err, req| {
+                        debug!("JSON decode error for req {:?} - {:?}", &req.path(), &err);
                         InternalError::from_response(err, HttpResponse::BadRequest().finish())
                             .into()
                     }),
             )
-            .service(
-                web::scope("v1")
-                    .route("/info", web::get().to(index::info_route))
-                    .route("/block/{block_hash}", web::get().to(block::get_block))
-                    .route(
-                        "/chunk/{ledger_num}/{ledger_offset}",
-                        web::get().to(get_chunk::get_chunk),
-                    )
-                    .route("/chunk", web::post().to(post_chunk::post_chunk))
-                    .route("/tx/{tx_id}", web::get().to(tx::get_tx))
-                    .route("/tx", web::post().to(tx::post_tx))
-                    .route("/price/{size}", web::get().to(price::get_price)),
-            )
+            .service(routes())
             .route("/", web::to(proxy))
             .wrap(Cors::permissive())
     })
@@ -117,11 +125,7 @@ async fn post_tx_and_chunks_golden_path() {
             .app_data(JsonConfig::default().limit(1024 * 1024)) // 1MB limit
             .app_data(web::Data::new(app_state))
             .wrap(Logger::default())
-            .service(
-                web::scope("v1")
-                    .route("/tx", web::post().to(tx::post_tx))
-                    .route("/chunk", web::post().to(post_chunk::post_chunk)),
-            ),
+            .service(routes()),
     )
     .await;
 
@@ -148,19 +152,19 @@ async fn post_tx_and_chunks_golden_path() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Loop though each of the transaction chunks
-    for (index, chunk_node) in tx.chunks.iter().enumerate() {
+    for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
         let data_root = tx.header.data_root;
         let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[index].proof.to_vec());
+        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
 
         let chunk = UnpackedChunk {
             data_root,
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            chunk_index: index as u32,
+            tx_offset: tx_chunk_offset as u32,
         };
 
         // Make a POST request with JSON payload

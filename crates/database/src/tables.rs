@@ -1,6 +1,6 @@
 use irys_types::{
     ingress::IngressProof, partition::PartitionHash, ChunkPathHash, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, H256,
+    IrysTransactionHeader, TxRelativeChunkOffset, H256,
 };
 use reth_codecs::Compact;
 use reth_db::{table::DupSort, tables, DatabaseError};

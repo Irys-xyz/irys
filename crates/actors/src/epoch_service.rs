@@ -35,6 +35,34 @@ impl Default for EpochServiceConfig {
     }
 }
 
+/// A state struct that can be wrapped with Arc<RwLock<>> to provide parallel read access
+#[derive(Debug)]
+pub struct PartitionAssignments {
+    /// Active data partition state mapped by partition hash
+    pub data_partitions: HashMap<PartitionHash, PartitionAssignment>,
+    /// Available capacity partitions mapped by partition hash
+    pub capacity_partitions: HashMap<PartitionHash, PartitionAssignment>,
+}
+
+/// Implementation helper functions
+impl PartitionAssignments {
+    /// Initialize a new PartitionAssignments state wrapper struct
+    pub fn new() -> Self {
+        Self {
+            data_partitions: HashMap::new(),
+            capacity_partitions: HashMap::new(),
+        }
+    }
+
+    /// Retrieves a PartitionAssignment by partition hash if it exists
+    pub fn get_assignment(&self, partition_hash: H256) -> Option<PartitionAssignment> {
+        self.data_partitions
+            .get(&partition_hash)
+            .copied()
+            .or(self.capacity_partitions.get(&partition_hash).copied())
+    }
+}
+
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug)]
 pub struct EpochServiceActor {
@@ -42,10 +70,8 @@ pub struct EpochServiceActor {
     pub last_epoch_hash: H256,
     /// Protocol-managed data ledgers (one permanent, N term)
     pub ledgers: Arc<RwLock<Ledgers>>,
-    /// Active data partition state mapped by partition hash
-    pub data_partitions: HashMap<PartitionHash, PartitionAssignment>,
-    /// Available capacity partitions mapped by partition hash
-    pub capacity_partitions: HashMap<PartitionHash, PartitionAssignment>,
+    /// Tracks active mining assignments for partitions (by hash)
+    pub partition_assignments: Arc<RwLock<PartitionAssignments>>,
     /// Sequential list of activated partition hashes
     pub all_active_partitions: Vec<PartitionHash>,
     /// Current partition & ledger parameters
@@ -81,8 +107,12 @@ pub enum EpochServiceError {
     NotAnEpochBlock,
 }
 
-/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
-#[derive(Debug, MessageResponse)]
+//==============================================================================
+// LedgersReadGuard
+//------------------------------------------------------------------------------
+
+/// Wraps the internal Arc<RwLock<>> to make the reference readonly
+#[derive(Debug, Clone, MessageResponse)]
 pub struct LedgersReadGuard {
     ledgers: Arc<RwLock<Ledgers>>,
 }
@@ -102,15 +132,59 @@ impl LedgersReadGuard {
 /// Retrieve a read only reference to the ledger partition assignments
 #[derive(Message, Debug)]
 #[rtype(result = "LedgersReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
-pub struct GetLedgersMessage;
+pub struct GetLedgersGuardMessage;
 
-impl Handler<GetLedgersMessage> for EpochServiceActor {
+impl Handler<GetLedgersGuardMessage> for EpochServiceActor {
     type Result = LedgersReadGuard; // Return guard directly
 
-    fn handle(&mut self, _msg: GetLedgersMessage, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, _msg: GetLedgersGuardMessage, _ctx: &mut Self::Context) -> Self::Result {
         LedgersReadGuard::new(Arc::clone(&self.ledgers))
     }
 }
+
+//==============================================================================
+// PartitionAssignmentsReadGuard
+//------------------------------------------------------------------------------
+/// Wraps the internal Arc<RwLock<>> to make the reference readonly
+#[derive(Debug, Clone, MessageResponse)]
+pub struct PartitionAssignmentsReadGuard {
+    partition_assignments: Arc<RwLock<PartitionAssignments>>,
+}
+
+impl PartitionAssignmentsReadGuard {
+    /// Creates a new ReadGard for Ledgers
+    pub fn new(partition_assignments: Arc<RwLock<PartitionAssignments>>) -> Self {
+        Self {
+            partition_assignments,
+        }
+    }
+
+    /// Accessor method to get a read guard for Ledgers
+    pub fn read(&self) -> RwLockReadGuard<'_, PartitionAssignments> {
+        self.partition_assignments.read().unwrap()
+    }
+}
+
+/// Retrieve a read only reference to the ledger partition assignments
+#[derive(Message, Debug)]
+#[rtype(result = "PartitionAssignmentsReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
+pub struct GetPartitionAssignmentsGuardMessage;
+
+impl Handler<GetPartitionAssignmentsGuardMessage> for EpochServiceActor {
+    type Result = PartitionAssignmentsReadGuard; // Return guard directly
+
+    fn handle(
+        &mut self,
+        _msg: GetPartitionAssignmentsGuardMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        PartitionAssignmentsReadGuard::new(self.partition_assignments.clone())
+    }
+}
+
+//==============================================================================
+// EpochServiceActor implementation
+//------------------------------------------------------------------------------
 
 /// Retrieve a read only reference to the ledger partition assignments
 #[derive(Message, Debug)]
@@ -136,16 +210,13 @@ pub struct GetPartitionAssignmentMessage(pub PartitionHash);
 
 impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
     type Result = Option<PartitionAssignment>;
-
     fn handle(
         &mut self,
         msg: GetPartitionAssignmentMessage,
         _ctx: &mut Self::Context,
     ) -> Self::Result {
-        self.data_partitions
-            .get(&msg.0)
-            .copied()
-            .or(self.capacity_partitions.get(&msg.0).copied())
+        let pa = self.partition_assignments.read().unwrap();
+        pa.get_assignment(msg.0)
     }
 }
 
@@ -161,8 +232,7 @@ impl EpochServiceActor {
         Self {
             last_epoch_hash: H256::zero(),
             ledgers: Arc::new(RwLock::new(Ledgers::new())),
-            data_partitions: HashMap::new(),
-            capacity_partitions: HashMap::new(),
+            partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
             all_active_partitions: Vec::new(),
             config,
         }
@@ -253,10 +323,14 @@ impl EpochServiceActor {
     /// additional partitions (and their state) as needed.
     fn allocate_additional_capacity(&mut self) {
         // Calculate total number of active partitions based on the amount of data stored
-        let num_data_partitions = self.data_partitions.len() as u64;
-        let num_capacity_partitions =
-            Self::get_num_capacity_partitions(num_data_partitions, &self.config);
-        let total_parts = num_capacity_partitions + num_data_partitions;
+        let total_parts: u64;
+        {
+            let pa = self.partition_assignments.read().unwrap();
+            let num_data_partitions = pa.data_partitions.len() as u64;
+            let num_capacity_partitions =
+                Self::get_num_capacity_partitions(num_data_partitions, &self.config);
+            total_parts = num_capacity_partitions + num_data_partitions;
+        }
 
         // Add additional capacity partitions as needed
         if total_parts > self.all_active_partitions.len() as u64 {
@@ -269,7 +343,11 @@ impl EpochServiceActor {
     /// capacity partitions assigned to maintain their replica counts
     fn backfill_missing_partitions(&mut self) {
         // Start with a sorted list of capacity partitions (sorted by hash)
-        let mut capacity_partitions: Vec<H256> = self.capacity_partitions.keys().copied().collect();
+        let mut capacity_partitions: Vec<H256>;
+        {
+            let pa = self.partition_assignments.read().unwrap();
+            capacity_partitions = pa.capacity_partitions.keys().copied().collect();
+        }
 
         // Sort partitions using `sort_unstable` for better performance.
         // Stability isn't needed/affected as each partition hash is unique.
@@ -361,8 +439,9 @@ impl EpochServiceActor {
 
         // Create partition assignments for all the partitions to the local miners address
         // TODO: Change this ^^ when pledging and staking exist
+        let mut pa = self.partition_assignments.write().unwrap();
         for partition_hash in &self.all_active_partitions {
-            self.capacity_partitions.insert(
+            pa.capacity_partitions.insert(
                 *partition_hash,
                 PartitionAssignment {
                     partition_hash: *partition_hash,
@@ -377,14 +456,15 @@ impl EpochServiceActor {
     // Updates PartitionAssignment information about a partition hash, marking
     // it as expired (or unassigned to a slot in a data ledger)
     fn mark_partition_as_expired(&mut self, partition_hash: H256) {
+        let mut pa = self.partition_assignments.write().unwrap();
         // Convert data partition to capacity partition if it exists
-        if let Some(mut assignment) = self.data_partitions.remove(&partition_hash) {
+        if let Some(mut assignment) = pa.data_partitions.remove(&partition_hash) {
             // Clear ledger assignment
             assignment.ledger_num = None;
             assignment.slot_index = None;
 
             // Add to capacity pool
-            self.capacity_partitions.insert(partition_hash, assignment);
+            pa.capacity_partitions.insert(partition_hash, assignment);
         }
     }
 
@@ -396,10 +476,11 @@ impl EpochServiceActor {
         ledger: Ledger,
         slot_index: usize,
     ) {
-        if let Some(mut assignment) = self.capacity_partitions.remove(&partition_hash) {
+        let mut pa = self.partition_assignments.write().unwrap();
+        if let Some(mut assignment) = pa.capacity_partitions.remove(&partition_hash) {
             assignment.ledger_num = Some(ledger as u64);
             assignment.slot_index = Some(slot_index);
-            self.data_partitions.insert(partition_hash, assignment);
+            pa.data_partitions.insert(partition_hash, assignment);
         }
     }
 
@@ -453,6 +534,8 @@ impl EpochServiceActor {
         let ledgers = self.ledgers.read().unwrap();
         let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
 
+        let mut pa = self.partition_assignments.read().unwrap();
+
         // Configure publish ledger storage
         let mut module_infos = ledgers
             .get_slots(Ledger::Publish)
@@ -461,7 +544,7 @@ impl EpochServiceActor {
             .enumerate()
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx,
-                partition_assignment: Some(*self.data_partitions.get(partition).unwrap()),
+                partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
                 submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx))],
             })
             .collect::<Vec<_>>();
@@ -476,7 +559,7 @@ impl EpochServiceActor {
             .enumerate()
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx_start + idx,
-                partition_assignment: Some(*self.data_partitions.get(partition).unwrap()),
+                partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
                 submodules: vec![(
                     ie(0, num_part_chunks),
                     format!("submodule_{}", idx_start + idx),
@@ -487,14 +570,14 @@ impl EpochServiceActor {
         module_infos.extend(submit_infos);
 
         // Sort the active capacity partitions by hash
-        let capacity_partitions: Vec<H256> = self.capacity_partitions.keys().copied().collect();
+        let capacity_partitions: Vec<H256> = pa.capacity_partitions.keys().copied().collect();
 
         // Add initial capacity partition config
         let cap_part = capacity_partitions.first().unwrap();
         let idx = module_infos.len();
         let cap_info = StorageModuleInfo {
             id: idx,
-            partition_assignment: Some(*self.capacity_partitions.get(cap_part).unwrap()),
+            partition_assignment: Some(*pa.capacity_partitions.get(cap_part).unwrap()),
             submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx))],
         };
 
@@ -566,8 +649,9 @@ mod tests {
 
             // Verify data partition assignments match _PUBLISH_ ledger slots
             for (slot_idx, slot) in pub_slots.iter().enumerate() {
+                let pa = epoch_service.partition_assignments.read().unwrap();
                 for &partition_hash in &slot.partitions {
-                    let assignment = epoch_service
+                    let assignment = pa
                         .data_partitions
                         .get(&partition_hash)
                         .expect("partition should be assigned");
@@ -590,8 +674,9 @@ mod tests {
 
             // Verify data partition assignments match _SUBMIT_ledger slots
             for (slot_idx, slot) in sub_slots.iter().enumerate() {
+                let pa = epoch_service.partition_assignments.read().unwrap();
                 for &partition_hash in &slot.partitions {
-                    let assignment = epoch_service
+                    let assignment = pa
                         .data_partitions
                         .get(&partition_hash)
                         .expect("partition should be assigned");
@@ -614,35 +699,38 @@ mod tests {
         }
 
         // Verify the correct number of genesis partitions have been activated
-        let data_partition_count = epoch_service.data_partitions.len() as u64;
-        let expected_partitions = data_partition_count
-            + EpochServiceActor::get_num_capacity_partitions(data_partition_count, &config);
-        assert_eq!(
-            epoch_service.all_active_partitions.len(),
-            expected_partitions as usize
-        );
-
-        // Validate that all the capacity partitions are assigned to the
-        // bootstrap miner but not assigned to any ledger
-        for pair in &epoch_service.capacity_partitions {
-            let partition_hash = pair.0;
-            let ass = pair.1;
+        {
+            let pa = epoch_service.partition_assignments.read().unwrap();
+            let data_partition_count = pa.data_partitions.len() as u64;
+            let expected_partitions = data_partition_count
+                + EpochServiceActor::get_num_capacity_partitions(data_partition_count, &config);
             assert_eq!(
-                ass,
-                &PartitionAssignment {
-                    partition_hash: *partition_hash,
-                    ledger_num: None,
-                    slot_index: None,
-                    miner_address
-                }
-            )
+                epoch_service.all_active_partitions.len(),
+                expected_partitions as usize
+            );
+
+            // Validate that all the capacity partitions are assigned to the
+            // bootstrap miner but not assigned to any ledger
+            for pair in &pa.capacity_partitions {
+                let partition_hash = pair.0;
+                let ass = pair.1;
+                assert_eq!(
+                    ass,
+                    &PartitionAssignment {
+                        partition_hash: *partition_hash,
+                        ledger_num: None,
+                        slot_index: None,
+                        miner_address
+                    }
+                )
+            }
         }
 
         // Debug output for verification
         // println!("Data Partitions: {:#?}", epoch_service.capacity_partitions);
         println!("Ledger State: {:#?}", epoch_service.ledgers);
 
-        let ledgers = epoch_service.handle(GetLedgersMessage, &mut Context::new());
+        let ledgers = epoch_service.handle(GetLedgersGuardMessage, &mut Context::new());
 
         println!("{:?}", ledgers.read());
 

@@ -1,6 +1,6 @@
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysTransaction,
-    IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID, MAX_CHUNK_SIZE,
+    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysSignature,
+    IrysTransaction, IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID, MAX_CHUNK_SIZE,
 };
 use alloy_core::primitives::keccak256;
 
@@ -76,11 +76,11 @@ impl IrysSigner {
 
         // Create the signature hash and sign it
         let prehash = transaction.signature_hash();
+
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
-        transaction.header.signature.reth_signature = signature.with_chain_id(self.chain_id);
-
-        // Drives the the txid by hashing the signature
+        transaction.header.signature = IrysSignature::new(signature);
+        // Derive the txid by hashing the signature
         let id: [u8; 32] = keccak256(signature.as_bytes()).into();
         transaction.header.id = H256::from(id);
         Ok(transaction)
@@ -89,16 +89,15 @@ impl IrysSigner {
     /// Builds a merkle tree, with a root, including all the proofs for each
     /// chunk.
     fn merklize(&self, data: Vec<u8>, chunk_size: usize) -> Result<IrysTransaction> {
-        let mut chunks = generate_leaves(data.clone(), chunk_size)?;
+        let chunks = generate_leaves(&data, chunk_size)?;
         let root = generate_data_root(chunks.clone())?;
-        let data_root = H256(root.id);
-        let mut proofs = resolve_proofs(root, None)?;
+        let data_root = H256(root.id.clone());
+        let proofs = resolve_proofs(root, None)?;
 
-        // Discard the last chunk & proof if it's zero length.
+        // Error if the last chunk or proof is zero length.
         let last_chunk = chunks.last().unwrap();
         if last_chunk.max_byte_range == last_chunk.min_byte_range {
-            chunks.pop();
-            proofs.pop();
+            return Err(eyre::eyre!("Last chunk cannot be zero length"));
         }
 
         Ok(IrysTransaction {
@@ -115,9 +114,9 @@ impl IrysSigner {
     }
 }
 
-impl From<IrysSigner> for LocalSigner<SigningKey> {
-    fn from(val: IrysSigner) -> Self {
-        LocalSigner::from_signing_key(val.signer)
+impl Into<LocalSigner<SigningKey>> for IrysSigner {
+    fn into(self) -> LocalSigner<SigningKey> {
+        LocalSigner::from_signing_key(self.signer)
     }
 }
 
@@ -126,7 +125,7 @@ mod tests {
     use crate::{hash_sha256, validate_chunk, MAX_CHUNK_SIZE};
     use assert_matches::assert_matches;
     use rand::Rng;
-    use reth_primitives::recover_signer_unchecked;
+    use reth_primitives::{recover_signer_unchecked, transaction::recover_signer};
 
     use super::IrysSigner;
 
@@ -155,7 +154,7 @@ mod tests {
             );
         }
 
-        println!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
+        print!("{}\n", serde_json::to_string_pretty(&tx.header).unwrap());
 
         // Make sure the size of the last chunk is just whatever is left over
         // after chunking the rest of the data at MAX_CHUNK_SIZE intervals.
@@ -178,12 +177,12 @@ mod tests {
             // Ensure every chunk proof (data_path) is valid
             let root_id = tx.header.data_root.0;
             let proof = tx.proofs[index].clone();
-            let proof_result = validate_chunk(root_id, chunk_node, &proof);
+            let proof_result = validate_chunk(root_id, &chunk_node, &proof);
             assert_matches!(proof_result, Ok(_));
 
             // Ensure the data_hash is valid by hashing the chunk data
             let chunk_bytes: &[u8] = &data_bytes[min..max];
-            let computed_hash = hash_sha256(chunk_bytes).unwrap();
+            let computed_hash = hash_sha256(&chunk_bytes).unwrap();
             let data_hash = chunk_node.data_hash.unwrap();
 
             assert_eq!(data_hash, computed_hash);
@@ -192,8 +191,9 @@ mod tests {
         // Recover the signer as a way to verify the signature
         let prehash = tx.header.signature_hash();
         let sig = tx.header.signature.as_bytes();
-        let signer = recover_signer_unchecked(&sig, &prehash).ok();
 
-        assert_eq!(signer.unwrap(), tx.header.signer);
+        let signer = recover_signer(&sig[..].try_into().unwrap(), prehash).unwrap();
+
+        assert_eq!(signer, tx.header.signer);
     }
 }

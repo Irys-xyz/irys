@@ -5200,6 +5200,7 @@ version = "0.1.0"
 dependencies = [
  "actix",
  "actix-rt",
+ "actix-web",
  "alloy-consensus",
  "alloy-contract",
  "alloy-core",
@@ -5213,6 +5214,9 @@ dependencies = [
  "alloy-sol-types",
  "arbitrary",
  "assert_matches",
+ "awc",
+ "base58",
+ "base64-url",
  "bytes",
  "clap",
  "derive_more 1.0.0",

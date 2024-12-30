@@ -13,7 +13,6 @@ irys-types.workspace = true
 #
 
 actix-proxy = "0.2.0"
-actix-web = "4.9.0"
 awc = "3.5.1"
 base58 = "0.2.0"
 base64-url.workspace = true
@@ -23,6 +22,7 @@ serde_json = { workspace = true, features = ["std", "raw_value"] }
 serde.workspace = true
 tempfile = "3.10"
 actix.workspace = true
+actix-web.workspace = true
 rand = "0.8.5"
 tokio.workspace = true
 actix-cors = "0.7.0"

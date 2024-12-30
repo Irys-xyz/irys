@@ -14,15 +14,18 @@ mod merkle;
 pub mod partition;
 pub mod reth_provider;
 pub mod serialization;
+pub mod signature;
 pub mod simple_rng;
 pub mod storage;
 pub mod storage_config;
 pub mod transaction;
 pub mod vdf_config;
+
 pub use block::*;
 pub use consensus::*;
 pub use difficulty_adjustment_config::*;
 pub use serialization::*;
+pub use signature::*;
 pub use storage::*;
 pub use transaction::*;
 

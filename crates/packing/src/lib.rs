@@ -1,7 +1,21 @@
 use std::ops::BitXor;
 
 pub use irys_c::{capacity, capacity_single};
-use irys_types::{partition::PartitionHash, Address, ChunkBytes, CHUNK_SIZE, PACKING_SHA_1_5_S};
+use irys_types::{partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CHUNK_SIZE, PACKING_SHA_1_5_S};
+
+pub fn unpack(packed_chunk: PackedChunk, entropy_packing_iterations: u32, chunk_size: usize) -> UnpackedChunk {
+        let mut out: Vec<u8> = Vec::with_capacity(chunk_size.try_into().unwrap());
+        capacity_single::compute_entropy_chunk(packed_chunk.packing_address, packed_chunk.tx_offset as u64, packed_chunk.partition_hash.0, entropy_packing_iterations, chunk_size, &mut out);
+        xor_vec_u8_arrays_in_place(&mut out, &(packed_chunk.bytes.0));
+
+        UnpackedChunk {
+            data_root: packed_chunk.data_root,
+            data_size: packed_chunk.data_size,
+            data_path: packed_chunk.data_path,
+            bytes: Base64(out),
+            tx_offset: packed_chunk.tx_offset,
+        }
+}
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
 /// defaults to [`PACKING_SHA_1_5_S`]`, returns entropy chunk in out_entropy_chunk parameter.

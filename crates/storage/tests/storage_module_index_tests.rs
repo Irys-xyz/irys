@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use irys_database::{
-    assign_data_root, cache_chunk, cached_chunk_by_chunk_index, get_partition_hashes_by_data_root,
+    assign_data_root, cache_chunk, cached_chunk_by_chunk_offset, get_partition_hashes_by_data_root,
     open_or_create_db,
     submodule::{get_full_tx_path, get_path_hashes_by_offset, get_start_offsets_by_data_root},
     tables::IrysTables,
@@ -110,11 +110,11 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     ];
 
     // Helpful logging when debugging
-    // let mut chunk_index = 0;
+    // let mut chunk_offset = 0;
     // for chunk_group in &data_chunks {
     //     for chunk in chunk_group {
-    //         println!("write[{:?}]: {:?}", chunk_index, chunk);
-    //         chunk_index += 1;
+    //         println!("write[{:?}]: {:?}", chunk_offset, chunk);
+    //         chunk_offset += 1;
     //     }
     // }
 
@@ -341,7 +341,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 data_size: chunk_bytes.len() as u64,
                 data_path: Base64(proof.proof.clone()),
                 bytes: chunk_bytes,
-                chunk_index: i as u32,
+                tx_offset: i as u32,
             };
 
             let _ = db.update_eyre(|tx| cache_chunk(tx, &chunk));
@@ -381,7 +381,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                         }
 
                         // Request the chunk from the global db index by  data root & tx relative offset
-                        let res = cached_chunk_by_chunk_index(tx, data_root, i).unwrap();
+                        let res = cached_chunk_by_chunk_offset(tx, data_root, i as u32).unwrap();
 
                         // Build a Chunk struct to store in the submodule
                         if let Some((_metadata, chunk)) = res {
@@ -393,7 +393,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                                 data_size: chunk_bytes.len() as u64,
                                 data_path: chunk.data_path,
                                 bytes: chunk_bytes,
-                                chunk_index: i,
+                                tx_offset: i as u32,
                             };
 
                             let res = storage_module.write_data_chunk(&chunk);

@@ -7,7 +7,7 @@ use irys_types::{DatabaseProvider, LedgerChunkOffset, PackedChunk, StorageConfig
 use crate::{get_storage_module_at_offset, StorageModule};
 
 /// Provides chunks to actix::web front end (mostly)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChunkProvider {
     /// Configuration parameters for storage system
     pub storage_config: StorageConfig,

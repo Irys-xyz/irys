@@ -22,12 +22,7 @@ use reth_db::Database;
 use tracing::{error, info};
 
 use crate::{
-    block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
-    block_validation::poa_is_valid,
-    chunk_migration::ChunkMigrationActor,
-    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
-    mempool::{GetBestMempoolTxs, MempoolActor},
-    mining_broadcaster::{BroadcastDifficultyUpdate, MiningBroadcaster},
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor}, block_index::{BlockIndexActor, GetLatestBlockIndexMessage}, chunk_migration::ChunkMigrationActor, epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage}, mempool::{GetBestMempoolTxs, MempoolActor}, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}
 };
 
 /// Used to mock up a `BlockProducerActor`
@@ -37,8 +32,8 @@ pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
 #[derive(Debug)]
 pub struct MockedBlockProducerAddr(pub Recipient<SolutionFoundMessage>);
 
-/// `BlockProducerActor` creates blocks from mining solutions
-#[derive(Debug)]
+/// BlockProducerActor creates blocks from mining solutions
+#[derive(Debug,)]
 pub struct BlockProducerActor {
     /// Reference to the global database
     pub db: DatabaseProvider,
@@ -48,8 +43,8 @@ pub struct BlockProducerActor {
     pub chunk_migration_addr: Addr<ChunkMigrationActor>,
     /// Address of the `bock_index` actor
     pub block_index_addr: Addr<BlockIndexActor>,
-    /// Enables broadcast messages to partition mining actors
-    pub mining_broadcaster_addr: Addr<MiningBroadcaster>,
+    /// Message the block discovery actor when a block is produced locally
+    pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     /// Tracks the global state of partition assignments on the protocol
     pub epoch_service: Addr<EpochServiceActor>,
     /// Reference to the VM node
@@ -61,6 +56,11 @@ pub struct BlockProducerActor {
     pub vdf_config: VDFStepsConfig,
 }
 
+/// Actors can handle this message to learn about the block_producer actor at startup
+#[derive(Message, Debug, Clone)]
+#[rtype(result = "()")]
+pub struct RegisterBlockProducerMessage(pub Addr<BlockProducerActor>);
+
 impl BlockProducerActor {
     /// Initializes a new `BlockProducerActor`
     pub const fn new(
@@ -68,7 +68,7 @@ impl BlockProducerActor {
         mempool_addr: Addr<MempoolActor>,
         chunk_migration_addr: Addr<ChunkMigrationActor>,
         block_index_addr: Addr<BlockIndexActor>,
-        mining_broadcaster_addr: Addr<MiningBroadcaster>,
+        block_discover_addr: Addr<BlockDiscoveryActor>,
         epoch_service: Addr<EpochServiceActor>,
         reth_provider: RethNodeProvider,
         storage_config: StorageConfig,
@@ -80,7 +80,7 @@ impl BlockProducerActor {
             mempool_addr,
             chunk_migration_addr,
             block_index_addr,
-            mining_broadcaster_addr,
+            block_discovery_addr: block_discover_addr,
             epoch_service,
             reth_provider,
             storage_config,
@@ -119,10 +119,11 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let mempool_addr = self.mempool_addr.clone();
         let block_index_addr = self.block_index_addr.clone();
+        let block_discovery_addr = self.block_discovery_addr.clone();
         let epoch_service_addr = self.epoch_service.clone();
         let chunk_migration_addr = self.chunk_migration_addr.clone();
-        let mining_broadcaster_addr = self.mining_broadcaster_addr.clone();
-
+        let mining_broadcaster_addr = BroadcastMiningService::from_registry();
+        
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
         let self_addr = ctx.address();
@@ -223,18 +224,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     partition_hash: solution.partition_hash,
                 };
 
-                if let Err(err) = poa_is_valid(
-                    &poa,
-                    &block_index_addr,
-                    &epoch_service_addr,
-                    &storage_config,
-                )
-                .await
-                {
-                    error!("PoA error {:?}", err);
-                    return None;
-                }
-
                 let mut irys_block = IrysBlockHeader {
                     block_hash,
                     height: block_height,
@@ -248,11 +237,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     previous_block_hash: prev_block_hash,
                     previous_cumulative_diff: U256::from(4000),
                     poa,
-                    reward_address: Address::ZERO,
+                    reward_address: solution.mining_address,
                     reward_key: Base64::from_str("").unwrap(),
-                    signature: IrysSignature {
-                        reth_signature: Signature::test_signature(),
-                    },
+                    signature: Signature::test_signature().into(),
                     timestamp: current_timestamp,
                     ledgers: vec![
                         // Permanent Publish Ledger
@@ -343,14 +330,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     .unwrap();
 
                 let block = Arc::new(irys_block);
-                let txs = Arc::new(data_txs);
-                let block_confirm_message =
-                    BlockConfirmedMessage(Arc::clone(&block), Arc::clone(&txs));
 
-                // Broadcast BLockConfirmedMessage
-                self_addr.do_send(block_confirm_message.clone());
-                block_index_addr.do_send(block_confirm_message.clone());
-                mempool_addr.do_send(block_confirm_message);
+                block_discovery_addr.do_send(BlockDiscoveredMessage(block.clone()));
+
 
                 // Get all the transactions for the previous block, error if not found
                 let txs = match prev_block_header.ledgers[Ledger::Submit]
@@ -377,12 +359,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
                 }
 
-                chunk_migration_addr.do_send(BlockFinalizedMessage {
+                let _ = chunk_migration_addr.send(BlockFinalizedMessage {
                     block_header: Arc::new(prev_block_header),
                     txs: Arc::new(txs),
-                });
-
-                Some((block, exec_payload))
+                }).await.unwrap();
+                info!("Finished producing block height: {}, hash: {}", &block_height, &block_hash);
+                Some((block.clone(), exec_payload))
             }
             .into_actor(self),
         ))

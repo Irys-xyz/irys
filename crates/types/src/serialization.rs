@@ -126,116 +126,20 @@ impl Decode for H256 {
 }
 
 impl Encodable for H256 {
+    #[inline]
+    fn length(&self) -> usize {
+        self.0.length()
+    }
+
+    #[inline]
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         self.0.encode(out);
-    }
-    fn length(&self) -> usize {
-        self.0.len()
     }
 }
 
 impl Decodable for H256 {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        if buf.len() < 32 {
-            return Err(RlpError::Custom("not enough bytes to decode H256"));
-        }
-        Ok(H256::from_slice(buf))
-    }
-}
-//==============================================================================
-// IrysSignature
-//------------------------------------------------------------------------------
-#[derive(Clone, Eq, Debug, Arbitrary, RlpEncodable, RlpDecodable)]
-pub struct IrysSignature {
-    pub reth_signature: Signature,
-}
-
-impl IrysSignature {
-    /// Passthough to the inner signature.as_bytes()
-    pub fn as_bytes(&self) -> [u8; 65] {
-        self.reth_signature.as_bytes()
-    }
-}
-
-impl PartialEq for IrysSignature {
-    fn eq(&self, other: &Self) -> bool {
-        self.reth_signature.r() == other.reth_signature.r()
-            && self.reth_signature.s() == other.reth_signature.s()
-            && self.reth_signature.v().y_parity() == other.reth_signature.v().y_parity()
-    }
-}
-
-impl From<Signature> for IrysSignature {
-    fn from(sig: Signature) -> Self {
-        IrysSignature {
-            reth_signature: sig, // Directly wrapping the Signature struct
-        }
-    }
-}
-
-impl Compact for IrysSignature {
-    #[inline]
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        self.reth_signature.with_parity_bool().to_compact(buf)
-    }
-
-    #[inline]
-    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let compact = Signature::from_compact(buf, len);
-        (
-            IrysSignature {
-                reth_signature: compact.0.with_parity_bool(),
-            },
-            compact.1,
-        )
-    }
-}
-
-// Implement Serialize for H256
-impl Serialize for IrysSignature {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let bytes = self.reth_signature.as_bytes();
-        serializer.serialize_str(bytes.to_base58().as_ref())
-    }
-}
-
-// Implement Deserialize for H256
-impl<'de> Deserialize<'de> for IrysSignature {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        // First, deserialize the base58-encoded string
-        let s: String = Deserialize::deserialize(deserializer)?;
-
-        // Decode the base58 string into bytes
-        let bytes = FromBase58::from_base58(s.as_str())
-            .map_err(|e| format!("Failed to decode from base58 {:?}", e))
-            .expect("base58 should prase");
-
-        // Ensure the byte array is exactly 65 bytes (r, s, and v values of the signature)
-        if bytes.len() != 65 {
-            return Err(de::Error::invalid_length(
-                bytes.len(),
-                &"expected 65 bytes for signature",
-            ));
-        }
-
-        // Convert the byte array into a Signature struct using TryFrom
-        let sig = Signature::try_from(bytes.as_slice())
-            .map_err(de::Error::custom)?
-            .with_chain_id(IRYS_CHAIN_ID);
-
-        // Return the IrysSignature by wrapping the Signature
-        Ok(IrysSignature {
-            reth_signature: sig,
-        })
+        Decodable::decode(buf).map(Self)
     }
 }
 
@@ -266,7 +170,7 @@ pub mod address_base58_stringify {
             .map_err(|e| format!("Failed to decode from base58 {:?}", e))
             .expect("base58 should prase");
 
-        // Ensure the byte array is exactly 65 bytes (r, s, and v values of the signature)
+        // Ensure the byte array is exactly 20 bytes
         if bytes.len() != 20 {
             return Err(de::Error::invalid_length(
                 bytes.len(),
@@ -307,18 +211,6 @@ pub mod option_u64_stringify {
             Some(Value::String(s)) => s.parse::<u64>().map(Some).map_err(serde::de::Error::custom),
             Some(_) => Err(serde::de::Error::custom("Invalid type")),
             None => Ok(None),
-        }
-    }
-}
-
-impl Default for IrysSignature {
-    fn default() -> Self {
-        IrysSignature {
-            reth_signature: Signature::new(
-                RethU256::default(),
-                RethU256::default(),
-                Parity::Eip155(0), // Assuming 0 as default parity
-            ),
         }
     }
 }
@@ -622,10 +514,102 @@ impl<'de> Deserialize<'de> for H256List {
     }
 }
 
+//==============================================================================
+// Uint <-> string HTTP/JSON serialization/deserialization
+//------------------------------------------------------------------------------
+
+/// Module containing serialization/deserialization for u64 to/from a string
+pub mod string_u64 {
+    use super::*;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string_or_number_to_int(deserializer)
+    }
+
+    pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+}
+
+/// Module containing serialization/deserialization for Option<u64> to/from a string
+pub mod optional_string_u64 {
+    use super::*;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string_or_number_to_optional_int(deserializer)
+    }
+
+    pub fn serialize<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(v) => serializer.serialize_str(&v.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+fn string_or_number_to_int<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: FromStr + serde::Deserialize<'de>,
+    T::Err: std::fmt::Display,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber<T> {
+        String(String),
+        Number(T),
+    }
+
+    match StringOrNumber::deserialize(deserializer)? {
+        StringOrNumber::String(s) => T::from_str(&s).map_err(serde::de::Error::custom),
+        StringOrNumber::Number(n) => Ok(n),
+    }
+}
+
+fn string_or_number_to_optional_int<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: FromStr + serde::Deserialize<'de>,
+    T::Err: std::fmt::Display,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber<T> {
+        String(String),
+        Number(T),
+        Null,
+    }
+
+    match StringOrNumber::deserialize(deserializer)? {
+        StringOrNumber::String(s) => {
+            if s.is_empty() {
+                Ok(None)
+            } else {
+                T::from_str(&s).map(Some).map_err(serde::de::Error::custom)
+            }
+        }
+        StringOrNumber::Number(n) => Ok(Some(n)),
+        StringOrNumber::Null => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::BytesMut;
+    use serde_json::json;
 
     #[test]
     fn test_u256_to_compact() {
@@ -662,5 +646,41 @@ mod tests {
 
         // Check that the decoded value matches the original value
         assert_eq!(decoded_value, original_value);
+    }
+
+    #[test]
+    fn test_string_or_number_to_u64() {
+        let json_number: serde_json::Value = json!(42);
+        let json_string: serde_json::Value = json!("42");
+
+        let number: Result<Result<u64, _>, _> = serde_json::from_value(json_number)
+            .map(|v: serde_json::Value| string_or_number_to_int(v));
+        let string: Result<Result<u64, _>, _> = serde_json::from_value(json_string)
+            .map(|v: serde_json::Value| string_or_number_to_int(v));
+
+        assert_eq!(number.unwrap().unwrap(), 42);
+        assert_eq!(string.unwrap().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_string_or_number_to_optional_u64() {
+        let json_number: serde_json::Value = json!(42);
+        let json_string: serde_json::Value = json!("42");
+        let json_null: serde_json::Value = json!(null);
+        let json_empty: serde_json::Value = json!("");
+
+        let number: Result<Result<Option<u64>, _>, _> = serde_json::from_value(json_number)
+            .map(|v: serde_json::Value| string_or_number_to_optional_int(v));
+        let string: Result<Result<Option<u64>, _>, _> = serde_json::from_value(json_string)
+            .map(|v: serde_json::Value| string_or_number_to_optional_int(v));
+        let null: Result<Result<Option<u64>, _>, _> = serde_json::from_value(json_null)
+            .map(|v: serde_json::Value| string_or_number_to_optional_int(v));
+        let empty: Result<Result<Option<u64>, _>, _> = serde_json::from_value(json_empty)
+            .map(|v: serde_json::Value| string_or_number_to_optional_int(v));
+
+        assert_eq!(number.unwrap().unwrap(), Some(42));
+        assert_eq!(string.unwrap().unwrap(), Some(42));
+        assert_eq!(null.unwrap().unwrap(), None);
+        assert_eq!(empty.unwrap().unwrap(), None);
     }
 }

@@ -1,18 +1,54 @@
+use crate::block_producer::BlockConfirmedMessage;
+use actix::prelude::*;
+use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
+use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
 use std::{
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockReadGuard},
     time::Duration,
 };
 
-use actix::prelude::*;
+//==============================================================================
+// BlockIndexReadGuard
+//------------------------------------------------------------------------------
 
-use irys_database::{
-    BlockBounds, BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem,
-};
-use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
+/// Wraps the internal Arc<RwLock<>> to make the reference readonly
+#[derive(Debug, Clone, MessageResponse)]
+pub struct BlockIndexReadGuard {
+    block_index_data: Arc<RwLock<BlockIndex<Initialized>>>,
+}
 
-use crate::block_producer::BlockConfirmedMessage;
+impl BlockIndexReadGuard {
+    /// Creates a new ReadGard for Ledgers
+    pub fn new(block_index_data: Arc<RwLock<BlockIndex<Initialized>>>) -> Self {
+        Self { block_index_data }
+    }
+
+    /// Accessor method to get a read guard for Ledgers
+    pub fn read(&self) -> RwLockReadGuard<'_, BlockIndex<Initialized>> {
+        self.block_index_data.read().unwrap()
+    }
+}
+
+/// Retrieve a read only reference to the ledger partition assignments
+#[derive(Message, Debug)]
+#[rtype(result = "BlockIndexReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
+pub struct GetBlockIndexGuardMessage;
+
+impl Handler<GetBlockIndexGuardMessage> for BlockIndexActor {
+    type Result = BlockIndexReadGuard; // Return guard directly
+
+    fn handle(
+        &mut self,
+        _msg: GetBlockIndexGuardMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        BlockIndexReadGuard::new(self.block_index.clone())
+    }
+}
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
+/// This actor primarily serves as a wrapper for nested block_index_data struct
+/// allowing it to receive to actix messages and update its state.
 #[derive(Debug)]
 pub struct BlockIndexActor {
     block_index: Arc<RwLock<BlockIndex<Initialized>>>,
@@ -23,6 +59,7 @@ pub struct BlockIndexActor {
 
 #[derive(Debug)]
 struct BlockLogEntry {
+    #[allow(dead_code)]
     pub block_hash: H256,
     pub height: u64,
     pub timestamp: u128,
@@ -73,7 +110,9 @@ impl BlockIndexActor {
             if index.num_blocks() == 0 && irys_block_header.height == 0 {
                 (0, chunks_added)
             } else {
-                let prev_block = index.get_item(0).unwrap();
+                let prev_block = index
+                    .get_item((irys_block_header.height - 1) as usize)
+                    .unwrap();
                 (
                     prev_block.ledgers[Ledger::Publish as usize].max_chunk_offset,
                     prev_block.ledgers[Ledger::Submit as usize].max_chunk_offset + chunks_added,
@@ -158,21 +197,5 @@ impl Handler<GetLatestBlockIndexMessage> for BlockIndexActor {
         let bi = self.block_index.read().unwrap();
         let block_height = bi.num_blocks().max(1) as usize - 1;
         Some(bi.get_item(block_height)?.clone())
-    }
-}
-
-/// Returns the block bounds containing ledger offset
-#[derive(Message, Clone, Debug)]
-#[rtype(result = "Option<BlockBounds>")]
-pub struct GetBlockBoundsMessage {
-    pub ledger: Ledger,
-    pub chunk_offset: u64,
-}
-
-impl Handler<GetBlockBoundsMessage> for BlockIndexActor {
-    type Result = Option<BlockBounds>;
-    fn handle(&mut self, msg: GetBlockBoundsMessage, _ctx: &mut Self::Context) -> Self::Result {
-        let bi = self.block_index.read().unwrap();
-        Some(bi.get_block_bounds(msg.ledger, msg.chunk_offset))
     }
 }

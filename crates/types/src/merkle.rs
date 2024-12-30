@@ -8,7 +8,7 @@ use eyre::eyre;
 use eyre::Error;
 use openssl::sha;
 
-use crate::{Base64, DataChunks};
+use crate::Base64;
 
 /// Single struct used for original data chunks (Leaves) and branch nodes (hashes of pairs of child nodes).
 #[derive(Debug, PartialEq, Clone)]
@@ -297,21 +297,16 @@ pub fn validate_chunk(
 }
 
 /// Generates data chunks from which the calculation of root id starts.
-pub fn generate_leaves(data: Vec<u8>, chunk_size: usize) -> Result<Vec<Node>, Error> {
-    let mut data_chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
-
-    if data_chunks.last().unwrap().len() == chunk_size {
-        data_chunks.push(&[]);
-    }
-
+pub fn generate_leaves(data: &Vec<u8>, chunk_size: usize) -> Result<Vec<Node>, Error> {
+    let data_chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
     generate_leaves_from_chunks(&data_chunks)
 }
 
 /// Generates merkle leaves from chunks
-pub fn generate_leaves_from_chunks(data_chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Error> {
+pub fn generate_leaves_from_chunks(chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
-    for chunk in data_chunks.iter() {
+    for chunk in chunks.into_iter() {
         let data_hash = hash_sha256(chunk)?;
         let max_byte_range = min_byte_range + &chunk.len();
         let offset = max_byte_range.to_note_vec();
@@ -332,17 +327,13 @@ pub fn generate_leaves_from_chunks(data_chunks: &Vec<&[u8]>) -> Result<Vec<Node>
 
 /// Generates data chunks from which the calculation of root id starts, including the provided address to interleave into the leaf data hash for ingress proofs
 pub fn generate_ingress_leaves(
-    mut data_chunks: DataChunks,
+    mut chunks: Vec<&[u8]>,
     address: Address,
 ) -> Result<Vec<Node>, Error> {
-    if data_chunks.last().unwrap().len() == MAX_CHUNK_SIZE {
-        data_chunks.push(vec![]);
-    }
-
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
-    for chunk in data_chunks.into_iter() {
-        let data_hash = hash_ingress_sha256(chunk.as_slice(), address)?;
+    for chunk in chunks.into_iter() {
+        let data_hash = hash_ingress_sha256(chunk, address)?;
         let max_byte_range = min_byte_range + &chunk.len();
         let offset = max_byte_range.to_note_vec();
         let id = hash_all_sha256(vec![&data_hash, &offset])?;
