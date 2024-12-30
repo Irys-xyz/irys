@@ -2,13 +2,14 @@ use actix::{Actor, Context, Handler, Message};
 use eyre::eyre;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
+use irys_database::{insert_tx_header, tx_header_by_txid, Ledger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
     IrysTransactionHeader, H256,
 };
-use irys_types::{DataRoot, StorageConfig};
+use irys_types::{DataRoot, StorageConfig, TxIngressProof};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
@@ -312,7 +313,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
     }
 }
 
-// Message for getting txs for block building
+/// Message for getting txs for block building
 #[derive(Message, Debug)]
 #[rtype(result = "Vec<IrysTransactionHeader>")]
 pub struct GetBestMempoolTxs;
@@ -320,7 +321,7 @@ pub struct GetBestMempoolTxs;
 impl Handler<GetBestMempoolTxs> for MempoolActor {
     type Result = Vec<IrysTransactionHeader>;
 
-    fn handle(&mut self, msg: GetBestMempoolTxs, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, _msg: GetBestMempoolTxs, _ctx: &mut Self::Context) -> Self::Result {
         self.valid_tx
             .iter()
             .take(10)
@@ -340,6 +341,64 @@ impl Handler<BlockConfirmedMessage> for MempoolActor {
         for tx in data_tx.iter() {
             // Remove them from the pending valid_tx pool
             self.valid_tx.remove(&tx.id);
+        }
+
+        let published_txids = &block.ledgers[Ledger::Publish].txids.0;
+
+        // Loop though the promoted transactions and remove their ingress proofs
+        // from the mempool. In the future on a multi node network we may keep
+        // ingress proofs around longer to account for re-orgs, but for now
+        // we just remove them.
+        if published_txids.len() > 0 {
+            let mut_tx = self
+                .db
+                .tx_mut()
+                .map_err(|e| {
+                    error!("Failed to create mdbx transaction: {}", e);
+                })
+                .unwrap();
+
+            for (i, txid) in block.ledgers[Ledger::Publish].txids.0.iter().enumerate() {
+                // Retrieve the promoted transactions header
+                let mut tx_header = match tx_header_by_txid(&mut_tx, &txid) {
+                    Ok(Some(header)) => header,
+                    Ok(None) => {
+                        error!("No transaction header found for txid: {}", txid);
+                        continue;
+                    }
+                    Err(e) => {
+                        error!("Error fetching transaction header for txid {}: {}", txid, e);
+                        continue;
+                    }
+                };
+
+                // TODO: In a single node world there is only one ingress proof
+                // per promoted tx, but in the future there will be multiple proofs.
+                let proofs = block.ledgers[Ledger::Publish].proofs.as_ref().unwrap();
+                let proof = proofs.0[i].clone();
+                tx_header.ingress_proofs = Some(proof);
+
+                // Update the header record in the database to include the ingress
+                // proof, indicating it is promoted
+                if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
+                    error!(
+                        "Could not update transactions with ingress proofs - txid: {} err: {}",
+                        txid, err
+                    );
+                }
+
+                // TODO: We may want to maintain two lists of IngressProofs
+                // those that have been recently promoted and those that are
+                // awaiting promotion. That would tidy up some of the logic
+                // around promotion.
+                if let Err(err) = mut_tx.delete::<IngressProofs>(tx_header.data_root, None) {
+                    error!("DatabaseError deleting ingress proof err: {}", err);
+                }
+
+                println!("Promoted tx:\n{:?}", tx_header);
+            }
+
+            let _ = mut_tx.commit();
         }
 
         info!(
