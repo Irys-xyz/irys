@@ -5,7 +5,7 @@ use irys_database::{
 };
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
 use std::{
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockReadGuard},
     time::Duration,
 };
 

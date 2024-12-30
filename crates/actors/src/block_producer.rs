@@ -171,6 +171,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // Get all the ingress proofs for data promotion
             let mut promotions: Vec<IrysTransactionHeader> = Vec::new();
+            let mut proofs: Vec<TxIngressProof> = Vec::new();
             let mut publish_txids: Vec<H256> = Vec::new();
             {
                 let read_tx = db.tx().map_err(|e| {
@@ -216,10 +217,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         match ingress_proofs.get(&tx_header.data_root) {
                             Some(proof) => {
                                 let mut tx_header = tx_header.clone();
-                                tx_header.ingress_proofs = Some(TxIngressProof { 
+                                let proof = TxIngressProof { 
                                     proof: proof.proof,
-                                    signature: IrysSignature { reth_signature: proof.signature }
-                                });
+                                    signature: proof.signature.into(),
+                                };
+                                proofs.push(proof.clone());
+                                tx_header.ingress_proofs = Some(proof);
                                 promotions.push(tx_header);
                             },
                             None => {
@@ -234,8 +237,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // Publish Ledger Transactions
             let publish_chunks_added = calculate_chunks_added(&promotions, chunk_size);
             let publish_max_chunk_offset =  prev_block_header.ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
+            let opt_proofs = if proofs.len() > 0 {
+                 Some(proofs)
+            } else {
+                None
+            };
                         
-
             // Submit Ledger Transactions    
             let data_txs: Vec<IrysTransactionHeader> =
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
@@ -296,15 +303,14 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 poa,
                 reward_address: Address::ZERO,
                 reward_key: Base64::from_str("").unwrap(),
-                signature: IrysSignature {
-                    reth_signature: Signature::test_signature(),
-                },
+                signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
                 ledgers: vec![
                     // Permanent Publish Ledger
                     TransactionLedger {
                         tx_root: TransactionLedger::merklize_tx_root(&promotions).0,
                         txids: H256List(publish_txids.clone()),
+                        proofs: opt_proofs,
                         max_chunk_offset: publish_max_chunk_offset,
                         expires: None,
                     },
@@ -312,6 +318,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     TransactionLedger {
                         tx_root: TransactionLedger::merklize_tx_root(&data_txs).0,
                         txids: H256List(data_tx_ids.clone()),
+                        proofs: None,
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),
                     },

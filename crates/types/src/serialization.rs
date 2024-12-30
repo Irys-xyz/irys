@@ -1,15 +1,17 @@
-use crate::{Arbitrary, Signature, IRYS_CHAIN_ID};
-use alloy_primitives::{bytes, Parity, U256 as RethU256};
+use crate::{Arbitrary, IrysSignature, Signature, IRYS_CHAIN_ID};
+use alloy_primitives::{bytes, Address, Parity, U256 as RethU256};
 use alloy_rlp::{Decodable, Encodable, Error as RlpError, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
 use bytes::Buf;
-use eyre::Error;
+use eyre::{Error, OptionExt};
+use openssl::sha;
 use rand::RngCore;
 use reth_codecs::Compact;
 use reth_db::table::{Compress, Decompress};
 use reth_db_api::table::{Decode, Encode};
 use reth_db_api::DatabaseError;
+use reth_primitives::transaction::recover_signer;
 use serde::{
     de::{self, Error as _},
     Deserialize, Deserializer, Serialize, Serializer,
@@ -162,6 +164,21 @@ impl Decodable for H256 {
 pub struct TxIngressProof {
     pub proof: H256,
     pub signature: IrysSignature,
+}
+
+impl TxIngressProof {
+    pub fn pre_validate(&self, data_root: &H256) -> eyre::Result<Address> {
+        let mut hasher = sha::Sha256::new();
+        hasher.update(&self.proof.0);
+        hasher.update(&data_root.0);
+        let prehash = hasher.finish();
+
+        let sig = self.signature.as_bytes();
+        let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())
+            .ok_or_eyre("Unable to recover signer")?;
+
+        Ok(recovered_address)
+    }
 }
 
 //==============================================================================

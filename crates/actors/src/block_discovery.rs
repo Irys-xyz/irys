@@ -124,8 +124,21 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 return;
             }
         };
+        let publish_proofs = match &new_block_header.ledgers[Ledger::Publish].proofs {
+            Some(proofs) => proofs,
+            None => {
+                error!("Ingress proofs missing");
+                return;
+            }
+        };
 
-        // Pre-Validate the ingress-proof
+        // Pre-Validate the ingress-proof by verifying the signature
+        for (i, tx_header) in publish_txs.iter().enumerate() {
+            if let Err(e) = publish_proofs[i].pre_validate(&tx_header.data_root) {
+                error!("Invalid ingress proof signature: {}", e);
+                return;
+            }
+        }
 
         //====================================
         // PoA validation

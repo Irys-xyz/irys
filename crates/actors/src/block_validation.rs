@@ -357,6 +357,7 @@ mod tests {
                 TransactionLedger {
                     tx_root: H256::zero(),
                     txids: H256List(Vec::new()),
+                    proofs: None,
                     max_chunk_offset: 0,
                     expires: None,
                 },
@@ -364,6 +365,7 @@ mod tests {
                 TransactionLedger {
                     tx_root,
                     txids: H256List(data_tx_ids.clone()),
+                    proofs: None,
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
                 },

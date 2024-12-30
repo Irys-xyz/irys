@@ -213,6 +213,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
             TransactionLedger {
                 tx_root: H256::zero(),
                 txids: H256List(Vec::new()),
+                proofs: None,
                 max_chunk_offset: 0,
                 expires: None,
             },
@@ -220,6 +221,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
             TransactionLedger {
                 tx_root: TransactionLedger::merklize_tx_root(&tx_headers).0,
                 txids: H256List(data_tx_ids.clone()),
+                proofs: None,
                 max_chunk_offset: 0,
                 expires: Some(1622543200),
             },
