@@ -301,7 +301,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 previous_block_hash: prev_block_hash,
                 previous_cumulative_diff: U256::from(4000),
                 poa,
-                reward_address: Address::ZERO,
+                reward_address: solution.mining_address,
                 reward_key: Base64::from_str("").unwrap(),
                 signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
@@ -425,10 +425,11 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-            chunk_migration_addr.do_send(BlockFinalizedMessage {
+            let _ = chunk_migration_addr.send(BlockFinalizedMessage {
                 block_header: Arc::new(prev_block_header),
                 txs: Arc::new(txs),
-            });
+            }).await.unwrap();
+            info!("Finished producing block height: {}, hash: {}", &block_height, &block_hash);
 
             Some((block.clone(), exec_payload))
         }

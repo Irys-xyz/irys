@@ -104,7 +104,9 @@ impl BlockIndexActor {
             if index.num_blocks() == 0 && irys_block_header.height == 0 {
                 (0, chunks_added)
             } else {
-                let prev_block = index.get_item(0).unwrap();
+                let prev_block = index
+                    .get_item((irys_block_header.height - 1) as usize)
+                    .unwrap();
                 (
                     prev_block.ledgers[Ledger::Publish as usize].max_chunk_offset,
                     prev_block.ledgers[Ledger::Submit as usize].max_chunk_offset + chunks_added,
