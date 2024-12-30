@@ -106,6 +106,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         // 2. Validate the transaction
         // 3. Update the local tx headers index so include the ingress- proof.
         //    This keeps the transaction from getting re-promoted each block.
+        //    (this last step performed in mempool after the block is confirmed)
         let publish_txs = match new_block_header.ledgers[Ledger::Publish]
             .txids
             .iter()
