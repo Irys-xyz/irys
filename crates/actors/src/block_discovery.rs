@@ -124,19 +124,22 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 return;
             }
         };
-        let publish_proofs = match &new_block_header.ledgers[Ledger::Publish].proofs {
-            Some(proofs) => proofs,
-            None => {
-                error!("Ingress proofs missing");
-                return;
-            }
-        };
 
-        // Pre-Validate the ingress-proof by verifying the signature
-        for (i, tx_header) in publish_txs.iter().enumerate() {
-            if let Err(e) = publish_proofs[i].pre_validate(&tx_header.data_root) {
-                error!("Invalid ingress proof signature: {}", e);
-                return;
+        if publish_txs.len() > 0 {
+            let publish_proofs = match &new_block_header.ledgers[Ledger::Publish].proofs {
+                Some(proofs) => proofs,
+                None => {
+                    error!("Ingress proofs missing");
+                    return;
+                }
+            };
+
+            // Pre-Validate the ingress-proof by verifying the signature
+            for (i, tx_header) in publish_txs.iter().enumerate() {
+                if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
+                    error!("Invalid ingress proof signature: {}", e);
+                    return;
+                }
             }
         }
 
@@ -149,7 +152,13 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let block_tree_addr = self.block_tree.clone();
         let storage_config = &self.storage_config;
 
-        match poa_is_valid(&poa, &block_index_guard, &partitions_guard, storage_config, &new_block_header.reward_address) {
+        match poa_is_valid(
+            &poa,
+            &block_index_guard,
+            &partitions_guard,
+            storage_config,
+            &new_block_header.reward_address,
+        ) {
             Ok(_) => {
                 block_tree_addr.do_send(BlockPreValidatedMessage(
                     new_block_header,

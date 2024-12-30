@@ -181,6 +181,15 @@ impl TxIngressProof {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Compact, Serialize, Deserialize, Arbitrary)]
+pub struct IngressProofsList(pub Vec<TxIngressProof>);
+
+impl From<Vec<TxIngressProof>> for IngressProofsList {
+    fn from(proofs: Vec<TxIngressProof>) -> Self {
+        Self(proofs)
+    }
+}
+
 //==============================================================================
 // Address Base58
 //------------------------------------------------------------------------------

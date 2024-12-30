@@ -11,8 +11,8 @@ use std::{
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash, resolve_proofs, u64_stringify, Arbitrary, Base64, Compact,
-    DataRootLeave, H256List, IrysSignature, IrysTransactionHeader, Proof, Signature,
-    TxIngressProof, H256, U256,
+    DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader, Proof,
+    Signature, H256, U256,
 };
 
 use alloy_primitives::{Address, B256};
@@ -147,17 +147,17 @@ impl IrysBlockHeader {
                 TransactionLedger {
                     tx_root: H256::zero(),
                     txids,
-                    proofs: None,
                     max_chunk_offset: 0,
                     expires: None,
+                    proofs: None,
                 },
                 // Term Submit Ledger
                 TransactionLedger {
                     tx_root: H256::zero(),
                     txids: H256List::new(),
-                    proofs: None,
                     max_chunk_offset: 0,
                     expires: Some(1622543200),
+                    proofs: None,
                 },
             ],
             evm_block_hash: B256::ZERO,
@@ -184,13 +184,14 @@ pub struct TransactionLedger {
     pub tx_root: H256,
     /// List of transaction ids included in the block
     pub txids: H256List,
-    /// When transactions are promoted they must include their ingress proofs
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub proofs: Option<Vec<TxIngressProof>>,
     #[serde(default, with = "u64_stringify")]
     pub max_chunk_offset: u64,
     /// This ledger expires after how many epochs
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expires: Option<u64>,
+    /// When transactions are promoted they must include their ingress proofs
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proofs: Option<IngressProofsList>,
 }
 
 impl TransactionLedger {

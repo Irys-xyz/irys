@@ -9,7 +9,7 @@ use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tables:
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, ingress::IngressProof, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64, DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysSignature, IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256
+    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256
 };
 use openssl::sha;
 use reth::revm::primitives::B256;
@@ -238,7 +238,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let publish_chunks_added = calculate_chunks_added(&promotions, chunk_size);
             let publish_max_chunk_offset =  prev_block_header.ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
             let opt_proofs = if proofs.len() > 0 {
-                 Some(proofs)
+                 Some(IngressProofsList::from(proofs))
             } else {
                 None
             };
@@ -310,17 +310,17 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     TransactionLedger {
                         tx_root: TransactionLedger::merklize_tx_root(&promotions).0,
                         txids: H256List(publish_txids.clone()),
-                        proofs: opt_proofs,
                         max_chunk_offset: publish_max_chunk_offset,
                         expires: None,
+                        proofs: opt_proofs,
                     },
                     // Term Submit Ledger
                     TransactionLedger {
                         tx_root: TransactionLedger::merklize_tx_root(&data_txs).0,
                         txids: H256List(data_tx_ids.clone()),
-                        proofs: None,
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),
+                        proofs: None,
                     },
                 ],
                 evm_block_hash: B256::ZERO,
