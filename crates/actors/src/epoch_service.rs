@@ -35,7 +35,7 @@ impl Default for EpochServiceConfig {
     }
 }
 
-/// A state struct that can be wrapped with Arc<RwLock<>> to provide parallel read access
+/// A state struct that can be wrapped with Arc<`RwLock`<>> to provide parallel read access
 #[derive(Debug)]
 pub struct PartitionAssignments {
     /// Active data partition state mapped by partition hash
@@ -45,8 +45,14 @@ pub struct PartitionAssignments {
 }
 
 /// Implementation helper functions
+impl Default for PartitionAssignments {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PartitionAssignments {
-    /// Initialize a new PartitionAssignments state wrapper struct
+    /// Initialize a new `PartitionAssignments` state wrapper struct
     pub fn new() -> Self {
         Self {
             data_partitions: HashMap::new(),
@@ -54,7 +60,7 @@ impl PartitionAssignments {
         }
     }
 
-    /// Retrieves a PartitionAssignment by partition hash if it exists
+    /// Retrieves a `PartitionAssignment` by partition hash if it exists
     pub fn get_assignment(&self, partition_hash: H256) -> Option<PartitionAssignment> {
         self.data_partitions
             .get(&partition_hash)
@@ -111,7 +117,7 @@ pub enum EpochServiceError {
 // LedgersReadGuard
 //------------------------------------------------------------------------------
 
-/// Wraps the internal Arc<RwLock<>> to make the reference readonly
+/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct LedgersReadGuard {
     ledgers: Arc<RwLock<Ledgers>>,
@@ -145,15 +151,15 @@ impl Handler<GetLedgersGuardMessage> for EpochServiceActor {
 //==============================================================================
 // PartitionAssignmentsReadGuard
 //------------------------------------------------------------------------------
-/// Wraps the internal Arc<RwLock<>> to make the reference readonly
+/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct PartitionAssignmentsReadGuard {
     partition_assignments: Arc<RwLock<PartitionAssignments>>,
 }
 
 impl PartitionAssignmentsReadGuard {
-    /// Creates a new ReadGard for Ledgers
-    pub fn new(partition_assignments: Arc<RwLock<PartitionAssignments>>) -> Self {
+    /// Creates a new `ReadGard` for Ledgers
+    pub const fn new(partition_assignments: Arc<RwLock<PartitionAssignments>>) -> Self {
         Self {
             partition_assignments,
         }
@@ -534,7 +540,7 @@ impl EpochServiceActor {
         let ledgers = self.ledgers.read().unwrap();
         let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
 
-        let mut pa = self.partition_assignments.read().unwrap();
+        let pa = self.partition_assignments.read().unwrap();
 
         // Configure publish ledger storage
         let mut module_infos = ledgers

@@ -59,9 +59,9 @@ impl From<Signature> for IrysSignature {
     }
 }
 
-impl Into<Signature> for IrysSignature {
-    fn into(self) -> Signature {
-        self.0
+impl From<IrysSignature> for Signature {
+    fn from(val: IrysSignature) -> Self {
+        val.0
     }
 }
 
@@ -84,7 +84,7 @@ impl Compact for IrysSignature {
         buf.put_slice(&self.0.r().as_le_bytes());
         buf.put_slice(&self.0.s().as_le_bytes());
         buf.put_u8(self.0.v().y_parity_byte());
-        return 65;
+        65
     }
 
     #[inline]

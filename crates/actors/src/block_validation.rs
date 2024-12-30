@@ -2,7 +2,7 @@ use crate::{block_index::BlockIndexReadGuard, epoch_service::PartitionAssignment
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_types::{
-    storage_config::StorageConfig, validate_path, vdf_config::VDFStepsConfig, Address, IrysBlockHeader, PoaData, VDFLimiterInfo, H256
+    storage_config::StorageConfig, validate_path, Address, IrysBlockHeader, PoaData
 };
 use openssl::sha;
 
@@ -40,7 +40,7 @@ pub fn block_is_valid(
     Ok(())
 }
 
-/// Returns Ok if the provided PoA is valid, Err otherwise
+/// Returns Ok if the provided `PoA` is valid, Err otherwise
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
@@ -105,7 +105,7 @@ pub fn poa_is_valid(
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
-            mining_address.clone(),
+            *mining_address,
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
@@ -128,13 +128,13 @@ pub fn poa_is_valid(
 
         let poa_chunk_hash = sha::sha256(poa_chunk_padd_trimmed);
 
-        if !(poa_chunk_hash == data_path_result.leaf_hash) {
+        if poa_chunk_hash != data_path_result.leaf_hash {
             return Err(eyre::eyre!("PoA chunk hash mismatch"));
         }
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
-            mining_address.clone(),
+            *mining_address,
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
@@ -167,13 +167,13 @@ mod tests {
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
-        irys::IrysSigner, Address, Arbitrary, Base64, H256List, IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, TransactionLedger, PACKING_SHA_1_5_S, U256
+        irys::IrysSigner, Address, Base64, H256List, IrysTransaction, IrysTransactionHeader, Signature, TransactionLedger, U256
     };
-    use reth::revm::primitives::B256;
+    
     use std::str::FromStr;
     use std::sync::{Arc, RwLock};
     use tracing::log::LevelFilter;
-    use tracing::{debug, error, info};
+    use tracing::{debug, info};
 
     use super::*;
 
@@ -215,7 +215,7 @@ mod tests {
         for poa_tx_num in 0..3 {
             for poa_chunk_num in 0..3 {
                 let mut poa_chunk: Vec<u8> =
-                    data_chunks[poa_tx_num as usize][poa_chunk_num as usize].into();
+                    data_chunks[poa_tx_num][poa_chunk_num].into();
                 poa_test(&txs, &mut poa_chunk, poa_tx_num, poa_chunk_num, 9, chunk_size).await;
             }
         }
@@ -226,7 +226,7 @@ mod tests {
         let chunk_size: usize = 32;
 
         // Create a signed TX from the chunks
-        let signer = IrysSigner::random_signer_with_chunk_size(chunk_size as usize);
+        let signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
         let mut txs: Vec<IrysTransaction> = Vec::new();
         
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
@@ -237,7 +237,7 @@ mod tests {
         let poa_tx_num = 0;
 
         for poa_chunk_num in 0..2 {
-                let mut poa_chunk: Vec<u8> = data[poa_chunk_num*chunk_size..std::cmp::min(((poa_chunk_num + 1) * chunk_size) as usize, data.len())].to_vec();
+                let mut poa_chunk: Vec<u8> = data[poa_chunk_num*chunk_size..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())].to_vec();
                 poa_test(&txs, &mut poa_chunk, poa_tx_num, poa_chunk_num, 2, chunk_size).await;
         }
     }
@@ -324,13 +324,13 @@ mod tests {
             height = block_index.read().unwrap().num_blocks().max(1) - 1;
         }
 
-        let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size as usize);
+        let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(
             miner_address,
             (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64,
             partition_hash.into(),
             config.storage_config.entropy_packing_iterations,
-            chunk_size as usize,
+            chunk_size,
             &mut entropy_chunk,
         );
 
@@ -343,16 +343,16 @@ mod tests {
         let data_tx_ids = 
             tx_headers
             .iter()
-            .map(|h| h.id.clone())
+            .map(|h| h.id)
             .collect::<Vec<H256>>();
 
 
         let (tx_root, tx_path) = TransactionLedger::merklize_tx_root(&tx_headers);
 
         let poa = PoaData {
-            tx_path: Some(Base64(tx_path[poa_tx_num as usize].proof.clone())),
+            tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(
-                txs[poa_tx_num as usize].proofs[poa_chunk_num as usize]
+                txs[poa_tx_num].proofs[poa_chunk_num]
                     .proof
                     .clone(),
             )),
@@ -365,7 +365,7 @@ mod tests {
         // Create a block from the tx
         let irys_block = IrysBlockHeader {
             height,
-            reward_address: miner_address.clone(),
+            reward_address: miner_address,
             poa: poa.clone(),            
             block_hash: H256::zero(),
             previous_block_hash: H256::zero(),

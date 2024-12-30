@@ -22,7 +22,7 @@ use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, H256List,
-    IrysBlockHeader, IrysSignature, IrysTransaction, IrysTransactionHeader, PoaData, Signature,
+    IrysBlockHeader, IrysTransaction, IrysTransactionHeader, PoaData, Signature,
     StorageConfig, TransactionLedger, UnpackedChunk, VDFLimiterInfo, H256, U256,
 };
 use reth::{revm::primitives::B256, tasks::TaskManager};
@@ -143,7 +143,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let mempool_addr = mempool_actor.start();
 
     // Send tx headers to mempool
-    for header in tx_headers.iter() {
+    for header in &tx_headers {
         mempool_addr.do_send(TxIngressMessage(header.clone()));
     }
 

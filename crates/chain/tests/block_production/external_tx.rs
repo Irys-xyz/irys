@@ -60,14 +60,14 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
         (
             config.mining_signer.address(),
             GenesisAccount {
-                balance: U256::from(690000000000000000 as u128),
+                balance: U256::from(690000000000000000_u128),
                 ..Default::default()
             },
         ),
         (
             config.mining_signer.address(),
             GenesisAccount {
-                balance: U256::from(690000000000000000 as u128),
+                balance: U256::from(690000000000000000_u128),
                 ..Default::default()
             },
         ),
@@ -94,7 +94,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
     info!(
         "received pending txs: {:?}",
         txs.iter()
-            .map(|tx| tx.hash().clone())
+            .map(|tx| *tx.hash())
             .collect::<Vec<TxHash>>()
     );
 

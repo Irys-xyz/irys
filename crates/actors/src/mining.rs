@@ -3,7 +3,7 @@ use crate::broadcast_mining_service::{
     BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe,
 };
 use actix::prelude::*;
-use actix::{Actor, Addr, Context, Handler, Message};
+use actix::{Actor, Context, Handler, Message};
 use irys_storage::{ie, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::{block_production::SolutionContext, H256, U256};
@@ -302,7 +302,7 @@ mod tests {
         // Set up the storage geometry for this test
         let storage_config = StorageConfig {
             chunk_size,
-            num_chunks_in_partition: chunk_count.try_into().unwrap(),
+            num_chunks_in_partition: chunk_count.into(),
             num_chunks_in_recall_range: 2,
             num_partitions_in_slot: 1,
             miner_address: mining_address,
@@ -313,7 +313,7 @@ mod tests {
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
-                partition_hash: partition_hash,
+                partition_hash,
                 miner_address: mining_address,
                 ledger_num: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
@@ -354,8 +354,8 @@ mod tests {
 
         for tx_chunk_offset in 0..chunk_count {
             let chunk = UnpackedChunk {
-                data_root: data_root,
-                data_size: chunk_size as u64,
+                data_root,
+                data_size: chunk_size,
                 data_path: data_path.to_vec().into(),
                 bytes: chunk_data.to_vec().into(),
                 tx_offset: tx_chunk_offset,
@@ -377,7 +377,7 @@ mod tests {
         );
 
         let seed: Seed = Seed(H256::random());
-        let _result = partition_mining_actor
+        partition_mining_actor
             .start()
             .send(BroadcastMiningSeed(seed))
             .await

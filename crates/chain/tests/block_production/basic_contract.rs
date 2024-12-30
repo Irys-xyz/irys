@@ -37,7 +37,7 @@ async fn test_erc20() -> eyre::Result<()> {
         (
             main_address,
             GenesisAccount {
-                balance: U256::from(690000000000000000 as u128),
+                balance: U256::from(690000000000000000_u128),
                 ..Default::default()
             },
         ),
@@ -68,7 +68,7 @@ async fn test_erc20() -> eyre::Result<()> {
 
     info!("Contract address is {:?}", contract.address());
     let main_balance = contract.balanceOf(main_address).call().await?._0;
-    assert_eq!(main_balance, U256::from(10000000000000000000000 as u128));
+    assert_eq!(main_balance, U256::from(10000000000000000000000_u128));
 
     let transfer_call_builder = contract.transfer(account1.address(), U256::from(10));
     let transfer_call = transfer_call_builder.send().await?;
@@ -88,7 +88,7 @@ async fn test_erc20() -> eyre::Result<()> {
     assert_eq!(addr1_balance, U256::from(10));
     assert_eq!(
         main_balance2,
-        U256::from(10000000000000000000000 - 10 as u128)
+        U256::from(10000000000000000000000 - 10_u128)
     );
 
     Ok(())

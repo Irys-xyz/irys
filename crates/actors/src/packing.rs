@@ -313,7 +313,7 @@ mod tests {
         let mut out = Vec::with_capacity(storage_config.chunk_size.try_into().unwrap());
         compute_entropy_chunk(
             mining_address,
-            0 as u64,
+            0_u64,
             partition_hash.0,
             storage_config.entropy_packing_iterations,
             storage_config.chunk_size.try_into().unwrap(),

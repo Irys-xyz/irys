@@ -12,8 +12,8 @@ use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64,
-    DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysSignature, IrysTransactionHeader,
+    storage_config::StorageConfig, vdf_config::VDFStepsConfig, Base64,
+    DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysTransactionHeader,
     PoaData, Signature, TransactionLedger, VDFLimiterInfo, H256, U256,
 };
 use openssl::sha;
@@ -32,7 +32,7 @@ pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
 #[derive(Debug)]
 pub struct MockedBlockProducerAddr(pub Recipient<SolutionFoundMessage>);
 
-/// BlockProducerActor creates blocks from mining solutions
+/// `BlockProducerActor` creates blocks from mining solutions
 #[derive(Debug,)]
 pub struct BlockProducerActor {
     /// Reference to the global database
@@ -56,7 +56,7 @@ pub struct BlockProducerActor {
     pub vdf_config: VDFStepsConfig,
 }
 
-/// Actors can handle this message to learn about the block_producer actor at startup
+/// Actors can handle this message to learn about the `block_producer` actor at startup
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
 pub struct RegisterBlockProducerMessage(pub Addr<BlockProducerActor>);

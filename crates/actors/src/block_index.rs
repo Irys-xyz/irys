@@ -11,15 +11,15 @@ use std::{
 // BlockIndexReadGuard
 //------------------------------------------------------------------------------
 
-/// Wraps the internal Arc<RwLock<>> to make the reference readonly
+/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct BlockIndexReadGuard {
     block_index_data: Arc<RwLock<BlockIndex<Initialized>>>,
 }
 
 impl BlockIndexReadGuard {
-    /// Creates a new ReadGard for Ledgers
-    pub fn new(block_index_data: Arc<RwLock<BlockIndex<Initialized>>>) -> Self {
+    /// Creates a new `ReadGard` for Ledgers
+    pub const fn new(block_index_data: Arc<RwLock<BlockIndex<Initialized>>>) -> Self {
         Self { block_index_data }
     }
 
@@ -47,7 +47,7 @@ impl Handler<GetBlockIndexGuardMessage> for BlockIndexActor {
 }
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
-/// This actor primarily serves as a wrapper for nested block_index_data struct
+/// This actor primarily serves as a wrapper for nested `block_index_data` struct
 /// allowing it to receive to actix messages and update its state.
 #[derive(Debug)]
 pub struct BlockIndexActor {
@@ -98,7 +98,7 @@ impl BlockIndexActor {
         // (300KB + 256KB - 1) / 256KB = 2 chunks -> 2 * 256KB = 512KB total
         let bytes_added = data_txs
             .iter()
-            .map(|tx| ((tx.data_size + chunk_size - 1) / chunk_size) * chunk_size)
+            .map(|tx| tx.data_size.div_ceil(chunk_size) * chunk_size)
             .sum::<u64>();
 
         let chunks_added = bytes_added / chunk_size;

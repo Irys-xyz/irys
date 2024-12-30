@@ -45,7 +45,7 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
         (
             main_address,
             GenesisAccount {
-                balance: U256::from(690000000000000000 as u128),
+                balance: U256::from(690000000000000000_u128),
                 ..Default::default()
             },
         ),

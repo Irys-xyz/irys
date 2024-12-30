@@ -34,8 +34,8 @@ pub struct BroadcastMiningService {
 // Actor Definition
 
 impl BroadcastMiningService {
-    /// Initialize a new MiningBroadcaster
-    pub fn new() -> Self {
+    /// Initialize a new `MiningBroadcaster`
+    pub const fn new() -> Self {
         Self {
             subscribers: Vec::new(),
         }

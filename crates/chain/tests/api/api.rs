@@ -26,7 +26,7 @@ async fn api_end_to_end_test_256kb() {
 
 async fn api_end_to_end_test(chunk_size: usize) {
     use std::{sync::Arc, time::Duration};
-    use irys_types::{irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, StorageConfig, UnpackedChunk, CHUNK_SIZE, MAX_CHUNK_SIZE};
+    use irys_types::{irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, StorageConfig, UnpackedChunk};
     use rand::Rng;
     use tokio::time::sleep;
     use tracing::{debug, info};    
@@ -66,7 +66,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     .await;
 
     // Create 2.5 chunks worth of data *  fill the data with random bytes
-    let data_size = chunk_size * 2 as usize;
+    let data_size = chunk_size * 2_usize;
     let mut data_bytes = vec![0u8; data_size];
     rand::thread_rng().fill(&mut data_bytes[..]);
 

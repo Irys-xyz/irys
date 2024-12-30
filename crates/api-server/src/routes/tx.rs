@@ -86,7 +86,7 @@ mod tests {
     use reth::tasks::TaskManager;
     use std::sync::Arc;
     use tempfile::tempdir;
-    use tracing::{debug, error, info, Level};
+    use tracing::{error, info};
 
     #[actix_web::test]
     async fn test_get_tx() -> eyre::Result<()> {

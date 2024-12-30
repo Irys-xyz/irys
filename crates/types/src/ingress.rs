@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, Parity, U256};
+use alloy_primitives::Address;
 use alloy_signer::Signature;
 use eyre::OptionExt;
 use openssl::sha;
@@ -12,7 +12,7 @@ use crate::irys::IrysSigner;
 
 use crate::{
     generate_data_root, generate_ingress_leaves, generate_leaves_from_chunks, DataRoot,
-    IrysSignature, Node, H256, IRYS_CHAIN_ID,
+    IrysSignature, Node, H256,
 };
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact)]
 pub struct IngressProof {
@@ -80,7 +80,7 @@ pub fn verify_ingress_proof(proof: IngressProof, chunks: &Vec<&[u8]>) -> eyre::R
 
     // re-compute the data_root
     let root = generate_data_root(nodes.clone())?;
-    let data_root = H256(root.id.clone());
+    let data_root = H256(root.id);
 
     // re-compute the prehash (combining data_root and proof)
     let mut hasher = sha::Sha256::new();
@@ -135,7 +135,7 @@ mod tests {
         // Build a merkle tree and data_root from the chunks
         let leaves = generate_leaves(&data_bytes, MAX_CHUNK_SIZE).unwrap();
         let root = generate_data_root(leaves)?;
-        let data_root = H256(root.id.clone());
+        let data_root = H256(root.id);
 
         // Generate an ingress proof
         let signer = IrysSigner::random_signer();

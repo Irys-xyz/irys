@@ -3,18 +3,18 @@ use crate::{
     epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor,
 };
 use actix::prelude::*;
-use irys_database::{tx_header_by_txid, BlockIndex, Initialized, Ledger};
+use irys_database::{tx_header_by_txid, Ledger};
 use irys_types::{DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageConfig};
 use reth_db::Database;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tracing::error;
 
-/// BlockDiscoveryActor listens for discovered blocks & validates them.
+/// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockDiscoveryActor {
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
-    /// PartitionAssignmentsReadGuard for looking up ledger info
+    /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Manages forks at the head of the chain before finalization
     pub block_tree: Addr<BlockTreeActor>,
@@ -45,8 +45,8 @@ impl Actor for BlockDiscoveryActor {
 }
 
 impl BlockDiscoveryActor {
-    /// Initializes a new BlockDiscoveryActor
-    pub fn new(
+    /// Initializes a new `BlockDiscoveryActor`
+    pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
         block_tree: Addr<BlockTreeActor>,

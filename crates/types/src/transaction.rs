@@ -166,9 +166,9 @@ mod tests {
     use crate::{irys::IrysSigner, IRYS_CHAIN_ID, MAX_CHUNK_SIZE};
 
     use super::*;
-    use alloy_core::hex::{self, ToHexExt};
+    use alloy_core::hex::{self};
     use alloy_rlp::Decodable;
-    use base58::ToBase58;
+    
     use k256::ecdsa::SigningKey;
     use serde_json;
 

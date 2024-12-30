@@ -82,7 +82,7 @@ pub fn run_vdf(
             reset_seed = h;
         }
 
-        global_step_number = global_step_number + 1;
+        global_step_number += 1;
         if global_step_number % nonce_limiter_reset_frequency == 0 {
             hash = apply_reset_seed(hash, reset_seed);
         }
@@ -104,7 +104,7 @@ pub fn vdf_sha(
         salt.to_little_endian(&mut local_salt);
 
         for _ in 0..num_iterations {
-            hasher.update(&local_salt);
+            hasher.update(local_salt);
             hasher.update(seed.as_bytes());
             *seed = H256(hasher.finalize_reset().into());
         }

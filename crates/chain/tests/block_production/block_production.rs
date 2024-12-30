@@ -250,14 +250,14 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         (
             account2.address(),
             GenesisAccount {
-                balance: U256::from(420000000000000 as u128),
+                balance: U256::from(420000000000000_u128),
                 ..Default::default()
             },
         ),
         (
             account3.address(),
             GenesisAccount {
-                balance: U256::from(690000000000000 as u128),
+                balance: U256::from(690000000000000_u128),
                 ..Default::default()
             },
         ),
@@ -291,7 +291,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     .inject_tx(signed_tx)
                     .await
                     .expect_err("tx should be rejected");
-                ()
+                
             }
             // 2 is less poor but should still fail
             2 => {
@@ -300,7 +300,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     .inject_tx(signed_tx)
                     .await
                     .expect_err("tx should be rejected");
-                ()
+                
             }
             // should succeed
             3 => {
@@ -309,7 +309,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     .inject_tx(signed_tx)
                     .await
                     .expect("tx should be accepted");
-                ()
+                
             }
             _ => return Err(eyre!("unknown account index")),
         }
@@ -356,7 +356,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     // height is hardcoded at 42 right now
     // assert_eq!(reth_block.number, block.height);
-    assert!(evm_txs.contains_key(&reth_block.body.transactions.get(0).unwrap().hash()));
+    assert!(evm_txs.contains_key(&reth_block.body.transactions.first().unwrap().hash()));
 
     assert_eq!(
         reth_context

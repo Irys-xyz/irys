@@ -8,19 +8,18 @@ mod tests {
     use irys_storage::ChunkProvider;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        generate_data_root, generate_leaves, irys::IrysSigner, resolve_proofs, Address, Base64,
-        DatabaseProvider, IrysTransaction, IrysTransactionHeader, StorageConfig, UnpackedChunk,
-        H256, IRYS_CHAIN_ID, MAX_CHUNK_SIZE,
+        irys::IrysSigner,
+        DatabaseProvider, StorageConfig,
     };
-    use k256::ecdsa::SigningKey;
-    use rand::Rng as _;
+    
+    
     use reth::tasks::TaskManager;
     use reth_db::transaction::DbTx;
     use reth_db::Database as _;
     use std::sync::Arc;
     use tokio::{
         task,
-        time::{sleep, timeout, Duration},
+        time::{sleep, Duration},
     };
     use tracing::info;
 

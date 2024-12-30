@@ -6,7 +6,7 @@ use crate::{
 };
 use actix::prelude::*;
 
-/// BlockDiscoveryActor listens for discovered blocks & validates them.
+/// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockTreeActor {
     /// Shared access to the block index used for validation.
@@ -22,8 +22,8 @@ impl Actor for BlockTreeActor {
 }
 
 impl BlockTreeActor {
-    /// Initializes a BlockTreeActor without a block_producer address
-    pub fn new(block_index: Addr<BlockIndexActor>, mempool: Addr<MempoolActor>) -> Self {
+    /// Initializes a `BlockTreeActor` without a `block_producer` address
+    pub const fn new(block_index: Addr<BlockIndexActor>, mempool: Addr<MempoolActor>) -> Self {
         Self {
             block_index,
             mempool,
@@ -58,7 +58,7 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeActor {
         if let Some(block_producer) = &self.block_producer {
             block_producer.do_send(block_confirm_message.clone());
         }
-        self.mempool.do_send(block_confirm_message.clone());
+        self.mempool.do_send(block_confirm_message);
 
         // TODO: Kick off a full validation process on the confirmed block that checks the VDF steps
         // and other heavy validation tasks, so it can be fully validated before we risk producing
