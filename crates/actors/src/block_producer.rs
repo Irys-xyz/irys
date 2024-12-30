@@ -160,15 +160,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 return None;
             }
 
-            // Retrieve all the transaction headers for the previous block
-            // Translate partition hash, chunk offset -> ledger, ledger chunk offset
-            let ledger_num = epoch_service_addr
-                .send(GetPartitionAssignmentMessage(solution.partition_hash))
-                .await
-                .unwrap()
-                .map(|pa| pa.ledger_num)
-                .flatten();
-
             // Get all the ingress proofs for data promotion
             let mut promotions: Vec<IrysTransactionHeader> = Vec::new();
             let mut proofs: Vec<TxIngressProof> = Vec::new();
@@ -278,6 +269,15 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // Generate a very stupid block_hash right now which is just
             // the hash of the timestamp
             let block_hash = hash_sha256(&current_timestamp.to_le_bytes());
+
+            // Use the partition hash to figure out what ledger it belongs to
+            let ledger_num = epoch_service_addr
+                .send(GetPartitionAssignmentMessage(solution.partition_hash))
+                .await
+                .unwrap()
+                .map(|pa| pa.ledger_num)
+                .flatten();
+
 
             let poa = PoaData {
                 tx_path: solution.tx_path.map(|tx_path| Base64(tx_path)),
