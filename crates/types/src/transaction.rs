@@ -168,7 +168,7 @@ mod tests {
     use super::*;
     use alloy_core::hex::{self};
     use alloy_rlp::Decodable;
-    
+
     use k256::ecdsa::SigningKey;
     use serde_json;
 

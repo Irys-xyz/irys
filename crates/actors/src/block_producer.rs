@@ -12,9 +12,9 @@ use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    storage_config::StorageConfig, vdf_config::VDFStepsConfig, Base64,
-    DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysTransactionHeader,
-    PoaData, Signature, TransactionLedger, VDFLimiterInfo, H256, U256,
+    storage_config::StorageConfig, vdf_config::VDFStepsConfig, Base64, DifficultyAdjustmentConfig,
+    H256List, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TransactionLedger,
+    VDFLimiterInfo, H256, U256,
 };
 use openssl::sha;
 use reth::revm::primitives::B256;
@@ -22,7 +22,12 @@ use reth_db::Database;
 use tracing::{error, info};
 
 use crate::{
-    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor}, block_index::{BlockIndexActor, GetLatestBlockIndexMessage}, chunk_migration::ChunkMigrationActor, epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage}, mempool::{GetBestMempoolTxs, MempoolActor}, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
+    block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
+    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    chunk_migration::ChunkMigrationActor,
+    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
+    mempool::{GetBestMempoolTxs, MempoolActor},
 };
 
 /// Used to mock up a `BlockProducerActor`
@@ -33,7 +38,7 @@ pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
 pub struct MockedBlockProducerAddr(pub Recipient<SolutionFoundMessage>);
 
 /// `BlockProducerActor` creates blocks from mining solutions
-#[derive(Debug,)]
+#[derive(Debug)]
 pub struct BlockProducerActor {
     /// Reference to the global database
     pub db: DatabaseProvider,
@@ -123,7 +128,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let epoch_service_addr = self.epoch_service.clone();
         let chunk_migration_addr = self.chunk_migration_addr.clone();
         let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-        
+
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
         let self_addr = ctx.address();

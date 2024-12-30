@@ -10,8 +10,8 @@ use crate::tables::{
 
 use irys_types::partition::PartitionHash;
 use irys_types::{
-    BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, IrysTransactionId, TxRelativeChunkOffset, UnpackedChunk, MEGABYTE,
+    BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
+    TxRelativeChunkOffset, UnpackedChunk, MEGABYTE,
 };
 use reth::prometheus_exporter::install_prometheus_recorder;
 use reth_db::cursor::DbDupCursorRO;
@@ -57,7 +57,8 @@ pub fn block_header_by_hash<T: DbTx>(
     block_hash: &BlockHash,
 ) -> eyre::Result<Option<IrysBlockHeader>> {
     Ok(tx
-        .get::<IrysBlockHeaders>(*block_hash)?.map(IrysBlockHeader::from))
+        .get::<IrysBlockHeaders>(*block_hash)?
+        .map(IrysBlockHeader::from))
 }
 
 /// Inserts a [`IrysTransactionHeader`] into [`IrysTxHeaders`]
@@ -71,7 +72,8 @@ pub fn tx_header_by_txid<T: DbTx>(
     txid: &IrysTransactionId,
 ) -> eyre::Result<Option<IrysTransactionHeader>> {
     Ok(tx
-        .get::<IrysTxHeaders>(*txid)?.map(IrysTransactionHeader::from))
+        .get::<IrysTxHeaders>(*txid)?
+        .map(IrysTransactionHeader::from))
 }
 
 /// Takes an [`IrysTransactionHeader`] and caches its `data_root` and tx.id in a
@@ -157,7 +159,8 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
     Ok(cursor
         .seek_by_key_subkey(data_root, chunk_offset)?
         // make sure we find the exact subkey - dupsort seek can seek to the value, or a value greater than if it doesn't exist.
-        .filter(|result| result.index == chunk_offset).map(|index_entry| index_entry.meta))
+        .filter(|result| result.index == chunk_offset)
+        .map(|index_entry| index_entry.meta))
 }
 /// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxRelativeChunkOffset`]
 pub fn cached_chunk_by_chunk_offset<T: DbTx>(
@@ -166,8 +169,6 @@ pub fn cached_chunk_by_chunk_offset<T: DbTx>(
     chunk_offset: TxRelativeChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-
-    
 
     if let Some(index_entry) = cursor
         .seek_by_key_subkey(data_root, chunk_offset)?

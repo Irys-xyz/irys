@@ -99,7 +99,13 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let block_tree_addr = self.block_tree.clone();
         let storage_config = &self.storage_config;
 
-        match poa_is_valid(&poa, &block_index_guard, &partitions_guard, storage_config, &new_block_header.reward_address) {
+        match poa_is_valid(
+            &poa,
+            &block_index_guard,
+            &partitions_guard,
+            storage_config,
+            &new_block_header.reward_address,
+        ) {
             Ok(_) => {
                 block_tree_addr.do_send(BlockPreValidatedMessage(
                     new_block_header,

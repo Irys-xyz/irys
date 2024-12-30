@@ -398,8 +398,12 @@ pub fn generate_ingress_proof(
 
         let chunk = ro_tx
             .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
-            .unwrap_or_else(|| panic!("unable to get chunk {} for data root {} from DB",
-                    chunk_path_hash, data_root));
+            .unwrap_or_else(|| {
+                panic!(
+                    "unable to get chunk {} for data root {} from DB",
+                    chunk_path_hash, data_root
+                )
+            });
         let chunk_bin = chunk.chunk.unwrap().0;
         data_size += chunk_bin.len() as u64;
         owned_chunks.push(chunk_bin);
@@ -441,7 +445,8 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         irys::IrysSigner,
-        partition::{PartitionAssignment, PartitionHash}, Address, Base64, MAX_CHUNK_SIZE,
+        partition::{PartitionAssignment, PartitionHash},
+        Address, Base64, MAX_CHUNK_SIZE,
     };
     use rand::Rng;
     use reth::tasks::TaskManager;
@@ -549,12 +554,12 @@ mod tests {
             let chunk_bytes = Base64(data_bytes[min..max].to_vec());
             // Create a ChunkIngressMessage for each chunk
             let chunk_ingress_msg = ChunkIngressMessage(UnpackedChunk {
-                    data_root,
-                    data_size,
-                    data_path: data_path.clone(),
-                    bytes: chunk_bytes.clone(),
-                    tx_offset: tx_chunk_offset as u32,
-                });
+                data_root,
+                data_size,
+                data_path: data_path.clone(),
+                bytes: chunk_bytes.clone(),
+                tx_offset: tx_chunk_offset as u32,
+            });
 
             let is_last_chunk = tx_chunk_offset == last_index;
             let interval = ii(0, last_index as u64);
@@ -604,8 +609,6 @@ mod tests {
                 assert_eq!(packed_bytes_slice, cbytes);
                 assert_eq!(r.1, ChunkType::Data);
             }
-
-            
         }
 
         // Modify one of the chunks

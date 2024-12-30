@@ -93,9 +93,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
 
     info!(
         "received pending txs: {:?}",
-        txs.iter()
-            .map(|tx| *tx.hash())
-            .collect::<Vec<TxHash>>()
+        txs.iter().map(|tx| *tx.hash()).collect::<Vec<TxHash>>()
     );
 
     loop {

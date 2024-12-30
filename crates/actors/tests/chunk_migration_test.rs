@@ -22,8 +22,8 @@ use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, H256List,
-    IrysBlockHeader, IrysTransaction, IrysTransactionHeader, PoaData, Signature,
-    StorageConfig, TransactionLedger, UnpackedChunk, VDFLimiterInfo, H256, U256,
+    IrysBlockHeader, IrysTransaction, IrysTransactionHeader, PoaData, Signature, StorageConfig,
+    TransactionLedger, UnpackedChunk, VDFLimiterInfo, H256, U256,
 };
 use reth::{revm::primitives::B256, tasks::TaskManager};
 use tracing::info;

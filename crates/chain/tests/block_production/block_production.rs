@@ -291,7 +291,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     .inject_tx(signed_tx)
                     .await
                     .expect_err("tx should be rejected");
-                
             }
             // 2 is less poor but should still fail
             2 => {
@@ -300,7 +299,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     .inject_tx(signed_tx)
                     .await
                     .expect_err("tx should be rejected");
-                
             }
             // should succeed
             3 => {
@@ -309,7 +307,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     .inject_tx(signed_tx)
                     .await
                     .expect("tx should be accepted");
-                
             }
             _ => return Err(eyre!("unknown account index")),
         }

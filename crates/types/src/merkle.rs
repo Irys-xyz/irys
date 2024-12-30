@@ -326,10 +326,7 @@ pub fn generate_leaves_from_chunks(chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Err
 }
 
 /// Generates data chunks from which the calculation of root id starts, including the provided address to interleave into the leaf data hash for ingress proofs
-pub fn generate_ingress_leaves(
-    chunks: Vec<&[u8]>,
-    address: Address,
-) -> Result<Vec<Node>, Error> {
+pub fn generate_ingress_leaves(chunks: Vec<&[u8]>, address: Address) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
     for chunk in chunks.into_iter() {

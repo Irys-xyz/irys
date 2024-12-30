@@ -7,12 +7,8 @@ mod tests {
     use irys_database::tables::{IngressProofs, IrysTables};
     use irys_storage::ChunkProvider;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{
-        irys::IrysSigner,
-        DatabaseProvider, StorageConfig,
-    };
-    
-    
+    use irys_types::{irys::IrysSigner, DatabaseProvider, StorageConfig};
+
     use reth::tasks::TaskManager;
     use reth_db::transaction::DbTx;
     use reth_db::Database as _;
