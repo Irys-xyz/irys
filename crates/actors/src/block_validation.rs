@@ -166,7 +166,7 @@ mod tests {
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
         irys::IrysSigner, Address, Base64, H256List, IrysTransaction, IrysTransactionHeader,
-        Signature, TransactionLedger, U256,
+        Signature, TransactionLedger, H256, U256,
     };
 
     use std::str::FromStr;
