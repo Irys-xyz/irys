@@ -1,7 +1,7 @@
-use crate::{Arbitrary, Signature, IRYS_CHAIN_ID};
-use alloy_primitives::{bytes, Parity, U256 as RethU256};
+use crate::Arbitrary;
+use alloy_primitives::bytes;
 use alloy_rlp::{
-    Decodable, Encodable, Error as RlpError, RlpDecodable, RlpEncodable, EMPTY_STRING_CODE,
+    Decodable, Encodable,
 };
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};

@@ -2,8 +2,8 @@ use crate::{block_index::BlockIndexReadGuard, epoch_service::PartitionAssignment
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_types::{
-    storage_config::StorageConfig, validate_path, vdf_config::VDFStepsConfig, Address,
-    IrysBlockHeader, PoaData, VDFLimiterInfo, H256,
+    storage_config::StorageConfig, validate_path, Address,
+    IrysBlockHeader, PoaData,
 };
 use openssl::sha;
 
@@ -168,11 +168,11 @@ mod tests {
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
-        irys::IrysSigner, Address, Arbitrary, Base64, H256List, IrysSignature, IrysTransaction,
-        IrysTransactionHeader, Signature, TransactionLedger, PACKING_SHA_1_5_S, U256,
+        irys::IrysSigner, Address, Base64, H256List, IrysTransaction,
+        IrysTransactionHeader, Signature, TransactionLedger, U256,
     };
 
-    use std::str::FromStr;
+    
     use std::sync::{Arc, RwLock};
     use tracing::log::LevelFilter;
     use tracing::{debug, info};

@@ -3,7 +3,6 @@ use alloy_primitives::{bytes, ruint::aliases::U256, Address, Parity, B256, U256 
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
-use eyre::eyre;
 use reth_codecs::Compact;
 use reth_primitives::transaction::recover_signer;
 
