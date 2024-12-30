@@ -483,6 +483,7 @@ mod tests {
                 txids,
                 max_chunk_offset: 100,
                 expires: Some(1622543200),
+                proofs: None,
             }],
             evm_block_hash: B256::ZERO,
             vdf_limiter_info: VDFLimiterInfo::default(),
