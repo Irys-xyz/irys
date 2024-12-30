@@ -35,8 +35,10 @@ sol!(
 #[tokio::test]
 async fn test_programmable_data_basic() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
-    let mut config = IrysNodeConfig::default();
-    config.base_directory = temp_dir.path().to_path_buf();
+    let mut config = irys_config::IrysNodeConfig {
+        base_directory: temp_dir.path().to_path_buf(),
+        ..Default::default()
+    };
     let main_address = config.mining_signer.address();
 
     let account1 = IrysSigner::random_signer();
