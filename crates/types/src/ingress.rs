@@ -121,7 +121,7 @@ mod tests {
             interleaved.push(leaf.id)
         }
 
-        let interleaved_hash = hash_sha256(interleaved.concat().as_slice())?;
+        let _interleaved_hash = hash_sha256(interleaved.concat().as_slice())?;
         Ok(())
     }
 

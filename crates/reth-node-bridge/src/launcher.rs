@@ -371,7 +371,7 @@ where
             .into_built_payload_stream()
             .fuse();
         let chainspec = ctx.chain_spec();
-        let (exit, rx) = oneshot::channel();
+        let (exit, _rx) = oneshot::channel();
         info!(target: "reth::cli", "Starting consensus engine");
         ctx.task_executor().spawn_critical("consensus engine", async move {
             if let Some(initial_target) = initial_target {

@@ -147,12 +147,12 @@ pub fn add_genesis_block(
             },
         );
         for (slot, value) in account.storage.unwrap_or_default() {
-            let res = cache_db.insert_account_storage(address, slot.into(), value.into());
+            let _res = cache_db.insert_account_storage(address, slot.into(), value.into());
         }
     }
     // apply all shadows
     for shadow in shadows.unwrap_or(Shadows::new(vec![])) {
-        let res = apply_shadow(shadow, &mut journaled_state, &mut cache_db);
+        let _res = apply_shadow(shadow, &mut journaled_state, &mut cache_db);
     }
 
     // commit state changes

@@ -10,7 +10,6 @@ use bytes::Buf;
 use futures::future::select;
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_chain::{chain::start_for_testing, IrysNodeCtx};
-use irys_config::IrysNodeConfig;
 use irys_database::tables::ProgrammableDataChunkCache;
 use irys_reth_node_bridge::precompile::irys_executor::IrysPrecompileOffsets;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;

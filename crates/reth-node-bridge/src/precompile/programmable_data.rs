@@ -27,7 +27,7 @@ const U16_BYTES: usize = size_of::<u16>();
 // TODO: Gas pricing
 fn programmable_data_precompile(
     call_data: &Bytes,
-    gas_limit: u64,
+    _gas_limit: u64,
     env: &Env,
     state_provider: &PrecompileStateProvider,
 ) -> PrecompileResult {
@@ -61,12 +61,12 @@ fn programmable_data_precompile(
             .try_into()
             .map_err(|_| invalid_input.clone())?,
     );
-    let start_offset = u32::from_be_bytes(
+    let _start_offset = u32::from_be_bytes(
         call_data_vec[U32_BYTES..U32_BYTES * 2]
             .try_into()
             .map_err(|_| invalid_input.clone())?,
     );
-    let to_read = u16::from_be_bytes(
+    let _to_read = u16::from_be_bytes(
         call_data_vec[U32_BYTES * 2..U32_BYTES * 2 + U16_BYTES]
             .try_into()
             .map_err(|_| invalid_input.clone())?,
@@ -105,7 +105,7 @@ fn programmable_data_precompile(
     let RangeSpecifier {
         partition_index,
         offset,
-        chunk_count,
+        _chunk_count,
     } = range_specifier;
 
     let o: u32 = partition_index.try_into().unwrap();

@@ -1,5 +1,5 @@
 use alloy_rpc_types::BlockId;
-use alloy_signer_local::LocalWallet;
+use alloy_signer_local::PrivateKeySigner;
 use foldhash::fast::RandomState;
 use irys_primitives::{Address, Genesis, ShadowReceipt};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
@@ -35,7 +35,6 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use strum::IntoEnumIterator;
 
 use tracing::debug;
 
@@ -425,7 +424,7 @@ impl AccountStateExtApiServer for AccountStateExt {
     async fn create_eth_tx(&self, private_key: B256) -> RpcResult<Bytes> {
         // create a new tx
         // let wallet = LocalWallet::from(private_key);
-        let wallet = LocalWallet::from_bytes(&private_key).map_err(|e| {
+        let wallet = PrivateKeySigner::from_bytes(&private_key).map_err(|e| {
             ErrorObjectOwned::owned::<String>(-32091, "error executing shadow", Some(e.to_string()))
         })?;
         debug!("Creating tx with owner: {}", wallet.address());
@@ -446,7 +445,7 @@ impl AccountStateExtApiServer for AccountStateExt {
 
     fn to_address(&self, private_key: B256) -> RpcResult<Address> {
         dbg!(&private_key.encode_hex());
-        let wallet = LocalWallet::from_bytes(&private_key).map_err(|e| {
+        let wallet = PrivateKeySigner::from_bytes(&private_key).map_err(|e| {
             ErrorObjectOwned::owned::<String>(
                 -32091,
                 "error resolving address for wallet",
