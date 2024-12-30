@@ -52,9 +52,43 @@ jobs:
           echo "Gate conditions met"
           true
 
-  # TODO @JesseTheRobot - remove `no-run` once we have stable tests, maybe use nextest?
-  compile-test:
-    name: compile-test
+  # # TODO @JesseTheRobot - remove `no-run` once we have stable tests, maybe use nextest?
+  # compile-test:
+  #   name: compile-test
+  #   runs-on: self-hosted
+  #   needs: gate
+  #   timeout-minutes: 30
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: 'true'
+  #         token: ${{ secrets.SUBMODULE_PAT }}
+  #     - uses: maxnowack/local-cache@v2
+  #       env:
+  #         cache-name: rust
+  #       with: 
+  #           # ~/.cargo/bin/
+  #           # ~/.rustup/
+  #         path: |
+  #           ~/.cargo/registry/index/
+  #           ~/.cargo/registry/cache/
+  #           ~/.cargo/git/db/
+  #           target/
+  #         key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-${{ hashFiles('**/Cargo.toml') }}
+  #         restore-keys: |
+  #           ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-
+  #     - uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         toolchain: stable
+      
+  #     - run: cargo test --no-run
+
+  #     - name: Clean cache
+  #       run: .github/scripts/clean_cache.sh
+
+
+  compile-check:
+    name: compile-check
     runs-on: self-hosted
     needs: gate
     timeout-minutes: 30
@@ -74,14 +108,14 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-${{ hashFiles('**/Cargo.toml') }}
+          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
-            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
       
-      - run: cargo test --no-run
+      - run: cargo check --all-features --workspace
 
       - name: Clean cache
         run: .github/scripts/clean_cache.sh
@@ -137,9 +171,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-${{ hashFiles('**/Cargo.toml') }}
+          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
-            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-
 
       - uses: dtolnay/rust-toolchain@stable
         with:
