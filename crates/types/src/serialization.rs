@@ -1,8 +1,6 @@
 use crate::Arbitrary;
 use alloy_primitives::bytes;
-use alloy_rlp::{
-    Decodable, Encodable,
-};
+use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
 use bytes::Buf;
