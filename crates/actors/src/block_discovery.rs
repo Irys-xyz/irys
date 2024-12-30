@@ -157,7 +157,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             &block_index_guard,
             &partitions_guard,
             storage_config,
-            &new_block_header.reward_address,
+            &new_block_header.miner_address,
         ) {
             Ok(_) => {
                 block_tree_addr.do_send(BlockPreValidatedMessage(

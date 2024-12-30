@@ -9,7 +9,7 @@ use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tables:
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256
+    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256
 };
 use openssl::sha;
 use reth::revm::primitives::B256;
@@ -301,8 +301,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 previous_block_hash: prev_block_hash,
                 previous_cumulative_diff: U256::from(4000),
                 poa,
-                reward_address: solution.mining_address,
-                reward_key: Base64::from_str("").unwrap(),
+                reward_address: Address::ZERO ,
+                miner_address: solution.mining_address,
                 signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
                 ledgers: vec![

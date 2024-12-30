@@ -421,6 +421,12 @@ impl From<Base64> for Vec<u8> {
     }
 }
 
+impl AsRef<[u8]> for Base64 {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 impl Base64 {
     pub fn from_utf8_str(str: &str) -> Result<Self, Error> {
         Ok(Self(str.as_bytes().to_vec()))

@@ -393,7 +393,7 @@ mod tests {
             block_hash: H256::zero(),
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(4000),
-            reward_key: Base64::from_str("").unwrap(),
+            miner_address: miner_address.clone(),
             signature: Signature::test_signature().into(),
             timestamp: 1000,
             ledgers: vec![
