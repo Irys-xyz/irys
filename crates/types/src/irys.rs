@@ -1,6 +1,7 @@
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysSignature,
-    IrysTransaction, IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID, MAX_CHUNK_SIZE,
+    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysBlockHeader,
+    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID,
+    MAX_CHUNK_SIZE,
 };
 use alloy_core::primitives::keccak256;
 
@@ -84,6 +85,22 @@ impl IrysSigner {
         let id: [u8; 32] = keccak256(signature.as_bytes()).into();
         transaction.header.id = H256::from(id);
         Ok(transaction)
+    }
+
+    pub fn sign_block_header(&self, mut block_header: IrysBlockHeader) -> Result<IrysBlockHeader> {
+        // Store the signer address
+        block_header.miner_address = Address::from_public_key(self.signer.verifying_key());
+
+        // Create the signature hash and sign it
+        let prehash = block_header.signature_hash()?;
+
+        let signature: Signature = self.signer.sign_prehash_recoverable(&prehash.0)?.into();
+
+        block_header.signature = IrysSignature::new(signature);
+        // Derive the block hash by hashing the signature
+        let id: [u8; 32] = keccak256(signature.as_bytes()).into();
+        block_header.block_hash = H256::from(id);
+        Ok(block_header)
     }
 
     /// Builds a merkle tree, with a root, including all the proofs for each

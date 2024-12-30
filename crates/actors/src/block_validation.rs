@@ -1,7 +1,10 @@
 use crate::{block_index::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard};
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
-use irys_types::{storage_config::StorageConfig, validate_path, Address, IrysBlockHeader, PoaData};
+use irys_types::{
+    storage_config::StorageConfig, validate_path, vdf_config::VDFStepsConfig, Address,
+    IrysBlockHeader, PoaData, VDFLimiterInfo, H256,
+};
 use openssl::sha;
 
 /// Full pre-validation steps for a block
@@ -165,8 +168,8 @@ mod tests {
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
-        irys::IrysSigner, Address, Base64, H256List, IrysTransaction, IrysTransactionHeader,
-        Signature, TransactionLedger, H256, U256,
+        irys::IrysSigner, Address, Arbitrary, Base64, H256List, IrysSignature, IrysTransaction,
+        IrysTransactionHeader, Signature, TransactionLedger, PACKING_SHA_1_5_S, U256,
     };
 
     use std::str::FromStr;
@@ -213,7 +216,8 @@ mod tests {
 
         for poa_tx_num in 0..3 {
             for poa_chunk_num in 0..3 {
-                let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
+                let mut poa_chunk: Vec<u8> =
+                    data_chunks[poa_tx_num as usize][poa_chunk_num as usize].into();
                 poa_test(
                     &txs,
                     &mut poa_chunk,
@@ -244,7 +248,7 @@ mod tests {
 
         for poa_chunk_num in 0..2 {
             let mut poa_chunk: Vec<u8> = data[poa_chunk_num * chunk_size
-                ..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())]
+                ..std::cmp::min(((poa_chunk_num + 1) * chunk_size) as usize, data.len())]
                 .to_vec();
             poa_test(
                 &txs,
@@ -363,7 +367,10 @@ mod tests {
         let tx_headers: Vec<IrysTransactionHeader> =
             txs.iter().map(|tx| tx.header.clone()).collect();
 
-        let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
+        let data_tx_ids = tx_headers
+            .iter()
+            .map(|h| h.id.clone())
+            .collect::<Vec<H256>>();
 
         let (tx_root, tx_path) = TransactionLedger::merklize_tx_root(&tx_headers);
 
@@ -380,12 +387,12 @@ mod tests {
         // Create a block from the tx
         let irys_block = IrysBlockHeader {
             height,
-            reward_address: miner_address,
+            reward_address: Address::ZERO,
             poa: poa.clone(),
             block_hash: H256::zero(),
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(4000),
-            reward_key: Base64::from_str("").unwrap(),
+            miner_address: miner_address.clone(),
             signature: Signature::test_signature().into(),
             timestamp: 1000,
             ledgers: vec![
