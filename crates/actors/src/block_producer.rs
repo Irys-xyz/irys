@@ -178,9 +178,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             }
             
             // Get all the ingress proofs for data promotion
-            let mut promotions: Vec<IrysTransactionHeader> = Vec::new();
-            let mut proofs: Vec<TxIngressProof> = Vec::new();
+            let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
             let mut publish_txids: Vec<H256> = Vec::new();
+            let mut proofs: Vec<TxIngressProof> = Vec::new();
             {
                 let read_tx = db.tx().map_err(|e| {
                     error!("Failed to create transaction: {}", e);
@@ -220,6 +220,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         }
                     };
                 
+                    // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
                     if tx_header.ingress_proofs.is_none() {
                         // Get the proof
                         match ingress_proofs.get(&tx_header.data_root) {
@@ -231,7 +232,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                                 };
                                 proofs.push(proof.clone());
                                 tx_header.ingress_proofs = Some(proof);
-                                promotions.push(tx_header);
+                                publish_txs.push(tx_header);
                             },
                             None => {
                                 error!("No ingress proof found for data_root: {}", tx_header.data_root);
@@ -243,7 +244,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             }
 
             // Publish Ledger Transactions
-            let publish_chunks_added = calculate_chunks_added(&promotions, chunk_size);
+            let publish_chunks_added = calculate_chunks_added(&publish_txs, chunk_size);
             let publish_max_chunk_offset =  prev_block_header.ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
             let opt_proofs = if proofs.len() > 0 {
                  Some(IngressProofsList::from(proofs))
@@ -252,13 +253,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
                         
             // Submit Ledger Transactions    
-            let data_txs: Vec<IrysTransactionHeader> =
+            let submit_txs: Vec<IrysTransactionHeader> =
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
 
-            let submit_chunks_added = calculate_chunks_added(&data_txs, chunk_size);
+            let submit_chunks_added = calculate_chunks_added(&submit_txs, chunk_size);
             let submit_max_chunk_offset = prev_block_header.ledgers[Ledger::Submit].max_chunk_offset + submit_chunks_added;
 
-            let data_tx_ids = data_txs.iter().map(|h| h.id.clone()).collect::<Vec<H256>>();
+            let submit_txids = submit_txs.iter().map(|h| h.id.clone()).collect::<Vec<H256>>();
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
             // Difficulty adjustment logic
@@ -267,7 +268,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let current_difficulty = prev_block_header.diff;
             let mut is_difficulty_updated = false;
             let block_height = prev_block_header.height + 1;
-
             let (diff, stats) = calculate_difficulty(block_height, last_diff_timestamp, current_timestamp, current_difficulty, &difficulty_config);
 
             // Did an adjustment happen?
@@ -338,7 +338,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 ledgers: vec![
                     // Permanent Publish Ledger
                     TransactionLedger {
-                        tx_root: TransactionLedger::merklize_tx_root(&promotions).0,
+                        tx_root: TransactionLedger::merklize_tx_root(&publish_txs).0,
                         txids: H256List(publish_txids.clone()),
                         max_chunk_offset: publish_max_chunk_offset,
                         expires: None,
@@ -346,8 +346,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     },
                     // Term Submit Ledger
                     TransactionLedger {
-                        tx_root: TransactionLedger::merklize_tx_root(&data_txs).0,
-                        txids: H256List(data_tx_ids.clone()),
+                        tx_root: TransactionLedger::merklize_tx_root(&submit_txs).0,
+                        txids: H256List(submit_txids.clone()),
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),
                         proofs: None,
@@ -369,7 +369,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let context = RethNodeContext::new(reth.into()).await.unwrap();
 
             let shadows = Shadows::new(
-                data_txs
+                submit_txs
                     .iter()
                     .map(|header| ShadowTx {
                         tx_id: IrysTxId::from_slice(header.id.as_bytes()),
@@ -439,7 +439,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
 
             // Get all the transactions for the previous block, error if not found
-            let txs = match prev_block_header.ledgers[Ledger::Submit]
+            let previous_submit_txs = match prev_block_header.ledgers[Ledger::Submit]
                 .txids
                 .iter()
                 .map(|txid| {
@@ -465,7 +465,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             let _ = chunk_migration_addr.send(BlockFinalizedMessage {
                 block_header: Arc::new(prev_block_header),
-                txs: Arc::new(txs),
+                txs: Arc::new(previous_submit_txs),
             }).await.unwrap();
             info!("Finished producing block height: {}, hash: {}", &block_height, &block_hash);
 
@@ -486,7 +486,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 ///
 /// # Returns
 /// Total number of chunks needed, including padding for partial chunks
-pub fn calculate_chunks_added(txs: &Vec<IrysTransactionHeader>, chunk_size: u64) -> u64 {
+pub fn calculate_chunks_added(txs: &[IrysTransactionHeader], chunk_size: u64) -> u64 {
     let bytes_added = txs.iter().fold(0, |acc, tx| {
         acc + tx.data_size.div_ceil(chunk_size) * chunk_size
     });
@@ -509,10 +509,10 @@ impl Handler<BlockConfirmedMessage> for BlockProducerActor {
     fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // Access the block header through msg.0
         let block = &msg.0;
-        let data_tx = &msg.1;
+        let all_txs = &msg.1;
 
         // Do something with the block
-        info!("Block height: {} num tx: {}", block.height, data_tx.len());
+        info!("Block height: {} num tx: {}", block.height, all_txs.len());
     }
 }
 

@@ -335,12 +335,11 @@ impl Handler<BlockConfirmedMessage> for MempoolActor {
     fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // Access the block header through msg.0
         let block = &msg.0;
-        let data_tx = &msg.1;
+        let all_txs = &msg.1;
 
-        // Loop through the storage tx in each ledger
-        for tx in data_tx.iter() {
-            // Remove them from the pending valid_tx pool
-            self.valid_tx.remove(&tx.id);
+        for txid in block.ledgers[Ledger::Submit].txids.iter() {
+            // Remove the submit tx from the pending valid_tx pool
+            self.valid_tx.remove(txid);
         }
 
         let published_txids = &block.ledgers[Ledger::Publish].txids.0;
@@ -404,7 +403,7 @@ impl Handler<BlockConfirmedMessage> for MempoolActor {
         info!(
             "Removing confirmed tx - Block height: {} num tx: {}",
             block.height,
-            data_tx.len()
+            all_txs.len()
         );
     }
 }

@@ -47,12 +47,12 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeActor {
     type Result = ();
     fn handle(&mut self, msg: BlockPreValidatedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         let pre_validated_block = msg.0;
-        let txs = msg.1;
+        let all_txs = msg.1;
         // TODO: Check and see if this block represents a new head for the canonical chain
         // or if it should be added to a fork.
 
         // For now, because there are no forks, we'll just auto confirm the block
-        let block_confirm_message = BlockConfirmedMessage(pre_validated_block, txs);
+        let block_confirm_message = BlockConfirmedMessage(pre_validated_block, all_txs);
 
         self.block_index.do_send(block_confirm_message.clone());
         if let Some(block_producer) = &self.block_producer {

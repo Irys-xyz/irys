@@ -152,9 +152,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         }
 
         //====================================
-        // PoA validation
+        // Block header pre-validation
         //------------------------------------
-        let poa = new_block_header.poa.clone();
         let block_index_guard = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = self.block_tree.clone();
@@ -177,9 +176,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         ) {
             Ok(_) => {
                 info!("Block is valid, sending to block tree");
+                let mut all_txs = submit_txs.clone();
+                all_txs.extend_from_slice(&publish_txs);
                 block_tree_addr.do_send(BlockPreValidatedMessage(
                     new_block_header,
-                    Arc::new(submit_txs),
+                    Arc::new(all_txs),
                 ));
             }
             Err(err) => {
