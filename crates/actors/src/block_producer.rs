@@ -1,5 +1,4 @@
 use std::{
-    os::unix::raw::off_t,
     str::FromStr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -13,14 +12,15 @@ use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64,
-    DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysSignature, IrysTransactionHeader,
+    storage_config::StorageConfig, vdf_config::VDFStepsConfig, Base64,
+    DifficultyAdjustmentConfig, H256List, IrysBlockHeader, IrysTransactionHeader,
     PoaData, Signature, TransactionLedger, VDFLimiterInfo, H256, U256,
 };
 use openssl::sha;
 use reth::revm::primitives::B256;
 use reth_db::Database;
 use tracing::{error, info, warn};
+use nodit::interval::ii;
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
@@ -238,14 +238,18 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     partition_hash: solution.partition_hash,
                 };
 
-                let checkpoints_result = vdf_steps.read().get_steps(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1);
-                let mut checkpoints = match checkpoints_result {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!("Error in requested vdf steps while producing block in step:{} error: {}", solution.vdf_step, e);
-                        return None
+                let mut checkpoints = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
+                    H256List::new()
+                } else {
+                    match vdf_steps.read().get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!("Error in requested vdf steps while producing block in step:{} error: {}", solution.vdf_step, e);
+                            return None
+                        }
                     }
                 };
+
                 checkpoints.push(solution.seed.0);
                 //info!("previous block step {} step {} checkpoints {}", prev_block_header.vdf_limiter_info.global_step_number, solution.vdf_step, checkpoints);
 

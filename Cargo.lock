@@ -5240,6 +5240,7 @@ dependencies = [
  "jsonrpsee",
  "k256",
  "modular-bitfield",
+ "nodit",
  "openssl",
  "rand",
  "rand_chacha",

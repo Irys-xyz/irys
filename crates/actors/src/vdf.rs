@@ -1,4 +1,5 @@
 use actix::prelude::*;
+use nodit::{interval::ii, InclusiveInterval, Interval};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock, RwLockReadGuard},
@@ -31,40 +32,32 @@ impl VdfState {
         );
     }
 
-    /// Get steps in inclusive range (from..=to) using global steps numbers as indices
-    pub fn get_steps(&self, from: u64, to: u64) -> eyre::Result<H256List> {
-        if from > to {
-            return Ok(H256List(vec![]));
-        }
-
+    /// Get steps in the given global steps numbers Interval
+    pub fn get_steps(&self, i: Interval<u64>) -> eyre::Result<H256List> {
         let vdf_steps_len = self.seeds.len() as u64;
 
         let last_global_step = self.global_step;
         let first_global_step = last_global_step - vdf_steps_len + 1;
 
-        if from < first_global_step || last_global_step < to {
+        if !ii(first_global_step,last_global_step).contains_interval(&i) {
             return Err(eyre::eyre!(
                 "Unavailable requested range ({}..={}). Stored steps range is ({}..={})",
-                from,
-                to,
+                i.start(),
+                i.end(),
                 first_global_step,
                 last_global_step
             ));
         }
 
-        let right: usize = (to - first_global_step).try_into()?;
-        let left: usize = (from - first_global_step).try_into()?;
+        let start: usize = (i.start() - first_global_step).try_into()?;
+        let end: usize = (i.end() - first_global_step).try_into()?;
 
-        if right >= left {
-            Ok(H256List(
-                self.seeds
-                    .range(left..=right)
-                    .map(|seed| seed.0.clone())
-                    .collect::<Vec<H256>>(),
-            ))
-        } else {
-            Ok(H256List(vec![]))
-        }
+        Ok(H256List(
+            self.seeds
+                .range(start..=end)
+                .map(|seed| seed.0.clone())
+                .collect::<Vec<H256>>(),
+        ))
     }
 }
 
@@ -181,15 +174,15 @@ mod tests {
         }
 
         // range not stored
-        let get_error = state.read().get_steps(3, 5);
+        let get_error = state.read().get_steps(ii(3, 5));
         assert!(get_error.is_err());
 
         // ok inner range
-        let get = state.read().get_steps(6, 7).unwrap();
+        let get = state.read().get_steps(ii(6, 7)).unwrap();
         assert_eq!(H256List(vec![H256([6; 32]), H256([7; 32])]), get);
 
         // complete stored range
-        let get_all = state.read().get_steps(5, 8).unwrap();
+        let get_all = state.read().get_steps(ii(5, 8)).unwrap();
         assert_eq!(
             H256List(vec![
                 H256([5; 32]),
