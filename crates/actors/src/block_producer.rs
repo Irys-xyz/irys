@@ -176,14 +176,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 warn!("Solution for old step number {}, previous block step number {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number);
                 return None;
             }
-
-            // Translate partition hash, chunk offset -> ledger, ledger chunk offset
-            let ledger_num = epoch_service_addr
-                .send(GetPartitionAssignmentMessage(solution.partition_hash))
-                .await
-                .unwrap()
-                .map(|pa| pa.ledger_num)
-                .flatten();
             
             // Get all the ingress proofs for data promotion
             let mut promotions: Vec<IrysTransactionHeader> = Vec::new();
