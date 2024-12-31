@@ -118,7 +118,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             &partitions_guard,
             storage_config,
             &self.vdf_config,
-            &new_block_header.reward_address,
+            &new_block_header.miner_address,
         ) {
             Ok(_) => {
                 info!("Block is valid, sending to block tree");

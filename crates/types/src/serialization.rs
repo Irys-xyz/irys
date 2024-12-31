@@ -1,6 +1,8 @@
 use crate::{Arbitrary, Signature, IRYS_CHAIN_ID};
 use alloy_primitives::{bytes, Parity, U256 as RethU256};
-use alloy_rlp::{Decodable, Encodable, Error as RlpError, RlpDecodable, RlpEncodable};
+use alloy_rlp::{
+    Decodable, Encodable, Error as RlpError, RlpDecodable, RlpEncodable, EMPTY_STRING_CODE,
+};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
 use bytes::Buf;
@@ -371,6 +373,12 @@ impl From<Vec<u8>> for Base64 {
 impl From<Base64> for Vec<u8> {
     fn from(value: Base64) -> Self {
         value.0
+    }
+}
+
+impl AsRef<[u8]> for Base64 {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }
 

@@ -14,7 +14,7 @@ pub fn block_is_valid(
     partitions_guard: &PartitionAssignmentsReadGuard,
     storage_config: &StorageConfig,
     vdf_config: &VDFStepsConfig,
-    reward_address: &Address,
+    miner_address: &Address,
 ) -> eyre::Result<()> {
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
         return Err(eyre::eyre!(
@@ -33,7 +33,7 @@ pub fn block_is_valid(
         &block_index_guard,
         &partitions_guard,
         storage_config,
-        reward_address,
+        miner_address,
     )?;
     Ok(())
 }
@@ -44,7 +44,7 @@ pub fn poa_is_valid(
     block_index_guard: &BlockIndexReadGuard,
     partitions_guard: &PartitionAssignmentsReadGuard,
     config: &StorageConfig,
-    mining_address: &Address,
+    miner_address: &Address,
 ) -> eyre::Result<()> {
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_num)) =
@@ -103,7 +103,7 @@ pub fn poa_is_valid(
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
-            mining_address.clone(),
+            miner_address.clone(),
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
@@ -132,7 +132,7 @@ pub fn poa_is_valid(
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
-            mining_address.clone(),
+            miner_address.clone(),
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
@@ -388,12 +388,12 @@ mod tests {
         // Create a block from the tx
         let irys_block = IrysBlockHeader {
             height,
-            reward_address: miner_address.clone(),
+            reward_address: Address::ZERO,
             poa: poa.clone(),
             block_hash: H256::zero(),
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(4000),
-            reward_key: Base64::from_str("").unwrap(),
+            miner_address: miner_address.clone(),
             signature: Signature::test_signature().into(),
             timestamp: 1000,
             ledgers: vec![
