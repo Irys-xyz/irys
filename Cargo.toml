@@ -283,6 +283,14 @@ useless_let_if_seq = "warn"
 while_float = "warn"
 zero_sized_map_values = "warn"
 
+
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_possible_wrap = "deny"
+cast_lossless = "deny"
+cast_precision_loss = "deny"
+
 # These are nursery lints which have findings. Allow them for now. Some are not
 # quite mature enough for use in our codebase and some we don't really want.
 # Explicitly listing should make it easier to fix in the future.
