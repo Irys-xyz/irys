@@ -189,6 +189,7 @@ mod tests {
             bundle_format: Some(0),
             chain_id: IRYS_CHAIN_ID,
             version: 0,
+            ingress_proofs: None,
             signature: Default::default(),
         };
         let transaction = IrysTransaction {

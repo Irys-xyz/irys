@@ -78,7 +78,13 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         // Validate discovered block
         let new_block_header = msg.0;
 
+        //====================================
+        // Submit ledger TX validation
+        //------------------------------------
         // Get all the submit ledger transactions for the new block, error if not found
+        // this is how we validate that the TXIDs in the Submit Ledger are real transactions.
+        // If they are in our mempool and validated we know they are real, if not we have
+        // to retrieve and validate them from the block producer.
         // TODO: in the future we'll retrieve the missing transactions from the block
         // producer and validate them.
         let submit_txs = match new_block_header.ledgers[Ledger::Submit]
@@ -95,11 +101,60 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         {
             Ok(txs) => txs,
             Err(e) => {
-                error!("Failed to collect tx headers: {}", e);
+                error!("Failed to collect submit tx headers: {}", e);
                 return;
             }
         };
 
+        //====================================
+        // Publish ledger TX Validation
+        //------------------------------------
+        // 1. Validate the proof
+        // 2. Validate the transaction
+        // 3. Update the local tx headers index so include the ingress- proof.
+        //    This keeps the transaction from getting re-promoted each block.
+        //    (this last step performed in mempool after the block is confirmed)
+        let publish_txs = match new_block_header.ledgers[Ledger::Publish]
+            .txids
+            .iter()
+            .map(|txid| {
+                self.db
+                    .view_eyre(|tx| tx_header_by_txid(tx, txid))
+                    .and_then(|opt| {
+                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(txs) => txs,
+            Err(e) => {
+                error!("Failed to collect publish tx headers: {}", e);
+                return;
+            }
+        };
+
+        if publish_txs.len() > 0 {
+            let publish_proofs = match &new_block_header.ledgers[Ledger::Publish].proofs {
+                Some(proofs) => proofs,
+                None => {
+                    error!("Ingress proofs missing");
+                    return;
+                }
+            };
+
+            // Pre-Validate the ingress-proof by verifying the signature
+            for (i, tx_header) in publish_txs.iter().enumerate() {
+                if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
+                    error!("Invalid ingress proof signature: {}", e);
+                    return;
+                }
+            }
+        }
+
+        //====================================
+        // PoA validation
+        //------------------------------------
+        let poa = new_block_header.poa.clone();
         let block_index_guard = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = self.block_tree.clone();

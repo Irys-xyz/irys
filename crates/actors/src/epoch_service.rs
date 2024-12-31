@@ -11,7 +11,6 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
-use tracing::info;
 
 /// Allows for overriding of the consensus parameters for ledgers and partitions
 #[derive(Debug, Clone)]
@@ -535,7 +534,7 @@ impl EpochServiceActor {
         let ledgers = self.ledgers.read().unwrap();
         let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
 
-        let mut pa = self.partition_assignments.read().unwrap();
+        let pa = self.partition_assignments.read().unwrap();
 
         // Configure publish ledger storage
         let mut module_infos = ledgers

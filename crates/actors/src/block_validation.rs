@@ -386,7 +386,7 @@ mod tests {
         // Create a block from the tx
         let irys_block = IrysBlockHeader {
             height,
-            reward_address: Address::ZERO,
+            reward_address: miner_address.clone(),
             poa: poa.clone(),
             block_hash: H256::zero(),
             previous_block_hash: H256::zero(),
@@ -401,6 +401,7 @@ mod tests {
                     txids: H256List(Vec::new()),
                     max_chunk_offset: 0,
                     expires: None,
+                    proofs: None,
                 },
                 // Term Submit Ledger
                 TransactionLedger {
@@ -408,6 +409,7 @@ mod tests {
                     txids: H256List(data_tx_ids.clone()),
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
+                    proofs: None,
                 },
             ],
             ..IrysBlockHeader::default()

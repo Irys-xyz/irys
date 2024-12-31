@@ -26,7 +26,6 @@ async fn api_end_to_end_test_256kb() {
 async fn api_end_to_end_test(chunk_size: usize) {
     use irys_types::{
         irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, StorageConfig, UnpackedChunk,
-        CHUNK_SIZE, MAX_CHUNK_SIZE,
     };
     use rand::Rng;
     use std::{sync::Arc, time::Duration};

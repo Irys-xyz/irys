@@ -13,3 +13,4 @@ pub mod packing;
 pub mod vdf;
 
 pub use addresses::*;
+pub use block_producer::*;
