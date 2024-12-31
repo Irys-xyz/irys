@@ -80,7 +80,6 @@ pub fn poa_is_valid(
             block_chunk_offset * (config.chunk_size as u128),
         )?;
 
-        // TODO: check if bounds are byte or chunk relative
         if !(tx_path_result.left_bound..=tx_path_result.right_bound)
             .contains(&(block_chunk_offset * (config.chunk_size as u128)))
         {
@@ -114,7 +113,6 @@ pub fn poa_is_valid(
         let mut poa_chunk: Vec<u8> = poa.chunk.clone().into();
         xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
 
-        // TODO: check if bounds are byte or chunk relative, if are chunk how I remove last chunk padding ?
         // Because all chunks are packed as config.chunk_size, if the proof chunk is
         // smaller we need to trim off the excess padding introduced by packing ?
         let (poa_chunk_pad_trimmed, _) = poa_chunk.split_at(
@@ -191,7 +189,7 @@ mod tests {
         let chunk_size: usize = 32;
         // Create a bunch of TX chunks
         let data_chunks = vec![
-            vec![[0; 32], [1; 32], [2; 32]], // tx0 TODO: test last not complete chunk
+            vec![[0; 32], [1; 32], [2; 32]], // tx0 
             vec![[3; 32], [4; 32], [5; 32]], // tx1
             vec![[6; 32], [7; 32], [8; 32]], // tx2
         ];
