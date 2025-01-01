@@ -124,17 +124,16 @@ impl BlockIndexActor {
         let mut index = self.block_index.write().unwrap();
 
         // Get previous ledger sizes or default to 0 for genesis
-        let (max_publish_chunks, max_submit_chunks) = if index.num_blocks() == 0
-            && block.height == 0
-        {
-            (0, sub_chunks_added)
-        } else {
-            let prev_block = index.get_item((block.height - 1) as usize).unwrap();
-            (
-                prev_block.ledgers[Ledger::Publish as usize].max_chunk_offset + pub_chunks_added,
-                prev_block.ledgers[Ledger::Submit as usize].max_chunk_offset + sub_chunks_added,
-            )
-        };
+        let (max_publish_chunks, max_submit_chunks) =
+            if index.num_blocks() == 0 && block.height == 0 {
+                (0, sub_chunks_added)
+            } else {
+                let prev_block = index.get_item((block.height - 1) as usize).unwrap();
+                (
+                    prev_block.ledgers[Ledger::Publish].max_chunk_offset + pub_chunks_added,
+                    prev_block.ledgers[Ledger::Submit].max_chunk_offset + sub_chunks_added,
+                )
+            };
 
         let block_index_item = BlockIndexItem {
             block_hash: block.block_hash,

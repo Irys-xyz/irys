@@ -247,7 +247,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let chunk_migration_addr = chunk_migration_actor.start();
     let block_finalized_message = BlockFinalizedMessage {
         block_header: block.clone(),
-        txs: txs.clone(),
+        all_txs: txs.clone(),
     };
     let _res = chunk_migration_addr.send(block_finalized_message).await?;
 

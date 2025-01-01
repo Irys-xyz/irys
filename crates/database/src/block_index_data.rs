@@ -450,7 +450,7 @@ mod tests {
                 ledger: Ledger::Publish,
                 start_chunk_offset: 100,
                 end_chunk_offset: 200,
-                tx_root: block_items[1].ledgers[Ledger::Publish as usize].tx_root
+                tx_root: block_items[1].ledgers[Ledger::Publish].tx_root
             }
         );
 
@@ -462,7 +462,7 @@ mod tests {
                 ledger: Ledger::Submit,
                 start_chunk_offset: 1000,
                 end_chunk_offset: 2000,
-                tx_root: block_items[1].ledgers[Ledger::Submit as usize].tx_root
+                tx_root: block_items[1].ledgers[Ledger::Submit].tx_root
             }
         );
 

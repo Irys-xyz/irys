@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap, str::FromStr, sync::Arc, time::{SystemTime, UNIX_EPOCH}
+    collections::HashMap, sync::Arc, time::{SystemTime, UNIX_EPOCH}
 };
 
 use actix::prelude::*;
@@ -434,38 +434,26 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .unwrap();
 
             let block = Arc::new(irys_block);
-
             block_discovery_addr.do_send(BlockDiscoveredMessage(block.clone()));
-
-
+            
             // Get all the transactions for the previous block, error if not found
-            let previous_submit_txs = match prev_block_header.ledgers[Ledger::Submit]
-                .txids
-                .iter()
-                .map(|txid| {
-                    db.view_eyre(|tx| tx_header_by_txid(tx, txid))
-                        .and_then(|opt| {
-                            opt.ok_or_else(|| {
-                                eyre::eyre!("No tx header found for txid {:?}", txid)
-                            })
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(txs) => txs,
-                Err(e) => {
-                    error!("Failed to collect tx headers: {}", e);
-                    return None;
-                }
-            };
+            // TODO: Eventually abstract this for support of `n` ledgers
+            let previous_submit_txs = get_ledger_tx_headers(&prev_block_header, Ledger::Submit, &db);
+            let previous_publish_txs = get_ledger_tx_headers(&prev_block_header, Ledger::Publish, &db);
 
+            let prev_all_txs = {
+                let mut combined = previous_submit_txs.unwrap_or_default();
+                combined.extend(previous_publish_txs.unwrap_or_default());
+                combined
+            };
+            
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
             let _ = chunk_migration_addr.send(BlockFinalizedMessage {
                 block_header: Arc::new(prev_block_header),
-                txs: Arc::new(previous_submit_txs),
+                all_txs: Arc::new(prev_all_txs),
             }).await.unwrap();
             info!("Finished producing block height: {}, hash: {}", &block_height, &block_hash);
 
@@ -473,6 +461,33 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         }
         .into_actor(self),
         ))
+    }
+}
+
+
+fn get_ledger_tx_headers(
+    block_header: &IrysBlockHeader,
+    ledger: Ledger,
+    db: &DatabaseProvider,
+) -> Option<Vec<IrysTransactionHeader>> {
+    match block_header.ledgers[ledger]
+        .txids
+        .iter()
+        .map(|txid| {
+            db.view_eyre(|tx| tx_header_by_txid(tx, txid))
+                .and_then(|opt| {
+                    opt.ok_or_else(|| {
+                        eyre::eyre!("No tx header found for txid {:?}", txid)
+                    })
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(txs) => Some(txs),
+        Err(e) => {
+            error!("Failed to collect tx headers for {:?} ledger: {}", ledger, e);
+            None
+        }
     }
 }
 
@@ -524,8 +539,10 @@ impl Handler<BlockConfirmedMessage> for BlockProducerActor {
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<(), ()>")]
 pub struct BlockFinalizedMessage {
+    /// Block being finalized
     pub block_header: Arc<IrysBlockHeader>,
-    pub txs: Arc<Vec<IrysTransactionHeader>>,
+    /// Include all the blocks transaction headers [Submit, Publish]
+    pub all_txs: Arc<Vec<IrysTransactionHeader>>,
 }
 
 /// SHA256 hash the message parameter
