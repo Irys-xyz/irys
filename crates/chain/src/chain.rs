@@ -260,6 +260,10 @@ pub async fn start_irys_node(
                     BlockTreeActor::new(block_index_actor_addr.clone(), mempool_actor_addr.clone());
                 let block_tree = block_tree_actor.start();
 
+                let vdf_service = VdfService::from_registry();
+                let vdf_steps_guard: VdfStepsReadGuard =
+                    vdf_service.send(GetVdfStateMessage).await.unwrap();
+
                 let block_discovery_actor = BlockDiscoveryActor {
                     block_index_guard: block_index_guard.clone(),
                     partition_assignments_guard: partition_assignments_guard.clone(),
@@ -268,12 +272,9 @@ pub async fn start_irys_node(
                     storage_config: storage_config.clone(),
                     db: db.clone(),
                     vdf_config: vdf_config.clone(),
+                    vdf_steps_guard: vdf_steps_guard.clone(),
                 };
                 let block_discovery_addr = block_discovery_actor.start();
-
-                let vdf_service = VdfService::from_registry();
-                let vdf_steps_guard: VdfStepsReadGuard =
-                    vdf_service.send(GetVdfStateMessage).await.unwrap();
 
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
@@ -300,6 +301,7 @@ pub async fn start_irys_node(
                         block_producer_addr.clone().recipient(),
                         sm.clone(),
                         false, // do not start mining automatically
+                        vdf_steps_guard.clone(),
                     );
                     part_actors.push(partition_mining_actor.start());
                 }

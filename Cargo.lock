@@ -5127,6 +5127,7 @@ dependencies = [
  "eyre",
  "irys-config",
  "irys-database",
+ "irys-efficient-sampling",
  "irys-packing",
  "irys-primitives",
  "irys-reth-node-bridge",
@@ -5303,6 +5304,50 @@ dependencies = [
  "test-fuzz",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "irys-efficient-sampling"
+version = "0.1.0"
+dependencies = [
+ "actix",
+ "alloy-core",
+ "alloy-genesis",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-rpc-types-engine",
+ "alloy-serde",
+ "alloy-signer",
+ "alloy-signer-local",
+ "arbitrary",
+ "assert_matches",
+ "base58",
+ "base64-url",
+ "borsh",
+ "borsh-derive",
+ "bytes",
+ "chrono",
+ "eyre",
+ "fixed-hash",
+ "futures",
+ "irys-types",
+ "k256",
+ "modular-bitfield",
+ "nodit",
+ "openssl",
+ "rand",
+ "reth-codecs",
+ "reth-db",
+ "reth-db-api",
+ "reth-primitives",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "test-fuzz",
+ "tokio",
+ "tracing",
+ "uint",
+ "zerocopy 0.8.13",
 ]
 
 [[package]]

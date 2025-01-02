@@ -1,6 +1,6 @@
 use crate::{
     block_index::BlockIndexReadGuard, block_tree::BlockTreeActor, block_validation::block_is_valid,
-    epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor,
+    epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor, vdf::VdfStepsReadGuard,
 };
 use actix::prelude::*;
 use irys_database::{tx_header_by_txid, BlockIndex, Initialized, Ledger};
@@ -29,6 +29,8 @@ pub struct BlockDiscoveryActor {
     pub db: DatabaseProvider,
     /// VDF configuration for the node
     pub vdf_config: VDFStepsConfig,
+    /// Store last VDF Steps
+    pub vdf_steps_guard: VdfStepsReadGuard,
 }
 
 /// When a block is discovered, either produced locally or received from
@@ -59,6 +61,7 @@ impl BlockDiscoveryActor {
         storage_config: StorageConfig,
         db: DatabaseProvider,
         vdf_config: VDFStepsConfig,
+        vdf_steps_guard: VdfStepsReadGuard,        
     ) -> Self {
         Self {
             block_index_guard,
@@ -68,6 +71,7 @@ impl BlockDiscoveryActor {
             storage_config,
             db,
             vdf_config,
+            vdf_steps_guard
         }
     }
 }
@@ -172,6 +176,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             &partitions_guard,
             storage_config,
             &self.vdf_config,
+            &self.vdf_steps_guard,
             &new_block_header.miner_address,
         ) {
             Ok(_) => {

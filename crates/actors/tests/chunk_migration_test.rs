@@ -202,6 +202,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
             chunk: Base64::from_str("").unwrap(),
             ledger_num: None,
             partition_chunk_offset: 0,
+            chunk_index: 0,
             partition_hash: PartitionHash::zero(),
         },
         reward_address: Address::ZERO,

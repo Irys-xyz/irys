@@ -18,13 +18,14 @@ impl Seed {
 pub struct SolutionContext {
     pub partition_hash: PartitionHash,
     pub chunk_offset: u32,
+    pub chunk_index: u32,
     pub mining_address: Address,
     pub tx_path: Option<TxPath>, // capacity partitions have no tx_path nor data_path
     pub data_path: Option<ChunkDataPath>,
     pub chunk: Vec<u8>,
     pub vdf_step: u64,
     pub checkpoints: H256List,
-    pub seed: Seed,
+    pub seed: Seed,    
 }
 #[derive(Debug, Clone)]
 pub struct Partition {

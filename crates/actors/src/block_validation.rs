@@ -1,11 +1,13 @@
-use crate::{block_index::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard};
+use crate::{block_index::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard, vdf::VdfStepsReadGuard};
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
+use irys_storage::ii;
 use irys_types::{
     storage_config::StorageConfig, validate_path, Address, IrysBlockHeader, PoaData, VDFStepsConfig,
 };
 use irys_vdf::checkpoints_are_valid;
 use openssl::sha;
+use tracing::info;
 
 /// Full pre-validation steps for a block
 pub fn block_is_valid(
@@ -14,6 +16,7 @@ pub fn block_is_valid(
     partitions_guard: &PartitionAssignmentsReadGuard,
     storage_config: &StorageConfig,
     vdf_config: &VDFStepsConfig,
+    steps_guard: &VdfStepsReadGuard,            
     miner_address: &Address,
 ) -> eyre::Result<()> {
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
@@ -23,11 +26,11 @@ pub fn block_is_valid(
     }
 
     //TODO: check block_hash
+    
+    recall_recall_range_is_valid(block, storage_config, steps_guard)?;
 
-    // check vdf steps
     checkpoints_are_valid(&block.vdf_limiter_info, &vdf_config)?;
 
-    // check PoA
     poa_is_valid(
         &block.poa,
         &block_index_guard,
@@ -36,6 +39,20 @@ pub fn block_is_valid(
         miner_address,
     )?;
     Ok(())
+}
+
+/// Check recall range is valid
+pub fn recall_recall_range_is_valid(
+    block: &IrysBlockHeader,
+    config: &StorageConfig,    
+    steps_guard: &VdfStepsReadGuard,                
+) -> eyre::Result<()> {
+    let num_recall_ranges_in_partition = config.num_chunks_in_partition / config.num_chunks_in_recall_range;
+    let reset_step_number = ((block.vdf_limiter_info.global_step_number  - 1 ) / num_recall_ranges_in_partition) * num_recall_ranges_in_partition + 1;
+    let steps = steps_guard.read().get_steps(ii(reset_step_number, block.vdf_limiter_info.global_step_number))?;
+
+    info!("Validating recall ranges steps from: {} to: {}", reset_step_number, block.vdf_limiter_info.global_step_number);
+    irys_efficient_sampling::recall_range_is_valid((block.poa.partition_chunk_offset as u64/config.num_chunks_in_recall_range) as usize, num_recall_ranges_in_partition as usize, &steps, &block.poa.partition_hash)
 }
 
 /// Returns Ok if the provided PoA is valid, Err otherwise
@@ -59,7 +76,7 @@ pub fn poa_is_valid(
         let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
             * config.num_partitions_in_slot
             * config.num_chunks_in_partition
-            + poa.partition_chunk_offset;
+            + poa.partition_chunk_offset as u64;
 
         // ledger data -> block
         let ledger = Ledger::try_from(ledger_num).unwrap();
@@ -103,7 +120,7 @@ pub fn poa_is_valid(
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
             miner_address.clone(),
-            poa.partition_chunk_offset,
+            poa.partition_chunk_offset as u64,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
             config.chunk_size as usize,
@@ -131,7 +148,7 @@ pub fn poa_is_valid(
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
             miner_address.clone(),
-            poa.partition_chunk_offset,
+            poa.partition_chunk_offset as u64,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
             config.chunk_size as usize,
@@ -378,8 +395,8 @@ mod tests {
             )),
             chunk: Base64(poa_chunk.clone()),
             ledger_num: Some(1),
-            partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
-                as u64,
+            partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u32,
+            chunk_index: 0,
             partition_hash,
         };
 
