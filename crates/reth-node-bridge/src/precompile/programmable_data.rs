@@ -102,6 +102,7 @@ fn programmable_data_precompile(
 
     // we have the range specifier, now we need to load the data from the node
 
+    #[allow(unused_variables)]
     let RangeSpecifier {
         partition_index,
         offset,
