@@ -563,18 +563,21 @@ impl StorageModule {
         // Get paths and process them
         let (tx_path, data_path) = self.read_tx_data_path(ledger_offset)?;
 
-        let data_root = match tx_path {
-            Some(bytes) => {
-                let proof = get_leaf_proof(&Base64::from(bytes))?;
-                proof
+        let (data_root, data_size) = match tx_path {
+            Some(tp) => {
+                let path_buff = Base64::from(tp);
+                let proof = get_leaf_proof(&path_buff)?;
+                let data_root = proof
                     .hash()
                     .map(H256::from)
-                    .ok_or_eyre("Unable to parse data_root from tx_path ")?
+                    .ok_or_eyre("Unable to parse data_root from tx_path ")?;
+                let data_size = proof.offset() as u64;
+                (data_root, data_size)
             }
             None => return Err(eyre::eyre!("Unable to find a chunk with that tx_path")),
         };
 
-        let (data_path, data_size) = match data_path {
+        let (data_path, _offset) = match data_path {
             Some(dp) => {
                 let path_buff = Base64::from(dp);
                 let proof = get_leaf_proof(&path_buff)?;
