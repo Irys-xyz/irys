@@ -334,7 +334,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     // Ok(())
 }
 
-async fn run_custom_node<Ext, C, L, Fut>(
+pub async fn run_custom_node<Ext, C, L, Fut>(
     ctx: CliContext,
     cli: Cli<C, Ext>,
     launcher: L,

@@ -130,12 +130,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
-        let self_addr = ctx.address();
+        let _self_addr = ctx.address();
         let difficulty_config = self.difficulty_config.clone();
         let chunk_size = self.storage_config.chunk_size;
 
-        let storage_config = self.storage_config.clone();
-        let vdf_config = self.vdf_config.clone();
+        let _storage_config = self.storage_config.clone();
+        let _vdf_config = self.vdf_config.clone();
 
         AtomicResponse::new(Box::pin(
             async move {

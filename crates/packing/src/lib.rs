@@ -68,7 +68,9 @@ pub fn capacity_pack_range_c(
 
 enum PackingType {
     CPU,
+    #[allow(unused)]
     CUDA,
+    #[allow(unused)]
     AMD,
 }
 

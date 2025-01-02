@@ -177,7 +177,7 @@ impl Actor for PackingActor {
 impl Handler<PackingRequest> for PackingActor {
     type Result = ();
 
-    fn handle(&mut self, msg: PackingRequest, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: PackingRequest, _ctx: &mut Self::Context) -> Self::Result {
         debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.start(), &msg.chunk_range.end(), &msg.storage_module.id);
         self.pending_jobs.write().unwrap().push_back(msg);
     }

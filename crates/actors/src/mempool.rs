@@ -92,7 +92,7 @@ pub enum TxIngressError {
 pub struct ChunkIngressMessage(pub UnpackedChunk);
 
 impl ChunkIngressMessage {
-    fn into_inner(self) -> UnpackedChunk {
+    pub fn into_inner(self) -> UnpackedChunk {
         self.0
     }
 }
@@ -320,7 +320,7 @@ pub struct GetBestMempoolTxs;
 impl Handler<GetBestMempoolTxs> for MempoolActor {
     type Result = Vec<IrysTransactionHeader>;
 
-    fn handle(&mut self, msg: GetBestMempoolTxs, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, _msg: GetBestMempoolTxs, _ctx: &mut Self::Context) -> Self::Result {
         self.valid_tx
             .iter()
             .take(10)

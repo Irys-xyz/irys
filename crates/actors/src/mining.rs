@@ -96,7 +96,7 @@ impl PartitionMiningActor {
             );
         }
 
-        for (index, (chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
+        for (index, (_chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
             let partition_chunk_offset = (start_chunk_offset + index) as PartitionChunkOffset;
             let (tx_path, data_path) = self
