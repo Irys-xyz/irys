@@ -1,4 +1,10 @@
 {
+	"rust-analyzer.check.command": "clippy",
+	"rust-analyzer.check.extraArgs": [
+		"--",
+		"-W",
+		"clippy::all"
+	],
 	"cSpell.words": [
 		"actix",
 		"borsh",
