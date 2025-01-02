@@ -105,7 +105,7 @@ fn programmable_data_precompile(
     let RangeSpecifier {
         partition_index,
         offset,
-        _chunk_count,
+        chunk_count,
     } = range_specifier;
 
     let o: u32 = partition_index.try_into().unwrap();
