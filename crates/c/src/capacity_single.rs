@@ -32,20 +32,24 @@ pub fn compute_entropy_chunk(
     let mut previous_segment = compute_seed_hash(mining_address, chunk_offset, partition_hash);
     out_entropy_chunk.clear();
     // Phase 1: sequential hashing
-    for _i in 0..(chunk_size as usize / SHA_HASH_SIZE) {
+    for _i in 0..(chunk_size / SHA_HASH_SIZE) {
         previous_segment = sha::sha256(&previous_segment);
-        for j in 0..SHA_HASH_SIZE as usize {
+        for j in 0..SHA_HASH_SIZE {
             out_entropy_chunk.push(previous_segment[j]); // inserting in [i * SHA_HASH_SIZE + j] entropy_chunk vector
         }
     }
 
     // Phase 2: 2D hash packing
-    let mut hash_count = chunk_size as usize / SHA_HASH_SIZE;
+    let mut hash_count = chunk_size / SHA_HASH_SIZE;
+    debug_assert_ne!(
+        hash_count, 0,
+        "0 2D packing iterations - is your chunk_size < 32?"
+    );
     while hash_count < iterations as usize {
-        let i = (hash_count % (chunk_size as usize / SHA_HASH_SIZE)) * SHA_HASH_SIZE;
+        let i = (hash_count % (chunk_size / SHA_HASH_SIZE)) * SHA_HASH_SIZE;
         let mut hasher = sha::Sha256::new();
         if i == 0 {
-            hasher.update(&out_entropy_chunk[chunk_size as usize - SHA_HASH_SIZE..]);
+            hasher.update(&out_entropy_chunk[chunk_size - SHA_HASH_SIZE..]);
         } else {
             hasher.update(&out_entropy_chunk[i - SHA_HASH_SIZE..i]);
         }
