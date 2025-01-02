@@ -248,7 +248,7 @@ pub async fn start_irys_node(
                 );
                 let chunk_migration_addr = chunk_migration_actor.start();
 
-                let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
+                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
                 let block_tree_actor =
                     BlockTreeActor::new(block_index_actor_addr.clone(), mempool_actor_addr.clone());
@@ -321,7 +321,7 @@ pub async fn start_irys_node(
                 broadcast_mining_service.do_send(BroadcastDifficultyUpdate(arc_genesis.clone()));
 
                 let part_actors_clone = part_actors.clone();
-                let vdf_thread_handler = std::thread::spawn(move || {
+                let _vdf_thread_handler = std::thread::spawn(move || {
                     run_vdf(
                         VDFStepsConfig::default(),
                         H256::random(),

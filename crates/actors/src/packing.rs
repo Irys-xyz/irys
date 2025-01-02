@@ -147,6 +147,7 @@ impl PackingActor {
     }
 }
 
+#[cfg(test)]
 #[inline]
 fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
     assert!(input.len() % N == 0, "wrong input N {}", N);
@@ -187,7 +188,6 @@ impl Handler<PackingRequest> for PackingActor {
 pub struct GetInternals();
 
 #[derive(Debug, MessageResponse, Clone)]
-
 pub struct Internals {
     pending_jobs: PackingJobs,
     semaphore: Arc<Semaphore>,

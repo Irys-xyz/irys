@@ -12,9 +12,10 @@ use openssl::sha;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+#[derive(Debug, Clone)]
 pub struct PartitionMiningActor {
     mining_address: Address,
-    database_provider: DatabaseProvider,
+    _database_provider: DatabaseProvider,
     block_producer_actor: Recipient<SolutionFoundMessage>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
@@ -24,14 +25,14 @@ pub struct PartitionMiningActor {
 impl PartitionMiningActor {
     pub const fn new(
         mining_address: Address,
-        database_provider: DatabaseProvider,
+        _database_provider: DatabaseProvider,
         block_producer_addr: Recipient<SolutionFoundMessage>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
     ) -> Self {
         Self {
             mining_address,
-            database_provider,
+            _database_provider,
             block_producer_actor: block_producer_addr,
             storage_module,
             should_mine: start_mining,
