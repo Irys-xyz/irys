@@ -205,7 +205,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
             partition_hash: PartitionHash::zero(),
         },
         reward_address: Address::ZERO,
-        reward_key: Base64::from_str("").unwrap(),
+        miner_address: Address::ZERO,
         signature: Signature::test_signature().into(),
         timestamp: now.as_millis(),
         ledgers: vec![
@@ -215,6 +215,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
                 txids: H256List(Vec::new()),
                 max_chunk_offset: 0,
                 expires: None,
+                proofs: None,
             },
             // Term Submit Ledger
             TransactionLedger {
@@ -222,6 +223,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
                 txids: H256List(data_tx_ids.clone()),
                 max_chunk_offset: 0,
                 expires: Some(1622543200),
+                proofs: None,
             },
         ],
         evm_block_hash: B256::ZERO,

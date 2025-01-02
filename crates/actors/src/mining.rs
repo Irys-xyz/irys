@@ -3,11 +3,14 @@ use crate::broadcast_mining_service::{
     BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe,
 };
 use actix::prelude::*;
-use actix::{Actor, Addr, Context, Handler, Message};
+use actix::{Actor, Context, Handler, Message};
 use irys_storage::{ie, StorageModule};
 use irys_types::app_state::DatabaseProvider;
-use irys_types::{block_production::SolutionContext, H256, U256};
-use irys_types::{Address, PartitionChunkOffset, SimpleRNG};
+use irys_types::{
+    block_production::{Seed, SolutionContext},
+    H256, U256,
+};
+use irys_types::{Address, H256List, PartitionChunkOffset, SimpleRNG};
 use openssl::sha;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -42,6 +45,8 @@ impl PartitionMiningActor {
     fn mine_partition_with_seed(
         &mut self,
         mining_seed: H256,
+        vdf_step: u64,
+        checkpoints: H256List,
     ) -> eyre::Result<Option<SolutionContext>> {
         let partition_hash = match self.storage_module.partition_hash() {
             Some(p) => p,
@@ -134,6 +139,9 @@ impl PartitionMiningActor {
                     tx_path, // capacity partitions have no tx_path nor data_path
                     data_path,
                     chunk: chunk_bytes.clone(),
+                    vdf_step,
+                    checkpoints,
+                    seed: Seed(mining_seed),
                 };
 
                 // TODO: Let all partitions know to stop mining
@@ -164,20 +172,11 @@ impl Actor for PartitionMiningActor {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Seed(pub H256);
-
-impl Seed {
-    fn into_inner(self) -> H256 {
-        self.0
-    }
-}
-
 impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
-        let seed = msg.0;
+        let seed = msg.seed;
         if !self.should_mine {
             debug!("Mining disabled, skipping seed {:?}", seed);
             return ();
@@ -189,7 +188,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
             self.difficulty
         );
 
-        match self.mine_partition_with_seed(seed.into_inner()) {
+        match self.mine_partition_with_seed(seed.into_inner(), msg.global_step, msg.checkpoints) {
             Ok(Some(s)) => match self.block_producer_actor.try_send(SolutionFoundMessage(s)) {
                 Ok(_) => {
                     // debug!("Solution sent!");
@@ -255,11 +254,11 @@ mod tests {
         ie, initialize_storage_files, read_info_file, StorageModule, StorageModuleInfo,
     };
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
-    use irys_types::IrysBlockHeader;
     use irys_types::{
         app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
+    use irys_types::{H256List, IrysBlockHeader};
     use std::any::Any;
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
@@ -378,7 +377,11 @@ mod tests {
         let seed: Seed = Seed(H256::random());
         let _result = partition_mining_actor
             .start()
-            .send(BroadcastMiningSeed(seed))
+            .send(BroadcastMiningSeed {
+                seed,
+                checkpoints: H256List(vec![]),
+                global_step: 0,
+            })
             .await
             .unwrap();
 

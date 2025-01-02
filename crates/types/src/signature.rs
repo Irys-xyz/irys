@@ -3,8 +3,10 @@ use alloy_primitives::{bytes, ruint::aliases::U256, Address, Parity, B256, U256 
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
+use eyre::eyre;
 use reth_codecs::Compact;
 use reth_primitives::transaction::recover_signer;
+
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 //==============================================================================
 // IrysSignature
@@ -35,7 +37,9 @@ impl IrysSignature {
     pub fn reth_signature(&self) -> Signature {
         self.0
     }
-    /// Validates this signature by performing signer recovery
+
+    /// Validates this signature by performing signer recovery  
+    /// NOTE: This will silently short circuit to `false` if any part of the recovery operation errors
     pub fn validate_signature(&self, prehash: B256, expected_address: Address) -> bool {
         recover_signer(&self.0, prehash).map_or(false, |recovered_address| {
             expected_address == recovered_address
@@ -185,6 +189,7 @@ mod tests {
             bundle_format: Some(0),
             chain_id: IRYS_CHAIN_ID,
             version: 0,
+            ingress_proofs: None,
             signature: Default::default(),
         };
         let transaction = IrysTransaction {

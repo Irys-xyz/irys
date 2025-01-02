@@ -6,16 +6,13 @@ use irys_database::{
 };
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    app_state::DatabaseProvider, chunk, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
+    app_state::DatabaseProvider, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
     LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, TransactionLedger,
     TxRelativeChunkOffset, UnpackedChunk,
 };
 use reth_db::Database;
-use std::{
-    ops::Range,
-    sync::{Arc, RwLock},
-};
-use tracing::{error, info};
+use std::sync::{Arc, RwLock};
+use tracing::error;
 
 use crate::block_producer::BlockFinalizedMessage;
 

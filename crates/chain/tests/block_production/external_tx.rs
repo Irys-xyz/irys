@@ -102,14 +102,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
         let (block, _) = node
             .actor_addresses
             .block_producer
-            .send(SolutionFoundMessage(SolutionContext {
-                partition_hash: H256::random(),
-                chunk_offset: 0,
-                mining_address: Address::random(),
-                tx_path: None,
-                data_path: None,
-                chunk: Vec::new(),
-            }))
+            .send(SolutionFoundMessage(SolutionContext::default()))
             .await?
             .unwrap();
 

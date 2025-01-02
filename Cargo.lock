@@ -5133,6 +5133,7 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "irys-vdf",
  "nodit",
  "openssl",
  "rand",
@@ -5235,9 +5236,11 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "irys-vdf",
  "jsonrpsee",
  "k256",
  "modular-bitfield",
+ "nodit",
  "openssl",
  "rand",
  "rand_chacha",
@@ -5497,6 +5500,27 @@ dependencies = [
  "tracing",
  "uint",
  "zerocopy 0.8.13",
+]
+
+[[package]]
+name = "irys-vdf"
+version = "0.1.0"
+dependencies = [
+ "assert_matches",
+ "env_logger",
+ "eyre",
+ "irys-config",
+ "irys-testing-utils",
+ "irys-types",
+ "openssl",
+ "rand",
+ "rand_chacha",
+ "rayon",
+ "sha2 0.10.8",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

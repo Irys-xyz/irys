@@ -1,10 +1,19 @@
-use crate::{partition::PartitionHash, ChunkDataPath, IrysBlockHeader, TxPath};
+use crate::{partition::PartitionHash, ChunkDataPath, H256List, IrysBlockHeader, TxPath, H256};
 use actix::Message;
 use alloy_primitives::Address;
 use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
 use std::sync::Arc;
 
-#[derive(Message, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Seed(pub H256);
+
+impl Seed {
+    pub fn into_inner(self) -> H256 {
+        self.0
+    }
+}
+
+#[derive(Message, Debug, Clone, PartialEq, Default)]
 #[rtype(result = "Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>")]
 pub struct SolutionContext {
     pub partition_hash: PartitionHash,
@@ -13,6 +22,9 @@ pub struct SolutionContext {
     pub tx_path: Option<TxPath>, // capacity partitions have no tx_path nor data_path
     pub data_path: Option<ChunkDataPath>,
     pub chunk: Vec<u8>,
+    pub vdf_step: u64,
+    pub checkpoints: H256List,
+    pub seed: Seed,
 }
 #[derive(Debug, Clone)]
 pub struct Partition {
