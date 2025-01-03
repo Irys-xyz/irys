@@ -1,4 +1,5 @@
 use actix::prelude::*;
+use base58::ToBase58 as _;
 use irys_database::{
     cached_chunk_by_chunk_offset,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
@@ -7,12 +8,12 @@ use irys_database::{
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
     app_state::DatabaseProvider, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, TransactionLedger,
-    TxRelativeChunkOffset, UnpackedChunk,
+    LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxRelativeChunkOffset,
+    UnpackedChunk,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::block_producer::BlockFinalizedMessage;
 
@@ -120,6 +121,8 @@ fn process_ledger_transactions(
             prev_chunk_offset + num_chunks_in_tx as u64,
         ));
 
+        debug!("Processing tx with data_root {}", &data_root.0.to_base58());
+
         let overlapped_modules =
             get_overlapped_storage_modules(storage_modules, ledger, &tx_chunk_range);
 
@@ -158,18 +161,26 @@ fn process_transaction_chunks(
     db: &DatabaseProvider,
 ) -> Result<(), ()> {
     for tx_chunk_offset in 0..num_chunks_in_tx {
+        debug!(
+            "processing chunk {} of  {}",
+            &tx_chunk_offset,
+            &data_root.0.to_base58()
+        );
+
         // Attempt to retrieve the cached chunk from the mempool
         let chunk_info = match get_cached_chunk(db, data_root, tx_chunk_offset) {
             Ok(Some(info)) => info,
             _ => continue,
         };
-
         // Find which storage module intersects this chunk
         let ledger_offset = tx_chunk_offset as u64 + tx_chunk_range.start();
+
         let storage_module = find_storage_module(storage_modules, Ledger::Submit, ledger_offset);
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
+            debug!("found SM ({})", &module.id);
+
             write_chunk_to_module(module, chunk_info, data_root, data_size, tx_chunk_offset)?;
         }
     }
@@ -294,7 +305,11 @@ fn write_chunk_to_module(
             bytes,
             tx_offset: chunk_offset,
         };
-
+        debug!(
+            "written chunk {} of {}",
+            &chunk_offset,
+            &data_root.0.to_base58()
+        );
         storage_module.write_data_chunk(&chunk).map_err(|e| {
             error!("Failed to write data chunk: {}", e);
             ()
