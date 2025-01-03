@@ -319,7 +319,7 @@ pub struct TransactionLedger {
 
 impl TransactionLedger {
     /// Computes the tx_root and tx_paths. The TX Root is composed of taking the data_roots of each of the storage transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
-    pub fn merklize_tx_root(data_txs: &Vec<IrysTransactionHeader>) -> (H256, Vec<Proof>) {
+    pub fn merklize_tx_root(data_txs: &[IrysTransactionHeader]) -> (H256, Vec<Proof>) {
         if data_txs.is_empty() {
             return (H256::zero(), vec![]);
         }
