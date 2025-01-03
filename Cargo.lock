@@ -12696,35 +12696,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "alloy"
-version = "0.4.2"
-
-[[patch.unused]]
-name = "alloy-eip7547"
-version = "0.4.2"
-
-[[patch.unused]]
-name = "alloy-node-bindings"
-version = "0.4.2"
-
-[[patch.unused]]
-name = "alloy-signer-aws"
-version = "0.4.2"
-
-[[patch.unused]]
-name = "alloy-signer-gcp"
-version = "0.4.2"
-
-[[patch.unused]]
-name = "alloy-signer-ledger"
-version = "0.4.2"
-
-[[patch.unused]]
-name = "alloy-signer-trezor"
-version = "0.4.2"
-
-[[patch.unused]]
-name = "alloy-transport-ipc"
-version = "0.4.2"

@@ -155,16 +155,13 @@ revm = { path = "./ext/revm/crates/revm" }
 revm-primitives = { path = "./ext/revm/crates/primitives" }
 
 # alloy
-alloy = { path = "./ext/alloy/crates/alloy" }
 alloy-consensus = { path = "./ext/alloy/crates/consensus" }
 alloy-contract = { path = "./ext/alloy/crates/contract" }
-alloy-eip7547 = { path = "./ext/alloy/crates/eip7547" }
 alloy-eips = { path = "./ext/alloy/crates/eips" }
 alloy-genesis = { path = "./ext/alloy/crates/genesis" }
 alloy-json-rpc = { path = "./ext/alloy/crates/json-rpc" }
 alloy-network = { path = "./ext/alloy/crates/network" }
 alloy-network-primitives = { path = "./ext/alloy/crates/network-primitives" }
-alloy-node-bindings = { path = "./ext/alloy/crates/node-bindings" }
 alloy-provider = { path = "./ext/alloy/crates/provider" }
 alloy-pubsub = { path = "./ext/alloy/crates/pubsub" }
 alloy-rpc-client = { path = "./ext/alloy/crates/rpc-client" }
@@ -180,14 +177,9 @@ alloy-rpc-types-trace = { path = "./ext/alloy/crates/rpc-types-trace" }
 alloy-rpc-types-txpool = { path = "./ext/alloy/crates/rpc-types-txpool" }
 alloy-serde = { path = "./ext/alloy/crates/serde" }
 alloy-signer = { path = "./ext/alloy/crates/signer" }
-alloy-signer-aws = { path = "./ext/alloy/crates/signer-aws" }
-alloy-signer-gcp = { path = "./ext/alloy/crates/signer-gcp" }
-alloy-signer-ledger = { path = "./ext/alloy/crates/signer-ledger" }
 alloy-signer-local = { path = "./ext/alloy/crates/signer-local" }
-alloy-signer-trezor = { path = "./ext/alloy/crates/signer-trezor" }
 alloy-transport = { path = "./ext/alloy/crates/transport" }
 alloy-transport-http = { path = "./ext/alloy/crates/transport-http" }
-alloy-transport-ipc = { path = "./ext/alloy/crates/transport-ipc" }
 alloy-transport-ws = { path = "./ext/alloy/crates/transport-ws" }
 
 # alloy-core
@@ -207,11 +199,11 @@ panic = "unwind"
 
 [workspace.lints]
 rust.missing_debug_implementations = "warn"
-rust.missing_docs = "warn"
+# rust.missing_docs = "warn" # disable for now until we can fix all the warnings
 rust.rust_2018_idioms = { level = "deny", priority = -1 }
 rust.unreachable_pub = "warn"
 rust.unused_must_use = "deny"
-rustdoc.all = "warn"
+#rustdoc.all = "warn"
 # rust.unnameable-types = "warn"
 
 [workspace.lints.clippy]
