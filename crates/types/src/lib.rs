@@ -39,3 +39,50 @@ pub use reth_codecs::Compact;
 pub use simple_rng::*;
 pub use storage_config::*;
 pub use vdf_config::*;
+
+mod t {
+    use std::ops::{Deref, DerefMut};
+
+    use nodit::interval::ii;
+
+    #[derive(Debug, Default, Copy, Clone)]
+    struct PartitionOffset(pub u32);
+    impl Deref for PartitionOffset {
+        type Target = u32;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    impl DerefMut for PartitionOffset {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.0
+        }
+    }
+    #[derive(Debug, Default, Copy, Clone)]
+
+    struct LedgerOffset(pub u64);
+
+    impl Deref for LedgerOffset {
+        type Target = u64;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    impl DerefMut for LedgerOffset {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.0
+        }
+    }
+
+    #[test]
+    fn ergo_test() {
+        let part_range = ii(100, 200);
+
+        let ledger_offset = LedgerOffset(150);
+        let mut lo2 = ledger_offset.clone();
+        let r = *lo2 + 123;
+        dbg!(r);
+    }
+}

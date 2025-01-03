@@ -13,8 +13,8 @@ use eyre::eyre;
 use irys_types::partition::PartitionHash;
 use irys_types::{
     hash_sha256, BlockHash, BlockRelativeChunkOffset, ChunkPathHash, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, IrysTransactionId, TxPath, TxRelativeChunkOffset, TxRoot, UnpackedChunk,
-    H256, MEGABYTE,
+    IrysTransactionHeader, IrysTransactionId, TxRelativeChunkOffset, TxPath, TxRoot,
+    UnpackedChunk, H256, MEGABYTE,
 };
 use reth::prometheus_exporter::install_prometheus_recorder;
 use reth_db::cursor::{DbDupCursorRO, DupWalker};
@@ -211,7 +211,9 @@ pub fn assign_data_root<T: DbTxMut + DbTx>(
 ) -> eyre::Result<()> {
     let partition_hashes = if let Some(mut phs) = get_partition_hashes_by_data_root(tx, data_root)?
     {
-        phs.0.push(partition_hash);
+        if !phs.0.contains(&partition_hash) {
+            phs.0.push(partition_hash)
+        };
         phs
     } else {
         PartitionHashes(vec![partition_hash])
@@ -234,7 +236,9 @@ pub fn get_partition_hashes_by_data_root<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
 ) -> eyre::Result<Option<PartitionHashes>> {
-    Ok(tx.get::<PartitionHashesByDataRoot>(data_root)?)
+    let r = tx.get::<PartitionHashesByDataRoot>(data_root)?;
+    dbg!(&r);
+    Ok(r)
 }
 
 #[cfg(test)]

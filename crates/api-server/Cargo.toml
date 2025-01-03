@@ -14,7 +14,7 @@ irys-types.workspace = true
 
 actix-proxy = "0.2.0"
 awc = "3.5.1"
-base58 = "0.2.0"
+base58.workspace = true
 base64-url.workspace = true
 reth.workspace = true
 reth-db.workspace = true

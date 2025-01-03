@@ -5122,6 +5122,7 @@ dependencies = [
  "actix_async_handler",
  "alloy-rpc-types-engine",
  "assert_matches",
+ "base58",
  "base64-url",
  "env_logger",
  "eyre",
@@ -5429,6 +5430,7 @@ version = "0.1.0"
 dependencies = [
  "actix",
  "actix-rt",
+ "base58",
  "bytes",
  "derive_more 1.0.0",
  "eyre",
@@ -5437,6 +5439,7 @@ dependencies = [
  "irys-packing",
  "irys-testing-utils",
  "irys-types",
+ "itertools 0.13.0",
  "nodit",
  "openssl",
  "rand",

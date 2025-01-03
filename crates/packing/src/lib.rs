@@ -3,7 +3,7 @@ use std::ops::BitXor;
 pub use irys_c::{capacity, capacity_single};
 use irys_types::{
     partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CHUNK_SIZE,
-    H256, PACKING_SHA_1_5_S,
+    PACKING_SHA_1_5_S,
 };
 
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
@@ -35,13 +35,17 @@ pub fn unpack(
 }
 
 /// Unpacks a PackedChunk using the supplied entropy, returning *just the unpacked data*
-/// this function is useful for cases when zeroed entropy is used
 #[inline]
 pub fn unpack_with_entropy(
     packed_chunk: &PackedChunk,
     entropy: Vec<u8>,
     chunk_size: usize,
 ) -> Vec<u8> {
+    debug_assert_eq!(
+        entropy.len(),
+        chunk_size,
+        "entropy needs to be exactly chunk_size"
+    );
     let chunk_size_u64: u64 = chunk_size.try_into().unwrap();
     let mut unpacked_data = packing_xor_vec_u8(entropy, &(packed_chunk.bytes.0));
 

@@ -34,8 +34,12 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/block/{block_hash}", web::get().to(block::get_block))
         .route(
-            "/chunk/{ledger_num}/{ledger_offset}",
-            web::get().to(get_chunk::get_chunk),
+            "/chunk/data_root/{ledger_num}/{data_root}/{offset}",
+            web::get().to(get_chunk::get_chunk_by_data_root_offset),
+        )
+        .route(
+            "/chunk/ledger/{ledger_num}/{ledger_offset}",
+            web::get().to(get_chunk::get_chunk_by_ledger_offset),
         )
         .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route("/tx/{tx_id}", web::get().to(tx::get_tx))

@@ -9,7 +9,7 @@ use irys_database::{
     },
     Ledger,
 };
-use irys_packing::xor_vec_u8_arrays_in_place;
+use irys_packing::{packing_xor_vec_u8, xor_vec_u8_arrays_in_place};
 use irys_types::{
     app_state::DatabaseProvider,
     get_leaf_proof,
@@ -515,16 +515,17 @@ impl StorageModule {
     /// Writes chunk data and its data_path to relevant storage locations
     pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> eyre::Result<()> {
         let data_path = &chunk.data_path.0;
-        let data_path_hash = UnpackedChunk::hash_data_path(&data_path);
+        let data_path_hash = UnpackedChunk::hash_data_path(data_path);
 
-        for partition_offset in self.get_write_offsets(&chunk)? {
+        for partition_offset in self.get_write_offsets(chunk)? {
             // read entropy from the storage module
-            let entropy = self.read_chunk_internal(partition_offset)?;
-            // xor
-            let mut data = chunk.bytes.0.clone();
-            xor_vec_u8_arrays_in_place(&mut data, &entropy);
+            let mut entropy = self.read_chunk_internal(partition_offset)?;
 
-            self.write_chunk(partition_offset, data, ChunkType::Data);
+            // xor is commutative, so we can avoid a clone of the chunk's data and use the entropy as the mutable component
+            // (this also handles cases where the chunk's data isn't the full size, as the entropy will be)
+            let packed_data = packing_xor_vec_u8(entropy, &chunk.bytes.0);
+
+            self.write_chunk(partition_offset, packed_data, ChunkType::Data);
             self.add_data_path_to_index(data_path_hash, data_path.clone(), partition_offset)?;
         }
 
@@ -899,6 +900,18 @@ pub fn get_storage_module_at_offset(
                     .map_or(false, |range| range.contains_point(chunk_offset))
         })
         .cloned()
+}
+
+pub const fn checked_add_i32_u64(a: i32, b: u64) -> Option<u64> {
+    if a < 0 {
+        // If a is negative, check if its absolute value is less than b
+        let abs_a = a.unsigned_abs() as u64;
+        b.checked_sub(abs_a)
+    } else {
+        // If a is positive or zero, convert to u64 and add
+        let a_u64 = a as u64;
+        b.checked_add(a_u64)
+    }
 }
 
 //==============================================================================

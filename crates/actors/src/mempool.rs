@@ -1,4 +1,5 @@
 use actix::{Actor, Context, Handler, Message};
+use base58::ToBase58;
 use eyre::eyre;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
@@ -129,7 +130,11 @@ impl Handler<TxIngressMessage> for MempoolActor {
 
     fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
         let tx = &tx_msg.0;
-        debug!("received tx {}", &tx.id);
+        debug!(
+            "received tx {:?} (data_root {:?})",
+            &tx.id.0.to_base58(),
+            &tx.data_root.0.to_base58()
+        );
         // Early out if we already know about this transaction
         if self.invalid_tx.contains(&tx.id) || self.valid_tx.contains_key(&tx.id) {
             // Skip tx reprocessing if already verified (valid or invalid) to prevent
