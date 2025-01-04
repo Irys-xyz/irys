@@ -14,7 +14,7 @@ pub fn unpack(
     let mut out: Vec<u8> = Vec::with_capacity(chunk_size.try_into().unwrap());
     capacity_single::compute_entropy_chunk(
         packed_chunk.packing_address,
-        packed_chunk.tx_offset as u64,
+        packed_chunk.partition_offset as u64,
         packed_chunk.partition_hash.0,
         entropy_packing_iterations,
         chunk_size,
