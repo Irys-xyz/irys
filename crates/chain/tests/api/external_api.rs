@@ -41,8 +41,8 @@ use tokio::{task, time::sleep};
 use tracing::info;
 
 #[actix::test]
-async fn finalize_block_test() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("finalize_block_test"), false);
+async fn external_api() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("external_api"), false);
 
     let mut node_config = IrysNodeConfig::default();
     node_config.base_directory = temp_dir.path().to_path_buf();
