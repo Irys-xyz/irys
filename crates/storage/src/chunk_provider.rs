@@ -1,13 +1,11 @@
-use std::{cmp::Ordering, sync::Arc};
-
-use eyre::{eyre, OptionExt};
-use irys_database::{get_partition_hashes_by_data_root, Ledger};
+use eyre::OptionExt;
+use irys_database::Ledger;
 use irys_types::{
     ChunkFormat, DataRoot, DatabaseProvider, LedgerChunkOffset, PackedChunk, StorageConfig,
     TxRelativeChunkOffset,
 };
-use itertools::Itertools;
-use reth_db::Database as _;
+use std::sync::Arc;
+
 use tracing::debug;
 
 use crate::{checked_add_i32_u64, get_storage_module_at_offset, StorageModule};
@@ -51,7 +49,7 @@ impl ChunkProvider {
     }
 
     /// Retrieves a chunk by [`DataRoot`]
-    pub fn get_chunk_by_ledger_data_tx_offset(
+    pub fn get_chunk_by_data_root(
         &self,
         ledger: Ledger,
         data_root: DataRoot,
@@ -195,11 +193,7 @@ mod tests {
 
         for original_chunk in unpacked_chunks {
             let chunk = chunk_provider
-                .get_chunk_by_ledger_data_tx_offset(
-                    Ledger::Publish,
-                    data_root,
-                    original_chunk.tx_offset,
-                )?
+                .get_chunk_by_data_root(Ledger::Publish, data_root, original_chunk.tx_offset)?
                 .unwrap();
             // let chunk_size = config.chunk_size as usize;
             // let start = chunk_offset as usize * chunk_size;

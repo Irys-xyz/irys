@@ -6,3 +6,4 @@
 .tmp
 .irys
 /.VSCodeCounter
+.vscode/settings.json
