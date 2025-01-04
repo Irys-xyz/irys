@@ -121,16 +121,12 @@ fn process_ledger_transactions(
             prev_chunk_offset + num_chunks_in_tx as u64,
         ));
 
-        debug!("Processing tx with data_root {}", &data_root.0.to_base58());
-
-        let overlapped_modules =
-            get_overlapped_storage_modules(storage_modules, ledger, &tx_chunk_range);
-
         update_storage_module_indexes(
-            &overlapped_modules,
             &tx_path.proof,
             data_root,
             tx_chunk_range,
+            ledger,
+            storage_modules,
         )?;
 
         process_transaction_chunks(
@@ -138,6 +134,7 @@ fn process_ledger_transactions(
             data_root,
             data_size,
             tx_chunk_range,
+            ledger,
             storage_modules,
             db,
         )?;
@@ -157,6 +154,7 @@ fn process_transaction_chunks(
     data_root: DataRoot,
     data_size: u64,
     tx_chunk_range: LedgerChunkRange,
+    ledger: Ledger,
     storage_modules: &[Arc<StorageModule>],
     db: &DatabaseProvider,
 ) -> Result<(), ()> {
@@ -169,7 +167,7 @@ fn process_transaction_chunks(
 
         // Find which storage module intersects this chunk
         let ledger_offset = tx_chunk_offset as u64 + tx_chunk_range.start();
-        let storage_module = find_storage_module(storage_modules, Ledger::Submit, ledger_offset);
+        let storage_module = find_storage_module(storage_modules, ledger, ledger_offset);
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
@@ -235,12 +233,16 @@ fn get_tx_path_pairs(
 }
 
 fn update_storage_module_indexes(
-    matching_modules: &[Arc<StorageModule>],
     proof: &[u8],
     data_root: DataRoot,
     tx_chunk_range: LedgerChunkRange,
+    ledger: Ledger,
+    storage_modules: &[Arc<StorageModule>],
 ) -> Result<(), ()> {
-    for storage_module in matching_modules {
+    let overlapped_modules =
+        get_overlapped_storage_modules(storage_modules, ledger, &tx_chunk_range);
+
+    for storage_module in overlapped_modules {
         storage_module
             .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range)
             .map_err(|e| {

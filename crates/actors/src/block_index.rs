@@ -192,10 +192,10 @@ impl Handler<BlockConfirmedMessage> for BlockIndexActor {
     fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // Access the block header through msg.0
         let irys_block_header = &msg.0;
-        let data_txs = &msg.1;
+        let all_txs = &msg.1;
 
         // Do something with the block
-        self.add_finalized_block(&irys_block_header, &data_txs);
+        self.add_finalized_block(&irys_block_header, &all_txs);
     }
 }
 

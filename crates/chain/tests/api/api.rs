@@ -127,7 +127,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
     let delay = Duration::from_secs(1);
 
-    // pools for tx being stored
+    // polls for tx being stored
     while attempts < max_attempts {
         let req = test::TestRequest::get()
             .uri(&format!("/v1/tx/{}", &id))

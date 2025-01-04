@@ -5201,6 +5201,7 @@ name = "irys-chain"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "actix-http",
  "actix-rt",
  "actix-web",
  "alloy-consensus",

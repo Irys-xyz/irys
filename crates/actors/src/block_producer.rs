@@ -468,17 +468,20 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 fn get_ledger_tx_headers(
     block_header: &IrysBlockHeader,
     ledger: Ledger,
-    db: &DatabaseProvider,
+db: &DatabaseProvider,
 ) -> Option<Vec<IrysTransactionHeader>> {
+    let tx = db.tx().map_err(|e| {
+        error!("Failed to create transaction: {}", e);
+    }).ok()?;
+
     match block_header.ledgers[ledger]
         .txids
         .iter()
         .map(|txid| {
-            db.view_eyre(|tx| tx_header_by_txid(tx, txid))
+            tx_header_by_txid(&tx, txid)
+                .map_err(|e| eyre::eyre!("Failed to get tx header: {}", e))
                 .and_then(|opt| {
-                    opt.ok_or_else(|| {
-                        eyre::eyre!("No tx header found for txid {:?}", txid)
-                    })
+                    opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
                 })
         })
         .collect::<Result<Vec<_>, _>>()
