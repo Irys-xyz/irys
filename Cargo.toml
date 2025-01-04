@@ -41,6 +41,8 @@ ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
 actix-rt = "2.10.0"
 actix-web = "4.9.0"
+actix-http = "3.9.0"
+base58 = "0.2.0"
 alloy-consensus = { path = "./ext/alloy/crates/consensus", default-features = false }
 alloy-core = { path = "./ext/alloy-core/crates/core" }
 alloy-eips = { path = "./ext/alloy/crates/eips", default-features = false }
