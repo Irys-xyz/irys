@@ -43,6 +43,7 @@ tempfile = "3.10"
 env_logger = "0.11.5"
 actix-rt.workspace = true
 actix-web.workspace = true
+actix-http.workspace = true
 jsonrpsee.workspace = true
 reth-e2e-test-utils.workspace = true
 tokio.workspace = true
