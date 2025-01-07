@@ -300,7 +300,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 tx_path: solution.tx_path.map(|tx_path| Base64(tx_path)),
                 data_path: solution.data_path.map(|data_path| Base64(data_path)),
                 chunk: Base64(solution.chunk),
-                chunk_index: solution.chunk_index,
+                recall_chunk_index: solution.recall_chunk_index,
                 ledger_num,
                 partition_chunk_offset: solution.chunk_offset,
                 partition_hash: solution.partition_hash,

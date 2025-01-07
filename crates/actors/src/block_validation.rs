@@ -399,7 +399,7 @@ mod tests {
             chunk: Base64(poa_chunk.clone()),
             ledger_num: Some(1),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u32,
-            chunk_index: 0,
+            recall_chunk_index: 0,
             partition_hash,
         };
 

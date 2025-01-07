@@ -142,7 +142,7 @@ impl PartitionMiningActor {
                 let solution = SolutionContext {
                     partition_hash,
                     chunk_offset: partition_chunk_offset,
-                    chunk_index: index as u32,
+                    recall_chunk_index: index as u32,
                     mining_address: self.mining_address,
                     tx_path, // capacity partitions have no tx_path nor data_path
                     data_path,
@@ -441,4 +441,11 @@ mod tests {
             "Not expected partition"
         );
     }
+
+    #[actix_rt::test]
+    async fn test_non_consecutive_recall_range() {
+        
+    }
+
+    
 }

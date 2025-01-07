@@ -256,7 +256,7 @@ async fn external_api() -> eyre::Result<()> {
             ledger_num: None,
             partition_chunk_offset: 0,
             partition_hash: PartitionHash::zero(),
-            chunk_index: 0,
+            recall_chunk_index: 0,
         },
         reward_address: Address::ZERO,
         miner_address: Address::ZERO,
