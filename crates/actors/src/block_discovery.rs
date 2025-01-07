@@ -3,13 +3,12 @@ use crate::{
     epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor, vdf::VdfStepsReadGuard,
 };
 use actix::prelude::*;
-use irys_database::{tx_header_by_txid, BlockIndex, Initialized, Ledger};
+use irys_database::{tx_header_by_txid, Ledger};
 use irys_types::{
     DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageConfig, VDFStepsConfig,
 };
-use reth::network::error;
 use reth_db::Database;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tracing::{error, info};
 
 /// BlockDiscoveryActor listens for discovered blocks & validates them.

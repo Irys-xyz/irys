@@ -38,6 +38,6 @@ actix_async_handler = "0.1.0"
 tracing-subscriber.workspace = true
 tempfile.workspace = true
 irys-testing-utils.workspace = true
-
+base58.workspace = true
 [lints]
 workspace = true

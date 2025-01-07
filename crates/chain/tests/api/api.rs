@@ -127,7 +127,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
     let delay = Duration::from_secs(1);
 
-    // pools for tx being stored
+    // polls for tx being stored
     while attempts < max_attempts {
         let req = test::TestRequest::get()
             .uri(&format!("/v1/tx/{}", &id))
@@ -157,7 +157,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     let mut missing_chunks = vec![1, 0];
     let ledger = 1; // Submit ledger
 
-    // pools for chunk being available
+    // polls for chunk being available
     while attempts < max_attempts {
         let chunk = missing_chunks.pop().unwrap();
         info!("Retrieving chunk: {} attempt: {}", chunk, attempts);
@@ -173,8 +173,9 @@ async fn api_end_to_end_test(chunk_size: usize) {
                 chunk, packed_chunk.tx_offset as usize,
                 "Got different chunk index"
             );
+
             let unpacked_chunk = unpack(
-                packed_chunk,
+                &packed_chunk,
                 storage_config.entropy_packing_iterations,
                 chunk_size,
             );

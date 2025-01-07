@@ -13,13 +13,29 @@ pub enum ChunkFormat {
     Packed(PackedChunk),
 }
 
+impl ChunkFormat {
+    pub fn as_packed(self) -> Option<PackedChunk> {
+        match self {
+            ChunkFormat::Unpacked(_) => None,
+            ChunkFormat::Packed(packed_chunk) => Some(packed_chunk),
+        }
+    }
+
+    pub fn as_unpacked(self) -> Option<UnpackedChunk> {
+        match self {
+            ChunkFormat::Unpacked(unpacked_chunk) => Some(unpacked_chunk),
+            ChunkFormat::Packed(_) => None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct UnpackedChunk {
     /// The root hash for this chunk which should map to the root_hash in the
     /// transaction header. Having this present makes it easier to do cached
     /// chunk lookups by data_root on the ingress node.
     pub data_root: DataRoot,
-    /// Total size of the data stored by this data_root. Helps identify if this
+    /// Total size of the data stored by this data_root in bytes. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
     #[serde(with = "string_u64")]
@@ -194,7 +210,7 @@ pub type ChunkPathHash = H256;
 // the root node ID for the merkle tree containing all the transaction's chunks
 pub type DataRoot = H256;
 
-/// The offset of the chunk relative to the first (0th) chunk of the tx's data tree
+/// The offset of the chunk relative to the first (0th) chunk of the data tree
 pub type TxRelativeChunkOffset = u32;
 
 /// the Block relative chunk offset

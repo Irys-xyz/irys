@@ -1,8 +1,6 @@
 use crate::{calculate_chunks_added, BlockConfirmedMessage};
 use actix::prelude::*;
-use irys_database::{
-    BlockBounds, BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem,
-};
+use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
 use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
@@ -124,17 +122,16 @@ impl BlockIndexActor {
         let mut index = self.block_index.write().unwrap();
 
         // Get previous ledger sizes or default to 0 for genesis
-        let (max_publish_chunks, max_submit_chunks) = if index.num_blocks() == 0
-            && block.height == 0
-        {
-            (0, sub_chunks_added)
-        } else {
-            let prev_block = index.get_item((block.height - 1) as usize).unwrap();
-            (
-                prev_block.ledgers[Ledger::Publish as usize].max_chunk_offset + pub_chunks_added,
-                prev_block.ledgers[Ledger::Submit as usize].max_chunk_offset + sub_chunks_added,
-            )
-        };
+        let (max_publish_chunks, max_submit_chunks) =
+            if index.num_blocks() == 0 && block.height == 0 {
+                (0, sub_chunks_added)
+            } else {
+                let prev_block = index.get_item((block.height - 1) as usize).unwrap();
+                (
+                    prev_block.ledgers[Ledger::Publish].max_chunk_offset + pub_chunks_added,
+                    prev_block.ledgers[Ledger::Submit].max_chunk_offset + sub_chunks_added,
+                )
+            };
 
         let block_index_item = BlockIndexItem {
             block_hash: block.block_hash,
@@ -193,10 +190,10 @@ impl Handler<BlockConfirmedMessage> for BlockIndexActor {
     fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // Access the block header through msg.0
         let irys_block_header = &msg.0;
-        let data_txs = &msg.1;
+        let all_txs = &msg.1;
 
         // Do something with the block
-        self.add_finalized_block(&irys_block_header, &data_txs);
+        self.add_finalized_block(&irys_block_header, &all_txs);
     }
 }
 

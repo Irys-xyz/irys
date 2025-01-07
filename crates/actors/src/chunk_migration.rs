@@ -7,8 +7,8 @@ use irys_database::{
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
     app_state::DatabaseProvider, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, TransactionLedger,
-    TxRelativeChunkOffset, UnpackedChunk,
+    LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxRelativeChunkOffset,
+    UnpackedChunk,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
@@ -55,75 +55,97 @@ impl ChunkMigrationActor {
         }
     }
 }
-
 impl Handler<BlockFinalizedMessage> for ChunkMigrationActor {
     type Result = ResponseFuture<Result<(), ()>>;
 
     fn handle(&mut self, msg: BlockFinalizedMessage, _: &mut Context<Self>) -> Self::Result {
         // Collect working variables to move into the closure
-        let block_header = msg.block_header;
-        let txs = msg.txs;
+        let block = msg.block_header;
+        let all_txs = msg.all_txs;
         let block_index = self.block_index.clone();
         let chunk_size = self.storage_config.chunk_size as usize;
-        let storage_modules = self.storage_modules.clone();
-        let db = self.db.clone();
+        let storage_modules = Arc::new(self.storage_modules.clone());
+        let db = Arc::new(self.db.clone());
 
-        // info!("Finalized BlockHeader: {:#?}", block_header);
+        // Extract transactions for each ledger
+        let submit_tx_count = block.ledgers[Ledger::Submit].txids.len();
+        let submit_txs = all_txs[..submit_tx_count].to_vec();
+        let publish_txs = all_txs[submit_tx_count..].to_vec();
 
-        // Async move closure to call async methods withing a non async fn
         Box::pin(async move {
-            let path_pairs = get_tx_path_pairs(&block_header, &txs).unwrap();
-            let block_range = get_block_range(&block_header, Ledger::Submit, block_index.clone());
+            // Process Submit ledger transactions
+            process_ledger_transactions(
+                &block,
+                Ledger::Submit,
+                &submit_txs,
+                &block_index,
+                chunk_size,
+                &storage_modules,
+                &db,
+            )?;
 
-            let mut prev_chunk_offset: LedgerChunkOffset = block_range.start();
-
-            // loop though each tx_path and add entries to the indexes in the storage modules
-            // overlapped by the tx_path's chunks
-            for (tx_path, (data_root, data_size)) in path_pairs {
-                let num_chunks_in_tx = data_size.div_ceil(chunk_size as u64) as u32;
-
-                // Calculate the ledger relative chunk range for this transaction
-                let tx_chunk_range = LedgerChunkRange(ie(
-                    prev_chunk_offset,
-                    prev_chunk_offset + num_chunks_in_tx as u64,
-                ));
-
-                // Retrieve the storage modules that are overlapped by this range
-                let overlapped_modules = get_overlapped_storage_modules(
-                    &storage_modules,
-                    Ledger::Submit,
-                    &tx_chunk_range,
-                );
-
-                // Update the transaction indexes of the overlapped StorageModules
-                update_storage_module_indexes(
-                    &overlapped_modules,
-                    &tx_path.proof,
-                    data_root,
-                    tx_chunk_range,
-                )?;
-
-                // Process the transaction's chunks, getting them from the cache
-                // and writing them to the correct StorageModule
-                process_transaction_chunks(
-                    num_chunks_in_tx,
-                    data_root,
-                    data_size,
-                    tx_chunk_range,
-                    &storage_modules,
-                    &db,
-                )?;
-
-                for module in storage_modules.iter() {
-                    let _ = module.sync_pending_chunks();
-                }
-
-                prev_chunk_offset += num_chunks_in_tx as u64;
-            }
+            // Process Publish ledger transactions
+            process_ledger_transactions(
+                &block,
+                Ledger::Publish,
+                &publish_txs,
+                &block_index,
+                chunk_size,
+                &storage_modules,
+                &db,
+            )?;
 
             Ok(())
         })
     }
+}
+
+fn process_ledger_transactions(
+    block: &Arc<IrysBlockHeader>,
+    ledger: Ledger,
+    txs: &[IrysTransactionHeader],
+    block_index: &Arc<RwLock<BlockIndex<Initialized>>>,
+    chunk_size: usize,
+    storage_modules: &Arc<Vec<Arc<StorageModule>>>,
+    db: &Arc<DatabaseProvider>,
+) -> Result<(), ()> {
+    let path_pairs = get_tx_path_pairs(block, ledger, txs).unwrap();
+    let block_range = get_block_range(block, ledger, block_index.clone());
+    let mut prev_chunk_offset = block_range.start();
+
+    for (tx_path, (data_root, data_size)) in path_pairs {
+        let num_chunks_in_tx = data_size.div_ceil(chunk_size as u64) as u32;
+        let tx_chunk_range = LedgerChunkRange(ie(
+            prev_chunk_offset,
+            prev_chunk_offset + num_chunks_in_tx as u64,
+        ));
+
+        update_storage_module_indexes(
+            &tx_path.proof,
+            data_root,
+            tx_chunk_range,
+            ledger,
+            storage_modules,
+        )?;
+
+        process_transaction_chunks(
+            num_chunks_in_tx,
+            data_root,
+            data_size,
+            tx_chunk_range,
+            ledger,
+            storage_modules,
+            db,
+        )?;
+
+        for module in storage_modules.iter() {
+            let _ = module.sync_pending_chunks();
+        }
+
+        prev_chunk_offset += num_chunks_in_tx as u64;
+    }
+
+    Ok(())
 }
 
 fn process_transaction_chunks(
@@ -131,6 +153,7 @@ fn process_transaction_chunks(
     data_root: DataRoot,
     data_size: u64,
     tx_chunk_range: LedgerChunkRange,
+    ledger: Ledger,
     storage_modules: &[Arc<StorageModule>],
     db: &DatabaseProvider,
 ) -> Result<(), ()> {
@@ -143,7 +166,7 @@ fn process_transaction_chunks(
 
         // Find which storage module intersects this chunk
         let ledger_offset = tx_chunk_offset as u64 + tx_chunk_range.start();
-        let storage_module = find_storage_module(storage_modules, Ledger::Submit, ledger_offset);
+        let storage_module = find_storage_module(storage_modules, ledger, ledger_offset);
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
@@ -153,18 +176,31 @@ fn process_transaction_chunks(
     Ok(())
 }
 
+/// Computes the range of chunks added to a ledger by the transactions in a block,
+/// relative to the ledger.
+///
+/// The calculation starts from the previous block's `max_chunk_offset` (or 0 for genesis)
+/// for the given ledger and extends to this block's `max_chunk_offset` within the same ledger.
+///
+/// # Arguments
+/// * `block_header` - The block header containing height and ledger information.
+/// * `ledger` - The target ledger (e.g., Submit or Publish).
+/// * `block_index` - Index of historical block data.
+///
+/// # Returns
+/// A `LedgerChunkRange` representing the [start, end] chunk offsets of the chunks
+/// added to the ledger by the specified block.
+
 fn get_block_range(
-    block_header: &IrysBlockHeader,
+    block: &IrysBlockHeader,
     ledger: Ledger,
     block_index: Arc<RwLock<BlockIndex<Initialized>>>,
 ) -> LedgerChunkRange {
     // Use the block index to get the ledger relative chunk offset of the
     // start of this new block from the previous block.
     let index_reader = block_index.read().unwrap();
-    let start_chunk_offset = if block_header.height > 0 {
-        let prev_item = index_reader
-            .get_item(block_header.height as usize - 1)
-            .unwrap();
+    let start_chunk_offset = if block.height > 0 {
+        let prev_item = index_reader.get_item(block.height as usize - 1).unwrap();
         prev_item.ledgers[ledger].max_chunk_offset
     } else {
         0
@@ -172,18 +208,20 @@ fn get_block_range(
 
     let block_offsets = LedgerChunkRange(ii(
         start_chunk_offset,
-        block_header.ledgers[ledger].max_chunk_offset,
+        block.ledgers[ledger].max_chunk_offset,
     ));
 
     block_offsets
 }
 fn get_tx_path_pairs(
-    block_header: &IrysBlockHeader,
-    txs: &Vec<IrysTransactionHeader>,
+    block: &IrysBlockHeader,
+    ledger: Ledger,
+    txs: &[IrysTransactionHeader],
 ) -> eyre::Result<Vec<(Proof, (DataRoot, u64))>> {
     // Changed Proof to TxPath
     let (tx_root, proofs) = TransactionLedger::merklize_tx_root(txs);
-    if tx_root != block_header.ledgers[Ledger::Submit].tx_root {
+
+    if tx_root != block.ledgers[ledger].tx_root {
         return Err(eyre::eyre!("Invalid tx_root"));
     }
 
@@ -194,12 +232,16 @@ fn get_tx_path_pairs(
 }
 
 fn update_storage_module_indexes(
-    matching_modules: &[Arc<StorageModule>],
     proof: &[u8],
     data_root: DataRoot,
     tx_chunk_range: LedgerChunkRange,
+    ledger: Ledger,
+    storage_modules: &[Arc<StorageModule>],
 ) -> Result<(), ()> {
-    for storage_module in matching_modules {
+    let overlapped_modules =
+        get_overlapped_storage_modules(storage_modules, ledger, &tx_chunk_range);
+
+    for storage_module in overlapped_modules {
         storage_module
             .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range)
             .map_err(|e| {
