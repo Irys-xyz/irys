@@ -162,7 +162,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         let chunk = missing_chunks.pop().unwrap();
         info!("Retrieving chunk: {} attempt: {}", chunk, attempts);
         let req = test::TestRequest::get()
-            .uri(&format!("/v1/chunk/{}/{}", ledger, chunk))
+            .uri(&format!("/v1/chunk/ledger/{}/{}", ledger, chunk))
             .to_request();
 
         let resp = test::call_service(&app, req).await;
