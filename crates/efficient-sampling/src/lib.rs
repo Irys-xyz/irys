@@ -27,11 +27,11 @@ impl Ranges {
     pub fn get_recall_range(&mut self, step:u64, seed: &H256, partition_hash: &H256) -> usize {
         if self.last_recall_ranges.contains_key(&step) {
             let range = *self.last_recall_ranges.get(&step).unwrap();
-            warn!("Partition hash {}, Recall range for step {} is cached, range {}", partition_hash, step, range);
+            warn!("Partition hash {}, Recall range for step {} is cached, range {}/{}", partition_hash, step, range, self.num_recall_ranges_in_partition);
             range
         } else {
             let range = self.next_recall_range(step, seed, partition_hash);
-            info!("Partition hash {}, Recall range for step {} is not cached, calling next range, range {}", partition_hash, step, range);
+            info!("Partition hash {}, Recall range for step {} is not cached, calling next range, range {}/{}", partition_hash, step, range, self.num_recall_ranges_in_partition);
             range
         }
     }
@@ -42,7 +42,7 @@ impl Ranges {
 
     /// Picks next random (using seed as entropy) range idx in [0..NUM_RECALL_RANGES_IN_PARTITION-1] interval
     pub fn next_recall_range(&mut self, step:u64, seed: &H256, partition_hash: &H256) -> usize {
-        // TODO: non consecutive vdf_steps handling, not needed for just one node
+        // non consecutive vdf_steps is handled at mining level
         if step != self.last_step_num + 1 {
             panic!("Non consecutive vdf steps are not supported, last step num {}, current step num {}", self.last_step_num, step);
         }

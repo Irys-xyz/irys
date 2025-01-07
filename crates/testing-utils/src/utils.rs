@@ -5,7 +5,7 @@ use std::{
 };
 use tempfile::TempDir;
 use tracing::{debug, level_filters::LevelFilter};
-use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt, FmtSubscriber};
+use tracing_subscriber::{fmt::SubscriberBuilder, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, FmtSubscriber};
 
 /// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<project_dir>/.tmp.  
 /// The temp directory is prefixed by <name> (default: "irys-test-"), and automatically deletes itself on test completion -
@@ -14,7 +14,7 @@ pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
     // tracing-subscriber is so the tracing log macros (i.e info!) work
     // TODO: expose tracing configuration
     let _ = SubscriberBuilder::default()
-        .with_max_level(LevelFilter::DEBUG)
+        .with_env_filter(EnvFilter::from_default_env())
         .finish()
         .try_init();
 
