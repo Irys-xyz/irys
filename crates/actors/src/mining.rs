@@ -392,7 +392,7 @@ mod tests {
             .send(BroadcastMiningSeed {
                 seed,
                 checkpoints: H256List(vec![]),
-                global_step: 0,
+                global_step: 1,
             })
             .await
             .unwrap();
