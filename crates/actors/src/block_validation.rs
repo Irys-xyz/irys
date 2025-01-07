@@ -273,6 +273,7 @@ mod tests {
             .await;
         }
     }
+
     async fn poa_test(
         txs: &Vec<IrysTransaction>,
         poa_chunk: &mut Vec<u8>,
@@ -360,8 +361,10 @@ mod tests {
 
         let height: u64;
         {
-            height = block_index.read().unwrap().num_blocks().max(1) - 1;
+            height = block_index.read().unwrap().num_blocks();
         }
+
+        info!("Block height {}", height);
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size as usize);
         compute_entropy_chunk(
