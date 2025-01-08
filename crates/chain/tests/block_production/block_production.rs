@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs::remove_dir_all, time::Duration};
 
 use alloy_consensus::TxEnvelope;
-use alloy_core::primitives::{Bytes, TxKind, B256, U256};
+use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
@@ -17,7 +17,7 @@ use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::Transac
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     block_production::SolutionContext, irys::IrysSigner, vdf_config::VDFStepsConfig, Address,
-    IrysTransaction, H256, IRYS_CHAIN_ID,
+    IrysTransaction, H256, IRYS_CHAIN_ID, StorageConfig
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
@@ -27,37 +27,94 @@ use reth_primitives::{
     GenesisAccount,
 };
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{info, debug};
 
-/// Create a valid capacity PoA
+/// Create a valid capacity PoA solution
 #[cfg(test)]
-pub fn capacity_chunk_solution(miner_addr: Address) -> SolutionContext {
+pub async fn capacity_chunk_solution(miner_addr: Address, vdf_steps_guard: VdfStepsReadGuard, vdf_config: &VDFStepsConfig, storage_config: &StorageConfig) -> SolutionContext {
+    use irys_storage::ii;
     use irys_types::{block_production::Seed, H256List};
+    use irys_vdf::{step_number_to_salt_number, vdf_sha};
+    use sha2::{Digest, Sha256};    
+    
+    let max_retries = 20; 
+    let mut i = 1;
+    let initial_step_num = vdf_steps_guard.read().global_step;
+    let mut step_num: u64 = 0;
+    // wait to have at least 2 new steps
+    while i < max_retries && step_num < initial_step_num + 2 {
+        sleep(Duration::from_secs(1)).await;
+        step_num = vdf_steps_guard.read().global_step;
+        i += 1;
+    }
+
+    let steps: H256List = 
+        match vdf_steps_guard.read().get_steps(ii(step_num - 1, step_num)) {
+            Ok(s) => s,
+            Err(err) => panic!("Not enough vdf steps {:?}, waiting...", err)
+        };
+
+    // calculate last step checkpoints
+    let mut hasher = Sha256::new();
+    let mut salt = irys_types::U256::from(step_number_to_salt_number(&vdf_config, step_num - 1 as u64));
+    let mut seed = steps[0];
+
+    let mut checkpoints: Vec<H256> =
+        vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
+    
+    vdf_sha(
+        &mut hasher,
+        &mut salt,
+        &mut seed,
+        vdf_config.num_checkpoints_in_vdf_step,
+        vdf_config.vdf_difficulty,
+        &mut checkpoints,
+    );
 
     let partition_hash = H256::zero();
-    let vdf_config = VDFStepsConfig::default(); // TODO: take it from test's vdf config
-    let chunk_size = 32; // TODO: take it from test's storage config
-
-    let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+    let mut entropy_chunk = Vec::<u8>::with_capacity(storage_config.chunk_size as usize);
     compute_entropy_chunk(
         miner_addr,
         0,
         partition_hash.into(),
-        vdf_config.vdf_difficulty as u32,
-        chunk_size, // take it from storage config
+        storage_config.entropy_packing_iterations,
+        storage_config.chunk_size as usize, // take it from storage config
         &mut entropy_chunk,
     );
+
+    debug!("Chunk mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_addr, 0, partition_hash, storage_config.entropy_packing_iterations, storage_config.chunk_size);
 
     SolutionContext {
         partition_hash,
         chunk_offset: 0,
         mining_address: miner_addr,
         chunk: entropy_chunk,
-        vdf_step: 1,
-        checkpoints: H256List(vec![]),
-        seed: Seed(H256::zero()),
+        vdf_step: step_num,
+        checkpoints: H256List(checkpoints),
+        seed: Seed(steps[1]),
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn vdf_err() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("vdf_err"), false);
+
+    let mut config = IrysNodeConfig::default();
+    config.base_directory = temp_dir.path().to_path_buf();
+
+    let node = start_for_testing(config).await?;
+    
+    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard, &node.vdf_config, &node.storage_config).await;
+    let (block, _reth_exec_env) = node
+        .actor_addresses
+        .block_producer
+        .send(SolutionFoundMessage(poa_solution.clone()))
+        .await?
+        .unwrap();
+    // the block gets produced, but it fails validation
+    // dbg!(block);
+    Ok(())
 }
 
 #[tokio::test]
@@ -114,7 +171,7 @@ async fn test_blockprod() -> eyre::Result<()> {
         // txs.push(tx);
     }
 
-    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address());
+    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard, &node.vdf_config, &node.storage_config).await;
 
     let (block, reth_exec_env) = node
         .actor_addresses
@@ -200,6 +257,47 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
 }
 
 #[tokio::test]
+async fn mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
+    let mut config = IrysNodeConfig::default();
+    config.base_directory = temp_dir.path().to_path_buf();
+
+    let node = start_for_testing(config).await?;
+
+    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+
+    for i in 1..10 {
+        info!("manually producing block {}", i);
+        let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard.clone(), &node.vdf_config, &node.storage_config).await;
+        let fut = node
+            .actor_addresses
+            .block_producer
+            .send(SolutionFoundMessage(poa_solution.clone()));
+        let (block, reth_exec_env) = fut.await?.unwrap();
+
+        //check reth for built block
+        let reth_block = reth_context
+            .inner
+            .provider
+            .block_by_hash(block.evm_block_hash)?
+            .unwrap();
+        assert_eq!(i, reth_block.header.number as u32);
+        // height is hardcoded at 42 right now
+        // assert_eq!(reth_block.number, block.height);
+
+        // check irys DB for built block
+        let db_irys_block = &node
+            .db
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+            .unwrap();
+        assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
+        // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
+        sleep(Duration::from_millis(1500)).await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_basic_blockprod() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
@@ -207,7 +305,7 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
 
     let node = start_for_testing(config).await?;
 
-    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address());
+    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard, &node.vdf_config, &node.storage_config).await;
 
     let (block, _) = node
         .actor_addresses
@@ -338,7 +436,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         // txs.push(tx);
     }
 
-    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address());
+    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard, &node.vdf_config, &node.storage_config).await;
 
     let (block, reth_exec_env) = node
         .actor_addresses

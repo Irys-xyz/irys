@@ -97,6 +97,9 @@ pub struct IrysNodeCtx {
     pub config: Arc<IrysNodeConfig>,
     pub chunk_provider: ChunkProvider,
     pub block_index_guard: BlockIndexReadGuard,
+    pub vdf_steps_guard: VdfStepsReadGuard,
+    pub vdf_config: VDFStepsConfig,
+    pub storage_config: StorageConfig,
 }
 
 pub async fn start_irys_node(
@@ -339,9 +342,10 @@ pub async fn start_irys_node(
                     arc_genesis.vdf_limiter_info.output, arc_genesis.vdf_limiter_info.seed
                 );
 
+                let vdf_config2 = vdf_config.clone();
                 let vdf_thread_handler = std::thread::spawn(move || {
                     run_vdf(
-                        vdf_config.clone(),
+                        vdf_config2,
                         arc_genesis.vdf_limiter_info.output,
                         arc_genesis.vdf_limiter_info.seed,
                         new_seed_rx,
@@ -369,6 +373,9 @@ pub async fn start_irys_node(
                     config: arc_config.clone(),
                     chunk_provider: chunk_provider.clone(),
                     block_index_guard: block_index_guard.clone(),
+                    vdf_steps_guard: vdf_steps_guard.clone(),
+                    vdf_config: vdf_config.clone(),
+                    storage_config: storage_config.clone(),
                 });
 
                 run_server(ApiState {

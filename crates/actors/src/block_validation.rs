@@ -6,6 +6,7 @@ use irys_types::{
 };
 use irys_vdf::checkpoints_are_valid;
 use openssl::sha;
+use tracing::debug;
 
 /// Full pre-validation steps for a block
 pub fn block_is_valid(
@@ -46,6 +47,7 @@ pub fn poa_is_valid(
     config: &StorageConfig,
     miner_address: &Address,
 ) -> eyre::Result<()> {
+    debug!("PoA validating mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_address, poa.partition_chunk_offset, poa.partition_hash, config.entropy_packing_iterations, config.chunk_size);
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_num)) =
         (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_num)
@@ -142,7 +144,6 @@ pub fn poa_is_valid(
             return Err(eyre::eyre!("PoA capacity chunk mismatch"));
         }
     }
-
     Ok(())
 }
 
@@ -166,11 +167,9 @@ mod tests {
         irys::IrysSigner, Address, Arbitrary, Base64, H256List, IrysSignature, IrysTransaction,
         IrysTransactionHeader, Signature, TransactionLedger, H256, PACKING_SHA_1_5_S, U256,
     };
-    use reth::revm::primitives::B256;
-    use std::str::FromStr;
     use std::sync::{Arc, RwLock};
     use tracing::log::LevelFilter;
-    use tracing::{debug, error, info};
+    use tracing::{debug, info};
 
     use super::*;
 
