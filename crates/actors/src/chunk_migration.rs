@@ -211,6 +211,7 @@ fn get_block_range(
         block.ledgers[ledger].max_chunk_offset,
     ));
 
+    // TODO: fix
     block_offsets
 }
 fn get_tx_path_pairs(

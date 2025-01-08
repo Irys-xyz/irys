@@ -6,6 +6,8 @@ use irys_types::{
     PACKING_SHA_1_5_S,
 };
 
+use rand::Rng;
+
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
 /// unpacking & trimming the data, and passing through metadata (size, tx_offset, etc)
 pub fn unpack(
@@ -182,7 +184,13 @@ pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
     entropy
 }
 
+#[cfg(test)]
 mod tests {
+    use crate::capacity_single::SHA_HASH_SIZE;
+    use crate::*;
+    use irys_types::H256;
+    use rand::{Rng, RngCore};
+    use std::time::*;
 
     #[test]
     fn test_compute_entropy_chunk() {
@@ -299,6 +307,7 @@ mod tests {
     #[test]
     fn test_chunk_packing_unpacking() {
         let mut rng = rand::thread_rng();
+
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
