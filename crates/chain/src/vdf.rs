@@ -77,7 +77,7 @@ mod tests {
     use actix::*;
     use irys_actors::vdf::{GetVdfStateMessage, VdfStepsReadGuard};
     use irys_types::*;
-    use irys_vdf::checkpoints_are_valid;
+    use irys_vdf::{checkpoints_are_valid, vdf_sha_verification};
     use nodit::interval::ii;
     use std::{sync::mpsc, time::Duration};
     use tracing::{debug, level_filters::LevelFilter};
