@@ -132,7 +132,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             }
         };
 
-        if publish_txs.len() > 0 {
+        if !publish_txs.is_empty() {
             let publish_proofs = match &new_block_header.ledgers[Ledger::Publish].proofs {
                 Some(proofs) => proofs,
                 None => {
@@ -175,7 +175,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         ) {
             Ok(_) => {
                 info!("Block is valid, sending to block tree");
-                let mut all_txs = submit_txs.clone();
+                let mut all_txs = submit_txs;
                 all_txs.extend_from_slice(&publish_txs);
                 block_tree_addr.do_send(BlockPreValidatedMessage(
                     new_block_header,

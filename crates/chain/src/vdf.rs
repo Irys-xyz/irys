@@ -3,9 +3,7 @@ use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     vdf::{VdfSeed, VdfService},
 };
-use irys_types::{
-    block_production::Seed, vdf_config::VDFStepsConfig, H256List, H256, U256,
-};
+use irys_types::{block_production::Seed, vdf_config::VDFStepsConfig, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::Receiver;
@@ -76,6 +74,8 @@ pub fn run_vdf(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix::*;
+    use irys_types::*;
     use irys_vdf::checkpoints_are_valid;
     use nodit::interval::ii;
     use std::{sync::mpsc, time::Duration};

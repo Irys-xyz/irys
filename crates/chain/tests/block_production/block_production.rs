@@ -170,7 +170,7 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
         info!("waiting block {}", i);
 
         let mut retries = 0;
-        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 10 as u64 {
+        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 10_u64 {
             sleep(Duration::from_millis(1000)).await;
             retries += 1;
         }

@@ -193,7 +193,7 @@ impl Handler<BlockConfirmedMessage> for BlockIndexActor {
         let all_txs = &msg.1;
 
         // Do something with the block
-        self.add_finalized_block(&irys_block_header, &all_txs);
+        self.add_finalized_block(irys_block_header, all_txs);
     }
 }
 

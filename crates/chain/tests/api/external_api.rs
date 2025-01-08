@@ -27,7 +27,7 @@ use irys_database::{
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    app_state::DatabaseProvider, chunk, partition::*, Address, Base64, H256List,
+    app_state::DatabaseProvider, partition::*, Address, Base64, H256List,
     IrysBlockHeader, PoaData, Signature,
     StorageConfig, TransactionLedger, VDFLimiterInfo, H256, U256,
 };

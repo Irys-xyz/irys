@@ -206,12 +206,12 @@ fn get_block_range(
         0
     };
 
-    let block_offsets = LedgerChunkRange(ii(
+    
+
+    LedgerChunkRange(ii(
         start_chunk_offset,
         block.ledgers[ledger].max_chunk_offset,
-    ));
-
-    block_offsets
+    ))
 }
 fn get_tx_path_pairs(
     block: &IrysBlockHeader,

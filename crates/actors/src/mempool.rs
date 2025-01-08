@@ -353,7 +353,7 @@ impl Handler<BlockConfirmedMessage> for MempoolActor {
         // from the mempool. In the future on a multi node network we may keep
         // ingress proofs around longer to account for re-orgs, but for now
         // we just remove them.
-        if published_txids.len() > 0 {
+        if !published_txids.is_empty() {
             let mut_tx = self
                 .db
                 .tx_mut()
@@ -364,7 +364,7 @@ impl Handler<BlockConfirmedMessage> for MempoolActor {
 
             for (i, txid) in block.ledgers[Ledger::Publish].txids.0.iter().enumerate() {
                 // Retrieve the promoted transactions header
-                let mut tx_header = match tx_header_by_txid(&mut_tx, &txid) {
+                let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
                     Ok(Some(header)) => header,
                     Ok(None) => {
                         error!("No transaction header found for txid: {}", txid);

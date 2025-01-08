@@ -25,13 +25,13 @@ pub fn block_is_valid(
     //TODO: check block_hash
 
     // check vdf steps
-    checkpoints_are_valid(&block.vdf_limiter_info, &vdf_config)?;
+    checkpoints_are_valid(&block.vdf_limiter_info, vdf_config)?;
 
     // check PoA
     poa_is_valid(
         &block.poa,
-        &block_index_guard,
-        &partitions_guard,
+        block_index_guard,
+        partitions_guard,
         storage_config,
         miner_address,
     )?;
@@ -102,7 +102,7 @@ pub fn poa_is_valid(
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
-            miner_address.clone(),
+            *miner_address,
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
@@ -122,7 +122,7 @@ pub fn poa_is_valid(
                 as usize,
         );
 
-        let poa_chunk_hash = sha::sha256(&poa_chunk_pad_trimmed);
+        let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
 
         if poa_chunk_hash != data_path_result.leaf_hash {
             return Err(eyre::eyre!("PoA chunk hash mismatch"));
@@ -130,7 +130,7 @@ pub fn poa_is_valid(
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
-            miner_address.clone(),
+            *miner_address,
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
@@ -377,7 +377,7 @@ mod tests {
         // Create a block from the tx
         let irys_block = IrysBlockHeader {
             height,
-            reward_address: miner_address.clone(),
+            reward_address: miner_address,
             poa: poa.clone(),
             block_hash: H256::zero(),
             previous_block_hash: H256::zero(),
