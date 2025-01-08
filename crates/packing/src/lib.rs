@@ -6,7 +6,6 @@ use irys_types::{
     PACKING_SHA_1_5_S,
 };
 
-use rand::Rng;
 
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
 /// unpacking & trimming the data, and passing through metadata (size, tx_offset, etc)
@@ -292,7 +291,7 @@ mod tests {
         let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
         capacity_pack_range_c(
             mining_address,
-            chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE as u64,
+            chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE,
             partition_hash.into(),
             Some(2 * CHUNK_SIZE as u32),
             &mut entropy_chunk,
