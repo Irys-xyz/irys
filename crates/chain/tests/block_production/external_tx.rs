@@ -7,7 +7,7 @@ use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, Address, H256, IRYS_CHAIN_ID,
+    block_production::SolutionContext, irys::IrysSigner, Address, IRYS_CHAIN_ID,
     MAX_CHUNK_SIZE,
 };
 use k256::ecdsa::SigningKey;

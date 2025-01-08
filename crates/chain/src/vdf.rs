@@ -1,13 +1,12 @@
-use actix::{Addr, ArbiterService};
+use actix::Addr;
 use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
-    vdf::{self, VdfSeed, VdfService},
+    vdf::{VdfSeed, VdfService},
 };
 use irys_types::{
-    block_production::Seed, vdf_config::VDFStepsConfig, H256List, VDFLimiterInfo, H256,
-    NONCE_LIMITER_RESET_FREQUENCY, NUM_CHECKPOINTS_IN_VDF_STEP, U256, VDF_SHA_1S,
+    block_production::Seed, vdf_config::VDFStepsConfig, H256List, H256, U256,
 };
-use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha, vdf_sha_verification};
+use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;

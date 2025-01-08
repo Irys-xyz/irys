@@ -8,7 +8,6 @@ use eyre::eyre;
 use irys_actors::{
     block_producer::SolutionFoundMessage,
     mempool::TxIngressMessage,
-    vdf::{self, GetVdfStateMessage, VdfService, VdfStepsReadGuard},
 };
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;

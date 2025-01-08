@@ -13,7 +13,7 @@ use irys_chain::{chain::start_for_testing, IrysNodeCtx};
 use irys_database::tables::ProgrammableDataChunkCache;
 use irys_reth_node_bridge::precompile::irys_executor::IrysPrecompileOffsets;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, CHUNK_SIZE, H256};
+use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, CHUNK_SIZE};
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::Database;

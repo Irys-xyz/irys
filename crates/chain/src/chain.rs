@@ -30,7 +30,7 @@ use irys_types::{
     app_state::DatabaseProvider,
     calculate_initial_difficulty,
     irys::IrysSigner,
-    vdf_config::{self, VDFStepsConfig},
+    vdf_config::{VDFStepsConfig},
     DifficultyAdjustmentConfig, StorageConfig, H256, U256,
 };
 use reth::{
