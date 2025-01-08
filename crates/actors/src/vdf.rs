@@ -6,7 +6,6 @@ use std::{
 };
 use tracing::info;
 
-use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService, Subscribe};
 use irys_types::{block_production::Seed, H256List, H256};
 
 #[derive(Debug)]

@@ -1,6 +1,6 @@
 use crate::mining::PartitionMiningActor;
 use actix::prelude::*;
-use irys_types::{block_production::Seed, H256List, IrysBlockHeader, H256};
+use irys_types::{block_production::Seed, H256List, IrysBlockHeader};
 use std::sync::Arc;
 use tracing::info;
 

@@ -163,8 +163,8 @@ mod tests {
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
-        irys::IrysSigner, Address, Arbitrary, Base64, H256List, IrysSignature, IrysTransaction,
-        IrysTransactionHeader, Signature, TransactionLedger, H256, PACKING_SHA_1_5_S, U256,
+        irys::IrysSigner, Address, Base64, H256List, IrysTransaction,
+        IrysTransactionHeader, Signature, TransactionLedger, H256, U256,
     };
 
     use std::sync::{Arc, RwLock};
