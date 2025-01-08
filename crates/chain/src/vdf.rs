@@ -175,7 +175,7 @@ mod tests {
 
         // calculate last step checkpoints
         let mut hasher = Sha256::new();
-        let mut salt = U256::from(step_number_to_salt_number(&vdf_config, step_num - 1 as u64));
+        let mut salt = U256::from(step_number_to_salt_number(&vdf_config, step_num - 1_u64));
         let mut seed = steps[2];
 
         let mut checkpoints: Vec<H256> =
