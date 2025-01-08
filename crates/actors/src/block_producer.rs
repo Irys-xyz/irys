@@ -185,7 +185,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 warn!("Solution for old step number {}, previous block step number {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number);
                 return None;
             }
-            
+
             // Get all the ingress proofs for data promotion
             let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
             let mut publish_txids: Vec<H256> = Vec::new();
@@ -228,14 +228,14 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                             continue;
                         }
                     };
-                
+
                     // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
                     if tx_header.ingress_proofs.is_none() {
                         // Get the proof
                         match ingress_proofs.get(&tx_header.data_root) {
                             Some(proof) => {
                                 let mut tx_header = tx_header.clone();
-                                let proof = TxIngressProof { 
+                                let proof = TxIngressProof {
                                     proof: proof.proof,
                                     signature: proof.signature.into(),
                                 };
@@ -260,7 +260,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             } else {
                 None
             };
-                        
+
             // Submit Ledger Transactions    
             let submit_txs: Vec<IrysTransactionHeader> =
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
@@ -444,7 +444,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             let block = Arc::new(irys_block);
             block_discovery_addr.do_send(BlockDiscoveredMessage(block.clone()));
-            
+
             // Get all the transactions for the previous block, error if not found
             // TODO: Eventually abstract this for support of `n` ledgers
             let previous_submit_txs = get_ledger_tx_headers(&prev_block_header, Ledger::Submit, &db);
@@ -455,7 +455,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 combined.extend(previous_publish_txs.unwrap_or_default());
                 combined
             };
-            
+
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
