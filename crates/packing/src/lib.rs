@@ -6,7 +6,6 @@ use irys_types::{
     PACKING_SHA_1_5_S,
 };
 
-
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
 /// unpacking & trimming the data, and passing through metadata (size, tx_offset, etc)
 pub fn unpack(
