@@ -74,8 +74,8 @@ pub fn run_vdf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vdf::{GetVdfStateMessage, VdfStepsReadGuard};
     use actix::*;
+    use irys_actors::vdf::{GetVdfStateMessage, VdfStepsReadGuard};
     use irys_types::*;
     use irys_vdf::checkpoints_are_valid;
     use nodit::interval::ii;
