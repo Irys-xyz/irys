@@ -183,16 +183,8 @@ pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
 }
 
 mod tests {
-    use irys_c::capacity_single::{self, SHA_HASH_SIZE};
-    use irys_types::{Address, Base64, ChunkBytes, PackedChunk, CHUNK_SIZE, H256};
-    use rand::Rng;
-    use rand::{self, RngCore as _};
-    use std::time::Instant;
 
-    use crate::{
-        capacity_pack_range_c, capacity_pack_range_with_data, capacity_pack_range_with_data_c,
-        packing_xor_vec_u8, unpack, xor_vec_u8_arrays_in_place,
-    };
+    
 
     #[test]
     fn test_compute_entropy_chunk() {
