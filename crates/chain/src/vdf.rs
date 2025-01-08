@@ -74,6 +74,7 @@ pub fn run_vdf(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vdf::{GetVdfStateMessage, VdfStepsReadGuard};
     use actix::*;
     use irys_types::*;
     use irys_vdf::checkpoints_are_valid;
@@ -81,7 +82,6 @@ mod tests {
     use std::{sync::mpsc, time::Duration};
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
-    use vdf::{GetVdfStateMessage, VdfStepsReadGuard};
 
     fn init_tracing() {
         let _ = SubscriberBuilder::default()
