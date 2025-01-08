@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use irys_types::{H256List, SimpleRNG, H256};
 use openssl::sha;
-use rand::{RngCore, SeedableRng};
-use tracing::{info, warn};
+use tracing::{debug, info};
 
 /// number of vdf steps cached for efficient sampling after ranges reinitialization
 pub const NUMBER_OF_KEPT_LAST_STEPS: u64 = 20;
@@ -27,11 +26,11 @@ impl Ranges {
     pub fn get_recall_range(&mut self, step:u64, seed: &H256, partition_hash: &H256) -> usize {
         if self.last_recall_ranges.contains_key(&step) {
             let range = *self.last_recall_ranges.get(&step).unwrap();
-            warn!("Partition hash {}, Recall range for step {} is cached, range {}/{}", partition_hash, step, range, self.num_recall_ranges_in_partition);
+            debug!("Partition hash {}, Recall range for step {} is cached, range {}/{}", partition_hash, step, range, self.num_recall_ranges_in_partition);
             range
         } else {
             let range = self.next_recall_range(step, seed, partition_hash);
-            info!("Partition hash {}, Recall range for step {} is not cached, calling next range, range {}/{}", partition_hash, step, range, self.num_recall_ranges_in_partition);
+            debug!("Partition hash {}, Recall range for step {} is not cached, calling next range, range {}/{}", partition_hash, step, range, self.num_recall_ranges_in_partition);
             range
         }
     }

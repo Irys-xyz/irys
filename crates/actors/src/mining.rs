@@ -51,7 +51,7 @@ impl PartitionMiningActor {
         let vdf_steps = self.steps_guard.read();
         let last_step = vdf_steps.global_step;
         if last_step + 1 >= step {
-            info!("Step {} already processed or next consecutive one", step);
+            debug!("Step {} already processed or next consecutive one", step);
             Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         } else {
             // This code is not needed for just one node, but will be needed for multiple nodes
@@ -441,11 +441,4 @@ mod tests {
             "Not expected partition"
         );
     }
-
-    #[actix_rt::test]
-    async fn test_non_consecutive_recall_range() {
-        
-    }
-
-    
 }
