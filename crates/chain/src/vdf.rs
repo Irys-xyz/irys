@@ -77,9 +77,9 @@ pub fn run_vdf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::mpsc, time::Duration};
-    use nodit::interval::ii;
     use irys_vdf::checkpoints_are_valid;
+    use nodit::interval::ii;
+    use std::{sync::mpsc, time::Duration};
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
     use vdf::{GetVdfStateMessage, VdfStepsReadGuard};
@@ -169,7 +169,10 @@ mod tests {
         assert!(step_num > 4, "Should have more than 4 seeds");
 
         // get last 4 steps
-        let steps = vdf_steps.read().get_steps(ii(step_num - 3, step_num)).unwrap();
+        let steps = vdf_steps
+            .read()
+            .get_steps(ii(step_num - 3, step_num))
+            .unwrap();
 
         // calculate last step checkpoints
         let mut hasher = Sha256::new();

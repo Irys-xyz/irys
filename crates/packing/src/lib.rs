@@ -184,8 +184,6 @@ pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
 
 mod tests {
 
-    
-
     #[test]
     fn test_compute_entropy_chunk() {
         let mut rng = rand::thread_rng();

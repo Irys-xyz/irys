@@ -1,22 +1,31 @@
 use std::{
-    collections::HashMap, sync::Arc, time::{SystemTime, UNIX_EPOCH}
+    collections::HashMap,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
-use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid, Ledger};
+use irys_database::{
+    block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
+    Ledger,
+};
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256
+    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
+    storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64,
+    DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
+    IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
+    H256, U256,
 };
+use nodit::interval::ii;
 use openssl::sha;
 use reth::revm::primitives::B256;
-use reth_db::Database;
 use reth_db::cursor::*;
+use reth_db::Database;
 use tracing::{error, info, warn};
-use nodit::interval::ii;
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
@@ -136,7 +145,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let db = self.db.clone();
         let difficulty_config = self.difficulty_config.clone();
         let chunk_size = self.storage_config.chunk_size;
-        
+
         // let self_addr = ctx.address();
         // let storage_config = self.storage_config.clone();
         // let vdf_config = self.vdf_config.clone();
@@ -464,15 +473,17 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
     }
 }
 
-
 fn get_ledger_tx_headers(
     block_header: &IrysBlockHeader,
     ledger: Ledger,
-db: &DatabaseProvider,
+    db: &DatabaseProvider,
 ) -> Option<Vec<IrysTransactionHeader>> {
-    let tx = db.tx().map_err(|e| {
-        error!("Failed to create transaction: {}", e);
-    }).ok()?;
+    let tx = db
+        .tx()
+        .map_err(|e| {
+            error!("Failed to create transaction: {}", e);
+        })
+        .ok()?;
 
     match block_header.ledgers[ledger]
         .txids
@@ -488,14 +499,17 @@ db: &DatabaseProvider,
     {
         Ok(txs) => Some(txs),
         Err(e) => {
-            error!("Failed to collect tx headers for {:?} ledger: {}", ledger, e);
+            error!(
+                "Failed to collect tx headers for {:?} ledger: {}",
+                ledger, e
+            );
             None
         }
     }
 }
 
 /// Calculates the total number of full chunks needed to store a list of transactions,
-/// taking into account padding for partial chunks. Each transaction's data is padded 
+/// taking into account padding for partial chunks. Each transaction's data is padded
 /// to the next full chunk boundary if it doesn't align perfectly with the chunk size.
 ///
 /// # Arguments

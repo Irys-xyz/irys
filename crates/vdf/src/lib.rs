@@ -219,7 +219,9 @@ pub fn checkpoints_are_valid(
 
     if !last_step_checkpoints_are_valid {
         // Compare the original list with the calculated one
-        if let Some(cks) = last_step_checkpoints { warn_mismatches(&cks, &vdf_info.last_step_checkpoints) }
+        if let Some(cks) = last_step_checkpoints {
+            warn_mismatches(&cks, &vdf_info.last_step_checkpoints)
+        }
         return Err(eyre::eyre!("VDF last step checkpoints are invalid!"));
     }
 

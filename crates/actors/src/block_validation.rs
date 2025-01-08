@@ -188,7 +188,7 @@ mod tests {
         let chunk_size: usize = 32;
         // Create a bunch of TX chunks
         let data_chunks = vec![
-            vec![[0; 32], [1; 32], [2; 32]], // tx0 
+            vec![[0; 32], [1; 32], [2; 32]], // tx0
             vec![[3; 32], [4; 32], [5; 32]], // tx1
             vec![[6; 32], [7; 32], [8; 32]], // tx2
         ];
@@ -210,8 +210,7 @@ mod tests {
 
         for poa_tx_num in 0..3 {
             for poa_chunk_num in 0..3 {
-                let mut poa_chunk: Vec<u8> =
-                    data_chunks[poa_tx_num][poa_chunk_num].into();
+                let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
                 poa_test(
                     &txs,
                     &mut poa_chunk,
@@ -361,10 +360,7 @@ mod tests {
         let tx_headers: Vec<IrysTransactionHeader> =
             txs.iter().map(|tx| tx.header.clone()).collect();
 
-        let data_tx_ids = tx_headers
-            .iter()
-            .map(|h| h.id)
-            .collect::<Vec<H256>>();
+        let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
 
         let (tx_root, tx_path) = TransactionLedger::merklize_tx_root(&tx_headers);
 

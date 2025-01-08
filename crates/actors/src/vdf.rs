@@ -39,7 +39,7 @@ impl VdfState {
         let last_global_step = self.global_step;
         let first_global_step = last_global_step - vdf_steps_len + 1;
 
-        if !ii(first_global_step,last_global_step).contains_interval(&i) {
+        if !ii(first_global_step, last_global_step).contains_interval(&i) {
             return Err(eyre::eyre!(
                 "Unavailable requested range ({}..={}). Stored steps range is ({}..={})",
                 i.start(),
