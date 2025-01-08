@@ -57,7 +57,9 @@ mod tests {
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
         let blk = IrysBlockHeader::default();
 
-        db.update(|tx| -> eyre::Result<()> { database::insert_block_header(tx, &blk) })?;
+        let res =
+            db.update(|tx| -> eyre::Result<()> { database::insert_block_header(tx, &blk) })?;
+        res.unwrap();
 
         match db.view_eyre(|tx| database::block_header_by_hash(tx, &blk.block_hash))? {
             None => error!("block not found, test db error!"),
