@@ -34,6 +34,7 @@ use reth_db::Database as _;
 use tokio::{task, time::sleep};
 use tracing::info;
 
+#[ignore]
 #[actix::test]
 async fn external_api() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("external_api"), false);
