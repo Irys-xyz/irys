@@ -6,29 +6,60 @@ use irys_types::{
     PACKING_SHA_1_5_S,
 };
 
+/// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
+/// unpacking & trimming the data, and passing through metadata (size, tx_offset, etc)
 pub fn unpack(
-    packed_chunk: PackedChunk,
+    packed_chunk: &PackedChunk,
     entropy_packing_iterations: u32,
     chunk_size: usize,
 ) -> UnpackedChunk {
-    let mut out: Vec<u8> = Vec::with_capacity(chunk_size.try_into().unwrap());
+    let mut entropy: Vec<u8> = Vec::with_capacity(chunk_size);
     capacity_single::compute_entropy_chunk(
         packed_chunk.packing_address,
-        packed_chunk.tx_offset as u64,
+        packed_chunk.partition_offset as u64,
         packed_chunk.partition_hash.0,
         entropy_packing_iterations,
         chunk_size,
-        &mut out,
+        &mut entropy,
     );
-    xor_vec_u8_arrays_in_place(&mut out, &(packed_chunk.bytes.0));
+
+    let unpacked_data = unpack_with_entropy(packed_chunk, entropy, chunk_size);
 
     UnpackedChunk {
         data_root: packed_chunk.data_root,
         data_size: packed_chunk.data_size,
-        data_path: packed_chunk.data_path,
-        bytes: Base64(out),
+        data_path: packed_chunk.data_path.clone(),
+        bytes: Base64(unpacked_data),
         tx_offset: packed_chunk.tx_offset,
     }
+}
+
+/// Unpacks a PackedChunk using the supplied entropy, returning *just the unpacked data*
+#[inline]
+pub fn unpack_with_entropy(
+    packed_chunk: &PackedChunk,
+    entropy: Vec<u8>,
+    chunk_size: usize,
+) -> Vec<u8> {
+    debug_assert_eq!(
+        entropy.len(),
+        chunk_size,
+        "entropy needs to be exactly chunk_size"
+    );
+    let chunk_size_u64: u64 = chunk_size.try_into().unwrap();
+    let mut unpacked_data = packing_xor_vec_u8(entropy, &(packed_chunk.bytes.0));
+
+    let data_size = packed_chunk.data_size;
+    let num_chunks_in_tx = data_size.div_ceil(chunk_size_u64);
+    // trim if this is the last chunk & if data_size isn't aligned to chunk_size
+    if (packed_chunk.tx_offset as u64) == num_chunks_in_tx - 1 {
+        let trailing_bytes = data_size % chunk_size_u64;
+        // 0 means this last chunk is a full chunk
+        if trailing_bytes != 0 {
+            unpacked_data.truncate(trailing_bytes.try_into().unwrap());
+        }
+    };
+    unpacked_data
 }
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
@@ -139,124 +170,185 @@ pub fn xor_vec_u8_arrays_in_place(a: &mut Vec<u8>, b: &Vec<u8>) {
     }
 }
 
-#[test]
-fn test_compute_entropy_chunk() {
-    use irys_c::capacity_single::SHA_HASH_SIZE;
-    use rand;
-    use rand::Rng;
-    use std::time::Instant;
-
-    let mut rng = rand::thread_rng();
-    let mining_address = Address::random();
-    let chunk_offset = rng.gen_range(1..=1000);
-    let mut partition_hash = [0u8; SHA_HASH_SIZE];
-    rng.fill(&mut partition_hash[..]);
-    let iterations = 2 * CHUNK_SIZE as u32;
-
-    let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
-
-    let now = Instant::now();
-
-    capacity_single::compute_entropy_chunk(
-        mining_address,
-        chunk_offset,
-        partition_hash,
-        iterations,
-        CHUNK_SIZE as usize,
-        &mut chunk,
-    );
-
-    let elapsed = now.elapsed();
-    println!("Rust implementation: {:.2?}", elapsed);
-
-    let mut c_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
-    let now = Instant::now();
-
-    capacity_pack_range_c(
-        mining_address,
-        chunk_offset,
-        partition_hash.into(),
-        Some(iterations),
-        &mut c_chunk,
-    );
-
-    let elapsed = now.elapsed();
-    println!("C implementation: {:.2?}", elapsed);
-
-    assert_eq!(chunk, c_chunk, "Chunks should be equal")
+/// Specialized variant, used when we pass in the entropy as argument a (which will always be chunk_size), and unpacked data in b (which can be smaller than chunk_size)
+/// as xor is commutative, this allows us to avoid a clone of the chunk's data when writing, as oftentimes we have mutable access to the required entropy, but only a ref to the unpacked data.
+/// note: this will always produce full chunk_size vecs, as expected by the storage module
+#[inline]
+pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
+    debug_assert!(data.len() <= entropy.len());
+    for i in 0..data.len() {
+        entropy[i] = entropy[i].bitxor(data[i]);
+    }
+    entropy
 }
 
-#[test]
-fn test_chunks_packing() {
-    use irys_c::capacity_single::SHA_HASH_SIZE;
-    use rand;
-    use rand::{Rng, RngCore};
+mod tests {
+    use irys_c::capacity_single::{self, SHA_HASH_SIZE};
+    use irys_types::{Address, Base64, ChunkBytes, PackedChunk, CHUNK_SIZE, H256};
+    use rand::Rng;
+    use rand::{self, RngCore as _};
     use std::time::Instant;
 
-    let mut rng = rand::thread_rng();
-    let mining_address = Address::random();
-    let chunk_offset = rng.gen_range(1..=1000);
-    let mut partition_hash: [u8; SHA_HASH_SIZE] = [0; SHA_HASH_SIZE];
-    rng.fill(&mut partition_hash);
+    use crate::{
+        capacity_pack_range_c, capacity_pack_range_with_data, capacity_pack_range_with_data_c,
+        packing_xor_vec_u8, unpack, xor_vec_u8_arrays_in_place,
+    };
 
-    let num_chunks: usize = 4;
-    let mut chunks: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
-    let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
+    #[test]
+    fn test_compute_entropy_chunk() {
+        let mut rng = rand::thread_rng();
+        let mining_address = Address::random();
+        let chunk_offset = rng.gen_range(1..=1000);
+        let mut partition_hash = [0u8; SHA_HASH_SIZE];
+        rng.fill(&mut partition_hash[..]);
+        let iterations = 2 * CHUNK_SIZE as u32;
 
-    for _i in 0..num_chunks {
-        let mut chunk = [0u8; CHUNK_SIZE as usize];
-        rng.fill_bytes(&mut chunk);
-        chunks.push(chunk.to_vec());
-        chunks_rust.push(chunk.to_vec());
+        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+
+        let now = Instant::now();
+
+        capacity_single::compute_entropy_chunk(
+            mining_address,
+            chunk_offset,
+            partition_hash,
+            iterations,
+            CHUNK_SIZE as usize,
+            &mut chunk,
+        );
+
+        let elapsed = now.elapsed();
+        println!("Rust implementation: {:.2?}", elapsed);
+
+        let mut c_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let now = Instant::now();
+
+        capacity_pack_range_c(
+            mining_address,
+            chunk_offset,
+            partition_hash.into(),
+            Some(iterations),
+            &mut c_chunk,
+        );
+
+        let elapsed = now.elapsed();
+        println!("C implementation: {:.2?}", elapsed);
+
+        assert_eq!(chunk, c_chunk, "Chunks should be equal")
     }
 
-    assert_eq!(chunks, chunks_rust, "Rust and C packing should start equal");
+    #[test]
+    fn test_bench_chunks_packing() {
+        let mut rng = rand::thread_rng();
+        let mining_address = Address::random();
+        let chunk_offset = rng.gen_range(1..=1000);
+        let mut partition_hash: [u8; SHA_HASH_SIZE] = [0; SHA_HASH_SIZE];
+        rng.fill(&mut partition_hash);
 
-    // pick random chunk to verify later
-    let rnd_chunk_pos = rng.gen_range(0..num_chunks);
-    let mut rnd_chunk = chunks[rnd_chunk_pos].clone();
+        let num_chunks: usize = 4;
+        let mut chunks: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
+        let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
-    let now = Instant::now();
+        for _i in 0..num_chunks {
+            let mut chunk = [0u8; CHUNK_SIZE as usize];
+            rng.fill_bytes(&mut chunk);
+            chunks.push(chunk.to_vec());
+            chunks_rust.push(chunk.to_vec());
+        }
 
-    capacity_pack_range_with_data_c(
-        &mut chunks,
-        mining_address,
-        chunk_offset,
-        partition_hash.into(),
-        Some(2 * CHUNK_SIZE as u32),
-    );
+        assert_eq!(chunks, chunks_rust, "Rust and C packing should start equal");
 
-    let elapsed = now.elapsed();
-    println!("C implementation: {:.2?}", elapsed);
+        // pick random chunk to verify later
+        let rnd_chunk_pos = rng.gen_range(0..num_chunks);
+        let mut rnd_chunk = chunks[rnd_chunk_pos].clone();
 
-    let now = Instant::now();
+        let now = Instant::now();
 
-    capacity_pack_range_with_data(
-        &mut chunks_rust,
-        mining_address,
-        chunk_offset,
-        partition_hash.into(),
-        Some(2 * CHUNK_SIZE as u32),
-        CHUNK_SIZE as usize,
-    );
+        capacity_pack_range_with_data_c(
+            &mut chunks,
+            mining_address,
+            chunk_offset,
+            partition_hash.into(),
+            Some(2 * CHUNK_SIZE as u32),
+        );
 
-    let elapsed = now.elapsed();
-    println!("Rust implementation: {:.2?}", elapsed);
+        let elapsed = now.elapsed();
+        println!("C implementation: {:.2?}", elapsed);
 
-    assert_eq!(chunks, chunks_rust, "Rust and C packing should be equal");
+        let now = Instant::now();
 
-    // calculate entropy for choosen random chunk
-    let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
-    capacity_pack_range_c(
-        mining_address,
-        chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE,
-        partition_hash.into(),
-        Some(2 * CHUNK_SIZE as u32),
-        &mut entropy_chunk,
-    );
+        capacity_pack_range_with_data(
+            &mut chunks_rust,
+            mining_address,
+            chunk_offset,
+            partition_hash.into(),
+            Some(2 * CHUNK_SIZE as u32),
+            CHUNK_SIZE as usize,
+        );
 
-    // sign picked random chunk with entropy
-    xor_vec_u8_arrays_in_place(&mut rnd_chunk, &entropy_chunk);
+        let elapsed = now.elapsed();
+        println!("Rust implementation: {:.2?}", elapsed);
 
-    assert_eq!(chunks[rnd_chunk_pos], rnd_chunk, "Wrong packed chunk")
+        assert_eq!(chunks, chunks_rust, "Rust and C packing should be equal");
+
+        // calculate entropy for choosen random chunk
+        let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
+        capacity_pack_range_c(
+            mining_address,
+            chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE as u64,
+            partition_hash.into(),
+            Some(2 * CHUNK_SIZE as u32),
+            &mut entropy_chunk,
+        );
+
+        // sign picked random chunk with entropy
+        xor_vec_u8_arrays_in_place(&mut rnd_chunk, &entropy_chunk);
+
+        assert_eq!(chunks[rnd_chunk_pos], rnd_chunk, "Wrong packed chunk")
+    }
+
+    #[test]
+    fn test_chunk_packing_unpacking() {
+        let mut rng = rand::thread_rng();
+        let mining_address = Address::random();
+        let chunk_offset = rng.gen_range(1..=1000);
+        let mut partition_hash = [0u8; SHA_HASH_SIZE];
+        rng.fill(&mut partition_hash[..]);
+
+        let chunk_size = 32;
+        let iterations = 2 * chunk_size as u32;
+
+        let mut entropy_chunk: Vec<u8> = Vec::<u8>::with_capacity(chunk_size);
+
+        capacity_single::compute_entropy_chunk(
+            mining_address,
+            chunk_offset,
+            partition_hash,
+            iterations,
+            chunk_size,
+            &mut entropy_chunk,
+        );
+
+        // simulate a smaller end chunk
+        let data_size = chunk_size - rng.gen_range(0..chunk_size);
+        let mut data_bytes = vec![0u8; data_size];
+        rand::thread_rng().fill(&mut data_bytes[..]);
+
+        // pack the data
+        let packed_data = packing_xor_vec_u8(entropy_chunk.clone(), &data_bytes);
+
+        let packed_chunk = PackedChunk {
+            data_root: H256::zero(),
+            data_size: data_size as u64,
+            data_path: Base64(vec![]),
+            bytes: Base64(packed_data.clone()),
+            tx_offset: 0,
+            packing_address: mining_address,
+            partition_offset: chunk_offset as u32,
+            partition_hash: H256::from(partition_hash),
+        };
+
+        let unpacked_chunk = unpack(&packed_chunk, iterations, chunk_size);
+
+        assert_eq!(unpacked_chunk.bytes.0, data_bytes);
+    }
 }

@@ -170,8 +170,9 @@ pub fn add_start_offset_to_data_root_index<T: DbTxMut + DbTx>(
     start_offset: RelativeChunkOffset,
 ) -> eyre::Result<()> {
     let mut offsets = get_start_offsets_by_data_root(tx, data_root)?.unwrap_or_default();
-    offsets.0.push(start_offset);
+    if !offsets.0.contains(&start_offset) {
+        offsets.0.push(start_offset);
+    }
     set_start_offsets_by_data_root(tx, data_root, offsets)?;
-
     Ok(())
 }

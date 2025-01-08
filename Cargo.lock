@@ -5122,6 +5122,7 @@ dependencies = [
  "actix_async_handler",
  "alloy-rpc-types-engine",
  "assert_matches",
+ "base58",
  "base64-url",
  "env_logger",
  "eyre",
@@ -5133,6 +5134,7 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "irys-vdf",
  "nodit",
  "openssl",
  "rand",
@@ -5199,6 +5201,7 @@ name = "irys-chain"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "actix-http",
  "actix-rt",
  "actix-web",
  "alloy-consensus",
@@ -5235,9 +5238,11 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "irys-vdf",
  "jsonrpsee",
  "k256",
  "modular-bitfield",
+ "nodit",
  "openssl",
  "rand",
  "rand_chacha",
@@ -5426,6 +5431,7 @@ version = "0.1.0"
 dependencies = [
  "actix",
  "actix-rt",
+ "base58",
  "bytes",
  "derive_more 1.0.0",
  "eyre",
@@ -5434,6 +5440,7 @@ dependencies = [
  "irys-packing",
  "irys-testing-utils",
  "irys-types",
+ "itertools 0.13.0",
  "nodit",
  "openssl",
  "rand",
@@ -5497,6 +5504,27 @@ dependencies = [
  "tracing",
  "uint",
  "zerocopy 0.8.13",
+]
+
+[[package]]
+name = "irys-vdf"
+version = "0.1.0"
+dependencies = [
+ "assert_matches",
+ "env_logger",
+ "eyre",
+ "irys-config",
+ "irys-testing-utils",
+ "irys-types",
+ "openssl",
+ "rand",
+ "rand_chacha",
+ "rayon",
+ "sha2 0.10.8",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

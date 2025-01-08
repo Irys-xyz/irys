@@ -1,6 +1,6 @@
-use crate::mining::{PartitionMiningActor, Seed};
+use crate::mining::PartitionMiningActor;
 use actix::prelude::*;
-use irys_types::IrysBlockHeader;
+use irys_types::{block_production::Seed, H256List, IrysBlockHeader, H256};
 use std::sync::Arc;
 use tracing::info;
 
@@ -19,7 +19,11 @@ pub struct Unsubscribe(pub Addr<PartitionMiningActor>);
 /// Send the most recent mining step to all the `PartitionMiningActors`
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
-pub struct BroadcastMiningSeed(pub Seed);
+pub struct BroadcastMiningSeed {
+    pub seed: Seed,
+    pub checkpoints: H256List,
+    pub global_step: u64,
+}
 
 /// Send the latest difficulty update to all the `PartitionMiningActors`
 #[derive(Message, Debug, Clone)]
@@ -78,7 +82,7 @@ impl Handler<BroadcastMiningSeed> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
-        info!("Mining: {:?}", msg.0);
+        info!("Mining: {:?}", msg.seed);
         self.subscribers.retain(|addr| addr.connected());
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());

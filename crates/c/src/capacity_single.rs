@@ -41,6 +41,10 @@ pub fn compute_entropy_chunk(
 
     // Phase 2: 2D hash packing
     let mut hash_count = chunk_size / SHA_HASH_SIZE;
+    debug_assert_ne!(
+        hash_count, 0,
+        "0 2D packing iterations - is your chunk_size < 32?"
+    );
     while hash_count < iterations as usize {
         let i = (hash_count % (chunk_size / SHA_HASH_SIZE)) * SHA_HASH_SIZE;
         let mut hasher = sha::Sha256::new();

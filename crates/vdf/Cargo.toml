@@ -1,0 +1,27 @@
+[package]
+name = "irys-vdf"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+assert_matches = "1.5.0"
+irys-types.workspace = true
+irys-config.workspace = true
+irys-testing-utils.workspace = true
+
+rand = "0.8.5"
+rand_chacha = "0.3.1"
+sha2 = "0.10.8"
+env_logger = "0.11.5"
+rayon = "1.8.0"
+
+tokio.workspace = true
+eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tempfile.workspace = true
+openssl.workspace = true
+
+[lints]
+workspace = true

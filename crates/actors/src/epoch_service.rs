@@ -796,7 +796,7 @@ mod tests {
         // Simulate a subsequent epoch block that adds multiple ledger slots
         let mut new_epoch_block = IrysBlockHeader::new();
         new_epoch_block.height = num_blocks_in_epoch * 2;
-        new_epoch_block.ledgers[Ledger::Submit as usize].max_chunk_offset =
+        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset =
             (num_chunks_in_partition as f64 * 2.5) as u64;
         new_epoch_block.ledgers[Ledger::Publish as usize].max_chunk_offset =
             (num_chunks_in_partition as f64 * 0.75) as u64;

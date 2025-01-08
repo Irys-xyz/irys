@@ -1,6 +1,6 @@
 use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    IrysSignature, Node, Proof, Signature, H256, IRYS_CHAIN_ID,
+    IrysSignature, Node, Proof, Signature, TxIngressProof, H256, IRYS_CHAIN_ID,
 };
 use alloy_primitives::{keccak256, FixedBytes};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -74,6 +74,9 @@ pub struct IrysTransactionHeader {
     /// Funds the storage of the transaction for the next 200+ years
     #[serde(default, with = "optional_string_u64")]
     pub perm_fee: Option<u64>,
+
+    /// Signed ingress proofs used to promote this transaction to the Publish ledger
+    pub ingress_proofs: Option<TxIngressProof>,
 }
 
 impl IrysTransactionHeader {
@@ -149,6 +152,7 @@ impl Default for IrysTransactionHeader {
             version: 0,
             chain_id: IRYS_CHAIN_ID,
             signature: Signature::test_signature().into(),
+            ingress_proofs: None,
         }
     }
 }
@@ -187,6 +191,7 @@ mod tests {
             bundle_format: None,
             chain_id: IRYS_CHAIN_ID,
             version: 0,
+            ingress_proofs: None,
             signature: Signature::test_signature().into(),
         };
 
@@ -224,6 +229,7 @@ mod tests {
             chain_id: IRYS_CHAIN_ID,
             bundle_format: None,
             version: 0,
+            ingress_proofs: None,
             signature: Default::default(),
         };
 

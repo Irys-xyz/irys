@@ -11,7 +11,8 @@ use std::{
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash, resolve_proofs, u64_stringify, Arbitrary, Base64, Compact,
-    DataRootLeave, H256List, IrysSignature, IrysTransactionHeader, Proof, Signature, H256, U256,
+    DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader, Proof,
+    Signature, H256, U256,
 };
 
 use alloy_primitives::{keccak256, Address, FixedBytes, B256};
@@ -148,6 +149,7 @@ impl IrysBlockHeader {
                     txids,
                     max_chunk_offset: 0,
                     expires: None,
+                    proofs: None,
                 },
                 // Term Submit Ledger
                 TransactionLedger {
@@ -155,6 +157,7 @@ impl IrysBlockHeader {
                     txids: H256List::new(),
                     max_chunk_offset: 0,
                     expires: Some(1622543200),
+                    proofs: None,
                 },
             ],
             evm_block_hash: B256::ZERO,
@@ -304,12 +307,17 @@ pub struct TransactionLedger {
     pub txids: H256List,
     #[serde(default, with = "u64_stringify")]
     pub max_chunk_offset: u64,
+    /// This ledger expires after how many epochs
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expires: Option<u64>,
+    /// When transactions are promoted they must include their ingress proofs
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proofs: Option<IngressProofsList>,
 }
 
 impl TransactionLedger {
     /// Computes the tx_root and tx_paths. The TX Root is composed of taking the data_roots of each of the storage transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
-    pub fn merklize_tx_root(data_txs: &Vec<IrysTransactionHeader>) -> (H256, Vec<Proof>) {
+    pub fn merklize_tx_root(data_txs: &[IrysTransactionHeader]) -> (H256, Vec<Proof>) {
         if data_txs.is_empty() {
             return (H256::zero(), vec![]);
         }
@@ -386,6 +394,7 @@ mod tests {
             ledgers: vec![TransactionLedger {
                 tx_root: H256::zero(),
                 txids,
+                proofs: None,
                 max_chunk_offset: 100,
                 expires: Some(1622543200),
             }],
@@ -472,6 +481,7 @@ mod tests {
                 txids,
                 max_chunk_offset: 100,
                 expires: Some(1622543200),
+                proofs: None,
             }],
             evm_block_hash: B256::ZERO,
             vdf_limiter_info: VDFLimiterInfo::default(),

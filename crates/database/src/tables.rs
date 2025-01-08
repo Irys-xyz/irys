@@ -104,6 +104,7 @@ tables! {
     /// Table mapping a chunk path hash to a cached chunk (with data)
     table CachedChunks<Key =ChunkPathHash , Value = CachedChunk>;
 
+    /// Indexes Ingress proofs by their data_root
     table IngressProofs<Key = DataRoot, Value = IngressProof>;
 
     /// Maps a data root to the partition hashes that store it. Primarily used for chunk ingress.

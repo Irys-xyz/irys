@@ -1,13 +1,20 @@
 use crate::{block_index::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard};
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
-use irys_types::{storage_config::StorageConfig, validate_path, Address, IrysBlockHeader, PoaData};
+use irys_types::{
+    storage_config::StorageConfig, validate_path, Address, IrysBlockHeader, PoaData, VDFStepsConfig,
+};
+use irys_vdf::checkpoints_are_valid;
 use openssl::sha;
 
 /// Full pre-validation steps for a block
 pub fn block_is_valid(
     block: &IrysBlockHeader,
-    prev_block_header: Option<IrysBlockHeader>,
+    block_index_guard: &BlockIndexReadGuard,
+    partitions_guard: &PartitionAssignmentsReadGuard,
+    storage_config: &StorageConfig,
+    vdf_config: &VDFStepsConfig,
+    miner_address: &Address,
 ) -> eyre::Result<()> {
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
         return Err(eyre::eyre!(
@@ -17,24 +24,17 @@ pub fn block_is_valid(
 
     //TODO: check block_hash
 
-    //TODO: check vdf steps
+    // check vdf steps
+    checkpoints_are_valid(&block.vdf_limiter_info, &vdf_config)?;
 
-    // check PoA recall range
-
-    if let Some(prev_block) = prev_block_header {
-        if block.previous_block_hash != prev_block.block_hash {
-            return Err(eyre::eyre!(
-                "Invalid block: previous blocks indep_hash is not the parent block"
-            ));
-        }
-
-        // check retarget
-
-        // check difficulty
-
-        //
-    } // if there is no previous block error ?
-
+    // check PoA
+    poa_is_valid(
+        &block.poa,
+        &block_index_guard,
+        &partitions_guard,
+        storage_config,
+        miner_address,
+    )?;
     Ok(())
 }
 
@@ -44,7 +44,7 @@ pub fn poa_is_valid(
     block_index_guard: &BlockIndexReadGuard,
     partitions_guard: &PartitionAssignmentsReadGuard,
     config: &StorageConfig,
-    mining_address: &Address,
+    miner_address: &Address,
 ) -> eyre::Result<()> {
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_num)) =
@@ -80,7 +80,6 @@ pub fn poa_is_valid(
             block_chunk_offset * (config.chunk_size as u128),
         )?;
 
-        // TODO: check if bounds are byte or chunk relative
         if !(tx_path_result.left_bound..=tx_path_result.right_bound)
             .contains(&(block_chunk_offset * (config.chunk_size as u128)))
         {
@@ -103,7 +102,7 @@ pub fn poa_is_valid(
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
-            *mining_address,
+            miner_address.clone(),
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
@@ -114,17 +113,16 @@ pub fn poa_is_valid(
         let mut poa_chunk: Vec<u8> = poa.chunk.clone().into();
         xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
 
-        // TODO: check if bounds are byte or chunk relative, if are chunk how I remove last chunk padding ?
         // Because all chunks are packed as config.chunk_size, if the proof chunk is
         // smaller we need to trim off the excess padding introduced by packing ?
-        let (poa_chunk_padd_trimmed, _) = poa_chunk.split_at(
+        let (poa_chunk_pad_trimmed, _) = poa_chunk.split_at(
             (config
                 .chunk_size
                 .min((data_path_result.right_bound - data_path_result.left_bound) as u64))
                 as usize,
         );
 
-        let poa_chunk_hash = sha::sha256(poa_chunk_padd_trimmed);
+        let poa_chunk_hash = sha::sha256(&poa_chunk_pad_trimmed);
 
         if poa_chunk_hash != data_path_result.leaf_hash {
             return Err(eyre::eyre!("PoA chunk hash mismatch"));
@@ -132,7 +130,7 @@ pub fn poa_is_valid(
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
-            *mining_address,
+            miner_address.clone(),
             poa.partition_chunk_offset,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
@@ -165,8 +163,8 @@ mod tests {
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
-        irys::IrysSigner, Address, Base64, H256List, IrysTransaction, IrysTransactionHeader,
-        Signature, TransactionLedger, H256, U256,
+        irys::IrysSigner, Address, Arbitrary, Base64, H256List, IrysSignature, IrysTransaction,
+        IrysTransactionHeader, Signature, TransactionLedger, H256, PACKING_SHA_1_5_S, U256,
     };
 
     use std::sync::{Arc, RwLock};
@@ -190,7 +188,7 @@ mod tests {
         let chunk_size: usize = 32;
         // Create a bunch of TX chunks
         let data_chunks = vec![
-            vec![[0; 32], [1; 32], [2; 32]], // tx0 TODO: test last not complete chunk
+            vec![[0; 32], [1; 32], [2; 32]], // tx0 
             vec![[3; 32], [4; 32], [5; 32]], // tx1
             vec![[6; 32], [7; 32], [8; 32]], // tx2
         ];
@@ -383,7 +381,7 @@ mod tests {
         // Create a block from the tx
         let irys_block = IrysBlockHeader {
             height,
-            reward_address: Address::ZERO,
+            reward_address: miner_address.clone(),
             poa: poa.clone(),
             block_hash: H256::zero(),
             previous_block_hash: H256::zero(),
@@ -398,6 +396,7 @@ mod tests {
                     txids: H256List(Vec::new()),
                     max_chunk_offset: 0,
                     expires: None,
+                    proofs: None,
                 },
                 // Term Submit Ledger
                 TransactionLedger {
@@ -405,6 +404,7 @@ mod tests {
                     txids: H256List(data_tx_ids.clone()),
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
+                    proofs: None,
                 },
             ],
             ..IrysBlockHeader::default()

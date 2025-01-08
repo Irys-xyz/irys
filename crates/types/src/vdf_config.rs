@@ -6,6 +6,7 @@ pub struct VDFStepsConfig {
     pub num_checkpoints_in_vdf_step: usize,
     pub nonce_limiter_reset_frequency: usize,
     pub vdf_difficulty: u64,
+    pub vdf_parallel_verification_thread_limit: usize,
 }
 
 impl Default for VDFStepsConfig {
@@ -18,6 +19,7 @@ impl Default for VDFStepsConfig {
             } else {
                 VDF_SHA_1S
             },
+            vdf_parallel_verification_thread_limit: VDF_PARALLEL_VERIFICATION_THREAD_LIMIT,
         }
     }
 }

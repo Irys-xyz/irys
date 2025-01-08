@@ -2,7 +2,7 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, ArbiterService};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
-    block_index::{BlockIndexActor, GetBlockIndexGuardMessage},
+    block_index::{BlockIndexActor, BlockIndexReadGuard, GetBlockIndexGuardMessage},
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
     block_tree::BlockTreeActor,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
@@ -14,6 +14,7 @@ use irys_actors::{
     mempool::MempoolActor,
     mining::PartitionMiningActor,
     packing::{wait_for_packing, PackingActor, PackingRequest},
+    vdf::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
     ActorAddresses,
 };
 use irys_api_server::{run_server, ApiState};
@@ -26,8 +27,11 @@ use irys_storage::{
     initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
-    vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256, U256,
+    app_state::DatabaseProvider,
+    calculate_initial_difficulty,
+    irys::IrysSigner,
+    vdf_config::{self, VDFStepsConfig},
+    DifficultyAdjustmentConfig, StorageConfig, H256, U256,
 };
 use reth::{
     builder::FullNode,
@@ -92,6 +96,7 @@ pub struct IrysNodeCtx {
     pub db: DatabaseProvider,
     pub config: Arc<IrysNodeConfig>,
     pub chunk_provider: ChunkProvider,
+    pub block_index_guard: BlockIndexReadGuard,
 }
 
 pub async fn start_irys_node(
@@ -154,6 +159,7 @@ pub async fn start_irys_node(
                 // the RethNodeHandle doesn't *need* to be Arc, but it will reduce the copy cost
                 let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
                 let db = DatabaseProvider(reth_node.provider.database.db.clone());
+                let vdf_config = VDFStepsConfig::default();
 
                 // Initialize the epoch_service actor to handle partition ledger assignments
                 let config = EpochServiceConfig {
@@ -261,8 +267,13 @@ pub async fn start_irys_node(
                     mempool: mempool_actor_addr.clone(),
                     storage_config: storage_config.clone(),
                     db: db.clone(),
+                    vdf_config: vdf_config.clone(),
                 };
                 let block_discovery_addr = block_discovery_actor.start();
+
+                let vdf_service = VdfService::from_registry();
+                let vdf_steps_guard: VdfStepsReadGuard =
+                    vdf_service.send(GetVdfStateMessage).await.unwrap();
 
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
@@ -274,7 +285,8 @@ pub async fn start_irys_node(
                     reth_node.clone(),
                     storage_config.clone(),
                     difficulty_adjustment_config.clone(),
-                    VDFStepsConfig::default(),
+                    vdf_config.clone(),
+                    vdf_steps_guard.clone(),
                 );
                 let block_producer_addr = block_producer_actor.start();
                 block_tree.do_send(RegisterBlockProducerMessage(block_producer_addr.clone()));
@@ -321,12 +333,20 @@ pub async fn start_irys_node(
                 broadcast_mining_service.do_send(BroadcastDifficultyUpdate(arc_genesis.clone()));
 
                 let part_actors_clone = part_actors.clone();
-                let _vdf_thread_handler = std::thread::spawn(move || {
+
+                info!(
+                    "Starting VDF thread seed {:?} reset_seed {:?}",
+                    arc_genesis.vdf_limiter_info.output, arc_genesis.vdf_limiter_info.seed
+                );
+
+                let vdf_thread_handler = std::thread::spawn(move || {
                     run_vdf(
-                        VDFStepsConfig::default(),
-                        H256::random(),
+                        vdf_config.clone(),
+                        arc_genesis.vdf_limiter_info.output,
+                        arc_genesis.vdf_limiter_info.seed,
                         new_seed_rx,
                         broadcast_mining_service.clone(),
+                        vdf_service.clone(),
                     )
                 });
 
@@ -348,6 +368,7 @@ pub async fn start_irys_node(
                     db: db.clone(),
                     config: arc_config.clone(),
                     chunk_provider: chunk_provider.clone(),
+                    block_index_guard: block_index_guard.clone(),
                 });
 
                 run_server(ApiState {

@@ -30,11 +30,15 @@ impl IrysSigner {
         }
     }
 
-    pub fn random_signer_with_chunk_size(chunk_size: usize) -> Self {
+    pub fn random_signer_with_chunk_size<T>(chunk_size: T) -> Self
+    where
+        T: TryInto<usize>,
+        <T as TryInto<usize>>::Error: std::fmt::Debug,
+    {
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
             chain_id: IRYS_CHAIN_ID,
-            chunk_size,
+            chunk_size: chunk_size.try_into().unwrap(),
         }
     }
 

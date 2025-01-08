@@ -171,14 +171,7 @@ where
         let _ = node_ctx
             .actor_addresses
             .block_producer
-            .send(SolutionFoundMessage(SolutionContext {
-                partition_hash: H256::random(),
-                chunk_offset: 0,
-                mining_address: Address::random(),
-                tx_path: None,
-                data_path: None,
-                chunk: Vec::new(),
-            }))
+            .send(SolutionFoundMessage(SolutionContext::default()))
             .await?
             .unwrap();
     }

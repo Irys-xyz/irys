@@ -212,6 +212,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
                 txids: H256List(Vec::new()),
                 max_chunk_offset: 0,
                 expires: None,
+                proofs: None,
             },
             // Term Submit Ledger
             TransactionLedger {
@@ -219,6 +220,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
                 txids: H256List(data_tx_ids.clone()),
                 max_chunk_offset: 0,
                 expires: Some(1622543200),
+                proofs: None,
             },
         ],
         evm_block_hash: B256::ZERO,
@@ -242,7 +244,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let chunk_migration_addr = chunk_migration_actor.start();
     let block_finalized_message = BlockFinalizedMessage {
         block_header: block.clone(),
-        txs: txs.clone(),
+        all_txs: txs.clone(),
     };
     let _res = chunk_migration_addr.send(block_finalized_message).await?;
 

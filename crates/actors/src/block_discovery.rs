@@ -1,13 +1,15 @@
 use crate::{
-    block_index::BlockIndexReadGuard, block_tree::BlockTreeActor, block_validation::poa_is_valid,
+    block_index::BlockIndexReadGuard, block_tree::BlockTreeActor, block_validation::block_is_valid,
     epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor,
 };
 use actix::prelude::*;
 use irys_database::{tx_header_by_txid, Ledger};
-use irys_types::{DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageConfig};
+use irys_types::{
+    DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageConfig, VDFStepsConfig,
+};
 use reth_db::Database;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{error, info};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
@@ -24,6 +26,8 @@ pub struct BlockDiscoveryActor {
     pub storage_config: StorageConfig,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
+    /// VDF configuration for the node
+    pub vdf_config: VDFStepsConfig,
 }
 
 /// When a block is discovered, either produced locally or received from
@@ -53,6 +57,7 @@ impl BlockDiscoveryActor {
         mempool: Addr<MempoolActor>,
         storage_config: StorageConfig,
         db: DatabaseProvider,
+        vdf_config: VDFStepsConfig,
     ) -> Self {
         Self {
             block_index_guard,
@@ -61,6 +66,7 @@ impl BlockDiscoveryActor {
             mempool,
             storage_config,
             db,
+            vdf_config,
         }
     }
 }
@@ -71,7 +77,13 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         // Validate discovered block
         let new_block_header = msg.0;
 
+        //====================================
+        // Submit ledger TX validation
+        //------------------------------------
         // Get all the submit ledger transactions for the new block, error if not found
+        // this is how we validate that the TXIDs in the Submit Ledger are real transactions.
+        // If they are in our mempool and validated we know they are real, if not we have
+        // to retrieve and validate them from the block producer.
         // TODO: in the future we'll retrieve the missing transactions from the block
         // producer and validate them.
         let submit_txs = match new_block_header.ledgers[Ledger::Submit]
@@ -88,32 +100,90 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         {
             Ok(txs) => txs,
             Err(e) => {
-                error!("Failed to collect tx headers: {}", e);
+                error!("Failed to collect submit tx headers: {}", e);
                 return;
             }
         };
 
-        let poa = new_block_header.poa.clone();
+        //====================================
+        // Publish ledger TX Validation
+        //------------------------------------
+        // 1. Validate the proof
+        // 2. Validate the transaction
+        // 3. Update the local tx headers index so include the ingress- proof.
+        //    This keeps the transaction from getting re-promoted each block.
+        //    (this last step performed in mempool after the block is confirmed)
+        let publish_txs = match new_block_header.ledgers[Ledger::Publish]
+            .txids
+            .iter()
+            .map(|txid| {
+                self.db
+                    .view_eyre(|tx| tx_header_by_txid(tx, txid))
+                    .and_then(|opt| {
+                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(txs) => txs,
+            Err(e) => {
+                error!("Failed to collect publish tx headers: {}", e);
+                return;
+            }
+        };
+
+        if publish_txs.len() > 0 {
+            let publish_proofs = match &new_block_header.ledgers[Ledger::Publish].proofs {
+                Some(proofs) => proofs,
+                None => {
+                    error!("Ingress proofs missing");
+                    return;
+                }
+            };
+
+            // Pre-Validate the ingress-proof by verifying the signature
+            for (i, tx_header) in publish_txs.iter().enumerate() {
+                if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
+                    error!("Invalid ingress proof signature: {}", e);
+                    return;
+                }
+            }
+        }
+
+        //====================================
+        // Block header pre-validation
+        //------------------------------------
         let block_index_guard = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = self.block_tree.clone();
         let storage_config = &self.storage_config;
 
-        match poa_is_valid(
-            &poa,
+        info!(
+            "Validating block height: {} step: {} output: {} prev output: {}",
+            new_block_header.height,
+            new_block_header.vdf_limiter_info.global_step_number,
+            new_block_header.vdf_limiter_info.output,
+            new_block_header.vdf_limiter_info.prev_output
+        );
+        match block_is_valid(
+            &new_block_header,
             &block_index_guard,
             &partitions_guard,
             storage_config,
-            &new_block_header.reward_address,
+            &self.vdf_config,
+            &new_block_header.miner_address,
         ) {
             Ok(_) => {
+                info!("Block is valid, sending to block tree");
+                let mut all_txs = submit_txs.clone();
+                all_txs.extend_from_slice(&publish_txs);
                 block_tree_addr.do_send(BlockPreValidatedMessage(
                     new_block_header,
-                    Arc::new(submit_txs),
+                    Arc::new(all_txs),
                 ));
             }
             Err(err) => {
-                error!("PoA error {:?}", err);
+                error!("Block validation error {:?}", err);
             }
         }
     }

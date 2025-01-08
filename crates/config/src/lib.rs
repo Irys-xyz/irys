@@ -1,5 +1,9 @@
-//! Crate dedicated to the `IrysNodeConfig` to avoid depdendency cycles
-use std::{env, fs, path::PathBuf};
+//! Crate dedicated to the IrysNodeConfig to avoid depdendency cycles
+use std::{
+    env, fs,
+    path::{absolute, PathBuf},
+    str::FromStr as _,
+};
 
 use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;

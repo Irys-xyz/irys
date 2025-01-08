@@ -1,4 +1,4 @@
-use crate::block_producer::BlockConfirmedMessage;
+use crate::{calculate_chunks_added, BlockConfirmedMessage};
 use actix::prelude::*;
 use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
@@ -85,51 +85,65 @@ impl BlockIndexActor {
         }
     }
 
-    /// Adds a finalized block to the index
+    /// Adds a finalized block and its associated transactions to the block index.
+    ///
+    /// # Safety Considerations
+    /// This function expects `all_txs` to contain transaction headers for every transaction ID
+    /// in the block's submit ledger and publish Ledger. This invariant is normally guaranteed
+    /// by the block validation process, which verifies all transactions before block confirmation.
+    /// However, if this function is called with incomplete or unvalidated transaction data,
+    /// it may result in:
+    /// - Index out of bounds errors when accessing `all_txs`
+    /// - Data corruption in the block index
+    /// - Invalid chunk calculations
+    ///
+    /// # Arguments
+    /// * `block` - The finalized block header to be added
+    /// * `all_txs` - Complete list of transaction headers, where the first `n` entries
+    ///               correspond to the submit ledger's transaction IDs
     fn add_finalized_block(
         &mut self,
-        irys_block_header: &Arc<IrysBlockHeader>,
-        data_txs: &Arc<Vec<IrysTransactionHeader>>,
+        block: &Arc<IrysBlockHeader>,
+        all_txs: &Arc<Vec<IrysTransactionHeader>>,
     ) {
         let chunk_size = self.storage_config.chunk_size;
 
-        // Calculate total bytes needed, rounding each tx up to nearest chunk_size
-        // Example: data_size 300KB with 256KiB chunks:
-        // (300KB + 256KB - 1) / 256KB = 2 chunks -> 2 * 256KB = 512KB total
-        let bytes_added = data_txs
-            .iter()
-            .map(|tx| tx.data_size.div_ceil(chunk_size) * chunk_size)
-            .sum::<u64>();
+        // Extract just the transactions referenced in the submit ledger
+        let submit_tx_count = block.ledgers[Ledger::Submit].txids.len();
+        let submit_txs = &all_txs[..submit_tx_count];
 
-        let chunks_added = bytes_added / chunk_size;
+        // Extract just the transactions referenced in the publish ledger
+        let publish_txs = &all_txs[submit_tx_count..];
+
+        // TODO: abstract this in the future to work for an arbitrary number of ledgers
+        let sub_chunks_added = calculate_chunks_added(submit_txs, chunk_size);
+        let pub_chunks_added = calculate_chunks_added(publish_txs, chunk_size);
 
         let mut index = self.block_index.write().unwrap();
 
         // Get previous ledger sizes or default to 0 for genesis
         let (max_publish_chunks, max_submit_chunks) =
-            if index.num_blocks() == 0 && irys_block_header.height == 0 {
-                (0, chunks_added)
+            if index.num_blocks() == 0 && block.height == 0 {
+                (0, sub_chunks_added)
             } else {
-                let prev_block = index
-                    .get_item((irys_block_header.height - 1) as usize)
-                    .unwrap();
+                let prev_block = index.get_item((block.height - 1) as usize).unwrap();
                 (
-                    prev_block.ledgers[Ledger::Publish as usize].max_chunk_offset,
-                    prev_block.ledgers[Ledger::Submit as usize].max_chunk_offset + chunks_added,
+                    prev_block.ledgers[Ledger::Publish].max_chunk_offset + pub_chunks_added,
+                    prev_block.ledgers[Ledger::Submit].max_chunk_offset + sub_chunks_added,
                 )
             };
 
         let block_index_item = BlockIndexItem {
-            block_hash: irys_block_header.block_hash,
+            block_hash: block.block_hash,
             num_ledgers: 2,
             ledgers: vec![
                 LedgerIndexItem {
                     max_chunk_offset: max_publish_chunks,
-                    tx_root: irys_block_header.ledgers[Ledger::Publish].tx_root,
+                    tx_root: block.ledgers[Ledger::Publish].tx_root,
                 },
                 LedgerIndexItem {
                     max_chunk_offset: max_submit_chunks,
-                    tx_root: irys_block_header.ledgers[Ledger::Submit].tx_root,
+                    tx_root: block.ledgers[Ledger::Submit].tx_root,
                 },
             ],
         };
@@ -138,10 +152,10 @@ impl BlockIndexActor {
 
         // Block log tracking
         self.block_log.push(BlockLogEntry {
-            block_hash: irys_block_header.block_hash,
-            height: irys_block_header.height,
-            timestamp: irys_block_header.timestamp,
-            difficulty: irys_block_header.diff,
+            block_hash: block.block_hash,
+            height: block.height,
+            timestamp: block.timestamp,
+            difficulty: block.diff,
         });
 
         // Remove oldest entries if we exceed 20
@@ -176,10 +190,10 @@ impl Handler<BlockConfirmedMessage> for BlockIndexActor {
     fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // Access the block header through msg.0
         let irys_block_header = &msg.0;
-        let data_txs = &msg.1;
+        let all_txs = &msg.1;
 
         // Do something with the block
-        self.add_finalized_block(irys_block_header, data_txs);
+        self.add_finalized_block(&irys_block_header, &all_txs);
     }
 }
 

@@ -204,7 +204,9 @@ pub fn assign_data_root<T: DbTxMut + DbTx>(
 ) -> eyre::Result<()> {
     let partition_hashes = if let Some(mut phs) = get_partition_hashes_by_data_root(tx, data_root)?
     {
-        phs.0.push(partition_hash);
+        if !phs.0.contains(&partition_hash) {
+            phs.0.push(partition_hash)
+        };
         phs
     } else {
         PartitionHashes(vec![partition_hash])

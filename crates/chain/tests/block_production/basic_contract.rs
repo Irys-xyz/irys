@@ -1,13 +1,17 @@
 use std::{future::Future, time::Duration};
 
 use crate::block_production::capacity_chunk_solution;
+use actix::ArbiterService;
 use alloy_core::primitives::U256;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use futures::future::select;
-use irys_actors::block_producer::SolutionFoundMessage;
+use irys_actors::{
+    block_producer::SolutionFoundMessage,
+    vdf::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
+};
 use irys_chain::{chain::start_for_testing, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
