@@ -206,8 +206,6 @@ fn get_block_range(
         0
     };
 
-    
-
     LedgerChunkRange(ii(
         start_chunk_offset,
         block.ledgers[ledger].max_chunk_offset,

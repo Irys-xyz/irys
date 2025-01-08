@@ -157,11 +157,7 @@ mod tests {
 
         let state = addr.send(GetVdfStateMessage).await.unwrap();
 
-        let steps = state
-            .read()
-            .seeds
-            .iter().cloned()
-            .collect::<Vec<_>>();
+        let steps = state.read().seeds.iter().cloned().collect::<Vec<_>>();
 
         // Should only contain last 3 messages
         assert_eq!(steps.len(), 4);

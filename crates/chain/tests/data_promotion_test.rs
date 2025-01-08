@@ -75,9 +75,11 @@ async fn data_promotion_test() {
     .await;
 
     // Create a bunch of TX chunks
-    let data_chunks = [vec![[10; 32], [20; 32], [30; 32]], // Fill most of one Partition
+    let data_chunks = [
+        vec![[10; 32], [20; 32], [30; 32]], // Fill most of one Partition
         vec![[40; 32], [50; 32], [50; 32]], // Overlap the next Partition
-        vec![[70; 32], [80; 32], [90; 32]]];
+        vec![[70; 32], [80; 32], [90; 32]],
+    ];
 
     // Create a bunch of signed TX from the chunks
     // Loop though all the data_chunks and create wrapper tx for them

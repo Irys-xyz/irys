@@ -6,11 +6,9 @@ use std::{
 };
 
 use {
-    irys_actors::block_index::BlockIndexActor,
-    irys_actors::block_producer::BlockConfirmedMessage,
+    irys_actors::block_index::BlockIndexActor, irys_actors::block_producer::BlockConfirmedMessage,
     irys_actors::mempool::MempoolActor,
 };
-
 
 use actix::prelude::*;
 use irys_actors::{
@@ -27,9 +25,8 @@ use irys_database::{
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    app_state::DatabaseProvider, partition::*, Address, Base64, H256List,
-    IrysBlockHeader, PoaData, Signature,
-    StorageConfig, TransactionLedger, VDFLimiterInfo, H256, U256,
+    app_state::DatabaseProvider, partition::*, Address, Base64, H256List, IrysBlockHeader, PoaData,
+    Signature, StorageConfig, TransactionLedger, VDFLimiterInfo, H256, U256,
 };
 use reth::{revm::primitives::B256, tasks::TaskManager};
 use reth_db::transaction::DbTx;

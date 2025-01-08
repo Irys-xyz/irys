@@ -27,11 +27,8 @@ use irys_storage::{
     initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
-    app_state::DatabaseProvider,
-    calculate_initial_difficulty,
-    irys::IrysSigner,
-    vdf_config::{VDFStepsConfig},
-    DifficultyAdjustmentConfig, StorageConfig, H256, U256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
+    vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256, U256,
 };
 use reth::{
     builder::FullNode,

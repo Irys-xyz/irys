@@ -521,7 +521,7 @@ pub fn calculate_chunks_added(txs: &[IrysTransactionHeader], chunk_size: u64) ->
     let bytes_added = txs.iter().fold(0, |acc, tx| {
         acc + tx.data_size.div_ceil(chunk_size) * chunk_size
     });
-    
+
     bytes_added / chunk_size
 }
 /// When a block is confirmed, this message broadcasts the block header and the

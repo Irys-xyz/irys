@@ -5,10 +5,7 @@ use alloy_core::primitives::{Bytes, TxKind, B256, U256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
-use irys_actors::{
-    block_producer::SolutionFoundMessage,
-    mempool::TxIngressMessage,
-};
+use irys_actors::{block_producer::SolutionFoundMessage, mempool::TxIngressMessage};
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_packing::capacity_single::compute_entropy_chunk;
