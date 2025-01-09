@@ -1,4 +1,7 @@
-use crate::{block_index::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard, vdf::VdfStepsReadGuard};
+use crate::{
+    block_index::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
+    vdf::VdfStepsReadGuard,
+};
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
@@ -16,7 +19,7 @@ pub fn block_is_valid(
     partitions_guard: &PartitionAssignmentsReadGuard,
     storage_config: &StorageConfig,
     vdf_config: &VDFStepsConfig,
-    steps_guard: &VdfStepsReadGuard,            
+    steps_guard: &VdfStepsReadGuard,
     miner_address: &Address,
 ) -> eyre::Result<()> {
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
@@ -26,7 +29,7 @@ pub fn block_is_valid(
     }
 
     //TODO: check block_hash
-    
+
     recall_recall_range_is_valid(block, storage_config, steps_guard)?;
 
     checkpoints_are_valid(&block.vdf_limiter_info, &vdf_config)?;
@@ -44,14 +47,29 @@ pub fn block_is_valid(
 /// Check recall range is valid
 pub fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
-    config: &StorageConfig,    
-    steps_guard: &VdfStepsReadGuard,                
+    config: &StorageConfig,
+    steps_guard: &VdfStepsReadGuard,
 ) -> eyre::Result<()> {
-    let num_recall_ranges_in_partition = config.num_chunks_in_partition / config.num_chunks_in_recall_range;
-    let reset_step_number = ((block.vdf_limiter_info.global_step_number  - 1 ) / num_recall_ranges_in_partition) * num_recall_ranges_in_partition + 1;
-    info!("Validating recall ranges steps from: {} to: {}", reset_step_number, block.vdf_limiter_info.global_step_number);    
-    let steps = steps_guard.read().get_steps(ii(reset_step_number, block.vdf_limiter_info.global_step_number))?;
-    irys_efficient_sampling::recall_range_is_valid((block.poa.partition_chunk_offset as u64/config.num_chunks_in_recall_range) as usize, num_recall_ranges_in_partition as usize, &steps, &block.poa.partition_hash)
+    let num_recall_ranges_in_partition =
+        config.num_chunks_in_partition / config.num_chunks_in_recall_range;
+    let reset_step_number = ((block.vdf_limiter_info.global_step_number - 1)
+        / num_recall_ranges_in_partition)
+        * num_recall_ranges_in_partition
+        + 1;
+    info!(
+        "Validating recall ranges steps from: {} to: {}",
+        reset_step_number, block.vdf_limiter_info.global_step_number
+    );
+    let steps = steps_guard.read().get_steps(ii(
+        reset_step_number,
+        block.vdf_limiter_info.global_step_number,
+    ))?;
+    irys_efficient_sampling::recall_range_is_valid(
+        (block.poa.partition_chunk_offset as u64 / config.num_chunks_in_recall_range) as usize,
+        num_recall_ranges_in_partition as usize,
+        &steps,
+        &block.poa.partition_hash,
+    )
 }
 
 /// Returns Ok if the provided PoA is valid, Err otherwise
@@ -386,7 +404,8 @@ mod tests {
             data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
             chunk: Base64(poa_chunk.clone()),
             ledger_num: Some(1),
-            partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u32,
+            partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
+                as u32,
             recall_chunk_index: 0,
             partition_hash,
         };

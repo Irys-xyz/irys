@@ -56,7 +56,6 @@ pub fn capacity_chunk_solution(miner_addr: Address) -> SolutionContext {
     }
 }
 
-
 #[tokio::test]
 async fn test_blockprod() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
@@ -112,10 +111,10 @@ async fn test_blockprod() -> eyre::Result<()> {
     }
 
     let poa_solution = capacity_chunk_solution(node.config.mining_signer.address());
-    
+
     // wait for vdf step being generated
     sleep(Duration::from_secs(2)).await;
-    
+
     let (block, reth_exec_env) = node
         .actor_addresses
         .block_producer

@@ -60,7 +60,7 @@ impl BlockDiscoveryActor {
         storage_config: StorageConfig,
         db: DatabaseProvider,
         vdf_config: VDFStepsConfig,
-        vdf_steps_guard: VdfStepsReadGuard,        
+        vdf_steps_guard: VdfStepsReadGuard,
     ) -> Self {
         Self {
             block_index_guard,
@@ -70,7 +70,7 @@ impl BlockDiscoveryActor {
             storage_config,
             db,
             vdf_config,
-            vdf_steps_guard
+            vdf_steps_guard,
         }
     }
 }

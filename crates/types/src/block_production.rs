@@ -25,7 +25,7 @@ pub struct SolutionContext {
     pub chunk: Vec<u8>,
     pub vdf_step: u64,
     pub checkpoints: H256List,
-    pub seed: Seed,    
+    pub seed: Seed,
 }
 #[derive(Debug, Clone)]
 pub struct Partition {

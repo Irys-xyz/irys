@@ -5,12 +5,12 @@ use crate::broadcast_mining_service::{
 use crate::vdf::VdfStepsReadGuard;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
+use irys_efficient_sampling::Ranges;
 use irys_storage::{ie, ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{storage, Address, H256List, PartitionChunkOffset, SimpleRNG};
-use irys_efficient_sampling::Ranges;
 use openssl::sha;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -24,7 +24,7 @@ pub struct PartitionMiningActor {
     should_mine: bool,
     difficulty: U256,
     ranges: Ranges,
-    steps_guard: VdfStepsReadGuard,    
+    steps_guard: VdfStepsReadGuard,
 }
 
 impl PartitionMiningActor {
@@ -40,7 +40,12 @@ impl PartitionMiningActor {
             mining_address,
             _database_provider,
             block_producer_actor: block_producer_addr,
-            ranges: Ranges::new((&storage_module.storage_config.num_chunks_in_partition/&storage_module.storage_config.num_chunks_in_recall_range).try_into().expect("Recall ranges number exceeds usize representation")),
+            ranges: Ranges::new(
+                (&storage_module.storage_config.num_chunks_in_partition
+                    / &storage_module.storage_config.num_chunks_in_recall_range)
+                    .try_into()
+                    .expect("Recall ranges number exceeds usize representation"),
+            ),
             storage_module,
             should_mine: start_mining,
             difficulty: U256::zero(),
@@ -48,7 +53,12 @@ impl PartitionMiningActor {
         }
     }
 
-    fn get_recall_range(&mut self, step: u64, seed: &H256, partition_hash: &H256) -> eyre::Result<u64> {
+    fn get_recall_range(
+        &mut self,
+        step: u64,
+        seed: &H256,
+        partition_hash: &H256,
+    ) -> eyre::Result<u64> {
         let vdf_steps = self.steps_guard.read();
         let last_step = vdf_steps.global_step;
         if last_step + 1 >= step {
@@ -56,7 +66,7 @@ impl PartitionMiningActor {
             Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         } else {
             // This code is not needed for just one node, but will be needed for multiple nodes
-            warn!("Non consecutive Step {} need to reconstruct ranges", step);            
+            warn!("Non consecutive Step {} need to reconstruct ranges", step);
             let steps = vdf_steps.get_steps(ii(last_step + 1, step - 1))?;
             self.ranges.reconstruct(&steps, partition_hash);
             Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
@@ -78,14 +88,14 @@ impl PartitionMiningActor {
         };
 
         // Pick a random recall range in the partition using efficient sampling
-        let recall_range_index = {
-            self.get_recall_range(vdf_step, &mining_seed, &partition_hash)?
-        };
+        let recall_range_index =
+            { self.get_recall_range(vdf_step, &mining_seed, &partition_hash)? };
 
         let config = &self.storage_module.storage_config;
 
         // Starting chunk index within partition
-        let start_chunk_offset = recall_range_index as u32 * config.num_chunks_in_recall_range as u32;
+        let start_chunk_offset =
+            recall_range_index as u32 * config.num_chunks_in_recall_range as u32;
 
         // info!(
         //     "Recall range index {} start chunk index {}",
@@ -114,7 +124,8 @@ impl PartitionMiningActor {
 
         for (index, (_chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
-            let partition_chunk_offset = (start_chunk_offset + index as u32) as PartitionChunkOffset;
+            let partition_chunk_offset =
+                (start_chunk_offset + index as u32) as PartitionChunkOffset;
             let (tx_path, data_path) = self
                 .storage_module
                 .read_tx_data_path(partition_chunk_offset as u64)?;
@@ -157,7 +168,7 @@ impl PartitionMiningActor {
 
                 // Once solution is sent stop mining and let all other partitions know
                 return Ok(Some(solution));
-            } 
+            }
         }
 
         Ok(None)
@@ -385,7 +396,7 @@ mod tests {
             mocked_addr.0,
             storage_module,
             true,
-            vdf_steps_guard.clone(),            
+            vdf_steps_guard.clone(),
         );
 
         let seed: Seed = Seed(H256::random());

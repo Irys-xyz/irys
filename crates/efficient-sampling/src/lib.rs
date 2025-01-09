@@ -18,16 +18,19 @@ pub struct Ranges {
     /// last recall ranges by step number
     last_recall_ranges: HashMap<u64, usize>,
     /// num recall ranges in a partition, equal to ranges vector capacity
-    num_recall_ranges_in_partition: usize,    
+    num_recall_ranges_in_partition: usize,
 }
 
 impl Ranges {
-    /// Returns recall range index for a given step number, seed and partition hash. 
-    /// if the range is already cached, it returns the cached range, otherwise it picks a new random range. 
-    pub fn get_recall_range(&mut self, step:u64, seed: &H256, partition_hash: &H256) -> usize {
+    /// Returns recall range index for a given step number, seed and partition hash.
+    /// if the range is already cached, it returns the cached range, otherwise it picks a new random range.
+    pub fn get_recall_range(&mut self, step: u64, seed: &H256, partition_hash: &H256) -> usize {
         if self.last_recall_ranges.contains_key(&step) {
             let range = *self.last_recall_ranges.get(&step).unwrap();
-            debug!("Partition hash {}, Recall range for step {} is cached, range {}/{}", partition_hash, step, range, self.num_recall_ranges_in_partition);
+            debug!(
+                "Partition hash {}, Recall range for step {} is cached, range {}/{}",
+                partition_hash, step, range, self.num_recall_ranges_in_partition
+            );
             range
         } else {
             let range = self.next_recall_range(step, seed, partition_hash);
@@ -37,11 +40,13 @@ impl Ranges {
     }
 
     pub fn get_last_recall_range(self) -> Option<usize> {
-        self.last_recall_ranges.get(&self.last_step_num).map(|idx| *idx)
+        self.last_recall_ranges
+            .get(&self.last_step_num)
+            .map(|idx| *idx)
     }
 
     /// Picks next random (using seed as entropy) range idx in [0..NUM_RECALL_RANGES_IN_PARTITION-1] interval
-    pub fn next_recall_range(&mut self, step:u64, seed: &H256, partition_hash: &H256) -> usize {
+    pub fn next_recall_range(&mut self, step: u64, seed: &H256, partition_hash: &H256) -> usize {
         // non consecutive vdf_steps is handled at mining level
         if step != self.last_step_num + 1 {
             panic!("Non consecutive vdf steps are not supported, last step num {}, current step num {}", self.last_step_num, step);
@@ -75,15 +80,16 @@ impl Ranges {
         self.ranges.clear();
         for i in 0..self.num_recall_ranges_in_partition {
             self.ranges.push(i);
-        }     
+        }
         self.last_range_pos = self.num_recall_ranges_in_partition - 1;
 
-        let last_step_to_keep = if self.last_step_num >=  NUMBER_OF_KEPT_LAST_STEPS {
+        let last_step_to_keep = if self.last_step_num >= NUMBER_OF_KEPT_LAST_STEPS {
             self.last_step_num - NUMBER_OF_KEPT_LAST_STEPS
         } else {
             0
         };
-        self.last_recall_ranges.retain(|k, _| *k > last_step_to_keep);
+        self.last_recall_ranges
+            .retain(|k, _| *k > last_step_to_keep);
     }
 
     pub fn new(num_recall_ranges_in_partition: usize) -> Self {
@@ -107,16 +113,24 @@ impl Ranges {
             self.next_recall_range(step + 1 + i as u64, seed, partition_hash);
         });
     }
-
 }
 
 /// Validates recall range index for a given step number, seed and partition hash
-pub fn recall_range_is_valid(recall_range:usize, num_recall_ranges_in_partition: usize, steps: &H256List, partition_hash: &H256) -> eyre::Result<()> { 
+pub fn recall_range_is_valid(
+    recall_range: usize,
+    num_recall_ranges_in_partition: usize,
+    steps: &H256List,
+    partition_hash: &H256,
+) -> eyre::Result<()> {
     let mut ranges = Ranges::new(num_recall_ranges_in_partition);
     ranges.reconstruct(steps, partition_hash);
-    if let Some(reconstructed_range) =  ranges.get_last_recall_range() {
+    if let Some(reconstructed_range) = ranges.get_last_recall_range() {
         if reconstructed_range != recall_range {
-            return Err(eyre::eyre!("Invalid recall range index {}, expected {}", recall_range, reconstructed_range));
+            return Err(eyre::eyre!(
+                "Invalid recall range index {}, expected {}",
+                recall_range,
+                reconstructed_range
+            ));
         } else {
             return Ok(());
         }
@@ -154,16 +168,11 @@ mod tests {
 
             // get the same cached range
             let range2 = ranges.get_recall_range(i, &seed, &partition_hash);
-            assert_eq!(
-                range, range2, "Cached range should be equal"
-            );
+            assert_eq!(range, range2, "Cached range should be equal");
         }
 
         // check ranges are reinitialized after all possible ranges are retrieved
-        assert_eq!(
-            num_recall_ranges as usize,
-            ranges.last_range_pos + 1,
-        )
+        assert_eq!(num_recall_ranges as usize, ranges.last_range_pos + 1,)
     }
 
     #[test]
@@ -176,11 +185,16 @@ mod tests {
             seeds.0.push(H256::random());
         }
 
-        let mut ranges =  Ranges::new(num_recall_ranges);
+        let mut ranges = Ranges::new(num_recall_ranges);
 
         for step in 1..=num_recall_ranges {
-            let range = ranges.get_recall_range(step as u64, &seeds[step-1], &partition_hash);
-            let res = recall_range_is_valid(range, num_recall_ranges, &H256List(seeds.0[0..step].into()), &partition_hash);
+            let range = ranges.get_recall_range(step as u64, &seeds[step - 1], &partition_hash);
+            let res = recall_range_is_valid(
+                range,
+                num_recall_ranges,
+                &H256List(seeds.0[0..step].into()),
+                &partition_hash,
+            );
             assert!(res.is_ok());
         }
     }
