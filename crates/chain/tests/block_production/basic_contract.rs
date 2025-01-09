@@ -62,9 +62,15 @@ async fn test_erc20() -> eyre::Result<()> {
 
     let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.address()));
 
-    let contract =
-        future_or_mine_on_timeout(node.clone(), &mut deploy_fut, Duration::from_millis(2_000), node.vdf_steps_guard.clone(), &node.vdf_config, &node.storage_config)
-            .await??;
+    let contract = future_or_mine_on_timeout(
+        node.clone(),
+        &mut deploy_fut,
+        Duration::from_millis(2_000),
+        node.vdf_steps_guard.clone(),
+        &node.vdf_config,
+        &node.storage_config,
+    )
+    .await??;
 
     info!("Contract address is {:?}", contract.address());
     let main_balance = contract.balanceOf(main_address).call().await?._0;
@@ -108,7 +114,13 @@ pub async fn future_or_mine_on_timeout<F, T>(
 where
     F: Future<Output = T> + Unpin,
 {
-    let poa_solution = capacity_chunk_solution(node_ctx.config.mining_signer.address(), vdf_steps_guard, &vdf_config, &storage_config).await;
+    let poa_solution = capacity_chunk_solution(
+        node_ctx.config.mining_signer.address(),
+        vdf_steps_guard,
+        &vdf_config,
+        &storage_config,
+    )
+    .await;
 
     // wait for vdf step being generated
     sleep(Duration::from_secs(2)).await;

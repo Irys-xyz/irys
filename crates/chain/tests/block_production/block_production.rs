@@ -5,7 +5,9 @@ use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
-use irys_actors::{block_producer::SolutionFoundMessage, mempool::TxIngressMessage, vdf::VdfStepsReadGuard};
+use irys_actors::{
+    block_producer::SolutionFoundMessage, mempool::TxIngressMessage, vdf::VdfStepsReadGuard,
+};
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_packing::capacity_single::compute_entropy_chunk;
@@ -13,9 +15,11 @@ use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::Transac
 use irys_storage::ii;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, vdf_config::VDFStepsConfig, Address,
-    IrysTransaction, H256, IRYS_CHAIN_ID, StorageConfig, block_production::Seed, H256List,
+    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
+    vdf_config::VDFStepsConfig, Address, H256List, IrysTransaction, StorageConfig, H256,
+    IRYS_CHAIN_ID,
 };
+use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use reth_db::Database;
@@ -23,14 +27,18 @@ use reth_primitives::{
     irys_primitives::{IrysTxId, ShadowResult},
     GenesisAccount,
 };
+use sha2::{Digest, Sha256};
 use tokio::time::sleep;
-use tracing::{info, debug};
-use sha2::{Digest, Sha256};    
-use irys_vdf::{step_number_to_salt_number, vdf_sha};
+use tracing::{debug, info};
 /// Create a valid capacity PoA solution
 #[cfg(test)]
-pub async fn capacity_chunk_solution(miner_addr: Address, vdf_steps_guard: VdfStepsReadGuard, vdf_config: &VDFStepsConfig, storage_config: &StorageConfig) -> SolutionContext {
-    let max_retries = 20; 
+pub async fn capacity_chunk_solution(
+    miner_addr: Address,
+    vdf_steps_guard: VdfStepsReadGuard,
+    vdf_config: &VDFStepsConfig,
+    storage_config: &StorageConfig,
+) -> SolutionContext {
+    let max_retries = 20;
     let mut i = 1;
     let initial_step_num = vdf_steps_guard.read().global_step;
     let mut step_num: u64 = 0;
@@ -41,20 +49,19 @@ pub async fn capacity_chunk_solution(miner_addr: Address, vdf_steps_guard: VdfSt
         i += 1;
     }
 
-    let steps: H256List = 
-        match vdf_steps_guard.read().get_steps(ii(step_num - 1, step_num)) {
-            Ok(s) => s,
-            Err(err) => panic!("Not enough vdf steps {:?}, waiting...", err)
-        };
+    let steps: H256List = match vdf_steps_guard.read().get_steps(ii(step_num - 1, step_num)) {
+        Ok(s) => s,
+        Err(err) => panic!("Not enough vdf steps {:?}, waiting...", err),
+    };
 
     // calculate last step checkpoints
     let mut hasher = Sha256::new();
-    let mut salt = irys_types::U256::from(step_number_to_salt_number(&vdf_config, step_num - 1 as u64));
+    let mut salt =
+        irys_types::U256::from(step_number_to_salt_number(&vdf_config, step_num - 1 as u64));
     let mut seed = steps[0];
 
-    let mut checkpoints: Vec<H256> =
-        vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
-    
+    let mut checkpoints: Vec<H256> = vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
+
     vdf_sha(
         &mut hasher,
         &mut salt,
@@ -97,8 +104,14 @@ async fn vdf_err() -> eyre::Result<()> {
     config.base_directory = temp_dir.path().to_path_buf();
 
     let node = start_for_testing(config).await?;
-    
-    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard, &node.vdf_config, &node.storage_config).await;
+
+    let poa_solution = capacity_chunk_solution(
+        node.config.mining_signer.address(),
+        node.vdf_steps_guard,
+        &node.vdf_config,
+        &node.storage_config,
+    )
+    .await;
     let (block, _reth_exec_env) = node
         .actor_addresses
         .block_producer
@@ -162,7 +175,13 @@ async fn test_blockprod() -> eyre::Result<()> {
         // txs.push(tx);
     }
 
-    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard, &node.vdf_config, &node.storage_config).await;
+    let poa_solution = capacity_chunk_solution(
+        node.config.mining_signer.address(),
+        node.vdf_steps_guard,
+        &node.vdf_config,
+        &node.storage_config,
+    )
+    .await;
 
     // wait for vdf step being generated
     sleep(Duration::from_secs(2)).await;
@@ -262,7 +281,13 @@ async fn mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
 
     for i in 1..10 {
         info!("manually producing block {}", i);
-        let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard.clone(), &node.vdf_config, &node.storage_config).await;
+        let poa_solution = capacity_chunk_solution(
+            node.config.mining_signer.address(),
+            node.vdf_steps_guard.clone(),
+            &node.vdf_config,
+            &node.storage_config,
+        )
+        .await;
         let fut = node
             .actor_addresses
             .block_producer
@@ -299,7 +324,13 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
 
     let node = start_for_testing(config).await?;
 
-    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard, &node.vdf_config, &node.storage_config).await;
+    let poa_solution = capacity_chunk_solution(
+        node.config.mining_signer.address(),
+        node.vdf_steps_guard,
+        &node.vdf_config,
+        &node.storage_config,
+    )
+    .await;
 
     // wait for vdf step being generated
     sleep(Duration::from_secs(2)).await;
@@ -430,7 +461,13 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         // txs.push(tx);
     }
 
-    let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard, &node.vdf_config, &node.storage_config).await;
+    let poa_solution = capacity_chunk_solution(
+        node.config.mining_signer.address(),
+        node.vdf_steps_guard,
+        &node.vdf_config,
+        &node.storage_config,
+    )
+    .await;
 
     // wait for vdf step being generated
     sleep(Duration::from_secs(2)).await;
