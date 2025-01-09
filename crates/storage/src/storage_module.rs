@@ -675,7 +675,7 @@ impl StorageModule {
             let result = file.write(bytes.as_slice());
             match result {
                 // TODO: better logging
-                Ok(bytes_written) => {
+                Ok(_bytes_written) => {
                     //info!("write_chunk_internal() -> bytes_written: {}", bytes_written)
                 }
                 Err(err) => info!("{:?}", err),
@@ -919,7 +919,7 @@ pub const fn checked_add_i32_u64(a: i32, b: u64) -> Option<u64> {
 mod tests {
     use super::*;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{storage, H256};
+    use irys_types::H256;
     use nodit::interval::ii;
 
     #[test]
@@ -1067,7 +1067,7 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let mut storage_module = StorageModule::new(&base_path, storage_module_info, config)?;
+        let storage_module = StorageModule::new(&base_path, storage_module_info, config)?;
         let chunk_data = vec![0, 1, 2, 3, 4];
         let data_path = vec![4, 3, 2, 1];
         let tx_path = vec![5, 6, 7, 8];

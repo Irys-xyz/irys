@@ -55,7 +55,7 @@ impl Compact for CachedChunk2 {
     }
 }
 
-/// DupSort works by allowing multiple unique values to be associated with a key,
+/// `DupSort` works by allowing multiple unique values to be associated with a key,
 /// with each duplicate value being sorted *by the encoded bytes of the value*;
 /// Under BE encoding, subkey 0 would come before subkey 255.
 /// This is why it's important the subkey is the first element that is encoded when serializing the value, as it defines the sort order for that encoded value.

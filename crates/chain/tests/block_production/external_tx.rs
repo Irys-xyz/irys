@@ -1,4 +1,4 @@
-use std::{fs::remove_dir_all, time::Duration};
+use std::time::Duration;
 
 use alloy_core::primitives::{TxHash, U256};
 use irys_actors::block_producer::SolutionFoundMessage;
@@ -7,8 +7,7 @@ use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, Address, H256, IRYS_CHAIN_ID,
-    MAX_CHUNK_SIZE,
+    block_production::SolutionContext, irys::IrysSigner, Address, IRYS_CHAIN_ID, MAX_CHUNK_SIZE,
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
@@ -60,14 +59,14 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
         (
             config.mining_signer.address(),
             GenesisAccount {
-                balance: U256::from(690000000000000000 as u128),
+                balance: U256::from(690000000000000000_u128),
                 ..Default::default()
             },
         ),
         (
             config.mining_signer.address(),
             GenesisAccount {
-                balance: U256::from(690000000000000000 as u128),
+                balance: U256::from(690000000000000000_u128),
                 ..Default::default()
             },
         ),
@@ -93,9 +92,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
 
     info!(
         "received pending txs: {:?}",
-        txs.iter()
-            .map(|tx| tx.hash().clone())
-            .collect::<Vec<TxHash>>()
+        txs.iter().map(|tx| *tx.hash()).collect::<Vec<TxHash>>()
     );
 
     loop {

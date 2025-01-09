@@ -1,13 +1,10 @@
-use actix::{Addr, ArbiterService};
+use actix::Addr;
 use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
-    vdf::{self, VdfSeed, VdfService},
+    vdf::{VdfSeed, VdfService},
 };
-use irys_types::{
-    block_production::Seed, vdf_config::VDFStepsConfig, H256List, VDFLimiterInfo, H256,
-    NONCE_LIMITER_RESET_FREQUENCY, NUM_CHECKPOINTS_IN_VDF_STEP, U256, VDF_SHA_1S,
-};
-use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha, vdf_sha_verification};
+use irys_types::{block_production::Seed, vdf_config::VDFStepsConfig, H256List, H256, U256};
+use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
@@ -77,12 +74,14 @@ pub fn run_vdf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::mpsc, time::Duration};
+    use actix::*;
+    use irys_actors::vdf::{GetVdfStateMessage, VdfStepsReadGuard};
+    use irys_types::*;
+    use irys_vdf::{checkpoints_are_valid, vdf_sha_verification};
     use nodit::interval::ii;
-    use irys_vdf::checkpoints_are_valid;
+    use std::{sync::mpsc, time::Duration};
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
-    use vdf::{GetVdfStateMessage, VdfStepsReadGuard};
 
     fn init_tracing() {
         let _ = SubscriberBuilder::default()
@@ -169,11 +168,14 @@ mod tests {
         assert!(step_num > 4, "Should have more than 4 seeds");
 
         // get last 4 steps
-        let steps = vdf_steps.read().get_steps(ii(step_num - 3, step_num)).unwrap();
+        let steps = vdf_steps
+            .read()
+            .get_steps(ii(step_num - 3, step_num))
+            .unwrap();
 
         // calculate last step checkpoints
         let mut hasher = Sha256::new();
-        let mut salt = U256::from(step_number_to_salt_number(&vdf_config, step_num - 1 as u64));
+        let mut salt = U256::from(step_number_to_salt_number(&vdf_config, step_num - 1_u64));
         let mut seed = steps[2];
 
         let mut checkpoints: Vec<H256> =

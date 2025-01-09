@@ -75,10 +75,10 @@ async fn data_promotion_test() {
     .await;
 
     // Create a bunch of TX chunks
-    let data_chunks = vec![
+    let data_chunks = [
         vec![[10; 32], [20; 32], [30; 32]], // Fill most of one Partition
         vec![[40; 32], [50; 32], [50; 32]], // Overlap the next Partition
-        vec![[70; 32], [80; 32], [90; 32]], // Fill most of the Partition
+        vec![[70; 32], [80; 32], [90; 32]],
     ];
 
     // Create a bunch of signed TX from the chunks
@@ -104,7 +104,7 @@ async fn data_promotion_test() {
         unconfirmed_tx.push(header.clone());
         let req = TestRequest::post()
             .uri("/v1/tx")
-            .set_json(&header)
+            .set_json(header)
             .to_request();
 
         let resp = call_service(&app, req).await;
@@ -413,7 +413,7 @@ fn get_block_parent(txid: H256, ledger: Ledger, db: &DatabaseProvider) -> Option
         .ok()?;
 
     // Loop tough all the blocks and find the one that contains the txid
-    for (_block_hash, block_header) in &block_headers {
+    for block_header in block_headers.values() {
         if block_header.ledgers[ledger].txids.0.contains(&txid) {
             return Some(IrysBlockHeader::from(block_header.clone()));
         }

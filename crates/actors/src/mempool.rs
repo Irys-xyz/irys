@@ -10,7 +10,7 @@ use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
     IrysTransactionHeader, H256,
 };
-use irys_types::{DataRoot, StorageConfig, TxIngressProof};
+use irys_types::{DataRoot, StorageConfig};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
@@ -28,8 +28,8 @@ pub struct MempoolActor {
     db: DatabaseProvider,
     /// Temporary mempool stubs - will replace with proper data models - dmac
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
-    /// task_exec is used to spawn background jobs on reth's MT tokio runtime
-    /// instead of the actor executor runtime, while also providing some QoL
+    /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
+    /// instead of the actor executor runtime, while also providing some `QoL`
     task_exec: TaskExecutor,
     /// The miner's signer instance, used to sign ingress proofs
     signer: IrysSigner,
@@ -44,8 +44,8 @@ impl Actor for MempoolActor {
 
 impl MempoolActor {
     /// Create a new instance of the mempool actor passing in a reference
-    /// counted reference to a DatabaseEnv, a copy of reth's task executor and the miner's signer
-    pub fn new(
+    /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
+    pub const fn new(
         db: DatabaseProvider,
         task_exec: TaskExecutor,
         signer: IrysSigner,
@@ -71,7 +71,7 @@ impl MempoolActor {
 pub struct TxIngressMessage(pub IrysTransactionHeader);
 
 impl TxIngressMessage {
-    fn into_inner(self) -> IrysTransactionHeader {
+    const fn into_inner(self) -> IrysTransactionHeader {
         self.0
     }
 }
@@ -94,7 +94,7 @@ pub enum TxIngressError {
 pub struct ChunkIngressMessage(pub UnpackedChunk);
 
 impl ChunkIngressMessage {
-    fn into_inner(self) -> UnpackedChunk {
+    pub fn into_inner(self) -> UnpackedChunk {
         self.0
     }
 }
@@ -102,11 +102,11 @@ impl ChunkIngressMessage {
 /// Reasons why Transaction Ingress might fail
 #[derive(Debug)]
 pub enum ChunkIngressError {
-    /// The data_path/proof provided with the chunk data is invalid
+    /// The `data_path/proof` provided with the chunk data is invalid
     InvalidProof,
     /// The data hash does not match the chunk data
     InvalidDataHash,
-    /// Only the last chunk in a data_root tree can be less than CHUNK_SIZE
+    /// Only the last chunk in a `data_root` tree can be less than `CHUNK_SIZE`
     InvalidChunkSize,
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
@@ -157,8 +157,8 @@ impl Handler<TxIngressMessage> for MempoolActor {
 
         // Cache the data_root in the database
         let _ = self.db.update_eyre(|db_tx| {
-            irys_database::cache_data_root(db_tx, &tx)?;
-            irys_database::insert_tx_header(db_tx, &tx)?;
+            irys_database::cache_data_root(db_tx, tx)?;
+            irys_database::insert_tx_header(db_tx, tx)?;
             Ok(())
         });
 
@@ -253,7 +253,7 @@ impl Handler<ChunkIngressMessage> for MempoolActor {
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         for sm in &self.storage_modules {
-            if sm.get_write_offsets(&chunk).unwrap_or(vec![]).len() != 0 {
+            if !sm.get_write_offsets(&chunk).unwrap_or(vec![]).is_empty() {
                 info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
                 sm.write_data_chunk(&chunk)
                     .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()))?;
@@ -353,7 +353,7 @@ impl Handler<BlockConfirmedMessage> for MempoolActor {
         // from the mempool. In the future on a multi node network we may keep
         // ingress proofs around longer to account for re-orgs, but for now
         // we just remove them.
-        if published_txids.len() > 0 {
+        if !published_txids.is_empty() {
             let mut_tx = self
                 .db
                 .tx_mut()
@@ -364,7 +364,7 @@ impl Handler<BlockConfirmedMessage> for MempoolActor {
 
             for (i, txid) in block.ledgers[Ledger::Publish].txids.0.iter().enumerate() {
                 // Retrieve the promoted transactions header
-                let mut tx_header = match tx_header_by_txid(&mut_tx, &txid) {
+                let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
                     Ok(Some(header)) => header,
                     Ok(None) => {
                         error!("No transaction header found for txid: {}", txid);
@@ -413,7 +413,7 @@ impl Handler<BlockConfirmedMessage> for MempoolActor {
     }
 }
 
-/// Generates an ingress proof for a specific data_root
+/// Generates an ingress proof for a specific `data_root`
 /// pulls required data from all sources
 pub fn generate_ingress_proof(
     db: DatabaseProvider,
@@ -461,13 +461,12 @@ pub fn generate_ingress_proof(
 
         let chunk = ro_tx
             .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
-            .expect(
-                &format!(
+            .unwrap_or_else(|| {
+                panic!(
                     "unable to get chunk {} for data root {} from DB",
                     chunk_path_hash, data_root
                 )
-                .as_str(),
-            );
+            });
         let chunk_bin = chunk.chunk.unwrap().0;
         data_size += chunk_bin.len() as u64;
         owned_chunks.push(chunk_bin);
@@ -503,14 +502,14 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use assert_matches::assert_matches;
-    use irys_database::{config::get_data_dir, open_or_create_db, tables::IrysTables};
+    use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_packing::xor_vec_u8_arrays_in_place;
     use irys_storage::{ii, initialize_storage_files, ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         irys::IrysSigner,
         partition::{PartitionAssignment, PartitionHash},
-        storage_config, Address, Base64, MAX_CHUNK_SIZE,
+        Address, Base64, MAX_CHUNK_SIZE,
     };
     use rand::Rng;
     use reth::tasks::TaskManager;
@@ -587,7 +586,7 @@ mod tests {
         println!("{:?}", tx.header);
         println!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
 
-        for proof in tx.proofs.iter() {
+        for proof in &tx.proofs {
             println!("offset: {}", proof.offset);
         }
 
@@ -613,19 +612,17 @@ mod tests {
             let min = chunk_node.min_byte_range;
             let max = chunk_node.max_byte_range;
             let offset = tx.proofs[tx_chunk_offset].offset as u32;
-            let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
+            let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
             let key: H256 = hash_sha256(&data_path.0).unwrap().into();
             let chunk_bytes = Base64(data_bytes[min..max].to_vec());
             // Create a ChunkIngressMessage for each chunk
-            let chunk_ingress_msg = ChunkIngressMessage {
-                0: UnpackedChunk {
-                    data_root,
-                    data_size,
-                    data_path: data_path.clone(),
-                    bytes: chunk_bytes.clone(),
-                    tx_offset: tx_chunk_offset as u32,
-                },
-            };
+            let chunk_ingress_msg = ChunkIngressMessage(UnpackedChunk {
+                data_root,
+                data_size,
+                data_path: data_path.clone(),
+                bytes: chunk_bytes.clone(),
+                tx_offset: tx_chunk_offset as u32,
+            });
 
             let is_last_chunk = tx_chunk_offset == last_index;
             let interval = ii(0, last_index as u64);
@@ -675,8 +672,6 @@ mod tests {
                 assert_eq!(packed_bytes_slice, cbytes);
                 assert_eq!(r.1, ChunkType::Data);
             }
-
-            ()
         }
 
         // Modify one of the chunks

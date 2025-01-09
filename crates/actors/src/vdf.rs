@@ -6,7 +6,6 @@ use std::{
 };
 use tracing::info;
 
-use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService, Subscribe};
 use irys_types::{block_production::Seed, H256List, H256};
 
 #[derive(Debug)]
@@ -39,7 +38,7 @@ impl VdfState {
         let last_global_step = self.global_step;
         let first_global_step = last_global_step - vdf_steps_len + 1;
 
-        if !ii(first_global_step,last_global_step).contains_interval(&i) {
+        if !ii(first_global_step, last_global_step).contains_interval(&i) {
             return Err(eyre::eyre!(
                 "Unavailable requested range ({}..={}). Stored steps range is ({}..={})",
                 i.start(),
@@ -55,7 +54,7 @@ impl VdfState {
         Ok(H256List(
             self.seeds
                 .range(start..=end)
-                .map(|seed| seed.0.clone())
+                .map(|seed| seed.0)
                 .collect::<Vec<H256>>(),
         ))
     }
@@ -71,7 +70,7 @@ impl Default for VdfService {
 }
 
 impl VdfService {
-    /// Creates a new VdfService setting up how many steps are stored in memory
+    /// Creates a new `VdfService` setting up how many steps are stored in memory
     pub fn new(capacity: usize) -> Self {
         Self(Arc::new(RwLock::new(VdfState {
             global_step: 0,
@@ -95,7 +94,7 @@ impl Actor for VdfService {
     }
 }
 
-/// Send the most recent mining step to all the PartitionMiningActors
+/// Send the most recent mining step to all the `PartitionMiningActors`
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
 pub struct VdfSeed(pub Seed);
@@ -109,13 +108,13 @@ impl Handler<VdfSeed> for VdfService {
     }
 }
 
-/// Wraps the internal Arc<RwLock<>> to make the reference readonly
+/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct VdfStepsReadGuard(Arc<RwLock<VdfState>>);
 
 impl VdfStepsReadGuard {
-    /// Creates a new ReadGard for Ledgers
-    pub fn new(state: Arc<RwLock<VdfState>>) -> Self {
+    /// Creates a new `ReadGard` for Ledgers
+    pub const fn new(state: Arc<RwLock<VdfState>>) -> Self {
         Self(state)
     }
 
@@ -158,12 +157,7 @@ mod tests {
 
         let state = addr.send(GetVdfStateMessage).await.unwrap();
 
-        let steps = state
-            .read()
-            .seeds
-            .iter()
-            .map(|seed| seed.clone())
-            .collect::<Vec<_>>();
+        let steps = state.read().seeds.iter().cloned().collect::<Vec<_>>();
 
         // Should only contain last 3 messages
         assert_eq!(steps.len(), 4);

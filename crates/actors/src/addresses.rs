@@ -32,7 +32,7 @@ impl ActorAddresses {
     }
     /// Send a custom control message to all known partition actors
     pub fn set_mining(&self, should_mine: bool) -> eyre::Result<()> {
-        for part in self.partitions.iter() {
+        for part in &self.partitions {
             part.try_send(MiningControl(should_mine))?;
         }
         Ok(())

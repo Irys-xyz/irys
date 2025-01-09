@@ -15,7 +15,7 @@ use alloy_rlp::{
 
 pub use alloy_primitives::{Address, U256};
 
-use crate::{commitment::IrysTxId, DestHash, DestHash::PartitionHash};
+use crate::commitment::IrysTxId;
 
 use super::new_account::NewAccountState;
 
@@ -52,8 +52,10 @@ pub struct ShadowTx {
     serde::Serialize,
     serde::Deserialize,
     arbitrary::Arbitrary,
+    Default,
 )]
 pub enum ShadowTxType {
+    #[default]
     Null, // because default is a required derive TODO: replace with a null TransferShadow or some other no-op
     Transfer(TransferShadow),
     Data(DataShadow),
@@ -183,12 +185,6 @@ impl Decodable for ShadowTxType {
             }
             ShadowTxTypeId::Diff => Ok(ShadowTxType::Diff(DiffShadow::decode(buf)?)),
         }
-    }
-}
-
-impl Default for ShadowTxType {
-    fn default() -> Self {
-        ShadowTxType::Null
     }
 }
 

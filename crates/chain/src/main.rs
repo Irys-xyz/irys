@@ -1,7 +1,5 @@
 use clap::{command, Parser};
 use irys_chain::chain::start_for_testing;
-use irys_config::IrysNodeConfig;
-use irys_types::StorageConfig;
 use reth_tracing::tracing_subscriber::fmt::SubscriberBuilder;
 use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
 use tracing::level_filters::LevelFilter;

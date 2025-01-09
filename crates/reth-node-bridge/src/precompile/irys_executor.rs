@@ -357,8 +357,8 @@ impl IrysPrecompileOffsets {
     }
 }
 
-impl Into<Address> for IrysPrecompileOffsets {
-    fn into(self) -> Address {
-        self.to_address()
+impl From<IrysPrecompileOffsets> for Address {
+    fn from(val: IrysPrecompileOffsets) -> Self {
+        val.to_address()
     }
 }

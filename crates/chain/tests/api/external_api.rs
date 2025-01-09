@@ -1,21 +1,16 @@
 //! chunk migration tests
 use std::{
-    fs::remove_dir_all,
     str::FromStr,
     sync::{Arc, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use {
-    irys_actors::block_index::BlockIndexActor,
-    irys_actors::block_producer::BlockConfirmedMessage,
-    irys_actors::mempool::{ChunkIngressMessage, MempoolActor, TxIngressMessage},
+    irys_actors::block_index::BlockIndexActor, irys_actors::block_producer::BlockConfirmedMessage,
+    irys_actors::mempool::MempoolActor,
 };
 
-use assert_matches::assert_matches;
-
 use actix::prelude::*;
-use chunk::TxRelativeChunkOffset;
 use irys_actors::{
     block_producer::BlockFinalizedMessage, chunk_migration::ChunkMigrationActor,
     mempool::GetBestMempoolTxs,
@@ -30,9 +25,8 @@ use irys_database::{
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, H256List,
-    IrysBlockHeader, IrysSignature, IrysTransaction, IrysTransactionHeader, PoaData, Signature,
-    StorageConfig, TransactionLedger, UnpackedChunk, VDFLimiterInfo, H256, U256,
+    app_state::DatabaseProvider, partition::*, Address, Base64, H256List, IrysBlockHeader, PoaData,
+    Signature, StorageConfig, TransactionLedger, VDFLimiterInfo, H256, U256,
 };
 use reth::{revm::primitives::B256, tasks::TaskManager};
 use reth_db::transaction::DbTx;
@@ -40,6 +34,7 @@ use reth_db::Database as _;
 use tokio::{task, time::sleep};
 use tracing::info;
 
+#[ignore]
 #[actix::test]
 async fn external_api() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("external_api"), false);

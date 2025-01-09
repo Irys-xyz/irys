@@ -6,15 +6,15 @@ use irys_types::{H256List, VDFLimiterInfo, VDFStepsConfig, H256, U256};
 use openssl::sha;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-/// Derives a salt value from the step_number for checkpoint hashing
+/// Derives a salt value from the `step_number` for checkpoint hashing
 ///
 /// # Arguments
 ///
 /// * `step_number` - The step the checkpoint belongs to, add 1 to the salt for
 /// each subsequent checkpoint calculation.
-pub fn step_number_to_salt_number(config: &VDFStepsConfig, step_number: u64) -> u64 {
+pub const fn step_number_to_salt_number(config: &VDFStepsConfig, step_number: u64) -> u64 {
     match step_number {
         0 => 0,
         _ => (step_number - 1) * config.num_checkpoints_in_vdf_step as u64 + 1,
@@ -57,7 +57,7 @@ pub fn vdf_sha(
         salt.to_little_endian(&mut local_salt);
 
         for _ in 0..num_iterations {
-            hasher.update(&local_salt);
+            hasher.update(local_salt);
             hasher.update(seed.as_bytes());
             *seed = H256(hasher.finalize_reset().into());
         }
@@ -116,7 +116,7 @@ pub fn vdf_sha_verification(
     checkpoints
 }
 
-/// Validate the checkpoints from the nonce_info to see if they are valid.
+/// Validate the checkpoints from the `nonce_info` to see if they are valid.
 /// Verifies each step in parallel across as many cores as are available.
 ///
 /// # Arguments
@@ -163,7 +163,7 @@ pub fn checkpoints_are_valid(
             .map(|i| {
                 let mut hasher = Sha256::new();
                 let mut salt = U256::from(step_number_to_salt_number(
-                    &config,
+                    config,
                     start_step_number + i as u64,
                 ));
                 let mut seed = steps[i];
@@ -189,7 +189,7 @@ pub fn checkpoints_are_valid(
                     &mut checkpoints,
                 );
                 (
-                    checkpoints.last().unwrap().clone(),
+                    *checkpoints.last().unwrap(),
                     if i == steps.len() - 2 {
                         // If this is the last step, return the last checkpoint
                         Some(H256List(checkpoints))
@@ -219,7 +219,9 @@ pub fn checkpoints_are_valid(
 
     if !last_step_checkpoints_are_valid {
         // Compare the original list with the calculated one
-        last_step_checkpoints.map(|cks| warn_mismatches(&cks, &vdf_info.last_step_checkpoints));
+        if let Some(cks) = last_step_checkpoints {
+            warn_mismatches(&cks, &vdf_info.last_step_checkpoints)
+        }
         return Err(eyre::eyre!("VDF last step checkpoints are invalid!"));
     }
 

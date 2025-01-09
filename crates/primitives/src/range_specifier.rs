@@ -52,8 +52,9 @@ impl RangeSpecifier {
     }
 }
 
+#[cfg(test)]
 mod tests {
-    use super::RangeSpecifier;
+    use crate::range_specifier::RangeSpecifier;
     use alloy_primitives::aliases::U208;
 
     #[test]

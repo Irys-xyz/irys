@@ -3,7 +3,6 @@ use alloy_primitives::{bytes, ruint::aliases::U256, Address, Parity, B256, U256 
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
-use eyre::eyre;
 use reth_codecs::Compact;
 use reth_primitives::transaction::recover_signer;
 
@@ -63,9 +62,9 @@ impl From<Signature> for IrysSignature {
     }
 }
 
-impl Into<Signature> for IrysSignature {
-    fn into(self) -> Signature {
-        self.0
+impl From<IrysSignature> for Signature {
+    fn from(val: IrysSignature) -> Self {
+        val.0
     }
 }
 
@@ -88,7 +87,7 @@ impl Compact for IrysSignature {
         buf.put_slice(&self.0.r().as_le_bytes());
         buf.put_slice(&self.0.s().as_le_bytes());
         buf.put_u8(self.0.v().y_parity_byte());
-        return 65;
+        65
     }
 
     #[inline]

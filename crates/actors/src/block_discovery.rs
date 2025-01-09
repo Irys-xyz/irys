@@ -11,12 +11,12 @@ use reth_db::Database;
 use std::sync::Arc;
 use tracing::{error, info};
 
-/// BlockDiscoveryActor listens for discovered blocks & validates them.
+/// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockDiscoveryActor {
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
-    /// PartitionAssignmentsReadGuard for looking up ledger info
+    /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Manages forks at the head of the chain before finalization
     pub block_tree: Addr<BlockTreeActor>,
@@ -51,8 +51,8 @@ impl Actor for BlockDiscoveryActor {
 }
 
 impl BlockDiscoveryActor {
-    /// Initializes a new BlockDiscoveryActor
-    pub fn new(
+    /// Initializes a new `BlockDiscoveryActor`
+    pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
         block_tree: Addr<BlockTreeActor>,
@@ -136,7 +136,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             }
         };
 
-        if publish_txs.len() > 0 {
+        if !publish_txs.is_empty() {
             let publish_proofs = match &new_block_header.ledgers[Ledger::Publish].proofs {
                 Some(proofs) => proofs,
                 None => {
@@ -180,7 +180,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         ) {
             Ok(_) => {
                 info!("Block is valid, sending to block tree");
-                let mut all_txs = submit_txs.clone();
+                let mut all_txs = submit_txs;
                 all_txs.extend_from_slice(&publish_txs);
                 block_tree_addr.do_send(BlockPreValidatedMessage(
                     new_block_header,

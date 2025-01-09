@@ -7,6 +7,7 @@ use tracing::{debug, info};
 /// number of vdf steps cached for efficient sampling after ranges reinitialization
 pub const NUMBER_OF_KEPT_LAST_STEPS: u64 = 20;
 /// Efficient sampling: randomly picks partition ranges indexes in [0..NUM_RECALL_RANGES_IN_PARTITION-1] interval without repeating up to automatic reinitialization after all indexes are retrieved.
+#[derive(Debug, Clone)]
 pub struct Ranges {
     /// Available partition's ranges indexes
     ranges: Vec<usize>,

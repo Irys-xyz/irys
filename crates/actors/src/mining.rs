@@ -15,9 +15,10 @@ use openssl::sha;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+#[derive(Debug, Clone)]
 pub struct PartitionMiningActor {
     mining_address: Address,
-    database_provider: DatabaseProvider,
+    _database_provider: DatabaseProvider,
     block_producer_actor: Recipient<SolutionFoundMessage>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
@@ -29,7 +30,7 @@ pub struct PartitionMiningActor {
 impl PartitionMiningActor {
     pub fn new(
         mining_address: Address,
-        database_provider: DatabaseProvider,
+        _database_provider: DatabaseProvider,
         block_producer_addr: Recipient<SolutionFoundMessage>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
@@ -37,7 +38,7 @@ impl PartitionMiningActor {
     ) -> Self {
         Self {
             mining_address,
-            database_provider,
+            _database_provider,
             block_producer_actor: block_producer_addr,
             ranges: Ranges::new((&storage_module.storage_config.num_chunks_in_partition/&storage_module.storage_config.num_chunks_in_recall_range).try_into().expect("Recall ranges number exceeds usize representation")),
             storage_module,
@@ -104,14 +105,14 @@ impl PartitionMiningActor {
         //     &read_range
         // );
 
-        if chunks.len() == 0 {
+        if chunks.is_empty() {
             warn!(
                 "No chunks found - storage_module_id:{}",
                 self.storage_module.id
             );
         }
 
-        for (index, (chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
+        for (index, (_chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
             let partition_chunk_offset = (start_chunk_offset + index as u32) as PartitionChunkOffset;
             let (tx_path, data_path) = self
@@ -185,7 +186,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         let seed = msg.seed;
         if !self.should_mine {
             debug!("Mining disabled, skipping seed {:?}", seed);
-            return ();
+            return;
         }
 
         debug!(
@@ -224,7 +225,7 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
 pub struct MiningControl(pub bool);
 
 impl MiningControl {
-    fn into_inner(self) -> bool {
+    const fn into_inner(self) -> bool {
         self.0
     }
 }
@@ -248,6 +249,7 @@ fn hash_to_number(hash: &[u8]) -> U256 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::block_producer::{
         BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
     };
@@ -267,7 +269,7 @@ mod tests {
     };
     use irys_types::{H256List, IrysBlockHeader};
     use std::any::Any;
-    use std::sync::{Arc, RwLock};
+    use std::sync::RwLock;
     use std::time::Duration;
     use tokio::time::sleep;
 
@@ -307,7 +309,7 @@ mod tests {
         // Set up the storage geometry for this test
         let storage_config = StorageConfig {
             chunk_size,
-            num_chunks_in_partition: chunk_count.try_into().unwrap(),
+            num_chunks_in_partition: chunk_count.into(),
             num_chunks_in_recall_range: 2,
             num_partitions_in_slot: 1,
             miner_address: mining_address,
@@ -318,7 +320,7 @@ mod tests {
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
-                partition_hash: partition_hash,
+                partition_hash,
                 miner_address: mining_address,
                 ledger_num: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
@@ -359,8 +361,8 @@ mod tests {
 
         for tx_chunk_offset in 0..chunk_count {
             let chunk = UnpackedChunk {
-                data_root: data_root,
-                data_size: chunk_size as u64,
+                data_root,
+                data_size: chunk_size,
                 data_path: data_path.to_vec().into(),
                 bytes: chunk_data.to_vec().into(),
                 tx_offset: tx_chunk_offset,
@@ -387,7 +389,7 @@ mod tests {
         );
 
         let seed: Seed = Seed(H256::random());
-        let _result = partition_mining_actor
+        partition_mining_actor
             .start()
             .send(BroadcastMiningSeed {
                 seed,

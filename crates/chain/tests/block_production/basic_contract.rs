@@ -1,21 +1,17 @@
-use std::{fs::remove_dir_all, future::Future, time::Duration};
+use std::{future::Future, time::Duration};
 
 use crate::block_production::capacity_chunk_solution;
-use actix::ArbiterService;
 use alloy_core::primitives::U256;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use futures::future::select;
-use irys_actors::{
-    block_producer::SolutionFoundMessage,
-    vdf::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
-};
+use irys_actors::block_producer::SolutionFoundMessage;
 use irys_chain::{chain::start_for_testing, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, Address, H256};
+use irys_types::irys::IrysSigner;
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
 use tracing::info;
@@ -41,7 +37,7 @@ async fn test_erc20() -> eyre::Result<()> {
         (
             main_address,
             GenesisAccount {
-                balance: U256::from(690000000000000000 as u128),
+                balance: U256::from(690000000000000000_u128),
                 ..Default::default()
             },
         ),
@@ -72,7 +68,7 @@ async fn test_erc20() -> eyre::Result<()> {
 
     info!("Contract address is {:?}", contract.address());
     let main_balance = contract.balanceOf(main_address).call().await?._0;
-    assert_eq!(main_balance, U256::from(10000000000000000000000 as u128));
+    assert_eq!(main_balance, U256::from(10000000000000000000000_u128));
 
     let transfer_call_builder = contract.transfer(account1.address(), U256::from(10));
     let transfer_call = transfer_call_builder.send().await?;
@@ -90,10 +86,7 @@ async fn test_erc20() -> eyre::Result<()> {
     let main_balance2 = contract.balanceOf(main_address).call().await?._0;
 
     assert_eq!(addr1_balance, U256::from(10));
-    assert_eq!(
-        main_balance2,
-        U256::from(10000000000000000000000 - 10 as u128)
-    );
+    assert_eq!(main_balance2, U256::from(10000000000000000000000 - 10_u128));
 
     Ok(())
 }
@@ -110,6 +103,9 @@ where
     F: Future<Output = T> + Unpin,
 {
     let poa_solution = capacity_chunk_solution(node_ctx.config.mining_signer.address());
+
+    // wait for vdf step being generated
+    sleep(Duration::from_secs(2)).await;
 
     loop {
         let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;

@@ -5,9 +5,9 @@ pub mod block_index_data;
 pub mod config;
 pub mod data_ledger;
 pub mod database;
-/// When data is unconfirmed it is stored in db_cache tables. Once the data
+/// When data is unconfirmed it is stored in `db_cache` tables. Once the data
 /// (which is part of transactions and blocks) is well confirmed it moves from
-/// the cache to one of the db_index tables.
+/// the cache to one of the `db_index` tables.
 /// Data in the caches can be pending or in a block still subject to re-org so
 /// it is not suitable for mining.
 pub mod db_cache;

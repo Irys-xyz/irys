@@ -172,11 +172,11 @@ impl IrysBlockHeader {
         let _ = &self.diff.write_bytes(buf);
         let _ = &self.cumulative_diff.write_bytes(buf);
         buf.extend_from_slice(&self.last_diff_timestamp.to_le_bytes());
-        buf.extend_from_slice(&self.solution_hash.as_bytes());
-        buf.extend_from_slice(&self.previous_solution_hash.as_bytes());
-        buf.extend_from_slice(&self.last_epoch_hash.as_bytes());
-        buf.extend_from_slice(&self.chunk_hash.as_bytes());
-        buf.extend_from_slice(&self.previous_block_hash.as_bytes());
+        buf.extend_from_slice(self.solution_hash.as_bytes());
+        buf.extend_from_slice(self.previous_solution_hash.as_bytes());
+        buf.extend_from_slice(self.last_epoch_hash.as_bytes());
+        buf.extend_from_slice(self.chunk_hash.as_bytes());
+        buf.extend_from_slice(self.previous_block_hash.as_bytes());
         let _ = &self.previous_cumulative_diff.write_bytes(buf);
 
         // poa data
@@ -186,7 +186,7 @@ impl IrysBlockHeader {
         buf.extend_from_slice(&hash_sha256(&self.poa.chunk.0)?);
         write_optional(buf, &self.poa.ledger_num);
         buf.extend_from_slice(&self.poa.partition_chunk_offset.to_le_bytes());
-        buf.extend_from_slice(&self.poa.partition_hash.as_bytes());
+        buf.extend_from_slice(self.poa.partition_hash.as_bytes());
         //
 
         buf.extend_from_slice(&self.reward_address.0 .0);
@@ -239,23 +239,21 @@ impl IrysBlockHeader {
     }
 }
 
-fn write_optional<'a, T>(buf: &mut Vec<u8>, value: &'a Option<T>) -> ()
+fn write_optional<'a, T>(buf: &mut Vec<u8>, value: &'a Option<T>)
 where
     &'a T: WriteBytes,
 {
-    match value {
-        Some(v) => v.write_bytes(buf),
-        None => (),
+    if let Some(v) = value {
+        v.write_bytes(buf)
     }
 }
 
-fn write_optional_ref<'a, T>(buf: &mut Vec<u8>, value: &'a Option<T>) -> ()
+fn write_optional_ref<T>(buf: &mut Vec<u8>, value: &Option<T>)
 where
     T: AsRef<[u8]>,
 {
-    match value {
-        Some(v) => buf.extend_from_slice(v.as_ref()),
-        None => (),
+    if let Some(v) = value {
+        buf.extend_from_slice(v.as_ref())
     }
 }
 
@@ -334,7 +332,7 @@ impl TransactionLedger {
             .collect::<Vec<DataRootLeave>>();
         let data_root_leaves = generate_leaves_from_data_roots(&txs_data_roots).unwrap();
         let root = generate_data_root(data_root_leaves.clone()).unwrap();
-        let root_id = root.id.clone();
+        let root_id = root.id;
         let proofs = resolve_proofs(root, None).unwrap();
         (H256(root_id), proofs)
     }
@@ -504,7 +502,7 @@ mod tests {
         // sign the block header
         header = signer.sign_block_header(header).unwrap();
 
-        assert_eq!(true, header.is_signature_valid().unwrap());
+        assert!(header.is_signature_valid().unwrap());
 
         // validate block hash
         let id: [u8; 32] = keccak256(header.signature.as_bytes()).into();
@@ -523,6 +521,6 @@ mod tests {
         rng.fill(&mut header.previous_block_hash.as_bytes_mut()[..]);
         rng.fill(&mut header.block_hash.as_bytes_mut()[..]);
 
-        assert_eq!(false, header.is_signature_valid().unwrap());
+        assert!(!header.is_signature_valid().unwrap());
     }
 }

@@ -4,10 +4,9 @@ use actix_web::{
     web::{self, Json},
     Result,
 };
-use awc::http::StatusCode;
 use irys_database::database;
 use irys_types::{IrysBlockHeader, H256};
-use reth_db::{Database, DatabaseEnv};
+use reth_db::Database;
 
 pub async fn get_block(
     state: web::Data<ApiState>,
@@ -36,13 +35,14 @@ mod tests {
     use super::*;
     use actix::Actor;
     use actix_web::{middleware::Logger, test, App, Error};
+    use awc::http::StatusCode;
     use base58::ToBase58;
     use database::open_or_create_db;
     use irys_actors::mempool::MempoolActor;
     use irys_database::tables::IrysTables;
     use irys_storage::ChunkProvider;
     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
-    use log::{debug, error, info, log_enabled, Level};
+    use log::{error, info};
     use reth::tasks::TaskManager;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -57,7 +57,9 @@ mod tests {
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
         let blk = IrysBlockHeader::default();
 
-        db.update(|tx| -> eyre::Result<()> { database::insert_block_header(tx, &blk) })?;
+        let res =
+            db.update(|tx| -> eyre::Result<()> { database::insert_block_header(tx, &blk) })?;
+        res.unwrap();
 
         match db.view_eyre(|tx| database::block_header_by_hash(tx, &blk.block_hash))? {
             None => error!("block not found, test db error!"),

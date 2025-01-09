@@ -1,4 +1,4 @@
-use std::{fs::remove_dir_all, future::Future, time::Duration};
+use std::{future::Future, time::Duration};
 
 use alloy_core::primitives::{aliases::U208, U256};
 use alloy_eips::eip2930::AccessListItem;
@@ -10,11 +10,10 @@ use bytes::Buf;
 use futures::future::select;
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_chain::{chain::start_for_testing, IrysNodeCtx};
-use irys_config::IrysNodeConfig;
 use irys_database::tables::ProgrammableDataChunkCache;
 use irys_reth_node_bridge::precompile::irys_executor::IrysPrecompileOffsets;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, CHUNK_SIZE, H256};
+use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, CHUNK_SIZE};
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::Database;
@@ -35,8 +34,10 @@ sol!(
 #[tokio::test]
 async fn test_programmable_data_basic() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
-    let mut config = IrysNodeConfig::default();
-    config.base_directory = temp_dir.path().to_path_buf();
+    let mut config = irys_config::IrysNodeConfig {
+        base_directory: temp_dir.path().to_path_buf(),
+        ..Default::default()
+    };
     let main_address = config.mining_signer.address();
 
     let account1 = IrysSigner::random_signer();
@@ -45,7 +46,7 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
         (
             main_address,
             GenesisAccount {
-                balance: U256::from(690000000000000000 as u128),
+                balance: U256::from(690000000000000000_u128),
                 ..Default::default()
             },
         ),

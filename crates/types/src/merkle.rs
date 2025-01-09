@@ -306,7 +306,7 @@ pub fn generate_leaves(data: &Vec<u8>, chunk_size: usize) -> Result<Vec<Node>, E
 pub fn generate_leaves_from_chunks(chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
-    for chunk in chunks.into_iter() {
+    for chunk in chunks.iter() {
         let data_hash = hash_sha256(chunk)?;
         let max_byte_range = min_byte_range + &chunk.len();
         let offset = max_byte_range.to_note_vec();
@@ -320,16 +320,13 @@ pub fn generate_leaves_from_chunks(chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Err
             left_child: None,
             right_child: None,
         });
-        min_byte_range = min_byte_range + &chunk.len();
+        min_byte_range += &chunk.len();
     }
     Ok(leaves)
 }
 
 /// Generates data chunks from which the calculation of root id starts, including the provided address to interleave into the leaf data hash for ingress proofs
-pub fn generate_ingress_leaves(
-    mut chunks: Vec<&[u8]>,
-    address: Address,
-) -> Result<Vec<Node>, Error> {
+pub fn generate_ingress_leaves(chunks: Vec<&[u8]>, address: Address) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
     for chunk in chunks.into_iter() {
@@ -347,7 +344,7 @@ pub fn generate_ingress_leaves(
             right_child: None,
         });
 
-        min_byte_range = min_byte_range + &chunk.len();
+        min_byte_range += &chunk.len();
     }
     Ok(leaves)
 }
@@ -363,7 +360,7 @@ pub fn generate_leaves_from_data_roots(
 ) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
-    for data_root in data_roots.into_iter() {
+    for data_root in data_roots.iter() {
         let data_root_hash = &data_root.data_root.0;
         let max_byte_range = min_byte_range + data_root.tx_size;
         let offset = max_byte_range.to_note_vec();
@@ -442,7 +439,7 @@ pub fn resolve_proofs(node: Node, proof: Option<Proof>) -> Result<Vec<Proof>, Er
             proof.offset = max_byte_range - 1;
             proof.proof.extend(data_hash);
             proof.proof.extend(max_byte_range.to_note_vec());
-            return Ok(vec![proof]);
+            Ok(vec![proof])
         }
         // Branch
         Node {
@@ -452,14 +449,14 @@ pub fn resolve_proofs(node: Node, proof: Option<Proof>) -> Result<Vec<Proof>, Er
             right_child: Some(right_child),
             ..
         } => {
-            proof.proof.extend(left_child.id.clone());
-            proof.proof.extend(right_child.id.clone());
+            proof.proof.extend(left_child.id);
+            proof.proof.extend(right_child.id);
             proof.proof.extend(min_byte_range.to_note_vec());
 
             let mut left_proof = resolve_proofs(*left_child, Some(proof.clone()))?;
             let right_proof = resolve_proofs(*right_child, Some(proof))?;
             left_proof.extend(right_proof);
-            return Ok(left_proof);
+            Ok(left_proof)
         }
         _ => unreachable!(),
     }

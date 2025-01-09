@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf};
 
-pub fn build_vdf(c_src: &PathBuf, ssl_inc_dir: &PathBuf) {
+pub(crate) fn build_vdf(c_src: &PathBuf, ssl_inc_dir: &PathBuf) {
     let mut cc = cc::Build::new();
     cc.cpp(true);
 
@@ -32,7 +32,7 @@ pub fn build_vdf(c_src: &PathBuf, ssl_inc_dir: &PathBuf) {
     cc.file(c_src.join("vdf.cpp")).compile("vdf");
 }
 
-pub fn bind_vdf(c_src: &PathBuf) {
+pub(crate) fn bind_vdf(c_src: &PathBuf) {
     let bindings = bindgen::Builder::default()
         .header(c_src.join("vdf.h").to_string_lossy())
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))

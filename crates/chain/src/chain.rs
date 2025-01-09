@@ -27,11 +27,8 @@ use irys_storage::{
     initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
-    app_state::DatabaseProvider,
-    calculate_initial_difficulty,
-    irys::IrysSigner,
-    vdf_config::{self, VDFStepsConfig},
-    DifficultyAdjustmentConfig, StorageConfig, H256, U256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
+    vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256, U256,
 };
 use reth::{
     builder::FullNode,
@@ -254,7 +251,7 @@ pub async fn start_irys_node(
                 );
                 let chunk_migration_addr = chunk_migration_actor.start();
 
-                let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
+                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
                 let block_tree_actor =
                     BlockTreeActor::new(block_index_actor_addr.clone(), mempool_actor_addr.clone());

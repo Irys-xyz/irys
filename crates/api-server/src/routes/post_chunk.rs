@@ -21,7 +21,7 @@ pub async fn post_chunk(
     let chunk = body.into_inner();
 
     // Create an actor message and send it
-    let chunk_ingress_message = ChunkIngressMessage { 0: chunk };
+    let chunk_ingress_message = ChunkIngressMessage(chunk);
     let msg_result = state.mempool.send(chunk_ingress_message).await;
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
