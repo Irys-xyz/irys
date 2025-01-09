@@ -1,4 +1,3 @@
-use core::num;
 use std::collections::HashMap;
 
 use irys_types::{H256List, SimpleRNG, StorageConfig, H256};
