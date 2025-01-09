@@ -10,7 +10,7 @@ use irys_storage::{ie, ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
-use irys_types::{storage, Address, H256List, PartitionChunkOffset, SimpleRNG};
+use irys_types::{Address, H256List, PartitionChunkOffset};
 use openssl::sha;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
