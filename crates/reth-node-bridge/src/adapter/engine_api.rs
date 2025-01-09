@@ -61,9 +61,9 @@ impl<E: EngineTypes> EngineApiContext<E> {
     pub async fn submit_payload(
         &self,
         payload: E::BuiltPayload,
-        payload_builder_attributes: E::PayloadBuilderAttributes,
+        _payload_builder_attributes: E::PayloadBuilderAttributes,
         expected_status: PayloadStatusEnum,
-        versioned_hashes: Vec<B256>,
+        _versioned_hashes: Vec<B256>,
     ) -> eyre::Result<B256>
     where
         E::ExecutionPayloadV1Irys: From<E::BuiltPayload> + PayloadEnvelopeExt,

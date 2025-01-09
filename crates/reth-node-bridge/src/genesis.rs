@@ -123,14 +123,14 @@ pub fn add_genesis_block(
 
     let mut genesis_accounts: BTreeMap<Address, GenesisAccount> = BTreeMap::new();
     accounts.iter().for_each(|(k, v)| {
-        genesis_accounts.insert(k.clone(), v.clone());
+        genesis_accounts.insert(*k, v.clone());
     });
 
     // load genesis accounts into cache (memory) db, then apply shadows
     // in future we can extend this to evaluate EVM txs for the genesis block, if needed.
     for (address, account) in genesis_accounts
         .iter()
-        .map(|(addr, acc)| (addr.clone(), acc.clone()))
+        .map(|(addr, acc)| (*addr, acc.clone()))
     {
         let bytecode = Bytecode::new_raw(account.code.unwrap_or_default());
         cache_db.insert_account_info(
@@ -147,12 +147,12 @@ pub fn add_genesis_block(
             },
         );
         for (slot, value) in account.storage.unwrap_or_default() {
-            let res = cache_db.insert_account_storage(address, slot.into(), value.into());
+            let _res = cache_db.insert_account_storage(address, slot.into(), value.into());
         }
     }
     // apply all shadows
     for shadow in shadows.unwrap_or(Shadows::new(vec![])) {
-        let res = apply_shadow(shadow, &mut journaled_state, &mut cache_db);
+        let _res = apply_shadow(shadow, &mut journaled_state, &mut cache_db);
     }
 
     // commit state changes
@@ -184,7 +184,7 @@ pub fn add_genesis_block(
             mining_permission: info.mining_permission,
             last_tx: info.last_tx,
         };
-        after_btree.insert(addr.clone(), genesis_account);
+        after_btree.insert(*addr, genesis_account);
     });
 
     // overwrite alloc

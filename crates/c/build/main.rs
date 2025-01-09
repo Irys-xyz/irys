@@ -45,8 +45,6 @@ fn main() {
 // build from src
 // add openssl-src = "300.3.2" to cargo toml
 
-use openssl_src;
-
 fn env_inner(name: &str) -> Option<OsString> {
     let var = env::var_os(name);
     println!("cargo:rerun-if-env-changed={}", name);

@@ -1,10 +1,9 @@
 use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
-    sync::Arc,
 };
 
-use nodit::{InclusiveInterval, Interval, IntervalType, NoditMap};
+use nodit::{InclusiveInterval, Interval};
 use serde::{Deserialize, Serialize};
 
 use crate::CHUNK_SIZE;
@@ -142,13 +141,13 @@ impl Deref for IntervalStateWrapped {
     type Target = IntervalState;
 
     fn deref(&self) -> &Self::Target {
-        return &self.inner;
+        &self.inner
     }
 }
 
 impl DerefMut for IntervalStateWrapped {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        return &mut self.inner;
+        &mut self.inner
     }
 }
 

@@ -27,11 +27,8 @@ use irys_storage::{
     initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
-    app_state::DatabaseProvider,
-    calculate_initial_difficulty,
-    irys::IrysSigner,
-    vdf_config::{self, VDFStepsConfig},
-    DifficultyAdjustmentConfig, StorageConfig, H256, U256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
+    vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256, U256,
 };
 use reth::{
     builder::FullNode,
@@ -257,11 +254,15 @@ pub async fn start_irys_node(
                 );
                 let chunk_migration_addr = chunk_migration_actor.start();
 
-                let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
+                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
                 let block_tree_actor =
                     BlockTreeActor::new(block_index_actor_addr.clone(), mempool_actor_addr.clone());
                 let block_tree = block_tree_actor.start();
+
+                let vdf_service = VdfService::from_registry();
+                let vdf_steps_guard: VdfStepsReadGuard =
+                    vdf_service.send(GetVdfStateMessage).await.unwrap();
 
                 let block_discovery_actor = BlockDiscoveryActor {
                     block_index_guard: block_index_guard.clone(),
@@ -271,12 +272,9 @@ pub async fn start_irys_node(
                     storage_config: storage_config.clone(),
                     db: db.clone(),
                     vdf_config: vdf_config.clone(),
+                    vdf_steps_guard: vdf_steps_guard.clone(),
                 };
                 let block_discovery_addr = block_discovery_actor.start();
-
-                let vdf_service = VdfService::from_registry();
-                let vdf_steps_guard: VdfStepsReadGuard =
-                    vdf_service.send(GetVdfStateMessage).await.unwrap();
 
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
@@ -303,6 +301,7 @@ pub async fn start_irys_node(
                         block_producer_addr.clone().recipient(),
                         sm.clone(),
                         false, // do not start mining automatically
+                        vdf_steps_guard.clone(),
                     );
                     part_actors.push(partition_mining_actor.start());
                 }

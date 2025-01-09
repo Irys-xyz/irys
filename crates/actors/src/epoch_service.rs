@@ -30,12 +30,12 @@ impl Default for EpochServiceConfig {
         Self {
             capacity_scalar: CAPACITY_SCALAR,
             num_blocks_in_epoch: NUM_BLOCKS_IN_EPOCH,
-            storage_config: StorageConfig::default().into(),
+            storage_config: StorageConfig::default(),
         }
     }
 }
 
-/// A state struct that can be wrapped with Arc<RwLock<>> to provide parallel read access
+/// A state struct that can be wrapped with Arc<`RwLock`<>> to provide parallel read access
 #[derive(Debug)]
 pub struct PartitionAssignments {
     /// Active data partition state mapped by partition hash
@@ -45,8 +45,14 @@ pub struct PartitionAssignments {
 }
 
 /// Implementation helper functions
+impl Default for PartitionAssignments {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PartitionAssignments {
-    /// Initialize a new PartitionAssignments state wrapper struct
+    /// Initialize a new `PartitionAssignments` state wrapper struct
     pub fn new() -> Self {
         Self {
             data_partitions: HashMap::new(),
@@ -54,7 +60,7 @@ impl PartitionAssignments {
         }
     }
 
-    /// Retrieves a PartitionAssignment by partition hash if it exists
+    /// Retrieves a `PartitionAssignment` by partition hash if it exists
     pub fn get_assignment(&self, partition_hash: H256) -> Option<PartitionAssignment> {
         self.data_partitions
             .get(&partition_hash)
@@ -111,15 +117,15 @@ pub enum EpochServiceError {
 // LedgersReadGuard
 //------------------------------------------------------------------------------
 
-/// Wraps the internal Arc<RwLock<>> to make the reference readonly
+/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct LedgersReadGuard {
     ledgers: Arc<RwLock<Ledgers>>,
 }
 
 impl LedgersReadGuard {
-    /// Creates a new ReadGard for Ledgers
-    pub fn new(ledgers: Arc<RwLock<Ledgers>>) -> Self {
+    /// Creates a new `ReadGard` for Ledgers
+    pub const fn new(ledgers: Arc<RwLock<Ledgers>>) -> Self {
         Self { ledgers }
     }
 
@@ -145,15 +151,15 @@ impl Handler<GetLedgersGuardMessage> for EpochServiceActor {
 //==============================================================================
 // PartitionAssignmentsReadGuard
 //------------------------------------------------------------------------------
-/// Wraps the internal Arc<RwLock<>> to make the reference readonly
+/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct PartitionAssignmentsReadGuard {
     partition_assignments: Arc<RwLock<PartitionAssignments>>,
 }
 
 impl PartitionAssignmentsReadGuard {
-    /// Creates a new ReadGard for Ledgers
-    pub fn new(partition_assignments: Arc<RwLock<PartitionAssignments>>) -> Self {
+    /// Creates a new `ReadGard` for Ledgers
+    pub const fn new(partition_assignments: Arc<RwLock<PartitionAssignments>>) -> Self {
         Self {
             partition_assignments,
         }
@@ -291,7 +297,7 @@ impl EpochServiceActor {
     }
 
     /// Loops though all of the term ledgers and looks for slots that are older
-    /// than the epoch_length (term length) of the ledger.
+    /// than the `epoch_length` (term length) of the ledger.
     fn expire_term_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
         let epoch_height = new_epoch_block.height;
         let expired_hashes: Vec<H256>;
@@ -413,12 +419,12 @@ impl EpochServiceActor {
         let log_10 = (base_count as f64).log10();
         let trunc = truncate_to_3_decimals(log_10);
         let scaled = truncate_to_3_decimals(trunc * config.capacity_scalar as f64);
-        let rounded = truncate_to_3_decimals(scaled).ceil() as u64;
+
         // println!(
         //     "- base_count: {}, log_10: {}, trunc: {}, scaled: {}, rounded: {}",
         //     base_count, log_10, trunc, scaled, rounded
         // );
-        rounded
+        truncate_to_3_decimals(scaled).ceil() as u64
     }
 
     /// Adds new capacity partitions to the protocols pool of partitions. This
@@ -445,7 +451,7 @@ impl EpochServiceActor {
                 *partition_hash,
                 PartitionAssignment {
                     partition_hash: *partition_hash,
-                    miner_address: self.config.storage_config.miner_address.clone(),
+                    miner_address: self.config.storage_config.miner_address,
                     ledger_num: None,
                     slot_index: None,
                 },
@@ -468,7 +474,7 @@ impl EpochServiceActor {
         }
     }
 
-    /// Takes a capacity partition hash and updates its PartitionAssignment
+    /// Takes a capacity partition hash and updates its `PartitionAssignment`
     /// state to indicate it is part of a data ledger
     fn assign_partition_to_slot(
         &mut self,
@@ -484,7 +490,7 @@ impl EpochServiceActor {
         }
     }
 
-    /// For a given ledger indicated by ledger_num, calculate the number of
+    /// For a given ledger indicated by `ledger_num`, calculate the number of
     /// partition slots to add to the ledger based on remaining capacity
     /// and data ingress this epoch
     fn calculate_additional_slots(
@@ -508,11 +514,11 @@ impl EpochServiceActor {
         if ledger_size >= add_capacity_threshold {
             // Add 1 slot for buffer plus enough slots to handle size above threshold
             let excess = ledger_size.saturating_sub(max_chunk_capacity);
-            slots_to_add = 1 + (excess as u64 / partition_chunk_count);
+            slots_to_add = 1 + (excess / partition_chunk_count);
 
             // Check if we need to add an additional slot for excess > half of
             // the partition size
-            if excess as u64 % partition_chunk_count >= partition_chunk_count / 2 {
+            if excess % partition_chunk_count >= partition_chunk_count / 2 {
                 slots_to_add += 1;
             }
         }

@@ -99,7 +99,9 @@ pub fn capacity_pack_range_c(
 
 enum PackingType {
     CPU,
+    #[allow(unused)]
     CUDA,
+    #[allow(unused)]
     AMD,
 }
 
@@ -119,16 +121,16 @@ pub fn capacity_pack_range_with_data(
     match PACKING_TYPE {
         PackingType::CPU => {
             let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
-            data.iter_mut().enumerate().for_each(|(pos, mut chunk)| {
+            data.iter_mut().enumerate().for_each(|(pos, chunk)| {
                 capacity_single::compute_entropy_chunk(
                     mining_address,
                     chunk_offset + pos as u64 * chunk_size as u64,
-                    partition_hash.0.into(),
+                    partition_hash.0,
                     iterations,
                     chunk_size,
                     &mut entropy_chunk,
                 );
-                xor_vec_u8_arrays_in_place(&mut chunk, &entropy_chunk);
+                xor_vec_u8_arrays_in_place(chunk, &entropy_chunk);
             })
         }
         _ => unimplemented!(),
@@ -146,15 +148,15 @@ pub fn capacity_pack_range_with_data_c(
     match PACKING_TYPE {
         PackingType::CPU => {
             let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
-            data.iter_mut().enumerate().for_each(|(pos, mut chunk)| {
+            data.iter_mut().enumerate().for_each(|(pos, chunk)| {
                 capacity_pack_range_c(
                     mining_address,
-                    chunk_offset + pos as u64 * CHUNK_SIZE as u64,
+                    chunk_offset + pos as u64 * CHUNK_SIZE,
                     partition_hash,
                     iterations,
                     &mut entropy_chunk,
                 );
-                xor_vec_u8_arrays_in_place(&mut chunk, &entropy_chunk);
+                xor_vec_u8_arrays_in_place(chunk, &entropy_chunk);
             })
         }
         _ => unimplemented!(),
@@ -180,17 +182,13 @@ pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
     entropy
 }
 
+#[cfg(test)]
 mod tests {
-    use irys_c::capacity_single::{self, SHA_HASH_SIZE};
-    use irys_types::{Address, Base64, ChunkBytes, PackedChunk, CHUNK_SIZE, H256};
-    use rand::Rng;
-    use rand::{self, RngCore as _};
-    use std::time::Instant;
-
-    use crate::{
-        capacity_pack_range_c, capacity_pack_range_with_data, capacity_pack_range_with_data_c,
-        packing_xor_vec_u8, unpack, xor_vec_u8_arrays_in_place,
-    };
+    use crate::capacity_single::SHA_HASH_SIZE;
+    use crate::*;
+    use irys_types::H256;
+    use rand::{Rng, RngCore};
+    use std::time::*;
 
     #[test]
     fn test_compute_entropy_chunk() {
@@ -292,7 +290,7 @@ mod tests {
         let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
         capacity_pack_range_c(
             mining_address,
-            chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE as u64,
+            chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE,
             partition_hash.into(),
             Some(2 * CHUNK_SIZE as u32),
             &mut entropy_chunk,
@@ -307,6 +305,7 @@ mod tests {
     #[test]
     fn test_chunk_packing_unpacking() {
         let mut rng = rand::thread_rng();
+
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];

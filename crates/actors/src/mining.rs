@@ -2,43 +2,74 @@ use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
     BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe,
 };
+use crate::vdf::VdfStepsReadGuard;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
-use irys_storage::{ie, StorageModule};
+use irys_efficient_sampling::Ranges;
+use irys_storage::{ie, ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
-use irys_types::{
-    block_production::{Seed, SolutionContext},
-    H256, U256,
-};
-use irys_types::{Address, H256List, PartitionChunkOffset, SimpleRNG};
+use irys_types::block_production::Seed;
+use irys_types::{block_production::SolutionContext, H256, U256};
+use irys_types::{Address, H256List, PartitionChunkOffset};
 use openssl::sha;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+#[derive(Debug, Clone)]
 pub struct PartitionMiningActor {
     mining_address: Address,
-    database_provider: DatabaseProvider,
+    _database_provider: DatabaseProvider,
     block_producer_actor: Recipient<SolutionFoundMessage>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
     difficulty: U256,
+    ranges: Ranges,
+    steps_guard: VdfStepsReadGuard,
 }
 
 impl PartitionMiningActor {
     pub fn new(
         mining_address: Address,
-        database_provider: DatabaseProvider,
+        _database_provider: DatabaseProvider,
         block_producer_addr: Recipient<SolutionFoundMessage>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
+        steps_guard: VdfStepsReadGuard,
     ) -> Self {
         Self {
             mining_address,
-            database_provider,
+            _database_provider,
             block_producer_actor: block_producer_addr,
+            ranges: Ranges::new(
+                (&storage_module.storage_config.num_chunks_in_partition
+                    / &storage_module.storage_config.num_chunks_in_recall_range)
+                    .try_into()
+                    .expect("Recall ranges number exceeds usize representation"),
+            ),
             storage_module,
             should_mine: start_mining,
             difficulty: U256::zero(),
+            steps_guard,
+        }
+    }
+
+    fn get_recall_range(
+        &mut self,
+        step: u64,
+        seed: &H256,
+        partition_hash: &H256,
+    ) -> eyre::Result<u64> {
+        let vdf_steps = self.steps_guard.read();
+        let last_step = vdf_steps.global_step;
+        if last_step + 1 >= step {
+            debug!("Step {} already processed or next consecutive one", step);
+            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
+        } else {
+            // This code is not needed for just one node, but will be needed for multiple nodes
+            warn!("Non consecutive Step {} need to reconstruct ranges", step);
+            let steps = vdf_steps.get_steps(ii(last_step + 1, step - 1))?;
+            self.ranges.reconstruct(&steps, partition_hash);
+            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         }
     }
 
@@ -51,29 +82,20 @@ impl PartitionMiningActor {
         let partition_hash = match self.storage_module.partition_hash() {
             Some(p) => p,
             None => {
-                info!("No parittion assigned !");
+                warn!("No partition assigned!");
                 return Ok(None);
             }
         };
 
-        // Hash together the mining_seed and partition to get randomness for the rng
-        let mut hasher = sha::Sha256::new();
-        hasher.update(&mining_seed.0);
-        hasher.update(&partition_hash.0);
-        let rng_seed: u32 = u32::from_be_bytes(hasher.finish()[28..32].try_into().unwrap());
-        let mut rng = SimpleRNG::new(rng_seed);
+        // Pick a random recall range in the partition using efficient sampling
+        let recall_range_index =
+            { self.get_recall_range(vdf_step, &mining_seed, &partition_hash)? };
 
         let config = &self.storage_module.storage_config;
 
-        // TODO: add a partition_state that keeps track of efficient sampling
-        // For now, Pick a random recall range in the partition
-        let num_chunks_in_partition = config.num_chunks_in_partition as u32;
-        let num_chunks_in_recall_range = config.num_chunks_in_recall_range as u32;
-        let recall_range_index =
-            rng.next() % (num_chunks_in_partition / num_chunks_in_recall_range);
-
         // Starting chunk index within partition
-        let start_chunk_offset = (recall_range_index * num_chunks_in_recall_range) as usize;
+        let start_chunk_offset =
+            recall_range_index as u32 * config.num_chunks_in_recall_range as u32;
 
         // info!(
         //     "Recall range index {} start chunk index {}",
@@ -82,7 +104,7 @@ impl PartitionMiningActor {
 
         let read_range = ie(
             start_chunk_offset as u32,
-            start_chunk_offset as u32 + config.num_chunks_in_recall_range as u32,
+            start_chunk_offset + config.num_chunks_in_recall_range as u32,
         );
 
         // haven't tested this, but it looks correct
@@ -93,16 +115,17 @@ impl PartitionMiningActor {
         //     &read_range
         // );
 
-        if chunks.len() == 0 {
+        if chunks.is_empty() {
             warn!(
                 "No chunks found - storage_module_id:{}",
                 self.storage_module.id
             );
         }
 
-        for (index, (chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
+        for (index, (_chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
-            let partition_chunk_offset = (start_chunk_offset + index) as PartitionChunkOffset;
+            let partition_chunk_offset =
+                (start_chunk_offset + index as u32) as PartitionChunkOffset;
             let (tx_path, data_path) = self
                 .storage_module
                 .read_tx_data_path(partition_chunk_offset as u64)?;
@@ -119,15 +142,11 @@ impl PartitionMiningActor {
             let test_solution = hash_to_number(&hasher.finish());
 
             if test_solution >= self.difficulty {
-                //info!("SOLUTION FOUND!!!!!!!!!");
-
-                //info!("{:?}", chunk_bytes);
-
                 info!(
                     "Solution Found - partition_id: {}, ledger_offset: {}/{}, range_offset: {}/{}",
                     self.storage_module.id,
                     partition_chunk_offset,
-                    num_chunks_in_partition,
+                    config.num_chunks_in_partition,
                     index,
                     chunks.len()
                 );
@@ -135,6 +154,7 @@ impl PartitionMiningActor {
                 let solution = SolutionContext {
                     partition_hash,
                     chunk_offset: partition_chunk_offset,
+                    recall_chunk_index: index as u32,
                     mining_address: self.mining_address,
                     tx_path, // capacity partitions have no tx_path nor data_path
                     data_path,
@@ -148,8 +168,6 @@ impl PartitionMiningActor {
 
                 // Once solution is sent stop mining and let all other partitions know
                 return Ok(Some(solution));
-            } else {
-                //  info!("NO SOLUTION!!!!")
             }
         }
 
@@ -179,7 +197,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         let seed = msg.seed;
         if !self.should_mine {
             debug!("Mining disabled, skipping seed {:?}", seed);
-            return ();
+            return;
         }
 
         debug!(
@@ -199,7 +217,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
             Ok(None) => {
                 //debug!("No solution sent!");
             }
-            Err(err) => error!("Error in hanling mining solution {:?}", err),
+            Err(err) => error!("Error in handling mining solution {:?}", err),
         };
     }
 }
@@ -218,7 +236,7 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
 pub struct MiningControl(pub bool);
 
 impl MiningControl {
-    fn into_inner(self) -> bool {
+    const fn into_inner(self) -> bool {
         self.0
     }
 }
@@ -242,12 +260,14 @@ fn hash_to_number(hash: &[u8]) -> U256 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::block_producer::{
         BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
     };
     use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
     use crate::mining::{PartitionMiningActor, Seed};
-    use actix::{Actor, Addr, Recipient};
+    use crate::vdf::{GetVdfStateMessage, VdfService, VdfStepsReadGuard};
+    use actix::{Actor, Addr, ArbiterService, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::{
@@ -260,7 +280,7 @@ mod tests {
     };
     use irys_types::{H256List, IrysBlockHeader};
     use std::any::Any;
-    use std::sync::{Arc, RwLock};
+    use std::sync::RwLock;
     use std::time::Duration;
     use tokio::time::sleep;
 
@@ -300,7 +320,7 @@ mod tests {
         // Set up the storage geometry for this test
         let storage_config = StorageConfig {
             chunk_size,
-            num_chunks_in_partition: chunk_count.try_into().unwrap(),
+            num_chunks_in_partition: chunk_count.into(),
             num_chunks_in_recall_range: 2,
             num_partitions_in_slot: 1,
             miner_address: mining_address,
@@ -311,7 +331,7 @@ mod tests {
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
-                partition_hash: partition_hash,
+                partition_hash,
                 miner_address: mining_address,
                 ledger_num: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
@@ -352,8 +372,8 @@ mod tests {
 
         for tx_chunk_offset in 0..chunk_count {
             let chunk = UnpackedChunk {
-                data_root: data_root,
-                data_size: chunk_size as u64,
+                data_root,
+                data_size: chunk_size,
                 data_path: data_path.to_vec().into(),
                 bytes: chunk_data.to_vec().into(),
                 tx_offset: tx_chunk_offset,
@@ -366,21 +386,26 @@ mod tests {
         let mining_broadcaster = BroadcastMiningService::new();
         let mining_broadcaster_addr = mining_broadcaster.start();
 
+        let vdf_service = VdfService::from_registry();
+        let vdf_steps_guard: VdfStepsReadGuard =
+            vdf_service.send(GetVdfStateMessage).await.unwrap();
+
         let partition_mining_actor = PartitionMiningActor::new(
             mining_address,
             database_provider.clone(),
             mocked_addr.0,
             storage_module,
             true,
+            vdf_steps_guard.clone(),
         );
 
         let seed: Seed = Seed(H256::random());
-        let _result = partition_mining_actor
+        partition_mining_actor
             .start()
             .send(BroadcastMiningSeed {
                 seed,
                 checkpoints: H256List(vec![]),
-                global_step: 0,
+                global_step: 1,
             })
             .await
             .unwrap();

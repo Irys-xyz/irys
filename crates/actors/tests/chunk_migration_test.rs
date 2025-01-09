@@ -22,8 +22,8 @@ use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, H256List,
-    IrysBlockHeader, IrysSignature, IrysTransaction, IrysTransactionHeader, PoaData, Signature,
-    StorageConfig, TransactionLedger, UnpackedChunk, VDFLimiterInfo, H256, U256,
+    IrysBlockHeader, IrysTransaction, IrysTransactionHeader, PoaData, Signature, StorageConfig,
+    TransactionLedger, UnpackedChunk, VDFLimiterInfo, H256, U256,
 };
 use reth::{revm::primitives::B256, tasks::TaskManager};
 use tracing::info;
@@ -116,10 +116,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
 
     // Create vectors of tx headers and txids
     let tx_headers: Vec<IrysTransactionHeader> = txs.iter().map(|tx| tx.header.clone()).collect();
-    let data_tx_ids = tx_headers
-        .iter()
-        .map(|h| h.id.clone())
-        .collect::<Vec<H256>>();
+    let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
     // Create a block_index
@@ -146,9 +143,9 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let mempool_addr = mempool_actor.start();
 
     // Send tx headers to mempool
-    tx_headers.iter().for_each(|header| {
+    for header in &tx_headers {
         mempool_addr.do_send(TxIngressMessage(header.clone()));
-    });
+    }
 
     // Send chunks to mempool
     for tx in &txs {
@@ -179,7 +176,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
         height = block_index.read().unwrap().num_blocks().max(1) - 1;
     }
 
-    for tx in txs.iter() {
+    for tx in &txs {
         println!("data_root: {:?}", tx.header.data_root.0);
     }
 
@@ -202,6 +199,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
             chunk: Base64::from_str("").unwrap(),
             ledger_num: None,
             partition_chunk_offset: 0,
+            recall_chunk_index: 0,
             partition_hash: PartitionHash::zero(),
         },
         reward_address: Address::ZERO,
@@ -252,7 +250,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let _res = chunk_migration_addr.send(block_finalized_message).await?;
 
     // Check to see if the chunks are in the StorageModules
-    for sm in storage_modules.iter() {
+    for sm in &storage_modules {
         let _ = sm.sync_pending_chunks();
     }
 

@@ -7,6 +7,7 @@ use awc::Client;
 #[derive(Debug)]
 pub enum ProxyError {
     RequestError(awc::error::SendRequestError),
+    #[allow(unused)]
     ParseError(String),
     MethodNotAllowed,
 }
@@ -40,14 +41,14 @@ pub async fn proxy(
     let target_uri = "http://localhost:8545";
 
     // Create a new client request
-    let mut client_req = match req.method() {
-        &actix_web::http::Method::GET => client.get(target_uri),
-        &actix_web::http::Method::POST => client.post(target_uri),
-        &actix_web::http::Method::PUT => client.put(target_uri),
-        &actix_web::http::Method::DELETE => client.delete(target_uri),
-        &actix_web::http::Method::HEAD => client.head(target_uri),
-        &actix_web::http::Method::OPTIONS => client.options(target_uri),
-        &actix_web::http::Method::PATCH => client.patch(target_uri),
+    let mut client_req = match *req.method() {
+        actix_web::http::Method::GET => client.get(target_uri),
+        actix_web::http::Method::POST => client.post(target_uri),
+        actix_web::http::Method::PUT => client.put(target_uri),
+        actix_web::http::Method::DELETE => client.delete(target_uri),
+        actix_web::http::Method::HEAD => client.head(target_uri),
+        actix_web::http::Method::OPTIONS => client.options(target_uri),
+        actix_web::http::Method::PATCH => client.patch(target_uri),
         _ => return Err(ProxyError::MethodNotAllowed),
     };
 

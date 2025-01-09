@@ -1,20 +1,16 @@
-use std::{
-    fs::create_dir_all,
-    path::{absolute, PathBuf},
-    str::FromStr as _,
-};
+use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _};
 use tempfile::TempDir;
-use tracing::{debug, level_filters::LevelFilter};
-use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt, FmtSubscriber};
+use tracing::debug;
+use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt, EnvFilter};
 
-/// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<project_dir>/.tmp.  
+/// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.  
 /// The temp directory is prefixed by <name> (default: "irys-test-"), and automatically deletes itself on test completion -
 /// unless the `keep` flag is set to `true` - in which case the folder persists indefinitely.
 pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
     // tracing-subscriber is so the tracing log macros (i.e info!) work
     // TODO: expose tracing configuration
     let _ = SubscriberBuilder::default()
-        .with_max_level(LevelFilter::DEBUG)
+        .with_env_filter(EnvFilter::from_default_env())
         .finish()
         .try_init();
 
@@ -22,7 +18,7 @@ pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
 }
 
 /// Constant used to make sure .tmp shows up in the right place all the time
-pub const CARGO_MANIFEST_DIR: &'static str = env!("CARGO_MANIFEST_DIR");
+pub const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 /// Creates a temporary directory
 pub fn temporary_directory(name: Option<&str>, keep: bool) -> TempDir {

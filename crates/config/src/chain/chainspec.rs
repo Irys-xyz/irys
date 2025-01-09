@@ -31,9 +31,7 @@ impl IrysChainSpecBuilder {
     }
 
     pub fn new() -> Self {
-        Self {
-            ..Default::default()
-        }
+        Default::default()
     }
 
     /// extend the genesis accounts

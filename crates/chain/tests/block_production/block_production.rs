@@ -1,23 +1,20 @@
-use std::{collections::HashMap, fs::remove_dir_all, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use alloy_consensus::TxEnvelope;
 use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
-use irys_actors::{
-    block_producer::SolutionFoundMessage,
-    mempool::TxIngressMessage,
-    vdf::{self, GetVdfStateMessage, VdfService, VdfStepsReadGuard},
-};
+use irys_actors::{block_producer::SolutionFoundMessage, mempool::TxIngressMessage, vdf::VdfStepsReadGuard};
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
+use irys_storage::ii;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     block_production::SolutionContext, irys::IrysSigner, vdf_config::VDFStepsConfig, Address,
-    IrysTransaction, H256, IRYS_CHAIN_ID, StorageConfig
+    IrysTransaction, H256, IRYS_CHAIN_ID, StorageConfig, block_production::Seed, H256List,
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
@@ -28,15 +25,11 @@ use reth_primitives::{
 };
 use tokio::time::sleep;
 use tracing::{info, debug};
-
+use sha2::{Digest, Sha256};    
+use irys_vdf::{step_number_to_salt_number, vdf_sha};
 /// Create a valid capacity PoA solution
 #[cfg(test)]
 pub async fn capacity_chunk_solution(miner_addr: Address, vdf_steps_guard: VdfStepsReadGuard, vdf_config: &VDFStepsConfig, storage_config: &StorageConfig) -> SolutionContext {
-    use irys_storage::ii;
-    use irys_types::{block_production::Seed, H256List};
-    use irys_vdf::{step_number_to_salt_number, vdf_sha};
-    use sha2::{Digest, Sha256};    
-    
     let max_retries = 20; 
     let mut i = 1;
     let initial_step_num = vdf_steps_guard.read().global_step;
@@ -75,7 +68,7 @@ pub async fn capacity_chunk_solution(miner_addr: Address, vdf_steps_guard: VdfSt
     let mut entropy_chunk = Vec::<u8>::with_capacity(storage_config.chunk_size as usize);
     compute_entropy_chunk(
         miner_addr,
-        0,
+        4 * storage_config.num_chunks_in_recall_range,
         partition_hash.into(),
         storage_config.entropy_packing_iterations,
         storage_config.chunk_size as usize, // take it from storage config
@@ -86,7 +79,7 @@ pub async fn capacity_chunk_solution(miner_addr: Address, vdf_steps_guard: VdfSt
 
     SolutionContext {
         partition_hash,
-        chunk_offset: 0,
+        chunk_offset: 4 * storage_config.num_chunks_in_recall_range as u32,
         mining_address: miner_addr,
         chunk: entropy_chunk,
         vdf_step: step_num,
@@ -171,6 +164,9 @@ async fn test_blockprod() -> eyre::Result<()> {
 
     let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard, &node.vdf_config, &node.storage_config).await;
 
+    // wait for vdf step being generated
+    sleep(Duration::from_secs(2)).await;
+
     let (block, reth_exec_env) = node
         .actor_addresses
         .block_producer
@@ -226,8 +222,8 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
         info!("waiting block {}", i);
 
         let mut retries = 0;
-        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 10 as u64 {
-            sleep(Duration::from_millis(1000)).await;
+        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 10_u64 {
+            sleep(Duration::from_secs(2)).await;
             retries += 1;
         }
 
@@ -305,6 +301,9 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
 
     let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard, &node.vdf_config, &node.storage_config).await;
 
+    // wait for vdf step being generated
+    sleep(Duration::from_secs(2)).await;
+
     let (block, _) = node
         .actor_addresses
         .block_producer
@@ -355,14 +354,14 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         (
             account2.address(),
             GenesisAccount {
-                balance: U256::from(420000000000000 as u128),
+                balance: U256::from(420000000000000_u128),
                 ..Default::default()
             },
         ),
         (
             account3.address(),
             GenesisAccount {
-                balance: U256::from(690000000000000 as u128),
+                balance: U256::from(690000000000000_u128),
                 ..Default::default()
             },
         ),
@@ -396,7 +395,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     .inject_tx(signed_tx)
                     .await
                     .expect_err("tx should be rejected");
-                ()
             }
             // 2 is less poor but should still fail
             2 => {
@@ -405,7 +403,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     .inject_tx(signed_tx)
                     .await
                     .expect_err("tx should be rejected");
-                ()
             }
             // should succeed
             3 => {
@@ -414,7 +411,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     .inject_tx(signed_tx)
                     .await
                     .expect("tx should be accepted");
-                ()
             }
             _ => return Err(eyre!("unknown account index")),
         }
@@ -435,6 +431,9 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     }
 
     let poa_solution = capacity_chunk_solution(node.config.mining_signer.address(), node.vdf_steps_guard, &node.vdf_config, &node.storage_config).await;
+
+    // wait for vdf step being generated
+    sleep(Duration::from_secs(2)).await;
 
     let (block, reth_exec_env) = node
         .actor_addresses
@@ -461,7 +460,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     // height is hardcoded at 42 right now
     // assert_eq!(reth_block.number, block.height);
-    assert!(evm_txs.contains_key(&reth_block.body.transactions.get(0).unwrap().hash()));
+    assert!(evm_txs.contains_key(&reth_block.body.transactions.first().unwrap().hash()));
 
     assert_eq!(
         reth_context

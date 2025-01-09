@@ -1,5 +1,5 @@
 use alloy_rpc_types::BlockId;
-use alloy_signer_local::LocalWallet;
+use alloy_signer_local::PrivateKeySigner;
 use foldhash::fast::RandomState;
 use irys_primitives::{Address, Genesis, ShadowReceipt};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
@@ -28,16 +28,15 @@ use reth_provider::{BlockIdReader, StateProviderFactory};
 use revm::db::State;
 use revm::JournaledState;
 
-use irys_primitives::shadow::{ShadowTx, Shadows};
+use irys_primitives::shadow::ShadowTx;
 use revm_primitives::hex::ToHexExt;
-use revm_primitives::{AccountInfo, Bytecode, Bytes, FixedBytes, HashSet, SpecId, B256};
-use std::collections::{BTreeMap, HashMap};
+use revm_primitives::{Bytes, HashSet, SpecId, B256};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use strum::IntoEnumIterator;
 
-use tracing::{debug, error};
+use tracing::debug;
 
 use crate::genesis::GenesisInfo;
 
@@ -145,7 +144,7 @@ impl AccountStateExtApiServer for AccountStateExt {
     }
 
     fn get_peer_id(&self) -> RpcResult<PeerId> {
-        Ok(self.network.peer_id().clone())
+        Ok(*self.network.peer_id())
     }
 
     fn get_account(
@@ -169,15 +168,14 @@ impl AccountStateExtApiServer for AccountStateExt {
             )
         })?;
         // TODO: replace with proper errors/error codes
-        let r2 = state.basic_account(address).map_err(|e| {
+
+        state.basic_account(address).map_err(|e| {
             ErrorObjectOwned::owned::<String>(
                 -32072,
                 "error getting account info",
                 Some(e.to_string()),
             )
-        });
-
-        return r2;
+        })
     }
 
     // fn get_account2(
@@ -250,8 +248,8 @@ impl AccountStateExtApiServer for AccountStateExt {
         let mut hm = HashMap::new();
         for address in addresses.iter() {
             hm.insert(
-                address.clone(),
-                state.basic_account(address.clone()).map_err(|e| {
+                *address,
+                state.basic_account(*address).map_err(|e| {
                     ErrorObjectOwned::owned::<String>(
                         -32072,
                         "error getting account info",
@@ -376,9 +374,9 @@ impl AccountStateExtApiServer for AccountStateExt {
         );
         // let res = apply_shadow(shadow, &mut journaled_state, &mut db);
         let res = simulate_apply_shadow_thin(shadow, &mut journaled_state, &mut db);
-        return Ok(res.map_err(|e| {
+        res.map_err(|e| {
             ErrorObjectOwned::owned::<String>(-32091, "error executing shadow", Some(e.to_string()))
-        })?);
+        })
         // OLD - used to build a full EVM env (lol) to execute the shadow //
 
         // let block_hash = parent
@@ -426,7 +424,7 @@ impl AccountStateExtApiServer for AccountStateExt {
     async fn create_eth_tx(&self, private_key: B256) -> RpcResult<Bytes> {
         // create a new tx
         // let wallet = LocalWallet::from(private_key);
-        let wallet = LocalWallet::from_bytes(&private_key).map_err(|e| {
+        let wallet = PrivateKeySigner::from_bytes(&private_key).map_err(|e| {
             ErrorObjectOwned::owned::<String>(-32091, "error executing shadow", Some(e.to_string()))
         })?;
         debug!("Creating tx with owner: {}", wallet.address());
@@ -447,14 +445,14 @@ impl AccountStateExtApiServer for AccountStateExt {
 
     fn to_address(&self, private_key: B256) -> RpcResult<Address> {
         dbg!(&private_key.encode_hex());
-        let wallet = LocalWallet::from_bytes(&private_key).map_err(|e| {
+        let wallet = PrivateKeySigner::from_bytes(&private_key).map_err(|e| {
             ErrorObjectOwned::owned::<String>(
                 -32091,
                 "error resolving address for wallet",
                 Some(e.to_string()),
             )
         })?;
-        return Ok(wallet.address());
+        Ok(wallet.address())
     }
 }
 

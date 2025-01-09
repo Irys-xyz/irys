@@ -8,7 +8,7 @@ use crate::shadow::Shadows;
 #[serde(rename_all = "camelCase")]
 pub struct PayloadAttributes {
     /// Value for the `timestamp` field of the new payload
-    #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
+    #[serde(with = "alloy_serde::quantity")]
     pub timestamp: u64,
     /// Value for the `prevRandao` field of the new payload
     pub prev_randao: B256,

@@ -1,0 +1,252 @@
+name: Rust Checks
+
+permissions:
+  contents: read
+
+# on:
+#   # Runs on pushes to master
+#   push:
+#     branches:
+#       - master
+  
+#   # Runs on PRs targeting master
+#   pull_request:
+#     branches:
+#       - master
+      
+#   # Manual trigger via commit message
+#   push:
+#     branches-ignore:
+#       - master
+
+#   # manual trigger from GitHub UI
+#   workflow_dispatch:
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    # branches: [main]
+    branches: [feat/basic-ci]
+
+
+env:
+  CARGO_TERM_COLOR: always
+  CACHE_VERSION: v1
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+
+  gate:
+    name: gate
+    runs-on: self-hosted
+    if: |
+      github.ref == 'refs/heads/master' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '#run-ci')
+    steps:
+      - name: No-op gate
+        run: |
+          echo "Gate conditions met"
+          true
+
+  # # TODO @JesseTheRobot - remove `no-run` once we have stable tests, maybe use nextest?
+  # compile-test:
+  #   name: compile-test
+  #   runs-on: self-hosted
+  #   needs: gate
+  #   timeout-minutes: 30
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: 'true'
+  #         token: ${{ secrets.SUBMODULE_PAT }}
+  #     - uses: maxnowack/local-cache@v2
+  #       env:
+  #         cache-name: rust
+  #       with: 
+  #           # ~/.cargo/bin/
+  #           # ~/.rustup/
+  #         path: |
+  #           ~/.cargo/registry/index/
+  #           ~/.cargo/registry/cache/
+  #           ~/.cargo/git/db/
+  #           target/
+  #         key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-${{ hashFiles('**/Cargo.toml') }}
+  #         restore-keys: |
+  #           ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-
+  #     - uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         toolchain: stable
+      
+  #     - run: cargo test --no-run
+
+  #     - name: Clean cache
+  #       run: .github/scripts/clean_cache.sh
+
+
+  compile-check:
+    name: compile-check
+    runs-on: self-hosted
+    needs: gate
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+          token: ${{ secrets.SUBMODULE_PAT }}
+      - uses: maxnowack/local-cache@v2
+        env:
+          cache-name: rust
+        with: 
+            # ~/.cargo/bin/
+            # ~/.rustup/
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      
+      - run: cargo check --all-features --workspace
+
+      - name: Clean cache
+        run: .github/scripts/clean_cache.sh
+
+        
+  clippy:
+    name: clippy
+    runs-on: self-hosted
+    needs: gate
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+          token: ${{ secrets.SUBMODULE_PAT }}
+      - uses: maxnowack/local-cache@v2
+        env:
+          cache-name: rust
+        with: 
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          toolchain: stable
+
+      - run: cargo clippy --workspace --lib --examples --tests --benches --all-features --locked
+        # env:
+        #   RUSTFLAGS: -D warnings
+
+  cargo-fmt:
+    name: cargo fmt
+    runs-on: self-hosted
+    needs: gate
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+          token: ${{ secrets.SUBMODULE_PAT }}
+      - uses: maxnowack/local-cache@v2
+        env:
+          cache-name: rust
+        with: 
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      
+      - name: cargo fmt
+        run: cargo fmt -- --check
+
+  cargo-doc:
+    name: cargo doc
+    runs-on: self-hosted
+    needs: gate
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+          token: ${{ secrets.SUBMODULE_PAT }}
+      - uses: maxnowack/local-cache@v2
+        env:
+          cache-name: rust
+        with: 
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      
+      - name: cargo doc
+        run: cargo doc --workspace --all-features
+
+  cargo-fix:
+    name: cargo fix
+    runs-on: self-hosted
+    needs: gate
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+          token: ${{ secrets.SUBMODULE_PAT }}
+      - uses: maxnowack/local-cache@v2
+        env:
+          cache-name: rust
+        with: 
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-check-
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      
+      - name: cargo fix
+        run: |
+          cargo fix --workspace --all-features
+
+          if ! git diff --exit-code; then
+              echo "There are local changes after running 'cargo fix --workspace --all-features' ❌"
+              exit 1
+          else
+              echo "No changes detected after running 'cargo fix --workspace --all-features' ✅"
+          fi

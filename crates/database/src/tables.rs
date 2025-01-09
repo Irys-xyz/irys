@@ -1,6 +1,6 @@
 use irys_types::{
     ingress::IngressProof, partition::PartitionHash, ChunkPathHash, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, TxRelativeChunkOffset, H256,
+    IrysTransactionHeader, H256,
 };
 use reth_codecs::Compact;
 use reth_db::{table::DupSort, tables, DatabaseError};
@@ -23,8 +23,7 @@ macro_rules! add_wrapper_struct {
 			$(
 					/// Wrapper struct so it can use StructFlags from Compact, when used as pure table values.
 					#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Compact)]
-					#[derive(arbitrary::Arbitrary)]
-					//#[add_arbitrary_tests(compact)]
+					#[derive(arbitrary::Arbitrary)] //#[add_arbitrary_tests(compact)]
 					pub struct $wrapper(pub $name);
 
 					impl From<$name> for $wrapper {
@@ -116,7 +115,7 @@ tables! {
     table ProgrammableDataChunkCache<Key = u32, Value = Vec<u8>>;
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, Compact)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
 /// partition hashes
 /// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
 pub struct PartitionHashes(pub Vec<PartitionHash>);

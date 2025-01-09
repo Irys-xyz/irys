@@ -1,13 +1,12 @@
 use std::path::Path;
 
-use bytes::Buf;
 use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset, TxPath,
     TxPathHash, UnpackedChunk,
 };
 use reth_db::{
     transaction::{DbTx, DbTxMut},
-    Database, DatabaseEnv,
+    DatabaseEnv,
 };
 
 use crate::open_or_create_db;
@@ -33,11 +32,7 @@ pub fn write_chunk_data_path<T: DbTxMut + DbTx>(
     let path_hash = path_hash.unwrap_or_else(|| UnpackedChunk::hash_data_path(&data_path));
     add_offset_for_path_hash(tx, offset, path_hash)?;
 
-    Ok(add_data_path_hash_to_offset_index(
-        tx,
-        offset,
-        Some(path_hash),
-    )?)
+    add_data_path_hash_to_offset_index(tx, offset, Some(path_hash))
 }
 
 /// writes a chunk's data path to the database using the provided transaction
@@ -151,7 +146,7 @@ pub fn set_path_hashes_by_offset<T: DbTxMut>(
     Ok(tx.put::<ChunkPathHashByOffset>(offset, path_hashes)?)
 }
 
-/// get all the start offsets for the data_root
+/// get all the start offsets for the `data_root`
 pub fn get_start_offsets_by_data_root<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
@@ -159,7 +154,7 @@ pub fn get_start_offsets_by_data_root<T: DbTx>(
     Ok(tx.get::<StartOffsetsByDataRoot>(data_root)?)
 }
 
-/// set (overwrite) all the start offsets for the data_root
+/// set (overwrite) all the start offsets for the `data_root`
 pub fn set_start_offsets_by_data_root<T: DbTxMut>(
     tx: &T,
     data_root: DataRoot,
@@ -168,7 +163,7 @@ pub fn set_start_offsets_by_data_root<T: DbTxMut>(
     Ok(tx.put::<StartOffsetsByDataRoot>(data_root, start_offsets)?)
 }
 
-///add a start offset to the start offsets for the data_root
+///add a start offset to the start offsets for the `data_root`
 pub fn add_start_offset_to_data_root_index<T: DbTxMut + DbTx>(
     tx: &T,
     data_root: DataRoot,

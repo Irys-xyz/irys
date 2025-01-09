@@ -1,16 +1,9 @@
-//! Crate dedicated to the IrysNodeConfig to avoid depdendency cycles
-use std::{
-    env, fs,
-    path::{absolute, PathBuf},
-    str::FromStr as _,
-};
+//! Crate dedicated to the `IrysNodeConfig` to avoid depdendency cycles
+use std::{env, fs, path::PathBuf};
 
 use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;
-use irys_types::{
-    block_production::Partition, irys::IrysSigner, Address, PartitionStorageProviderConfig,
-    StorageModuleConfig, CHUNK_SIZE,
-};
+use irys_types::{irys::IrysSigner, Address};
 use tracing::info;
 
 pub mod chain;
@@ -28,7 +21,7 @@ pub struct IrysNodeConfig {
     /// base data directory, i.e `./.tmp`
     /// should not be used directly, instead use the appropriate methods, i.e `instance_directory`
     pub base_directory: PathBuf,
-    /// ChainSpec builder - used to generate ChainSpec, which defines most of the chain-related parameters
+    /// `ChainSpec` builder - used to generate `ChainSpec`, which defines most of the chain-related parameters
     pub chainspec_builder: IrysChainSpecBuilder,
 }
 
@@ -70,7 +63,7 @@ impl IrysNodeConfig {
     pub fn reth_log_dir(&self) -> PathBuf {
         self.reth_data_dir().join("logs")
     }
-    /// get the instance-specific block_index directory path  
+    /// get the instance-specific `block_index` directory path  
     pub fn block_index_dir(&self) -> PathBuf {
         self.instance_directory().join("block_index")
     }

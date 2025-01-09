@@ -1,13 +1,5 @@
 use core::fmt;
-use std::{
-    fs::{canonicalize, File},
-    future::Future,
-    io::Write,
-    ops::Deref,
-    path::PathBuf,
-    sync::{mpsc::Sender, Arc},
-    time::Duration,
-};
+use std::{fs::canonicalize, future::Future, ops::Deref, sync::Arc};
 
 use clap::{command, Args, Parser};
 use irys_config::IrysNodeConfig;
@@ -15,27 +7,26 @@ use irys_types::reth_provider::IrysRethProvider;
 use reth::{
     chainspec::EthereumChainSpecParser,
     cli::{Cli, Commands},
-    core::irys_ext::{NodeExitReason, ReloadPayload},
+    core::irys_ext::NodeExitReason,
     prometheus_exporter::install_prometheus_recorder,
-    version, CliContext, CliRunner,
+    version, CliContext,
 };
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
-use reth_cli_commands::{node::NoArgs, NodeCommand};
+use reth_cli_commands::NodeCommand;
 use reth_consensus::Consensus;
 use reth_db::{init_db, DatabaseEnv, HasName, HasTableType};
 use reth_engine_tree::tree::TreeConfig;
 use reth_ethereum_engine_primitives::EthereumEngineValidator;
 use reth_node_api::{FullNodeTypesAdapter, NodeTypesWithDBAdapter};
 use reth_node_builder::{
-    common::WithTree,
     components::Components,
     engine_tree_config::{DEFAULT_MEMORY_BLOCK_BUFFER_TARGET, DEFAULT_PERSISTENCE_THRESHOLD},
     FullNode, NodeBuilder, NodeConfig, WithLaunchContext,
 };
 use reth_node_builder::{NodeAdapter, NodeHandle};
 use reth_node_ethereum::{node::EthereumAddOns, EthEvmConfig, EthExecutorProvider, EthereumNode};
-use reth_provider::providers::{BlockchainProvider, BlockchainProvider2};
+use reth_provider::providers::BlockchainProvider2;
 use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
     blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
@@ -133,9 +124,9 @@ impl Deref for RethNodeProvider {
     }
 }
 
-impl Into<RethNodeHandle> for RethNodeProvider {
-    fn into(self) -> RethNodeHandle {
-        self.0.as_ref().clone()
+impl From<RethNodeProvider> for RethNodeHandle {
+    fn from(val: RethNodeProvider) -> Self {
+        val.0.as_ref().clone()
     }
 }
 
@@ -343,7 +334,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     // Ok(())
 }
 
-async fn run_custom_node<Ext, C, L, Fut>(
+pub async fn run_custom_node<Ext, C, L, Fut>(
     ctx: CliContext,
     cli: Cli<C, Ext>,
     launcher: L,

@@ -1,6 +1,6 @@
 use crate::{
     block_index::BlockIndexReadGuard, block_tree::BlockTreeActor, block_validation::block_is_valid,
-    epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor,
+    epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor, vdf::VdfStepsReadGuard,
 };
 use actix::prelude::*;
 use irys_database::{tx_header_by_txid, Ledger};
@@ -11,12 +11,12 @@ use reth_db::Database;
 use std::sync::Arc;
 use tracing::{error, info};
 
-/// BlockDiscoveryActor listens for discovered blocks & validates them.
+/// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockDiscoveryActor {
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
-    /// PartitionAssignmentsReadGuard for looking up ledger info
+    /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Manages forks at the head of the chain before finalization
     pub block_tree: Addr<BlockTreeActor>,
@@ -28,6 +28,8 @@ pub struct BlockDiscoveryActor {
     pub db: DatabaseProvider,
     /// VDF configuration for the node
     pub vdf_config: VDFStepsConfig,
+    /// Store last VDF Steps
+    pub vdf_steps_guard: VdfStepsReadGuard,
 }
 
 /// When a block is discovered, either produced locally or received from
@@ -49,8 +51,8 @@ impl Actor for BlockDiscoveryActor {
 }
 
 impl BlockDiscoveryActor {
-    /// Initializes a new BlockDiscoveryActor
-    pub fn new(
+    /// Initializes a new `BlockDiscoveryActor`
+    pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
         block_tree: Addr<BlockTreeActor>,
@@ -58,6 +60,7 @@ impl BlockDiscoveryActor {
         storage_config: StorageConfig,
         db: DatabaseProvider,
         vdf_config: VDFStepsConfig,
+        vdf_steps_guard: VdfStepsReadGuard,
     ) -> Self {
         Self {
             block_index_guard,
@@ -67,6 +70,7 @@ impl BlockDiscoveryActor {
             storage_config,
             db,
             vdf_config,
+            vdf_steps_guard,
         }
     }
 }
@@ -132,7 +136,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             }
         };
 
-        if publish_txs.len() > 0 {
+        if !publish_txs.is_empty() {
             let publish_proofs = match &new_block_header.ledgers[Ledger::Publish].proofs {
                 Some(proofs) => proofs,
                 None => {
@@ -171,11 +175,12 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             &partitions_guard,
             storage_config,
             &self.vdf_config,
+            &self.vdf_steps_guard,
             &new_block_header.miner_address,
         ) {
             Ok(_) => {
                 info!("Block is valid, sending to block tree");
-                let mut all_txs = submit_txs.clone();
+                let mut all_txs = submit_txs;
                 all_txs.extend_from_slice(&publish_txs);
                 block_tree_addr.do_send(BlockPreValidatedMessage(
                     new_block_header,
