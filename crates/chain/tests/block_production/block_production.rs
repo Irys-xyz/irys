@@ -112,8 +112,6 @@ async fn vdf_err() -> eyre::Result<()> {
         .send(SolutionFoundMessage(poa_solution.clone()))
         .await?
         .unwrap();
-    // the block gets produced, but it fails validation
-    // dbg!(block);
     Ok(())
 }
 
