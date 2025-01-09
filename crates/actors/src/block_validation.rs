@@ -6,7 +6,8 @@ use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
 use irys_types::{
-    storage_config::StorageConfig, validate_path, Address, IrysBlockHeader, PoaData, VDFStepsConfig, H256,
+    storage_config::StorageConfig, validate_path, Address, IrysBlockHeader, PoaData,
+    VDFStepsConfig, H256,
 };
 use irys_vdf::checkpoints_are_valid;
 use openssl::sha;
@@ -50,8 +51,12 @@ pub fn recall_recall_range_is_valid(
     config: &StorageConfig,
     steps_guard: &VdfStepsReadGuard,
 ) -> eyre::Result<()> {
-    let num_recall_ranges_in_partition = irys_efficient_sampling::num_recall_ranges_in_partition(config);
-    let reset_step_number = irys_efficient_sampling::reset_step_number(block.vdf_limiter_info.global_step_number, config);
+    let num_recall_ranges_in_partition =
+        irys_efficient_sampling::num_recall_ranges_in_partition(config);
+    let reset_step_number = irys_efficient_sampling::reset_step_number(
+        block.vdf_limiter_info.global_step_number,
+        config,
+    );
     info!(
         "Validating recall ranges steps from: {} to: {}",
         reset_step_number, block.vdf_limiter_info.global_step_number
@@ -68,17 +73,18 @@ pub fn recall_recall_range_is_valid(
     )
 }
 
-pub fn get_recall_range(step_num: u64,
+pub fn get_recall_range(
+    step_num: u64,
     config: &StorageConfig,
     steps_guard: &VdfStepsReadGuard,
     partition_hash: &H256,
 ) -> eyre::Result<usize> {
-    let num_recall_ranges_in_partition = irys_efficient_sampling::num_recall_ranges_in_partition(config);
+    let num_recall_ranges_in_partition =
+        irys_efficient_sampling::num_recall_ranges_in_partition(config);
     let reset_step_number = irys_efficient_sampling::reset_step_number(step_num, config);
-    let steps = steps_guard.read().get_steps(ii(
-        reset_step_number,
-        step_num
-    ))?;
+    let steps = steps_guard
+        .read()
+        .get_steps(ii(reset_step_number, step_num))?;
     irys_efficient_sampling::get_recall_range(
         num_recall_ranges_in_partition as usize,
         &steps,

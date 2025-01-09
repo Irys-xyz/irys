@@ -6,7 +6,8 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
 use irys_actors::{
-    block_producer::SolutionFoundMessage, mempool::TxIngressMessage, vdf::VdfStepsReadGuard, block_validation,
+    block_producer::SolutionFoundMessage, block_validation, mempool::TxIngressMessage,
+    vdf::VdfStepsReadGuard,
 };
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
@@ -72,8 +73,14 @@ pub async fn capacity_chunk_solution(
     );
 
     let partition_hash = H256::zero();
-    let recall_range_idx = block_validation::get_recall_range(step_num, storage_config, &vdf_steps_guard, &partition_hash).unwrap();
-    
+    let recall_range_idx = block_validation::get_recall_range(
+        step_num,
+        storage_config,
+        &vdf_steps_guard,
+        &partition_hash,
+    )
+    .unwrap();
+
     let mut entropy_chunk = Vec::<u8>::with_capacity(storage_config.chunk_size as usize);
     compute_entropy_chunk(
         miner_addr,

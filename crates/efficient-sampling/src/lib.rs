@@ -123,7 +123,8 @@ pub fn recall_range_is_valid(
     steps: &H256List,
     partition_hash: &H256,
 ) -> eyre::Result<()> {
-    let reconstructed_range = get_recall_range(num_recall_ranges_in_partition, steps, partition_hash)?;
+    let reconstructed_range =
+        get_recall_range(num_recall_ranges_in_partition, steps, partition_hash)?;
     if reconstructed_range != recall_range {
         Err(eyre::eyre!(
             "Invalid recall range index {}, expected {}",
@@ -131,7 +132,7 @@ pub fn recall_range_is_valid(
             reconstructed_range
         ))
     } else {
-      Ok(())
+        Ok(())
     }
 }
 
@@ -153,13 +154,10 @@ pub fn get_recall_range(
 /// Get last step number where ranges were reinitialized
 pub fn reset_step_number(step_num: u64, config: &StorageConfig) -> u64 {
     let num_recall_ranges_in_partition = num_recall_ranges_in_partition(config);
-    (step_num - 1)
-        / num_recall_ranges_in_partition
-        * num_recall_ranges_in_partition
-        + 1
+    (step_num - 1) / num_recall_ranges_in_partition * num_recall_ranges_in_partition + 1
 }
 
-pub fn num_recall_ranges_in_partition(config: &StorageConfig) -> u64{
+pub fn num_recall_ranges_in_partition(config: &StorageConfig) -> u64 {
     config.num_chunks_in_partition / config.num_chunks_in_recall_range
 }
 
