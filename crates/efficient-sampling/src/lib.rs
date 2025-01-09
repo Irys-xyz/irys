@@ -1,6 +1,7 @@
+use core::num;
 use std::collections::HashMap;
 
-use irys_types::{H256List, SimpleRNG, H256};
+use irys_types::{H256List, SimpleRNG, StorageConfig, H256};
 use openssl::sha;
 use tracing::{debug, info};
 
@@ -122,21 +123,44 @@ pub fn recall_range_is_valid(
     steps: &H256List,
     partition_hash: &H256,
 ) -> eyre::Result<()> {
+    let reconstructed_range = get_recall_range(num_recall_ranges_in_partition, steps, partition_hash)?;
+    if reconstructed_range != recall_range {
+        Err(eyre::eyre!(
+            "Invalid recall range index {}, expected {}",
+            recall_range,
+            reconstructed_range
+        ))
+    } else {
+      Ok(())
+    }
+}
+
+/// Construct recall range index from given step seeds and partition hash
+pub fn get_recall_range(
+    num_recall_ranges_in_partition: usize,
+    steps: &H256List,
+    partition_hash: &H256,
+) -> eyre::Result<usize> {
     let mut ranges = Ranges::new(num_recall_ranges_in_partition);
     ranges.reconstruct(steps, partition_hash);
     if let Some(reconstructed_range) = ranges.get_last_recall_range() {
-        if reconstructed_range != recall_range {
-            return Err(eyre::eyre!(
-                "Invalid recall range index {}, expected {}",
-                recall_range,
-                reconstructed_range
-            ));
-        } else {
-            return Ok(());
-        }
+        Ok(reconstructed_range)
     } else {
-        return Err(eyre::eyre!("No recall range index found"));
+        Err(eyre::eyre!("No recall range index found"))
     }
+}
+
+/// Get last step number where ranges were reinitialized
+pub fn reset_step_number(step_num: u64, config: &StorageConfig) -> u64 {
+    let num_recall_ranges_in_partition = num_recall_ranges_in_partition(config);
+    (step_num - 1)
+        / num_recall_ranges_in_partition
+        * num_recall_ranges_in_partition
+        + 1
+}
+
+pub fn num_recall_ranges_in_partition(config: &StorageConfig) -> u64{
+    config.num_chunks_in_partition / config.num_chunks_in_recall_range
 }
 
 //==============================================================================

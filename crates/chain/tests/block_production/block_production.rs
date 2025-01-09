@@ -6,7 +6,7 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
 use irys_actors::{
-    block_producer::SolutionFoundMessage, mempool::TxIngressMessage, vdf::VdfStepsReadGuard,
+    block_producer::SolutionFoundMessage, mempool::TxIngressMessage, vdf::VdfStepsReadGuard, block_validation,
 };
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
@@ -72,10 +72,12 @@ pub async fn capacity_chunk_solution(
     );
 
     let partition_hash = H256::zero();
+    let recall_range_idx = block_validation::get_recall_range(step_num, storage_config, &vdf_steps_guard, &partition_hash).unwrap();
+    
     let mut entropy_chunk = Vec::<u8>::with_capacity(storage_config.chunk_size as usize);
     compute_entropy_chunk(
         miner_addr,
-        4 * storage_config.num_chunks_in_recall_range,
+        recall_range_idx as u64 * storage_config.num_chunks_in_recall_range,
         partition_hash.into(),
         storage_config.entropy_packing_iterations,
         storage_config.chunk_size as usize, // take it from storage config
@@ -86,7 +88,7 @@ pub async fn capacity_chunk_solution(
 
     SolutionContext {
         partition_hash,
-        chunk_offset: 4 * storage_config.num_chunks_in_recall_range as u32,
+        chunk_offset: recall_range_idx as u32 * storage_config.num_chunks_in_recall_range as u32,
         mining_address: miner_addr,
         chunk: entropy_chunk,
         vdf_step: step_num,
