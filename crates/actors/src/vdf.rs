@@ -38,6 +38,10 @@ impl VdfState {
         let last_global_step = self.global_step;
         let first_global_step = last_global_step - vdf_steps_len + 1;
 
+        if first_global_step > last_global_step {
+            return Err(eyre::eyre!("No steps stored!"));
+        }
+
         if !ii(first_global_step, last_global_step).contains_interval(&i) {
             return Err(eyre::eyre!(
                 "Unavailable requested range ({}..={}). Stored steps range is ({}..={})",
@@ -140,8 +144,6 @@ impl Handler<GetVdfStateMessage> for VdfService {
 // Tests
 #[cfg(test)]
 mod tests {
-    use irys_types::H256;
-
     use super::*;
 
     #[actix_rt::test]

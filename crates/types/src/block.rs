@@ -138,6 +138,7 @@ impl IrysBlockHeader {
                 chunk: Base64::from_str("").unwrap(),
                 partition_hash: PartitionHash::zero(),
                 partition_chunk_offset: 0,
+                recall_chunk_index: 0,
                 ledger_num: None,
             },
             reward_address: Address::ZERO,
@@ -294,8 +295,9 @@ pub struct PoaData {
     pub tx_path: Option<Base64>,
     pub data_path: Option<Base64>,
     pub chunk: Base64,
+    pub recall_chunk_index: u32,
     pub ledger_num: Option<u64>,
-    pub partition_chunk_offset: u64, // TODO: implement Compact for u32 ?
+    pub partition_chunk_offset: u32,
     pub partition_hash: PartitionHash,
 }
 
@@ -387,6 +389,7 @@ mod tests {
                 chunk: Base64::from_str("").unwrap(),
                 partition_hash: H256::zero(),
                 partition_chunk_offset: 0,
+                recall_chunk_index: 0,
                 ledger_num: None,
             },
             reward_address: Address::ZERO,
@@ -472,6 +475,7 @@ mod tests {
                 chunk: Base64::from_str("").unwrap(),
                 partition_hash: H256::zero(),
                 partition_chunk_offset: 0,
+                recall_chunk_index: 0,
                 ledger_num: None,
             },
             reward_address: Address::ZERO,

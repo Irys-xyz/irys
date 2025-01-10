@@ -1,11 +1,17 @@
-use crate::{block_index::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard};
+use crate::{
+    block_index::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
+    vdf::VdfStepsReadGuard,
+};
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
+use irys_storage::ii;
 use irys_types::{
-    storage_config::StorageConfig, validate_path, Address, IrysBlockHeader, PoaData, VDFStepsConfig,
+    storage_config::StorageConfig, validate_path, Address, IrysBlockHeader, PoaData,
+    VDFStepsConfig, H256,
 };
 use irys_vdf::checkpoints_are_valid;
 use openssl::sha;
+use tracing::{debug, info};
 
 /// Full pre-validation steps for a block
 pub fn block_is_valid(
@@ -14,6 +20,7 @@ pub fn block_is_valid(
     partitions_guard: &PartitionAssignmentsReadGuard,
     storage_config: &StorageConfig,
     vdf_config: &VDFStepsConfig,
+    steps_guard: &VdfStepsReadGuard,
     miner_address: &Address,
 ) -> eyre::Result<()> {
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
@@ -24,10 +31,10 @@ pub fn block_is_valid(
 
     //TODO: check block_hash
 
-    // check vdf steps
-    checkpoints_are_valid(&block.vdf_limiter_info, vdf_config)?;
+    recall_recall_range_is_valid(block, storage_config, steps_guard)?;
 
-    // check PoA
+    checkpoints_are_valid(&block.vdf_limiter_info, &vdf_config)?;
+
     poa_is_valid(
         &block.poa,
         block_index_guard,
@@ -38,7 +45,54 @@ pub fn block_is_valid(
     Ok(())
 }
 
-/// Returns Ok if the provided `PoA` is valid, Err otherwise
+/// Check recall range is valid
+pub fn recall_recall_range_is_valid(
+    block: &IrysBlockHeader,
+    config: &StorageConfig,
+    steps_guard: &VdfStepsReadGuard,
+) -> eyre::Result<()> {
+    let num_recall_ranges_in_partition =
+        irys_efficient_sampling::num_recall_ranges_in_partition(config);
+    let reset_step_number = irys_efficient_sampling::reset_step_number(
+        block.vdf_limiter_info.global_step_number,
+        config,
+    );
+    info!(
+        "Validating recall ranges steps from: {} to: {}",
+        reset_step_number, block.vdf_limiter_info.global_step_number
+    );
+    let steps = steps_guard.read().get_steps(ii(
+        reset_step_number,
+        block.vdf_limiter_info.global_step_number,
+    ))?;
+    irys_efficient_sampling::recall_range_is_valid(
+        (block.poa.partition_chunk_offset as u64 / config.num_chunks_in_recall_range) as usize,
+        num_recall_ranges_in_partition as usize,
+        &steps,
+        &block.poa.partition_hash,
+    )
+}
+
+pub fn get_recall_range(
+    step_num: u64,
+    config: &StorageConfig,
+    steps_guard: &VdfStepsReadGuard,
+    partition_hash: &H256,
+) -> eyre::Result<usize> {
+    let num_recall_ranges_in_partition =
+        irys_efficient_sampling::num_recall_ranges_in_partition(config);
+    let reset_step_number = irys_efficient_sampling::reset_step_number(step_num, config);
+    let steps = steps_guard
+        .read()
+        .get_steps(ii(reset_step_number, step_num))?;
+    irys_efficient_sampling::get_recall_range(
+        num_recall_ranges_in_partition as usize,
+        &steps,
+        &partition_hash,
+    )
+}
+
+/// Returns Ok if the provided PoA is valid, Err otherwise
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
@@ -46,6 +100,7 @@ pub fn poa_is_valid(
     config: &StorageConfig,
     miner_address: &Address,
 ) -> eyre::Result<()> {
+    debug!("PoA validating mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_address, poa.partition_chunk_offset, poa.partition_hash, config.entropy_packing_iterations, config.chunk_size);
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_num)) =
         (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_num)
@@ -59,7 +114,7 @@ pub fn poa_is_valid(
         let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
             * config.num_partitions_in_slot
             * config.num_chunks_in_partition
-            + poa.partition_chunk_offset;
+            + poa.partition_chunk_offset as u64;
 
         // ledger data -> block
         let ledger = Ledger::try_from(ledger_num).unwrap();
@@ -103,7 +158,7 @@ pub fn poa_is_valid(
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
             *miner_address,
-            poa.partition_chunk_offset,
+            poa.partition_chunk_offset as u64,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
             config.chunk_size as usize,
@@ -131,7 +186,7 @@ pub fn poa_is_valid(
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
             *miner_address,
-            poa.partition_chunk_offset,
+            poa.partition_chunk_offset as u64,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
             config.chunk_size as usize,
@@ -142,7 +197,6 @@ pub fn poa_is_valid(
             return Err(eyre::eyre!("PoA capacity chunk mismatch"));
         }
     }
-
     Ok(())
 }
 
@@ -166,7 +220,6 @@ mod tests {
         irys::IrysSigner, Address, Base64, H256List, IrysTransaction, IrysTransactionHeader,
         Signature, TransactionLedger, H256, U256,
     };
-
     use std::sync::{Arc, RwLock};
     use tracing::log::LevelFilter;
     use tracing::{debug, info};
@@ -183,7 +236,6 @@ mod tests {
             .try_init();
     }
 
-    #[ignore]
     #[actix::test]
     async fn poa_test_3_complete_txs() {
         let chunk_size: usize = 32;
@@ -225,7 +277,6 @@ mod tests {
         }
     }
 
-    #[ignore]
     #[actix::test]
     async fn poa_not_complete_last_chunk_test() {
         let chunk_size: usize = 32;
@@ -256,6 +307,7 @@ mod tests {
             .await;
         }
     }
+
     async fn poa_test(
         txs: &Vec<IrysTransaction>,
         poa_chunk: &mut Vec<u8>,
@@ -343,7 +395,7 @@ mod tests {
 
         let height: u64;
         {
-            height = block_index.read().unwrap().num_blocks().max(1) - 1;
+            height = block_index.read().unwrap().num_blocks();
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
@@ -372,7 +424,8 @@ mod tests {
             chunk: Base64(poa_chunk.clone()),
             ledger_num: Some(1),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
-                as u64,
+                as u32,
+            recall_chunk_index: 0,
             partition_hash,
         };
 

@@ -308,8 +308,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 tx_path: solution.tx_path.map(Base64),
                 data_path: solution.data_path.map(Base64),
                 chunk: Base64(solution.chunk),
+                recall_chunk_index: solution.recall_chunk_index,
                 ledger_num,
-                partition_chunk_offset: solution.chunk_offset as u64,
+                partition_chunk_offset: solution.chunk_offset,
                 partition_hash: solution.partition_hash,
             };
 
@@ -374,7 +375,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
-            let context = RethNodeContext::new(reth.into()).await.unwrap();
+            let context =  match RethNodeContext::new(reth.into()).await {
+                Ok(c) => c,
+                Err(_) => {
+                    error!("Reth node is unavailable!");
+                    return None
+                }
+            };
 
             let shadows = Shadows::new(
                 submit_txs

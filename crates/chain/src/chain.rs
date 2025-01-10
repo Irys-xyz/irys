@@ -94,6 +94,9 @@ pub struct IrysNodeCtx {
     pub config: Arc<IrysNodeConfig>,
     pub chunk_provider: ChunkProvider,
     pub block_index_guard: BlockIndexReadGuard,
+    pub vdf_steps_guard: VdfStepsReadGuard,
+    pub vdf_config: VDFStepsConfig,
+    pub storage_config: StorageConfig,
 }
 
 pub async fn start_irys_node(
@@ -251,11 +254,13 @@ pub async fn start_irys_node(
                 );
                 let chunk_migration_addr = chunk_migration_actor.start();
 
-                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
-
                 let block_tree_actor =
                     BlockTreeActor::new(block_index_actor_addr.clone(), mempool_actor_addr.clone());
                 let block_tree = block_tree_actor.start();
+
+                let vdf_service = VdfService::from_registry();
+                let vdf_steps_guard: VdfStepsReadGuard =
+                    vdf_service.send(GetVdfStateMessage).await.unwrap();
 
                 let block_discovery_actor = BlockDiscoveryActor {
                     block_index_guard: block_index_guard.clone(),
@@ -265,12 +270,9 @@ pub async fn start_irys_node(
                     storage_config: storage_config.clone(),
                     db: db.clone(),
                     vdf_config: vdf_config.clone(),
+                    vdf_steps_guard: vdf_steps_guard.clone(),
                 };
                 let block_discovery_addr = block_discovery_actor.start();
-
-                let vdf_service = VdfService::from_registry();
-                let vdf_steps_guard: VdfStepsReadGuard =
-                    vdf_service.send(GetVdfStateMessage).await.unwrap();
 
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
@@ -297,6 +299,7 @@ pub async fn start_irys_node(
                         block_producer_addr.clone().recipient(),
                         sm.clone(),
                         false, // do not start mining automatically
+                        vdf_steps_guard.clone(),
                     );
                     part_actors.push(partition_mining_actor.start());
                 }
@@ -336,12 +339,17 @@ pub async fn start_irys_node(
                     arc_genesis.vdf_limiter_info.output, arc_genesis.vdf_limiter_info.seed
                 );
 
+                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
+                let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+                let vdf_config2 = vdf_config.clone();
                 let vdf_thread_handler = std::thread::spawn(move || {
                     run_vdf(
-                        vdf_config.clone(),
+                        vdf_config2,
                         arc_genesis.vdf_limiter_info.output,
                         arc_genesis.vdf_limiter_info.seed,
                         new_seed_rx,
+                        shutdown_rx,
                         broadcast_mining_service.clone(),
                         vdf_service.clone(),
                     )
@@ -366,6 +374,9 @@ pub async fn start_irys_node(
                     config: arc_config.clone(),
                     chunk_provider: chunk_provider.clone(),
                     block_index_guard: block_index_guard.clone(),
+                    vdf_steps_guard: vdf_steps_guard.clone(),
+                    vdf_config: vdf_config.clone(),
+                    storage_config: storage_config.clone(),
                 });
 
                 run_server(ApiState {
@@ -374,6 +385,12 @@ pub async fn start_irys_node(
                     db,
                 })
                 .await;
+
+                // Send shutdown signal
+                shutdown_tx.send(()).unwrap();
+
+                // Wait for vdf thread to finish
+                vdf_thread_handler.join().unwrap();
             });
         })?;
 
