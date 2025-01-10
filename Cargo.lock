@@ -5128,6 +5128,7 @@ dependencies = [
  "eyre",
  "irys-config",
  "irys-database",
+ "irys-efficient-sampling",
  "irys-packing",
  "irys-primitives",
  "irys-reth-node-bridge",
@@ -5304,6 +5305,19 @@ dependencies = [
  "tempfile",
  "test-fuzz",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "irys-efficient-sampling"
+version = "0.1.0"
+dependencies = [
+ "arbitrary",
+ "assert_matches",
+ "eyre",
+ "irys-types",
+ "openssl",
+ "rand",
  "tracing",
 ]
 

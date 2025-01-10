@@ -7,11 +7,11 @@ use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use futures::future::select;
-use irys_actors::block_producer::SolutionFoundMessage;
+use irys_actors::{block_producer::SolutionFoundMessage, vdf::VdfStepsReadGuard};
 use irys_chain::{chain::start_for_testing, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::irys::IrysSigner;
+use irys_types::{irys::IrysSigner, StorageConfig, VDFStepsConfig};
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
 use tracing::info;
@@ -53,7 +53,7 @@ async fn test_erc20() -> eyre::Result<()> {
     let node = start_for_testing(config.clone()).await?;
 
     let signer: PrivateKeySigner = config.mining_signer.signer.into();
-    let wallet = EthereumWallet::from(signer);
+    let wallet: EthereumWallet = EthereumWallet::from(signer);
 
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
@@ -62,9 +62,15 @@ async fn test_erc20() -> eyre::Result<()> {
 
     let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.address()));
 
-    let contract =
-        future_or_mine_on_timeout(node.clone(), &mut deploy_fut, Duration::from_millis(2_000))
-            .await??;
+    let contract = future_or_mine_on_timeout(
+        node.clone(),
+        &mut deploy_fut,
+        Duration::from_millis(2_000),
+        node.vdf_steps_guard.clone(),
+        &node.vdf_config,
+        &node.storage_config,
+    )
+    .await??;
 
     info!("Contract address is {:?}", contract.address());
     let main_balance = contract.balanceOf(main_address).call().await?._0;
@@ -78,6 +84,9 @@ async fn test_erc20() -> eyre::Result<()> {
         node.clone(),
         &mut transfer_receipt_fut,
         Duration::from_millis(2_000),
+        node.vdf_steps_guard,
+        &node.vdf_config,
+        &node.storage_config,
     )
     .await??;
 
@@ -98,11 +107,20 @@ pub async fn future_or_mine_on_timeout<F, T>(
     node_ctx: IrysNodeCtx,
     mut future: F,
     timeout_duration: Duration,
+    vdf_steps_guard: VdfStepsReadGuard,
+    vdf_config: &VDFStepsConfig,
+    storage_config: &StorageConfig,
 ) -> eyre::Result<T>
 where
     F: Future<Output = T> + Unpin,
 {
-    let poa_solution = capacity_chunk_solution(node_ctx.config.mining_signer.address());
+    let poa_solution = capacity_chunk_solution(
+        node_ctx.config.mining_signer.address(),
+        vdf_steps_guard,
+        &vdf_config,
+        &storage_config,
+    )
+    .await;
 
     loop {
         let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;

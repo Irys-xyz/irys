@@ -15,6 +15,7 @@ pub fn run_vdf(
     seed: H256,
     initial_reset_seed: H256,
     new_seed_listener: Receiver<H256>,
+    shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
     vdf_service: Addr<VdfService>,
 ) {
@@ -63,6 +64,11 @@ pub fn run_vdf(
             );
             hash = apply_reset_seed(hash, reset_seed);
         }
+
+        if shutdown_listener.try_recv().is_ok() {
+            // Shutdown signal received
+            break;
+        };
 
         if let Ok(h) = new_seed_listener.try_recv() {
             debug!("New Send Seed {}", h); // TODO: wire new seed injections from chain accepted blocks message BlockConfirmedMessage
@@ -141,13 +147,13 @@ mod tests {
 
         init_tracing();
 
-        let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
-
         let broadcast_mining_service = BroadcastMiningService::from_registry();
         let vdf_service = VdfService::from_registry();
         let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();
 
         let vdf_config2 = vdf_config.clone();
+        let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
         let vdf_thread_handler = std::thread::spawn(move || {
             run_vdf(
@@ -155,6 +161,7 @@ mod tests {
                 seed,
                 reset_seed,
                 new_seed_rx,
+                shutdown_rx,
                 broadcast_mining_service,
                 vdf_service,
             )
@@ -206,5 +213,11 @@ mod tests {
             checkpoints_are_valid(&vdf_info, &vdf_config).is_ok(),
             "Invalid VDF"
         );
+
+        // Send shutdown signal
+        shutdown_tx.send(()).unwrap();
+
+        // Wait for vdf thread to finish
+        vdf_thread_handler.join().unwrap();
     }
 }
