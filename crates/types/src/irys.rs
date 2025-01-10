@@ -98,7 +98,7 @@ impl IrysSigner {
         // Create the signature hash and sign it
         let prehash = block_header.signature_hash()?;
 
-        let signature: Signature = self.signer.sign_prehash_recoverable(&prehash.0)?.into();
+        let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
         block_header.signature = IrysSignature::new(signature);
         // Derive the block hash by hashing the signature
@@ -213,7 +213,7 @@ mod tests {
         let prehash = tx.header.signature_hash();
         let sig = tx.header.signature.as_bytes();
 
-        let signer = recover_signer(&sig[..].try_into().unwrap(), prehash).unwrap();
+        let signer = recover_signer(&sig[..].try_into().unwrap(), prehash.into()).unwrap();
 
         assert_eq!(signer, tx.header.signer);
     }

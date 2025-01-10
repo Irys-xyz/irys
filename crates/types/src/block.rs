@@ -71,7 +71,7 @@ pub struct IrysBlockHeader {
     /// timestamp (in milliseconds) since UNIX_EPOCH of the last difficulty adjustment
     pub last_diff_timestamp: u128,
 
-    /// The solution hash for the block
+    /// The solution hash for the block hash(chunk_bytes + partition_chunk_offset + mining_seed)
     pub solution_hash: H256,
 
     /// The solution hash of the previous block in the chain.
@@ -221,10 +221,10 @@ impl IrysBlockHeader {
         Ok(())
     }
 
-    pub fn signature_hash(&self) -> eyre::Result<FixedBytes<32>> {
+    pub fn signature_hash(&self) -> eyre::Result<[u8; 32]> {
         let mut bytes = Vec::new();
         self.encode_for_signing(&mut bytes)?;
-        let prehash = keccak256(&bytes);
+        let prehash = keccak256(&bytes).0;
         Ok(prehash)
     }
 
