@@ -1,5 +1,5 @@
 use crate::{Arbitrary, Signature};
-use alloy_primitives::{bytes, ruint::aliases::U256, Address, Parity, B256, U256 as RethU256};
+use alloy_primitives::{bytes, ruint::aliases::U256, Address, Parity, U256 as RethU256};
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;

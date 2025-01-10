@@ -15,7 +15,7 @@ use crate::{
     Signature, H256, U256,
 };
 
-use alloy_primitives::{keccak256, Address, FixedBytes, B256};
+use alloy_primitives::{keccak256, Address, B256};
 use serde::{Deserialize, Serialize};
 
 use crate::hash_sha256;

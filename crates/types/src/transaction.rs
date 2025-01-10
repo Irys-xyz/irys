@@ -2,7 +2,7 @@ use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     IrysSignature, Node, Proof, Signature, TxIngressProof, H256, IRYS_CHAIN_ID,
 };
-use alloy_primitives::{keccak256, FixedBytes};
+use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use serde::{Deserialize, Serialize};
 
