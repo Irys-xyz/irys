@@ -377,7 +377,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
             let context =  match RethNodeContext::new(reth.into()).await {
                 Ok(c) => c,
-                Err(e) => {
+                Err(_) => {
                     error!("Reth node is unavailable!");
                     return None
                 }
