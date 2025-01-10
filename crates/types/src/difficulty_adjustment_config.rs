@@ -66,11 +66,7 @@ pub fn calculate_initial_difficulty(
     Ok(initial_difficulty)
 }
 
-pub fn adjust_difficulty(
-    current_difficulty: U256,
-    actual_time_ms: u128,
-    target_time_ms: u128,
-) -> U256 {
+pub fn adjust_difficulty(current_diff: U256, actual_time_ms: u128, target_time_ms: u128) -> U256 {
     let max_u256 = U256::MAX;
     let scale = U256::from(1000);
 
@@ -84,7 +80,7 @@ pub fn adjust_difficulty(
         (U256::from(actual_time_ms) * scale) / U256::from(target_time_ms)
     };
 
-    let target_current = max_u256 - current_difficulty;
+    let target_current = max_u256 - current_diff;
 
     // For target adjustment, always divide first then multiply
     let new_target = (target_current / scale) * adjustment_ratio;
@@ -103,14 +99,14 @@ pub fn calculate_difficulty(
     block_height: u64,
     last_diff_timestamp: u128,
     current_timestamp: u128,
-    current_difficulty: U256,
+    current_diff: U256,
     difficulty_config: &DifficultyAdjustmentConfig,
 ) -> (U256, Option<AdjustmentStats>) {
     let blocks_between_adjustments = difficulty_config.adjustment_interval as u128;
 
     // Early return if no difficulty adjustment needed
     if block_height as u128 % blocks_between_adjustments != 0 {
-        return (current_difficulty, None);
+        return (current_diff, None);
     }
 
     // Calculate times
@@ -137,20 +133,20 @@ pub fn calculate_difficulty(
     };
 
     let difficulty = if stats.is_adjusted {
-        adjust_difficulty(current_difficulty, actual_time_ms, target_time_ms)
+        adjust_difficulty(current_diff, actual_time_ms, target_time_ms)
     } else {
-        current_difficulty
+        current_diff
     };
 
     (difficulty, Some(stats))
 }
 
 /// Calculates the next cumulative difficulty by adding the expected hashes needed
-/// (max_difficulty / (max_difficulty - new_difficulty)) to the previous cumulative difficulty.
-pub fn next_cumulative_diff(previous_cumulative_difficulty: U256, new_difficulty: U256) -> U256 {
-    let max_difficulty = U256::MAX;
-    let network_hash_rate = max_difficulty / (max_difficulty - new_difficulty);
-    previous_cumulative_difficulty + network_hash_rate
+/// (max_diff / (max_diff - new_diff)) to the previous cumulative difficulty.
+pub fn next_cumulative_diff(previous_cumulative_diff: U256, new_diff: U256) -> U256 {
+    let max_diff = U256::MAX;
+    let network_hash_rate = max_diff / (max_diff - new_diff);
+    previous_cumulative_diff + network_hash_rate
 }
 //==============================================================================
 // Tests

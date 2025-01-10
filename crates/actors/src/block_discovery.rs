@@ -3,9 +3,10 @@ use crate::{
     epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor,
 };
 use actix::prelude::*;
-use irys_database::{tx_header_by_txid, Ledger};
+use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
 use irys_types::{
-    DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageConfig, VDFStepsConfig,
+    DatabaseProvider, DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader,
+    StorageConfig, VDFStepsConfig,
 };
 use reth_db::Database;
 use std::sync::Arc;
@@ -24,6 +25,8 @@ pub struct BlockDiscoveryActor {
     pub mempool: Addr<MempoolActor>,
     /// Reference to global storage config for node
     pub storage_config: StorageConfig,
+    /// Reference to global difficulty config
+    pub difficulty_config: DifficultyAdjustmentConfig,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
     /// VDF configuration for the node
@@ -56,6 +59,7 @@ impl BlockDiscoveryActor {
         block_tree: Addr<BlockTreeActor>,
         mempool: Addr<MempoolActor>,
         storage_config: StorageConfig,
+        difficulty_config: DifficultyAdjustmentConfig,
         db: DatabaseProvider,
         vdf_config: VDFStepsConfig,
     ) -> Self {
@@ -65,6 +69,7 @@ impl BlockDiscoveryActor {
             block_tree,
             mempool,
             storage_config,
+            difficulty_config,
             db,
             vdf_config,
         }
@@ -76,6 +81,21 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
     fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // Validate discovered block
         let new_block_header = msg.0;
+        let prev_block_hash = new_block_header.previous_block_hash;
+
+        let previous_block_header = match self
+            .db
+            .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash))
+        {
+            Ok(Some(header)) => header,
+            other => {
+                error!(
+                    "Failed to get block header for hash {}: {:?}",
+                    prev_block_hash, other
+                );
+                return;
+            }
+        };
 
         //====================================
         // Submit ledger TX validation
@@ -157,6 +177,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = self.block_tree.clone();
         let storage_config = &self.storage_config;
+        let difficulty_config = &self.difficulty_config;
 
         info!(
             "Validating block height: {} step: {} output: {} prev output: {}",
@@ -167,9 +188,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         );
         match block_is_valid(
             &new_block_header,
+            &previous_block_header,
             &block_index_guard,
             &partitions_guard,
             storage_config,
+            difficulty_config,
             &self.vdf_config,
             &new_block_header.miner_address,
         ) {

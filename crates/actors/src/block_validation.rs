@@ -2,7 +2,8 @@ use crate::{block_index::BlockIndexReadGuard, epoch_service::PartitionAssignment
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_types::{
-    storage_config::StorageConfig, validate_path, Address, IrysBlockHeader, PoaData, VDFStepsConfig,
+    calculate_difficulty, next_cumulative_diff, storage_config::StorageConfig, validate_path,
+    Address, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, VDFStepsConfig,
 };
 use irys_vdf::checkpoints_are_valid;
 use openssl::sha;
@@ -10,9 +11,11 @@ use openssl::sha;
 /// Full pre-validation steps for a block
 pub fn block_is_valid(
     block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
     block_index_guard: &BlockIndexReadGuard,
     partitions_guard: &PartitionAssignmentsReadGuard,
     storage_config: &StorageConfig,
+    difficulty_config: &DifficultyAdjustmentConfig,
     vdf_config: &VDFStepsConfig,
     miner_address: &Address,
 ) -> eyre::Result<()> {
@@ -21,6 +24,12 @@ pub fn block_is_valid(
             "Invalid block: chunk hash distinct from PoA chunk hash"
         ));
     }
+
+    // Check the difficulty
+    difficulty_is_valid(block, previous_block, difficulty_config)?;
+
+    // Check the cumulative difficulty
+    cumulative_difficulty_is_valid(block, previous_block)?;
 
     //TODO: check block_hash
 
@@ -36,6 +45,53 @@ pub fn block_is_valid(
         miner_address,
     )?;
     Ok(())
+}
+
+/// Validates if a block's difficulty matches the expected difficulty calculated
+/// from previous block data.
+/// Returns Ok if valid, Err if the difficulty doesn't match the calculated value.
+pub fn difficulty_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+    difficulty_config: &DifficultyAdjustmentConfig,
+) -> eyre::Result<()> {
+    let block_height = block.height;
+    let current_timestamp = block.timestamp;
+    let last_diff_timestamp = previous_block.last_diff_timestamp;
+    let current_difficulty = previous_block.diff;
+
+    let (diff, stats) = calculate_difficulty(
+        block_height,
+        last_diff_timestamp,
+        current_timestamp,
+        current_difficulty,
+        &difficulty_config,
+    );
+
+    if diff == block.diff {
+        Ok(())
+    } else {
+        Err(eyre::eyre!("Invalid difficulty"))
+    }
+}
+
+/// Validates if a block's cumulative difficulty equals the previous cumulative difficulty
+/// plus the expected hashes from its new difficulty. Returns Ok if valid.
+///
+/// Note: Requires valid block difficulty - call difficulty_is_valid() first.
+pub fn cumulative_difficulty_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> eyre::Result<()> {
+    let previous_cumulative_diff = previous_block.cumulative_diff;
+    let new_diff = block.diff;
+
+    let cumulative_diff = next_cumulative_diff(previous_cumulative_diff, new_diff);
+    if cumulative_diff == block.cumulative_diff {
+        Ok(())
+    } else {
+        Err(eyre::eyre!("Invalid cumulative_difficulty"))
+    }
 }
 
 /// Returns Ok if the provided `PoA` is valid, Err otherwise

@@ -266,6 +266,7 @@ pub async fn start_irys_node(
                     block_tree: block_tree.clone(),
                     mempool: mempool_actor_addr.clone(),
                     storage_config: storage_config.clone(),
+                    difficulty_config: difficulty_adjustment_config.clone(),
                     db: db.clone(),
                     vdf_config: vdf_config.clone(),
                 };
