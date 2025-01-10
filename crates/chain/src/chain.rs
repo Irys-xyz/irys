@@ -253,8 +253,11 @@ pub async fn start_irys_node(
 
                 let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
-                let block_tree_actor =
-                    BlockTreeActor::new(block_index_actor_addr.clone(), mempool_actor_addr.clone());
+                let block_tree_actor = BlockTreeActor::new(
+                    block_index_actor_addr.clone(),
+                    mempool_actor_addr.clone(),
+                    &arc_genesis,
+                );
                 let block_tree = block_tree_actor.start();
 
                 let block_discovery_actor = BlockDiscoveryActor {
