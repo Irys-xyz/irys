@@ -254,8 +254,6 @@ pub async fn start_irys_node(
                 );
                 let chunk_migration_addr = chunk_migration_actor.start();
 
-                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
-
                 let block_tree_actor =
                     BlockTreeActor::new(block_index_actor_addr.clone(), mempool_actor_addr.clone());
                 let block_tree = block_tree_actor.start();
@@ -341,6 +339,9 @@ pub async fn start_irys_node(
                     arc_genesis.vdf_limiter_info.output, arc_genesis.vdf_limiter_info.seed
                 );
 
+                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
+                let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
                 let vdf_config2 = vdf_config.clone();
                 let vdf_thread_handler = std::thread::spawn(move || {
                     run_vdf(
@@ -348,6 +349,7 @@ pub async fn start_irys_node(
                         arc_genesis.vdf_limiter_info.output,
                         arc_genesis.vdf_limiter_info.seed,
                         new_seed_rx,
+                        shutdown_rx,
                         broadcast_mining_service.clone(),
                         vdf_service.clone(),
                     )
@@ -383,6 +385,12 @@ pub async fn start_irys_node(
                     db,
                 })
                 .await;
+
+                // Send shutdown signal
+                shutdown_tx.send(()).unwrap();
+
+                // Wait for vdf thread to finish
+                vdf_thread_handler.join().unwrap();
             });
         })?;
 

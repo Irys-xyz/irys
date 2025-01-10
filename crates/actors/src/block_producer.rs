@@ -375,7 +375,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
-            let context = RethNodeContext::new(reth.into()).await.unwrap();
+            let context =  match RethNodeContext::new(reth.into()).await {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Reth node is unavailable!");
+                    return None
+                }
+            };
 
             let shadows = Shadows::new(
                 submit_txs

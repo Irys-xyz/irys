@@ -122,9 +122,6 @@ where
     )
     .await;
 
-    // wait for vdf step being generated
-    sleep(Duration::from_secs(2)).await;
-
     loop {
         let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;
         match race {

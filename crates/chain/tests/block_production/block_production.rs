@@ -106,31 +106,6 @@ pub async fn capacity_chunk_solution(
 }
 
 #[tokio::test]
-async fn vdf_err() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("vdf_err"), false);
-
-    let mut config = IrysNodeConfig::default();
-    config.base_directory = temp_dir.path().to_path_buf();
-
-    let node = start_for_testing(config).await?;
-
-    let poa_solution = capacity_chunk_solution(
-        node.config.mining_signer.address(),
-        node.vdf_steps_guard,
-        &node.vdf_config,
-        &node.storage_config,
-    )
-    .await;
-    let (block, _reth_exec_env) = node
-        .actor_addresses
-        .block_producer
-        .send(SolutionFoundMessage(poa_solution.clone()))
-        .await?
-        .unwrap();
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_blockprod() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
@@ -192,9 +167,6 @@ async fn test_blockprod() -> eyre::Result<()> {
     )
     .await;
 
-    // wait for vdf step being generated
-    sleep(Duration::from_secs(2)).await;
-
     let (block, reth_exec_env) = node
         .actor_addresses
         .block_producer
@@ -250,8 +222,8 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
         info!("waiting block {}", i);
 
         let mut retries = 0;
-        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 10_u64 {
-            sleep(Duration::from_secs(2)).await;
+        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 20_u64 {
+            sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
 
@@ -340,9 +312,6 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
         &node.storage_config,
     )
     .await;
-
-    // wait for vdf step being generated
-    sleep(Duration::from_secs(2)).await;
 
     let (block, _) = node
         .actor_addresses
@@ -477,9 +446,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         &node.storage_config,
     )
     .await;
-
-    // wait for vdf step being generated
-    sleep(Duration::from_secs(2)).await;
 
     let (block, reth_exec_env) = node
         .actor_addresses
