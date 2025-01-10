@@ -117,7 +117,8 @@ impl PartitionMiningActor {
             hasher.update(chunk_bytes);
             hasher.update(&partition_chunk_offset.to_le_bytes());
             hasher.update(mining_seed.as_bytes());
-            let test_solution = hash_to_number(&hasher.finish());
+            let solution_hash = hasher.finish();
+            let test_solution = hash_to_number(&solution_hash);
 
             if test_solution >= self.difficulty {
                 //info!("SOLUTION FOUND!!!!!!!!!");
@@ -143,6 +144,7 @@ impl PartitionMiningActor {
                     vdf_step,
                     checkpoints,
                     seed: Seed(mining_seed),
+                    solution_hash: H256::from(solution_hash),
                 };
 
                 // TODO: Let all partitions know to stop mining
