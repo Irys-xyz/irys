@@ -376,8 +376,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 },
             };
 
-            println!("{}", irys_block);
-
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
             let context =  match RethNodeContext::new(reth.into()).await {
                 Ok(c) => c,
