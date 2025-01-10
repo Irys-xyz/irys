@@ -144,6 +144,14 @@ pub fn calculate_difficulty(
 
     (difficulty, Some(stats))
 }
+
+/// Calculates the next cumulative difficulty by adding the expected hashes needed
+/// (max_difficulty / (max_difficulty - new_difficulty)) to the previous cumulative difficulty.
+pub fn next_cumulative_diff(previous_cumulative_difficulty: U256, new_difficulty: U256) -> U256 {
+    let max_difficulty = U256::MAX;
+    let network_hash_rate = max_difficulty / (max_difficulty - new_difficulty);
+    previous_cumulative_difficulty + network_hash_rate
+}
 //==============================================================================
 // Tests
 //------------------------------------------------------------------------------

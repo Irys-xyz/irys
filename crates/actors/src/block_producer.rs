@@ -15,8 +15,8 @@ use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64,
-    DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
+    next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
+    Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
     IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
     H256, U256,
 };
@@ -291,6 +291,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 last_diff_timestamp = current_timestamp;
             }
 
+            let cumulative_difficulty = next_cumulative_diff(prev_block_header.cumulative_diff, diff);
+
             // TODO: Hash the block signature to create a block_hash
             // Generate a very stupid block_hash right now which is just
             // the hash of the timestamp
@@ -330,14 +332,14 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 block_hash,
                 height: block_height,
                 diff,
-                cumulative_diff: U256::from(5000),
+                cumulative_diff: cumulative_difficulty,
                 last_diff_timestamp: last_diff_timestamp,
                 solution_hash: solution.solution_hash,
                 previous_solution_hash: H256::zero(),
                 last_epoch_hash: H256::random(),
                 chunk_hash: H256(sha::sha256(&poa.chunk.0)),
                 previous_block_hash: prev_block_hash,
-                previous_cumulative_diff: U256::from(4000),
+                previous_cumulative_diff: prev_block_header.cumulative_diff,
                 poa,
                 reward_address: Address::ZERO ,
                 miner_address: solution.mining_address,
@@ -372,6 +374,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     ..Default::default()
                 },
             };
+
+            println!("{}", irys_block);
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
             let context = RethNodeContext::new(reth.into()).await.unwrap();
