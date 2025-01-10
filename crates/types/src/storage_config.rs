@@ -41,6 +41,7 @@ impl Default for StorageConfig {
 /// Primarily used for testing clients, so we don't have to manually sync parameters
 /// note: chain ID is not included for now as that's still a constant
 /// once we parameterize that we'll put it in here.
+#[serde(rename_all = "camelCase")]
 pub struct PublicStorageConfig {
     /// Size of each chunk in bytes
     #[serde(with = "string_u64")]

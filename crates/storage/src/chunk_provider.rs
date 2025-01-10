@@ -97,6 +97,45 @@ impl ChunkProvider {
 
         Ok(None)
     }
+
+    pub fn get_ledger_relative_starts_for_data_root(
+        &self,
+        ledger: Ledger,
+        data_root: DataRoot,
+    ) -> eyre::Result<Option<Vec<u64>>> {
+        debug!(
+            "getting ledger: {:?}, data_root: {}",
+            &ledger,
+            &data_root.0.to_base58(),
+        );
+        // map hashes to SMs
+        let sms = self
+            .storage_modules
+            .iter()
+            .filter(|sm| {
+                sm.partition_assignment
+                    .and_then(|sm| sm.ledger_num)
+                    .map_or(false, |ledger_num| ledger_num == ledger as u64)
+            })
+            .collect::<Vec<_>>();
+
+        for sm in sms {
+            let sm_range_start = sm.get_storage_module_range().unwrap().start();
+            let start_offsets = sm.collect_start_offsets(data_root)?;
+            let mapped_offsets = start_offsets
+                .0
+                .iter()
+                .filter_map(|so| {
+                    checked_add_i32_u64(*so, sm_range_start) // translate into ledger-relative space
+                })
+                .collect::<Vec<_>>();
+
+            if !mapped_offsets.is_empty() {
+                return Ok(Some(mapped_offsets));
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

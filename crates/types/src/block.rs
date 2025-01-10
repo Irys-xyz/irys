@@ -54,6 +54,7 @@ pub struct VDFLimiterInfo {
 
 #[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
 /// Stores deserialized fields from a JSON formatted Irys block header.
+#[serde(rename_all = "camelCase")]
 pub struct IrysBlockHeader {
     /// The block identifier.
     pub block_hash: BlockHash,

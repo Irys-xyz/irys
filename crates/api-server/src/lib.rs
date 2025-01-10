@@ -1,6 +1,5 @@
 pub mod error;
 mod routes;
-
 use std::sync::Arc;
 
 use actix::Addr;
@@ -42,7 +41,11 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(get_chunk::get_chunk_by_ledger_offset),
         )
         .route("/chunk", web::post().to(post_chunk::post_chunk))
-        .route("/tx/{tx_id}", web::get().to(tx::get_tx))
+        .route("/tx/{tx_id}", web::get().to(tx::get_tx_header_api))
+        .route(
+            "/tx/{tx_id}/with_start_offsets",
+            web::get().to(tx::get_tx_data_metadata),
+        )
         .route("/tx", web::post().to(tx::post_tx))
         .route("/price/{size}", web::get().to(price::get_price))
 }
