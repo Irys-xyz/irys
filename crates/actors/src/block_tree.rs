@@ -25,7 +25,7 @@ pub struct BlockTreeActor {
     /// Needs to know the current block to build on
     block_producer: Option<Addr<BlockProducerActor>>,
     /// Block tree internal state
-    cache: Arc<RwLock<BlockTreeCache>>,
+    pub cache: Arc<RwLock<BlockTreeCache>>,
 }
 
 impl Actor for BlockTreeActor {
@@ -88,7 +88,7 @@ const BLOCK_CACHE_DEPTH: u64 = 50;
 type ChainCacheEntry = (BlockHash, Vec<IrysTransactionId>, Vec<IrysTransactionId>); // (block_hash, publish_txs, submit_txs)
 
 #[derive(Debug)]
-struct BlockTreeCache {
+pub struct BlockTreeCache {
     // Main block storage
     blocks: HashMap<BlockHash, BlockEntry>,
 
@@ -109,7 +109,7 @@ struct BlockTreeCache {
 }
 
 #[derive(Debug)]
-struct BlockEntry {
+pub struct BlockEntry {
     block: IrysBlockHeader,
     status: BlockStatus,
     timestamp: SystemTime,
@@ -117,14 +117,14 @@ struct BlockEntry {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-enum BlockStatus {
+pub enum BlockStatus {
     OnChain,
     Validated,
     NotValidated(ValidationState),
 }
 
 #[derive(Debug, PartialEq, Clone)]
-enum ValidationState {
+pub enum ValidationState {
     AwaitingValidation,
     AwaitingVdfStepValidation,
     VdfStepValidationScheduled,
