@@ -52,6 +52,7 @@ async fn external_api() -> eyre::Result<()> {
         miner_address: Address::random(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1,
+        num_confirmations_for_finality: 1, // Testnet / single node config
     };
     let chunk_size = storage_config.chunk_size;
 

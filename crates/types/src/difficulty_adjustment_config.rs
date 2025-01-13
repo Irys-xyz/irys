@@ -184,6 +184,7 @@ mod tests {
             miner_address: Address::random(),
             min_writes_before_sync: 1,
             entropy_packing_iterations: PACKING_SHA_1_5_S,
+            num_confirmations_for_finality: 1, // Testnet / single node config
         };
 
         let mut storage_module_count = 3;

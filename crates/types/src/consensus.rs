@@ -21,12 +21,12 @@ pub const NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
 pub const NUM_RECALL_RANGES_IN_PARTITION: u64 =
     NUM_CHUNKS_IN_PARTITION / NUM_CHUNKS_IN_RECALL_RANGE;
 
-// Reset the nonce limiter (vdf) once every 1200 steps/seconds or every ~20 min
+/// Reset the nonce limiter (vdf) once every 1200 steps/seconds or every ~20 min
 pub const NONCE_LIMITER_RESET_FREQUENCY: usize = 10 * 120;
 
 pub const VDF_PARALLEL_VERIFICATION_THREAD_LIMIT: usize = 4;
 
-// 25 checkpoints 40 ms each = 1000 ms
+/// 25 checkpoints 40 ms each = 1000 ms
 pub const NUM_CHECKPOINTS_IN_VDF_STEP: usize = 25;
 
 pub const VDF_SHA_1S: u64 = 530_000;
@@ -40,3 +40,12 @@ pub const NUM_BLOCKS_IN_EPOCH: u64 = 100;
 pub const SUBMIT_LEDGER_EPOCH_LENGTH: u64 = 5;
 pub const NUM_PARTITIONS_PER_SLOT: u64 = 1;
 pub const NUM_WRITES_BEFORE_SYNC: u64 = 5;
+
+// Longest chain consensus
+/// Number of block confirmations required before considering data final.
+///
+/// In Nakamoto consensus, finality is probabilistic based on chain depth:
+/// - 6 confirmations protects against attackers with <25% hashpower
+/// - 20 confirmations protects against attackers with <40% hashpower
+/// - No number of confirmations is secure against attackers with >50% hashpower
+pub const NUM_CONFIRMATIONS_FOR_FINALITY: u32 = 6;
