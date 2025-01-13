@@ -4,17 +4,19 @@ use crate::{
     StorageConfig, BLOCK_TIME, DIFFICULTY_ADJUSTMENT_INTERVAL, MAX_DIFFICULTY_ADJUSTMENT_FACTOR,
     MIN_DIFFICULTY_ADJUSTMENT_FACTOR, U256,
 };
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct DifficultyAdjustmentConfig {
     /// Desired block time in seconds.
     pub target_block_time: u64,
     /// Number of blocks between difficulty adjustments.
     pub adjustment_interval: u64,
     /// Factor for smoothing difficulty adjustments.
-    pub max_adjustment_factor: u64,
+    pub max_adjustment_factor: Decimal,
     /// Factor for smoothing difficulty adjustments.
-    pub min_adjustment_factor: f64,
+    pub min_adjustment_factor: Decimal,
     /// Minimum difficulty allowed.
     pub min_difficulty: U256,
     /// Maximum difficulty allowed.
