@@ -110,9 +110,10 @@ fn programmable_data_precompile(
     } = range_specifier;
 
     let o: u32 = partition_index.try_into().unwrap();
-    // TODO FIXME: THIS IS FOR THE DEMO ONLY! ONCE WE HAVE THE FULL DATA MODEL THIS SHOULD BE CHANGED
+    // // TODO FIXME: THIS IS FOR THE DEMO ONLY! ONCE WE HAVE THE FULL DATA MODEL THIS SHOULD BE CHANGED
     let key: u32 = (10 * o) + offset;
-    let ro_tx = state_provider.provider.db.tx().unwrap();
+    
+    let ro_tx = state_provider.provider.get().unwrap().db.tx().unwrap();
 
     let chunk = ro_tx
         .get::<ProgrammableDataChunkCache>(key)

@@ -7,9 +7,9 @@ rust-version.workspace = true
 [dependencies]
 actix.workspace = true
 assert_matches.workspace = true
-irys-config.workspace = true
-reth.workspace = true
 tokio.workspace = true
+reth-node-metrics.workspace = true
+irys-config.workspace = true
 reth-db.workspace = true
 arbitrary = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }

@@ -1,5 +1,5 @@
 use alloy_primitives::{Address, Bytes, U256};
-use irys_types::reth_provider::IrysRethProvider;
+use irys_storage::reth_provider::IrysRethProvider;
 use reth::{
     api::NextBlockEnvAttributes,
     builder::{
@@ -288,9 +288,10 @@ where
 
         ctx: &BuilderContext<Node>,
     ) -> eyre::Result<(Self::EVM, Self::Executor)> {
-        let precompile_state_provider = PrecompileStateProvider {
-            provider: ctx.irys_ext.clone().unwrap().provider,
-        };
+        let provider = ctx.irys_ext.clone().unwrap().provider;
+
+        let precompile_state_provider = PrecompileStateProvider { provider: provider };
+
         let evm_config = IrysEvmConfig {
             inner: EthEvmConfig::new(ctx.chain_spec()),
             precompile_state_provider,

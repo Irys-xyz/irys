@@ -57,7 +57,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     let app_state = ApiState {
         db: handle.db,
         mempool: handle.actor_addresses.mempool,
-        chunk_provider: Arc::new(handle.chunk_provider.clone()),
+        chunk_provider: handle.chunk_provider.clone(),
     };
 
     // Initialize the app

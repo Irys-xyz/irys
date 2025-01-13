@@ -13,7 +13,6 @@ use irys_types::{
     BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, IrysTransactionId,
     TxRelativeChunkOffset, UnpackedChunk, MEGABYTE,
 };
-use reth::prometheus_exporter::install_prometheus_recorder;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
@@ -23,6 +22,8 @@ use reth_db::{
     ClientVersion, DatabaseEnv, DatabaseError,
 };
 use reth_db::{HasName, HasTableType};
+use reth_node_metrics::recorder::install_prometheus_recorder;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 

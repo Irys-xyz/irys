@@ -4,6 +4,7 @@ name = "irys-reth-node-bridge"
 version = "0.1.0"
 
 [dependencies]
+irys-storage.workspace = true
 irys-database.workspace = true
 alloy-eips.workspace = true
 alloy-rpc-types.workspace = true

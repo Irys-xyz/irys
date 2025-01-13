@@ -11,7 +11,7 @@ eyre.workspace = true
 reth-chainspec.workspace = true
 irys-primitives.workspace = true
 once_cell.workspace = true
-reth-cli.workspace = true
+# reth-cli.workspace = true
 tracing.workspace = true
 serde.workspace = true
 

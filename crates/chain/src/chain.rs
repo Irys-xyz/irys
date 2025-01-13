@@ -24,7 +24,9 @@ pub use irys_reth_node_bridge::node::{
 };
 
 use irys_storage::{
-    initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
+    initialize_storage_files,
+    reth_provider::{IrysRethProvider, IrysRethProviderInner},
+    ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
@@ -39,7 +41,7 @@ use reth::{
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c};
 use reth_db::{Database as _, HasName, HasTableType};
 use std::{
-    sync::{mpsc, Arc, RwLock},
+    sync::{mpsc, Arc, OnceLock, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tracing::{debug, info};
@@ -92,7 +94,7 @@ pub struct IrysNodeCtx {
     pub actor_addresses: ActorAddresses,
     pub db: DatabaseProvider,
     pub config: Arc<IrysNodeConfig>,
-    pub chunk_provider: ChunkProvider,
+    pub chunk_provider: Arc<ChunkProvider>,
     pub block_index_guard: BlockIndexReadGuard,
     pub vdf_steps_guard: VdfStepsReadGuard,
     pub vdf_config: VDFStepsConfig,
@@ -149,6 +151,10 @@ pub async fn start_irys_node(
 
     // Spawn thread and runtime for actors
     let arc_config_copy = arc_config.clone();
+    let irys_provider_0: IrysRethProvider = Arc::new(OnceLock::new());
+
+    let irys_provider_1 = irys_provider_0.clone();
+
     std::thread::Builder::new()
         .name("actor-main-thread".to_string())
         .stack_size(32 * 1024 * 1024)
@@ -372,13 +378,22 @@ pub async fn start_irys_node(
 
                 let chunk_provider =
                     ChunkProvider::new(storage_config.clone(), storage_modules.clone(), db.clone());
+                let arc_chunk_provider = Arc::new(chunk_provider);
+                // this OnceLock is due to the cyclic chain between Reth & the Irys node, where the IrysRethProvider requires both
+                // this is "safe", as the OnceLock is always set before this start function returns
+                irys_provider_1
+                    .set(IrysRethProviderInner {
+                        db: reth_node.provider.database.db.clone(),
+                        chunk_provider: arc_chunk_provider.clone(),
+                    })
+                    .expect("Unable to set IrysRethProvider OnceLock");
 
                 let _ = irys_node_handle_sender.send(IrysNodeCtx {
                     actor_addresses: actor_addresses.clone(),
                     reth_handle: reth_node,
                     db: db.clone(),
                     config: arc_config.clone(),
-                    chunk_provider: chunk_provider.clone(),
+                    chunk_provider: arc_chunk_provider.clone(),
                     block_index_guard: block_index_guard.clone(),
                     vdf_steps_guard: vdf_steps_guard.clone(),
                     vdf_config: vdf_config.clone(),
@@ -387,7 +402,7 @@ pub async fn start_irys_node(
 
                 run_server(ApiState {
                     mempool: mempool_actor_addr,
-                    chunk_provider: Arc::new(chunk_provider),
+                    chunk_provider: arc_chunk_provider.clone(),
                     db,
                 })
                 .await;
@@ -402,7 +417,7 @@ pub async fn start_irys_node(
 
     // run reth in it's own thread w/ it's own tokio runtime
     // this is done as reth exhibits strange behaviour (notably channel dropping) when not in it's own context/when the exit future isn't been awaited
-
+    let irys_provider2 = irys_provider_0.clone();
     std::thread::Builder::new().name("reth-thread".to_string())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
@@ -413,7 +428,7 @@ pub async fn start_irys_node(
 
             tokio_runtime.block_on(run_to_completion_or_panic(
                 &mut task_manager,
-                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender)),
+                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider2)),
             )).unwrap();
         })?;
 
@@ -427,9 +442,16 @@ async fn start_reth_node<T: HasName + HasTableType>(
     irys_config: Arc<IrysNodeConfig>,
     tables: &[T],
     sender: oneshot::Sender<FullNode<RethNode, RethNodeAddOns>>,
+    irys_provider: IrysRethProvider,
 ) -> eyre::Result<NodeExitReason> {
-    let node_handle =
-        irys_reth_node_bridge::run_node(Arc::new(chainspec), exec, irys_config, tables).await?;
+    let node_handle = irys_reth_node_bridge::run_node(
+        Arc::new(chainspec),
+        exec,
+        irys_config,
+        tables,
+        irys_provider,
+    )
+    .await?;
     sender
         .send(node_handle.node.clone())
         .expect("unable to send reth node handle");

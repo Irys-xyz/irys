@@ -3,7 +3,7 @@
 
 use alloy_rpc_types::engine::ClientVersionV1;
 use futures::{future::Either, stream, stream_select, StreamExt};
-use irys_types::reth_provider::IrysRethProvider;
+use irys_storage::reth_provider::IrysRethProvider;
 use reth::payload::ExecutionPayloadValidator;
 use reth_beacon_consensus::{
     hooks::{EngineHooks, StaticFileHook},

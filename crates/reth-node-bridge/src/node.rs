@@ -3,7 +3,7 @@ use std::{fs::canonicalize, future::Future, ops::Deref, sync::Arc};
 
 use clap::{command, Args, Parser};
 use irys_config::IrysNodeConfig;
-use irys_types::reth_provider::IrysRethProvider;
+use irys_storage::reth_provider::IrysRethProvider;
 use reth::{
     chainspec::EthereumChainSpecParser,
     cli::{Cli, Commands},
@@ -135,6 +135,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     task_executor: TaskExecutor,
     irys_config: Arc<IrysNodeConfig>,
     tables: &[T],
+    provider: IrysRethProvider,
 ) -> eyre::Result<RethNodeExitHandle> {
     let mut os_args: Vec<String> = std::env::args().collect();
     let bp = os_args.remove(0);
@@ -249,9 +250,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     let database =
         Arc::new(init_db(db_path.clone(), db.database_args())?.with_metrics_and_tables(tables));
 
-    let irys_provider = IrysRethProvider {
-        db: database.clone(),
-    };
+    let irys_provider = provider;
 
     if with_unused_ports {
         node_config = node_config.with_unused_ports();
