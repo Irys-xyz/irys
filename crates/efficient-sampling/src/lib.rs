@@ -14,7 +14,7 @@ pub struct Ranges {
     /// last valid range position
     last_range_pos: usize,
     /// last step number
-    last_step_num: u64,
+    pub last_step_num: u64,
     /// last recall ranges by step number
     last_recall_ranges: HashMap<u64, usize>,
     /// num recall ranges in a partition, equal to ranges vector capacity
