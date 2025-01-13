@@ -98,7 +98,7 @@ impl ChunkProvider {
         Ok(None)
     }
 
-    pub fn get_ledger_relative_starts_for_data_root(
+    pub fn get_ledger_offsets_for_data_root(
         &self,
         ledger: Ledger,
         data_root: DataRoot,
@@ -108,7 +108,8 @@ impl ChunkProvider {
             &ledger,
             &data_root.0.to_base58(),
         );
-        // map hashes to SMs
+
+        // get all SMs for this ledger
         let sms = self
             .storage_modules
             .iter()
@@ -119,6 +120,7 @@ impl ChunkProvider {
             })
             .collect::<Vec<_>>();
 
+        // find a SM that contains this data root, return the start_offsets once we find it
         for sm in sms {
             let sm_range_start = sm.get_storage_module_range().unwrap().start();
             let start_offsets = sm.collect_start_offsets(data_root)?;

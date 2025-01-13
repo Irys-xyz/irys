@@ -7,7 +7,7 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_actors::mempool::{TxIngressError, TxIngressMessage};
 use irys_database::{database, Ledger};
-use irys_types::{IrysTransactionHeader, H256};
+use irys_types::{u64_stringify, IrysTransactionHeader, H256};
 use log::info;
 use reth_db::Database;
 use serde::{Deserialize, Serialize};
@@ -78,40 +78,42 @@ pub fn get_tx_header(
     }
 }
 
-pub async fn get_tx_data_metadata(
+pub async fn get_tx_local_start_offset(
     state: web::Data<ApiState>,
     path: web::Path<H256>,
-) -> Result<Json<AugmentedTxHeader>, ApiError> {
+) -> Result<Json<TxOffset>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx data metadata by tx_id: {}", tx_id);
     let tx_header = get_tx_header(&state, tx_id)?;
     let ledger = Ledger::try_from(tx_header.ledger_num).unwrap();
 
-    // get data root and start offsets
     match state
         .chunk_provider
-        .get_ledger_relative_starts_for_data_root(ledger, tx_header.data_root)
+        .get_ledger_offsets_for_data_root(ledger, tx_header.data_root)
     {
         Err(_error) => Err(ApiError::Internal {
             err: String::from("db error"),
         }),
         Ok(None) => Err(ApiError::ErrNoId {
             id: tx_id.to_string(),
-            err: String::from("tx not found"),
+            err: String::from("Transaction data isn't stored by this node"),
         }),
-        Ok(Some(offsets)) => Ok(web::Json(AugmentedTxHeader {
-            tx_header,
-            data_start_offset: offsets.get(0).copied(),
-        })),
+        Ok(Some(offsets)) => {
+            let offset = offsets.get(0).copied().ok_or(ApiError::Internal {
+                err: String::from("ChunkProvider error"), // the ChunkProvider should only return a Some if the vec has at least one element
+            })?;
+            Ok(web::Json(TxOffset {
+                data_start_offset: offset,
+            }))
+        }
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub struct AugmentedTxHeader {
-    tx_header: IrysTransactionHeader,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    data_start_offset: Option<u64>,
+pub struct TxOffset {
+    #[serde(default, with = "u64_stringify")]
+    pub data_start_offset: u64,
 }
 
 #[cfg(test)]

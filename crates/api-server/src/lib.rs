@@ -43,8 +43,8 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route("/tx/{tx_id}", web::get().to(tx::get_tx_header_api))
         .route(
-            "/tx/{tx_id}/with_start_offsets",
-            web::get().to(tx::get_tx_data_metadata),
+            "/tx/{tx_id}/local/data_start_offset",
+            web::get().to(tx::get_tx_local_start_offset),
         )
         .route("/tx", web::post().to(tx::post_tx))
         .route("/price/{size}", web::get().to(price::get_price))
