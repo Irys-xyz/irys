@@ -111,7 +111,7 @@ pub async fn start_irys_node(
     let arc_config = Arc::new(node_config);
     let mut difficulty_adjustment_config = DifficultyAdjustmentConfig {
         target_block_time: 1,        // 1->5 seconds
-        adjustment_interval: 20,     // every X blocks
+        adjustment_interval: 2000,   // every X blocks
         max_adjustment_factor: 4,    // No more than 4x or 1/4th with each adjustment
         min_adjustment_factor: 0.25, // a minimum 25% adjustment threshold
         min_difficulty: U256::one(),
