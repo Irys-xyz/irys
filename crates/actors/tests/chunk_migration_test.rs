@@ -18,7 +18,6 @@ use chunk::TxRelativeChunkOffset;
 use dev::Registry;
 use irys_actors::{
     block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
-    mempool_service,
 };
 use irys_config::IrysNodeConfig;
 use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized};
