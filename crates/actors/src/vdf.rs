@@ -137,8 +137,9 @@ impl VdfStepsReadGuard {
             match self.read().get_steps(i) {
                         Ok(c) => return Ok(c),
                         Err(e) =>
-                            warn!("Requested vdf steps range {:?} still unavailable, attempt: {}, reason: {:?}, waiting...", &i, attempt, e),
+                            warn!("Requested vdf steps range {:?} still unavailable, attempt: {}, reason: {:?}, waiting ...", &i, attempt, e),
                     };
+            // should be similar to a yield
             sleep(Duration::from_millis(200)).await;
         }
         Err(eyre::eyre!(
