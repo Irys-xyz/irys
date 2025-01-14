@@ -13,8 +13,7 @@ use {
 use actix::prelude::*;
 use dev::Registry;
 use irys_actors::{
-    block_producer::BlockFinalizedMessage,
-    chunk_migration_service::{ChunkMigrationService},
+    block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
     mempool::GetBestMempoolTxs,
 };
 use irys_api_server::{run_server, ApiState};

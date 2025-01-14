@@ -31,7 +31,7 @@ use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    chunk_migration_service::{ChunkMigrationService},
+    chunk_migration_service::ChunkMigrationService,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool::{GetBestMempoolTxs, MempoolActor},
     vdf::VdfStepsReadGuard,
