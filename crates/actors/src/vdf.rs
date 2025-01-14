@@ -1,10 +1,11 @@
 use actix::prelude::*;
 use nodit::{interval::ii, InclusiveInterval, Interval};
-use tokio::time::sleep;
 use std::{
     collections::VecDeque,
-    sync::{Arc, RwLock, RwLockReadGuard}, time::Duration,
+    sync::{Arc, RwLock, RwLockReadGuard},
+    time::Duration,
 };
+use tokio::time::sleep;
 use tracing::{info, warn};
 
 use irys_types::{block_production::Seed, H256List, H256};
@@ -136,13 +137,15 @@ impl VdfStepsReadGuard {
         loop {
             match self.read().get_steps(i) {
                 Ok(c) => break Ok(c),
-                Err(e) => 
-                    warn!("Requested vdf steps range still not available while producing block reason: {:?}, waiting ...", e),                            
+                Err(e) =>
+                    warn!("Requested vdf steps range still not available while producing block reason: {:?}, waiting ...", e),
             };
             sleep(Duration::from_millis(200)).await;
             attempt += 1;
             if attempt > MAX_RETRIES {
-                break Err(eyre::eyre!("Max. retries reached while waiting for getting VDF steps!"))
+                break Err(eyre::eyre!(
+                    "Max. retries reached while waiting for getting VDF steps!"
+                ));
             }
         }
     }
