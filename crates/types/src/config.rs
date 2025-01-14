@@ -29,6 +29,7 @@ pub struct Config {
     pub num_writes_before_sync: u64,
 }
 
+/// The default [`Config`] used in local development mode. Not suitable for production.
 pub const DEFAULT_CONFIG: Config = {
     const BLOCK_TIME: u64 = 30;
     const CHUNK_SIZE: u64 = 256 * 1024;
