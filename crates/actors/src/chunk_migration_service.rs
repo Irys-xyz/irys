@@ -41,20 +41,6 @@ impl Actor for ChunkMigrationService {
 }
 
 impl ChunkMigrationService {
-    pub fn init(
-        &mut self,
-        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
-        storage_config: StorageConfig,
-        storage_modules: Vec<Arc<StorageModule>>,
-        db: DatabaseProvider,
-    ) {
-        // Initialize with config
-        self.block_index = Some(block_index);
-        self.storage_config = storage_config;
-        self.storage_modules = storage_modules;
-        self.db = Some(db);
-    }
-
     pub fn new(
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         storage_config: StorageConfig,

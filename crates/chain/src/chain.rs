@@ -1,5 +1,5 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, ArbiterService, Registry, System};
+use actix::{Actor, ArbiterService, Registry};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index::{BlockIndexActor, BlockIndexReadGuard, GetBlockIndexGuardMessage},

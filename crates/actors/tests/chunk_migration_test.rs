@@ -239,8 +239,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
     block_index_addr.do_send(block_confirm_message.clone());
 
     // Send the block finalized message
-    let mut chunk_migration_service = ChunkMigrationService::default();
-    chunk_migration_service.init(
+    let mut chunk_migration_service = ChunkMigrationService::new(
         block_index.clone(),
         storage_config.clone(),
         storage_modules.clone(),
