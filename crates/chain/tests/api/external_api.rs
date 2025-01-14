@@ -6,8 +6,8 @@ use std::{
 };
 
 use {
-    irys_actors::block_index_service::BlockIndexService, irys_actors::block_producer::BlockConfirmedMessage,
-    irys_actors::mempool::MempoolActor,
+    irys_actors::block_index_service::BlockIndexService,
+    irys_actors::block_producer::BlockConfirmedMessage, irys_actors::mempool::MempoolActor,
 };
 
 use actix::prelude::*;
