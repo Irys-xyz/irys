@@ -1,7 +1,5 @@
 use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    collections::HashMap, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}
 };
 
 use actix::prelude::*;
@@ -25,6 +23,7 @@ use openssl::sha;
 use reth::revm::primitives::B256;
 use reth_db::cursor::*;
 use reth_db::Database;
+use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 use crate::{
@@ -319,13 +318,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let mut checkpoints = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
                 H256List::new()
             } else {
-                match vdf_steps.read().get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!("Error in requested vdf steps while producing block in step:{} error: {}", solution.vdf_step, e);
-                        return None
+                    match vdf_steps.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!("Not available vdf steps range while producing block in step:{} reason: {:?}, waiting ...", solution.vdf_step, e);
+                            return None
+                        }
                     }
-                }
             };
             checkpoints.push(solution.seed.0);
 
