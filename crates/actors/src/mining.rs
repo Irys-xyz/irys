@@ -60,14 +60,13 @@ impl PartitionMiningActor {
         partition_hash: &H256,
     ) -> eyre::Result<u64> {
         let vdf_steps = self.steps_guard.read();
-        let last_step = vdf_steps.global_step;
-        if last_step + 1 >= step {
+        if self.ranges.last_step_num + 1 >= step {
             debug!("Step {} already processed or next consecutive one", step);
             Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         } else {
             // This code is not needed for just one node, but will be needed for multiple nodes
             warn!("Non consecutive Step {} need to reconstruct ranges", step);
-            let steps = vdf_steps.get_steps(ii(last_step + 1, step - 1))?;
+            let steps = vdf_steps.get_steps(ii(self.ranges.last_step_num + 1, step - 1))?;
             self.ranges.reconstruct(&steps, partition_hash);
             Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         }
@@ -328,6 +327,7 @@ mod tests {
             miner_address: mining_address,
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1,
+            num_confirmations_for_finality: 1, // Testnet / single node config
         };
 
         let infos = vec![StorageModuleInfo {

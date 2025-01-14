@@ -45,6 +45,7 @@ async fn data_promotion_test() {
         miner_address: miner_signer.address(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
+        num_confirmations_for_finality: 1, // Testnet / single node config
     };
 
     // This will create 3 storage modules, one for submit, one for publish, and one for capacity

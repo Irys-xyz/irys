@@ -6,10 +6,11 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use irys_actors::mempool::{TxIngressError, TxIngressMessage};
-use irys_database::database;
-use irys_types::{IrysTransactionHeader, H256};
+use irys_database::{database, Ledger};
+use irys_types::{u64_stringify, IrysTransactionHeader, H256};
 use log::info;
 use reth_db::Database;
+use serde::{Deserialize, Serialize};
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `IrysTransactionHeader` type,
@@ -49,12 +50,19 @@ pub async fn post_tx(
     Ok(HttpResponse::Ok().finish())
 }
 
-pub async fn get_tx(
+pub async fn get_tx_header_api(
     state: web::Data<ApiState>,
     path: web::Path<H256>,
 ) -> Result<Json<IrysTransactionHeader>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx by tx_id: {}", tx_id);
+    get_tx_header(&state, tx_id).and_then(|header| Ok(web::Json(header)))
+}
+
+pub fn get_tx_header(
+    state: &web::Data<ApiState>,
+    tx_id: H256,
+) -> Result<IrysTransactionHeader, ApiError> {
     match state
         .db
         .view_eyre(|tx| database::tx_header_by_txid(tx, &tx_id))
@@ -66,8 +74,46 @@ pub async fn get_tx(
             id: tx_id.to_string(),
             err: String::from("tx not found"),
         }),
-        Ok(Some(tx_header)) => Ok(web::Json(tx_header)),
+        Ok(Some(tx_header)) => Ok(tx_header),
     }
+}
+
+pub async fn get_tx_local_start_offset(
+    state: web::Data<ApiState>,
+    path: web::Path<H256>,
+) -> Result<Json<TxOffset>, ApiError> {
+    let tx_id: H256 = path.into_inner();
+    info!("Get tx data metadata by tx_id: {}", tx_id);
+    let tx_header = get_tx_header(&state, tx_id)?;
+    let ledger = Ledger::try_from(tx_header.ledger_num).unwrap();
+
+    match state
+        .chunk_provider
+        .get_ledger_offsets_for_data_root(ledger, tx_header.data_root)
+    {
+        Err(_error) => Err(ApiError::Internal {
+            err: String::from("db error"),
+        }),
+        Ok(None) => Err(ApiError::ErrNoId {
+            id: tx_id.to_string(),
+            err: String::from("Transaction data isn't stored by this node"),
+        }),
+        Ok(Some(offsets)) => {
+            let offset = offsets.get(0).copied().ok_or(ApiError::Internal {
+                err: String::from("ChunkProvider error"), // the ChunkProvider should only return a Some if the vec has at least one element
+            })?;
+            Ok(web::Json(TxOffset {
+                data_start_offset: offset,
+            }))
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TxOffset {
+    #[serde(default, with = "u64_stringify")]
+    pub data_start_offset: u64,
 }
 
 #[cfg(test)]
@@ -189,7 +235,7 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(app_state))
-                .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx))),
+                .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx_header_api))),
         )
         .await;
 

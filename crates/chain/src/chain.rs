@@ -63,6 +63,7 @@ pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeC
         miner_address: config.mining_signer.address(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
+        num_confirmations_for_finality: 1, // Testnet / single node config
     };
 
     start_irys_node(config, storage_config).await
@@ -82,6 +83,7 @@ pub async fn start_for_testing_default(
 
     let storage_config = StorageConfig {
         miner_address: miner_signer.address(), // just in case to keep the same miner address
+        num_confirmations_for_finality: 1,     // Testnet / single node config
         ..storage_config
     };
 
