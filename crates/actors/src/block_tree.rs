@@ -18,8 +18,6 @@ use irys_types::{BlockHash, IrysBlockHeader, IrysTransactionId, H256, U256};
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockTreeActor {
-    /// Shared access to the block index used for validation.
-    pub block_index: Addr<BlockIndexActor>,
     /// Reference to the mempool actor, which maintains the validity of pending transactions.
     pub mempool: Addr<MempoolActor>,
     /// Needs to know the current block to build on
@@ -34,13 +32,8 @@ impl Actor for BlockTreeActor {
 
 impl BlockTreeActor {
     /// Initializes a BlockTreeActor without a block_producer address
-    pub fn new(
-        block_index: Addr<BlockIndexActor>,
-        mempool: Addr<MempoolActor>,
-        genesis_block: &IrysBlockHeader,
-    ) -> Self {
+    pub fn new(mempool: Addr<MempoolActor>, genesis_block: &IrysBlockHeader) -> Self {
         Self {
-            block_index,
             mempool,
             block_producer: None,
             cache: Arc::new(RwLock::new(BlockTreeCache::new(genesis_block))),
@@ -70,7 +63,8 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeActor {
         // For now, because there are no forks, we'll just auto confirm the block
         let block_confirm_message = BlockConfirmedMessage(pre_validated_block, all_txs);
 
-        self.block_index.do_send(block_confirm_message.clone());
+        let block_index = BlockIndexActor::from_registry();
+        block_index.do_send(block_confirm_message.clone());
         if let Some(block_producer) = &self.block_producer {
             block_producer.do_send(block_confirm_message.clone());
         }

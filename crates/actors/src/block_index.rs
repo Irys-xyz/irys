@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
     time::Duration,
 };
+use tracing::error;
 
 //==============================================================================
 // BlockIndexReadGuard
@@ -42,19 +43,36 @@ impl Handler<GetBlockIndexGuardMessage> for BlockIndexActor {
         _msg: GetBlockIndexGuardMessage,
         _ctx: &mut Self::Context,
     ) -> Self::Result {
-        BlockIndexReadGuard::new(self.block_index.clone())
+        if self.block_index.is_none() {
+            error!("block_index service not initialized");
+        }
+        let binding = self.block_index.clone().unwrap();
+        BlockIndexReadGuard::new(binding.clone())
     }
 }
+
+//==============================================================================
+// BlockIndex Actor
+//------------------------------------------------------------------------------
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
 /// This actor primarily serves as a wrapper for nested `block_index_data` struct
 /// allowing it to receive to actix messages and update its state.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BlockIndexActor {
-    block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+    block_index: Option<Arc<RwLock<BlockIndex<Initialized>>>>,
     block_log: Vec<BlockLogEntry>,
     num_blocks: u64,
     storage_config: StorageConfig,
+}
+
+/// Allows this actor to live in the the local service registry
+impl Supervised for BlockIndexActor {}
+
+impl ArbiterService for BlockIndexActor {
+    fn service_started(&mut self, _ctx: &mut Context<Self>) {
+        println!("block_index service started");
+    }
 }
 
 #[derive(Debug)]
@@ -73,12 +91,13 @@ impl Actor for BlockIndexActor {
 impl BlockIndexActor {
     /// Create a new instance of the mempool actor passing in a reference
     /// counted reference to a `DatabaseEnv`
-    pub const fn new(
+    pub fn new(
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         storage_config: StorageConfig,
     ) -> Self {
+        println!("block_index service started");
         Self {
-            block_index,
+            block_index: Some(block_index),
             block_log: Vec::new(),
             num_blocks: 0,
             storage_config,
@@ -106,6 +125,11 @@ impl BlockIndexActor {
         block: &Arc<IrysBlockHeader>,
         all_txs: &Arc<Vec<IrysTransactionHeader>>,
     ) {
+        if self.block_index.is_none() {
+            error!("block_index service not initialized");
+            return;
+        }
+
         let chunk_size = self.storage_config.chunk_size;
 
         // Extract just the transactions referenced in the submit ledger
@@ -119,7 +143,8 @@ impl BlockIndexActor {
         let sub_chunks_added = calculate_chunks_added(submit_txs, chunk_size);
         let pub_chunks_added = calculate_chunks_added(publish_txs, chunk_size);
 
-        let mut index = self.block_index.write().unwrap();
+        let binding = self.block_index.clone().unwrap();
+        let mut index = binding.write().unwrap();
 
         // Get previous ledger sizes or default to 0 for genesis
         let (max_publish_chunks, max_submit_chunks) =
@@ -204,11 +229,18 @@ pub struct GetLatestBlockIndexMessage {}
 
 impl Handler<GetLatestBlockIndexMessage> for BlockIndexActor {
     type Result = Option<BlockIndexItem>;
-    fn handle(&mut self, msg: GetLatestBlockIndexMessage, ctx: &mut Self::Context) -> Self::Result {
-        let _ = ctx;
-        let _ = msg;
+    fn handle(
+        &mut self,
+        _msg: GetLatestBlockIndexMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        if self.block_index.is_none() {
+            error!("block_index service not initialized");
+            return None;
+        }
 
-        let bi = self.block_index.read().unwrap();
+        let binding = (self.block_index.clone().unwrap());
+        let bi = binding.read().unwrap();
         let block_height = bi.num_blocks().max(1) as usize - 1;
         Some(bi.get_item(block_height)?.clone())
     }

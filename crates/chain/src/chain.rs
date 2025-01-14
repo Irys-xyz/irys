@@ -176,7 +176,8 @@ pub async fn start_irys_node(
                 // Initialize the block_index actor and tell it about the genesis block
                 let block_index_actor =
                     BlockIndexActor::new(block_index.clone(), storage_config.clone());
-                let block_index_actor_addr = block_index_actor.start();
+                Registry::set(block_index_actor.start());
+                let block_index_actor_addr = BlockIndexActor::from_registry();
                 let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
                 db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
                     .unwrap();
@@ -258,11 +259,8 @@ pub async fn start_irys_node(
 
                 let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
-                let block_tree_actor = BlockTreeActor::new(
-                    block_index_actor_addr.clone(),
-                    mempool_actor_addr.clone(),
-                    &arc_genesis,
-                );
+                let block_tree_actor =
+                    BlockTreeActor::new(mempool_actor_addr.clone(), &arc_genesis);
                 let block_tree = block_tree_actor.start();
 
                 let vdf_service = VdfService::from_registry();
@@ -285,7 +283,6 @@ pub async fn start_irys_node(
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
                     mempool_actor_addr.clone(),
-                    block_index_actor_addr.clone(),
                     block_discovery_addr.clone(),
                     epoch_service_actor_addr.clone(),
                     reth_node.clone(),

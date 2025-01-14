@@ -51,8 +51,6 @@ pub struct BlockProducerActor {
     pub db: DatabaseProvider,
     /// Address of the mempool actor
     pub mempool_addr: Addr<MempoolActor>,
-    /// Address of the `bock_index` actor
-    pub block_index_addr: Addr<BlockIndexActor>,
     /// Message the block discovery actor when a block is produced locally
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     /// Tracks the global state of partition assignments on the protocol
@@ -79,7 +77,6 @@ impl BlockProducerActor {
     pub const fn new(
         db: DatabaseProvider,
         mempool_addr: Addr<MempoolActor>,
-        block_index_addr: Addr<BlockIndexActor>,
         block_discover_addr: Addr<BlockDiscoveryActor>,
         epoch_service: Addr<EpochServiceActor>,
         reth_provider: RethNodeProvider,
@@ -91,7 +88,6 @@ impl BlockProducerActor {
         Self {
             db,
             mempool_addr,
-            block_index_addr,
             block_discovery_addr: block_discover_addr,
             epoch_service,
             reth_provider,
@@ -131,7 +127,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         }
 
         let mempool_addr = self.mempool_addr.clone();
-        let block_index_addr = self.block_index_addr.clone();
         let block_discovery_addr = self.block_discovery_addr.clone();
         let epoch_service_addr = self.epoch_service.clone();
         let mining_broadcaster_addr = BroadcastMiningService::from_registry();
@@ -149,6 +144,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         AtomicResponse::new(Box::pin( async move {
             // Acquire lock and check that the height hasn't changed identifying a race condition
             // TEMP: This demonstrates how to get the block height from the block_index_actor
+            let block_index_addr = BlockIndexActor::from_registry();
             let latest_block = block_index_addr
                 .send(GetLatestBlockIndexMessage {})
                 .await
