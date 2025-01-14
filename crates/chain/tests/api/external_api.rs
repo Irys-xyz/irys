@@ -11,8 +11,10 @@ use {
 };
 
 use actix::prelude::*;
+use dev::Registry;
 use irys_actors::{
-    block_producer::BlockFinalizedMessage, chunk_migration::ChunkMigrationActor,
+    block_producer::BlockFinalizedMessage,
+    chunk_migration_service::{self, ChunkMigrationService},
     mempool::GetBestMempoolTxs,
 };
 use irys_api_server::{run_server, ApiState};
@@ -288,17 +290,18 @@ async fn external_api() -> eyre::Result<()> {
     block_index_addr.do_send(block_confirm_message.clone());
 
     // Send the block finalized message
-    let chunk_migration_actor = ChunkMigrationActor::new(
+    let chunk_migration_service = ChunkMigrationService::new(
         block_index.clone(),
         storage_config.clone(),
         storage_modules.clone(),
         arc_db.clone(),
     );
-    let chunk_migration_addr = chunk_migration_actor.start();
+    Registry::set(chunk_migration_service.start());
     let block_finalized_message = BlockFinalizedMessage {
         block_header: block.clone(),
         all_txs: txs.clone(),
     };
+    let chunk_migration_addr = ChunkMigrationService::from_registry();
     let _res = chunk_migration_addr.send(block_finalized_message).await?;
 
     // Check to see if the chunks are in the StorageModules

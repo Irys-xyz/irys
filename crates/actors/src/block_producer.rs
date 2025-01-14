@@ -31,7 +31,7 @@ use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    chunk_migration::ChunkMigrationActor,
+    chunk_migration_service::{self, ChunkMigrationService},
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool::{GetBestMempoolTxs, MempoolActor},
     vdf::VdfStepsReadGuard,
@@ -51,8 +51,6 @@ pub struct BlockProducerActor {
     pub db: DatabaseProvider,
     /// Address of the mempool actor
     pub mempool_addr: Addr<MempoolActor>,
-    /// Address of the chunk migration actor
-    pub chunk_migration_addr: Addr<ChunkMigrationActor>,
     /// Address of the `bock_index` actor
     pub block_index_addr: Addr<BlockIndexActor>,
     /// Message the block discovery actor when a block is produced locally
@@ -81,7 +79,6 @@ impl BlockProducerActor {
     pub const fn new(
         db: DatabaseProvider,
         mempool_addr: Addr<MempoolActor>,
-        chunk_migration_addr: Addr<ChunkMigrationActor>,
         block_index_addr: Addr<BlockIndexActor>,
         block_discover_addr: Addr<BlockDiscoveryActor>,
         epoch_service: Addr<EpochServiceActor>,
@@ -94,7 +91,6 @@ impl BlockProducerActor {
         Self {
             db,
             mempool_addr,
-            chunk_migration_addr,
             block_index_addr,
             block_discovery_addr: block_discover_addr,
             epoch_service,
@@ -138,7 +134,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let block_index_addr = self.block_index_addr.clone();
         let block_discovery_addr = self.block_discovery_addr.clone();
         let epoch_service_addr = self.epoch_service.clone();
-        let chunk_migration_addr = self.chunk_migration_addr.clone();
         let mining_broadcaster_addr = BroadcastMiningService::from_registry();
 
         let reth = self.reth_provider.clone();
@@ -467,6 +462,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
+
+
+            let chunk_migration_addr = ChunkMigrationService::from_registry();
 
             let _ = chunk_migration_addr.send(BlockFinalizedMessage {
                 block_header: Arc::new(prev_block_header),

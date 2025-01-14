@@ -15,7 +15,9 @@ use assert_matches::assert_matches;
 
 use actix::prelude::*;
 use chunk::TxRelativeChunkOffset;
-use irys_actors::{block_producer::BlockFinalizedMessage, chunk_migration::ChunkMigrationActor};
+use irys_actors::{
+    block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
+};
 use irys_config::IrysNodeConfig;
 use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized};
 use irys_storage::*;
@@ -237,13 +239,15 @@ async fn finalize_block_test() -> eyre::Result<()> {
     block_index_addr.do_send(block_confirm_message.clone());
 
     // Send the block finalized message
-    let chunk_migration_actor = ChunkMigrationActor::new(
+    let mut chunk_migration_service = ChunkMigrationService::default();
+    chunk_migration_service.init(
         block_index.clone(),
         storage_config.clone(),
         storage_modules.clone(),
         arc_db1.clone(),
     );
-    let chunk_migration_addr = chunk_migration_actor.start();
+
+    let chunk_migration_addr = chunk_migration_service.start();
     let block_finalized_message = BlockFinalizedMessage {
         block_header: block.clone(),
         all_txs: txs.clone(),

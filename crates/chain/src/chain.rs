@@ -1,12 +1,12 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, ArbiterService};
+use actix::{Actor, ArbiterService, Registry, System};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index::{BlockIndexActor, BlockIndexReadGuard, GetBlockIndexGuardMessage},
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
     block_tree::BlockTreeActor,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    chunk_migration::ChunkMigrationActor,
+    chunk_migration_service::ChunkMigrationService,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
         GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage, NewEpochMessage,
@@ -248,13 +248,13 @@ pub async fn start_irys_node(
 
                 let mempool_actor_addr = mempool_actor.start();
 
-                let chunk_migration_actor = ChunkMigrationActor::new(
+                let chunk_migration_service = ChunkMigrationService::new(
                     block_index.clone(),
                     storage_config.clone(),
                     storage_modules.clone(),
                     db.clone(),
                 );
-                let chunk_migration_addr = chunk_migration_actor.start();
+                Registry::set(chunk_migration_service.start());
 
                 let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
@@ -285,7 +285,6 @@ pub async fn start_irys_node(
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
                     mempool_actor_addr.clone(),
-                    chunk_migration_addr.clone(),
                     block_index_actor_addr.clone(),
                     block_discovery_addr.clone(),
                     epoch_service_actor_addr.clone(),
