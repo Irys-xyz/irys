@@ -1,6 +1,6 @@
 mod addresses;
 pub mod block_discovery;
-pub mod block_index;
+pub mod block_index_service;
 pub mod block_producer;
 pub mod block_tree;
 pub mod block_validation;

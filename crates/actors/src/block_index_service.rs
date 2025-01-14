@@ -35,7 +35,7 @@ impl BlockIndexReadGuard {
 #[rtype(result = "BlockIndexReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
 pub struct GetBlockIndexGuardMessage;
 
-impl Handler<GetBlockIndexGuardMessage> for BlockIndexActor {
+impl Handler<GetBlockIndexGuardMessage> for BlockIndexService {
     type Result = BlockIndexReadGuard; // Return guard directly
 
     fn handle(
@@ -59,7 +59,7 @@ impl Handler<GetBlockIndexGuardMessage> for BlockIndexActor {
 /// This actor primarily serves as a wrapper for nested `block_index_data` struct
 /// allowing it to receive to actix messages and update its state.
 #[derive(Debug, Default)]
-pub struct BlockIndexActor {
+pub struct BlockIndexService {
     block_index: Option<Arc<RwLock<BlockIndex<Initialized>>>>,
     block_log: Vec<BlockLogEntry>,
     num_blocks: u64,
@@ -67,9 +67,9 @@ pub struct BlockIndexActor {
 }
 
 /// Allows this actor to live in the the local service registry
-impl Supervised for BlockIndexActor {}
+impl Supervised for BlockIndexService {}
 
-impl ArbiterService for BlockIndexActor {
+impl ArbiterService for BlockIndexService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("block_index service started");
     }
@@ -84,11 +84,11 @@ struct BlockLogEntry {
     pub difficulty: U256,
 }
 
-impl Actor for BlockIndexActor {
+impl Actor for BlockIndexService {
     type Context = Context<Self>;
 }
 
-impl BlockIndexActor {
+impl BlockIndexService {
     /// Create a new instance of the mempool actor passing in a reference
     /// counted reference to a `DatabaseEnv`
     pub fn new(
@@ -206,7 +206,7 @@ impl BlockIndexActor {
     }
 }
 
-impl Handler<BlockConfirmedMessage> for BlockIndexActor {
+impl Handler<BlockConfirmedMessage> for BlockIndexService {
     type Result = ();
 
     // TODO: We are treating confirmed blocks like finalized blocks here when we
@@ -227,7 +227,7 @@ impl Handler<BlockConfirmedMessage> for BlockIndexActor {
 #[rtype(result = "Option<BlockIndexItem>")]
 pub struct GetLatestBlockIndexMessage {}
 
-impl Handler<GetLatestBlockIndexMessage> for BlockIndexActor {
+impl Handler<GetLatestBlockIndexMessage> for BlockIndexService {
     type Result = Option<BlockIndexItem>;
     fn handle(
         &mut self,

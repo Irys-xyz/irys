@@ -1,5 +1,5 @@
 use crate::{
-    block_index::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
+    block_index_service::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
     vdf::VdfStepsReadGuard,
 };
 use irys_database::Ledger;
@@ -262,7 +262,7 @@ pub fn poa_is_valid(
 #[cfg(test)]
 mod tests {
     use crate::{
-        block_index::{BlockIndexActor, GetBlockIndexGuardMessage},
+        block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
         block_producer::BlockConfirmedMessage,
         epoch_service::{
             EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
@@ -434,12 +434,12 @@ mod tests {
                 .unwrap(),
         ));
 
-        let block_index_actor = BlockIndexActor::new(block_index.clone(), storage_config.clone());
+        let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
         Registry::set(block_index_actor.start());
 
         let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
 
-        let block_index_addr = BlockIndexActor::from_registry();
+        let block_index_addr = BlockIndexService::from_registry();
         match block_index_addr.send(msg).await {
             Ok(_) => info!("Genesis block indexed"),
             Err(_) => panic!("Failed to index genesis block"),

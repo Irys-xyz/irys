@@ -29,7 +29,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
-    block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
+    block_index_service::{BlockIndexService, GetLatestBlockIndexMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
@@ -144,7 +144,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         AtomicResponse::new(Box::pin( async move {
             // Acquire lock and check that the height hasn't changed identifying a race condition
             // TEMP: This demonstrates how to get the block height from the block_index_actor
-            let block_index_addr = BlockIndexActor::from_registry();
+            let block_index_addr = BlockIndexService::from_registry();
             let latest_block = block_index_addr
                 .send(GetLatestBlockIndexMessage {})
                 .await

@@ -1,6 +1,7 @@
 use crate::{
-    block_index::BlockIndexReadGuard, block_tree::BlockTreeActor, block_validation::block_is_valid,
-    epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor, vdf::VdfStepsReadGuard,
+    block_index_service::BlockIndexReadGuard, block_tree::BlockTreeActor,
+    block_validation::block_is_valid, epoch_service::PartitionAssignmentsReadGuard,
+    mempool::MempoolActor, vdf::VdfStepsReadGuard,
 };
 use actix::prelude::*;
 use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};

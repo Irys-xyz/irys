@@ -2,7 +2,7 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, ArbiterService, Registry};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
-    block_index::{BlockIndexActor, BlockIndexReadGuard, GetBlockIndexGuardMessage},
+    block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
     block_tree::BlockTreeActor,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
@@ -175,9 +175,9 @@ pub async fn start_irys_node(
 
                 // Initialize the block_index actor and tell it about the genesis block
                 let block_index_actor =
-                    BlockIndexActor::new(block_index.clone(), storage_config.clone());
+                    BlockIndexService::new(block_index.clone(), storage_config.clone());
                 Registry::set(block_index_actor.start());
-                let block_index_actor_addr = BlockIndexActor::from_registry();
+                let block_index_actor_addr = BlockIndexService::from_registry();
                 let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
                 db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
                     .unwrap();

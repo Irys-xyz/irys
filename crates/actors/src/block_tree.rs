@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     block_discovery::BlockPreValidatedMessage,
-    block_index::BlockIndexActor,
+    block_index_service::BlockIndexService,
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
     mempool::MempoolActor,
 };
@@ -63,7 +63,7 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeActor {
         // For now, because there are no forks, we'll just auto confirm the block
         let block_confirm_message = BlockConfirmedMessage(pre_validated_block, all_txs);
 
-        let block_index = BlockIndexActor::from_registry();
+        let block_index = BlockIndexService::from_registry();
         block_index.do_send(block_confirm_message.clone());
         if let Some(block_producer) = &self.block_producer {
             block_producer.do_send(block_confirm_message.clone());

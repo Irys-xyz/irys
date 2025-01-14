@@ -6,7 +6,7 @@ use std::{
 };
 
 use {
-    irys_actors::block_index::BlockIndexActor,
+    irys_actors::block_index_service::BlockIndexService,
     irys_actors::block_producer::BlockConfirmedMessage,
     irys_actors::mempool::{ChunkIngressMessage, MempoolActor, TxIngressMessage},
 };
@@ -172,9 +172,9 @@ async fn finalize_block_test() -> eyre::Result<()> {
     }
 
     // Create a block_index actor
-    let block_index_actor = BlockIndexActor::new(block_index.clone(), storage_config.clone());
+    let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
     Registry::set(block_index_actor.start());
-    let block_index_addr = BlockIndexActor::from_registry();
+    let block_index_addr = BlockIndexService::from_registry();
 
     let height: u64;
     {
