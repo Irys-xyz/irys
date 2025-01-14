@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use actix::prelude::*;
@@ -25,7 +25,6 @@ use openssl::sha;
 use reth::revm::primitives::B256;
 use reth_db::cursor::*;
 use reth_db::Database;
-use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 use crate::{
