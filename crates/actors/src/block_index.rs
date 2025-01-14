@@ -239,7 +239,7 @@ impl Handler<GetLatestBlockIndexMessage> for BlockIndexActor {
             return None;
         }
 
-        let binding = (self.block_index.clone().unwrap());
+        let binding = self.block_index.clone().unwrap();
         let bi = binding.read().unwrap();
         let block_height = bi.num_blocks().max(1) as usize - 1;
         Some(bi.get_item(block_height)?.clone())
