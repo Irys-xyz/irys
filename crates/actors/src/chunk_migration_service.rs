@@ -47,7 +47,7 @@ impl ChunkMigrationService {
         storage_modules: Vec<Arc<StorageModule>>,
         db: DatabaseProvider,
     ) -> Self {
-        println!("chunk_migration service started");
+        println!("service started: chunk_migration");
         Self {
             block_index: Some(block_index),
             storage_config,

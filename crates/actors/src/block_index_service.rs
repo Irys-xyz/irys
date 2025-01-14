@@ -71,7 +71,7 @@ impl Supervised for BlockIndexService {}
 
 impl ArbiterService for BlockIndexService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
-        println!("block_index service started");
+        println!("service started: block_index");
     }
 }
 
@@ -95,7 +95,7 @@ impl BlockIndexService {
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         storage_config: StorageConfig,
     ) -> Self {
-        println!("block_index service started");
+        println!("service started: block_index (Default)");
         Self {
             block_index: Some(block_index),
             block_log: Vec::new(),

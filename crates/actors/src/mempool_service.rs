@@ -54,13 +54,14 @@ impl ArbiterService for MempoolService {
 impl MempoolService {
     /// Create a new instance of the mempool actor passing in a reference
     /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
-    pub const fn new(
+    pub fn new(
         db: DatabaseProvider,
         task_exec: TaskExecutor,
         signer: IrysSigner,
         storage_config: StorageConfig,
         storage_modules: StorageModuleVec,
     ) -> Self {
+        println!("service started: mempool");
         Self {
             db: Some(db),
             valid_tx: BTreeMap::new(),
