@@ -133,21 +133,17 @@ impl VdfStepsReadGuard {
     /// TODO @ernius: remove this method usage after VDF validation is done async, vdf steps validation reads VDF steps blocking last steps pushes so the need of this pooling.
     pub async fn get_steps(&self, i: Interval<u64>) -> eyre::Result<H256List> {
         const MAX_RETRIES: i32 = 10;
-        let mut attempt = 0;
-        loop {
+        for attempt in 0..MAX_RETRIES {
             match self.read().get_steps(i) {
-                Ok(c) => break Ok(c),
-                Err(e) =>
-                    warn!("Requested vdf steps range still not available while producing block reason: {:?}, waiting ...", e),
-            };
+                        Ok(c) => return Ok(c),
+                        Err(e) =>
+                            warn!("Requested vdf steps range {:?} still unavailable, attempt: {}, reason: {:?}, waiting...", &i, attempt, e),
+                    };
             sleep(Duration::from_millis(200)).await;
-            attempt += 1;
-            if attempt > MAX_RETRIES {
-                break Err(eyre::eyre!(
-                    "Max. retries reached while waiting for getting VDF steps!"
-                ));
-            }
         }
+        Err(eyre::eyre!(
+            "Max. retries reached while waiting to get VDF steps!"
+        ))
     }
 }
 

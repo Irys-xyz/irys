@@ -322,7 +322,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     match vdf_steps.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await {
                         Ok(c) => c,
                         Err(e) => {
-                            error!("Not available vdf steps range while producing block in step:{} reason: {:?}, waiting ...", solution.vdf_step, e);
+                            error!("VDF step range {} unavailable while producing block, reason: {:?}, aborting", solution.vdf_step, e);
                             return None
                         }
                     }
