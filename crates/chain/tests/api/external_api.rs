@@ -7,14 +7,15 @@ use std::{
 
 use {
     irys_actors::block_index_service::BlockIndexService,
-    irys_actors::block_producer::BlockConfirmedMessage, irys_actors::mempool::MempoolActor,
+    irys_actors::block_producer::BlockConfirmedMessage,
+    irys_actors::mempool_service::MempoolService,
 };
 
 use actix::prelude::*;
 use dev::Registry;
 use irys_actors::{
     block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
-    mempool::GetBestMempoolTxs,
+    mempool_service::GetBestMempoolTxs,
 };
 use irys_api_server::{run_server, ApiState};
 use irys_config::IrysNodeConfig;
@@ -132,14 +133,15 @@ async fn external_api() -> eyre::Result<()> {
     let arc_db = DatabaseProvider(Arc::new(db));
 
     // Create an instance of the mempool actor
-    let mempool_actor = MempoolActor::new(
+    let mempool_service = MempoolService::new(
         arc_db.clone(),
         task_manager.executor(),
         arc_config.mining_signer.clone(),
         storage_config.clone(),
         storage_modules.clone(),
     );
-    let mempool_addr = mempool_actor.start();
+    Registry::set(mempool_service.start());
+    let mempool_addr = MempoolService::from_registry();
 
     // Create a block_index
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(

@@ -8,7 +8,7 @@ use std::{
 use {
     irys_actors::block_index_service::BlockIndexService,
     irys_actors::block_producer::BlockConfirmedMessage,
-    irys_actors::mempool::{ChunkIngressMessage, MempoolActor, TxIngressMessage},
+    irys_actors::mempool_service::{ChunkIngressMessage, MempoolService, TxIngressMessage},
 };
 
 use assert_matches::assert_matches;
@@ -18,6 +18,7 @@ use chunk::TxRelativeChunkOffset;
 use dev::Registry;
 use irys_actors::{
     block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
+    mempool_service,
 };
 use irys_config::IrysNodeConfig;
 use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized};
@@ -137,14 +138,15 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let task_manager = TaskManager::current();
     let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
     let arc_db1 = DatabaseProvider(Arc::new(db));
-    let mempool_actor = MempoolActor::new(
+    let mempool_service = MempoolService::new(
         arc_db1.clone(),
         task_manager.executor(),
         arc_config.mining_signer.clone(),
         storage_config.clone(),
         storage_modules.clone(),
     );
-    let mempool_addr = mempool_actor.start();
+    Registry::set(mempool_service.start());
+    let mempool_addr = MempoolService::from_registry();
 
     // Send tx headers to mempool
     for header in &tx_headers {

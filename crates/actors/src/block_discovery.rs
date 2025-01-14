@@ -1,7 +1,7 @@
 use crate::{
     block_index_service::BlockIndexReadGuard, block_tree::BlockTreeActor,
     block_validation::block_is_valid, epoch_service::PartitionAssignmentsReadGuard,
-    mempool::MempoolActor, vdf::VdfStepsReadGuard,
+    vdf::VdfStepsReadGuard,
 };
 use actix::prelude::*;
 use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
@@ -22,8 +22,6 @@ pub struct BlockDiscoveryActor {
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Manages forks at the head of the chain before finalization
     pub block_tree: Addr<BlockTreeActor>,
-    /// Reference to the mempool actor, which maintains the validity of pending transactions.
-    pub mempool: Addr<MempoolActor>,
     /// Reference to global storage config for node
     pub storage_config: StorageConfig,
     /// Reference to global difficulty config
@@ -60,7 +58,6 @@ impl BlockDiscoveryActor {
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
         block_tree: Addr<BlockTreeActor>,
-        mempool: Addr<MempoolActor>,
         storage_config: StorageConfig,
         difficulty_config: DifficultyAdjustmentConfig,
         db: DatabaseProvider,
@@ -71,7 +68,6 @@ impl BlockDiscoveryActor {
             block_index_guard,
             partition_assignments_guard,
             block_tree,
-            mempool,
             storage_config,
             difficulty_config,
             db,

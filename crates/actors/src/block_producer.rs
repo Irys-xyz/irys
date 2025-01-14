@@ -33,7 +33,7 @@ use crate::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
-    mempool::{GetBestMempoolTxs, MempoolActor},
+    mempool_service::{GetBestMempoolTxs, MempoolService},
     vdf::VdfStepsReadGuard,
 };
 
@@ -50,7 +50,7 @@ pub struct BlockProducerActor {
     /// Reference to the global database
     pub db: DatabaseProvider,
     /// Address of the mempool actor
-    pub mempool_addr: Addr<MempoolActor>,
+    pub mempool_addr: Addr<MempoolService>,
     /// Message the block discovery actor when a block is produced locally
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     /// Tracks the global state of partition assignments on the protocol
@@ -76,7 +76,7 @@ impl BlockProducerActor {
     /// Initializes a new `BlockProducerActor`
     pub const fn new(
         db: DatabaseProvider,
-        mempool_addr: Addr<MempoolActor>,
+        mempool_addr: Addr<MempoolService>,
         block_discover_addr: Addr<BlockDiscoveryActor>,
         epoch_service: Addr<EpochServiceActor>,
         reth_provider: RethNodeProvider,

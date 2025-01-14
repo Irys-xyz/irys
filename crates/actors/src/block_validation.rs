@@ -66,7 +66,7 @@ pub fn difficulty_is_valid(
     let last_diff_timestamp = previous_block.last_diff_timestamp;
     let current_difficulty = previous_block.diff;
 
-    let (diff, stats) = calculate_difficulty(
+    let (diff, _stats) = calculate_difficulty(
         block_height,
         last_diff_timestamp,
         current_timestamp,

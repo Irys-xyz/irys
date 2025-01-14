@@ -6,7 +6,7 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
 use irys_actors::{
-    block_producer::SolutionFoundMessage, block_validation, mempool::TxIngressMessage,
+    block_producer::SolutionFoundMessage, block_validation, mempool_service::TxIngressMessage,
     vdf::VdfStepsReadGuard,
 };
 use irys_chain::chain::start_for_testing;

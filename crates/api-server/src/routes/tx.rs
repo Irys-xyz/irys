@@ -5,7 +5,7 @@ use actix_web::{
     HttpResponse, Result,
 };
 use awc::http::StatusCode;
-use irys_actors::mempool::{TxIngressError, TxIngressMessage};
+use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
 use irys_database::{database, Ledger};
 use irys_types::{u64_stringify, IrysTransactionHeader, H256};
 use log::info;
@@ -43,6 +43,10 @@ pub async fn post_tx(
                 .body(format!("Unfunded: {:?}", err))),
             TxIngressError::Skipped => Ok(HttpResponse::Ok()
                 .body("Already processed: the transaction was previously handled")),
+            TxIngressError::Other(err) => {
+                Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(format!("Failed to deliver transaction: {:?}", err)))
+            }
         };
     }
 
@@ -121,11 +125,11 @@ mod tests {
     use crate::routes;
 
     use super::*;
-    use actix::Actor;
+    use actix::{Actor, ArbiterService, Registry};
     use actix_web::{middleware::Logger, test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
-    use irys_actors::mempool::MempoolActor;
+    use irys_actors::mempool_service::MempoolService;
     use irys_database::tables::IrysTables;
     use irys_storage::ChunkProvider;
     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
@@ -157,14 +161,15 @@ mod tests {
         let task_manager = TaskManager::current();
         let storage_config = StorageConfig::default();
 
-        let mempool_actor = MempoolActor::new(
+        let mempool_service = MempoolService::new(
             irys_types::app_state::DatabaseProvider(arc_db.clone()),
             task_manager.executor(),
             IrysSigner::random_signer(),
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
-        let mempool_actor_addr = mempool_actor.start();
+        Registry::set(mempool_service.start());
+        let mempool_addr = MempoolService::from_registry();
 
         let chunk_provider = ChunkProvider::new(
             storage_config.clone(),
@@ -174,7 +179,7 @@ mod tests {
 
         let app_state = ApiState {
             db: DatabaseProvider(arc_db.clone()),
-            mempool: mempool_actor_addr,
+            mempool: mempool_addr,
             chunk_provider: Arc::new(chunk_provider),
         };
 
@@ -212,14 +217,16 @@ mod tests {
         let task_manager = TaskManager::current();
         let storage_config = StorageConfig::default();
 
-        let mempool_actor = MempoolActor::new(
+        let mempool_service = MempoolService::new(
             irys_types::app_state::DatabaseProvider(db_arc.clone()),
             task_manager.executor(),
             IrysSigner::random_signer(),
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
-        let mempool_actor_addr = mempool_actor.start();
+        Registry::set(mempool_service.start());
+        let mempool_addr = MempoolService::from_registry();
+
         let chunk_provider = ChunkProvider::new(
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
@@ -228,7 +235,7 @@ mod tests {
 
         let app_state = ApiState {
             db: DatabaseProvider(db_arc.clone()),
-            mempool: mempool_actor_addr,
+            mempool: mempool_addr,
             chunk_provider: Arc::new(chunk_provider),
         };
 

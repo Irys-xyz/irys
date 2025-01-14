@@ -8,7 +8,7 @@ use crate::{
     block_discovery::BlockPreValidatedMessage,
     block_index_service::BlockIndexService,
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
-    mempool::MempoolActor,
+    mempool_service::MempoolService,
 };
 use actix::prelude::*;
 use eyre::ensure;
@@ -18,8 +18,6 @@ use irys_types::{BlockHash, IrysBlockHeader, IrysTransactionId, H256, U256};
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockTreeActor {
-    /// Reference to the mempool actor, which maintains the validity of pending transactions.
-    pub mempool: Addr<MempoolActor>,
     /// Needs to know the current block to build on
     block_producer: Option<Addr<BlockProducerActor>>,
     /// Block tree internal state
@@ -32,9 +30,8 @@ impl Actor for BlockTreeActor {
 
 impl BlockTreeActor {
     /// Initializes a BlockTreeActor without a block_producer address
-    pub fn new(mempool: Addr<MempoolActor>, genesis_block: &IrysBlockHeader) -> Self {
+    pub fn new(genesis_block: &IrysBlockHeader) -> Self {
         Self {
-            mempool,
             block_producer: None,
             cache: Arc::new(RwLock::new(BlockTreeCache::new(genesis_block))),
         }
@@ -68,7 +65,8 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeActor {
         if let Some(block_producer) = &self.block_producer {
             block_producer.do_send(block_confirm_message.clone());
         }
-        self.mempool.do_send(block_confirm_message);
+        let mempool_service = MempoolService::from_registry();
+        mempool_service.do_send(block_confirm_message);
 
         // TODO: Kick off a full validation process on the confirmed block that checks the VDF steps
         // and other heavy validation tasks, so it can be fully validated before we risk producing
