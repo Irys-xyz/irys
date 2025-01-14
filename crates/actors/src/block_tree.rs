@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockReadGuard},
     time::SystemTime,
 };
 
@@ -8,16 +8,63 @@ use crate::{
     block_discovery::BlockPreValidatedMessage,
     block_index_service::BlockIndexService,
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
+    chunk_migration_service::ChunkMigrationService,
     mempool_service::MempoolService,
+    BlockFinalizedMessage,
 };
 use actix::prelude::*;
 use eyre::ensure;
-use irys_database::Ledger;
-use irys_types::{BlockHash, IrysBlockHeader, IrysTransactionId, H256, U256};
+use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
+use irys_types::{
+    BlockHash, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, IrysTransactionId, H256,
+    U256,
+};
+use reth_db::{transaction::DbTx, Database};
+use tracing::error;
+
+//==============================================================================
+// BlockTreeReadGuard
+//------------------------------------------------------------------------------
+
+/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
+#[derive(Debug, Clone, MessageResponse)]
+pub struct BlockTreeReadGuard {
+    block_tree_cache: Arc<RwLock<BlockTreeCache>>,
+}
+
+impl BlockTreeReadGuard {
+    /// Creates a new `ReadGard` for the block_tree cache
+    pub const fn new(block_tree_cache: Arc<RwLock<BlockTreeCache>>) -> Self {
+        Self { block_tree_cache }
+    }
+
+    /// Accessor method to get a read guard for the block_tree cache
+    pub fn read(&self) -> RwLockReadGuard<'_, BlockTreeCache> {
+        self.block_tree_cache.read().unwrap()
+    }
+}
+
+/// Retrieve a read only reference to the block_tree's cache
+#[derive(Message, Debug)]
+#[rtype(result = "BlockTreeReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
+pub struct GetBlockTreeGuardMessage;
+
+impl Handler<GetBlockTreeGuardMessage> for BlockTreeActor {
+    type Result = BlockTreeReadGuard; // Return guard directly
+
+    fn handle(&mut self, _msg: GetBlockTreeGuardMessage, _ctx: &mut Self::Context) -> Self::Result {
+        BlockTreeReadGuard::new(self.cache.clone())
+    }
+}
+
+//==============================================================================
+// BlockTree Actor
+//------------------------------------------------------------------------------
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockTreeActor {
+    db: DatabaseProvider,
     /// Needs to know the current block to build on
     block_producer: Option<Addr<BlockProducerActor>>,
     /// Block tree internal state
@@ -30,11 +77,48 @@ impl Actor for BlockTreeActor {
 
 impl BlockTreeActor {
     /// Initializes a BlockTreeActor without a block_producer address
-    pub fn new(genesis_block: &IrysBlockHeader) -> Self {
+    pub fn new(db: DatabaseProvider, genesis_block: &IrysBlockHeader) -> Self {
         Self {
+            db,
             block_producer: None,
             cache: Arc::new(RwLock::new(BlockTreeCache::new(genesis_block))),
         }
+    }
+
+    fn send_storage_finalized_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
+        let tx = self
+            .db
+            .tx()
+            .map_err(|e| eyre::eyre!("Failed to create transaction: {}", e))?;
+
+        let block_header = match block_header_by_hash(&tx, &block_hash) {
+            Ok(Some(header)) => header,
+            Ok(None) => {
+                return Err(eyre::eyre!("No block header found for hash {}", block_hash));
+            }
+            Err(e) => {
+                return Err(eyre::eyre!("Failed to get previous block header: {}", e));
+            }
+        };
+
+        // Get all the transactions for the finalized block, error if not found
+        // TODO: Eventually abstract this for support of `n` ledgers
+        let submit_txs = get_ledger_tx_headers(&tx, &block_header, Ledger::Submit);
+        let publish_txs = get_ledger_tx_headers(&tx, &block_header, Ledger::Publish);
+
+        let all_txs = {
+            let mut combined = submit_txs.unwrap_or_default();
+            combined.extend(publish_txs.unwrap_or_default());
+            combined
+        };
+
+        let chunk_migration = ChunkMigrationService::from_registry();
+
+        let _ = chunk_migration.do_send(BlockFinalizedMessage {
+            block_header: Arc::new(block_header),
+            all_txs: Arc::new(all_txs),
+        });
+        Ok(())
     }
 }
 
@@ -54,23 +138,63 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeActor {
     fn handle(&mut self, msg: BlockPreValidatedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         let pre_validated_block = msg.0;
         let all_txs = msg.1;
-        // TODO: Check and see if this block represents a new head for the canonical chain
-        // or if it should be added to a fork.
+        let finalized_block_hash = pre_validated_block.previous_block_hash;
 
-        // For now, because there are no forks, we'll just auto confirm the block
-        let block_confirm_message = BlockConfirmedMessage(pre_validated_block, all_txs);
+        let mut cache = self.cache.write().unwrap();
+        if cache.add_block(&pre_validated_block).is_ok() {
+            // TODO: Schedule VDF step validation for the new block
 
-        let block_index = BlockIndexService::from_registry();
-        block_index.do_send(block_confirm_message.clone());
-        if let Some(block_producer) = &self.block_producer {
-            block_producer.do_send(block_confirm_message.clone());
+            // For now, because there are no forks, we'll just auto confirm the block
+            let block_confirm_message = BlockConfirmedMessage(pre_validated_block, all_txs);
+            let block_index = BlockIndexService::from_registry();
+            let mempool = MempoolService::from_registry();
+
+            block_index.do_send(block_confirm_message.clone());
+            if let Some(block_producer) = &self.block_producer {
+                block_producer.do_send(block_confirm_message.clone());
+            }
+            mempool.do_send(block_confirm_message);
+
+            // As a first step, move the Storage finalized message from the block_producer
+            // to here. Ultimately blocks will be storage finalized when they reach
+            // `storage_config.num_confirmations_for_finality`
+            if self
+                .send_storage_finalized_message(finalized_block_hash)
+                .is_err()
+            {
+                error!("Unable to send block finalized message");
+            }
+        } else {
+            error!("Unable to add block to block_tree");
         }
-        let mempool_service = MempoolService::from_registry();
-        mempool_service.do_send(block_confirm_message);
+    }
+}
 
-        // TODO: Kick off a full validation process on the confirmed block that checks the VDF steps
-        // and other heavy validation tasks, so it can be fully validated before we risk producing
-        // a block on top of it.
+fn get_ledger_tx_headers<T: DbTx>(
+    tx: &T,
+    block_header: &IrysBlockHeader,
+    ledger: Ledger,
+) -> Option<Vec<IrysTransactionHeader>> {
+    match block_header.ledgers[ledger]
+        .txids
+        .iter()
+        .map(|txid| {
+            tx_header_by_txid(tx, txid)
+                .map_err(|e| eyre::eyre!("Failed to get tx header: {}", e))
+                .and_then(|opt| {
+                    opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(txs) => Some(txs),
+        Err(e) => {
+            error!(
+                "Failed to collect tx headers for {:?} ledger: {}",
+                ledger, e
+            );
+            None
+        }
     }
 }
 

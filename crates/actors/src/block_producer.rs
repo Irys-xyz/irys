@@ -439,71 +439,18 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .unwrap();
 
             let block = Arc::new(irys_block);
-            block_discovery_addr.do_send(BlockDiscoveredMessage(block.clone()));
-
-            // Get all the transactions for the previous block, error if not found
-            // TODO: Eventually abstract this for support of `n` ledgers
-            let previous_submit_txs = get_ledger_tx_headers(&prev_block_header, Ledger::Submit, &db);
-            let previous_publish_txs = get_ledger_tx_headers(&prev_block_header, Ledger::Publish, &db);
-
-            let prev_all_txs = {
-                let mut combined = previous_submit_txs.unwrap_or_default();
-                combined.extend(previous_publish_txs.unwrap_or_default());
-                combined
-            };
+            block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await.unwrap();
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-
-            let chunk_migration_addr = ChunkMigrationService::from_registry();
-
-            let _ = chunk_migration_addr.send(BlockFinalizedMessage {
-                block_header: Arc::new(prev_block_header),
-                all_txs: Arc::new(prev_all_txs),
-            }).await.unwrap();
             info!("Finished producing block height: {}, hash: {}", &block_height, &block_hash);
 
             Some((block.clone(), exec_payload))
         }
         .into_actor(self),
         ))
-    }
-}
-
-fn get_ledger_tx_headers(
-    block_header: &IrysBlockHeader,
-    ledger: Ledger,
-    db: &DatabaseProvider,
-) -> Option<Vec<IrysTransactionHeader>> {
-    let tx = db
-        .tx()
-        .map_err(|e| {
-            error!("Failed to create transaction: {}", e);
-        })
-        .ok()?;
-
-    match block_header.ledgers[ledger]
-        .txids
-        .iter()
-        .map(|txid| {
-            tx_header_by_txid(&tx, txid)
-                .map_err(|e| eyre::eyre!("Failed to get tx header: {}", e))
-                .and_then(|opt| {
-                    opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(txs) => Some(txs),
-        Err(e) => {
-            error!(
-                "Failed to collect tx headers for {:?} ledger: {}",
-                ledger, e
-            );
-            None
-        }
     }
 }
 
