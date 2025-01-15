@@ -1,7 +1,9 @@
 //! This crate provides functions and utilities for VDF (Verifiable Delay Function) operations,
 //! including checkpoint validation and seed application.
 
-use irys_types::{H256List, VDFLimiterInfo, VDFStepsConfig, H256, U256};
+use irys_types::{
+    Base64, H256List, VDFLimiterInfo, VDFStepsConfig, H256, NUM_CHECKPOINTS_IN_VDF_STEP, U256,
+};
 
 use openssl::sha;
 use rayon::prelude::*;
@@ -114,6 +116,122 @@ pub fn vdf_sha_verification(
         local_salt = local_salt + 1;
     }
     checkpoints
+}
+
+/// Validates VDF last_step_checkpoints in parallel across available cores.
+///
+/// Takes a VDFLimiterInfo from a block header and verifies each checkpoint by:
+/// 1. Getting initial seed from previous vdf step or prev_output
+/// 2. Applying entropy if at a reset step
+/// 3. Computing checkpoints in parallel using configured thread limit
+/// 4. Comparing computed results against provided checkpoints
+///
+/// Returns Ok(()) if checkpoints are valid, Err otherwise with details of mismatches.
+pub fn last_step_checkpoints_is_valid(
+    vdf_info: &VDFLimiterInfo,
+    config: &VDFStepsConfig,
+) -> eyre::Result<()> {
+    let mut seed = if vdf_info.steps.len() >= 2 {
+        vdf_info.steps[vdf_info.steps.len() - 2]
+    } else {
+        vdf_info.prev_output
+    };
+    let mut checkpoint_hashes = vdf_info.last_step_checkpoints.clone();
+
+    // println!("---");
+    // for (i, step) in vdf_info.steps.iter().enumerate() {
+    //     println!("step{}: {}", i, Base64::from(step.to_vec()));
+    // }
+    // println!("seed: {}", Base64::from(seed.to_vec()));
+    // println!(
+    //     "prev_output: {}",
+    //     Base64::from(vdf_info.prev_output.to_vec())
+    // );
+
+    // println!(
+    //     "cp{}: {}",
+    //     0,
+    //     Base64::from(vdf_info.last_step_checkpoints[0].to_vec())
+    // );
+    // println!(
+    //     "cp{}: {}",
+    //     24,
+    //     Base64::from(vdf_info.last_step_checkpoints[24].to_vec())
+    // );
+
+    let global_step_number: usize = vdf_info.global_step_number as usize;
+
+    // If the vdf reset happened on this step, apply the entropy to the seed
+    if global_step_number % config.nonce_limiter_reset_frequency == 0 {
+        let reset_seed = vdf_info.seed;
+        seed = apply_reset_seed(seed, reset_seed);
+    }
+
+    // Insert the seed at the head of the checkpoint list
+    checkpoint_hashes.0.insert(0, seed);
+    let cp = checkpoint_hashes.clone();
+
+    // Calculate the starting salt value for checkpoint validation
+    let start_salt = U256::from(step_number_to_salt_number(
+        config,
+        (global_step_number - 1) as u64,
+    ));
+
+    // Limit threads number to avoid overloading the system using configuration limit
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(config.vdf_parallel_verification_thread_limit)
+        .build()
+        .unwrap();
+
+    let num_iterations = config.vdf_difficulty;
+    let test: Vec<H256> = pool.install(|| {
+        (0..config.num_checkpoints_in_vdf_step)
+            .into_par_iter()
+            .map(|i| {
+                let mut salt_buff: [u8; 32] = [0; 32];
+                (start_salt + i).to_little_endian(&mut salt_buff);
+                let mut seed = cp[i];
+                let mut hasher = Sha256::new();
+
+                for _ in 0..num_iterations {
+                    hasher.update(salt_buff);
+                    hasher.update(seed.as_bytes());
+                    seed = H256(hasher.finalize_reset().into());
+                }
+                seed
+            })
+            .collect::<Vec<H256>>()
+    });
+
+    // println!("test{}: {}", 0, Base64::from(test[0].to_vec()));
+    // println!("test{}: {}", 24, Base64::from(test[24].to_vec()));
+
+    let is_valid = test == vdf_info.last_step_checkpoints;
+
+    if !is_valid {
+        // Compare the blocks list with the calculated one, looking for mismatches
+        let mismatches: Vec<(usize, &H256, &H256)> = vdf_info
+            .last_step_checkpoints
+            .iter()
+            .zip(&test)
+            .enumerate()
+            .filter(|(_i, (a, b))| a != b)
+            .map(|(i, (a, b))| (i, a, b))
+            .collect();
+
+        for (index, a, b) in mismatches {
+            println!(
+                "Mismatched hashes at index {}: expected {} got {}",
+                index,
+                Base64::from(a.to_vec()),
+                Base64::from(b.to_vec())
+            );
+        }
+
+        Err(eyre::eyre!("Checkpoints are invalid"))
+    } else {
+        Ok(())
+    }
 }
 
 /// Validate the steps from the `nonce_info` to see if they are valid.

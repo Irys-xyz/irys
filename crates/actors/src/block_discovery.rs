@@ -1,6 +1,6 @@
 use crate::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeService,
-    block_validation::block_is_valid, epoch_service::PartitionAssignmentsReadGuard,
+    block_validation::prevalidate_block, epoch_service::PartitionAssignmentsReadGuard,
     vdf::VdfStepsReadGuard,
 };
 use actix::prelude::*;
@@ -183,7 +183,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             new_block_header.vdf_limiter_info.output,
             new_block_header.vdf_limiter_info.prev_output
         );
-        match block_is_valid(
+
+        match prevalidate_block(
             &new_block_header,
             &previous_block_header,
             &block_index_guard,

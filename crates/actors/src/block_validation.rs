@@ -9,12 +9,12 @@ use irys_types::{
     calculate_difficulty, next_cumulative_diff, storage_config::StorageConfig, validate_path,
     Address, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, VDFStepsConfig, H256,
 };
-use irys_vdf::vdf_steps_are_valid;
+use irys_vdf::{last_step_checkpoints_is_valid, vdf_steps_are_valid};
 use openssl::sha;
 use tracing::{debug, info};
 
 /// Full pre-validation steps for a block
-pub fn block_is_valid(
+pub fn prevalidate_block(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
     block_index_guard: &BlockIndexReadGuard,
@@ -31,6 +31,9 @@ pub fn block_is_valid(
         ));
     }
 
+    // Check prev_output (vdf)
+    prev_output_is_valid(block, previous_block)?;
+
     // Check the difficulty
     difficulty_is_valid(block, previous_block, difficulty_config)?;
 
@@ -41,7 +44,8 @@ pub fn block_is_valid(
 
     recall_recall_range_is_valid(block, storage_config, steps_guard)?;
 
-    vdf_steps_are_valid(&block.vdf_limiter_info, &vdf_config)?;
+    // We only check last_step_checkpoints during pre-validation
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config)?;
 
     poa_is_valid(
         &block.poa,
@@ -51,6 +55,19 @@ pub fn block_is_valid(
         miner_address,
     )?;
     Ok(())
+}
+
+pub fn prev_output_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> eyre::Result<()> {
+    if block.vdf_limiter_info.prev_output == previous_block.vdf_limiter_info.output {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "vdf_limiter.prev_output does not match previous blocks vdf_limiter.output"
+        ))
+    }
 }
 
 /// Validates if a block's difficulty matches the expected difficulty calculated
