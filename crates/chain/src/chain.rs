@@ -4,7 +4,7 @@ use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
-    block_tree_service::{BlockTreeService},
+    block_tree_service::BlockTreeService,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
     epoch_service::{
