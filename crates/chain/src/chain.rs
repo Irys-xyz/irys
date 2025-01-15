@@ -4,7 +4,7 @@ use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
-    block_tree_service::{self, BlockTreeService},
+    block_tree_service::{BlockTreeService},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
     epoch_service::{
@@ -31,7 +31,6 @@ use irys_types::{
     vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256, U256,
 };
 use reth::{
-    blockchain_tree::BlockchainTreeEngine,
     builder::FullNode,
     chainspec::ChainSpec,
     core::irys_ext::NodeExitReason,
