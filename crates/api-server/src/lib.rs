@@ -1,5 +1,5 @@
 pub mod error;
-mod routes;
+pub mod routes;
 use std::sync::Arc;
 
 use actix::Addr;

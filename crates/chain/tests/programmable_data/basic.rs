@@ -1,22 +1,27 @@
 use crate::block_production::basic_contract::future_or_mine_on_timeout;
+use actix_http::StatusCode;
 use alloy_core::primitives::{aliases::U208, U256};
 use alloy_eips::eip2930::AccessListItem;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
+use base58::ToBase58;
 use bytes::Buf;
+use irys_actors::packing::wait_for_packing;
+use irys_api_server::routes::tx::TxOffset;
 use irys_chain::chain::start_for_testing;
-use irys_database::tables::ProgrammableDataChunkCache;
 use irys_reth_node_bridge::precompile::irys_executor::IrysPrecompileOffsets;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{irys::IrysSigner, Address, CHUNK_SIZE};
+use irys_types::{Base64, IrysTransactionHeader, UnpackedChunk};
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::Database;
 use reth_primitives::{irys_primitives::range_specifier::RangeSpecifier, GenesisAccount};
 use std::time::Duration;
-use tracing::info;
+use tokio::time::sleep;
+use tracing::{debug, info};
 use IrysProgrammableDataBasic::ProgrammableDataArgs;
 
 // Codegen from artifact.
@@ -28,8 +33,10 @@ sol!(
     "../../fixtures/contracts/out/IrysProgrammableDataBasic.sol/ProgrammableDataBasic.json"
 );
 
-#[tokio::test]
+#[actix_web::test]
 async fn test_programmable_data_basic() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+
     let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
     let mut config = irys_config::IrysNodeConfig {
         base_directory: temp_dir.path().to_path_buf(),
@@ -50,13 +57,18 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
         (
             account1.address(),
             GenesisAccount {
-                balance: U256::from(1),
+                balance: U256::from(420000000000000_u128),
                 ..Default::default()
             },
         ),
     ]);
 
     let node = start_for_testing(config.clone()).await?;
+    wait_for_packing(
+        node.actor_addresses.packing.clone(),
+        Some(Duration::from_secs(10)),
+    )
+    .await?;
 
     let signer: PrivateKeySigner = config.mining_signer.signer.into();
     let wallet = EthereumWallet::from(signer.clone());
@@ -83,26 +95,146 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
 
     let contract = IrysProgrammableDataBasic::new(contract_address, alloy_provider.clone());
 
-    let precompile_address: Address = IrysPrecompileOffsets::ProgrammableData.into();
+    let precompile_address: Address = IrysPrecompileOffsets::ProgrammableDataReadChunks.into();
     info!(
         "Contract address is {:?}, precompile address is {:?}",
         contract.address(),
         precompile_address
     );
 
-    // insert some dummy data to the PD cache table
-    // note: this logic is very dumbed down for the PoC
-    let write_tx = node.db.tx_mut()?;
-    let mut chunk = [0u8; CHUNK_SIZE as usize];
+    let http_url = "http://127.0.0.1:8080";
+
+    // server should be running
+    // check with request to `/v1/info`
+    let client = awc::Client::default();
+
+    let response = client
+        .get(format!("{}/v1/info", http_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    info!("HTTP server started");
 
     let message = "Hirys, world!";
+    let data_bytes = message.as_bytes().to_vec();
+    // post a tx, mine a block
+    let tx = account1
+        .create_transaction(data_bytes.clone(), None)
+        .unwrap();
+    let tx = account1.sign_transaction(tx).unwrap();
 
-    message
-        .as_bytes()
-        .copy_to_slice(&mut chunk[0..message.len()]);
+    // post tx header
+    let resp = client
+        .post(format!("{}/v1/tx", http_url))
+        .send_json(&tx.header)
+        .await
+        .unwrap();
 
-    write_tx.put::<ProgrammableDataChunkCache>(0, chunk.to_vec())?;
-    write_tx.commit()?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let id: String = tx.header.id.as_bytes().to_base58();
+    let mut tx_header_fut = Box::pin(async {
+        let delay = Duration::from_secs(1);
+        // sleep(delay).await;
+        // println!("slept");
+        for attempt in 1..20 {
+            let mut response = client
+                .get(format!("{}/v1/tx/{}", http_url, &id))
+                .send()
+                .await
+                .unwrap();
+
+            if response.status() == StatusCode::OK {
+                let result: IrysTransactionHeader = response.json().await.unwrap();
+                assert_eq!(&tx.header, &result);
+                info!("Transaction was retrieved ok after {} attempts", attempt);
+                break;
+            }
+            sleep(delay).await;
+        }
+    });
+
+    future_or_mine_on_timeout(
+        node.clone(),
+        &mut tx_header_fut,
+        Duration::from_millis(500),
+        node.vdf_steps_guard.clone(),
+        &node.vdf_config,
+        &node.storage_config,
+    )
+    .await?;
+
+    // upload chunk(s)
+    for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
+        let data_root = tx.header.data_root;
+        let data_size = tx.header.data_size;
+        let min = chunk_node.min_byte_range;
+        let max = chunk_node.max_byte_range;
+        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
+
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size,
+            data_path,
+            bytes: Base64(data_bytes[min..max].to_vec()),
+            tx_offset: tx_chunk_offset as u32,
+        };
+
+        // Make a POST request with JSON payload
+
+        let resp = client
+            .post(format!("{}/v1/chunk", http_url))
+            .send_json(&chunk)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // wait for the chunks to migrate
+    let mut start_offset_fut = Box::pin(async {
+        let delay = Duration::from_secs(1);
+
+        for attempt in 1..20 {
+            let mut response = client
+                .get(format!(
+                    "{}/v1/tx/{}/local/data_start_offset",
+                    http_url, &id
+                ))
+                .send()
+                .await
+                .unwrap();
+
+            if response.status() == StatusCode::OK {
+                let res: TxOffset = response.json().await.unwrap();
+                debug!("start offset: {:?}", &res);
+                info!("Transaction was retrieved ok after {} attempts", attempt);
+                return Some(res);
+            }
+            sleep(delay).await;
+        }
+        None
+    });
+
+    let start_offset = future_or_mine_on_timeout(
+        node.clone(),
+        &mut start_offset_fut,
+        Duration::from_millis(500),
+        node.vdf_steps_guard.clone(),
+        &node.vdf_config,
+        &node.storage_config,
+    )
+    .await?
+    .unwrap();
+
+    let read_chunk = &node.chunk_provider.get_chunk_by_ledger_offset(
+        irys_database::Ledger::Publish,
+        start_offset.data_start_offset,
+    );
+
+    dbg!(read_chunk);
 
     // call with a range specifier index, position in the requested range to start from, and the number of chunks to read
     let mut invocation_builder = contract.read_pd_chunk_into_storage(

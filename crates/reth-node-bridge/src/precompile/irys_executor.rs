@@ -28,7 +28,7 @@ use revm_primitives::StatefulPrecompile;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::precompile::programmable_data::PROGRAMMABLE_DATA_PRECOMPILE;
+use crate::precompile::programmable_data_read_chunks::PROGRAMMABLE_DATA_READ_CHUNKS_PRECOMPILE;
 
 // TODO: sometimes the EVM is initialized with spec ID CANCUN, and sometimes with MERGE
 // for now it doesn't matter much, but we do want to fix it eventually.
@@ -341,7 +341,7 @@ where
 }
 
 pub fn irys_precompiles() -> Precompiles {
-    vec![PROGRAMMABLE_DATA_PRECOMPILE]
+    vec![PROGRAMMABLE_DATA_READ_CHUNKS_PRECOMPILE]
 }
 
 // reserve space for any future eth precompiles
@@ -349,7 +349,8 @@ const BASE_PRECOMPILE_OFFSET: u64 = 1337;
 
 #[repr(u64)]
 pub enum IrysPrecompileOffsets {
-    ProgrammableData = BASE_PRECOMPILE_OFFSET,
+    ProgrammableDataReadChunks = BASE_PRECOMPILE_OFFSET,
+    ProgrammableDataReadBytes,
 }
 
 impl IrysPrecompileOffsets {

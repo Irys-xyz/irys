@@ -111,8 +111,7 @@ tables! {
     /// Common case is a 1:1, but 1:N is possible
     table PartitionHashesByDataRoot<Key = DataRoot, Value = PartitionHashes>;
 
-    // !!THIS IS TEMPORARY - ONCE WE WORK OUT THE FULL PD DATA MODEL WE CAN REMOVE!!
-    table ProgrammableDataChunkCache<Key = u32, Value = Vec<u8>>;
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]

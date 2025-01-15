@@ -1,5 +1,7 @@
-use irys_database::tables::ProgrammableDataChunkCache;
+use irys_packing::unpack;
 use irys_primitives::range_specifier::RangeSpecifier;
+use irys_storage::reth_provider::IrysRethProviderInner;
+use irys_types::NUM_CHUNKS_IN_PARTITION;
 use reth_db::transaction::DbTx;
 use reth_db::Database;
 
@@ -12,10 +14,11 @@ use super::{
     irys_executor::{CustomPrecompileWithAddress, PrecompileStateProvider},
 };
 
-pub const PROGRAMMABLE_DATA_PRECOMPILE: CustomPrecompileWithAddress = CustomPrecompileWithAddress(
-    IrysPrecompileOffsets::ProgrammableData.to_address(),
-    programmable_data_precompile,
-);
+const PRECOMPILE_ADDRESS: irys_types::Address =
+    IrysPrecompileOffsets::ProgrammableDataReadChunks.to_address();
+
+pub const PROGRAMMABLE_DATA_READ_CHUNKS_PRECOMPILE: CustomPrecompileWithAddress =
+    CustomPrecompileWithAddress(PRECOMPILE_ADDRESS, programmable_data_read_chunks_precompile);
 
 // u32: range specifier index, u32 range relative offset, u16 number of chunks to read
 // TODO: make a type for this so we can encapsulate the decode + validation logic
@@ -25,7 +28,7 @@ const U16_BYTES: usize = size_of::<u16>();
 
 /// programmable data precompile
 // TODO: Gas pricing
-fn programmable_data_precompile(
+fn programmable_data_read_chunks_precompile(
     call_data: &Bytes,
     _gas_limit: u64,
     env: &Env,
@@ -72,21 +75,18 @@ fn programmable_data_precompile(
             .map_err(|_| invalid_input.clone())?,
     );
 
-    let precompile_address: irys_types::Address =
-        IrysPrecompileOffsets::ProgrammableData.to_address();
-
     // find access_list entry for the address of this precompile
 
     // TODO: evaluate if we should check for every entry that is addressed to this precompile, and collate them
     let range_specifiers: Vec<RangeSpecifier> = access_list
         .iter()
-        .find(|item| item.address == precompile_address)
+        .find(|item| item.address == PRECOMPILE_ADDRESS)
         .ok_or(PrecompileErrors::Error(PrecompileError::Other(
             "Transaction has no access list entries for this precompile".to_string(),
         )))?
         .storage_keys
         .iter()
-        .map(|sk| RangeSpecifier::from_slice(sk.0))
+        .map(|sk| RangeSpecifier::from_slice(&sk.0))
         .collect();
 
     // find the requested range specifier
@@ -109,17 +109,58 @@ fn programmable_data_precompile(
         chunk_count,
     } = range_specifier;
 
-    let o: u32 = partition_index.try_into().unwrap();
-    // // TODO FIXME: THIS IS FOR THE DEMO ONLY! ONCE WE HAVE THE FULL DATA MODEL THIS SHOULD BE CHANGED
-    let key: u32 = (10 * o) + offset;
-    
-    let ro_tx = state_provider.provider.get().unwrap().db.tx().unwrap();
+    // let o: u32 = partition_index.try_into().unwrap();
+    // // // TODO FIXME: THIS IS FOR THE DEMO ONLY! ONCE WE HAVE THE FULL DATA MODEL THIS SHOULD BE CHANGED
+    // let key: u32 = (10 * o) + offset;
 
-    let chunk = ro_tx
-        .get::<ProgrammableDataChunkCache>(key)
-        .unwrap()
-        .unwrap();
+    // let ro_tx = state_provider.provider.get().unwrap().db.tx().unwrap();
+    let provider_inner = state_provider
+        .provider
+        .get()
+        .ok_or(PrecompileErrors::Error(PrecompileError::Other(
+            "Internal error - provider uninitialised".to_owned(),
+        )))?;
+
+    let storage_config = &provider_inner.chunk_provider.storage_config;
+
+    // TODO: this will error if the partition_index > u64::MAX
+    // this is fine for testnet, but will need fixing later.
+
+    let translated_base_offset =
+        storage_config
+            .num_chunks_in_partition
+            .saturating_mul(partition_index.try_into().map_err(|_| {
+                PrecompileErrors::Error(PrecompileError::Other(format!(
+                    "partition_index {} is out of range (u64)",
+                    partition_index,
+                )))
+            })?);
+    let translated_start_offset = translated_base_offset.saturating_add(*offset as u64);
+    let translated_end_offset = translated_start_offset.saturating_add(*chunk_count as u64);
+    // TODO: make safer
+    let mut bytes = Vec::with_capacity((*chunk_count as u64 * storage_config.chunk_size) as usize);
+    for i in translated_start_offset..translated_end_offset {
+        let chunk = provider_inner
+            .chunk_provider
+            .get_chunk_by_ledger_offset(irys_database::Ledger::Publish, i)
+            .map_err(|e| {
+                PrecompileErrors::Error(PrecompileError::Other(format!(
+                    "Error reading chunk with part offset {} - {}",
+                    &i, &e
+                )))
+            })?
+            .ok_or(PrecompileErrors::Error(PrecompileError::Other(format!(
+                "Unable to read chunk with part offset {}",
+                &i,
+            ))))?;
+        let unpacked_chunk = unpack(
+            &chunk,
+            storage_config.entropy_packing_iterations,
+            storage_config.chunk_size as usize,
+        );
+        bytes.extend(unpacked_chunk.bytes.0)
+    }
 
     // TODO use a proper gas calc
-    Ok(PrecompileOutput::new(100, chunk.into()))
+    Ok(PrecompileOutput::new(10_000, bytes.into()))
 }

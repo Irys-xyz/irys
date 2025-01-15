@@ -5375,6 +5375,7 @@ dependencies = [
  "futures-util",
  "irys-config",
  "irys-database",
+ "irys-packing",
  "irys-primitives",
  "irys-storage",
  "irys-types",
