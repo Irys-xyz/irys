@@ -203,7 +203,7 @@ mod tests {
             global_step_number: step_num,
             output: steps[3],
             prev_output: steps[0],
-            checkpoints: H256List(steps.0[1..=3].into()),
+            steps: H256List(steps.0[1..=3].into()),
             last_step_checkpoints: H256List(checkpoints),
             seed: reset_seed,
             ..VDFLimiterInfo::default()

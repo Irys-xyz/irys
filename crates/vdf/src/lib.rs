@@ -137,7 +137,7 @@ pub fn checkpoints_are_valid(
 
     let reset_seed = vdf_info.seed;
 
-    let mut step_hashes = vdf_info.checkpoints.clone();
+    let mut step_hashes = vdf_info.steps.clone();
 
     // Add the seed from the previous nonce info to the steps
     let previous_seed = vdf_info.prev_output;
@@ -147,7 +147,7 @@ pub fn checkpoints_are_valid(
     let steps = step_hashes.clone();
 
     // Calculate the step number of the first step in the blocks sequence
-    let start_step_number: u64 = vdf_info.global_step_number - vdf_info.checkpoints.len() as u64;
+    let start_step_number: u64 = vdf_info.global_step_number - vdf_info.steps.len() as u64;
 
     // We must calculate the checkpoint iterations for each step sequentially
     // because we only have the first and last checkpoint of each step, but we
@@ -205,11 +205,11 @@ pub fn checkpoints_are_valid(
     let last_step_checkpoints = test.last().unwrap().1.clone();
     let test: H256List = H256List(test.into_iter().map(|par| par.0).collect());
 
-    let checkpoints_are_valid = test == vdf_info.checkpoints;
+    let steps_are_valid = test == vdf_info.steps;
 
-    if !checkpoints_are_valid {
+    if !steps_are_valid {
         // Compare the original list with the calculated one
-        warn_mismatches(&test, &vdf_info.checkpoints);
+        warn_mismatches(&test, &vdf_info.steps);
         return Err(eyre::eyre!("VDF checkpoints are invalid!"));
     }
 

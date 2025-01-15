@@ -40,7 +40,7 @@ pub struct VDFLimiterInfo {
     /// A list of the output of each step of the nonce limiting process. Note: each step
     /// has VDF_CHECKPOINT_COUNT_IN_STEP checkpoints, the last of which is that step's output.
     /// This field would be more accurately named "steps" as checkpoints are between steps.
-    pub checkpoints: H256List,
+    pub steps: H256List,
     /// The number of SHA2-256 iterations in a single VDF checkpoint. The protocol aims to keep the
     /// checkpoint calculation time to around 40ms by varying this parameter. Note: there are
     /// 25 checkpoints in a single VDF step - so the protocol aims to keep the step calculation at
@@ -213,7 +213,7 @@ impl IrysBlockHeader {
 
         let _ = &self
             .vdf_limiter_info
-            .checkpoints
+            .steps
             .iter()
             .for_each(|c| buf.extend_from_slice(&c.0));
 

@@ -306,7 +306,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 partition_hash: solution.partition_hash,
             };
 
-            let mut checkpoints = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
+            let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
                 H256List::new()
             } else {
                     match vdf_steps.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await {
@@ -317,7 +317,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                         }
                     }
             };
-            checkpoints.push(solution.seed.0);
+            steps.push(solution.seed.0);
 
             let mut irys_block = IrysBlockHeader {
                 block_hash,
@@ -361,7 +361,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     last_step_checkpoints: solution.checkpoints,
                     prev_output: prev_block_header.vdf_limiter_info.output,
                     seed: prev_block_header.vdf_limiter_info.seed,
-                    checkpoints,
+                    steps,
                     ..Default::default()
                 },
             };
