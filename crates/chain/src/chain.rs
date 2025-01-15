@@ -4,7 +4,7 @@ use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
-    block_tree::BlockTreeActor,
+    block_tree_service::{self, BlockTreeService},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
     epoch_service::{
@@ -31,6 +31,7 @@ use irys_types::{
     vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, H256, U256,
 };
 use reth::{
+    blockchain_tree::BlockchainTreeEngine,
     builder::FullNode,
     chainspec::ChainSpec,
     core::irys_ext::NodeExitReason,
@@ -259,8 +260,8 @@ pub async fn start_irys_node(
 
                 let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
-                let block_tree_actor = BlockTreeActor::new(db.clone(), &arc_genesis);
-                let block_tree = block_tree_actor.start();
+                let block_tree_actor = BlockTreeService::new(db.clone(), &arc_genesis);
+                Registry::set(block_tree_actor.start());
 
                 let vdf_service = VdfService::from_registry();
                 let vdf_steps_guard: VdfStepsReadGuard =
@@ -269,7 +270,6 @@ pub async fn start_irys_node(
                 let block_discovery_actor = BlockDiscoveryActor {
                     block_index_guard: block_index_guard.clone(),
                     partition_assignments_guard: partition_assignments_guard.clone(),
-                    block_tree: block_tree.clone(),
                     storage_config: storage_config.clone(),
                     difficulty_config: difficulty_adjustment_config.clone(),
                     db: db.clone(),
@@ -290,6 +290,7 @@ pub async fn start_irys_node(
                     vdf_steps_guard.clone(),
                 );
                 let block_producer_addr = block_producer_actor.start();
+                let block_tree = BlockTreeService::from_registry();
                 block_tree.do_send(RegisterBlockProducerMessage(block_producer_addr.clone()));
 
                 let mut part_actors = Vec::new();

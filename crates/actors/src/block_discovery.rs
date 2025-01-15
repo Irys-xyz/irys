@@ -1,5 +1,5 @@
 use crate::{
-    block_index_service::BlockIndexReadGuard, block_tree::BlockTreeActor,
+    block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeService,
     block_validation::block_is_valid, epoch_service::PartitionAssignmentsReadGuard,
     vdf::VdfStepsReadGuard,
 };
@@ -20,8 +20,6 @@ pub struct BlockDiscoveryActor {
     pub block_index_guard: BlockIndexReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
-    /// Manages forks at the head of the chain before finalization
-    pub block_tree: Addr<BlockTreeActor>,
     /// Reference to global storage config for node
     pub storage_config: StorageConfig,
     /// Reference to global difficulty config
@@ -57,7 +55,6 @@ impl BlockDiscoveryActor {
     pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
-        block_tree: Addr<BlockTreeActor>,
         storage_config: StorageConfig,
         difficulty_config: DifficultyAdjustmentConfig,
         db: DatabaseProvider,
@@ -67,7 +64,6 @@ impl BlockDiscoveryActor {
         Self {
             block_index_guard,
             partition_assignments_guard,
-            block_tree,
             storage_config,
             difficulty_config,
             db,
@@ -176,7 +172,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         //------------------------------------
         let block_index_guard = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
-        let block_tree_addr = self.block_tree.clone();
+        let block_tree_addr = BlockTreeService::from_registry();
         let storage_config = &self.storage_config;
         let difficulty_config = &self.difficulty_config;
 

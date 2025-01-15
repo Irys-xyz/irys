@@ -49,11 +49,11 @@ impl BlockTreeReadGuard {
 #[rtype(result = "BlockTreeReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
 pub struct GetBlockTreeGuardMessage;
 
-impl Handler<GetBlockTreeGuardMessage> for BlockTreeActor {
+impl Handler<GetBlockTreeGuardMessage> for BlockTreeService {
     type Result = BlockTreeReadGuard; // Return guard directly
 
     fn handle(&mut self, _msg: GetBlockTreeGuardMessage, _ctx: &mut Self::Context) -> Self::Result {
-        BlockTreeReadGuard::new(self.cache.clone())
+        BlockTreeReadGuard::new(self.cache.clone().unwrap())
     }
 }
 
@@ -62,32 +62,43 @@ impl Handler<GetBlockTreeGuardMessage> for BlockTreeActor {
 //------------------------------------------------------------------------------
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
-#[derive(Debug)]
-pub struct BlockTreeActor {
-    db: DatabaseProvider,
+#[derive(Debug, Default)]
+pub struct BlockTreeService {
+    db: Option<DatabaseProvider>,
     /// Needs to know the current block to build on
     block_producer: Option<Addr<BlockProducerActor>>,
     /// Block tree internal state
-    pub cache: Arc<RwLock<BlockTreeCache>>,
+    pub cache: Option<Arc<RwLock<BlockTreeCache>>>,
 }
 
-impl Actor for BlockTreeActor {
+impl Actor for BlockTreeService {
     type Context = Context<Self>;
 }
 
-impl BlockTreeActor {
+/// Adds this actor the the local service registry
+impl Supervised for BlockTreeService {}
+
+impl ArbiterService for BlockTreeService {
+    fn service_started(&mut self, ctx: &mut Context<Self>) {
+        println!("service started: block_tree (Default)");
+    }
+}
+
+impl BlockTreeService {
     /// Initializes a BlockTreeActor without a block_producer address
     pub fn new(db: DatabaseProvider, genesis_block: &IrysBlockHeader) -> Self {
         Self {
-            db,
+            db: Some(db),
             block_producer: None,
-            cache: Arc::new(RwLock::new(BlockTreeCache::new(genesis_block))),
+            cache: Some(Arc::new(RwLock::new(BlockTreeCache::new(genesis_block)))),
         }
     }
 
     fn send_storage_finalized_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
         let tx = self
             .db
+            .clone()
+            .unwrap()
             .tx()
             .map_err(|e| eyre::eyre!("Failed to create transaction: {}", e))?;
 
@@ -122,7 +133,7 @@ impl BlockTreeActor {
     }
 }
 
-impl Handler<RegisterBlockProducerMessage> for BlockTreeActor {
+impl Handler<RegisterBlockProducerMessage> for BlockTreeService {
     type Result = ();
     fn handle(
         &mut self,
@@ -133,14 +144,15 @@ impl Handler<RegisterBlockProducerMessage> for BlockTreeActor {
     }
 }
 
-impl Handler<BlockPreValidatedMessage> for BlockTreeActor {
+impl Handler<BlockPreValidatedMessage> for BlockTreeService {
     type Result = ();
     fn handle(&mut self, msg: BlockPreValidatedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         let pre_validated_block = msg.0;
         let all_txs = msg.1;
         let finalized_block_hash = pre_validated_block.previous_block_hash;
 
-        let mut cache = self.cache.write().unwrap();
+        let binding = self.cache.clone().unwrap();
+        let mut cache = binding.write().unwrap();
         if cache.add_block(&pre_validated_block).is_ok() {
             // TODO: Schedule VDF step validation for the new block
 
