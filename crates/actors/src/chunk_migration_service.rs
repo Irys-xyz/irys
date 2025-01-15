@@ -8,7 +8,7 @@ use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, St
 use irys_types::{
     app_state::DatabaseProvider, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
     LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxRelativeChunkOffset,
-    UnpackedChunk,
+    UnpackedChunk, H256,
 };
 
 use reth_db::Database;
@@ -130,7 +130,7 @@ fn process_ledger_transactions(
     let block_range = get_block_range(block, ledger, block_index.clone());
     let mut prev_chunk_offset = block_range.start();
 
-    for (tx_path, (data_root, data_size)) in path_pairs {
+    for ((_txid, tx_path), (data_root, data_size)) in path_pairs {
         let num_chunks_in_tx = data_size.div_ceil(chunk_size as u64) as u32;
         let tx_chunk_range = LedgerChunkRange(ie(
             prev_chunk_offset,
@@ -232,8 +232,7 @@ fn get_tx_path_pairs(
     block: &IrysBlockHeader,
     ledger: Ledger,
     txs: &[IrysTransactionHeader],
-) -> eyre::Result<Vec<(Proof, (DataRoot, u64))>> {
-    // Changed Proof to TxPath
+) -> eyre::Result<Vec<((H256, Proof), (DataRoot, u64))>> {
     let (tx_root, proofs) = TransactionLedger::merklize_tx_root(txs);
 
     if tx_root != block.ledgers[ledger].tx_root {
@@ -242,7 +241,8 @@ fn get_tx_path_pairs(
 
     Ok(proofs
         .into_iter()
-        .zip(txs.iter().map(|tx| (tx.data_root, tx.data_size)))
+        .zip(txs.iter())
+        .map(|(proof, tx)| ((tx.id, proof), (tx.data_root, tx.data_size)))
         .collect())
 }
 

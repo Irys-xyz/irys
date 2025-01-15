@@ -200,6 +200,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         ) {
             Ok(_) => {
                 info!("Block is valid, sending to block tree");
+
+                self.db
+                    .update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
+                    .unwrap();
+
                 let mut all_txs = submit_txs;
                 all_txs.extend_from_slice(&publish_txs);
                 block_tree_addr.do_send(BlockPreValidatedMessage(

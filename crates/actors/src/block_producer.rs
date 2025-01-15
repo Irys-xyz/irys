@@ -438,9 +438,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .await
                 .unwrap();
 
-            db.update_eyre(|tx| irys_database::insert_block_header(tx, &irys_block))
-                .unwrap();
-
             let block = Arc::new(irys_block);
             block_discovery_addr.do_send(BlockDiscoveredMessage(block.clone()));
 
