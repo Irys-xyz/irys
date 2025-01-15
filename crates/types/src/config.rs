@@ -65,3 +65,7 @@ thread_local! {
         DEFAULT_CONFIG.clone()
     });
 }
+
+pub fn config() -> &'static Config {
+    CONFIG.with(|c| c as &Config)
+}

@@ -12,7 +12,8 @@ members = [
     "crates/storage",
     "crates/testing-utils",
     "crates/config",
-    "crates/efficient-sampling",    
+    "crates/efficient-sampling",
+    "crates/macros",
 ]
 resolver = "2"
 
