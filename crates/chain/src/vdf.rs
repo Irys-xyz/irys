@@ -1,7 +1,7 @@
 use actix::Addr;
 use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
-    vdf::{VdfSeed, VdfService},
+    vdf_service::{VdfSeed, VdfService},
 };
 use irys_types::{block_production::Seed, vdf_config::VDFStepsConfig, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
@@ -81,7 +81,7 @@ pub fn run_vdf(
 mod tests {
     use super::*;
     use actix::*;
-    use irys_actors::vdf::{GetVdfStateMessage, VdfStepsReadGuard};
+    use irys_actors::vdf_service::{GetVdfStateMessage, VdfStepsReadGuard};
     use irys_types::*;
     use irys_vdf::{vdf_sha_verification, vdf_steps_are_valid};
     use nodit::interval::ii;

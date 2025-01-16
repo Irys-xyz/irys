@@ -33,7 +33,7 @@ use crate::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::{GetBestMempoolTxs, MempoolService},
-    vdf::VdfStepsReadGuard,
+    vdf_service::VdfStepsReadGuard,
 };
 
 /// Used to mock up a `BlockProducerActor`

@@ -7,7 +7,7 @@ use alloy_signer_local::LocalSigner;
 use eyre::eyre;
 use irys_actors::{
     block_producer::SolutionFoundMessage, block_validation, mempool_service::TxIngressMessage,
-    vdf::VdfStepsReadGuard,
+    vdf_service::VdfStepsReadGuard,
 };
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;

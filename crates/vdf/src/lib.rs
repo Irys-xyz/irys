@@ -210,24 +210,7 @@ pub fn last_step_checkpoints_is_valid(
 
     if !is_valid {
         // Compare the blocks list with the calculated one, looking for mismatches
-        let mismatches: Vec<(usize, &H256, &H256)> = vdf_info
-            .last_step_checkpoints
-            .iter()
-            .zip(&test)
-            .enumerate()
-            .filter(|(_i, (a, b))| a != b)
-            .map(|(i, (a, b))| (i, a, b))
-            .collect();
-
-        for (index, a, b) in mismatches {
-            println!(
-                "Mismatched hashes at index {}: expected {} got {}",
-                index,
-                Base64::from(a.to_vec()),
-                Base64::from(b.to_vec())
-            );
-        }
-
+        warn_mismatches(&vdf_info.last_step_checkpoints, &H256List(test));
         Err(eyre::eyre!("Checkpoints are invalid"))
     } else {
         Ok(())

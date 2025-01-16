@@ -14,7 +14,7 @@ use irys_actors::{
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
     packing::{wait_for_packing, PackingActor, PackingRequest},
-    vdf::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
+    vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
     ActorAddresses,
 };
 use irys_api_server::{run_server, ApiState};

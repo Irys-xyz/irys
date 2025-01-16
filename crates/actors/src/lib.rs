@@ -10,7 +10,7 @@ pub mod epoch_service;
 pub mod mempool_service;
 pub mod mining;
 pub mod packing;
-pub mod vdf;
+pub mod vdf_service;
 
 pub use addresses::*;
 pub use block_producer::*;

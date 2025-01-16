@@ -1,6 +1,6 @@
 use crate::{
     block_index_service::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
-    vdf::VdfStepsReadGuard,
+    vdf_service::VdfStepsReadGuard,
 };
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
