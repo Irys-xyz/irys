@@ -111,7 +111,9 @@ pub fn capacity_pack_range_with_data_cuda_c(
             let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
             let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
             let iterations: u32 = iterations.unwrap_or(PACKING_SHA_1_5_S);
-            let entropy_chunk_ptr = data.as_ptr() as *mut u8;
+
+            let mut entropy_chunk: Vec<u8> = Vec::with_capacity(data.len());
+            let entropy_chunk_ptr = entropy_chunk.as_ptr() as *mut u8;
 
             let num_chunks = data.len() as i64 / CHUNK_SIZE as i64;
             unsafe {
@@ -125,9 +127,10 @@ pub fn capacity_pack_range_with_data_cuda_c(
                     entropy_chunk_ptr,
                     iterations,
                 );
-                
+
+                entropy_chunk.set_len(entropy_chunk.capacity());                
             }     
-            // mising xor ?   
+            xor_vec_u8_arrays_in_place(data, &entropy_chunk);
         }
         _ => unimplemented!(),
     }
@@ -356,7 +359,7 @@ mod tests {
 
         for _i in 0..num_chunks {
             let mut chunk = [0u8; CHUNK_SIZE as usize];
-            // rng.fill_bytes(&mut chunk);
+            rng.fill_bytes(&mut chunk);
             chunks_rust.push(chunk.to_vec());
             for j in 0..CHUNK_SIZE as usize {
                 chunks.push(chunk[j]);
