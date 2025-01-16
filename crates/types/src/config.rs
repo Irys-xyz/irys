@@ -13,7 +13,6 @@ pub struct Config {
     pub min_difficulty_adjustment_factor: Decimal,
     pub chunk_size: u64,
     pub num_chunks_in_partition: u64,
-    pub partition_size: u64,
     pub num_chunks_in_recall_range: u64,
     pub num_recall_ranges_in_partition: u64,
     pub nonce_limiter_reset_frequency: usize,
@@ -31,7 +30,6 @@ pub struct Config {
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 1;
-pub const DEFAULT_CHUNK_SIZE: u64 = 256 * 1024;
 pub const DEFAULT_NUM_CHUNKS_IN_PARTITION: u64 = 10;
 pub const DEFAULT_NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
 
@@ -42,9 +40,8 @@ pub const CONFIG: Config = load_toml!(
         difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME) * 14, // 2 weeks worth of blocks
         max_difficulty_adjustment_factor: rust_decimal_macros::dec!(4), // A difficulty adjustment can be 4x larger or 1/4th the current difficulty
         min_difficulty_adjustment_factor: rust_decimal_macros::dec!(0.25), // A 10% change must be required before a difficulty adjustment will occur
-        chunk_size: DEFAULT_CHUNK_SIZE,
+        chunk_size: 256 * 1024,
         num_chunks_in_partition: DEFAULT_NUM_CHUNKS_IN_PARTITION,
-        partition_size: DEFAULT_CHUNK_SIZE * DEFAULT_NUM_CHUNKS_IN_PARTITION,
         num_chunks_in_recall_range: DEFAULT_NUM_CHUNKS_IN_RECALL_RANGE,
         num_recall_ranges_in_partition: DEFAULT_NUM_CHUNKS_IN_PARTITION
             / DEFAULT_NUM_CHUNKS_IN_RECALL_RANGE,
@@ -61,6 +58,8 @@ pub const CONFIG: Config = load_toml!(
         num_writes_before_sync: 5,
     }
 );
+
+pub const PARTITION_SIZE: u64 = CONFIG.chunk_size * CONFIG.num_chunks_in_partition;
 
 impl From<Config> for DifficultyAdjustmentConfig {
     fn from(config: Config) -> Self {
