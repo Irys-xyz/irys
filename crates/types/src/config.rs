@@ -1,4 +1,4 @@
-use once_cell::unsync::Lazy;
+use irys_macros::load_toml;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -29,22 +29,24 @@ pub struct Config {
     pub num_writes_before_sync: u64,
 }
 
-/// The default [`Config`] used in local development mode. Not suitable for production.
-pub const DEFAULT_CONFIG: Config = {
-    const BLOCK_TIME: u64 = 30;
-    const CHUNK_SIZE: u64 = 256 * 1024;
-    const NUM_CHUNKS_IN_PARTITION: u64 = 10;
-    const NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
+const DEFAULT_BLOCK_TIME: u64 = 30;
+const DEFAULT_CHUNK_SIZE: u64 = 256 * 1024;
+const DEFAULT_NUM_CHUNKS_IN_PARTITION: u64 = 10;
+const DEFAULT_NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
+
+pub const CONFIG: Config = load_toml!(
+    "CONFIG_TOML_PATH",
     Config {
-        block_time: BLOCK_TIME,
-        difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000).div_ceil(BLOCK_TIME) * 14, // 2 weeks worth of blocks
+        block_time: DEFAULT_BLOCK_TIME,
+        difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME) * 14, // 2 weeks worth of blocks
         max_difficulty_adjustment_factor: dec!(4), // A difficulty adjustment can be 4x larger or 1/4th the current difficulty
         min_difficulty_adjustment_factor: dec!(0.1), // A 10% change must be required before a difficulty adjustment will occur
-        chunk_size: CHUNK_SIZE,
-        num_chunks_in_partition: NUM_CHUNKS_IN_PARTITION,
-        partition_size: CHUNK_SIZE * NUM_CHUNKS_IN_PARTITION,
-        num_chunks_in_recall_range: NUM_CHUNKS_IN_RECALL_RANGE,
-        num_recall_ranges_in_partition: NUM_CHUNKS_IN_PARTITION / NUM_CHUNKS_IN_RECALL_RANGE,
+        chunk_size: DEFAULT_CHUNK_SIZE,
+        num_chunks_in_partition: DEFAULT_NUM_CHUNKS_IN_PARTITION,
+        partition_size: DEFAULT_CHUNK_SIZE * DEFAULT_NUM_CHUNKS_IN_PARTITION,
+        num_chunks_in_recall_range: DEFAULT_NUM_CHUNKS_IN_RECALL_RANGE,
+        num_recall_ranges_in_partition: DEFAULT_NUM_CHUNKS_IN_PARTITION
+            / DEFAULT_NUM_CHUNKS_IN_RECALL_RANGE,
         nonce_limiter_reset_frequency: 10 * 120, // Reset the nonce limiter (vdf) once every 1200 steps/seconds or every ~20 min
         vdf_parallel_verification_thread_limit: 4,
         num_checkpoints_in_vdf_step: 25, // 25 checkpoints 40 ms each = 1000 ms
@@ -57,15 +59,4 @@ pub const DEFAULT_CONFIG: Config = {
         num_partitions_per_slot: 1,
         num_writes_before_sync: 5,
     }
-};
-
-thread_local! {
-    pub static CONFIG: Lazy<Config> = Lazy::new(|| {
-        // TODO: load from env
-        DEFAULT_CONFIG.clone()
-    });
-}
-
-pub fn config() -> &'static Config {
-    CONFIG.with(|c| c as &Config)
-}
+);

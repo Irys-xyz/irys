@@ -145,6 +145,10 @@ test-fuzz = "6"
 thiserror = "1.0"
 tokio = { version = "1.40.0", features = ["rt", "macros"] }
 toml = "0.8"
+derive-syn-parse = "0"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
 tracing = "0.1.0"
 tracing-subscriber = { version = "0.3", default-features = false, features = [
     "env-filter",
