@@ -1,9 +1,9 @@
 use derive_syn_parse::Parse;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{quote, ToTokens};
 use std::{env, fs};
-use syn::{parse2, Error, ExprStruct, Ident, LitStr, Result, Token};
+use syn::{parse2, parse_quote, Error, Expr, ExprStruct, Field, Ident, Lit, LitStr, Result, Token};
 
 #[proc_macro]
 pub fn load_toml(input: TokenStream) -> TokenStream {
@@ -17,7 +17,7 @@ pub fn load_toml(input: TokenStream) -> TokenStream {
 struct LoadImplArgs {
     env_var: LitStr,
     _comma: Token![,],
-    default_literal: ExprStruct,
+    default_value: ExprStruct,
 }
 
 fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
@@ -25,18 +25,35 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
 
     // Parse input arguments
     let args: LoadImplArgs = parse2(tokens)?;
-    let default_literal = args.default_literal;
+    let default_value = args.default_value;
     let env_var = args.env_var;
 
-    let struct_ident = default_literal.path.segments.last().unwrap().ident.clone();
+    let struct_ident = default_value.path.segments.last().unwrap().ident.clone();
 
     // Retrieve the environment variable
     let file_path = match env::var(&env_var.value()) {
         Ok(path) => path,
         Err(_) => {
             // Use the provided default if the environment variable is not set
+            let mut default_value = default_value;
+            default_value.fields = default_value
+                .fields
+                .into_iter()
+                .map(|f| {
+                    let Expr::Lit(lit) = &f.expr else {
+                        return f;
+                    };
+                    let Lit::Float(float) = &lit.lit else {
+                        return f;
+                    };
+                    let f_raw: TokenStream2 = float.to_string().parse().unwrap();
+                    let mut f = f;
+                    f.expr = parse_quote!(rust_decimal_macros::dec![#f_raw]);
+                    f
+                })
+                .collect();
             return Ok(quote! {
-                #default_literal
+                #default_value
             });
         }
     };
@@ -109,14 +126,8 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
     Ok(generated)
 }
 
-#[cfg(test)]
-use syn::parse_quote;
-
-#[cfg(test)]
-use quote::ToTokens;
-
 #[test]
-fn test_load_toml_impl_01() {
+fn test_load_toml_valid() {
     let env_var_name = "TOML_FILE_01";
     env::set_var(env_var_name, "integration/input_01.toml");
 
@@ -163,4 +174,48 @@ fn test_load_toml_impl_01() {
 
     // Cleanup
     env::remove_var(env_var_name);
+}
+
+#[test]
+fn test_load_toml_default() {
+    let input = quote! {
+        "TOML_FILE_NOT_SET", FooBar {
+            foo: 1,
+            bar: false,
+            fizz: "default".to_string(),
+            buzz: 0.1,
+        }
+    };
+
+    let expected_output: ExprStruct = parse_quote! {
+        FooBar {
+            foo: 1,
+            bar: false,
+            fizz: "default".to_string(),
+            buzz: rust_decimal_macros::dec![0.1],
+        }
+    };
+
+    let output = load_toml_impl(input).unwrap().to_token_stream();
+    let output = parse2::<ExprStruct>(output).unwrap();
+    assert_eq!(
+        output.path.to_token_stream().to_string(),
+        expected_output.path.to_token_stream().to_string()
+    );
+
+    let mut output_fields = output
+        .fields
+        .into_iter()
+        .map(|f| f.to_token_stream().to_string())
+        .collect::<Vec<_>>();
+    output_fields.sort();
+
+    let mut expected_fields = expected_output
+        .fields
+        .into_iter()
+        .map(|f| f.to_token_stream().to_string())
+        .collect::<Vec<_>>();
+    expected_fields.sort();
+
+    assert_eq!(output_fields, expected_fields);
 }

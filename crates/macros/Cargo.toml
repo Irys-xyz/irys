@@ -8,10 +8,10 @@ rust-version.workspace = true
 proc-macro = true
 
 [dependencies]
-derive-syn-parse = "0.2.0"
-proc-macro2 = "1.0.93"
-quote = "1.0.38"
-syn = "2.0.96"
+derive-syn-parse = "0"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
 toml.workspace = true
 
 [lints]
