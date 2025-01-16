@@ -72,10 +72,7 @@ __device__ void compute_start_entropy_chunk_cuda(const unsigned char *chunk_id, 
  * @param new_entropy_chunk The new entropy chunk
  * @param packing_sha_1_5_s The number of iterations
  */
-__device__ void compute_entropy_chunk2_cuda(const unsigned char *segment, const unsigned char *entropy_chunk, unsigned char *new_entropy_chunk, unsigned int packing_sha_1_5_s) {
-    //printf("start compute_entropy_chunk2_cuda !\n");
-    memcpy(new_entropy_chunk, entropy_chunk, DATA_CHUNK_SIZE);
-    //printf("after memcopy !\n");
+__device__ void compute_entropy_chunk2_cuda(const unsigned char *segment, unsigned char *entropy_chunk, unsigned int packing_sha_1_5_s) {
     SHA256_CTX sha256;
 
     for (int hash_count = HASH_ITERATIONS_PER_BLOCK; hash_count < packing_sha_1_5_s; ++hash_count) {
@@ -87,9 +84,9 @@ __device__ void compute_entropy_chunk2_cuda(const unsigned char *segment, const 
         if (hash_count / HASH_ITERATIONS_PER_BLOCK < 2)
             sha256_update(&sha256, entropy_chunk + start_offset, SHA256_DIGEST_LENGTH);
         else 
-            sha256_update(&sha256, new_entropy_chunk + start_offset, SHA256_DIGEST_LENGTH);
-        sha256_final(&sha256, new_entropy_chunk + start_offset);
-        segment = new_entropy_chunk + start_offset;
+            sha256_update(&sha256, entropy_chunk + start_offset, SHA256_DIGEST_LENGTH);
+        sha256_final(&sha256, entropy_chunk + start_offset);
+        segment = entropy_chunk + start_offset;
     }
     //printf("end compute_entropy_chunk2_cuda !\n");    
 }
@@ -102,18 +99,17 @@ __device__ void compute_entropy_chunk2_cuda(const unsigned char *segment, const 
  * @param chunk_1 First layer of the chunk
  * @param packing_sha_1_5_s The number of iterations
  */
-__device__ void compute_entropy_chunk_cuda(const unsigned char *chunk_id, size_t chunk_id_length, unsigned char *entropy_chunk, unsigned char *chunk_1, unsigned int packing_sha_1_5_s) {
+__device__ void compute_entropy_chunk_cuda(const unsigned char *chunk_id, size_t chunk_id_length, unsigned char *entropy_chunk, unsigned int packing_sha_1_5_s) {
 
     //printf("compute_entropy_chunk_cuda !\n");    
     const int partial_entropy_chunk_size = (HASH_ITERATIONS_PER_BLOCK - 1) * PACKING_HASH_SIZE;
-    unsigned char *start_entropy_chunk = chunk_1;
 
-    compute_start_entropy_chunk_cuda(chunk_id, chunk_id_length, start_entropy_chunk);
+    compute_start_entropy_chunk_cuda(chunk_id, chunk_id_length, entropy_chunk);
 
     unsigned char last_entropy_chunk_segment[PACKING_HASH_SIZE];
-    memcpy(last_entropy_chunk_segment, start_entropy_chunk + partial_entropy_chunk_size, PACKING_HASH_SIZE);
+    memcpy(last_entropy_chunk_segment, entropy_chunk + partial_entropy_chunk_size, PACKING_HASH_SIZE);
 
-    compute_entropy_chunk2_cuda(last_entropy_chunk_segment, start_entropy_chunk, entropy_chunk, packing_sha_1_5_s);
+    compute_entropy_chunk2_cuda(last_entropy_chunk_segment, entropy_chunk, packing_sha_1_5_s);
     //printf("end compute_entropy_chunk_cuda !\n");    
 }
 
@@ -121,18 +117,17 @@ __device__ void compute_entropy_chunk_cuda(const unsigned char *chunk_id, size_t
  * Computes the entropy chunks for the given list of chunks.
  * The entropy chunks are computed in parallel using the GPU.
  */
-__global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsigned long int chunk_offset_start, long int chunks_count, unsigned char *chunks, unsigned char *chunks_1, unsigned int packing_sha_1_5_s) {
+__global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsigned long int chunk_offset_start, long int chunks_count, unsigned char *chunks, unsigned int packing_sha_1_5_s) {
     // Get the index of the current thread - as we are using a 1D grid, we only need to get the index of the current block.
     // The index of the current thread is then the index of the block times the number of threads per block plus the index of the current thread in the block.
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < chunks_count) {
         //printf("enter compute_entropy_chunks_cuda_kernel idx=%d !\n", idx);                   
         unsigned char *output = chunks + idx * DATA_CHUNK_SIZE;
-        unsigned char *chunk_1 = chunks_1 + idx * DATA_CHUNK_SIZE;
         unsigned char chunk_id_thread[CHUNK_ID_LEN];
         memcpy(chunk_id_thread, chunk_id, CHUNK_ID_LEN - sizeof(uint64_t));
         *((uint32_t*)&chunk_id_thread[CHUNK_ID_LEN - sizeof(uint64_t)]) = chunk_offset_start + idx * DATA_CHUNK_SIZE;
-        compute_entropy_chunk_cuda(chunk_id_thread, CHUNK_ID_LEN, output, chunk_1, packing_sha_1_5_s);
+        compute_entropy_chunk_cuda(chunk_id_thread, CHUNK_ID_LEN, output, packing_sha_1_5_s);
     }
     //printf("end compute_entropy_chunks_cuda_kernel idx=%d !\n", idx);            
 }
@@ -147,16 +142,11 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
     printf("CUDA: Entropy chunks computation started\n");
 
     unsigned char *d_chunks;
-    unsigned char *d_chunks_1;
     unsigned char *d_chunk_id;
 
     // We need to allocate memory for each layer here, as kernel/device functions can't allocate any
     // additional memory, so we need to prepare it for them.
     if (cudaMalloc(&d_chunks, DATA_CHUNK_SIZE * chunks_count) != cudaSuccess) {
-        return CUDA_ERROR;
-    }
-
-    if (cudaMalloc(&d_chunks_1, DATA_CHUNK_SIZE * chunks_count) != cudaSuccess) {
         return CUDA_ERROR;
     }
 
@@ -174,7 +164,7 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
 
     // Launch kernel
     int blocks = (chunks_count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    compute_entropy_chunks_cuda_kernel<<<blocks, THREADS_PER_BLOCK>>>(d_chunk_id, chunk_offset_start, chunks_count, d_chunks, d_chunks_1, packing_sha_1_5_s);
+    compute_entropy_chunks_cuda_kernel<<<blocks, THREADS_PER_BLOCK>>>(d_chunk_id, chunk_offset_start, chunks_count, d_chunks, packing_sha_1_5_s);
 
     // Check for errors after kernel launch
     cudaError_t err = cudaGetLastError();
@@ -188,7 +178,6 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
     }
 
     cudaFree(d_chunks);
-    cudaFree(d_chunks_1);
     cudaFree(d_chunk_id);
 
     printf("end CUDA: Entropy chunks computation started\n");
