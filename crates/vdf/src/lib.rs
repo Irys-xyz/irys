@@ -2,7 +2,7 @@
 //! including checkpoint validation and seed application.
 
 use irys_types::{
-    Base64, H256List, VDFLimiterInfo, VDFStepsConfig, H256, NUM_CHECKPOINTS_IN_VDF_STEP, U256,
+    H256List, VDFLimiterInfo, VDFStepsConfig, H256, U256,
 };
 
 use openssl::sha;
