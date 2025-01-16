@@ -14,7 +14,6 @@ pub struct Config {
     pub chunk_size: u64,
     pub num_chunks_in_partition: u64,
     pub num_chunks_in_recall_range: u64,
-    pub num_recall_ranges_in_partition: u64,
     pub nonce_limiter_reset_frequency: usize,
     pub vdf_parallel_verification_thread_limit: usize,
     pub num_checkpoints_in_vdf_step: usize,
@@ -30,8 +29,6 @@ pub struct Config {
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 1;
-pub const DEFAULT_NUM_CHUNKS_IN_PARTITION: u64 = 10;
-pub const DEFAULT_NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
 
 pub const CONFIG: Config = load_toml!(
     "CONFIG_TOML_PATH",
@@ -41,10 +38,8 @@ pub const CONFIG: Config = load_toml!(
         max_difficulty_adjustment_factor: rust_decimal_macros::dec!(4), // A difficulty adjustment can be 4x larger or 1/4th the current difficulty
         min_difficulty_adjustment_factor: rust_decimal_macros::dec!(0.25), // A 10% change must be required before a difficulty adjustment will occur
         chunk_size: 256 * 1024,
-        num_chunks_in_partition: DEFAULT_NUM_CHUNKS_IN_PARTITION,
-        num_chunks_in_recall_range: DEFAULT_NUM_CHUNKS_IN_RECALL_RANGE,
-        num_recall_ranges_in_partition: DEFAULT_NUM_CHUNKS_IN_PARTITION
-            / DEFAULT_NUM_CHUNKS_IN_RECALL_RANGE,
+        num_chunks_in_partition: 10,
+        num_chunks_in_recall_range: 2,
         nonce_limiter_reset_frequency: 10 * 120, // Reset the nonce limiter (vdf) once every 1200 steps/seconds or every ~20 min
         vdf_parallel_verification_thread_limit: 4,
         num_checkpoints_in_vdf_step: 25, // 25 checkpoints 40 ms each = 1000 ms
@@ -60,6 +55,8 @@ pub const CONFIG: Config = load_toml!(
 );
 
 pub const PARTITION_SIZE: u64 = CONFIG.chunk_size * CONFIG.num_chunks_in_partition;
+pub const NUM_RECALL_RANGES_IN_PARTITION: u64 =
+    CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range;
 
 impl From<Config> for DifficultyAdjustmentConfig {
     fn from(config: Config) -> Self {
