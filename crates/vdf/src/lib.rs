@@ -1,9 +1,7 @@
 //! This crate provides functions and utilities for VDF (Verifiable Delay Function) operations,
 //! including checkpoint validation and seed application.
 
-use irys_types::{
-    H256List, VDFLimiterInfo, VDFStepsConfig, H256, U256,
-};
+use irys_types::{H256List, VDFLimiterInfo, VDFStepsConfig, H256, U256};
 
 use openssl::sha;
 use rayon::prelude::*;
