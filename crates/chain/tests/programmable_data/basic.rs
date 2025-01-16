@@ -1,28 +1,28 @@
 use crate::block_production::basic_contract::future_or_mine_on_timeout;
 use actix_http::StatusCode;
-use alloy_core::primitives::{aliases::U208, U256};
+use alloy_core::primitives::aliases::U200;
+use alloy_core::primitives::U256;
 use alloy_eips::eip2930::AccessListItem;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use base58::ToBase58;
-use bytes::Buf;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_chain::chain::start_for_testing;
 use irys_reth_node_bridge::precompile::irys_executor::IrysPrecompileOffsets;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, Address, CHUNK_SIZE};
+use irys_types::{irys::IrysSigner, Address};
 use irys_types::{Base64, IrysTransactionHeader, UnpackedChunk};
-use reth_db::transaction::DbTx;
-use reth_db::transaction::DbTxMut;
-use reth_db::Database;
+
+use reth_primitives::irys_primitives::range_specifier::{
+    BytesRangeSpecifier, PdAccessListArgSerde, U18, U34,
+};
 use reth_primitives::{irys_primitives::range_specifier::RangeSpecifier, GenesisAccount};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
-use IrysProgrammableDataBasic::ProgrammableDataArgs;
 
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
@@ -95,7 +95,7 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
 
     let contract = IrysProgrammableDataBasic::new(contract_address, alloy_provider.clone());
 
-    let precompile_address: Address = IrysPrecompileOffsets::ProgrammableDataReadChunks.into();
+    let precompile_address: Address = IrysPrecompileOffsets::ProgrammableData.into();
     info!(
         "Contract address is {:?}, precompile address is {:?}",
         contract.address(),
@@ -229,33 +229,37 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
     .await?
     .unwrap();
 
-    let read_chunk = &node.chunk_provider.get_chunk_by_ledger_offset(
-        irys_database::Ledger::Publish,
-        start_offset.data_start_offset,
-    );
+    // let read_chunk = &node.chunk_provider.get_chunk_by_ledger_offset(
+    //     irys_database::Ledger::Publish,
+    //     start_offset.data_start_offset,
+    // );
 
-    dbg!(read_chunk);
+    // dbg!(read_chunk);
 
     // call with a range specifier index, position in the requested range to start from, and the number of chunks to read
-    let mut invocation_builder = contract.read_pd_chunk_into_storage(
-        ProgrammableDataArgs {
-            range_index: 0,
-            offset: 0,
-            count: 1,
-        },
-        message.len() as u8,
-    );
+    let mut invocation_builder = contract.read_pd_chunk_into_storage();
 
     // set the access list (this lets the node know in advance what chunks you want to access)
     invocation_builder = invocation_builder.access_list(
         vec![AccessListItem {
             address: precompile_address,
-            storage_keys: vec![RangeSpecifier {
-                partition_index: U208::from(0),
-                offset: 0,
-                chunk_count: 1_u16,
-            }
-            .into()],
+            storage_keys: vec![
+                RangeSpecifier {
+                    partition_index: U200::from(0),
+                    offset: 0,
+                    chunk_count: 1_u16,
+                }
+                .encode()
+                .into(),
+                BytesRangeSpecifier {
+                    index: 0,
+                    chunk_offset: 0,
+                    byte_offset: U18::from(0),
+                    len: U34::from(data_bytes.len()),
+                }
+                .encode()
+                .into(),
+            ],
         }]
         .into(),
     );

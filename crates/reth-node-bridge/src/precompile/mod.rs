@@ -1,3 +1,6 @@
+pub mod entrypoint;
+pub mod functions;
 pub mod irys_executor;
-pub mod programmable_data_read_bytes;
-pub mod programmable_data_read_chunks;
+pub mod read_bytes;
+pub mod read_chunks;
+pub mod utils;
