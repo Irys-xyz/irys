@@ -9,7 +9,7 @@
 
 // Max threads - this is the maximum number of threads per block for the GPU
 // This is a constant defined by the GPU architecture.
-#define THREADS_PER_BLOCK 10 // TODO @ernius: how to correctly setup this parameter ?
+#define THREADS_PER_BLOCK 5 // TODO @ernius: how to correctly setup this parameter ?
 #define NUM_HASHES (DATA_CHUNK_SIZE / PACKING_HASH_SIZE)
 #define INPUT_SIZE PACKING_HASH_SIZE
 
