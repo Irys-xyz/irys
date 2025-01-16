@@ -1,25 +1,49 @@
+use derive_syn_parse::Parse;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use std::{env, fs};
-use syn::{parse2, Error, Ident, LitStr, Result, Token};
+use syn::{parse2, Error, ExprStruct, Ident, LitStr, Result, Token};
 
-fn generate_struct_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
-    let tokens = tokens.into();
+#[cfg(test)]
+use quote::ToTokens;
+
+#[cfg(test)]
+use syn::parse_quote;
+
+#[proc_macro]
+pub fn load_toml(input: TokenStream) -> TokenStream {
+    match load_toml_impl(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[derive(Parse)]
+struct LoadImplArgs {
+    env_var: LitStr,
+    _comma: Token![,],
+    default_literal: ExprStruct,
+}
+
+fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
+    let tokens: TokenStream2 = tokens.into();
 
     // Parse input arguments
-    let env_var: LitStr = parse2(tokens.clone())?;
-    parse2::<Token![,]>(tokens.clone())?;
-    let struct_ident: Ident = parse2(tokens)?;
+    let args: LoadImplArgs = parse2(tokens)?;
+    let default_literal = args.default_literal;
+    let env_var = args.env_var;
+
+    let struct_ident = default_literal.path.segments.last().unwrap().ident.clone();
 
     // Retrieve the environment variable
     let file_path = match env::var(&env_var.value()) {
         Ok(path) => path,
         Err(_) => {
-            return Err(Error::new_spanned(
-                &env_var,
-                format!("Environment variable '{}' is not set.", env_var.value()),
-            ));
+            // Use the provided default if the environment variable is not set
+            return Ok(quote! {
+                #default_literal
+            });
         }
     };
 
@@ -88,10 +112,52 @@ fn generate_struct_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2>
     Ok(generated)
 }
 
-#[proc_macro]
-pub fn generate_struct_from_env_var(input: TokenStream) -> TokenStream {
-    match generate_struct_impl(input) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
+#[test]
+fn test_load_toml_impl() {
+    let env_var_name = "TOML_FILE_01";
+    env::set_var(env_var_name, "integration/input_01.toml");
+
+    let input = quote! {
+        "TOML_FILE_01", FooBar {
+            foo: 1,
+            bar: false,
+            fizz: "default",
+            buzz: 0.0,
+        }
+    };
+
+    let expected_output: ExprStruct = parse_quote! {
+        FooBar {
+            foo: 7i64,
+            bar: true,
+            fizz: "hey".to_string(),
+            buzz: 3.14f64,
+        }
+    };
+
+    let output = load_toml_impl(input).unwrap().to_token_stream();
+    let output = parse2::<ExprStruct>(output).unwrap();
+    assert_eq!(
+        output.path.to_token_stream().to_string(),
+        expected_output.path.to_token_stream().to_string()
+    );
+
+    let mut output_fields = output
+        .fields
+        .into_iter()
+        .map(|f| f.to_token_stream().to_string())
+        .collect::<Vec<_>>();
+    output_fields.sort();
+
+    let mut expected_fields = expected_output
+        .fields
+        .into_iter()
+        .map(|f| f.to_token_stream().to_string())
+        .collect::<Vec<_>>();
+    expected_fields.sort();
+
+    assert_eq!(output_fields, expected_fields);
+
+    // Cleanup
+    env::remove_var(env_var_name);
 }

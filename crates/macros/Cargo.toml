@@ -1,5 +1,5 @@
 [package]
-name = "macros"
+name = "irys-macros"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,7 @@ rust-version.workspace = true
 proc-macro = true
 
 [dependencies]
+derive-syn-parse = "0.2.0"
 proc-macro2 = "1.0.93"
 quote = "1.0.38"
 syn = "2.0.96"

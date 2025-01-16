@@ -23,6 +23,7 @@ rust-version = "1.82"
 
 [workspace.dependencies]
 # Irys
+irys-macros = { path = "./crates/macros" }
 irys-database = { path = "./crates/database" }
 irys-actors = { path = "./crates/actors" }
 irys-api-server = { path = "./crates/api-server" }
