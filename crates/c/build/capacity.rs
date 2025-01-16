@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf};
 
-pub(crate) fn build_capacity(c_src: &PathBuf, ssl_inc_dir: &PathBuf) {
+pub(crate) fn build_capacity(c_src: &PathBuf, _ssl_inc_dir: &PathBuf) {
     let mut cc = cc::Build::new();
     cc.flag("-O3");
     // TODO: enable below for debug

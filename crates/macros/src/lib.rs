@@ -1,9 +1,9 @@
 use derive_syn_parse::Parse;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, ToTokens};
+use quote::quote;
 use std::{env, fs};
-use syn::{parse2, parse_quote, Error, Expr, ExprStruct, Field, Ident, Lit, LitStr, Result, Token};
+use syn::{parse2, parse_quote, Error, Expr, ExprStruct, Ident, Lit, LitStr, Result, Token};
 
 #[proc_macro]
 pub fn load_toml(input: TokenStream) -> TokenStream {
@@ -175,6 +175,9 @@ fn test_load_toml_valid() {
     // Cleanup
     env::remove_var(env_var_name);
 }
+
+#[cfg(test)]
+use quote::ToTokens;
 
 #[test]
 fn test_load_toml_default() {
