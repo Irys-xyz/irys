@@ -24,12 +24,12 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            chunk_size: CHUNK_SIZE,
-            num_chunks_in_partition: NUM_CHUNKS_IN_PARTITION,
-            num_chunks_in_recall_range: NUM_CHUNKS_IN_RECALL_RANGE,
-            num_partitions_in_slot: NUM_PARTITIONS_PER_SLOT,
+            chunk_size: CONFIG.chunk_size,
+            num_chunks_in_partition: CONFIG.num_chunks_in_partition,
+            num_chunks_in_recall_range: CONFIG.num_chunks_in_recall_range,
+            num_partitions_in_slot: CONFIG.num_partitions_per_slot,
             miner_address: Address::random(),
-            min_writes_before_sync: NUM_WRITES_BEFORE_SYNC,
+            min_writes_before_sync: CONFIG.num_writes_before_sync,
             // TODO: revert this back
             entropy_packing_iterations: 1_000, /* PACKING_SHA_1_5_S */
         }

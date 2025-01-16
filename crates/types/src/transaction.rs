@@ -1,6 +1,6 @@
 use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    IrysSignature, Node, Proof, Signature, TxIngressProof, H256, IRYS_CHAIN_ID,
+    IrysSignature, Node, Proof, Signature, TxIngressProof, CONFIG, H256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -150,7 +150,7 @@ impl Default for IrysTransactionHeader {
             ledger_num: 0,
             bundle_format: None,
             version: 0,
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             signature: Signature::test_signature().into(),
             ingress_proofs: None,
         }
@@ -167,9 +167,9 @@ pub type TxPathHash = H256;
 //------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use crate::{irys::IrysSigner, IRYS_CHAIN_ID, MAX_CHUNK_SIZE};
-
     use super::*;
+    use crate::{irys::IrysSigner, MAX_CHUNK_SIZE};
+
     use alloy_core::hex::{self};
     use alloy_rlp::Decodable;
 
@@ -189,7 +189,7 @@ mod tests {
             perm_fee: Some(200),
             ledger_num: 1,
             bundle_format: None,
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             version: 0,
             ingress_proofs: None,
             signature: Signature::test_signature().into(),
@@ -226,7 +226,7 @@ mod tests {
             // perm_fee: Some(200),
             perm_fee: None,
             ledger_num: 0,
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             bundle_format: None,
             version: 0,
             ingress_proofs: None,
@@ -244,7 +244,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };
 

@@ -1,5 +1,5 @@
 block_time = 30
-difficulty_adjustment_interval = 40320000
+difficulty_adjustment_interval = 2000
 max_difficulty_adjustment_factor = 4.0
 min_difficulty_adjustment_factor = 0.1
 chunk_size = 262144

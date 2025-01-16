@@ -12,14 +12,14 @@ pub struct VDFStepsConfig {
 impl Default for VDFStepsConfig {
     fn default() -> Self {
         VDFStepsConfig {
-            num_checkpoints_in_vdf_step: NUM_CHECKPOINTS_IN_VDF_STEP,
-            nonce_limiter_reset_frequency: NONCE_LIMITER_RESET_FREQUENCY,
+            num_checkpoints_in_vdf_step: CONFIG.num_checkpoints_in_vdf_step,
+            nonce_limiter_reset_frequency: CONFIG.nonce_limiter_reset_frequency,
             vdf_difficulty: if cfg!(test) || cfg!(debug_assertions) {
                 7_000
             } else {
-                VDF_SHA_1S
+                CONFIG.vdf_sha_1s
             },
-            vdf_parallel_verification_thread_limit: VDF_PARALLEL_VERIFICATION_THREAD_LIMIT,
+            vdf_parallel_verification_thread_limit: CONFIG.vdf_parallel_verification_thread_limit,
         }
     }
 }

@@ -3,6 +3,8 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
+use crate::{DifficultyAdjustmentConfig, U256};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Block time in seconds
@@ -29,7 +31,7 @@ pub struct Config {
     pub num_writes_before_sync: u64,
 }
 
-const DEFAULT_BLOCK_TIME: u64 = 30;
+const DEFAULT_BLOCK_TIME: u64 = 1;
 const DEFAULT_CHUNK_SIZE: u64 = 256 * 1024;
 const DEFAULT_NUM_CHUNKS_IN_PARTITION: u64 = 10;
 const DEFAULT_NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
@@ -40,7 +42,7 @@ pub const CONFIG: Config = load_toml!(
         block_time: DEFAULT_BLOCK_TIME,
         difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME) * 14, // 2 weeks worth of blocks
         max_difficulty_adjustment_factor: dec!(4), // A difficulty adjustment can be 4x larger or 1/4th the current difficulty
-        min_difficulty_adjustment_factor: dec!(0.1), // A 10% change must be required before a difficulty adjustment will occur
+        min_difficulty_adjustment_factor: dec!(0.25), // A 10% change must be required before a difficulty adjustment will occur
         chunk_size: DEFAULT_CHUNK_SIZE,
         num_chunks_in_partition: DEFAULT_NUM_CHUNKS_IN_PARTITION,
         partition_size: DEFAULT_CHUNK_SIZE * DEFAULT_NUM_CHUNKS_IN_PARTITION,
@@ -60,3 +62,16 @@ pub const CONFIG: Config = load_toml!(
         num_writes_before_sync: 5,
     }
 );
+
+impl From<Config> for DifficultyAdjustmentConfig {
+    fn from(config: Config) -> Self {
+        DifficultyAdjustmentConfig {
+            target_block_time: config.block_time,
+            adjustment_interval: config.difficulty_adjustment_interval,
+            max_adjustment_factor: config.max_difficulty_adjustment_factor,
+            min_adjustment_factor: config.min_difficulty_adjustment_factor,
+            min_difficulty: U256::one(), // TODO: make this customizable if desirable
+            max_difficulty: U256::MAX,
+        }
+    }
+}

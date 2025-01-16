@@ -354,7 +354,7 @@ impl fmt::Display for IrysBlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::{irys::IrysSigner, validate_path, IRYS_CHAIN_ID, MAX_CHUNK_SIZE};
+    use crate::{irys::IrysSigner, validate_path, CONFIG, MAX_CHUNK_SIZE};
 
     use super::*;
     use alloy_core::hex;
@@ -495,7 +495,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };
 

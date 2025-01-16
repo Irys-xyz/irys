@@ -4,7 +4,7 @@ use irys_database::data_ledger::*;
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    IrysBlockHeader, SimpleRNG, StorageConfig, CAPACITY_SCALAR, H256, NUM_BLOCKS_IN_EPOCH,
+    IrysBlockHeader, SimpleRNG, StorageConfig, CONFIG, H256,
 };
 use openssl::sha;
 use std::{
@@ -28,8 +28,8 @@ pub struct EpochServiceConfig {
 impl Default for EpochServiceConfig {
     fn default() -> Self {
         Self {
-            capacity_scalar: CAPACITY_SCALAR,
-            num_blocks_in_epoch: NUM_BLOCKS_IN_EPOCH,
+            capacity_scalar: CONFIG.capacity_scalar,
+            num_blocks_in_epoch: CONFIG.num_blocks_in_epoch,
             storage_config: StorageConfig::default(),
         }
     }
@@ -250,7 +250,7 @@ impl EpochServiceActor {
         new_epoch_block: Arc<IrysBlockHeader>,
     ) -> Result<(), EpochServiceError> {
         // Validate this is an epoch block height
-        if new_epoch_block.height % NUM_BLOCKS_IN_EPOCH != 0 {
+        if new_epoch_block.height % CONFIG.num_blocks_in_epoch != 0 {
             return Err(EpochServiceError::NotAnEpochBlock);
         }
 

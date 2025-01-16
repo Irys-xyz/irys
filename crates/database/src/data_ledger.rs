@@ -1,7 +1,4 @@
-use irys_types::{
-    Compact, TransactionLedger, H256, NUM_BLOCKS_IN_EPOCH, NUM_PARTITIONS_PER_SLOT,
-    SUBMIT_LEDGER_EPOCH_LENGTH,
-};
+use irys_types::{Compact, TransactionLedger, CONFIG, H256};
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 
@@ -72,11 +69,11 @@ impl TermLedger {
         let mut expired_indices = Vec::new();
 
         // Make sure enough blocks have transpired before calculating expiry height
-        if epoch_height < self.epoch_length * NUM_BLOCKS_IN_EPOCH {
+        if epoch_height < self.epoch_length * CONFIG.num_blocks_in_epoch {
             return expired_indices;
         }
 
-        let expiry_height = epoch_height - self.epoch_length * NUM_BLOCKS_IN_EPOCH;
+        let expiry_height = epoch_height - self.epoch_length * CONFIG.num_blocks_in_epoch;
 
         // Collect indices of slots to expire
         for (idx, slot) in self.slots.iter().enumerate() {
@@ -126,7 +123,7 @@ impl LedgerCore for PermanentLedger {
                 is_expired: false,
                 last_height: 0,
             });
-            num_partitions_added += NUM_PARTITIONS_PER_SLOT;
+            num_partitions_added += CONFIG.num_partitions_per_slot;
         }
         num_partitions_added
     }
@@ -135,7 +132,7 @@ impl LedgerCore for PermanentLedger {
             .iter()
             .enumerate()
             .filter_map(|(idx, slot)| {
-                let needed = NUM_PARTITIONS_PER_SLOT as usize - slot.partitions.len();
+                let needed = CONFIG.num_partitions_per_slot as usize - slot.partitions.len();
                 if needed > 0 {
                     Some((idx, needed))
                 } else {
@@ -166,7 +163,7 @@ impl LedgerCore for TermLedger {
                 is_expired: false,
                 last_height: 0,
             });
-            num_partitions_added += NUM_PARTITIONS_PER_SLOT;
+            num_partitions_added += CONFIG.num_partitions_per_slot;
         }
         num_partitions_added
     }
@@ -176,7 +173,7 @@ impl LedgerCore for TermLedger {
             .iter()
             .enumerate()
             .filter_map(|(idx, slot)| {
-                let needed = NUM_PARTITIONS_PER_SLOT as usize - slot.partitions.len();
+                let needed = CONFIG.num_partitions_per_slot as usize - slot.partitions.len();
                 if needed > 0 {
                     Some((idx, needed))
                 } else {
@@ -255,7 +252,7 @@ impl Ledgers {
             perm: PermanentLedger::new(),
             term: vec![TermLedger::new(
                 Ledger::Submit as usize,
-                SUBMIT_LEDGER_EPOCH_LENGTH,
+                CONFIG.submit_ledger_epoch_length,
             )],
         }
     }

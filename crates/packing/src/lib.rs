@@ -2,8 +2,7 @@ use std::ops::BitXor;
 
 pub use irys_c::{capacity, capacity_single};
 use irys_types::{
-    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CHUNK_SIZE,
-    PACKING_SHA_1_5_S,
+    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CONFIG,
 };
 
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
@@ -80,7 +79,7 @@ pub fn capacity_pack_range_c(
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
     let entropy_chunk_ptr = out_entropy_chunk.as_ptr() as *mut u8;
 
-    let iterations: u32 = iterations.unwrap_or(PACKING_SHA_1_5_S);
+    let iterations: u32 = iterations.unwrap_or(CONFIG.packing_sha_1_5_s);
 
     unsafe {
         capacity::compute_entropy_chunk(
@@ -116,7 +115,7 @@ pub fn capacity_pack_range_with_data(
     iterations: Option<u32>,
     chunk_size: usize,
 ) {
-    let iterations: u32 = iterations.unwrap_or(PACKING_SHA_1_5_S);
+    let iterations: u32 = iterations.unwrap_or(CONFIG.packing_sha_1_5_s);
 
     match PACKING_TYPE {
         PackingType::CPU => {
@@ -147,11 +146,11 @@ pub fn capacity_pack_range_with_data_c(
 ) {
     match PACKING_TYPE {
         PackingType::CPU => {
-            let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+            let mut entropy_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
             data.iter_mut().enumerate().for_each(|(pos, chunk)| {
                 capacity_pack_range_c(
                     mining_address,
-                    chunk_offset + pos as u64 * CHUNK_SIZE,
+                    chunk_offset + pos as u64 * CONFIG.chunk_size,
                     partition_hash,
                     iterations,
                     &mut entropy_chunk,
