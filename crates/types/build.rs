@@ -2,18 +2,17 @@ use build_print::{info, warn};
 use std::env;
 
 fn main() {
-    let Ok(profile) = env::var("CARGO_PROFILE") else {
-        info!("irys-types using default config");
+    let Ok(irys_env) = env::var("IRYS_ENV") else {
+        info!("irys-types using default config (set IRYS_ENV to override)");
         return;
     };
-    println!("cargo:rustc-cfg=profile=\"{}\"", profile);
-    let config_toml_path = match profile.as_str() {
-        "testnet" => "configs/testnet.toml",
-        "mainnet" => "configs/mainnet.toml",
+    let config_toml_path = match irys_env.as_str() {
+        "testnet" => "crates/types/configs/testnet.toml",
+        "mainnet" => "crates/types/configs/mainnet.toml",
         _ => {
             warn!(
-                "irys-types using default config, no config defined for profile: {}",
-                profile
+                "irys-types using default config, no config defined for IRYS_ENV={}",
+                irys_env
             );
             return;
         }

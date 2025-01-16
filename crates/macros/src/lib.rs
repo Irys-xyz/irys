@@ -93,8 +93,11 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
             let field_ident = Ident::new(&key, proc_macro2::Span::call_site());
 
             let field_value = match value {
-                toml::Value::String(s) => quote!(#s.to_string()),
-                toml::Value::Integer(i) => quote!(#i),
+                toml::Value::String(s) => quote!(#s),
+                toml::Value::Integer(i) => {
+                    let i_raw: TokenStream2 = i.to_string().parse().unwrap();
+                    quote!(#i_raw)
+                }
                 toml::Value::Float(f) => {
                     let f_raw: TokenStream2 = f.to_string().parse().unwrap();
                     quote!(rust_decimal_macros::dec![#f_raw])
