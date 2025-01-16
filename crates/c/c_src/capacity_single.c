@@ -15,6 +15,8 @@ entropy_chunk_errors compute_seed_hash(const unsigned char *mining_addr, size_t 
         return SEED_HASH_ERROR;
     }
 
+    //printf("mining addr size %d partition hash size % d chunk offset length %d\n", mining_addr_size, partition_hash_size, sizeof(uint64_t));
+
     unsigned int hash_len;
     EVP_DigestInit_ex(mdctx, PACKING_HASH_ALG, NULL);
     EVP_DigestUpdate(mdctx, mining_addr, mining_addr_size);
@@ -48,6 +50,7 @@ entropy_chunk_errors compute_start_entropy_chunk2(const unsigned char *previous_
     }
 
     while (chunk_len < DATA_CHUNK_SIZE) {
+        //printf("compute_start_entropy_chunk2 chunk_len %d\n", chunk_len);        
         EVP_DigestInit_ex(mdctx, PACKING_HASH_ALG, NULL);
         EVP_DigestUpdate(mdctx, previous_segment, previous_segment_len);
         EVP_DigestFinal_ex(mdctx, chunk + chunk_len, &segment_len);
@@ -93,6 +96,7 @@ entropy_chunk_errors compute_entropy_chunk2(const unsigned char *segment, const 
     }
 
     for (int hash_count = HASH_ITERATIONS_PER_BLOCK; hash_count < packing_sha_1_5_s; ++hash_count) {
+        //printf("compute_entropy_chunk2 hash count %d iterations %d\n", hash_count, packing_sha_1_5_s);
         size_t start_offset = (hash_count % HASH_ITERATIONS_PER_BLOCK) * PACKING_HASH_SIZE;
 
         EVP_DigestInit_ex(mdctx, PACKING_HASH_ALG, NULL);

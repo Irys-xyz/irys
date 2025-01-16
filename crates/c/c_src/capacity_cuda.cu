@@ -4,14 +4,12 @@
 #include <cuda.h>
 #include <stdint.h>
 
-#include "erl_nif.h"
-
 #include "capacity.h"
 #include "sha256.cuh"
 
 // Max threads - this is the maximum number of threads per block for the GPU
 // This is a constant defined by the GPU architecture.
-#define THREADS_PER_BLOCK 512
+#define THREADS_PER_BLOCK 1024 // TODO @ernius: how to correctly setup this parameter ?
 #define NUM_HASHES (DATA_CHUNK_SIZE / PACKING_HASH_SIZE)
 #define INPUT_SIZE PACKING_HASH_SIZE
 
@@ -24,6 +22,7 @@
  * @param seed_hash The output seed hash
  */
 __device__ void compute_seed_hash_cuda(const unsigned char *chunk_id, size_t chunk_id_length, unsigned char *seed_hash) {
+    //printf("compute_seed_hash_cuda !\n");
     SHA256_CTX sha256;
     sha256_init(&sha256);
     sha256_update(&sha256, chunk_id, chunk_id_length);
@@ -40,14 +39,15 @@ __device__ void compute_start_entropy_chunk2_cuda(const unsigned char *previous_
     size_t chunk_len = 0;
     SHA256_CTX sha256;
 
+    //printf("compute_start_entropy_chunk2_cuda !\n");
     while (chunk_len < DATA_CHUNK_SIZE) {
         sha256_init(&sha256);
-        sha256_update(&sha256, previous_segment, SHA256_DIGEST_LENGTH);
+        sha256_update(&sha256, previous_segment, previous_segment_len);
         sha256_final(&sha256, chunk + chunk_len);
-
         previous_segment = chunk + chunk_len;
-        chunk_len += SHA256_DIGEST_LENGTH;
+        chunk_len += previous_segment_len;
     }
+    //printf("end compute_start_entropy_chunk2_cuda !\n");    
 }
 
 /**
@@ -59,8 +59,10 @@ __device__ void compute_start_entropy_chunk2_cuda(const unsigned char *previous_
 __device__ void compute_start_entropy_chunk_cuda(const unsigned char *chunk_id, size_t chunk_id_length, unsigned char *chunk) {
     unsigned char seed_hash[PACKING_HASH_SIZE];
 
+    //printf("compute_start_entropy_chunk_cuda !\n");
     compute_seed_hash_cuda(chunk_id, chunk_id_length, seed_hash);
     compute_start_entropy_chunk2_cuda(seed_hash, PACKING_HASH_SIZE, chunk);
+    //printf("end compute_start_entropy_chunk_cuda !\n");    
 }
 
 /**
@@ -71,18 +73,25 @@ __device__ void compute_start_entropy_chunk_cuda(const unsigned char *chunk_id, 
  * @param packing_sha_1_5_s The number of iterations
  */
 __device__ void compute_entropy_chunk2_cuda(const unsigned char *segment, const unsigned char *entropy_chunk, unsigned char *new_entropy_chunk, unsigned int packing_sha_1_5_s) {
+    //printf("start compute_entropy_chunk2_cuda !\n");
     memcpy(new_entropy_chunk, entropy_chunk, DATA_CHUNK_SIZE);
+    //printf("after memcopy !\n");
     SHA256_CTX sha256;
 
     for (int hash_count = HASH_ITERATIONS_PER_BLOCK; hash_count < packing_sha_1_5_s; ++hash_count) {
+        //printf("compute_entropy_chunk2_cuda hash count %d iterations %d\n", hash_count, packing_sha_1_5_s);
         size_t start_offset = (hash_count % HASH_ITERATIONS_PER_BLOCK) * PACKING_HASH_SIZE;
 
         sha256_init(&sha256);
         sha256_update(&sha256, segment, SHA256_DIGEST_LENGTH);
-        sha256_update(&sha256, entropy_chunk + start_offset, SHA256_DIGEST_LENGTH);
+        if (hash_count / HASH_ITERATIONS_PER_BLOCK < 2)
+            sha256_update(&sha256, entropy_chunk + start_offset, SHA256_DIGEST_LENGTH);
+        else 
+            sha256_update(&sha256, new_entropy_chunk + start_offset, SHA256_DIGEST_LENGTH);
         sha256_final(&sha256, new_entropy_chunk + start_offset);
         segment = new_entropy_chunk + start_offset;
     }
+    //printf("end compute_entropy_chunk2_cuda !\n");    
 }
 
 /**
@@ -94,6 +103,8 @@ __device__ void compute_entropy_chunk2_cuda(const unsigned char *segment, const 
  * @param packing_sha_1_5_s The number of iterations
  */
 __device__ void compute_entropy_chunk_cuda(const unsigned char *chunk_id, size_t chunk_id_length, unsigned char *entropy_chunk, unsigned char *chunk_1, unsigned int packing_sha_1_5_s) {
+
+    //printf("compute_entropy_chunk_cuda !\n");    
     const int partial_entropy_chunk_size = (HASH_ITERATIONS_PER_BLOCK - 1) * PACKING_HASH_SIZE;
     unsigned char *start_entropy_chunk = chunk_1;
 
@@ -103,6 +114,7 @@ __device__ void compute_entropy_chunk_cuda(const unsigned char *chunk_id, size_t
     memcpy(last_entropy_chunk_segment, start_entropy_chunk + partial_entropy_chunk_size, PACKING_HASH_SIZE);
 
     compute_entropy_chunk2_cuda(last_entropy_chunk_segment, start_entropy_chunk, entropy_chunk, packing_sha_1_5_s);
+    //printf("end compute_entropy_chunk_cuda !\n");    
 }
 
 /**
@@ -114,6 +126,7 @@ __global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsi
     // The index of the current thread is then the index of the block times the number of threads per block plus the index of the current thread in the block.
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < chunks_count) {
+        //printf("enter compute_entropy_chunks_cuda_kernel idx=%d !\n", idx);                   
         unsigned char *output = chunks + idx * DATA_CHUNK_SIZE;
         unsigned char *chunk_1 = chunks_1 + idx * DATA_CHUNK_SIZE;
         unsigned char chunk_id_thread[CHUNK_ID_LEN];
@@ -121,6 +134,7 @@ __global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsi
         *((uint32_t*)&chunk_id_thread[CHUNK_ID_LEN - sizeof(uint64_t)]) = chunk_offset_start + idx * DATA_CHUNK_SIZE;
         compute_entropy_chunk_cuda(chunk_id_thread, CHUNK_ID_LEN, output, chunk_1, packing_sha_1_5_s);
     }
+    //printf("end compute_entropy_chunks_cuda_kernel idx=%d !\n", idx);            
 }
 
 /**
@@ -129,9 +143,8 @@ __global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsi
  */
 extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char *mining_addr, size_t mining_addr_size, unsigned long int chunk_offset_start, long int chunks_count, const unsigned char *partition_hash, size_t partition_hash_size, unsigned char *chunks, unsigned int packing_sha_1_5_s)
 {
-#ifdef BENCHMARK_PARALLEL
+
     printf("CUDA: Entropy chunks computation started\n");
-#endif
 
     unsigned char *d_chunks;
     unsigned char *d_chunks_1;
@@ -177,6 +190,8 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
     cudaFree(d_chunks);
     cudaFree(d_chunks_1);
     cudaFree(d_chunk_id);
+
+    printf("end CUDA: Entropy chunks computation started\n");
 
     return NO_ERROR;
 }

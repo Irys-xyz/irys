@@ -138,7 +138,7 @@ static ERL_NIF_TERM compute_chunks_parallel_nif(ErlNifEnv* env, int argc, const 
 #endif
 
 #if defined(CAP_IMPL_CUDA)
-    error = compute_entropy_chunks_cuda(mining_addr.data, mining_addr.size, chunk_offset_start, chunk_count, partition.data, partition.size, entropy_chunks.data, packing_sha_1_5_s);
+    error = compute_entropy_chunks_cuda(mining_addr.data, mining_addr.size, chunk_count, partition.data, partition.size, entropy_chunks.data, packing_sha_1_5_s);
 #elif defined(CAP_IMPL_HIP)
     error = compute_entropy_chunks_hip(mining_addr.data, mining_addr.size, chunk_offset_start, chunk_count, partition.data, partition.size, entropy_chunks.data, packing_sha_1_5_s);
 #else

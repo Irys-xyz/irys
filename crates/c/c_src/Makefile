@@ -1,5 +1,3 @@
-# Based on c_src.mk from erlang.mk by Loic Hoguin <essen@ninenines.eu>
-
 CURDIR := $(shell pwd)
 BASEDIR := $(abspath $(CURDIR)/..)
 
@@ -16,9 +14,6 @@ else
 	CXXFLAGS ?= -O3
 endif
 
-ERTS_INCLUDE_DIR ?= $(shell erl -noshell -s init stop -eval "io:format(\"~ts/erts-~ts/include/\", [code:root_dir(), erlang:system_info(version)]).")
-ERL_INTERFACE_INCLUDE_DIR ?= $(shell erl -noshell -s init stop -eval "io:format(\"~ts\", [code:lib_dir(erl_interface, include)]).")
-ERL_INTERFACE_LIB_DIR ?= $(shell erl -noshell -s init stop -eval "io:format(\"~ts\", [code:lib_dir(erl_interface, lib)]).")
 CUDA_LIBS ?= /opt/cuda/targets/x86_64-linux/lib
 HIP_LIBS ?= /opt/rocm/lib/
 
@@ -65,13 +60,13 @@ ifneq (, $(shell which pkg-config))
 	LDFLAGS += `pkg-config --libs gmp openssl`
 endif
 
-CFLAGS += -fPIC -I $(ERTS_INCLUDE_DIR) -I $(ERL_INTERFACE_INCLUDE_DIR) -I /usr/local/include -Ofast -g0 -march=native
-CXXFLAGS += -fPIC -I $(ERTS_INCLUDE_DIR) -I $(ERL_INTERFACE_INCLUDE_DIR) -std=c++17 -Ofast -g0 -march=native
-CXXFLAGS_NVCC += -I $(ERTS_INCLUDE_DIR) -I $(ERL_INTERFACE_INCLUDE_DIR) -O3 -std=c++17 -Xcompiler -fPIC -DCAP_IMPL_CUDA
-CXXFLAGS_HIPCC += -I $(ERTS_INCLUDE_DIR) -I $(ERL_INTERFACE_INCLUDE_DIR) -O3 -std=c++17 -fPIC -DCAP_IMPL_HIP
+CFLAGS += -fPIC -I /usr/local/include -Ofast -g0 -march=native
+CXXFLAGS += -fPIC -std=c++17 -Ofast -g0 -march=native
+CXXFLAGS_NVCC += -O3 -std=c++17 -Xcompiler -fPIC -DCAP_IMPL_CUDA -ccbin /usr/bin/gcc-13
+CXXFLAGS_HIPCC += -O3 -std=c++17 -fPIC -DCAP_IMPL_HIP
 
-LDLIBS += -L $(ERL_INTERFACE_LIB_DIR) -L /usr/local/lib -lei -lgmp -lssl -lcrypto
-LDLIBS_CAP_LIB += -L $(ERL_INTERFACE_LIB_DIR) -L $(CUDA_LIBS) -L $(HIP_LIBS) -L /usr/local/lib -lei -lgmp -lssl -lcrypto
+LDLIBS += -L /usr/local/lib -lgmp -lssl -lcrypto
+LDLIBS_CAP_LIB += -L $(CUDA_LIBS) -L $(HIP_LIBS) -L /usr/local/lib -lgmp -lssl -lcrypto
 
 # Verbosity.
 
@@ -91,7 +86,7 @@ link_verbose_0 = @echo " LD    " $(@F);
 link_verbose = $(link_verbose_$(V))
 
 ALL_LIB_SOURCES_W_CAPACITY := $(wildcard $(C_SRC_DIR)/*.c $(C_SRC_DIR)/*.cpp)
-CAPACITY_SOURCES := $(wildcard $(C_SRC_DIR)/capacity.c $(C_SRC_DIR)/capacity_single.c )
+CAPACITY_SOURCES := $(wildcard $(C_SRC_DIR)/capacity_single.c )
 ALL_LIB_SOURCES := $(filter-out $(CAPACITY_SOURCES), $(ALL_LIB_SOURCES_W_CAPACITY))
 ifeq ($(CAP_IMPL), cuda)
 	CAPACITY_SOURCES += $(wildcard $(C_SRC_DIR)/capacity_cuda.cu )
@@ -105,7 +100,6 @@ ifeq ($(CAP_IMPL), hip)
 	CFLAGS += -DCAP_IMPL_HIP
 	CXXFLAGS += -DCAP_IMPL_HIP
 endif
-ENIF_SOURCES := $(wildcard $(C_SRC_DIR)/ar_*.c $(C_SRC_DIR)/ar_*.cpp)
 C_SOURCES := $(filter-out $(ENIF_SOURCES), $(ALL_LIB_SOURCES))
 TESTS_SOURCES = $(wildcard $(TESTS_DIR)/*.cpp)
 
