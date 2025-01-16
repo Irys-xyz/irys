@@ -5,12 +5,6 @@ use quote::quote;
 use std::{env, fs};
 use syn::{parse2, Error, ExprStruct, Ident, LitStr, Result, Token};
 
-#[cfg(test)]
-use quote::ToTokens;
-
-#[cfg(test)]
-use syn::parse_quote;
-
 #[proc_macro]
 pub fn load_toml(input: TokenStream) -> TokenStream {
     match load_toml_impl(input) {
@@ -84,7 +78,10 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
             let field_value = match value {
                 toml::Value::String(s) => quote!(#s.to_string()),
                 toml::Value::Integer(i) => quote!(#i),
-                toml::Value::Float(f) => quote!(#f),
+                toml::Value::Float(f) => {
+                    let f_raw: TokenStream2 = f.to_string().parse().unwrap();
+                    quote!(rust_decimal_macros::dec![#f_raw])
+                }
                 toml::Value::Boolean(b) => quote!(#b),
                 _ => {
                     return Err(Error::new_spanned(
@@ -112,8 +109,14 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
     Ok(generated)
 }
 
+#[cfg(test)]
+use syn::parse_quote;
+
+#[cfg(test)]
+use quote::ToTokens;
+
 #[test]
-fn test_load_toml_impl() {
+fn test_load_toml_impl_01() {
     let env_var_name = "TOML_FILE_01";
     env::set_var(env_var_name, "integration/input_01.toml");
 
@@ -131,7 +134,7 @@ fn test_load_toml_impl() {
             foo: 7i64,
             bar: true,
             fizz: "hey".to_string(),
-            buzz: 3.14f64,
+            buzz: rust_decimal_macros::dec![3.14],
         }
     };
 
