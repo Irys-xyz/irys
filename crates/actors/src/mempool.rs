@@ -71,7 +71,7 @@ impl MempoolActor {
 pub struct TxIngressMessage(pub IrysTransactionHeader);
 
 impl TxIngressMessage {
-    const fn into_inner(self) -> IrysTransactionHeader {
+    pub const fn into_inner(self) -> IrysTransactionHeader {
         self.0
     }
 }

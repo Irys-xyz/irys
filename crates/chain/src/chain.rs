@@ -28,7 +28,7 @@ use irys_storage::{
 };
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
-    vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, CONFIG, H256, U256,
+    vdf_config::VDFStepsConfig, StorageConfig, CONFIG, H256,
 };
 use reth::{
     builder::FullNode,
@@ -123,13 +123,13 @@ pub async fn start_irys_node(
     let arc_genesis = Arc::new(irys_genesis);
 
     let mut storage_modules: StorageModuleVec = Vec::new();
-    let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
-        BlockIndex::default()
-            .reset(&arc_config.clone())?
-            .init(arc_config.clone())
-            .await
-            .unwrap(),
-    ));
+    let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
+        let mut idx = BlockIndex::default();
+        if !CONFIG.persist_data_on_restart {
+            idx = idx.reset(&arc_config.clone())?
+        }
+        idx.init(arc_config.clone()).await.unwrap()
+    }));
 
     let reth_chainspec = arc_config
         .clone()
@@ -247,7 +247,7 @@ pub async fn start_irys_node(
                 );
                 let chunk_migration_addr = chunk_migration_actor.start();
 
-                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
+                let (_new_seed_tx, _new_seed_rx) = mpsc::channel::<H256>();
 
                 let block_tree_actor = BlockTreeActor::new(
                     block_index_actor_addr.clone(),

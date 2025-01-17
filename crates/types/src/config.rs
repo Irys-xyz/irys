@@ -26,6 +26,9 @@ pub struct Config {
     pub submit_ledger_epoch_length: u64,
     pub num_partitions_per_slot: u64,
     pub num_writes_before_sync: u64,
+    /// If `true`, the ledger will be persisted on disk when the node restarts. Otherwise the
+    /// entire state of the node will reset to genesis upon restart.
+    pub persist_data_on_restart: bool,
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 1;
@@ -51,6 +54,7 @@ pub const CONFIG: Config = load_toml!(
         submit_ledger_epoch_length: 5,
         num_partitions_per_slot: 1,
         num_writes_before_sync: 5,
+        persist_data_on_restart: false,
     }
 );
 
