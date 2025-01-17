@@ -609,7 +609,7 @@ fn truncate_to_3_decimals(value: f64) -> f64 {
 //------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use irys_types::{Address, PACKING_SHA_1_5_S};
+    use irys_types::{Address, CONFIG};
 
     use super::*;
 
@@ -758,7 +758,7 @@ mod tests {
             num_partitions_in_slot: 1,
             miner_address: Address::random(),
             min_writes_before_sync: 1,
-            entropy_packing_iterations: PACKING_SHA_1_5_S,
+            entropy_packing_iterations: CONFIG.packing_sha_1_5_s,
         };
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;
 

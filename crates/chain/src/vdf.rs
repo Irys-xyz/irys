@@ -98,7 +98,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_vdf_step() {
         let mut hasher = Sha256::new();
-        let mut checkpoints: Vec<H256> = vec![H256::default(); NUM_CHECKPOINTS_IN_VDF_STEP];
+        let mut checkpoints: Vec<H256> = vec![H256::default(); CONFIG.num_checkpoints_in_vdf_step];
         let mut hash: H256 = H256::random();
         let original_hash = hash;
         let mut salt: U256 = U256::from(10);

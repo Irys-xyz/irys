@@ -63,7 +63,7 @@ pub fn unpack_with_entropy(
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
 /// defaults to [`PACKING_SHA_1_5_S`]`, returns entropy chunk in out_entropy_chunk parameter.
-/// Precondition: `out_entropy_chunk` should have at least DATA_CHUNK_SIZE = 256KB (definded in capacity.h file) capacity
+/// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (definded in capacity.h file) capacity
 /// Uses C 2D Packing implementation
 pub fn capacity_pack_range_c(
     mining_address: Address,
@@ -196,9 +196,9 @@ mod tests {
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-        let iterations = 2 * CHUNK_SIZE as u32;
+        let iterations = 2 * CONFIG.chunk_size as u32;
 
-        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
 
         let now = Instant::now();
 
@@ -207,14 +207,14 @@ mod tests {
             chunk_offset,
             partition_hash,
             iterations,
-            CHUNK_SIZE as usize,
+            CONFIG.chunk_size as usize,
             &mut chunk,
         );
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
-        let mut c_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut c_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
         let now = Instant::now();
 
         capacity_pack_range_c(
@@ -244,7 +244,7 @@ mod tests {
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
         for _i in 0..num_chunks {
-            let mut chunk = [0u8; CHUNK_SIZE as usize];
+            let mut chunk = [0u8; CONFIG.chunk_size as usize];
             rng.fill_bytes(&mut chunk);
             chunks.push(chunk.to_vec());
             chunks_rust.push(chunk.to_vec());
@@ -263,7 +263,7 @@ mod tests {
             mining_address,
             chunk_offset,
             partition_hash.into(),
-            Some(2 * CHUNK_SIZE as u32),
+            Some(2 * CONFIG.chunk_size as u32),
         );
 
         let elapsed = now.elapsed();
@@ -276,8 +276,8 @@ mod tests {
             mining_address,
             chunk_offset,
             partition_hash.into(),
-            Some(2 * CHUNK_SIZE as u32),
-            CHUNK_SIZE as usize,
+            Some(2 * CONFIG.chunk_size as u32),
+            CONFIG.chunk_size as usize,
         );
 
         let elapsed = now.elapsed();
@@ -286,12 +286,12 @@ mod tests {
         assert_eq!(chunks, chunks_rust, "Rust and C packing should be equal");
 
         // calculate entropy for choosen random chunk
-        let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
+        let mut entropy_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size.try_into().unwrap());
         capacity_pack_range_c(
             mining_address,
-            chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE,
+            chunk_offset + rnd_chunk_pos as u64 * CONFIG.chunk_size,
             partition_hash.into(),
-            Some(2 * CHUNK_SIZE as u32),
+            Some(2 * CONFIG.chunk_size as u32),
             &mut entropy_chunk,
         );
 
