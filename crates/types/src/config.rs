@@ -29,6 +29,14 @@ pub struct Config {
     /// If `true`, the ledger will be persisted on disk when the node restarts. Otherwise the
     /// entire state of the node will reset to genesis upon restart.
     pub persist_data_on_restart: bool,
+    // Longest chain consensus
+    /// Number of block confirmations required before considering data final.
+    ///
+    /// In Nakamoto consensus, finality is probabilistic based on chain depth:
+    /// - 6 confirmations protects against attackers with <25% hashpower
+    /// - 20 confirmations protects against attackers with <40% hashpower
+    /// - No number of confirmations is secure against attackers with >50% hashpower
+    pub num_confirmations_for_finality: u32,
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 1;
@@ -55,6 +63,7 @@ pub const CONFIG: Config = load_toml!(
         num_partitions_per_slot: 1,
         num_writes_before_sync: 5,
         persist_data_on_restart: false,
+        num_confirmations_for_finality: 6,
     }
 );
 

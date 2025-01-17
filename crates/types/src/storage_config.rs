@@ -34,7 +34,7 @@ impl Default for StorageConfig {
             min_writes_before_sync: CONFIG.num_writes_before_sync,
             // TODO: revert this back
             entropy_packing_iterations: 1_000, /* PACKING_SHA_1_5_S */
-            num_confirmations_for_finality: NUM_CONFIRMATIONS_FOR_FINALITY,
+            num_confirmations_for_finality: CONFIG.num_confirmations_for_finality,
         }
     }
 }
