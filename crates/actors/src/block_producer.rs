@@ -29,12 +29,11 @@ use tracing::{error, info, warn};
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
-    block_index::{BlockIndexActor, GetLatestBlockIndexMessage},
+    block_index_service::{BlockIndexService, GetLatestBlockIndexMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    chunk_migration::ChunkMigrationActor,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
-    mempool::{GetBestMempoolTxs, MempoolActor},
-    vdf::VdfStepsReadGuard,
+    mempool_service::{GetBestMempoolTxs, MempoolService},
+    vdf_service::VdfStepsReadGuard,
 };
 
 /// Used to mock up a `BlockProducerActor`
@@ -50,11 +49,7 @@ pub struct BlockProducerActor {
     /// Reference to the global database
     pub db: DatabaseProvider,
     /// Address of the mempool actor
-    pub mempool_addr: Addr<MempoolActor>,
-    /// Address of the chunk migration actor
-    pub chunk_migration_addr: Addr<ChunkMigrationActor>,
-    /// Address of the `bock_index` actor
-    pub block_index_addr: Addr<BlockIndexActor>,
+    pub mempool_addr: Addr<MempoolService>,
     /// Message the block discovery actor when a block is produced locally
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     /// Tracks the global state of partition assignments on the protocol
@@ -80,9 +75,7 @@ impl BlockProducerActor {
     /// Initializes a new `BlockProducerActor`
     pub const fn new(
         db: DatabaseProvider,
-        mempool_addr: Addr<MempoolActor>,
-        chunk_migration_addr: Addr<ChunkMigrationActor>,
-        block_index_addr: Addr<BlockIndexActor>,
+        mempool_addr: Addr<MempoolService>,
         block_discover_addr: Addr<BlockDiscoveryActor>,
         epoch_service: Addr<EpochServiceActor>,
         reth_provider: RethNodeProvider,
@@ -94,8 +87,6 @@ impl BlockProducerActor {
         Self {
             db,
             mempool_addr,
-            chunk_migration_addr,
-            block_index_addr,
             block_discovery_addr: block_discover_addr,
             epoch_service,
             reth_provider,
@@ -135,10 +126,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         }
 
         let mempool_addr = self.mempool_addr.clone();
-        let block_index_addr = self.block_index_addr.clone();
         let block_discovery_addr = self.block_discovery_addr.clone();
         let epoch_service_addr = self.epoch_service.clone();
-        let chunk_migration_addr = self.chunk_migration_addr.clone();
         let mining_broadcaster_addr = BroadcastMiningService::from_registry();
 
         let reth = self.reth_provider.clone();
@@ -154,6 +143,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         AtomicResponse::new(Box::pin( async move {
             // Acquire lock and check that the height hasn't changed identifying a race condition
             // TEMP: This demonstrates how to get the block height from the block_index_actor
+            let block_index_addr = BlockIndexService::from_registry();
             let latest_block = block_index_addr
                 .send(GetLatestBlockIndexMessage {})
                 .await
@@ -316,18 +306,18 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 partition_hash: solution.partition_hash,
             };
 
-            let mut checkpoints = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
+            let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
                 H256List::new()
             } else {
-                match vdf_steps.read().get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!("Error in requested vdf steps while producing block in step:{} error: {}", solution.vdf_step, e);
-                        return None
+                    match vdf_steps.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!("VDF step range {} unavailable while producing block, reason: {:?}, aborting", solution.vdf_step, e);
+                            return None
+                        }
                     }
-                }
             };
-            checkpoints.push(solution.seed.0);
+            steps.push(solution.seed.0);
 
             let mut irys_block = IrysBlockHeader {
                 block_hash,
@@ -371,7 +361,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     last_step_checkpoints: solution.checkpoints,
                     prev_output: prev_block_header.vdf_limiter_info.output,
                     seed: prev_block_header.vdf_limiter_info.seed,
-                    checkpoints,
+                    steps,
                     ..Default::default()
                 },
             };
@@ -447,72 +437,19 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .await
                 .unwrap();
 
-            db.update_eyre(|tx| irys_database::insert_block_header(tx, &irys_block))
-                .unwrap();
-
             let block = Arc::new(irys_block);
-            block_discovery_addr.do_send(BlockDiscoveredMessage(block.clone()));
-
-            // Get all the transactions for the previous block, error if not found
-            // TODO: Eventually abstract this for support of `n` ledgers
-            let previous_submit_txs = get_ledger_tx_headers(&prev_block_header, Ledger::Submit, &db);
-            let previous_publish_txs = get_ledger_tx_headers(&prev_block_header, Ledger::Publish, &db);
-
-            let prev_all_txs = {
-                let mut combined = previous_submit_txs.unwrap_or_default();
-                combined.extend(previous_publish_txs.unwrap_or_default());
-                combined
-            };
+            block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await.unwrap();
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-            let _ = chunk_migration_addr.send(BlockFinalizedMessage {
-                block_header: Arc::new(prev_block_header),
-                all_txs: Arc::new(prev_all_txs),
-            }).await.unwrap();
             info!("Finished producing block height: {}, hash: {}", &block_height, &block_hash);
 
             Some((block.clone(), exec_payload))
         }
         .into_actor(self),
         ))
-    }
-}
-
-fn get_ledger_tx_headers(
-    block_header: &IrysBlockHeader,
-    ledger: Ledger,
-    db: &DatabaseProvider,
-) -> Option<Vec<IrysTransactionHeader>> {
-    let tx = db
-        .tx()
-        .map_err(|e| {
-            error!("Failed to create transaction: {}", e);
-        })
-        .ok()?;
-
-    match block_header.ledgers[ledger]
-        .txids
-        .iter()
-        .map(|txid| {
-            tx_header_by_txid(&tx, txid)
-                .map_err(|e| eyre::eyre!("Failed to get tx header: {}", e))
-                .and_then(|opt| {
-                    opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(txs) => Some(txs),
-        Err(e) => {
-            error!(
-                "Failed to collect tx headers for {:?} ledger: {}",
-                ledger, e
-            );
-            None
-        }
     }
 }
 

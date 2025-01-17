@@ -3,7 +3,7 @@ use actix_web::{
     HttpResponse,
 };
 use awc::http::StatusCode;
-use irys_actors::mempool::{ChunkIngressError, ChunkIngressMessage};
+use irys_actors::mempool_service::{ChunkIngressError, ChunkIngressMessage};
 use irys_types::UnpackedChunk;
 use log::info;
 

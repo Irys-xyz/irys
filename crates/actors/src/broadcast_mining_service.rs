@@ -55,7 +55,7 @@ impl Supervised for BroadcastMiningService {}
 
 impl ArbiterService for BroadcastMiningService {
     fn service_started(&mut self, ctx: &mut Context<Self>) {
-        println!("broadcast_mining service started");
+        println!("service started: broadcast_mining (Default)");
     }
 }
 

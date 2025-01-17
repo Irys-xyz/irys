@@ -24,7 +24,7 @@ pub type IrysTransactionId = H256;
 /// Stores deserialized fields from a JSON formatted Irys transaction header.
 /// will decode from strings or numeric literals for u64 fields, due to JS's max safe int being 2^53-1 instead of 2^64
 /// We include the Irys prefix to differentiate from EVM transactions.
-
+#[serde(rename_all = "camelCase", default)]
 pub struct IrysTransactionHeader {
     /// A SHA-256 hash of the transaction signature.
     #[rlp(skip)]

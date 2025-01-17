@@ -1,20 +1,20 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, ArbiterService};
+use actix::{Actor, ArbiterService, Registry};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
-    block_index::{BlockIndexActor, BlockIndexReadGuard, GetBlockIndexGuardMessage},
+    block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
-    block_tree::BlockTreeActor,
+    block_tree_service::BlockTreeService,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    chunk_migration::ChunkMigrationActor,
+    chunk_migration_service::ChunkMigrationService,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
         GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage, NewEpochMessage,
     },
-    mempool::MempoolActor,
+    mempool_service::MempoolService,
     mining::PartitionMiningActor,
     packing::{wait_for_packing, PackingActor, PackingRequest},
-    vdf::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
+    vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
     ActorAddresses,
 };
 use irys_api_server::{run_server, ApiState};
@@ -61,6 +61,7 @@ pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeC
         miner_address: config.mining_signer.address(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
+        num_confirmations_for_finality: 1, // Testnet / single node config
     };
 
     start_irys_node(config, storage_config).await
@@ -80,6 +81,7 @@ pub async fn start_for_testing_default(
 
     let storage_config = StorageConfig {
         miner_address: miner_signer.address(), // just in case to keep the same miner address
+        num_confirmations_for_finality: 1,     // Testnet / single node config
         ..storage_config
     };
 
@@ -166,8 +168,9 @@ pub async fn start_irys_node(
 
                 // Initialize the block_index actor and tell it about the genesis block
                 let block_index_actor =
-                    BlockIndexActor::new(block_index.clone(), storage_config.clone());
-                let block_index_actor_addr = block_index_actor.start();
+                    BlockIndexService::new(block_index.clone(), storage_config.clone());
+                Registry::set(block_index_actor.start());
+                let block_index_actor_addr = BlockIndexService::from_registry();
                 let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
                 db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
                     .unwrap();
@@ -229,32 +232,28 @@ pub async fn start_irys_node(
                     // arc_module.pack_with_zeros();
                 }
 
-                let mempool_actor = MempoolActor::new(
+                let mempool_service = MempoolService::new(
                     db.clone(),
                     reth_node.task_executor.clone(),
                     node_config.mining_signer.clone(),
                     storage_config.clone(),
                     storage_modules.clone(),
                 );
+                Registry::set(mempool_service.start());
+                let mempool_addr = MempoolService::from_registry();
 
-                let mempool_actor_addr = mempool_actor.start();
-
-                let chunk_migration_actor = ChunkMigrationActor::new(
+                let chunk_migration_service = ChunkMigrationService::new(
                     block_index.clone(),
                     storage_config.clone(),
                     storage_modules.clone(),
                     db.clone(),
                 );
-                let chunk_migration_addr = chunk_migration_actor.start();
+                Registry::set(chunk_migration_service.start());
 
                 let (_new_seed_tx, _new_seed_rx) = mpsc::channel::<H256>();
 
-                let block_tree_actor = BlockTreeActor::new(
-                    block_index_actor_addr.clone(),
-                    mempool_actor_addr.clone(),
-                    &arc_genesis,
-                );
-                let block_tree = block_tree_actor.start();
+                let block_tree_actor = BlockTreeService::new(db.clone(), &arc_genesis);
+                Registry::set(block_tree_actor.start());
 
                 let vdf_service = VdfService::from_registry();
                 let vdf_steps_guard: VdfStepsReadGuard =
@@ -263,8 +262,6 @@ pub async fn start_irys_node(
                 let block_discovery_actor = BlockDiscoveryActor {
                     block_index_guard: block_index_guard.clone(),
                     partition_assignments_guard: partition_assignments_guard.clone(),
-                    block_tree: block_tree.clone(),
-                    mempool: mempool_actor_addr.clone(),
                     storage_config: storage_config.clone(),
                     difficulty_config: difficulty_adjustment_config.clone(),
                     db: db.clone(),
@@ -275,9 +272,7 @@ pub async fn start_irys_node(
 
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
-                    mempool_actor_addr.clone(),
-                    chunk_migration_addr.clone(),
-                    block_index_actor_addr.clone(),
+                    mempool_addr.clone(),
                     block_discovery_addr.clone(),
                     epoch_service_actor_addr.clone(),
                     reth_node.clone(),
@@ -287,6 +282,7 @@ pub async fn start_irys_node(
                     vdf_steps_guard.clone(),
                 );
                 let block_producer_addr = block_producer_actor.start();
+                let block_tree = BlockTreeService::from_registry();
                 block_tree.do_send(RegisterBlockProducerMessage(block_producer_addr.clone()));
 
                 let mut part_actors = Vec::new();
@@ -358,7 +354,7 @@ pub async fn start_irys_node(
                     partitions: part_actors_clone,
                     block_producer: block_producer_addr,
                     packing: packing_actor_addr,
-                    mempool: mempool_actor_addr.clone(),
+                    mempool: mempool_addr.clone(),
                     block_index: block_index_actor_addr,
                     epoch_service: epoch_service_actor_addr,
                 };
@@ -379,7 +375,7 @@ pub async fn start_irys_node(
                 });
 
                 run_server(ApiState {
-                    mempool: mempool_actor_addr,
+                    mempool: mempool_addr,
                     chunk_provider: Arc::new(chunk_provider),
                     db,
                 })
