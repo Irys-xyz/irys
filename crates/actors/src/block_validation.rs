@@ -158,7 +158,7 @@ pub fn poa_is_valid(
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
             *miner_address,
-            poa.partition_chunk_offset as u64,
+            poa.partition_chunk_offset as u64 * config.chunk_size,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
             config.chunk_size as usize,
@@ -180,13 +180,13 @@ pub fn poa_is_valid(
         let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
 
         if poa_chunk_hash != data_path_result.leaf_hash {
-            return Err(eyre::eyre!("PoA chunk hash mismatch"));
+            return Err(eyre::eyre!("PoA chunk hash mismatch {:?} /= {:?}", poa_chunk_hash, data_path_result.leaf_hash));
         }
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
             *miner_address,
-            poa.partition_chunk_offset as u64,
+            poa.partition_chunk_offset as u64 * config.chunk_size,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
             config.chunk_size as usize,
@@ -194,7 +194,7 @@ pub fn poa_is_valid(
         );
 
         if entropy_chunk != poa.chunk.0 {
-            return Err(eyre::eyre!("PoA capacity chunk mismatch"));
+            return Err(eyre::eyre!("PoA capacity chunk mismatch {:?} /= {:?}", entropy_chunk.first(), poa.chunk.0.first()));
         }
     }
     Ok(())
@@ -401,7 +401,7 @@ mod tests {
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(
             miner_address,
-            (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64,
+            ((poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) * chunk_size) as u64,
             partition_hash.into(),
             config.storage_config.entropy_packing_iterations,
             chunk_size,

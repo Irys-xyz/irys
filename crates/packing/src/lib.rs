@@ -16,7 +16,7 @@ pub fn unpack(
     let mut entropy: Vec<u8> = Vec::with_capacity(chunk_size);
     capacity_single::compute_entropy_chunk(
         packed_chunk.packing_address,
-        packed_chunk.partition_offset as u64,
+        packed_chunk.partition_offset as u64 * chunk_size as u64,
         packed_chunk.partition_hash.0,
         entropy_packing_iterations,
         chunk_size,
@@ -97,6 +97,39 @@ pub fn capacity_pack_range_c(
 }
 
 /// 2D Packing CUDA C implementation
+pub fn capacity_pack_range_cuda_c(
+    num_chunks: u32,
+    mining_address: Address,
+    chunk_offset: std::ffi::c_ulong,
+    partition_hash: PartitionHash,
+    iterations: Option<u32>,
+    entropy: &mut Vec<u8>,
+) {
+    let mining_addr_len = mining_address.len(); // note: might not line up with capacity? that should be fine...
+    let partition_hash_len = partition_hash.0.len();
+    let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
+    let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
+    let iterations: u32 = iterations.unwrap_or(PACKING_SHA_1_5_S);
+
+    let entropy_ptr = entropy.as_ptr() as *mut u8;
+
+    unsafe {
+        capacity_cuda::compute_entropy_chunks_cuda(
+            mining_addr,
+            mining_addr_len,
+            chunk_offset,   
+            num_chunks as i64,
+            partition_hash,
+            partition_hash_len,
+            entropy_ptr,
+            iterations,
+        );
+
+        entropy.set_len(entropy.capacity());                
+    }     
+}
+
+/// 2D Packing CUDA C implementation
 pub fn capacity_pack_range_with_data_cuda_c(
     data: &mut Vec<u8>,
     mining_address: Address,
@@ -104,41 +137,16 @@ pub fn capacity_pack_range_with_data_cuda_c(
     partition_hash: PartitionHash,
     iterations: Option<u32>,
 ) {
-    match PACKING_TYPE {
-        PackingType::CPU => {
-            let mining_addr_len = mining_address.len(); // note: might not line up with capacity? that should be fine...
-            let partition_hash_len = partition_hash.0.len();
-            let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
-            let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
-            let iterations: u32 = iterations.unwrap_or(PACKING_SHA_1_5_S);
+    let num_chunks: u32 = data.len() as u32 / CHUNK_SIZE as u32;
+    let mut entropy: Vec<u8> = Vec::with_capacity(data.len());
+    capacity_pack_range_cuda_c( num_chunks, mining_address, chunk_offset, partition_hash, iterations, &mut entropy);
 
-            let mut entropy_chunk: Vec<u8> = Vec::with_capacity(data.len());
-            let entropy_chunk_ptr = entropy_chunk.as_ptr() as *mut u8;
-
-            let num_chunks = data.len() as i64 / CHUNK_SIZE as i64;
-            unsafe {
-                capacity_cuda::compute_entropy_chunks_cuda(
-                    mining_addr,
-                    mining_addr_len,
-                    chunk_offset,   
-                    num_chunks,
-                    partition_hash,
-                    partition_hash_len,
-                    entropy_chunk_ptr,
-                    iterations,
-                );
-
-                entropy_chunk.set_len(entropy_chunk.capacity());                
-            }     
-            xor_vec_u8_arrays_in_place(data, &entropy_chunk);
-        }
-        _ => unimplemented!(),
-    }
+    // TODO: check if it is worth to move this to GPU ? implies big data transfer from host to device that now is not needed
+    xor_vec_u8_arrays_in_place(data, &entropy);
 }
 
-
-
-enum PackingType {
+#[derive(PartialEq)]
+pub enum PackingType {
     CPU,
     #[allow(unused)]
     CUDA,
@@ -146,7 +154,7 @@ enum PackingType {
     AMD,
 }
 
-const PACKING_TYPE: PackingType = PackingType::CPU;
+pub const PACKING_TYPE: PackingType = PackingType::CPU; //PackingType::CUDA; 
 
 /// 2D Packing Rust implementation
 pub fn capacity_pack_range_with_data(
@@ -157,11 +165,10 @@ pub fn capacity_pack_range_with_data(
     iterations: Option<u32>,
     chunk_size: usize,
 ) {
-    let iterations: u32 = iterations.unwrap_or(PACKING_SHA_1_5_S);
-
     match PACKING_TYPE {
         PackingType::CPU => {
             let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+            let iterations: u32 = iterations.unwrap_or(PACKING_SHA_1_5_S);
             data.iter_mut().enumerate().for_each(|(pos, chunk)| {
                 capacity_single::compute_entropy_chunk(
                     mining_address,
@@ -174,6 +181,9 @@ pub fn capacity_pack_range_with_data(
                 xor_vec_u8_arrays_in_place(chunk, &entropy_chunk);
             })
         }
+        // PackingType::CUDA => {
+        //     capacity_pack_range_with_data_cuda_c(data, mining_address, chunk_offset, partition_hash, iterations)
+        // }
         _ => unimplemented!(),
     }
 }
@@ -241,6 +251,7 @@ mod tests {
         let iterations = 2 * CHUNK_SIZE as u32;
 
         let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
 
         let now = Instant::now();
 
@@ -253,10 +264,21 @@ mod tests {
             &mut chunk,
         );
 
+        capacity_single::compute_entropy_chunk(
+            mining_address,
+            chunk_offset + CHUNK_SIZE,
+            partition_hash,
+            iterations,
+            CHUNK_SIZE as usize,
+            &mut chunk2,
+        );
+
+
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
         let mut c_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut c_chunk2 = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);        
         let now = Instant::now();
 
         capacity_pack_range_c(
@@ -267,10 +289,39 @@ mod tests {
             &mut c_chunk,
         );
 
+        capacity_pack_range_c(
+            mining_address,
+            chunk_offset + CHUNK_SIZE ,
+            partition_hash.into(),
+            Some(iterations),
+            &mut c_chunk2,
+        );
+
+
         let elapsed = now.elapsed();
         println!("C implementation: {:.2?}", elapsed);
 
-        assert_eq!(chunk, c_chunk, "Chunks should be equal")
+        assert_eq!(chunk, c_chunk, "C chunks should be equal");
+        assert_eq!(chunk2, c_chunk2, "Second C chunks should be equal");
+
+        let mut c_chunk_cuda = Vec::<u8>::with_capacity(2 * CHUNK_SIZE as usize);
+        let now = Instant::now();
+
+        capacity_pack_range_cuda_c(
+            2,
+            mining_address,
+            chunk_offset,
+            partition_hash.into(),
+            Some(iterations),
+            &mut c_chunk_cuda,
+        );
+
+        let elapsed = now.elapsed();
+        println!("C CUDA implementation: {:.2?}", elapsed);
+
+        assert_eq!(chunk, c_chunk_cuda[0..CHUNK_SIZE as usize].to_vec(), "CUDA chunk should be equal");
+        assert_eq!(chunk2, c_chunk_cuda[CHUNK_SIZE as usize..(2*CHUNK_SIZE) as usize].to_vec(), "Second CUDA chunk should be equal");
+
     }
 
     #[test]
@@ -281,7 +332,7 @@ mod tests {
         let mut partition_hash: [u8; SHA_HASH_SIZE] = [0; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash);
 
-        let num_chunks: usize = 512;
+        let num_chunks: usize = 4;
         let mut chunks: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
@@ -353,7 +404,7 @@ mod tests {
         let mut partition_hash: [u8; SHA_HASH_SIZE] = [0; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash);
 
-        let num_chunks: usize = 512;
+        let num_chunks: usize = 2;
         let mut chunks: Vec<u8> = Vec::with_capacity(num_chunks * CHUNK_SIZE as usize);
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 

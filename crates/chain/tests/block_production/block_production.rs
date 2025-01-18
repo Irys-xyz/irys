@@ -84,7 +84,7 @@ pub async fn capacity_chunk_solution(
     let mut entropy_chunk = Vec::<u8>::with_capacity(storage_config.chunk_size as usize);
     compute_entropy_chunk(
         miner_addr,
-        recall_range_idx as u64 * storage_config.num_chunks_in_recall_range,
+        recall_range_idx as u64 * storage_config.num_chunks_in_recall_range * storage_config.chunk_size as u64,
         partition_hash.into(),
         storage_config.entropy_packing_iterations,
         storage_config.chunk_size as usize, // take it from storage config
