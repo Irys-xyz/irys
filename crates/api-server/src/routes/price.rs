@@ -1,4 +1,3 @@
-use std::cmp::max;
 
 use actix_web::{web::Path, HttpResponse};
 use irys_config::{PRICE_PER_CHUNK_5_EPOCH, PRICE_PER_CHUNK_PERM};
