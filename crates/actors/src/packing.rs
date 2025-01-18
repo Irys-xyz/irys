@@ -1,6 +1,5 @@
 use std::{
     collections::VecDeque,
-    fmt::Display,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -13,7 +12,6 @@ use irys_packing::{
 };
 use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
 use irys_types::{split_interval, PartitionChunkRange, StorageConfig, CHUNK_SIZE};
-use nodit::Interval;
 use reth::tasks::TaskExecutor;
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
 use tracing::{debug, info, warn};

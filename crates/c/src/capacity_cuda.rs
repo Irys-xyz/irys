@@ -1,6 +1,4 @@
-use std::ffi::c_ulong;
 
-use irys_types::PACKING_SHA_1_5_S;
 
 #[allow(non_upper_case_globals)]
 #[allow(non_camel_case_types)]

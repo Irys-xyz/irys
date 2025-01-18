@@ -4,7 +4,7 @@ use std::{
 };
 
 use nodit::{
-    interval::{ie, ii},
+    interval::ie,
     InclusiveInterval, Interval,
 };
 use serde::{Deserialize, Serialize};
