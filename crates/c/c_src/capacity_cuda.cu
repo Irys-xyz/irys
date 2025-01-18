@@ -125,7 +125,7 @@ __global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsi
  * Computes the entropy chunks for the given list of chunks.
  * The entropy chunks are computed in parallel using the GPU.
  */
-extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char *mining_addr, size_t mining_addr_size, unsigned long int chunk_offset_start, long int chunks_count, const unsigned char *partition_hash, size_t partition_hash_size, unsigned char *chunks, unsigned int packing_sha_1_5_s)
+extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char *mining_addr, size_t mining_addr_size, unsigned long int chunk_offset_start, unsigned long int chain_id, long int chunks_count, const unsigned char *partition_hash, size_t partition_hash_size, unsigned char *chunks, unsigned int packing_sha_1_5_s)
 {
     unsigned char *d_chunks;
     unsigned char *d_chunk_id;
@@ -145,6 +145,10 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
     }
 
     if (cudaMemcpy(d_chunk_id + mining_addr_size, partition_hash, partition_hash_size, cudaMemcpyHostToDevice) != cudaSuccess) {
+        return CUDA_ERROR;
+    }
+
+    if (cudaMemcpy(d_chunk_id + mining_addr_size + partition_hash_size, &chain_id, sizeof(uint64_t), cudaMemcpyHostToDevice) != cudaSuccess) {
         return CUDA_ERROR;
     }
 

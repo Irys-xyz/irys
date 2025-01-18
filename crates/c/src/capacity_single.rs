@@ -1,4 +1,5 @@
 use irys_primitives::Address;
+use irys_types::CONFIG;
 use openssl::sha;
 
 pub const SHA_HASH_SIZE: usize = 32;
@@ -13,6 +14,7 @@ pub fn compute_seed_hash(
     let address_buffer: [u8; 20] = address.0.into();
     hasher.update(&address_buffer);
     hasher.update(&hash);
+    hasher.update(&CONFIG.irys_chain_id.to_le_bytes());
     hasher.update(&offset.to_le_bytes());
     hasher.finish()
 }
@@ -98,12 +100,14 @@ mod tests {
         let c_hash_ptr = c_hash.as_ptr() as *mut u8;
 
         let now = Instant::now();
+        let chain_id: u64 = CONFIG.irys_chain_id;
 
         unsafe {
             compute_seed_hash(
                 mining_addr,
                 mining_addr_len,
                 chunk_offset,
+                chain_id,
                 partition_hash,
                 partition_hash_len,
                 c_hash_ptr,
@@ -153,12 +157,14 @@ mod tests {
         let c_chunk_ptr = c_chunk.as_ptr() as *mut u8;
 
         let now = Instant::now();
+        let chain_id: u64 = CONFIG.irys_chain_id;
 
         unsafe {
             compute_entropy_chunk(
                 mining_addr,
                 mining_addr_len,
                 chunk_offset,
+                chain_id,
                 partition_hash,
                 partition_hash_len,
                 c_chunk_ptr,

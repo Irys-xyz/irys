@@ -27,11 +27,15 @@ fn capacity_single_test() {
     let partition_hash_len = partition_hash.len();
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
     let entropy_chunk_ptr = entropy_chunk.as_ptr() as *mut u8;
+
+    let chain_id: u64 = CONFIG.irys_chain_id;
+    
     unsafe {
         compute_entropy_chunk(
             mining_addr,
             mining_addr_len,
             chunk_offset,
+            chain_id,
             partition_hash,
             partition_hash_len,
             entropy_chunk_ptr,

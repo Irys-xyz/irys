@@ -5,8 +5,8 @@
 #define PACKING_HASH_SIZE 32
 #define DATA_CHUNK_SIZE (HASH_ITERATIONS_PER_BLOCK * PACKING_HASH_SIZE)
 
-// Length of the chunk ID - mining address + partition ID + chunk offset (8 bytes)
-#define CHUNK_ID_LEN 60
+// Length of the chunk ID - mining address (20 bytes) + partition ID (32 bytes) + chain id (8 bytes) + chunk offset (8 bytes)
+#define CHUNK_ID_LEN 68
 
 // Define entropy_chunk_errors as an enumeration
 typedef enum {

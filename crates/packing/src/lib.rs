@@ -79,12 +79,14 @@ pub fn capacity_pack_range_c(
     let entropy_chunk_ptr = out_entropy_chunk.as_ptr() as *mut u8;
 
     let iterations: u32 = iterations.unwrap_or(CONFIG.packing_sha_1_5_s);
+    let chain_id: u64 = CONFIG.irys_chain_id;
 
     unsafe {
         capacity::compute_entropy_chunk(
             mining_addr,
             mining_addr_len,
             chunk_offset,
+            chain_id,
             partition_hash,
             partition_hash_len,
             entropy_chunk_ptr,
@@ -111,12 +113,14 @@ pub fn capacity_pack_range_cuda_c(
     let iterations: u32 = iterations.unwrap_or(CONFIG.packing_sha_1_5_s);
 
     let entropy_ptr = entropy.as_ptr() as *mut u8;
+    let chain_id: u64 = CONFIG.irys_chain_id;
 
     unsafe {
         capacity_cuda::compute_entropy_chunks_cuda(
             mining_addr,
             mining_addr_len,
             chunk_offset,
+            chain_id,
             num_chunks as i64,
             partition_hash,
             partition_hash_len,
@@ -160,7 +164,7 @@ pub enum PackingType {
     AMD,
 }
 
-pub const PACKING_TYPE: PackingType = PackingType::CUDA; //PackingType::CPU; 
+pub const PACKING_TYPE: PackingType = PackingType::CPU; //PackingType::CUDA;
 
 /// 2D Packing Rust implementation
 pub fn capacity_pack_range_with_data(
@@ -209,7 +213,7 @@ pub fn capacity_pack_range_with_data_c(
             data.iter_mut().enumerate().for_each(|(pos, chunk)| {
                 capacity_pack_range_c(
                     mining_address,
-                    chunk_offset + pos as u64 * CONFIG.chunk_size,
+                    chunk_offset + pos as u64,
                     partition_hash,
                     iterations,
                     &mut entropy_chunk,
@@ -395,7 +399,7 @@ mod tests {
         let mut entropy_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size.try_into().unwrap());
         capacity_pack_range_c(
             mining_address,
-            chunk_offset + rnd_chunk_pos as u64 * CONFIG.chunk_size,
+            chunk_offset + rnd_chunk_pos as u64,
             partition_hash.into(),
             iterations,
             &mut entropy_chunk,
