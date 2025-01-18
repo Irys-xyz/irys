@@ -3,8 +3,10 @@ use nodit::{interval::ii, InclusiveInterval, Interval};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock, RwLockReadGuard},
+    time::Duration,
 };
-use tracing::info;
+use tokio::time::sleep;
+use tracing::{info, warn};
 
 use irys_types::{block_production::Seed, H256List, H256};
 
@@ -58,7 +60,7 @@ impl VdfState {
         Ok(H256List(
             self.seeds
                 .range(start..=end)
-                .map(|seed| seed.0)
+                .map(|seed| seed.0.clone())
                 .collect::<Vec<H256>>(),
         ))
     }
@@ -125,6 +127,24 @@ impl VdfStepsReadGuard {
     /// Read access to internal steps queue
     pub fn read(&self) -> RwLockReadGuard<'_, VdfState> {
         self.0.read().unwrap()
+    }
+
+    /// Try to read steps interval pooling a max. of 10 times waiting for interval to be available
+    /// TODO @ernius: remove this method usage after VDF validation is done async, vdf steps validation reads VDF steps blocking last steps pushes so the need of this pooling.
+    pub async fn get_steps(&self, i: Interval<u64>) -> eyre::Result<H256List> {
+        const MAX_RETRIES: i32 = 10;
+        for attempt in 0..MAX_RETRIES {
+            match self.read().get_steps(i) {
+                        Ok(c) => return Ok(c),
+                        Err(e) =>
+                            warn!("Requested vdf steps range {:?} still unavailable, attempt: {}, reason: {:?}, waiting ...", &i, attempt, e),
+                    };
+            // should be similar to a yield
+            sleep(Duration::from_millis(200)).await;
+        }
+        Err(eyre::eyre!(
+            "Max. retries reached while waiting to get VDF steps!"
+        ))
     }
 }
 

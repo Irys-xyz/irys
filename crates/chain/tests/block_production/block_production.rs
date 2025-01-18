@@ -6,8 +6,8 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
 use irys_actors::{
-    block_producer::SolutionFoundMessage, block_validation, mempool::TxIngressMessage,
-    vdf::VdfStepsReadGuard,
+    block_producer::SolutionFoundMessage, block_validation, mempool_service::TxIngressMessage,
+    vdf_service::VdfStepsReadGuard,
 };
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
@@ -17,8 +17,7 @@ use irys_storage::ii;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    vdf_config::VDFStepsConfig, Address, H256List, IrysTransaction, StorageConfig, H256,
-    IRYS_CHAIN_ID,
+    vdf_config::VDFStepsConfig, Address, H256List, IrysTransaction, StorageConfig, CONFIG, H256,
 };
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use k256::ecdsa::SigningKey;
@@ -392,12 +391,12 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             gas: Some(21000),
             value: Some(U256::from(1)),
             nonce: Some(0),
-            chain_id: Some(IRYS_CHAIN_ID),
+            chain_id: Some(CONFIG.irys_chain_id),
             ..Default::default()
         };
         let tx_env = TransactionTestContext::sign_tx(es, evm_tx_req).await;
         let signed_tx: Bytes = tx_env.encoded_2718().into();
-        // let signed_tx = TransactionTestContext::transfer_tx_bytes(IRYS_CHAIN_ID, es).await;
+        // let signed_tx = TransactionTestContext::transfer_tx_bytes(CONFIG.irys_chain_id, es).await;
         match i {
             // 1 is poor, tx should fail to inject
             1 => {

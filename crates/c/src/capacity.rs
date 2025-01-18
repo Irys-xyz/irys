@@ -1,6 +1,6 @@
 use std::ffi::c_ulong;
 
-use irys_types::PACKING_SHA_1_5_S;
+use irys_types::CONFIG;
 
 #[allow(non_upper_case_globals)]
 #[allow(non_camel_case_types)]
@@ -35,7 +35,7 @@ fn capacity_single_test() {
             partition_hash,
             partition_hash_len,
             entropy_chunk_ptr,
-            PACKING_SHA_1_5_S,
+            CONFIG.packing_sha_1_5_s,
         );
         // we need to move the `len` ptr so rust picks up on the data the C fn wrote to the vec
         entropy_chunk.set_len(entropy_chunk.capacity());

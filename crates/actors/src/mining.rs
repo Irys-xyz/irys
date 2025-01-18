@@ -2,7 +2,7 @@ use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
     BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe,
 };
-use crate::vdf::VdfStepsReadGuard;
+use crate::vdf_service::VdfStepsReadGuard;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use irys_efficient_sampling::Ranges;
@@ -60,14 +60,13 @@ impl PartitionMiningActor {
         partition_hash: &H256,
     ) -> eyre::Result<u64> {
         let vdf_steps = self.steps_guard.read();
-        let last_step = vdf_steps.global_step;
-        if last_step + 1 >= step {
+        if self.ranges.last_step_num + 1 >= step {
             debug!("Step {} already processed or next consecutive one", step);
             Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         } else {
             // This code is not needed for just one node, but will be needed for multiple nodes
             warn!("Non consecutive Step {} need to reconstruct ranges", step);
-            let steps = vdf_steps.get_steps(ii(last_step + 1, step - 1))?;
+            let steps = vdf_steps.get_steps(ii(self.ranges.last_step_num + 1, step - 1))?;
             self.ranges.reconstruct(&steps, partition_hash);
             Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         }
@@ -122,13 +121,21 @@ impl PartitionMiningActor {
             );
         }
 
-        for (index, (_chunk_offset, (chunk_bytes, _chunk_type))) in chunks.iter().enumerate() {
+        for (index, (_chunk_offset, (chunk_bytes, chunk_type))) in chunks.iter().enumerate() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
             let partition_chunk_offset =
                 (start_chunk_offset + index as u32) as PartitionChunkOffset;
-            let (tx_path, data_path) = self
-                .storage_module
-                .read_tx_data_path(partition_chunk_offset as u64)?;
+
+            // Only include the tx_path and data_path for chunks that contain data
+            let (tx_path, data_path) = match chunk_type {
+                irys_storage::ChunkType::Entropy => (None, None),
+                irys_storage::ChunkType::Data => self
+                    .storage_module
+                    .read_tx_data_path(partition_chunk_offset as u64)?,
+                irys_storage::ChunkType::Uninitialized => {
+                    return Err(eyre::eyre!("Cannot mine uninitialized chunks"))
+                }
+            };
 
             // info!(
             //     "partition_hash: {}, chunk offset: {}",
@@ -139,7 +146,8 @@ impl PartitionMiningActor {
             hasher.update(chunk_bytes);
             hasher.update(&partition_chunk_offset.to_le_bytes());
             hasher.update(mining_seed.as_bytes());
-            let test_solution = hash_to_number(&hasher.finish());
+            let solution_hash = hasher.finish();
+            let test_solution = hash_to_number(&solution_hash);
 
             if test_solution >= self.difficulty {
                 info!(
@@ -162,6 +170,7 @@ impl PartitionMiningActor {
                     vdf_step,
                     checkpoints,
                     seed: Seed(mining_seed),
+                    solution_hash: H256::from(solution_hash),
                 };
 
                 // TODO: Let all partitions know to stop mining
@@ -266,7 +275,7 @@ mod tests {
     };
     use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
     use crate::mining::{PartitionMiningActor, Seed};
-    use crate::vdf::{GetVdfStateMessage, VdfService, VdfStepsReadGuard};
+    use crate::vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard};
     use actix::{Actor, Addr, ArbiterService, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
@@ -326,6 +335,7 @@ mod tests {
             miner_address: mining_address,
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1,
+            num_confirmations_for_finality: 1, // Testnet / single node config
         };
 
         let infos = vec![StorageModuleInfo {

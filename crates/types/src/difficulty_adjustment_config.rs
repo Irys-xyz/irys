@@ -1,20 +1,19 @@
 use std::time::Duration;
 
-use crate::{
-    StorageConfig, BLOCK_TIME, DIFFICULTY_ADJUSTMENT_INTERVAL, MAX_DIFFICULTY_ADJUSTMENT_FACTOR,
-    MIN_DIFFICULTY_ADJUSTMENT_FACTOR, U256,
-};
+use crate::{StorageConfig, CONFIG, U256};
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
-#[derive(Debug, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct DifficultyAdjustmentConfig {
     /// Desired block time in seconds.
     pub target_block_time: u64,
     /// Number of blocks between difficulty adjustments.
     pub adjustment_interval: u64,
     /// Factor for smoothing difficulty adjustments.
-    pub max_adjustment_factor: u64,
+    pub max_adjustment_factor: Decimal,
     /// Factor for smoothing difficulty adjustments.
-    pub min_adjustment_factor: f64,
+    pub min_adjustment_factor: Decimal,
     /// Minimum difficulty allowed.
     pub min_difficulty: U256,
     /// Maximum difficulty allowed.
@@ -23,14 +22,7 @@ pub struct DifficultyAdjustmentConfig {
 
 impl Default for DifficultyAdjustmentConfig {
     fn default() -> Self {
-        Self {
-            target_block_time: BLOCK_TIME,                       // Default to 30s
-            adjustment_interval: DIFFICULTY_ADJUSTMENT_INTERVAL, // 2 weeks worth of blocks
-            max_adjustment_factor: MAX_DIFFICULTY_ADJUSTMENT_FACTOR, // Cap adjustments to 4x or 1/4x
-            min_adjustment_factor: MIN_DIFFICULTY_ADJUSTMENT_FACTOR, // Minimum adjustment threshold is 25%
-            min_difficulty: U256::from(1),
-            max_difficulty: U256::MAX,
-        }
+        CONFIG.into()
     }
 }
 
@@ -66,11 +58,7 @@ pub fn calculate_initial_difficulty(
     Ok(initial_difficulty)
 }
 
-pub fn adjust_difficulty(
-    current_difficulty: U256,
-    actual_time_ms: u128,
-    target_time_ms: u128,
-) -> U256 {
+pub fn adjust_difficulty(current_diff: U256, actual_time_ms: u128, target_time_ms: u128) -> U256 {
     let max_u256 = U256::MAX;
     let scale = U256::from(1000);
 
@@ -84,7 +72,7 @@ pub fn adjust_difficulty(
         (U256::from(actual_time_ms) * scale) / U256::from(target_time_ms)
     };
 
-    let target_current = max_u256 - current_difficulty;
+    let target_current = max_u256 - current_diff;
 
     // For target adjustment, always divide first then multiply
     let new_target = (target_current / scale) * adjustment_ratio;
@@ -103,14 +91,14 @@ pub fn calculate_difficulty(
     block_height: u64,
     last_diff_timestamp: u128,
     current_timestamp: u128,
-    current_difficulty: U256,
+    current_diff: U256,
     difficulty_config: &DifficultyAdjustmentConfig,
 ) -> (U256, Option<AdjustmentStats>) {
     let blocks_between_adjustments = difficulty_config.adjustment_interval as u128;
 
     // Early return if no difficulty adjustment needed
     if block_height as u128 % blocks_between_adjustments != 0 {
-        return (current_difficulty, None);
+        return (current_diff, None);
     }
 
     // Calculate times
@@ -126,7 +114,9 @@ pub fn calculate_difficulty(
     // Calculate difference
     let percent_diff = actual_block_time.abs_diff(target_block_time).as_millis() * 100
         / target_block_time.as_millis();
-    let min_threshold = (difficulty_config.min_adjustment_factor * 100.0) as u128;
+    let min_threshold = (difficulty_config.min_adjustment_factor * dec![100.0])
+        .try_into()
+        .unwrap();
 
     let stats = AdjustmentStats {
         actual_block_time,
@@ -137,12 +127,20 @@ pub fn calculate_difficulty(
     };
 
     let difficulty = if stats.is_adjusted {
-        adjust_difficulty(current_difficulty, actual_time_ms, target_time_ms)
+        adjust_difficulty(current_diff, actual_time_ms, target_time_ms)
     } else {
-        current_difficulty
+        current_diff
     };
 
     (difficulty, Some(stats))
+}
+
+/// Calculates the next cumulative difficulty by adding the expected hashes needed
+/// (max_diff / (max_diff - new_diff)) to the previous cumulative difficulty.
+pub fn next_cumulative_diff(previous_cumulative_diff: U256, new_diff: U256) -> U256 {
+    let max_diff = U256::MAX;
+    let network_hash_rate = max_diff / (max_diff - new_diff);
+    previous_cumulative_diff + network_hash_rate
 }
 //==============================================================================
 // Tests
@@ -151,12 +149,12 @@ pub fn calculate_difficulty(
 mod tests {
     use std::time::Duration;
 
+    use super::*;
     use alloy_primitives::Address;
     use openssl::sha;
 
     use crate::{
-        adjust_difficulty, calculate_initial_difficulty, StorageConfig, H256, PACKING_SHA_1_5_S,
-        U256,
+        adjust_difficulty, calculate_initial_difficulty, StorageConfig, CONFIG, H256, U256,
     };
 
     use super::DifficultyAdjustmentConfig;
@@ -164,10 +162,10 @@ mod tests {
     #[test]
     fn test_adjustments() {
         let difficulty_config = DifficultyAdjustmentConfig {
-            target_block_time: 5,        // 5 seconds
-            adjustment_interval: 10,     // every X blocks
-            max_adjustment_factor: 4,    // No more than 4x or 1/4th with each adjustment
-            min_adjustment_factor: 0.25, // a minimum 25% adjustment threshold
+            target_block_time: 5,              // 5 seconds
+            adjustment_interval: 10,           // every X blocks
+            max_adjustment_factor: dec![4],    // No more than 4x or 1/4th with each adjustment
+            min_adjustment_factor: dec![0.25], // a minimum 25% adjustment threshold
             min_difficulty: U256::one(),
             max_difficulty: U256::MAX,
         };
@@ -179,7 +177,8 @@ mod tests {
             num_partitions_in_slot: 1,
             miner_address: Address::random(),
             min_writes_before_sync: 1,
-            entropy_packing_iterations: PACKING_SHA_1_5_S,
+            entropy_packing_iterations: CONFIG.packing_sha_1_5_s,
+            num_confirmations_for_finality: 1, // Testnet / single node config
         };
 
         let mut storage_module_count = 3;

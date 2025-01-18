@@ -5,11 +5,12 @@ use actix_web::{
     HttpResponse, Result,
 };
 use awc::http::StatusCode;
-use irys_actors::mempool::{TxIngressError, TxIngressMessage};
-use irys_database::database;
-use irys_types::{IrysTransactionHeader, H256};
+use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
+use irys_database::{database, Ledger};
+use irys_types::{u64_stringify, IrysTransactionHeader, H256};
 use log::info;
 use reth_db::Database;
+use serde::{Deserialize, Serialize};
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `IrysTransactionHeader` type,
@@ -42,6 +43,10 @@ pub async fn post_tx(
                 .body(format!("Unfunded: {:?}", err))),
             TxIngressError::Skipped => Ok(HttpResponse::Ok()
                 .body("Already processed: the transaction was previously handled")),
+            TxIngressError::Other(err) => {
+                Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(format!("Failed to deliver transaction: {:?}", err)))
+            }
         };
     }
 
@@ -49,12 +54,19 @@ pub async fn post_tx(
     Ok(HttpResponse::Ok().finish())
 }
 
-pub async fn get_tx(
+pub async fn get_tx_header_api(
     state: web::Data<ApiState>,
     path: web::Path<H256>,
 ) -> Result<Json<IrysTransactionHeader>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx by tx_id: {}", tx_id);
+    get_tx_header(&state, tx_id).and_then(|header| Ok(web::Json(header)))
+}
+
+pub fn get_tx_header(
+    state: &web::Data<ApiState>,
+    tx_id: H256,
+) -> Result<IrysTransactionHeader, ApiError> {
     match state
         .db
         .view_eyre(|tx| database::tx_header_by_txid(tx, &tx_id))
@@ -66,8 +78,46 @@ pub async fn get_tx(
             id: tx_id.to_string(),
             err: String::from("tx not found"),
         }),
-        Ok(Some(tx_header)) => Ok(web::Json(tx_header)),
+        Ok(Some(tx_header)) => Ok(tx_header),
     }
+}
+
+pub async fn get_tx_local_start_offset(
+    state: web::Data<ApiState>,
+    path: web::Path<H256>,
+) -> Result<Json<TxOffset>, ApiError> {
+    let tx_id: H256 = path.into_inner();
+    info!("Get tx data metadata by tx_id: {}", tx_id);
+    let tx_header = get_tx_header(&state, tx_id)?;
+    let ledger = Ledger::try_from(tx_header.ledger_num).unwrap();
+
+    match state
+        .chunk_provider
+        .get_ledger_offsets_for_data_root(ledger, tx_header.data_root)
+    {
+        Err(_error) => Err(ApiError::Internal {
+            err: String::from("db error"),
+        }),
+        Ok(None) => Err(ApiError::ErrNoId {
+            id: tx_id.to_string(),
+            err: String::from("Transaction data isn't stored by this node"),
+        }),
+        Ok(Some(offsets)) => {
+            let offset = offsets.get(0).copied().ok_or(ApiError::Internal {
+                err: String::from("ChunkProvider error"), // the ChunkProvider should only return a Some if the vec has at least one element
+            })?;
+            Ok(web::Json(TxOffset {
+                data_start_offset: offset,
+            }))
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TxOffset {
+    #[serde(default, with = "u64_stringify")]
+    pub data_start_offset: u64,
 }
 
 #[cfg(test)]
@@ -75,11 +125,11 @@ mod tests {
     use crate::routes;
 
     use super::*;
-    use actix::Actor;
+    use actix::{Actor, ArbiterService, Registry};
     use actix_web::{middleware::Logger, test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
-    use irys_actors::mempool::MempoolActor;
+    use irys_actors::mempool_service::MempoolService;
     use irys_database::tables::IrysTables;
     use irys_storage::ChunkProvider;
     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
@@ -111,14 +161,15 @@ mod tests {
         let task_manager = TaskManager::current();
         let storage_config = StorageConfig::default();
 
-        let mempool_actor = MempoolActor::new(
+        let mempool_service = MempoolService::new(
             irys_types::app_state::DatabaseProvider(arc_db.clone()),
             task_manager.executor(),
             IrysSigner::random_signer(),
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
-        let mempool_actor_addr = mempool_actor.start();
+        Registry::set(mempool_service.start());
+        let mempool_addr = MempoolService::from_registry();
 
         let chunk_provider = ChunkProvider::new(
             storage_config.clone(),
@@ -128,7 +179,7 @@ mod tests {
 
         let app_state = ApiState {
             db: DatabaseProvider(arc_db.clone()),
-            mempool: mempool_actor_addr,
+            mempool: mempool_addr,
             chunk_provider: Arc::new(chunk_provider),
         };
 
@@ -166,14 +217,16 @@ mod tests {
         let task_manager = TaskManager::current();
         let storage_config = StorageConfig::default();
 
-        let mempool_actor = MempoolActor::new(
+        let mempool_service = MempoolService::new(
             irys_types::app_state::DatabaseProvider(db_arc.clone()),
             task_manager.executor(),
             IrysSigner::random_signer(),
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
-        let mempool_actor_addr = mempool_actor.start();
+        Registry::set(mempool_service.start());
+        let mempool_addr = MempoolService::from_registry();
+
         let chunk_provider = ChunkProvider::new(
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
@@ -182,14 +235,14 @@ mod tests {
 
         let app_state = ApiState {
             db: DatabaseProvider(db_arc.clone()),
-            mempool: mempool_actor_addr,
+            mempool: mempool_addr,
             chunk_provider: Arc::new(chunk_provider),
         };
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(app_state))
-                .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx))),
+                .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx_header_api))),
         )
         .await;
 

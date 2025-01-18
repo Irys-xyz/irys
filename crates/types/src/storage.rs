@@ -3,13 +3,12 @@ use std::{
     path::PathBuf,
 };
 
+use crate::CONFIG;
 use nodit::{
     interval::ie,
     InclusiveInterval, Interval,
 };
 use serde::{Deserialize, Serialize};
-
-use crate::CHUNK_SIZE;
 
 pub const MEGABYTE: usize = 1024 * 1024;
 pub const GIGABYTE: usize = MEGABYTE * 1024;
@@ -110,7 +109,7 @@ impl Default for StorageModuleConfig {
     fn default() -> Self {
         Self {
             directory_path: "/tmp".into(),
-            size_bytes: 100 * CHUNK_SIZE,
+            size_bytes: 100 * CONFIG.chunk_size,
             // chunks_per_lock_segment: 800, // 200MB
         }
     }

@@ -1,5 +1,5 @@
 use crate::{Arbitrary, Signature};
-use alloy_primitives::{bytes, ruint::aliases::U256, Address, Parity, B256, U256 as RethU256};
+use alloy_primitives::{bytes, ruint::aliases::U256, Address, Parity, U256 as RethU256};
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
@@ -39,8 +39,8 @@ impl IrysSignature {
 
     /// Validates this signature by performing signer recovery  
     /// NOTE: This will silently short circuit to `false` if any part of the recovery operation errors
-    pub fn validate_signature(&self, prehash: B256, expected_address: Address) -> bool {
-        recover_signer(&self.0, prehash).map_or(false, |recovered_address| {
+    pub fn validate_signature(&self, prehash: [u8; 32], expected_address: Address) -> bool {
+        recover_signer(&self.0, prehash.into()).map_or(false, |recovered_address| {
             expected_address == recovered_address
         })
     }
@@ -150,8 +150,7 @@ mod tests {
     use super::*;
 
     use crate::{
-        irys::IrysSigner, IrysTransaction, IrysTransactionHeader, H256, IRYS_CHAIN_ID,
-        MAX_CHUNK_SIZE,
+        irys::IrysSigner, IrysTransaction, IrysTransactionHeader, CONFIG, H256, MAX_CHUNK_SIZE,
     };
     use alloy_core::hex::{self};
     use alloy_primitives::Address;
@@ -172,7 +171,7 @@ mod tests {
         let irys_signer = IrysSigner {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };
 
@@ -186,7 +185,7 @@ mod tests {
             perm_fee: Some(1),
             ledger_num: 0,
             bundle_format: Some(0),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             version: 0,
             ingress_proofs: None,
             signature: Default::default(),

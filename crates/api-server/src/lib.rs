@@ -1,6 +1,5 @@
 pub mod error;
 mod routes;
-
 use std::sync::Arc;
 
 use actix::Addr;
@@ -12,7 +11,7 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 
-use irys_actors::mempool::MempoolActor;
+use irys_actors::mempool_service::MempoolService;
 use irys_storage::ChunkProvider;
 use irys_types::app_state::DatabaseProvider;
 use routes::{block, get_chunk, index, network_config, post_chunk, price, proxy::proxy, tx};
@@ -20,7 +19,7 @@ use tracing::debug;
 
 #[derive(Clone)]
 pub struct ApiState {
-    pub mempool: Addr<MempoolActor>,
+    pub mempool: Addr<MempoolService>,
     pub chunk_provider: Arc<ChunkProvider>,
     pub db: DatabaseProvider,
 }
@@ -42,9 +41,13 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(get_chunk::get_chunk_by_ledger_offset),
         )
         .route("/chunk", web::post().to(post_chunk::post_chunk))
-        .route("/tx/{tx_id}", web::get().to(tx::get_tx))
+        .route("/tx/{tx_id}", web::get().to(tx::get_tx_header_api))
+        .route(
+            "/tx/{tx_id}/local/data_start_offset",
+            web::get().to(tx::get_tx_local_start_offset),
+        )
         .route("/tx", web::post().to(tx::post_tx))
-        .route("/price/{size}", web::get().to(price::get_price))
+        .route("/price/{ledger}/{size}", web::get().to(price::get_price))
 }
 
 pub async fn run_server(app_state: ApiState) {
@@ -86,10 +89,10 @@ async fn post_tx_and_chunks_golden_path() {
     std::env::set_var("RUST_LOG", "trace");
 
     use ::irys_database::{config::get_data_dir, open_or_create_db};
-    use actix::Actor;
+    use actix::{Actor, ArbiterService, Registry};
     use actix_web::{middleware::Logger, test};
     use awc::http::StatusCode;
-    use irys_actors::mempool::MempoolActor;
+    use irys_actors::mempool_service::MempoolService;
     use irys_types::{irys::IrysSigner, Base64, StorageConfig, UnpackedChunk, MAX_CHUNK_SIZE};
 
     use rand::Rng;
@@ -102,14 +105,15 @@ async fn post_tx_and_chunks_golden_path() {
     let storage_config = StorageConfig::default();
 
     // TODO Fixup this test, maybe with some stubs
-    let mempool_actor = MempoolActor::new(
+    let mempool_service = MempoolService::new(
         irys_types::app_state::DatabaseProvider(arc_db.clone()),
         task_manager.executor(),
         IrysSigner::random_signer(),
         storage_config.clone(),
         Arc::new(Vec::new()).to_vec(),
     );
-    let mempool_actor_addr = mempool_actor.start();
+    Registry::set(mempool_service.start());
+    let mempool_addr = MempoolService::from_registry();
 
     let chunk_provider = ChunkProvider::new(
         storage_config.clone(),
@@ -119,7 +123,7 @@ async fn post_tx_and_chunks_golden_path() {
 
     let app_state = ApiState {
         db: DatabaseProvider(arc_db.clone()),
-        mempool: mempool_actor_addr,
+        mempool: mempool_addr,
         chunk_provider: Arc::new(chunk_provider),
     };
 

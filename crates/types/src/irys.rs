@@ -1,7 +1,6 @@
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysBlockHeader,
-    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID,
-    MAX_CHUNK_SIZE,
+    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, CONFIG, H256, MAX_CHUNK_SIZE,
 };
 use alloy_core::primitives::keccak256;
 
@@ -25,7 +24,7 @@ impl IrysSigner {
     pub fn random_signer() -> Self {
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         }
     }
@@ -37,7 +36,7 @@ impl IrysSigner {
     {
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             chunk_size: chunk_size.try_into().unwrap(),
         }
     }
@@ -98,7 +97,7 @@ impl IrysSigner {
         // Create the signature hash and sign it
         let prehash = block_header.signature_hash()?;
 
-        let signature: Signature = self.signer.sign_prehash_recoverable(&prehash.0)?.into();
+        let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
         block_header.signature = IrysSignature::new(signature);
         // Derive the block hash by hashing the signature
@@ -213,7 +212,7 @@ mod tests {
         let prehash = tx.header.signature_hash();
         let sig = tx.header.signature.as_bytes();
 
-        let signer = recover_signer(&sig[..].try_into().unwrap(), prehash).unwrap();
+        let signer = recover_signer(&sig[..].try_into().unwrap(), prehash.into()).unwrap();
 
         assert_eq!(signer, tx.header.signer);
     }

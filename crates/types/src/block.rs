@@ -15,7 +15,7 @@ use crate::{
     Signature, H256, U256,
 };
 
-use alloy_primitives::{keccak256, Address, FixedBytes, B256};
+use alloy_primitives::{keccak256, Address, B256};
 use serde::{Deserialize, Serialize};
 
 use crate::hash_sha256;
@@ -40,7 +40,7 @@ pub struct VDFLimiterInfo {
     /// A list of the output of each step of the nonce limiting process. Note: each step
     /// has VDF_CHECKPOINT_COUNT_IN_STEP checkpoints, the last of which is that step's output.
     /// This field would be more accurately named "steps" as checkpoints are between steps.
-    pub checkpoints: H256List,
+    pub steps: H256List,
     /// The number of SHA2-256 iterations in a single VDF checkpoint. The protocol aims to keep the
     /// checkpoint calculation time to around 40ms by varying this parameter. Note: there are
     /// 25 checkpoints in a single VDF step - so the protocol aims to keep the step calculation at
@@ -54,6 +54,7 @@ pub struct VDFLimiterInfo {
 
 #[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
 /// Stores deserialized fields from a JSON formatted Irys block header.
+#[serde(rename_all = "camelCase")]
 pub struct IrysBlockHeader {
     /// The block identifier.
     pub block_hash: BlockHash,
@@ -71,7 +72,7 @@ pub struct IrysBlockHeader {
     /// timestamp (in milliseconds) since UNIX_EPOCH of the last difficulty adjustment
     pub last_diff_timestamp: u128,
 
-    /// The solution hash for the block
+    /// The solution hash for the block hash(chunk_bytes + partition_chunk_offset + mining_seed)
     pub solution_hash: H256,
 
     /// The solution hash of the previous block in the chain.
@@ -212,7 +213,7 @@ impl IrysBlockHeader {
 
         let _ = &self
             .vdf_limiter_info
-            .checkpoints
+            .steps
             .iter()
             .for_each(|c| buf.extend_from_slice(&c.0));
 
@@ -222,10 +223,10 @@ impl IrysBlockHeader {
         Ok(())
     }
 
-    pub fn signature_hash(&self) -> eyre::Result<FixedBytes<32>> {
+    pub fn signature_hash(&self) -> eyre::Result<[u8; 32]> {
         let mut bytes = Vec::new();
         self.encode_for_signing(&mut bytes)?;
-        let prehash = keccak256(&bytes);
+        let prehash = keccak256(&bytes).0;
         Ok(prehash)
     }
 
@@ -354,7 +355,7 @@ impl fmt::Display for IrysBlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::{irys::IrysSigner, validate_path, IRYS_CHAIN_ID, MAX_CHUNK_SIZE};
+    use crate::{irys::IrysSigner, validate_path, CONFIG, MAX_CHUNK_SIZE};
 
     use super::*;
     use alloy_core::hex;
@@ -495,7 +496,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };
 

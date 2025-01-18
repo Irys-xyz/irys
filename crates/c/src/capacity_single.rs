@@ -18,7 +18,7 @@ pub fn compute_seed_hash(
 }
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
-/// defaults to `[PACKING_SHA_1_5_S]`, returns entropy chunk in `out_entropy_chunk` parameter.
+/// defaults to `[CONFIG.packing_sha_1_5_S]`, returns entropy chunk in `out_entropy_chunk` parameter.
 /// Precondition: `out_entropy_chunk` should have at least `chunk_size` capacity
 #[inline]
 pub fn compute_entropy_chunk(
@@ -68,7 +68,7 @@ mod tests {
         capacity_single::{self, SHA_HASH_SIZE},
     };
     use irys_primitives::Address;
-    use irys_types::{CHUNK_SIZE, PACKING_SHA_1_5_S};
+    use irys_types::CONFIG;
     use rand;
     use rand::Rng;
     use std::time::Instant;
@@ -125,9 +125,9 @@ mod tests {
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-        let iterations = PACKING_SHA_1_5_S;
+        let iterations = CONFIG.packing_sha_1_5_s;
 
-        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
 
         let now = Instant::now();
 
@@ -136,14 +136,14 @@ mod tests {
             chunk_offset,
             partition_hash,
             iterations,
-            CHUNK_SIZE as usize,
+            CONFIG.chunk_size as usize,
             &mut chunk,
         );
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
-        let mut c_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut c_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
 
         let mining_addr_len = mining_address.len(); // note: might not line up with capacity? that should be fine...
         let partition_hash_len = partition_hash.len();

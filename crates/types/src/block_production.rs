@@ -26,6 +26,7 @@ pub struct SolutionContext {
     pub vdf_step: u64,
     pub checkpoints: H256List,
     pub seed: Seed,
+    pub solution_hash: H256,
 }
 #[derive(Debug, Clone)]
 pub struct Partition {

@@ -8,8 +8,9 @@ use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, St
 use irys_types::{
     app_state::DatabaseProvider, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
     LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxRelativeChunkOffset,
-    UnpackedChunk,
+    UnpackedChunk, H256,
 };
+
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
 use tracing::error;
@@ -23,49 +24,65 @@ use crate::block_producer::BlockFinalizedMessage;
 /// - Maintains chunk location indices
 /// - Coordinates chunk reads/writes
 /// - Manages storage state transitions
-#[derive(Debug)]
-pub struct ChunkMigrationActor {
+#[derive(Debug, Default)]
+pub struct ChunkMigrationService {
     /// Tracks block boundaries and offsets for locating chunks in ledgers
-    pub block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+    pub block_index: Option<Arc<RwLock<BlockIndex<Initialized>>>>,
     /// Configuration parameters for storage system
     pub storage_config: StorageConfig,
     /// Collection of storage modules for distributing chunk data
     pub storage_modules: Vec<Arc<StorageModule>>,
     /// Persistent database for storing chunk metadata and indices
-    pub db: DatabaseProvider,
+    pub db: Option<DatabaseProvider>,
 }
 
-impl Actor for ChunkMigrationActor {
+impl Actor for ChunkMigrationService {
     type Context = Context<Self>;
 }
 
-impl ChunkMigrationActor {
-    /// Creates a new chunk storage actor
-    pub const fn new(
+impl ChunkMigrationService {
+    pub fn new(
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         storage_config: StorageConfig,
         storage_modules: Vec<Arc<StorageModule>>,
         db: DatabaseProvider,
     ) -> Self {
+        println!("service started: chunk_migration");
         Self {
-            block_index,
+            block_index: Some(block_index),
             storage_config,
             storage_modules,
-            db,
+            db: Some(db),
         }
     }
 }
-impl Handler<BlockFinalizedMessage> for ChunkMigrationActor {
+
+/// Adds this actor the the local service registry
+impl Supervised for ChunkMigrationService {}
+
+impl ArbiterService for ChunkMigrationService {
+    fn service_started(&mut self, _ctx: &mut Context<Self>) {
+        println!("chunk_migration service started");
+    }
+}
+
+impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
     type Result = ResponseFuture<Result<(), ()>>;
 
     fn handle(&mut self, msg: BlockFinalizedMessage, _: &mut Context<Self>) -> Self::Result {
+        // Early return if not initialized
+        if self.block_index.is_none() || self.db.is_none() {
+            error!("chunk_migration service not initialized");
+            return Box::pin(async move { Err(()) });
+        }
+
         // Collect working variables to move into the closure
         let block = msg.block_header;
         let all_txs = msg.all_txs;
-        let block_index = self.block_index.clone();
+        let block_index = self.block_index.clone().unwrap();
         let chunk_size = self.storage_config.chunk_size as usize;
         let storage_modules = Arc::new(self.storage_modules.clone());
-        let db = Arc::new(self.db.clone());
+        let db = Arc::new(self.db.clone().unwrap());
 
         // Extract transactions for each ledger
         let submit_tx_count = block.ledgers[Ledger::Submit].txids.len();
@@ -113,7 +130,7 @@ fn process_ledger_transactions(
     let block_range = get_block_range(block, ledger, block_index.clone());
     let mut prev_chunk_offset = block_range.start();
 
-    for (tx_path, (data_root, data_size)) in path_pairs {
+    for ((_txid, tx_path), (data_root, data_size)) in path_pairs {
         let num_chunks_in_tx = data_size.div_ceil(chunk_size as u64) as u32;
         let tx_chunk_range = LedgerChunkRange(ie(
             prev_chunk_offset,
@@ -215,8 +232,7 @@ fn get_tx_path_pairs(
     block: &IrysBlockHeader,
     ledger: Ledger,
     txs: &[IrysTransactionHeader],
-) -> eyre::Result<Vec<(Proof, (DataRoot, u64))>> {
-    // Changed Proof to TxPath
+) -> eyre::Result<Vec<((H256, Proof), (DataRoot, u64))>> {
     let (tx_root, proofs) = TransactionLedger::merklize_tx_root(txs);
 
     if tx_root != block.ledgers[ledger].tx_root {
@@ -225,7 +241,8 @@ fn get_tx_path_pairs(
 
     Ok(proofs
         .into_iter()
-        .zip(txs.iter().map(|tx| (tx.data_root, tx.data_size)))
+        .zip(txs.iter())
+        .map(|(proof, tx)| ((tx.id, proof), (tx.data_root, tx.data_size)))
         .collect())
 }
 

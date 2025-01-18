@@ -13,7 +13,7 @@ use irys_chain::{chain::start_for_testing, IrysNodeCtx};
 use irys_database::tables::ProgrammableDataChunkCache;
 use irys_reth_node_bridge::precompile::irys_executor::IrysPrecompileOffsets;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, CHUNK_SIZE};
+use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, CONFIG};
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::Database;
@@ -90,7 +90,7 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
     // insert some dummy data to the PD cache table
     // note: this logic is very dumbed down for the PoC
     let write_tx = node.db.tx_mut()?;
-    let mut chunk = [0u8; CHUNK_SIZE as usize];
+    let mut chunk = [0u8; CONFIG.chunk_size as usize];
 
     let message = "Hirys, world!";
 

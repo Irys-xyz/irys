@@ -12,7 +12,8 @@ members = [
     "crates/storage",
     "crates/testing-utils",
     "crates/config",
-    "crates/efficient-sampling",    
+    "crates/efficient-sampling",
+    "crates/macros",
 ]
 resolver = "2"
 
@@ -22,6 +23,7 @@ rust-version = "1.82"
 
 [workspace.dependencies]
 # Irys
+irys-macros = { path = "./crates/macros" }
 irys-database = { path = "./crates/database" }
 irys-actors = { path = "./crates/actors" }
 irys-api-server = { path = "./crates/api-server" }
@@ -134,12 +136,19 @@ alloy-network = { path = "./ext/alloy/crates/network" }
 revm = { path = "./ext/revm/crates/revm", features = ["std", "serde-json"] }
 revm-primitives = { path = "./ext/revm/crates/primitives" }
 reth-payload-builder = { path = "./ext/reth/crates/payload/builder" }
-serde = { version = "1.0", default-features = false }
+rust_decimal = "1"
+rust_decimal_macros = "1"
+serde = { version = "1", default-features = false }
 reth-rpc-layer = { path = "./ext/reth/crates/rpc/rpc-layer" }
-serde_json = "1.0.94"
+serde_json = "1"
 test-fuzz = "6"
 thiserror = "1.0"
 tokio = { version = "1.40.0", features = ["rt", "macros"] }
+toml = "0.8"
+derive-syn-parse = "0"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
 tracing = "0.1.0"
 tracing-subscriber = { version = "0.3", default-features = false, features = [
     "env-filter",

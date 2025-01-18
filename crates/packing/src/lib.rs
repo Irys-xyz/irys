@@ -2,8 +2,7 @@ use std::ops::BitXor;
 
 pub use irys_c::{capacity, capacity_cuda, capacity_single};
 use irys_types::{
-    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CHUNK_SIZE,
-    PACKING_SHA_1_5_S,
+    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CONFIG, CHUNK_SIZE
 };
 
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
@@ -64,7 +63,7 @@ pub fn unpack_with_entropy(
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
 /// defaults to [`PACKING_SHA_1_5_S`]`, returns entropy chunk in out_entropy_chunk parameter.
-/// Precondition: `out_entropy_chunk` should have at least DATA_CHUNK_SIZE = 256KB (definded in capacity.h file) capacity
+/// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (definded in capacity.h file) capacity
 /// Uses C 2D Packing implementation
 pub fn capacity_pack_range_c(
     mining_address: Address,
@@ -79,7 +78,7 @@ pub fn capacity_pack_range_c(
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
     let entropy_chunk_ptr = out_entropy_chunk.as_ptr() as *mut u8;
 
-    let iterations: u32 = iterations.unwrap_or(PACKING_SHA_1_5_S);
+    let iterations: u32 = iterations.unwrap_or(CONFIG.packing_sha_1_5_s);
 
     unsafe {
         capacity::compute_entropy_chunk(
@@ -109,7 +108,7 @@ pub fn capacity_pack_range_cuda_c(
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
-    let iterations: u32 = iterations.unwrap_or(PACKING_SHA_1_5_S);
+    let iterations: u32 = iterations.unwrap_or(CONFIG.packing_sha_1_5_s);
 
     let entropy_ptr = entropy.as_ptr() as *mut u8;
 
@@ -172,10 +171,11 @@ pub fn capacity_pack_range_with_data(
     iterations: Option<u32>,
     chunk_size: usize,
 ) {
+    let iterations: u32 = iterations.unwrap_or(CONFIG.packing_sha_1_5_s);
+
     match PACKING_TYPE {
         PackingType::CPU => {
             let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
-            let iterations: u32 = iterations.unwrap_or(PACKING_SHA_1_5_S);
             data.iter_mut().enumerate().for_each(|(pos, chunk)| {
                 capacity_single::compute_entropy_chunk(
                     mining_address,
@@ -205,11 +205,11 @@ pub fn capacity_pack_range_with_data_c(
 ) {
     match PACKING_TYPE {
         PackingType::CPU => {
-            let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+            let mut entropy_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
             data.iter_mut().enumerate().for_each(|(pos, chunk)| {
                 capacity_pack_range_c(
                     mining_address,
-                    chunk_offset + pos as u64 * CHUNK_SIZE,
+                    chunk_offset + pos as u64 * CONFIG.chunk_size,
                     partition_hash,
                     iterations,
                     &mut entropy_chunk,
@@ -255,7 +255,7 @@ mod tests {
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-        let iterations = 2 * CHUNK_SIZE as u32;
+        let iterations = 2 * CONFIG.chunk_size as u32;
 
         let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
         let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
@@ -267,7 +267,7 @@ mod tests {
             chunk_offset,
             partition_hash,
             iterations,
-            CHUNK_SIZE as usize,
+            CONFIG.chunk_size as usize,
             &mut chunk,
         );
 
@@ -349,7 +349,7 @@ mod tests {
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
         for _i in 0..num_chunks {
-            let mut chunk = [0u8; CHUNK_SIZE as usize];
+            let mut chunk = [0u8; CONFIG.chunk_size as usize];
             rng.fill_bytes(&mut chunk);
             chunks.push(chunk.to_vec());
             chunks_rust.push(chunk.to_vec());
@@ -392,10 +392,10 @@ mod tests {
         assert_eq!(chunks, chunks_rust, "Rust and C packing should be equal");
 
         // calculate entropy for choosen random chunk
-        let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
+        let mut entropy_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size.try_into().unwrap());
         capacity_pack_range_c(
             mining_address,
-            chunk_offset + rnd_chunk_pos as u64 * CHUNK_SIZE,
+            chunk_offset + rnd_chunk_pos as u64 * CONFIG.chunk_size,
             partition_hash.into(),
             iterations,
             &mut entropy_chunk,
