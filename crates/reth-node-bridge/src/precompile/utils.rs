@@ -1,5 +1,5 @@
 use alloy_rpc_types::AccessListItem;
-use irys_primitives::range_specifier::{BytesRangeSpecifier, PdAccessListArg, RangeSpecifier};
+use irys_primitives::range_specifier::{ByteRangeSpecifier, PdAccessListArg, RangeSpecifier};
 use tracing::warn;
 
 use super::entrypoint::PRECOMPILE_ADDRESS;
@@ -7,7 +7,7 @@ use super::entrypoint::PRECOMPILE_ADDRESS;
 #[derive(Debug, Clone)]
 pub struct ParsedAccessLists {
     pub chunk_reads: Vec<RangeSpecifier>,
-    pub byte_reads: Vec<BytesRangeSpecifier>,
+    pub byte_reads: Vec<ByteRangeSpecifier>,
 }
 
 pub fn parse_access_list(access_list: &Vec<AccessListItem>) -> eyre::Result<ParsedAccessLists> {

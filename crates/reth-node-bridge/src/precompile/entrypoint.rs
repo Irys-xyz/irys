@@ -4,7 +4,7 @@ use tracing::debug;
 use super::{
     functions::PdFunctionId,
     irys_executor::{CustomPrecompileWithAddress, IrysPrecompileOffsets, PrecompileStateProvider},
-    read_bytes::{read_bytes_first_range, read_bytes_first_range_with_args},
+    read_bytes::{read_bytes_range_by_index, read_partial_byte_range},
     utils::parse_access_list,
 };
 
@@ -23,7 +23,6 @@ fn programmable_data_precompile(
     env: &Env,
     state_provider: &PrecompileStateProvider,
 ) -> PrecompileResult {
-    // make sure we were given the u32 index, the u32 range relative offset, and the u16 number of chunks to read
     if call_data.is_empty() {
         return Err(PrecompileError::Other(format!(
             "Invalid empty calldata (function selector required)",
@@ -33,7 +32,7 @@ fn programmable_data_precompile(
 
     let access_list = &env.tx.access_list;
     if access_list.is_empty() {
-        // this is a constant requirement across all execution paths, as we always need at least one PD request range, which must be in the access list.
+        // this is a constant requirement across all execution paths, as we always need at least one PD chunk read range, which must be in the access list.
         return Err(PrecompileError::Other("Transaction has no access list".to_string()).into());
     }
 
@@ -56,14 +55,12 @@ fn programmable_data_precompile(
         ))
     })?;
 
-    debug!("Parsed access lists: {:?}", &parsed);
-
     match decoded_id {
-        PdFunctionId::ReadBytesFirstRange => {
-            read_bytes_first_range(call_data, gas_limit, env, state_provider, parsed)
+        PdFunctionId::ReadFullByteRange => {
+            read_bytes_range_by_index(call_data, gas_limit, env, state_provider, parsed)
         }
-        PdFunctionId::ReadBytesFirstRangeWithArgs => {
-            read_bytes_first_range_with_args(call_data, gas_limit, env, state_provider, parsed)
+        PdFunctionId::ReadPartialByteRange => {
+            read_partial_byte_range(call_data, gas_limit, env, state_provider, parsed)
         }
     }
 }

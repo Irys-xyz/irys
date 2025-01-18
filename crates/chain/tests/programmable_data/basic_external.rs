@@ -1,4 +1,5 @@
 use crate::block_production::basic_contract::future_or_mine_on_timeout;
+use crate::block_production::block_production::capacity_chunk_solution;
 use actix_http::StatusCode;
 use alloy_core::primitives::aliases::U200;
 use alloy_core::primitives::U256;
@@ -8,19 +9,19 @@ use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use base58::ToBase58;
+use irys_actors::mempool::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
+use irys_actors::SolutionFoundMessage;
 use irys_api_server::routes::tx::TxOffset;
 use irys_chain::chain::start_for_testing;
+use irys_database::tables::IngressProofs;
 use irys_reth_node_bridge::precompile::irys_executor::IrysPrecompileOffsets;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{irys::IrysSigner, Address};
-use irys_types::{Base64, IrysTransactionHeader, UnpackedChunk};
-
 use k256::ecdsa::SigningKey;
-use reth_primitives::irys_primitives::range_specifier::{
-    ByteRangeSpecifier, PdAccessListArgSerde, U18, U34,
-};
-use reth_primitives::{irys_primitives::range_specifier::RangeSpecifier, GenesisAccount};
+use reth_db::transaction::DbTx;
+use reth_db::Database as _;
+use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -37,13 +38,15 @@ sol!(
 const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
 const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
+#[ignore]
 #[actix_web::test]
-async fn test_programmable_data_basic() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
+async fn test_programmable_data_basic_external() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "info");
 
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic_external"), false);
     let mut config = irys_config::IrysNodeConfig {
         base_directory: temp_dir.path().to_path_buf(),
+
         ..Default::default()
     };
     let main_address = config.mining_signer.address();
@@ -75,6 +78,7 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
     ]);
 
     let node = start_for_testing(config.clone()).await?;
+    node.actor_addresses.stop_mining()?;
     wait_for_packing(
         node.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
@@ -133,81 +137,42 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
     assert_eq!(response.status(), 200);
     info!("HTTP server started");
 
-    let message = "Hirys, world!";
-    let data_bytes = message.as_bytes().to_vec();
-    // post a tx, mine a block
-    let tx = account1
-        .create_transaction(data_bytes.clone(), None)
-        .unwrap();
-    let tx = account1.sign_transaction(tx).unwrap();
+    info!("waiting for tx header...");
 
-    // post tx header
-    let resp = client
-        .post(format!("{}/v1/tx", http_url))
-        .send_json(&tx.header)
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let id: String = tx.header.id.as_bytes().to_base58();
-    let mut tx_header_fut = Box::pin(async {
-        let delay = Duration::from_secs(1);
-        // sleep(delay).await;
-        // println!("slept");
-        for attempt in 1..20 {
-            let mut response = client
-                .get(format!("{}/v1/tx/{}", http_url, &id))
-                .send()
-                .await
-                .unwrap();
-
-            if response.status() == StatusCode::OK {
-                let result: IrysTransactionHeader = response.json().await.unwrap();
-                assert_eq!(&tx.header, &result);
-                info!("Transaction was retrieved ok after {} attempts", attempt);
-                break;
+    let recv_tx = loop {
+        let txs = &node.actor_addresses.mempool.send(GetBestMempoolTxs).await;
+        match txs {
+            Ok(transactions) if !transactions.is_empty() => {
+                break transactions[0].clone();
             }
-            sleep(delay).await;
+            _ => {
+                sleep(Duration::from_millis(100)).await;
+            }
         }
-    });
+    };
+    info!(
+        "got tx {:?}- waiting for chunks & ingress proof generation...",
+        &recv_tx.id
+    );
+    let tx_id = recv_tx.id;
 
-    future_or_mine_on_timeout(
-        node.clone(),
-        &mut tx_header_fut,
-        Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
-    )
-    .await?;
+    // now we wait for an ingress proof to be generated for this tx (automatic once all chunks have been uploaded)
+    let ingress_proof = loop {
+        // don't reuse the tx! it has read isolation (won't see anything commited after it's creation)
+        let ro_tx = &node.db.0.tx().unwrap();
+        match ro_tx.get::<IngressProofs>(recv_tx.data_root).unwrap() {
+            Some(ip) => break ip,
+            None => sleep(Duration::from_millis(100)).await,
+        }
+    };
 
-    // upload chunk(s)
-    for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
-        let data_root = tx.header.data_root;
-        let data_size = tx.header.data_size;
-        let min = chunk_node.min_byte_range;
-        let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
+    info!(
+        "got ingress proof for data root {}",
+        &ingress_proof.data_root
+    );
+    assert_eq!(&ingress_proof.data_root, &recv_tx.data_root);
 
-        let chunk = UnpackedChunk {
-            data_root,
-            data_size,
-            data_path,
-            bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: tx_chunk_offset as u32,
-        };
-
-        // Make a POST request with JSON payload
-
-        let resp = client
-            .post(format!("{}/v1/chunk", http_url))
-            .send_json(&chunk)
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
+    let id: String = tx_id.as_bytes().to_base58();
 
     // wait for the chunks to migrate
     let mut start_offset_fut = Box::pin(async {
@@ -245,64 +210,25 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
     .await?
     .unwrap();
 
-    // let read_chunk = &node.chunk_provider.get_chunk_by_ledger_offset(
-    //     irys_database::Ledger::Publish,
-    //     start_offset.data_start_offset,
-    // );
+    for i in 1..10 {
+        let poa_solution = capacity_chunk_solution(
+            node.config.mining_signer.address(),
+            node.vdf_steps_guard.clone(),
+            &node.vdf_config,
+            &node.storage_config,
+        )
+        .await;
 
-    // dbg!(read_chunk);
+        let _ = node
+            .actor_addresses
+            .block_producer
+            .send(SolutionFoundMessage(poa_solution.clone()))
+            .await?
+            .unwrap();
+    }
 
-    // call with a range specifier index, position in the requested range to start from, and the number of chunks to read
-    // let mut invocation_builder = contract.read_pd_chunk_into_storage();
-
-    let mut invocation_builder = contract.readPdChunkIntoStorage();
-
-    // set the access list (this lets the node know in advance what chunks you want to access)
-    invocation_builder = invocation_builder.access_list(
-        vec![AccessListItem {
-            address: precompile_address,
-            storage_keys: vec![
-                RangeSpecifier {
-                    partition_index: U200::from(0),
-                    offset: 0,
-                    chunk_count: 1_u16,
-                }
-                .encode()
-                .into(),
-                ByteRangeSpecifier {
-                    index: 0,
-                    chunk_offset: 0,
-                    byte_offset: U18::from(0),
-                    length: U34::from(data_bytes.len()),
-                }
-                .encode()
-                .into(),
-            ],
-        }]
-        .into(),
-    );
-
-    let invocation_call = invocation_builder.send().await?;
-    let mut invocation_receipt_fut = Box::pin(invocation_call.get_receipt());
-    let _res = future_or_mine_on_timeout(
-        node.clone(),
-        &mut invocation_receipt_fut,
-        Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
-    )
-    .await??;
-
-    let stored_bytes = contract.getStorage().call().await?._0;
-    let stored_message = String::from_utf8(stored_bytes.to_vec())?;
-
-    println!(
-        "Original string: {}, stored string: {}",
-        &message, &stored_message
-    );
-
-    assert_eq!(&message, &stored_message);
+    // sleep so the client has a chance to read the chunks
+    sleep(Duration::from_millis(100_000)).await;
 
     Ok(())
 }

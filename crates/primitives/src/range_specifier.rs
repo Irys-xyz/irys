@@ -1,5 +1,7 @@
 //! Range offsets are used by PD to figure out what chunks/bytes are required to fufill a precompile call.
 
+use std::ops::Div;
+
 use alloy_primitives::{aliases::U200, B256};
 use eyre::eyre;
 use ruint::Uint;
@@ -31,7 +33,7 @@ impl TryFrom<u8> for PdAccessListArgsTypeId {
 
 pub enum PdAccessListArg {
     ChunksRead(RangeSpecifier),
-    BytesRead(BytesRangeSpecifier),
+    BytesRead(ByteRangeSpecifier),
 }
 
 impl PdAccessListArg {
@@ -58,7 +60,7 @@ impl PdAccessListArg {
                 Ok(PdAccessListArg::ChunksRead(RangeSpecifier::decode(bytes)?))
             }
             PdAccessListArgsTypeId::BytesRead => Ok(PdAccessListArg::BytesRead(
-                BytesRangeSpecifier::decode(bytes)?,
+                ByteRangeSpecifier::decode(bytes)?,
             )),
         }
     }
@@ -203,15 +205,38 @@ pub type U34 = Uint<34, 1>;
 pub type U18 = Uint<18, 1>;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct BytesRangeSpecifier {
+pub struct ByteRangeSpecifier {
     pub index: u8,         // index of the corresponding PD chunk range request
     pub chunk_offset: u16, // the PD chunk range request start relative chunk offset (matches chunk_count in RangeSpecifier)
     pub byte_offset: U18,  // the chunk offset relative byte offset to start reading from
-    pub len: U34,          // the number of bytes to read - this is optional
+    pub length: U34,       // the number of bytes to read - this is optional
                            // pub reserved: [u8; 20], // 20 bytes, unused (for now)
 }
 
-impl PdAccessListArgSerde for BytesRangeSpecifier {
+impl ByteRangeSpecifier {
+    pub fn translate_offset(&mut self, chunk_size: u64, offset: u64) -> eyre::Result<()> {
+        let full_offset: u64 = offset
+            .checked_add(u64::try_from(self.byte_offset)?)
+            .ok_or_else(|| eyre!("Offset addition overflow"))?;
+
+        let additional_chunks = full_offset.div(chunk_size);
+        let new_chunk_offset = self
+            .chunk_offset
+            .checked_add(
+                u16::try_from(additional_chunks).map_err(|_| eyre!("Chunk offset overflow"))?,
+            )
+            .ok_or_else(|| eyre!("Chunk offset addition overflow"))?;
+
+        let new_byte_offset = U18::try_from(full_offset % chunk_size)
+            .map_err(|_| eyre!("Byte offset conversion error"))?;
+
+        self.chunk_offset = new_chunk_offset;
+        self.byte_offset = new_byte_offset;
+        Ok(())
+    }
+}
+
+impl PdAccessListArgSerde for ByteRangeSpecifier {
     fn get_type() -> PdAccessListArgsTypeId {
         PdAccessListArgsTypeId::BytesRead
     }
@@ -221,7 +246,7 @@ impl PdAccessListArgSerde for BytesRangeSpecifier {
         buf[0] = self.index;
         buf[1..=2].copy_from_slice(&self.chunk_offset.to_le_bytes());
         buf[3..=5].copy_from_slice(&self.byte_offset.to_le_bytes::<3>());
-        buf[6..=10].copy_from_slice(&self.len.to_le_bytes::<5>());
+        buf[6..=10].copy_from_slice(&self.length.to_le_bytes::<5>());
         // 20 unused bytes
         // buf[11..=30].copy_from_slice(&self.reserved);
         buf
@@ -231,11 +256,11 @@ impl PdAccessListArgSerde for BytesRangeSpecifier {
     where
         Self: Sized,
     {
-        Ok(BytesRangeSpecifier {
+        Ok(ByteRangeSpecifier {
             index: bytes[0],
             chunk_offset: u16::from_le_bytes(bytes[1..=2].try_into()?),
             byte_offset: U18::from_le_bytes::<3>(bytes[3..=5].try_into()?),
-            len: U34::from_le_bytes::<5>(bytes[6..=10].try_into()?),
+            length: U34::from_le_bytes::<5>(bytes[6..=10].try_into()?),
         })
     }
 }
@@ -246,15 +271,15 @@ mod bytes_range_specifier_tests {
 
     #[test]
     fn test_encode_decode_roundtrip() {
-        let original = BytesRangeSpecifier {
+        let original = ByteRangeSpecifier {
             index: 42,
             chunk_offset: 12345,
             byte_offset: U18::from(123456),
-            len: U34::from(12345678),
+            length: U34::from(12345678),
         };
 
         let encoded = original.encode();
-        let decoded = BytesRangeSpecifier::decode(&encoded).unwrap();
+        let decoded = ByteRangeSpecifier::decode(&encoded).unwrap();
 
         assert_eq!(original, decoded);
     }
@@ -262,15 +287,15 @@ mod bytes_range_specifier_tests {
     #[test]
     fn test_bit_boundaries() {
         // Test maximum values
-        let max_values = BytesRangeSpecifier {
+        let max_values = ByteRangeSpecifier {
             index: 255,
             chunk_offset: 65535,
             byte_offset: U18::from((1 << 18) - 1),
-            len: U34::from((1_u64 << 34) - 1),
+            length: U34::from((1_u64 << 34) - 1),
         };
 
         let encoded = max_values.encode();
-        let decoded = BytesRangeSpecifier::decode(&encoded).unwrap();
+        let decoded = ByteRangeSpecifier::decode(&encoded).unwrap();
 
         assert_eq!(max_values, decoded);
     }
@@ -279,5 +304,147 @@ mod bytes_range_specifier_tests {
     fn test_validation() {
         U18::try_from(1_u32 << 18).expect_err("value should overflow");
         U34::try_from(1_u64 << 34).expect_err("value should overflow");
+    }
+    use super::*;
+
+    #[test]
+    fn test_translate_offset_within_chunk() -> eyre::Result<()> {
+        let mut specifier = ByteRangeSpecifier {
+            index: 0,
+            chunk_offset: 5,
+            byte_offset: U18::from(100),
+            length: U34::from(50),
+        };
+
+        let chunk_size = 1000;
+        let offset = 200;
+        specifier.translate_offset(chunk_size, offset)?;
+
+        assert_eq!(specifier.chunk_offset, 5);
+        assert_eq!(u64::try_from(specifier.byte_offset)?, 300);
+        assert_eq!(specifier.length, specifier.length);
+        Ok(())
+    }
+
+    #[test]
+    fn test_translate_offset_cross_chunk() -> eyre::Result<()> {
+        let mut specifier = ByteRangeSpecifier {
+            index: 1,
+            chunk_offset: 10,
+            byte_offset: U18::from(800),
+            length: U34::from(100),
+        };
+
+        let chunk_size = 1000;
+        let offset = 300;
+        specifier.translate_offset(chunk_size, offset)?;
+
+        assert_eq!(specifier.chunk_offset, 11);
+        assert_eq!(u64::try_from(specifier.byte_offset)?, 100);
+        assert_eq!(specifier.length, specifier.length);
+        Ok(())
+    }
+
+    #[test]
+    fn test_translate_offset_multiple_chunks() -> eyre::Result<()> {
+        let mut specifier = ByteRangeSpecifier {
+            index: 2,
+            chunk_offset: 20,
+            byte_offset: U18::from(500),
+            length: U34::from(200),
+        };
+
+        let chunk_size = 1000;
+        let offset = 2500;
+        specifier.translate_offset(chunk_size, offset)?;
+
+        assert_eq!(specifier.chunk_offset, 23);
+        assert_eq!(u64::try_from(specifier.byte_offset)?, 0);
+        assert_eq!(specifier.length, specifier.length);
+        Ok(())
+    }
+
+    #[test]
+    fn test_translate_offset_zero() -> eyre::Result<()> {
+        let mut specifier = ByteRangeSpecifier {
+            index: 3,
+            chunk_offset: 15,
+            byte_offset: U18::from(250),
+            length: U34::from(75),
+        };
+
+        let chunk_size = 1000;
+        let offset = 0;
+        specifier.translate_offset(chunk_size, offset)?;
+
+        assert_eq!(specifier.chunk_offset, 15);
+        assert_eq!(u64::try_from(specifier.byte_offset)?, 250);
+        assert_eq!(specifier.length, specifier.length);
+        Ok(())
+    }
+
+    #[test]
+    fn test_translate_offset_exact_chunk_boundary() -> eyre::Result<()> {
+        let mut specifier = ByteRangeSpecifier {
+            index: 4,
+            chunk_offset: 30,
+            byte_offset: U18::from(900),
+            length: U34::from(150),
+        };
+
+        let chunk_size = 1000;
+        let offset = 100;
+        specifier.translate_offset(chunk_size, offset)?;
+
+        assert_eq!(specifier.chunk_offset, 31);
+        assert_eq!(u64::try_from(specifier.byte_offset)?, 0);
+        assert_eq!(specifier.length, specifier.length);
+        Ok(())
+    }
+
+    #[test]
+    fn test_translate_offset_overflow_handling() -> eyre::Result<()> {
+        let mut specifier = ByteRangeSpecifier {
+            index: 5,
+            chunk_offset: u16::MAX,
+            byte_offset: U18::from(500),
+            length: U34::from(100),
+        };
+
+        let chunk_size = 1000;
+        let offset = 1000;
+
+        // Should return an error instead of panicking
+        let result = specifier.translate_offset(chunk_size, offset);
+        assert!(result.is_err());
+
+        // Verify error message
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("overflow"),
+            "Expected overflow error, got: {}",
+            err
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_translate_offset_huge_offset() -> eyre::Result<()> {
+        let mut specifier = ByteRangeSpecifier {
+            index: 6,
+            chunk_offset: 0,
+            byte_offset: U18::from(0),
+            length: U34::from(100),
+        };
+
+        let chunk_size = 1000;
+        let offset = u64::MAX;
+
+        // Should return an error for impossibly large offset
+        let result = specifier.translate_offset(chunk_size, offset);
+        assert!(result.is_err());
+
+        Ok(())
     }
 }
