@@ -1,7 +1,6 @@
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysBlockHeader,
-    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, H256, IRYS_CHAIN_ID,
-    MAX_CHUNK_SIZE,
+    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, CONFIG, H256, MAX_CHUNK_SIZE,
 };
 use alloy_core::primitives::keccak256;
 
@@ -25,7 +24,7 @@ impl IrysSigner {
     pub fn random_signer() -> Self {
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         }
     }
@@ -37,7 +36,7 @@ impl IrysSigner {
     {
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             chunk_size: chunk_size.try_into().unwrap(),
         }
     }

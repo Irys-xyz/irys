@@ -1,7 +1,7 @@
 use actix::Addr;
 use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
-    vdf::{VdfSeed, VdfService},
+    vdf_service::{VdfSeed, VdfService},
 };
 use irys_types::{block_production::Seed, vdf_config::VDFStepsConfig, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
@@ -81,9 +81,9 @@ pub fn run_vdf(
 mod tests {
     use super::*;
     use actix::*;
-    use irys_actors::vdf::{GetVdfStateMessage, VdfStepsReadGuard};
+    use irys_actors::vdf_service::{GetVdfStateMessage, VdfStepsReadGuard};
     use irys_types::*;
-    use irys_vdf::{checkpoints_are_valid, vdf_sha_verification};
+    use irys_vdf::{vdf_sha_verification, vdf_steps_are_valid};
     use nodit::interval::ii;
     use std::{sync::mpsc, time::Duration};
     use tracing::{debug, level_filters::LevelFilter};
@@ -98,7 +98,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_vdf_step() {
         let mut hasher = Sha256::new();
-        let mut checkpoints: Vec<H256> = vec![H256::default(); NUM_CHECKPOINTS_IN_VDF_STEP];
+        let mut checkpoints: Vec<H256> = vec![H256::default(); CONFIG.num_checkpoints_in_vdf_step];
         let mut hash: H256 = H256::random();
         let original_hash = hash;
         let mut salt: U256 = U256::from(10);
@@ -203,14 +203,14 @@ mod tests {
             global_step_number: step_num,
             output: steps[3],
             prev_output: steps[0],
-            checkpoints: H256List(steps.0[1..=3].into()),
+            steps: H256List(steps.0[1..=3].into()),
             last_step_checkpoints: H256List(checkpoints),
             seed: reset_seed,
             ..VDFLimiterInfo::default()
         };
 
         assert!(
-            checkpoints_are_valid(&vdf_info, &vdf_config).is_ok(),
+            vdf_steps_are_valid(&vdf_info, &vdf_config).is_ok(),
             "Invalid VDF"
         );
 

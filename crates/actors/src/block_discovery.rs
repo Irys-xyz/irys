@@ -1,6 +1,7 @@
 use crate::{
-    block_index::BlockIndexReadGuard, block_tree::BlockTreeActor, block_validation::block_is_valid,
-    epoch_service::PartitionAssignmentsReadGuard, mempool::MempoolActor, vdf::VdfStepsReadGuard,
+    block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeService,
+    block_validation::prevalidate_block, epoch_service::PartitionAssignmentsReadGuard,
+    vdf_service::VdfStepsReadGuard,
 };
 use actix::prelude::*;
 use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
@@ -19,10 +20,6 @@ pub struct BlockDiscoveryActor {
     pub block_index_guard: BlockIndexReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
-    /// Manages forks at the head of the chain before finalization
-    pub block_tree: Addr<BlockTreeActor>,
-    /// Reference to the mempool actor, which maintains the validity of pending transactions.
-    pub mempool: Addr<MempoolActor>,
     /// Reference to global storage config for node
     pub storage_config: StorageConfig,
     /// Reference to global difficulty config
@@ -58,8 +55,6 @@ impl BlockDiscoveryActor {
     pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
-        block_tree: Addr<BlockTreeActor>,
-        mempool: Addr<MempoolActor>,
         storage_config: StorageConfig,
         difficulty_config: DifficultyAdjustmentConfig,
         db: DatabaseProvider,
@@ -69,8 +64,6 @@ impl BlockDiscoveryActor {
         Self {
             block_index_guard,
             partition_assignments_guard,
-            block_tree,
-            mempool,
             storage_config,
             difficulty_config,
             db,
@@ -179,7 +172,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         //------------------------------------
         let block_index_guard = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
-        let block_tree_addr = self.block_tree.clone();
+        let block_tree_addr = BlockTreeService::from_registry();
         let storage_config = &self.storage_config;
         let difficulty_config = &self.difficulty_config;
 
@@ -190,7 +183,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             new_block_header.vdf_limiter_info.output,
             new_block_header.vdf_limiter_info.prev_output
         );
-        match block_is_valid(
+
+        match prevalidate_block(
             &new_block_header,
             &previous_block_header,
             &block_index_guard,
@@ -203,6 +197,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         ) {
             Ok(_) => {
                 info!("Block is valid, sending to block tree");
+
+                self.db
+                    .update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
+                    .unwrap();
+
                 let mut all_txs = submit_txs;
                 all_txs.extend_from_slice(&publish_txs);
                 block_tree_addr.do_send(BlockPreValidatedMessage(

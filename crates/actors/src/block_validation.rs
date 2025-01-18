@@ -1,6 +1,6 @@
 use crate::{
-    block_index::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
-    vdf::VdfStepsReadGuard,
+    block_index_service::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
+    vdf_service::VdfStepsReadGuard,
 };
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
@@ -9,12 +9,12 @@ use irys_types::{
     calculate_difficulty, next_cumulative_diff, storage_config::StorageConfig, validate_path,
     Address, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, VDFStepsConfig, H256,
 };
-use irys_vdf::checkpoints_are_valid;
+use irys_vdf::last_step_checkpoints_is_valid;
 use openssl::sha;
 use tracing::{debug, info};
 
 /// Full pre-validation steps for a block
-pub fn block_is_valid(
+pub fn prevalidate_block(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
     block_index_guard: &BlockIndexReadGuard,
@@ -31,6 +31,9 @@ pub fn block_is_valid(
         ));
     }
 
+    // Check prev_output (vdf)
+    prev_output_is_valid(block, previous_block)?;
+
     // Check the difficulty
     difficulty_is_valid(block, previous_block, difficulty_config)?;
 
@@ -41,7 +44,8 @@ pub fn block_is_valid(
 
     recall_recall_range_is_valid(block, storage_config, steps_guard)?;
 
-    checkpoints_are_valid(&block.vdf_limiter_info, &vdf_config)?;
+    // We only check last_step_checkpoints during pre-validation
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config)?;
 
     poa_is_valid(
         &block.poa,
@@ -51,6 +55,19 @@ pub fn block_is_valid(
         miner_address,
     )?;
     Ok(())
+}
+
+pub fn prev_output_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> eyre::Result<()> {
+    if block.vdf_limiter_info.prev_output == previous_block.vdf_limiter_info.output {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "vdf_limiter.prev_output does not match previous blocks vdf_limiter.output"
+        ))
+    }
 }
 
 /// Validates if a block's difficulty matches the expected difficulty calculated
@@ -66,7 +83,7 @@ pub fn difficulty_is_valid(
     let last_diff_timestamp = previous_block.last_diff_timestamp;
     let current_difficulty = previous_block.diff;
 
-    let (diff, stats) = calculate_difficulty(
+    let (diff, _stats) = calculate_difficulty(
         block_height,
         last_diff_timestamp,
         current_timestamp,
@@ -236,7 +253,13 @@ pub fn poa_is_valid(
         let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
 
         if poa_chunk_hash != data_path_result.leaf_hash {
-            return Err(eyre::eyre!("PoA chunk hash mismatch"));
+            return Err(eyre::eyre!(
+                "PoA chunk hash mismatch\n{:?}\nleaf_hash: {:?}\nledger_num: {}\nledger_chunk_offset: {}",
+                poa_chunk,
+                data_path_result.leaf_hash,
+                ledger_num,
+                ledger_chunk_offset
+            ));
         }
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -262,7 +285,7 @@ pub fn poa_is_valid(
 #[cfg(test)]
 mod tests {
     use crate::{
-        block_index::{BlockIndexActor, GetBlockIndexGuardMessage},
+        block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
         block_producer::BlockConfirmedMessage,
         epoch_service::{
             EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
@@ -270,6 +293,7 @@ mod tests {
         },
     };
     use actix::prelude::*;
+    use dev::Registry;
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
@@ -433,11 +457,12 @@ mod tests {
                 .unwrap(),
         ));
 
-        let block_index_actor = BlockIndexActor::new(block_index.clone(), storage_config.clone());
-        let block_index_addr = block_index_actor.start();
+        let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
+        Registry::set(block_index_actor.start());
 
         let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
 
+        let block_index_addr = BlockIndexService::from_registry();
         match block_index_addr.send(msg).await {
             Ok(_) => info!("Genesis block indexed"),
             Err(_) => panic!("Failed to index genesis block"),

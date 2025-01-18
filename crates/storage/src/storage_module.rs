@@ -16,7 +16,7 @@ use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset,
     LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize,
-    StorageConfig, TxPath, TxRelativeChunkOffset, UnpackedChunk, H256,
+    StorageConfig, TxPath, TxRelativeChunkOffset, UnpackedChunk, CONFIG, H256,
 };
 use nodit::{
     interval::{ie, ii},
@@ -799,7 +799,7 @@ pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleIn
             infos[0].id
         );
         let path = Path::new(&path);
-        if path.exists() {
+        if path.exists() && !CONFIG.persist_data_on_restart {
             fs::remove_file(path).unwrap();
         }
     }

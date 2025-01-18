@@ -150,8 +150,7 @@ mod tests {
     use super::*;
 
     use crate::{
-        irys::IrysSigner, IrysTransaction, IrysTransactionHeader, H256, IRYS_CHAIN_ID,
-        MAX_CHUNK_SIZE,
+        irys::IrysSigner, IrysTransaction, IrysTransactionHeader, CONFIG, H256, MAX_CHUNK_SIZE,
     };
     use alloy_core::hex::{self};
     use alloy_primitives::Address;
@@ -172,7 +171,7 @@ mod tests {
         let irys_signer = IrysSigner {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };
 
@@ -186,7 +185,7 @@ mod tests {
             perm_fee: Some(1),
             ledger_num: 0,
             bundle_format: Some(0),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             version: 0,
             ingress_proofs: None,
             signature: Default::default(),

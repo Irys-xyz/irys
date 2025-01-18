@@ -57,7 +57,7 @@ construct_uint! {
 
 // Manually implement Arbitrary for U256
 impl<'a> Arbitrary<'a> for U256 {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+    fn arbitrary(_u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let mut rng = rand::thread_rng();
         let mut bytes = [0u8; 32]; // 32 bytes for 256 bits
         rng.fill_bytes(&mut bytes);
@@ -106,7 +106,7 @@ construct_fixed_hash! {
 
 // Manually implement Arbitrary for H256
 impl<'a> Arbitrary<'a> for H256 {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+    fn arbitrary(_u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(H256::random())
     }
 }

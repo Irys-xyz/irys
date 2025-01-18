@@ -40,7 +40,7 @@ pub struct VDFLimiterInfo {
     /// A list of the output of each step of the nonce limiting process. Note: each step
     /// has VDF_CHECKPOINT_COUNT_IN_STEP checkpoints, the last of which is that step's output.
     /// This field would be more accurately named "steps" as checkpoints are between steps.
-    pub checkpoints: H256List,
+    pub steps: H256List,
     /// The number of SHA2-256 iterations in a single VDF checkpoint. The protocol aims to keep the
     /// checkpoint calculation time to around 40ms by varying this parameter. Note: there are
     /// 25 checkpoints in a single VDF step - so the protocol aims to keep the step calculation at
@@ -213,7 +213,7 @@ impl IrysBlockHeader {
 
         let _ = &self
             .vdf_limiter_info
-            .checkpoints
+            .steps
             .iter()
             .for_each(|c| buf.extend_from_slice(&c.0));
 
@@ -355,7 +355,7 @@ impl fmt::Display for IrysBlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::{irys::IrysSigner, validate_path, IRYS_CHAIN_ID, MAX_CHUNK_SIZE};
+    use crate::{irys::IrysSigner, validate_path, CONFIG, MAX_CHUNK_SIZE};
 
     use super::*;
     use alloy_core::hex;
@@ -496,7 +496,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
-            chain_id: IRYS_CHAIN_ID,
+            chain_id: CONFIG.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };
 

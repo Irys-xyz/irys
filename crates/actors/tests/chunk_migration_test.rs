@@ -6,16 +6,19 @@ use std::{
 };
 
 use {
-    irys_actors::block_index::BlockIndexActor,
+    irys_actors::block_index_service::BlockIndexService,
     irys_actors::block_producer::BlockConfirmedMessage,
-    irys_actors::mempool::{ChunkIngressMessage, MempoolActor, TxIngressMessage},
+    irys_actors::mempool_service::{ChunkIngressMessage, MempoolService, TxIngressMessage},
 };
 
 use assert_matches::assert_matches;
 
 use actix::prelude::*;
 use chunk::TxRelativeChunkOffset;
-use irys_actors::{block_producer::BlockFinalizedMessage, chunk_migration::ChunkMigrationActor};
+use dev::Registry;
+use irys_actors::{
+    block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
+};
 use irys_config::IrysNodeConfig;
 use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized};
 use irys_storage::*;
@@ -134,14 +137,15 @@ async fn finalize_block_test() -> eyre::Result<()> {
     let task_manager = TaskManager::current();
     let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
     let arc_db1 = DatabaseProvider(Arc::new(db));
-    let mempool_actor = MempoolActor::new(
+    let mempool_service = MempoolService::new(
         arc_db1.clone(),
         task_manager.executor(),
         arc_config.mining_signer.clone(),
         storage_config.clone(),
         storage_modules.clone(),
     );
-    let mempool_addr = mempool_actor.start();
+    Registry::set(mempool_service.start());
+    let mempool_addr = MempoolService::from_registry();
 
     // Send tx headers to mempool
     for header in &tx_headers {
@@ -169,8 +173,9 @@ async fn finalize_block_test() -> eyre::Result<()> {
     }
 
     // Create a block_index actor
-    let block_index_actor = BlockIndexActor::new(block_index.clone(), storage_config.clone());
-    let block_index_addr = block_index_actor.start();
+    let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
+    Registry::set(block_index_actor.start());
+    let block_index_addr = BlockIndexService::from_registry();
 
     let height: u64;
     {
@@ -237,13 +242,14 @@ async fn finalize_block_test() -> eyre::Result<()> {
     block_index_addr.do_send(block_confirm_message.clone());
 
     // Send the block finalized message
-    let chunk_migration_actor = ChunkMigrationActor::new(
+    let chunk_migration_service = ChunkMigrationService::new(
         block_index.clone(),
         storage_config.clone(),
         storage_modules.clone(),
         arc_db1.clone(),
     );
-    let chunk_migration_addr = chunk_migration_actor.start();
+
+    let chunk_migration_addr = chunk_migration_service.start();
     let block_finalized_message = BlockFinalizedMessage {
         block_header: block.clone(),
         all_txs: txs.clone(),

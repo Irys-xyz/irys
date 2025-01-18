@@ -7,7 +7,7 @@ use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use futures::future::select;
-use irys_actors::{block_producer::SolutionFoundMessage, vdf::VdfStepsReadGuard};
+use irys_actors::{block_producer::SolutionFoundMessage, vdf_service::VdfStepsReadGuard};
 use irys_chain::{chain::start_for_testing, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;

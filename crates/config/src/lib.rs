@@ -3,7 +3,7 @@ use std::{env, fs, path::PathBuf};
 
 use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;
-use irys_types::{irys::IrysSigner, Address};
+use irys_types::{irys::IrysSigner, Address, CONFIG};
 use tracing::info;
 
 pub mod chain;
@@ -34,7 +34,7 @@ impl Default for IrysNodeConfig {
 
         // remove existing data directory as storage modules are packed with a different miner_signer generated next
         info!("Removing .irys folder {:?}", &base_dir);
-        if fs::exists(&base_dir).unwrap_or(false) {
+        if fs::exists(&base_dir).unwrap_or(false) && !CONFIG.persist_data_on_restart {
             fs::remove_dir_all(&base_dir).expect("Unable to remove .irys folder");
         }
 
@@ -130,3 +130,7 @@ impl IrysNodeConfig {
 //         return self.config;
 //     }
 // }
+
+
+pub const PRICE_PER_CHUNK_PERM: u128 = 10000;
+pub const PRICE_PER_CHUNK_5_EPOCH: u128 = 10;
