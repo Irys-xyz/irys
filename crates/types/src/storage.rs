@@ -4,10 +4,7 @@ use std::{
 };
 
 use crate::CONFIG;
-use nodit::{
-    interval::ie,
-    InclusiveInterval, Interval,
-};
+use nodit::{interval::ie, InclusiveInterval, Interval};
 use serde::{Deserialize, Serialize};
 
 pub const MEGABYTE: usize = 1024 * 1024;

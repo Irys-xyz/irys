@@ -224,7 +224,7 @@ impl Ledger {
         match s {
             "perm" => eyre::Result::Ok(Ledger::Publish),
             "5days" => eyre::Result::Ok(Ledger::Submit),
-            _ => Err(eyre::eyre!("Ledger {} not supported", s))
+            _ => Err(eyre::eyre!("Ledger {} not supported", s)),
         }
     }
 }

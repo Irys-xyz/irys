@@ -168,8 +168,10 @@ impl Handler<TxIngressMessage> for MempoolService {
         let db = self.db.clone().unwrap();
 
         // TODO: Don't unwrap here
-        if irys_database::get_account_balance(&db.tx().unwrap(), tx_msg.0.signer).unwrap() < U256::from(tx_msg.0.total_fee()) {
-            return Err(TxIngressError::Unfunded)
+        if irys_database::get_account_balance(&db.tx().unwrap(), tx_msg.0.signer).unwrap()
+            < U256::from(tx_msg.0.total_fee())
+        {
+            return Err(TxIngressError::Unfunded);
         }
 
         // Validate the transaction signature

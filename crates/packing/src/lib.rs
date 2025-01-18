@@ -2,7 +2,8 @@ use std::ops::BitXor;
 
 pub use irys_c::{capacity, capacity_cuda, capacity_single};
 use irys_types::{
-    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CONFIG, CHUNK_SIZE
+    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CHUNK_SIZE,
+    CONFIG,
 };
 
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,

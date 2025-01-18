@@ -29,7 +29,7 @@ fn capacity_single_test() {
     let entropy_chunk_ptr = entropy_chunk.as_ptr() as *mut u8;
 
     let chain_id: u64 = CONFIG.irys_chain_id;
-    
+
     unsafe {
         compute_entropy_chunk(
             mining_addr,
