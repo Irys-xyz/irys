@@ -231,7 +231,7 @@ pub fn poa_is_valid(
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
             *miner_address,
-            poa.partition_chunk_offset as u64 * config.chunk_size,
+            poa.partition_chunk_offset as u64,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
             config.chunk_size as usize,
@@ -265,7 +265,7 @@ pub fn poa_is_valid(
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
             *miner_address,
-            poa.partition_chunk_offset as u64 * config.chunk_size,
+            poa.partition_chunk_offset as u64,
             poa.partition_hash.into(),
             config.entropy_packing_iterations,
             config.chunk_size as usize,
@@ -487,7 +487,7 @@ mod tests {
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(
             miner_address,
-            ((poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) * chunk_size) as u64,
+            (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64,
             partition_hash.into(),
             config.storage_config.entropy_packing_iterations,
             chunk_size,

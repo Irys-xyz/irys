@@ -134,7 +134,7 @@ impl PackingActor {
                             let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
                             compute_entropy_chunk(
                                 mining_address,
-                                i as u64 * chunk_size,
+                                i as u64,
                                 partition_hash.0,
                                 entropy_packing_iterations,
                                 chunk_size.try_into().unwrap(),
@@ -170,7 +170,7 @@ impl PackingActor {
                         capacity_pack_range_cuda_c(
                             num_chunks,
                             mining_address,
-                            chunk_range_split.start() as u64 * chunk_size,
+                            chunk_range_split.start() as u64,
                             partition_hash,
                             Some(entropy_packing_iterations),
                             &mut out,
@@ -363,7 +363,7 @@ mod tests {
             let mut out = Vec::with_capacity(storage_config.chunk_size.try_into().unwrap());
             compute_entropy_chunk(
                 mining_address,
-                i as u64 * storage_config.chunk_size,
+                i as u64,
                 partition_hash.0,
                 storage_config.entropy_packing_iterations,
                 storage_config.chunk_size.try_into().unwrap(),

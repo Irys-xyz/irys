@@ -15,7 +15,7 @@ pub fn unpack(
     let mut entropy: Vec<u8> = Vec::with_capacity(chunk_size);
     capacity_single::compute_entropy_chunk(
         packed_chunk.packing_address,
-        packed_chunk.partition_offset as u64 * chunk_size as u64,
+        packed_chunk.partition_offset as u64,
         packed_chunk.partition_hash.0,
         entropy_packing_iterations,
         chunk_size,
@@ -160,7 +160,7 @@ pub enum PackingType {
     AMD,
 }
 
-pub const PACKING_TYPE: PackingType = PackingType::CPU; //PackingType::CUDA;
+pub const PACKING_TYPE: PackingType = PackingType::CUDA; //PackingType::CPU; 
 
 /// 2D Packing Rust implementation
 pub fn capacity_pack_range_with_data(
@@ -179,7 +179,7 @@ pub fn capacity_pack_range_with_data(
             data.iter_mut().enumerate().for_each(|(pos, chunk)| {
                 capacity_single::compute_entropy_chunk(
                     mining_address,
-                    chunk_offset + pos as u64 * chunk_size as u64,
+                    chunk_offset + pos as u64,
                     partition_hash.0,
                     iterations,
                     chunk_size,
@@ -273,7 +273,7 @@ mod tests {
 
         capacity_single::compute_entropy_chunk(
             mining_address,
-            chunk_offset + CHUNK_SIZE,
+            chunk_offset + 1,
             partition_hash,
             iterations,
             CHUNK_SIZE as usize,
@@ -297,7 +297,7 @@ mod tests {
 
         capacity_pack_range_c(
             mining_address,
-            chunk_offset + CHUNK_SIZE,
+            chunk_offset + 1,
             partition_hash.into(),
             Some(iterations),
             &mut c_chunk2,
@@ -415,7 +415,7 @@ mod tests {
         let mut partition_hash: [u8; SHA_HASH_SIZE] = [0; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash);
 
-        let num_chunks: usize = 2;
+        let num_chunks: usize = 512;
         let mut chunks: Vec<u8> = Vec::with_capacity(num_chunks * CHUNK_SIZE as usize);
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
