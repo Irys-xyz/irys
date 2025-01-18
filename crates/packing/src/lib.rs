@@ -253,6 +253,8 @@ mod tests {
     use rand::{Rng, RngCore};
     use std::time::*;
 
+    // Enable with CUDA hardware
+    #[ignore]
     #[test]
     fn test_compute_entropy_chunk() {
         let mut rng = rand::thread_rng();
@@ -412,6 +414,8 @@ mod tests {
         assert_eq!(chunks[rnd_chunk_pos], rnd_chunk, "Wrong packed chunk")
     }
 
+    // Enable with CUDA hardware
+    #[ignore]
     #[test]
     fn test_bench_chunks_packing_cuda() {
         let mut rng = rand::thread_rng();
