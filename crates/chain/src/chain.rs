@@ -390,7 +390,7 @@ pub async fn start_irys_node(
                 });
 
                 run_server(ApiState {
-                    mempool: mempool_actor_addr,
+                    mempool: mempool_addr,
                     chunk_provider: arc_chunk_provider.clone(),
                     db,
                 })

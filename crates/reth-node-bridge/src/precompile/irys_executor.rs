@@ -345,7 +345,8 @@ pub fn irys_precompiles() -> Precompiles {
 }
 
 // reserve space for any future eth precompiles
-const BASE_PRECOMPILE_OFFSET: u64 = 1337;
+// 0x500
+const BASE_PRECOMPILE_OFFSET: u64 = 1280;
 
 #[repr(u64)]
 pub enum IrysPrecompileOffsets {

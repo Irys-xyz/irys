@@ -9,7 +9,7 @@ use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use base58::ToBase58;
-use irys_actors::mempool::GetBestMempoolTxs;
+use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
 use irys_actors::SolutionFoundMessage;
 use irys_api_server::routes::tx::TxOffset;
@@ -140,7 +140,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     info!("waiting for tx header...");
 
     let recv_tx = loop {
-        let txs = &node.actor_addresses.mempool.send(GetBestMempoolTxs).await;
+        let txs = node.actor_addresses.mempool.send(GetBestMempoolTxs).await;
         match txs {
             Ok(transactions) if !transactions.is_empty() => {
                 break transactions[0].clone();
