@@ -43,7 +43,7 @@ pub(crate) fn bind_capacity(c_src: &PathBuf) {
 
 pub(crate) fn build_capacity_cuda(c_src: &PathBuf, ssl_inc_dir: &PathBuf) {
     let mut cc = cc::Build::new();
-    
+
     cc.cuda(true);
     cc.cudart("static");
 

@@ -28,7 +28,8 @@ use irys_storage::{
     initialize_storage_files, ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner, vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, CHUNK_SIZE, H256, U256
+    app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
+    vdf_config::VDFStepsConfig, DifficultyAdjustmentConfig, StorageConfig, CHUNK_SIZE, H256, U256,
 };
 use reth::{
     builder::FullNode,
@@ -106,7 +107,7 @@ pub async fn start_irys_node(
     info!("Using directory {:?}", &node_config.base_directory);
 
     if PACKING_TYPE != PackingType::CPU && storage_config.chunk_size != CHUNK_SIZE {
-        error!("C packing only supports chunk size {}!", CHUNK_SIZE)        
+        error!("C packing only supports chunk size {}!", CHUNK_SIZE)
     }
 
     let (reth_handle_sender, reth_handle_receiver) =

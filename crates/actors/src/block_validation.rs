@@ -180,7 +180,11 @@ pub fn poa_is_valid(
         let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
 
         if poa_chunk_hash != data_path_result.leaf_hash {
-            return Err(eyre::eyre!("PoA chunk hash mismatch {:?} /= {:?}", poa_chunk_hash, data_path_result.leaf_hash));
+            return Err(eyre::eyre!(
+                "PoA chunk hash mismatch {:?} /= {:?}",
+                poa_chunk_hash,
+                data_path_result.leaf_hash
+            ));
         }
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -194,7 +198,11 @@ pub fn poa_is_valid(
         );
 
         if entropy_chunk != poa.chunk.0 {
-            return Err(eyre::eyre!("PoA capacity chunk mismatch {:?} /= {:?}", entropy_chunk.first(), poa.chunk.0.first()));
+            return Err(eyre::eyre!(
+                "PoA capacity chunk mismatch {:?} /= {:?}",
+                entropy_chunk.first(),
+                poa.chunk.0.first()
+            ));
         }
     }
     Ok(())

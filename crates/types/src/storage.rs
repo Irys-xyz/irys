@@ -3,7 +3,10 @@ use std::{
     path::PathBuf,
 };
 
-use nodit::{interval::{ie, ii}, InclusiveInterval, Interval};
+use nodit::{
+    interval::{ie, ii},
+    InclusiveInterval, Interval,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::CHUNK_SIZE;
@@ -194,23 +197,25 @@ pub enum ChunkState {
 /// assert_eq!(splits[0], PartitionChunkRange(ii(0, 2)));
 /// assert_eq!(splits[1], PartitionChunkRange(ii(3, 4)));
 /// ```
-pub fn split_interval(interval: &PartitionChunkRange, step: u32) -> eyre::Result<Vec<PartitionChunkRange>> {
+pub fn split_interval(
+    interval: &PartitionChunkRange,
+    step: u32,
+) -> eyre::Result<Vec<PartitionChunkRange>> {
     if step == 0 {
         return Err(eyre::eyre!("Invalid zero step for split interval"));
     }
 
     let start = interval.start();
     let end = interval.end();
-    
-    
+
     if start >= end {
         return Err(eyre::eyre!("Invalid interval bounds: [{}, {}]", start, end));
     }
 
-    let n = if (end - start + 1) % step == 0 { 
+    let n = if (end - start + 1) % step == 0 {
         ((end - start + 1) / step).try_into().unwrap()
     } else {
-        ((end - start + 1) / step  + 1).try_into().unwrap()
+        ((end - start + 1) / step + 1).try_into().unwrap()
     };
 
     let mut intervals = Vec::with_capacity(n);
@@ -222,7 +227,7 @@ pub fn split_interval(interval: &PartitionChunkRange, step: u32) -> eyre::Result
         } else {
             start + (i as u32 + 1) * step
         };
-        
+
         intervals.push(PartitionChunkRange(ie(interval_start, interval_end)));
     }
     Ok(intervals)

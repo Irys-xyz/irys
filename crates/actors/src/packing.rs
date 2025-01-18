@@ -1,11 +1,16 @@
 use std::{
-    collections::VecDeque, fmt::Display, sync::{Arc, RwLock}, time::Duration
+    collections::VecDeque,
+    fmt::Display,
+    sync::{Arc, RwLock},
+    time::Duration,
 };
 
 use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
 
 use eyre::eyre;
-use irys_packing::{capacity_pack_range_cuda_c, capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
+use irys_packing::{
+    capacity_pack_range_cuda_c, capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE,
+};
 use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
 use irys_types::{split_interval, PartitionChunkRange, StorageConfig, CHUNK_SIZE};
 use nodit::Interval;
@@ -114,7 +119,7 @@ impl PackingActor {
             } = storage_module.storage_config;
 
             match PACKING_TYPE {
-                PackingType::CPU =>
+                PackingType::CPU => {
                     for i in chunk_range.start()..=chunk_range.end() {
                         // each semaphore permit corresponds to a single chunk to be packed, as we assume it'll use an entire CPU thread's worth of compute.
                         // when we implement GPU packing, this is where we need to fork the logic between the two methods - GPU can take larger contiguous segments
@@ -144,24 +149,48 @@ impl PackingActor {
                             storage_module.write_chunk(i, out, ChunkType::Entropy);
                             let _ = storage_module.sync_pending_chunks();
                         });
-                    },
+                    }
+                }
                 PackingType::CUDA => {
-                    assert_eq!(chunk_size, CHUNK_SIZE, "Chunk size is not aligned with C code");
-                    for chunk_range_split in split_interval(&chunk_range, self.config.max_chunks).unwrap().iter() {
-                        info!("Packing using CUDA C implementation, start:{} end:{}!", chunk_range_split.start(), chunk_range_split.end());
+                    assert_eq!(
+                        chunk_size, CHUNK_SIZE,
+                        "Chunk size is not aligned with C code"
+                    );
+                    for chunk_range_split in split_interval(&chunk_range, self.config.max_chunks)
+                        .unwrap()
+                        .iter()
+                    {
+                        info!(
+                            "Packing using CUDA C implementation, start:{} end:{}!",
+                            chunk_range_split.start(),
+                            chunk_range_split.end()
+                        );
                         let num_chunks = chunk_range_split.end() - chunk_range_split.start() + 1;
-                        let mut out: Vec<u8> = Vec::with_capacity((num_chunks * chunk_size as u32).try_into().unwrap());   
-                        capacity_pack_range_cuda_c(num_chunks, mining_address, chunk_range_split.start() as u64 * chunk_size, partition_hash, Some(entropy_packing_iterations), &mut out);
+                        let mut out: Vec<u8> = Vec::with_capacity(
+                            (num_chunks * chunk_size as u32).try_into().unwrap(),
+                        );
+                        capacity_pack_range_cuda_c(
+                            num_chunks,
+                            mining_address,
+                            chunk_range_split.start() as u64 * chunk_size,
+                            partition_hash,
+                            Some(entropy_packing_iterations),
+                            &mut out,
+                        );
                         for i in 0..num_chunks {
-                            storage_module.write_chunk(chunk_range_split.start() + i, out[(i * chunk_size as u32) as usize..((i + 1) * chunk_size as u32) as usize].to_vec(), ChunkType::Entropy);
+                            storage_module.write_chunk(
+                                chunk_range_split.start() + i,
+                                out[(i * chunk_size as u32) as usize
+                                    ..((i + 1) * chunk_size as u32) as usize]
+                                    .to_vec(),
+                                ChunkType::Entropy,
+                            );
                         }
                     }
                     let _ = storage_module.sync_pending_chunks();
-
-                },
-                _ => unimplemented!() 
+                }
+                _ => unimplemented!(),
             }
-                    
 
             // Remove from queue once complete
             let _ = self.pending_jobs.write().unwrap().pop_front();

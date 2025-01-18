@@ -1,6 +1,6 @@
 use std::ops::BitXor;
 
-pub use irys_c::{capacity, capacity_single, capacity_cuda};
+pub use irys_c::{capacity, capacity_cuda, capacity_single};
 use irys_types::{
     partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CHUNK_SIZE,
     PACKING_SHA_1_5_S,
@@ -117,7 +117,7 @@ pub fn capacity_pack_range_cuda_c(
         capacity_cuda::compute_entropy_chunks_cuda(
             mining_addr,
             mining_addr_len,
-            chunk_offset,   
+            chunk_offset,
             num_chunks as i64,
             partition_hash,
             partition_hash_len,
@@ -125,8 +125,8 @@ pub fn capacity_pack_range_cuda_c(
             iterations,
         );
 
-        entropy.set_len(entropy.capacity());                
-    }     
+        entropy.set_len(entropy.capacity());
+    }
 }
 
 /// 2D Packing CUDA C implementation
@@ -139,7 +139,14 @@ pub fn capacity_pack_range_with_data_cuda_c(
 ) {
     let num_chunks: u32 = data.len() as u32 / CHUNK_SIZE as u32;
     let mut entropy: Vec<u8> = Vec::with_capacity(data.len());
-    capacity_pack_range_cuda_c( num_chunks, mining_address, chunk_offset, partition_hash, iterations, &mut entropy);
+    capacity_pack_range_cuda_c(
+        num_chunks,
+        mining_address,
+        chunk_offset,
+        partition_hash,
+        iterations,
+        &mut entropy,
+    );
 
     // TODO: check if it is worth to move this to GPU ? implies big data transfer from host to device that now is not needed
     xor_vec_u8_arrays_in_place(data, &entropy);
@@ -154,7 +161,7 @@ pub enum PackingType {
     AMD,
 }
 
-pub const PACKING_TYPE: PackingType = PackingType::CPU; //PackingType::CUDA; 
+pub const PACKING_TYPE: PackingType = PackingType::CPU; //PackingType::CUDA;
 
 /// 2D Packing Rust implementation
 pub fn capacity_pack_range_with_data(
@@ -273,12 +280,11 @@ mod tests {
             &mut chunk2,
         );
 
-
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
         let mut c_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
-        let mut c_chunk2 = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);        
+        let mut c_chunk2 = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
         let now = Instant::now();
 
         capacity_pack_range_c(
@@ -291,12 +297,11 @@ mod tests {
 
         capacity_pack_range_c(
             mining_address,
-            chunk_offset + CHUNK_SIZE ,
+            chunk_offset + CHUNK_SIZE,
             partition_hash.into(),
             Some(iterations),
             &mut c_chunk2,
         );
-
 
         let elapsed = now.elapsed();
         println!("C implementation: {:.2?}", elapsed);
@@ -319,9 +324,16 @@ mod tests {
         let elapsed = now.elapsed();
         println!("C CUDA implementation: {:.2?}", elapsed);
 
-        assert_eq!(chunk, c_chunk_cuda[0..CHUNK_SIZE as usize].to_vec(), "CUDA chunk should be equal");
-        assert_eq!(chunk2, c_chunk_cuda[CHUNK_SIZE as usize..(2*CHUNK_SIZE) as usize].to_vec(), "Second CUDA chunk should be equal");
-
+        assert_eq!(
+            chunk,
+            c_chunk_cuda[0..CHUNK_SIZE as usize].to_vec(),
+            "CUDA chunk should be equal"
+        );
+        assert_eq!(
+            chunk2,
+            c_chunk_cuda[CHUNK_SIZE as usize..(2 * CHUNK_SIZE) as usize].to_vec(),
+            "Second CUDA chunk should be equal"
+        );
     }
 
     #[test]
@@ -357,7 +369,7 @@ mod tests {
             mining_address,
             chunk_offset,
             partition_hash.into(),
-            iterations
+            iterations,
         );
 
         let elapsed = now.elapsed();
@@ -395,7 +407,6 @@ mod tests {
         assert_eq!(chunks[rnd_chunk_pos], rnd_chunk, "Wrong packed chunk")
     }
 
-
     #[test]
     fn test_bench_chunks_packing_cuda() {
         let mut rng = rand::thread_rng();
@@ -425,13 +436,13 @@ mod tests {
             mining_address,
             chunk_offset,
             partition_hash.into(),
-            iterations
+            iterations,
         );
 
         let elapsed = now.elapsed();
         println!("C CUDA implementation: {:.2?}", elapsed);
 
-        let now = Instant::now();        
+        let now = Instant::now();
         capacity_pack_range_with_data(
             &mut chunks_rust,
             mining_address,
@@ -447,7 +458,7 @@ mod tests {
         for i in 0..num_chunks {
             for j in 0..CHUNK_SIZE as usize {
                 //println!("chunk {} pos {}", i, j);
-                assert_eq!(chunks_rust[i][j], chunks[i*CHUNK_SIZE as usize + j]);
+                assert_eq!(chunks_rust[i][j], chunks[i * CHUNK_SIZE as usize + j]);
             }
         }
     }
