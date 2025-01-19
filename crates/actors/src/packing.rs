@@ -121,7 +121,7 @@ impl PackingActor {
                 let storage_module = storage_module.clone();
                 // wait for the permit before spawning the thread
                 let permit = semaphore.acquire_owned().await.unwrap();
-                //debug!(target: "irys::packing", "Packing chunk {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                
                 self.task_executor.spawn_blocking(async move {
                     let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
                     compute_entropy_chunk(
@@ -132,6 +132,8 @@ impl PackingActor {
                         chunk_size.try_into().unwrap(),
                         &mut out,
                     );
+                    debug!(target: "irys::packing", "Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                    debug!(target: "irys::packing", "chunk {:?}", out);
                     // computation is done, release semaphore
                     drop(permit);
                     // write the chunk

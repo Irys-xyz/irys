@@ -55,8 +55,8 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
     let storage_config = StorageConfig {
         chunk_size: 32,
-        num_chunks_in_partition: 400,
-        num_chunks_in_recall_range: 80,
+        num_chunks_in_partition: 10,
+        num_chunks_in_recall_range: 2,
         num_partitions_in_slot: 1,
         miner_address: config.mining_signer.address(),
         min_writes_before_sync: 1,
@@ -128,6 +128,7 @@ pub async fn start_irys_node(
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
         let mut idx = BlockIndex::default();
         if !CONFIG.persist_data_on_restart {
+            debug!("Reseting block index");
             idx = idx.reset(&arc_config.clone())?
         }
         idx.init(arc_config.clone()).await.unwrap()
@@ -163,6 +164,7 @@ pub async fn start_irys_node(
                 };
 
                 let miner_address = node_config.mining_signer.address();
+                debug!("Miner address {:?}", miner_address);
                 let epoch_service = EpochServiceActor::new(Some(config));
                 let epoch_service_actor_addr = epoch_service.start();
 
@@ -255,9 +257,17 @@ pub async fn start_irys_node(
                 let block_tree_actor = BlockTreeService::new(db.clone(), &arc_genesis);
                 Registry::set(block_tree_actor.start());
 
-                let vdf_service = VdfService::from_registry();
+                let vdf_step_path = if !CONFIG.persist_data_on_restart { None }
+                    else { Some(node_config.vdf_steps_dir()) };
+                let vdf_service_actor = VdfService::new(1000, vdf_step_path);
+                let vdf_service = vdf_service_actor.start();
+                Registry::set(vdf_service.clone()); // register it as a service
+
                 let vdf_steps_guard: VdfStepsReadGuard =
                     vdf_service.send(GetVdfStateMessage).await.unwrap();
+
+
+                let (global_step_number, seed) = vdf_steps_guard.read().get_last_step_and_seed();
 
                 let block_discovery_actor = BlockDiscoveryActor {
                     block_index_guard: block_index_guard.clone(),
@@ -329,19 +339,23 @@ pub async fn start_irys_node(
 
                 let part_actors_clone = part_actors.clone();
 
-                info!(
-                    "Starting VDF thread seed {:?} reset_seed {:?}",
-                    arc_genesis.vdf_limiter_info.output, arc_genesis.vdf_limiter_info.seed
-                );
-
                 let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
                 let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
                 let vdf_config2 = vdf_config.clone();
+
+                let seed = seed.map_or(arc_genesis.vdf_limiter_info.output, |seed| seed.0);
+
+                info!(
+                    "Starting VDF thread seed {:?} reset_seed {:?}",
+                    seed, arc_genesis.vdf_limiter_info.seed
+                );
+
                 let vdf_thread_handler = std::thread::spawn(move || {
                     run_vdf(
                         vdf_config2,
-                        arc_genesis.vdf_limiter_info.output,
+                        global_step_number,
+                        seed,
                         arc_genesis.vdf_limiter_info.seed,
                         new_seed_rx,
                         shutdown_rx,
@@ -384,8 +398,9 @@ pub async fn start_irys_node(
                 // Send shutdown signal
                 shutdown_tx.send(()).unwrap();
 
-                // Wait for vdf thread to finish
+                // Wait for vdf thread to finish & save steps
                 vdf_thread_handler.join().unwrap();
+                vdf_steps_guard.save(node_config.vdf_steps_dir()).unwrap();
             });
         })?;
 

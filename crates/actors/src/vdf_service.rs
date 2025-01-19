@@ -1,26 +1,32 @@
 use actix::prelude::*;
 use nodit::{interval::ii, InclusiveInterval, Interval};
+use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
-    sync::{Arc, RwLock, RwLockReadGuard},
-    time::Duration,
+    collections::VecDeque, fs::{self, File}, io::{Read, Write}, path::PathBuf, sync::{Arc, RwLock, RwLockReadGuard}, time::Duration
 };
 use tokio::time::sleep;
 use tracing::{info, warn};
 
 use irys_types::{block_production::Seed, H256List, H256};
 
-#[derive(Debug)]
+const FILE_NAME: &str = "vdf.dat";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VdfState {
     /// last global step stored
     pub global_step: u64,
+    pub max_seeds_num: usize,    
     pub seeds: VecDeque<Seed>,
 }
 
 impl VdfState {
+    pub fn get_last_step_and_seed(&self) -> (u64, Option<Seed>) {
+        (self.global_step, self.seeds.back().map(|seed| seed.clone()))
+    }
+
     /// Push new seed, and removing oldest one if is full
     pub fn push_step(&mut self, seed: Seed) {
-        if self.seeds.len() >= self.seeds.capacity() {
+        if self.seeds.len() >= self.max_seeds_num {
             self.seeds.pop_front();
         }
 
@@ -64,6 +70,27 @@ impl VdfState {
                 .collect::<Vec<H256>>(),
         ))
     }
+    
+    /// Saves the VdfState to a file
+    pub fn save_to_file(&self, path: PathBuf) -> eyre::Result<()> {
+        fs::create_dir_all(path.clone())?;
+        let file = path.clone().join(FILE_NAME);
+        info!("Storing vdf steps in file {:?} ...", &file);
+        let serialized = serde_json::to_string(self)?;
+        let mut file = File::create(file)?;
+        file.write_all(serialized.as_bytes())?;
+        Ok(())
+    }
+
+    /// Loads VdfState from a file
+    pub fn load_from_file(path: PathBuf) -> eyre::Result<Self> {
+        info!("Loading vdf steps from file {:?} ...", path);
+        let mut file = File::open(path)?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        let state: VdfState = serde_json::from_str(&contents)?;
+        Ok(state)
+    }
 }
 
 #[derive(Debug)]
@@ -71,17 +98,24 @@ pub struct VdfService(pub Arc<RwLock<VdfState>>);
 
 impl Default for VdfService {
     fn default() -> Self {
-        Self::new(100)
+        Self::new(1000, None)
     }
 }
 
 impl VdfService {
-    /// Creates a new `VdfService` setting up how many steps are stored in memory
-    pub fn new(capacity: usize) -> Self {
-        Self(Arc::new(RwLock::new(VdfState {
+    /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available 
+    pub fn new(capacity: usize, vdf_steps_path: Option<PathBuf>) -> Self {
+        let vdf_state_default = VdfState {
             global_step: 0,
             seeds: VecDeque::with_capacity(capacity),
-        })))
+            max_seeds_num: capacity,
+        };
+        let vdf_state = vdf_steps_path.
+            map_or(vdf_state_default.clone(),
+            |path| VdfState::load_from_file(path.join(FILE_NAME)).unwrap_or(vdf_state_default)
+        );
+
+        Self(Arc::new(RwLock::new(vdf_state)))
     }
 }
 
@@ -129,6 +163,11 @@ impl VdfStepsReadGuard {
         self.0.read().unwrap()
     }
 
+    /// Store steps in file
+    pub fn save(&self, path: PathBuf) -> eyre::Result<()> {
+        self.0.write().unwrap().save_to_file(path)
+    }
+
     /// Try to read steps interval pooling a max. of 10 times waiting for interval to be available
     /// TODO @ernius: remove this method usage after VDF validation is done async, vdf steps validation reads VDF steps blocking last steps pushes so the need of this pooling.
     pub async fn get_steps(&self, i: Interval<u64>) -> eyre::Result<H256List> {
@@ -168,7 +207,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf() {
-        let addr = VdfService::new(4).start();
+        let addr = VdfService::new(4, None).start();
 
         // Send 8 seeds 1,2..,8 (capacity is 4)
         for i in 0..8 {

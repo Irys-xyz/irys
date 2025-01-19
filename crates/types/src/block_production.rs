@@ -2,9 +2,10 @@ use crate::{partition::PartitionHash, ChunkDataPath, H256List, IrysBlockHeader, 
 use actix::Message;
 use alloy_primitives::Address;
 use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Seed(pub H256);
 
 impl Seed {

@@ -14,11 +14,7 @@ use irys_database::{
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
-    Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
-    IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
-    H256, U256,
+    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo, CONFIG, H256, U256
 };
 use nodit::interval::ii;
 use openssl::sha;
@@ -114,7 +110,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
     fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
         let solution = msg.0;
         info!(
-            "BlockProducerActor solution received partition_hash:{:?} offset:{} capacity:{} chunk_length:{}",
+            "BlockProducerActor solution received miner:{:?} partition_hash:{:?} offset:{} capacity:{} chunk_length:{}",
+            solution.mining_address,
             solution.partition_hash,
             solution.chunk_offset,
             solution.tx_path.is_none(),

@@ -31,10 +31,10 @@ impl Default for IrysNodeConfig {
         let base_dir = env::current_dir()
             .expect("Unable to determine working dir, aborting")
             .join(".irys");
-
-        // remove existing data directory as storage modules are packed with a different miner_signer generated next
-        info!("Removing .irys folder {:?}", &base_dir);
+        
         if fs::exists(&base_dir).unwrap_or(false) && !CONFIG.persist_data_on_restart {
+            // remove existing data directory as storage modules are packed with a different miner_signer generated next
+            info!("Removing .irys folder {:?}", &base_dir);
             fs::remove_dir_all(&base_dir).expect("Unable to remove .irys folder");
         }
 
@@ -67,6 +67,12 @@ impl IrysNodeConfig {
     pub fn block_index_dir(&self) -> PathBuf {
         self.instance_directory().join("block_index")
     }
+
+    /// get the instance-specific `vdf_steps` directory path  
+    pub fn vdf_steps_dir(&self) -> PathBuf {
+        self.instance_directory().join("vdf_steps")
+    }
+
     /// Extend the configured genesis accounts
     /// These accounts are used as the genesis state for the chain
     pub fn extend_genesis_accounts(
