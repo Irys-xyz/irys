@@ -3,12 +3,12 @@ use irys_packing::unpack;
 use irys_primitives::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier, U34};
 use irys_storage::reth_provider::IrysRethProviderInner;
 use revm_primitives::{
-    bytes::Buf, Bytes, Env, FixedBytes, PrecompileError, PrecompileErrors, PrecompileOutput,
-    PrecompileResult,
+    Bytes, Env, PrecompileError, PrecompileErrors, PrecompileOutput, PrecompileResult,
 };
-use tracing::{info_span, span};
 
 use super::utils::ParsedAccessLists;
+
+const PD_CHUNK_READ_COST: u64 = 500;
 
 struct ReadBytesRangeByIndexArgs {
     index: u8,
@@ -225,7 +225,7 @@ pub fn read_bytes_range(
     let extracted: Bytes = bytes.drain(offset..offset + truncated_len).collect();
 
     Ok(PrecompileOutput {
-        gas_used: 100,
+        gas_used: (*chunk_count as u64) * PD_CHUNK_READ_COST,
         bytes: extracted,
     })
 }
