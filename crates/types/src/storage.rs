@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::CONFIG;
-use nodit::{InclusiveInterval, Interval};
+use nodit::{interval::ie, InclusiveInterval, Interval};
 use serde::{Deserialize, Serialize};
 
 pub const MEGABYTE: usize = 1024 * 1024;
@@ -15,7 +15,7 @@ pub const TERABYTE: usize = GIGABYTE * 1024;
 pub type PartitionChunkOffset = u32;
 
 /// Partition relative chunk interval/ranges
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct PartitionChunkRange(pub Interval<PartitionChunkOffset>);
 
 impl Deref for PartitionChunkRange {
@@ -172,4 +172,59 @@ pub enum ChunkState {
     Packed,
     Data,
     Writing,
+}
+
+/// Splits an interval into n equal-sized intervals
+///
+/// # Arguments
+/// * `interval` - The interval to split
+/// * `step` - Number of elements in each chunk
+///
+/// # Returns
+/// * `Result<Vec<Interval>, IntervalSplitError>` - Vector of splitted chunks
+///
+/// # Examples
+/// ```
+/// use nodit::interval::ii;
+/// use irys_types::storage::{PartitionChunkRange, split_interval};
+/// let interval = PartitionChunkRange(ii(0, 4));
+/// let splits = split_interval(&interval, 3).unwrap();
+/// assert_eq!(splits.len(), 2);
+/// assert_eq!(splits[0], PartitionChunkRange(ii(0, 2)));
+/// assert_eq!(splits[1], PartitionChunkRange(ii(3, 4)));
+/// ```
+pub fn split_interval(
+    interval: &PartitionChunkRange,
+    step: u32,
+) -> eyre::Result<Vec<PartitionChunkRange>> {
+    if step == 0 {
+        return Err(eyre::eyre!("Invalid zero step for split interval"));
+    }
+
+    let start = interval.start();
+    let end = interval.end();
+
+    if start >= end {
+        return Err(eyre::eyre!("Invalid interval bounds: [{}, {}]", start, end));
+    }
+
+    let n = if (end - start + 1) % step == 0 {
+        ((end - start + 1) / step).try_into().unwrap()
+    } else {
+        ((end - start + 1) / step + 1).try_into().unwrap()
+    };
+
+    let mut intervals = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let interval_start = start + i as u32 * step;
+        let interval_end = if i == n - 1 {
+            end + 1 // exclusive end, last chunk could not be full
+        } else {
+            start + (i as u32 + 1) * step
+        };
+
+        intervals.push(PartitionChunkRange(ie(interval_start, interval_end)));
+    }
+    Ok(intervals)
 }

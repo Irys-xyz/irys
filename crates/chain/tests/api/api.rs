@@ -1,6 +1,6 @@
 use irys_api_server::{routes, ApiState};
 use irys_chain::chain::start_for_testing_default;
-use irys_packing::unpack;
+use irys_packing::{unpack, PackingType, PACKING_TYPE};
 
 use actix_web::{
     middleware::Logger,
@@ -10,11 +10,16 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use base58::ToBase58;
+use tracing::info;
 
 #[cfg(test)]
 #[actix_web::test]
 async fn api_end_to_end_test_32b() {
-    api_end_to_end_test(32).await;
+    if PACKING_TYPE == PackingType::CPU {
+        api_end_to_end_test(32).await;
+    } else {
+        info!("C packing implementation do  not support chunk size different from CHUNK_SIZE");
+    }
 }
 
 #[cfg(test)]

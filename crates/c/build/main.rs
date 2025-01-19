@@ -19,6 +19,9 @@ fn main() {
 
     capacity::build_capacity(&c_src, &include_dir);
     capacity::bind_capacity(&c_src);
+
+    capacity::build_capacity_cuda(&c_src, &include_dir);
+    capacity::bind_capacity_cuda(&c_src);
 }
 
 // fn build_cuda() {

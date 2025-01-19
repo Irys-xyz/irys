@@ -1,5 +1,3 @@
-use std::cmp::max;
-
 use actix_web::{web::Path, HttpResponse};
 use irys_config::{PRICE_PER_CHUNK_5_EPOCH, PRICE_PER_CHUNK_PERM};
 use irys_database::Ledger;
@@ -19,7 +17,7 @@ pub async fn get_price(path: Path<(String, u64)>) -> actix_web::Result<HttpRespo
     if let Ok(l) = ledger {
         let final_price = match l {
             Ledger::Publish => PRICE_PER_CHUNK_PERM,
-            Ledger::Submit => PRICE_PER_CHUNK_5_EPOCH
+            Ledger::Submit => PRICE_PER_CHUNK_5_EPOCH,
         } * num_of_chunks;
 
         Ok(HttpResponse::Ok().body(final_price.to_string()))
