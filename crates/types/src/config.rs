@@ -8,6 +8,7 @@ use crate::{DifficultyAdjustmentConfig, U256};
 pub struct Config {
     /// Block time in seconds
     pub block_time: u64,
+    pub max_data_txs_per_block: u64,
     pub difficulty_adjustment_interval: u64,
     pub max_difficulty_adjustment_factor: Decimal,
     pub min_difficulty_adjustment_factor: Decimal,
@@ -45,6 +46,7 @@ pub const CONFIG: Config = load_toml!(
     "CONFIG_TOML_PATH",
     Config {
         block_time: DEFAULT_BLOCK_TIME,
+        max_data_txs_per_block: 100,
         difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME) * 14, // 2 weeks worth of blocks
         max_difficulty_adjustment_factor: rust_decimal_macros::dec!(4), // A difficulty adjustment can be 4x larger or 1/4th the current difficulty
         min_difficulty_adjustment_factor: rust_decimal_macros::dec!(0.25), // A 10% change must be required before a difficulty adjustment will occur

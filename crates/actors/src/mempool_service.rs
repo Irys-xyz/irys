@@ -10,14 +10,15 @@ use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
     IrysTransactionHeader, H256,
 };
-use irys_types::{DataRoot, StorageConfig, U256};
+use irys_types::{DataRoot, StorageConfig, CONFIG, U256};
+use reth::rpc::api::eth::helpers::fee;
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::Database;
-use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 use tracing::{debug, error, info};
 
@@ -378,9 +379,28 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
     type Result = Vec<IrysTransactionHeader>;
 
     fn handle(&mut self, _msg: GetBestMempoolTxs, _ctx: &mut Self::Context) -> Self::Result {
+        let db = self.db.clone().unwrap();
+        let mut fees_spent_per_address = HashMap::new();
+
+        // TODO sort by fee
         self.valid_tx
             .iter()
-            .take(10)
+            .filter(|(_, tx)| {
+                let current_spent = *fees_spent_per_address.get(&tx.signer).unwrap_or(&0_u64);
+                let valid = irys_database::get_account_balance(&db.tx().unwrap(), tx.signer)
+                    .unwrap()
+                    >= U256::from(current_spent + tx.total_fee());
+                match fees_spent_per_address.get_mut(&tx.signer) {
+                    Some(val) => {
+                        *val += tx.total_fee();
+                    }
+                    None => {
+                        fees_spent_per_address.insert(tx.signer, tx.total_fee());
+                    }
+                };
+                valid
+            })
+            .take(CONFIG.max_data_txs_per_block.try_into().unwrap())
             .map(|(_, header)| header.clone())
             .collect()
     }
