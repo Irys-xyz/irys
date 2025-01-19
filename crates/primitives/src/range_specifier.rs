@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum PdAccessListArgsTypeId {
-    ChunksRead = 0,
-    BytesRead = 1,
+    ChunkRead = 0,
+    ByteRead = 1,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -24,30 +24,30 @@ impl TryFrom<u8> for PdAccessListArgsTypeId {
     type Error = PdAccessListArgsTypeIdDecodeError;
     fn try_from(id: u8) -> Result<Self, Self::Error> {
         match id {
-            0 => Ok(PdAccessListArgsTypeId::ChunksRead),
-            1 => Ok(PdAccessListArgsTypeId::BytesRead),
+            0 => Ok(PdAccessListArgsTypeId::ChunkRead),
+            1 => Ok(PdAccessListArgsTypeId::ByteRead),
             _ => Err(PdAccessListArgsTypeIdDecodeError::UnknownPdAccessListArgsTypeId(id)),
         }
     }
 }
 
 pub enum PdAccessListArg {
-    ChunksRead(RangeSpecifier),
-    BytesRead(ByteRangeSpecifier),
+    ChunkRead(ChunkRangeSpecifier),
+    ByteRead(ByteRangeSpecifier),
 }
 
 impl PdAccessListArg {
     pub fn type_id(&self) -> PdAccessListArgsTypeId {
         match self {
-            &PdAccessListArg::ChunksRead(_) => PdAccessListArgsTypeId::ChunksRead,
-            &PdAccessListArg::BytesRead(_) => PdAccessListArgsTypeId::BytesRead,
+            &PdAccessListArg::ChunkRead(_) => PdAccessListArgsTypeId::ChunkRead,
+            &PdAccessListArg::ByteRead(_) => PdAccessListArgsTypeId::ByteRead,
         }
     }
 
     pub fn encode(&self) -> [u8; 32] {
         match self {
-            PdAccessListArg::ChunksRead(range_specifier) => range_specifier.encode(),
-            PdAccessListArg::BytesRead(bytes_range_specifier) => bytes_range_specifier.encode(),
+            PdAccessListArg::ChunkRead(range_specifier) => range_specifier.encode(),
+            PdAccessListArg::ByteRead(bytes_range_specifier) => bytes_range_specifier.encode(),
         }
     }
 
@@ -56,10 +56,10 @@ impl PdAccessListArg {
             .map_err(|e| eyre!("failed to decode type ID: {}", e))?;
 
         match type_id {
-            PdAccessListArgsTypeId::ChunksRead => {
-                Ok(PdAccessListArg::ChunksRead(RangeSpecifier::decode(bytes)?))
-            }
-            PdAccessListArgsTypeId::BytesRead => Ok(PdAccessListArg::BytesRead(
+            PdAccessListArgsTypeId::ChunkRead => Ok(PdAccessListArg::ChunkRead(
+                ChunkRangeSpecifier::decode(bytes)?,
+            )),
+            PdAccessListArgsTypeId::ByteRead => Ok(PdAccessListArg::ByteRead(
                 ByteRangeSpecifier::decode(bytes)?,
             )),
         }
@@ -101,15 +101,15 @@ pub trait PdAccessListArgSerde {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct RangeSpecifier {
+pub struct ChunkRangeSpecifier {
     pub partition_index: U200, // 3 64-bit words + 1 8 bit word, 25 bytes
     pub offset: u32,
     pub chunk_count: u16,
 }
 
-impl PdAccessListArgSerde for RangeSpecifier {
+impl PdAccessListArgSerde for ChunkRangeSpecifier {
     fn get_type() -> PdAccessListArgsTypeId {
-        PdAccessListArgsTypeId::ChunksRead
+        PdAccessListArgsTypeId::ChunkRead
     }
 
     fn encode_inner(&self) -> [u8; 31] {
@@ -124,7 +124,7 @@ impl PdAccessListArgSerde for RangeSpecifier {
     where
         Self: Sized,
     {
-        Ok(RangeSpecifier {
+        Ok(ChunkRangeSpecifier {
             partition_index: U200::from_le_bytes::<25>(bytes[0..=24].try_into()?),
             offset: u32::from_le_bytes(bytes[25..=28].try_into()?),
             chunk_count: u16::from_le_bytes(bytes[29..=30].try_into()?),
@@ -167,20 +167,20 @@ impl<T: PdAccessListArgSerde> From<&B256> for PdArgsEncWrapper<T> {
 #[cfg(test)]
 mod range_specifier_tests {
 
-    use crate::range_specifier::{PdAccessListArgSerde as _, RangeSpecifier};
+    use crate::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
     use alloy_primitives::aliases::U200;
     use std::{u16, u32};
 
     #[test]
     fn test_encode_decode_roundtrip() -> eyre::Result<()> {
-        let range_spec = RangeSpecifier {
+        let range_spec = ChunkRangeSpecifier {
             partition_index: U200::from(42_u16),
             offset: 12_u32,
             chunk_count: 11_u16,
         };
 
         let enc = range_spec.encode();
-        let dec = RangeSpecifier::decode(&enc).unwrap();
+        let dec = ChunkRangeSpecifier::decode(&enc).unwrap();
         assert_eq!(dec, range_spec);
         Ok(())
     }
@@ -188,14 +188,14 @@ mod range_specifier_tests {
     #[test]
     fn test_byte_boundaries() {
         // Test maximum values
-        let max_values = RangeSpecifier {
+        let max_values = ChunkRangeSpecifier {
             partition_index: U200::MAX,
             offset: u32::MAX,
             chunk_count: u16::MAX,
         };
 
         let encoded = max_values.encode();
-        let decoded = RangeSpecifier::decode(&encoded).unwrap();
+        let decoded = ChunkRangeSpecifier::decode(&encoded).unwrap();
 
         assert_eq!(max_values, decoded);
     }
@@ -238,7 +238,7 @@ impl ByteRangeSpecifier {
 
 impl PdAccessListArgSerde for ByteRangeSpecifier {
     fn get_type() -> PdAccessListArgsTypeId {
-        PdAccessListArgsTypeId::BytesRead
+        PdAccessListArgsTypeId::ByteRead
     }
 
     fn encode_inner(&self) -> [u8; 31] {
@@ -267,6 +267,8 @@ impl PdAccessListArgSerde for ByteRangeSpecifier {
 
 #[cfg(test)]
 mod bytes_range_specifier_tests {
+    use std::u16;
+
     use super::*;
 
     #[test]

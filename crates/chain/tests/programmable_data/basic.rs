@@ -20,7 +20,7 @@ use k256::ecdsa::SigningKey;
 use reth_primitives::irys_primitives::range_specifier::{
     ByteRangeSpecifier, PdAccessListArgSerde, U18, U34,
 };
-use reth_primitives::{irys_primitives::range_specifier::RangeSpecifier, GenesisAccount};
+use reth_primitives::{irys_primitives::range_specifier::ChunkRangeSpecifier, GenesisAccount};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -262,7 +262,7 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
         vec![AccessListItem {
             address: precompile_address,
             storage_keys: vec![
-                RangeSpecifier {
+                ChunkRangeSpecifier {
                     partition_index: U200::from(0),
                     offset: 0,
                     chunk_count: 1_u16,

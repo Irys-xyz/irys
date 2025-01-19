@@ -1,6 +1,6 @@
 use eyre::eyre;
 use irys_packing::unpack;
-use irys_primitives::range_specifier::{ByteRangeSpecifier, RangeSpecifier, U34};
+use irys_primitives::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier, U34};
 use irys_storage::reth_provider::IrysRethProviderInner;
 use revm_primitives::{
     bytes::Buf, Bytes, Env, FixedBytes, PrecompileError, PrecompileErrors, PrecompileOutput,
@@ -138,7 +138,7 @@ pub fn read_bytes_range(
             "Invalid byte read range chunk range index".to_owned(),
         )))?;
 
-    let RangeSpecifier {
+    let ChunkRangeSpecifier {
         partition_index,
         offset,
         chunk_count,
