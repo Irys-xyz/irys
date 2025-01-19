@@ -152,9 +152,10 @@ pub async fn start_irys_node(
 
     // Spawn thread and runtime for actors
     let arc_config_copy = arc_config.clone();
-    let irys_provider_0: IrysRethProvider = Arc::new(OnceLock::new());
+    let irys_provider: IrysRethProvider = Arc::new(OnceLock::new());
 
-    let irys_provider_1 = irys_provider_0.clone();
+    // clone as this gets `move`d into the thread
+    let irys_provider_1 = irys_provider.clone();
 
     std::thread::Builder::new()
         .name("actor-main-thread".to_string())
@@ -412,7 +413,7 @@ pub async fn start_irys_node(
 
     // run reth in it's own thread w/ it's own tokio runtime
     // this is done as reth exhibits strange behaviour (notably channel dropping) when not in it's own context/when the exit future isn't been awaited
-    let irys_provider2 = irys_provider_0.clone();
+
     std::thread::Builder::new().name("reth-thread".to_string())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
@@ -423,7 +424,7 @@ pub async fn start_irys_node(
 
             tokio_runtime.block_on(run_to_completion_or_panic(
                 &mut task_manager,
-                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider2)),
+                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider)),
             )).unwrap();
         })?;
 

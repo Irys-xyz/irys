@@ -1,9 +1,9 @@
+use irys_primitives::precompile::IrysPrecompileOffsets;
 use revm_primitives::{Bytes, Env, PrecompileError, PrecompileErrors, PrecompileResult};
-use tracing::debug;
 
 use super::{
     functions::PdFunctionId,
-    irys_executor::{CustomPrecompileWithAddress, IrysPrecompileOffsets, PrecompileStateProvider},
+    irys_executor::{CustomPrecompileWithAddress, PrecompileStateProvider},
     read_bytes::{read_bytes_range_by_index, read_partial_byte_range},
     utils::parse_access_list,
 };

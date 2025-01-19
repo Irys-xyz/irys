@@ -207,6 +207,7 @@ impl ConfigureEvm for IrysEvmConfig {
     type DefaultExternalContext<'a> = ();
 
     fn evm<DB: Database>(&self, db: DB) -> Evm<'_, Self::DefaultExternalContext<'_>, DB> {
+        // TODO: create a custom `Handler` so we can provide a custom validation handler for gas price estimations
         EvmBuilder::default()
             .with_db(db)
             // add additional precompiles
@@ -342,25 +343,4 @@ where
 
 pub fn irys_precompiles() -> Precompiles {
     vec![PROGRAMMABLE_DATA_PRECOMPILE]
-}
-
-// reserve space for any future eth precompiles
-// 0x500
-const BASE_PRECOMPILE_OFFSET: u64 = 1280;
-
-#[repr(u64)]
-pub enum IrysPrecompileOffsets {
-    ProgrammableData = BASE_PRECOMPILE_OFFSET,
-}
-
-impl IrysPrecompileOffsets {
-    pub const fn to_address(self) -> Address {
-        u64_to_address(self as u64)
-    }
-}
-
-impl From<IrysPrecompileOffsets> for Address {
-    fn from(val: IrysPrecompileOffsets) -> Self {
-        val.to_address()
-    }
 }

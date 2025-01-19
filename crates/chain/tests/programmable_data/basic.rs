@@ -11,12 +11,12 @@ use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_chain::chain::start_for_testing;
-use irys_reth_node_bridge::precompile::irys_executor::IrysPrecompileOffsets;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{irys::IrysSigner, Address};
 use irys_types::{Base64, IrysTransactionHeader, UnpackedChunk};
 
 use k256::ecdsa::SigningKey;
+use reth_primitives::irys_primitives::precompile::IrysPrecompileOffsets;
 use reth_primitives::irys_primitives::range_specifier::{
     ByteRangeSpecifier, PdAccessListArgSerde, U18, U34,
 };

@@ -4,6 +4,7 @@ pub mod genesis;
 pub mod last_tx;
 pub mod new_account;
 pub mod payload;
+pub mod precompile;
 pub mod range_specifier;
 pub mod shadow;
 

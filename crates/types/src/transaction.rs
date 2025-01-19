@@ -161,6 +161,11 @@ impl Default for IrysTransactionHeader {
     }
 }
 
+#[test]
+fn t() {
+    dbg!(serde_json::to_string(&IrysTransactionHeader::default()).unwrap());
+}
+
 pub type TxPath = Vec<u8>;
 
 /// sha256(tx_path)

@@ -103,8 +103,8 @@ pub trait PdAccessListArgSerde {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct ChunkRangeSpecifier {
     pub partition_index: U200, // 3 64-bit words + 1 8 bit word, 25 bytes
-    pub offset: u32,
-    pub chunk_count: u16,
+    pub offset: u32,           // offset within the partition (chunks)
+    pub chunk_count: u16,      // number of chunks in the range
 }
 
 impl PdAccessListArgSerde for ChunkRangeSpecifier {
