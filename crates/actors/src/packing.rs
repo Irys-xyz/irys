@@ -158,7 +158,7 @@ impl PackingActor {
                         .unwrap()
                         .iter()
                     {
-                        info!(
+                        debug!(
                             "Packing using CUDA C implementation, start:{} end:{}!",
                             chunk_range_split.start(),
                             chunk_range_split.end()

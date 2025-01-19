@@ -109,7 +109,7 @@ pub async fn start_irys_node(
     info!("Using directory {:?}", &node_config.base_directory);
 
     if PACKING_TYPE != PackingType::CPU && storage_config.chunk_size != CHUNK_SIZE {
-        error!("C packing only supports chunk size {}!", CHUNK_SIZE)
+        error!("GPU packing only supports chunk size {}!", CHUNK_SIZE)
     }
 
     let (reth_handle_sender, reth_handle_receiver) =
