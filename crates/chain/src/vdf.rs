@@ -25,7 +25,7 @@ pub fn run_vdf(
     let mut global_step_number: u64 = 0;
     let mut reset_seed = initial_reset_seed;
     info!("VDF thread started");
-    let nonce_limiter_reset_frequency = config.nonce_limiter_reset_frequency as u64;
+    let nonce_limiter_reset_frequency = config.vdf_reset_frequency as u64;
     loop {
         let now = Instant::now();
 
@@ -140,7 +140,7 @@ mod tests {
         let reset_seed = H256::random();
 
         let vdf_config = VDFStepsConfig {
-            nonce_limiter_reset_frequency: 2, // so to validation get into reset point
+            vdf_reset_frequency: 2, // so to validation get into reset point
             vdf_difficulty: 1,                // go quicker
             ..VDFStepsConfig::default()
         };
@@ -187,7 +187,7 @@ mod tests {
 
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
-        if step_num > 0 && (step_num - 1) % vdf_config.nonce_limiter_reset_frequency as u64 == 0 {
+        if step_num > 0 && (step_num - 1) % vdf_config.vdf_reset_frequency as u64 == 0 {
             seed = apply_reset_seed(seed, reset_seed);
         }
         vdf_sha(

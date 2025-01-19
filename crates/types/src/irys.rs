@@ -21,6 +21,15 @@ pub struct IrysSigner {
 /// Encapsulates an Irys API for doing client type things, making transactions,
 /// signing them, posting them etc.
 impl IrysSigner {
+    pub fn mainnet_from_slice(key_slice: &[u8]) -> Self {
+        IrysSigner {
+            signer: k256::ecdsa::SigningKey::from_slice(key_slice).unwrap(),
+            chain_id: CONFIG.irys_chain_id,
+            chunk_size: CONFIG.chunk_size.try_into().unwrap(),
+        }
+    }
+
+    // DO NOT USE IN PROD
     pub fn random_signer() -> Self {
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),

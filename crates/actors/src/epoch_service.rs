@@ -1,16 +1,18 @@
-use actix::{Actor, Context, Handler, Message, MessageResponse};
+use actix::{Actor, Addr, ArbiterService, Context, Handler, Message, MessageResponse, SystemRegistry};
 use eyre::{Error, Result};
-use irys_database::data_ledger::*;
+use irys_database::{data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
-    partition::{PartitionAssignment, PartitionHash},
-    IrysBlockHeader, SimpleRNG, StorageConfig, CONFIG, H256,
+    partition::{PartitionAssignment, PartitionHash}, DatabaseProvider, IrysBlockHeader, SimpleRNG, StorageConfig, CONFIG, H256
 };
 use openssl::sha;
+use reth_db::Database;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
+
+use crate::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
 
 /// Allows for overriding of the consensus parameters for ledgers and partitions
 #[derive(Debug, Clone)]
@@ -241,6 +243,30 @@ impl EpochServiceActor {
             partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
             all_active_partitions: Vec::new(),
             config,
+        }
+
+    }
+
+    pub async fn initialize(&mut self, db: &DatabaseProvider) {
+        let addr = BlockIndexService::from_registry();
+        
+        let read_guard = addr.send(GetBlockIndexGuardMessage).await.unwrap();
+
+        let rg = read_guard.read();
+
+        let mut block_index = 0_u64;
+
+        loop {
+            let block = rg.get_item(block_index.try_into().unwrap());
+
+            match block {
+                Some(b) => { 
+                    let block_header = database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash).unwrap().unwrap();
+                    self.perform_epoch_tasks(Arc::new(block_header)).unwrap();
+                    block_index += self.config.num_blocks_in_epoch;
+                 },
+                None => { break; },
+            }
         }
     }
 
@@ -758,7 +784,7 @@ mod tests {
             num_partitions_in_slot: 1,
             miner_address: Address::random(),
             min_writes_before_sync: 1,
-            entropy_packing_iterations: CONFIG.packing_sha_1_5_s,
+            entropy_packing_iterations: CONFIG.entropy_packing_iterations,
             num_confirmations_for_finality: 1, // Testnet / single node config
         };
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;

@@ -7,9 +7,11 @@ use std::{
 use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
 
 use eyre::eyre;
-use irys_packing::{
-    capacity_pack_range_cuda_c, capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE,
-};
+use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
+
+#[cfg(feature = "nvidia")]
+use irys_packing::capacity_pack_range_cuda_c;
+
 use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
 use irys_types::{split_interval, PartitionChunkRange, StorageConfig, CHUNK_SIZE};
 use reth::tasks::TaskExecutor;
@@ -149,6 +151,7 @@ impl PackingActor {
                         });
                     }
                 }
+                #[cfg(feature = "nvidia")]
                 PackingType::CUDA => {
                     assert_eq!(
                         chunk_size, CHUNK_SIZE,

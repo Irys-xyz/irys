@@ -20,30 +20,11 @@ fn main() {
     capacity::build_capacity(&c_src, &include_dir);
     capacity::bind_capacity(&c_src);
 
-    capacity::build_capacity_cuda(&c_src, &include_dir);
-    capacity::bind_capacity_cuda(&c_src);
+    if std::env::var("CARGO_FEATURE_NVIDIA").is_ok() {
+        capacity::build_capacity_cuda(&c_src, &include_dir);
+        capacity::bind_capacity_cuda(&c_src);
+    }
 }
-
-// fn build_cuda() {
-//     cc::Build::new()
-//     // Switch to CUDA C++ library compilation using NVCC.
-//     .cuda(true)
-//     .cudart("static")
-//     // Generate code for Maxwell (GTX 970, 980, 980 Ti, Titan X).
-//     .flag("-gencode").flag("arch=compute_52,code=sm_52")
-//     // Generate code for Maxwell (Jetson TX1).
-//     .flag("-gencode").flag("arch=compute_53,code=sm_53")
-//     // Generate code for Pascal (GTX 1070, 1080, 1080 Ti, Titan Xp).
-//     .flag("-gencode").flag("arch=compute_61,code=sm_61")
-//     // Generate code for Pascal (Tesla P100).
-//     .flag("-gencode").flag("arch=compute_60,code=sm_60")
-//     // Generate code for Pascal (Jetson TX2).
-//     .flag("-gencode").flag("arch=compute_62,code=sm_62")
-//     // Generate code in parallel
-//     .flag("-t0")
-//     .file("bar.cu")
-//     .compile("bar");
-// }
 
 // build from src
 // add openssl-src = "300.3.2" to cargo toml

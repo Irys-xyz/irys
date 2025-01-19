@@ -27,5 +27,4 @@ vcpkg = "0.2.8"
 workspace = true
 
 [features]
-hip = []
 nvidia = []

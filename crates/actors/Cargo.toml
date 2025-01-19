@@ -41,3 +41,6 @@ irys-testing-utils.workspace = true
 base58.workspace = true
 [lints]
 workspace = true
+
+[feature]
+nvidia = ["irys-packing/nvidia"]

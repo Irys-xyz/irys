@@ -9,3 +9,6 @@ irys-primitives.workspace = true
 irys-types.workspace = true
 eyre.workspace = true
 rand.workspace = true
+
+[features]
+nvidia = ["irys-c/nvidia"]

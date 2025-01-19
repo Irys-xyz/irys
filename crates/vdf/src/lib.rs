@@ -160,7 +160,7 @@ pub fn last_step_checkpoints_is_valid(
     let global_step_number: usize = vdf_info.global_step_number as usize;
 
     // If the vdf reset happened on this step, apply the entropy to the seed
-    if global_step_number % config.nonce_limiter_reset_frequency == 0 {
+    if global_step_number % config.vdf_reset_frequency == 0 {
         let reset_seed = vdf_info.seed;
         seed = apply_reset_seed(seed, reset_seed);
     }
@@ -266,7 +266,7 @@ pub fn vdf_steps_are_valid(vdf_info: &VDFLimiterInfo, config: &VDFStepsConfig) -
                 let mut checkpoints: Vec<H256> =
                     vec![H256::default(); config.num_checkpoints_in_vdf_step];
                 if start_step_number + i as u64 > 0
-                    && (start_step_number + i as u64) % config.nonce_limiter_reset_frequency as u64
+                    && (start_step_number + i as u64) % config.vdf_reset_frequency as u64
                         == 0
                 {
                     info!(

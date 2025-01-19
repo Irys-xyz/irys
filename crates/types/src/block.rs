@@ -24,6 +24,7 @@ pub type BlockHash = H256;
 
 /// Stores the `vdf_limiter_info` in the [`IrysBlockHeader`]
 #[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
+#[serde(rename_all = "camelCase")]
 pub struct VDFLimiterInfo {
     /// The output of the latest step - the source of the entropy for the mining nonces.
     pub output: H256,
@@ -290,6 +291,7 @@ impl WriteBytes for U256 {
 }
 
 #[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Compact, Arbitrary)]
+#[serde(rename_all = "camelCase")]
 /// Stores deserialized fields from a `poa` (Proof of Access) JSON
 pub struct PoaData {
     pub tx_path: Option<Base64>,
@@ -304,6 +306,7 @@ pub struct PoaData {
 pub type TxRoot = H256;
 
 #[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Compact, Arbitrary)]
+#[serde(rename_all = "camelCase")]
 pub struct TransactionLedger {
     pub tx_root: H256,
     /// List of transaction ids included in the block

@@ -129,7 +129,7 @@ mod tests {
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-        let iterations = CONFIG.packing_sha_1_5_s;
+        let iterations = CONFIG.entropy_packing_iterations;
 
         let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
 
