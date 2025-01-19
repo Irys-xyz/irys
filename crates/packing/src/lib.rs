@@ -1,10 +1,14 @@
 use std::ops::BitXor;
 
-pub use irys_c::{capacity, capacity_cuda, capacity_single};
+pub use irys_c::{capacity, capacity_single};
+
 use irys_types::{
     partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CHUNK_SIZE,
     CONFIG,
 };
+
+#[cfg(feature = "nvidia")]
+pub use irys_c::capacity_cuda;
 
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
 /// unpacking & trimming the data, and passing through metadata (size, tx_offset, etc)
@@ -79,7 +83,7 @@ pub fn capacity_pack_range_c(
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
     let entropy_chunk_ptr = out_entropy_chunk.as_ptr() as *mut u8;
 
-    let iterations: u32 = iterations.unwrap_or(CONFIG.packing_sha_1_5_s);
+    let iterations: u32 = iterations.unwrap_or(CONFIG.entropy_packing_iterations);
     let chain_id: u64 = CONFIG.irys_chain_id;
 
     unsafe {
@@ -98,6 +102,7 @@ pub fn capacity_pack_range_c(
     }
 }
 
+#[cfg(feature = "nvidia")]
 /// 2D Packing CUDA C implementation
 pub fn capacity_pack_range_cuda_c(
     num_chunks: u32,
@@ -111,7 +116,7 @@ pub fn capacity_pack_range_cuda_c(
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
-    let iterations: u32 = iterations.unwrap_or(CONFIG.packing_sha_1_5_s);
+    let iterations: u32 = iterations.unwrap_or(CONFIG.entropy_packing_iterations);
 
     let entropy_ptr = entropy.as_ptr() as *mut u8;
     let chain_id: u64 = CONFIG.irys_chain_id;
@@ -133,6 +138,7 @@ pub fn capacity_pack_range_cuda_c(
     }
 }
 
+#[cfg(feature = "nvidia")]
 /// 2D Packing CUDA C implementation
 pub fn capacity_pack_range_with_data_cuda_c(
     data: &mut Vec<u8>,
@@ -160,6 +166,7 @@ pub fn capacity_pack_range_with_data_cuda_c(
 pub enum PackingType {
     CPU,
     #[allow(unused)]
+    #[cfg(feature = "nvidia")]
     CUDA,
     #[allow(unused)]
     AMD,
@@ -176,7 +183,7 @@ pub fn capacity_pack_range_with_data(
     iterations: Option<u32>,
     chunk_size: usize,
 ) {
-    let iterations: u32 = iterations.unwrap_or(CONFIG.packing_sha_1_5_s);
+    let iterations: u32 = iterations.unwrap_or(CONFIG.entropy_packing_iterations);
 
     match PACKING_TYPE {
         PackingType::CPU => {
@@ -254,7 +261,7 @@ mod tests {
     use std::time::*;
 
     // Enable with CUDA hardware
-    #[ignore]
+    #[cfg(feature = "nvidia")]
     #[test]
     fn test_compute_entropy_chunk() {
         let mut rng = rand::thread_rng();
@@ -414,8 +421,7 @@ mod tests {
         assert_eq!(chunks[rnd_chunk_pos], rnd_chunk, "Wrong packed chunk")
     }
 
-    // Enable with CUDA hardware
-    #[ignore]
+    #[cfg(feature = "nvidia")]
     #[test]
     fn test_bench_chunks_packing_cuda() {
         let mut rng = rand::thread_rng();
