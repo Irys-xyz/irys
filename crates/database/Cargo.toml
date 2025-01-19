@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+alloy-primitives.workspace = true
 actix.workspace = true
 assert_matches.workspace = true
 tokio.workspace = true

@@ -62,7 +62,7 @@ async fn data_promotion_test() {
     let app_state = ApiState {
         db: node_context.db.clone(),
         mempool: node_context.actor_addresses.mempool,
-        chunk_provider: Arc::new(node_context.chunk_provider.clone()),
+        chunk_provider: node_context.chunk_provider.clone(),
     };
 
     // Initialize the app

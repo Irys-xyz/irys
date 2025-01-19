@@ -1,6 +1,6 @@
+use alloy_primitives::B256;
 use arbitrary::Arbitrary;
 use irys_types::Base64;
-use reth::revm::primitives::B256;
 use reth_codecs::Compact;
 use reth_db::cursor::DbCursorRO;
 use reth_db::transaction::DbTxMut;

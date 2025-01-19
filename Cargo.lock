@@ -5341,6 +5341,7 @@ name = "irys-database"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "alloy-primitives",
  "arbitrary",
  "assert_matches",
  "bytes",
