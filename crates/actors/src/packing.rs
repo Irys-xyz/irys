@@ -14,7 +14,7 @@ use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
 use irys_types::{split_interval, PartitionChunkRange, StorageConfig, CHUNK_SIZE};
 use reth::tasks::TaskExecutor;
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 #[derive(Debug, Message, Clone)]
 #[rtype("()")]
