@@ -141,7 +141,7 @@ mod tests {
 
         let vdf_config = VDFStepsConfig {
             vdf_reset_frequency: 2, // so to validation get into reset point
-            vdf_difficulty: 1,                // go quicker
+            vdf_difficulty: 1,      // go quicker
             ..VDFStepsConfig::default()
         };
 
