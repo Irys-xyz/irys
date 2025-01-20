@@ -3,8 +3,7 @@ use std::ops::BitXor;
 pub use irys_c::{capacity, capacity_single};
 
 use irys_types::{
-    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CHUNK_SIZE,
-    CONFIG,
+    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CONFIG,
 };
 
 #[cfg(feature = "nvidia")]
@@ -375,7 +374,7 @@ mod tests {
         let rnd_chunk_pos = rng.gen_range(0..num_chunks);
         let mut rnd_chunk = chunks[rnd_chunk_pos].clone();
 
-        let iterations = Some(2 * CHUNK_SIZE as u32);
+        let iterations = Some(2 * CONFIG.chunk_size as u32);
         let now = Instant::now();
 
         capacity_pack_range_with_data_c(
@@ -397,7 +396,7 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
-            CHUNK_SIZE as usize,
+            CONFIG.chunk_size as usize,
         );
 
         let elapsed = now.elapsed();
