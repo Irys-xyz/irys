@@ -1,6 +1,6 @@
 use crate::{
     block_index_service::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
-    vdf_service::VdfStepsReadGuard,
+    mining::hash_to_number, vdf_service::VdfStepsReadGuard,
 };
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
@@ -40,20 +40,15 @@ pub fn prevalidate_block(
     // Check the cumulative difficulty
     cumulative_difficulty_is_valid(block, previous_block)?;
 
-    //TODO: check block_hash
+    // Check the solution_hash
+    solution_hash_is_valid(block)?;
 
+    // Recall range check
     recall_recall_range_is_valid(block, storage_config, steps_guard)?;
 
     // We only check last_step_checkpoints during pre-validation
     last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config)?;
 
-    poa_is_valid(
-        &block.poa,
-        block_index_guard,
-        partitions_guard,
-        storage_config,
-        miner_address,
-    )?;
     Ok(())
 }
 
@@ -114,6 +109,20 @@ pub fn cumulative_difficulty_is_valid(
         Ok(())
     } else {
         Err(eyre::eyre!("Invalid cumulative_difficulty"))
+    }
+}
+
+/// Checks to see if the `solution_hash` exceeds the difficulty threshold
+///
+/// Note: Requires valid block difficulty - call difficulty_is_valid() first.
+pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
+    let solution_hash = block.solution_hash;
+    let solution_diff = hash_to_number(&solution_hash.0);
+
+    if solution_diff >= block.diff {
+        Ok(())
+    } else {
+        Err(eyre::eyre!("Invalid solution_hash"))
     }
 }
 
@@ -299,6 +308,7 @@ mod tests {
             EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
             GetPartitionAssignmentsGuardMessage, NewEpochMessage,
         },
+        BlockFinalizedMessage,
     };
     use actix::prelude::*;
     use dev::Registry;
@@ -472,7 +482,10 @@ mod tests {
         let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
         Registry::set(block_index_actor.start());
 
-        let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
+        let msg = BlockFinalizedMessage {
+            block_header: arc_genesis.clone(),
+            all_txs: Arc::new(vec![]),
+        };
 
         let block_index_addr = BlockIndexService::from_registry();
         match block_index_addr.send(msg).await {
@@ -558,7 +571,10 @@ mod tests {
         // Send the block confirmed message
         let block = Arc::new(irys_block);
         let txs = Arc::new(tx_headers);
-        let block_confirm_message = BlockConfirmedMessage(block.clone(), Arc::clone(&txs));
+        let block_confirm_message = BlockFinalizedMessage {
+            block_header: block.clone(),
+            all_txs: Arc::clone(&txs),
+        };
 
         match block_index_addr.send(block_confirm_message.clone()).await {
             Ok(_) => info!("Second block indexed"),

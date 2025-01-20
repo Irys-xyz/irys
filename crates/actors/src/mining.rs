@@ -263,7 +263,7 @@ impl Handler<MiningControl> for PartitionMiningActor {
     }
 }
 
-fn hash_to_number(hash: &[u8]) -> U256 {
+pub fn hash_to_number(hash: &[u8]) -> U256 {
     U256::from_little_endian(hash)
 }
 
