@@ -10,7 +10,8 @@ use crate::tables::{
 
 use irys_types::partition::PartitionHash;
 use irys_types::{
-    Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, IrysTransactionId, TxRelativeChunkOffset, UnpackedChunk, MEGABYTE, U256
+    Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
+    IrysTransactionId, TxRelativeChunkOffset, UnpackedChunk, MEGABYTE, U256,
 };
 use reth::prometheus_exporter::install_prometheus_recorder;
 use reth_db::cursor::DbDupCursorRO;
@@ -232,14 +233,11 @@ pub fn get_partition_hashes_by_data_root<T: DbTx>(
 }
 
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
-pub fn get_account_balance<T: DbTx>(
-    tx: &T,
-    address: Address,
-) -> eyre::Result<U256> {
-        Ok(tx
-            .get::<PlainAccountState>(address)?
-            .map(|a| U256::from_little_endian(a.balance.as_le_slice()))
-            .unwrap_or(U256::from(0)))          
+pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U256> {
+    Ok(tx
+        .get::<PlainAccountState>(address)?
+        .map(|a| U256::from_little_endian(a.balance.as_le_slice()))
+        .unwrap_or(U256::from(0)))
 }
 
 #[cfg(test)]

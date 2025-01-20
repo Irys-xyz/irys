@@ -4,7 +4,7 @@ use crate::*;
 #[derive(Debug, Clone)]
 pub struct VDFStepsConfig {
     pub num_checkpoints_in_vdf_step: usize,
-    pub nonce_limiter_reset_frequency: usize,
+    pub vdf_reset_frequency: usize,
     pub vdf_difficulty: u64,
     pub vdf_parallel_verification_thread_limit: usize,
 }
@@ -13,7 +13,7 @@ impl Default for VDFStepsConfig {
     fn default() -> Self {
         VDFStepsConfig {
             num_checkpoints_in_vdf_step: CONFIG.num_checkpoints_in_vdf_step,
-            nonce_limiter_reset_frequency: CONFIG.nonce_limiter_reset_frequency,
+            vdf_reset_frequency: CONFIG.vdf_reset_frequency,
             vdf_difficulty: if cfg!(test) || cfg!(debug_assertions) {
                 7_000
             } else {

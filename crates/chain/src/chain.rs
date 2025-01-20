@@ -1,3 +1,4 @@
+use irys_database::database;
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, ArbiterService, Registry};
 use irys_actors::{
@@ -19,6 +20,7 @@ use irys_actors::{
 };
 use irys_api_server::{run_server, ApiState};
 use irys_config::IrysNodeConfig;
+use irys_packing::{PackingType, PACKING_TYPE};
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
@@ -28,7 +30,7 @@ use irys_storage::{
 };
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
-    vdf_config::VDFStepsConfig, StorageConfig, CONFIG, H256,
+    vdf_config::VDFStepsConfig, StorageConfig, CHUNK_SIZE, CONFIG, H256,
 };
 use reth::{
     builder::FullNode,
@@ -42,7 +44,7 @@ use std::{
     sync::{mpsc, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use tokio::{
     runtime::Handle,
@@ -51,6 +53,21 @@ use tokio::{
 
 use crate::vdf::run_vdf;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+
+pub async fn start(config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
+    let storage_config = StorageConfig {
+        chunk_size: CONFIG.chunk_size,
+        num_chunks_in_partition: CONFIG.num_chunks_in_partition,
+        num_chunks_in_recall_range: CONFIG.num_chunks_in_recall_range,
+        num_partitions_in_slot: CONFIG.num_partitions_per_slot,
+        miner_address: config.mining_signer.address(),
+        min_writes_before_sync: 1,
+        entropy_packing_iterations: CONFIG.entropy_packing_iterations,
+        num_confirmations_for_finality: CONFIG.num_confirmations_for_finality, // Testnet / single node config
+    };
+
+    start_irys_node(config, storage_config).await
+}
 
 pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
     let storage_config = StorageConfig {
@@ -106,6 +123,11 @@ pub async fn start_irys_node(
     storage_config: StorageConfig,
 ) -> eyre::Result<IrysNodeCtx> {
     info!("Using directory {:?}", &node_config.base_directory);
+
+    if PACKING_TYPE != PackingType::CPU && storage_config.chunk_size != CHUNK_SIZE {
+        error!("GPU packing only supports chunk size {}!", CHUNK_SIZE)
+    }
+
     let (reth_handle_sender, reth_handle_receiver) =
         oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
     let (irys_node_handle_sender, irys_node_handle_receiver) = oneshot::channel::<IrysNodeCtx>();
@@ -125,14 +147,23 @@ pub async fn start_irys_node(
     let arc_genesis = Arc::new(irys_genesis);
 
     let mut storage_modules: StorageModuleVec = Vec::new();
+
+    let mut at_genesis = false;
+    let mut latest_block_index = None;
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
         let mut idx = BlockIndex::default();
         if !CONFIG.persist_data_on_restart {
             debug!("Reseting block index");
             idx = idx.reset(&arc_config.clone())?
         }
-        idx.init(arc_config.clone()).await.unwrap()
+        let i = idx.init(arc_config.clone()).await.unwrap();
+
+        at_genesis = i.get_item(0).is_none();
+        latest_block_index = i.get_latest_item().map(|ii| ii.clone());
+
+        i
     }));
+
 
     let reth_chainspec = arc_config
         .clone()
@@ -157,36 +188,47 @@ pub async fn start_irys_node(
                 let db = DatabaseProvider(reth_node.provider.database.db.clone());
                 let vdf_config = VDFStepsConfig::default();
 
+                let latest_block = latest_block_index.map(|b| database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash).unwrap().unwrap());
+
                 // Initialize the epoch_service actor to handle partition ledger assignments
                 let config = EpochServiceConfig {
                     storage_config: storage_config.clone(),
-                    ..Default::default()
+                    ..EpochServiceConfig::default()
                 };
 
                 let miner_address = node_config.mining_signer.address();
                 debug!("Miner address {:?}", miner_address);
-                let epoch_service = EpochServiceActor::new(Some(config));
-                let epoch_service_actor_addr = epoch_service.start();
 
                 // Initialize the block_index actor and tell it about the genesis block
                 let block_index_actor =
-                    BlockIndexService::new(block_index.clone(), storage_config.clone());
+                BlockIndexService::new(block_index.clone(), storage_config.clone());
                 Registry::set(block_index_actor.start());
                 let block_index_actor_addr = BlockIndexService::from_registry();
-                let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
-                db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
-                    .unwrap();
-                match block_index_actor_addr.send(msg).await {
-                    Ok(_) => info!("Genesis block indexed"),
-                    Err(_) => panic!("Failed to index genesis block"),
+                if at_genesis {
+                    let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
+                    db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
+                        .unwrap();
+                    match block_index_actor_addr.send(msg).await {
+                        Ok(_) => info!("Genesis block indexed"),
+                        Err(_) => panic!("Failed to index genesis block"),
+                    } 
+                }
+                            
+
+
+                let mut epoch_service = EpochServiceActor::new(Some(config));
+                epoch_service.initialize(&db).await;
+                let epoch_service_actor_addr = epoch_service.start();
+
+                if at_genesis {
+                    // Tell the epoch_service to initialize the ledgers
+                    let msg = NewEpochMessage(arc_genesis.clone());
+                    match epoch_service_actor_addr.send(msg).await {
+                        Ok(_) => info!("Genesis Epoch tasks complete."),
+                        Err(_) => panic!("Failed to perform genesis epoch tasks"),
+                    }                    
                 }
 
-                // Tell the epoch_service to initialize the ledgers
-                let msg = NewEpochMessage(arc_genesis.clone());
-                match epoch_service_actor_addr.send(msg).await {
-                    Ok(_) => info!("Genesis Epoch tasks complete."),
-                    Err(_) => panic!("Failed to perform genesis epoch tasks"),
-                }
 
                 // Retrieve ledger assignments
                 let ledgers_guard = epoch_service_actor_addr
@@ -216,8 +258,10 @@ pub async fn start_irys_node(
                     .unwrap();
 
                 // For Genesis we create the storage_modules and their files
-                initialize_storage_files(&arc_config.storage_module_dir(), &storage_module_infos)
-                    .unwrap();
+                if at_genesis {
+                  initialize_storage_files(&arc_config.storage_module_dir(), &storage_module_infos)
+                    .unwrap();  
+                }
 
                 // Create a list of storage modules wrapping the storage files
                 for info in storage_module_infos {
@@ -335,7 +379,7 @@ pub async fn start_irys_node(
 
                 // Let the partition actors know about the genesis difficulty
                 let broadcast_mining_service = BroadcastMiningService::from_registry();
-                broadcast_mining_service.do_send(BroadcastDifficultyUpdate(arc_genesis.clone()));
+                broadcast_mining_service.do_send(BroadcastDifficultyUpdate(latest_block.map(|b| Arc::new(b)).unwrap_or(arc_genesis.clone())));
 
                 let part_actors_clone = part_actors.clone();
 

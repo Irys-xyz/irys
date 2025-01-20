@@ -1,9 +1,10 @@
 //! Crate dedicated to the `IrysNodeConfig` to avoid depdendency cycles
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, num::ParseIntError, path::PathBuf};
 
 use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;
 use irys_types::{irys::IrysSigner, Address, CONFIG};
+use reth_chainspec::ChainSpecBuilder;
 use tracing::info;
 
 pub mod chain;
@@ -46,7 +47,28 @@ impl Default for IrysNodeConfig {
         }
     }
 }
+
+pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+        .collect()
+}
+
 impl IrysNodeConfig {
+    pub fn mainnet() -> IrysNodeConfig {
+        IrysNodeConfig {
+            mining_signer: IrysSigner::mainnet_from_slice(
+                &decode_hex(&CONFIG.mining_key[2..]).unwrap(),
+            ),
+            instance_number: 0,
+            base_directory: env::current_dir()
+                .expect("Unable to determine working dir, aborting")
+                .join(".irys"),
+            chainspec_builder: IrysChainSpecBuilder::mainnet(),
+        }
+    }
+
     /// get the instance-specific directory path
     pub fn instance_directory(&self) -> PathBuf {
         self.base_directory.join(self.instance_number.to_string())
@@ -136,7 +158,6 @@ impl IrysNodeConfig {
 //         return self.config;
 //     }
 // }
-
 
 pub const PRICE_PER_CHUNK_PERM: u128 = 10000;
 pub const PRICE_PER_CHUNK_5_EPOCH: u128 = 10;

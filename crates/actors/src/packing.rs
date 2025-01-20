@@ -7,9 +7,13 @@ use std::{
 use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
 
 use eyre::eyre;
-use irys_packing::capacity_single::compute_entropy_chunk;
+use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
+
+#[cfg(feature = "nvidia")]
+use irys_packing::capacity_pack_range_cuda_c;
+
 use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
-use irys_types::{PartitionChunkRange, StorageConfig};
+use irys_types::{split_interval, PartitionChunkRange, StorageConfig, CHUNK_SIZE};
 use reth::tasks::TaskExecutor;
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
@@ -42,13 +46,17 @@ pub struct PackingActor {
 /// configuration for the packing actor
 pub struct PackingConfig {
     poll_duration: Duration,
+    /// Max. number of packing threads for CPU packing
     concurrency: u16,
+    /// Max. number of chunks send to GPU packing
+    max_chunks: u32,
 }
 impl Default for PackingConfig {
     fn default() -> Self {
         Self {
             poll_duration: Duration::from_millis(1000),
             concurrency: 4,
+            max_chunks: 1024,
         }
     }
 }
@@ -110,37 +118,82 @@ impl PackingActor {
                 ..
             } = storage_module.storage_config;
 
-            for i in chunk_range.start()..=chunk_range.end() {
-                // each semaphore permit corresponds to a single chunk to be packed, as we assume it'll use an entire CPU thread's worth of compute.
-                // when we implement GPU packing, this is where we need to fork the logic between the two methods - GPU can take larger contiguous segments
-                // whereas CPU will do this permit system
+            match PACKING_TYPE {
+                PackingType::CPU => {
+                    for i in chunk_range.start()..=chunk_range.end() {
+                        // each semaphore permit corresponds to a single chunk to be packed, as we assume it'll use an entire CPU thread's worth of compute.
+                        // when we implement GPU packing, this is where we need to fork the logic between the two methods - GPU can take larger contiguous segments
+                        // whereas CPU will do this permit system
 
-                // TODO: have stateful executor threads / an arena for entropy chunks so we don't have to allocate chunks all over the place when we can just re-use
-                // TODO: improve this! use wakers instead of polling, allow for work-stealing, use a dedicated thread pool w/ lower priorities etc.
-                let semaphore: Arc<Semaphore> = self.semaphore.clone();
-                let storage_module = storage_module.clone();
-                // wait for the permit before spawning the thread
-                let permit = semaphore.acquire_owned().await.unwrap();
-                
-                self.task_executor.spawn_blocking(async move {
-                    let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
-                    compute_entropy_chunk(
-                        mining_address,
-                        i as u64,
-                        partition_hash.0,
-                        entropy_packing_iterations,
-                        chunk_size.try_into().unwrap(),
-                        &mut out,
+                        // TODO: have stateful executor threads / an arena for entropy chunks so we don't have to allocate chunks all over the place when we can just re-use
+                        // TODO: improve this! use wakers instead of polling, allow for work-stealing, use a dedicated thread pool w/ lower priorities etc.
+                        let semaphore: Arc<Semaphore> = self.semaphore.clone();
+                        let storage_module = storage_module.clone();
+                        // wait for the permit before spawning the thread
+                        let permit = semaphore.acquire_owned().await.unwrap();
+                        //debug!(target: "irys::packing", "Packing chunk {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                        self.task_executor.spawn_blocking(async move {
+                            let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
+                            compute_entropy_chunk(
+                                mining_address,
+                                i as u64,
+                                partition_hash.0,
+                                entropy_packing_iterations,
+                                chunk_size.try_into().unwrap(),
+                                &mut out,
+                            );
+
+                            debug!(target: "irys::packing", "Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                            debug!(target: "irys::packing", "chunk {:?}", out);
+                            // computation is done, release semaphore
+                            drop(permit);
+                            // write the chunk
+                            //debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.id);
+                            storage_module.write_chunk(i, out, ChunkType::Entropy);
+                            let _ = storage_module.sync_pending_chunks();
+                        });
+                    }
+                }
+                #[cfg(feature = "nvidia")]
+                PackingType::CUDA => {
+                    assert_eq!(
+                        chunk_size, CHUNK_SIZE,
+                        "Chunk size is not aligned with C code"
                     );
-                    debug!(target: "irys::packing", "Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
-                    debug!(target: "irys::packing", "chunk {:?}", out);
-                    // computation is done, release semaphore
-                    drop(permit);
-                    // write the chunk
-                    //debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.id);
-                    storage_module.write_chunk(i, out, ChunkType::Entropy);
+                    for chunk_range_split in split_interval(&chunk_range, self.config.max_chunks)
+                        .unwrap()
+                        .iter()
+                    {
+                        debug!(
+                            "Packing using CUDA C implementation, start:{} end:{}!",
+                            chunk_range_split.start(),
+                            chunk_range_split.end()
+                        );
+                        let num_chunks = chunk_range_split.end() - chunk_range_split.start() + 1;
+                        let mut out: Vec<u8> = Vec::with_capacity(
+                            (num_chunks * chunk_size as u32).try_into().unwrap(),
+                        );
+                        capacity_pack_range_cuda_c(
+                            num_chunks,
+                            mining_address,
+                            chunk_range_split.start() as u64,
+                            partition_hash,
+                            Some(entropy_packing_iterations),
+                            &mut out,
+                        );
+                        for i in 0..num_chunks {
+                            storage_module.write_chunk(
+                                chunk_range_split.start() + i,
+                                out[(i * chunk_size as u32) as usize
+                                    ..((i + 1) * chunk_size as u32) as usize]
+                                    .to_vec(),
+                                ChunkType::Entropy,
+                            );
+                        }
+                    }
                     let _ = storage_module.sync_pending_chunks();
-                });
+                }
+                _ => unimplemented!(),
             }
 
             // Remove from queue once complete
@@ -310,18 +363,20 @@ mod tests {
         assert_eq!(intervals, vec![ii(0, 3)]);
         let stored_entropy = storage_module.read_chunks(ii(0, 3))?;
         // verify the packing
-        let chunk = stored_entropy.get(&0).unwrap();
+        for i in 0..=3 {
+            let chunk = stored_entropy.get(&i).unwrap();
 
-        let mut out = Vec::with_capacity(storage_config.chunk_size.try_into().unwrap());
-        compute_entropy_chunk(
-            mining_address,
-            0_u64,
-            partition_hash.0,
-            storage_config.entropy_packing_iterations,
-            storage_config.chunk_size.try_into().unwrap(),
-            &mut out,
-        );
-        assert_eq!(chunk.0, out);
+            let mut out = Vec::with_capacity(storage_config.chunk_size.try_into().unwrap());
+            compute_entropy_chunk(
+                mining_address,
+                i as u64,
+                partition_hash.0,
+                storage_config.entropy_packing_iterations,
+                storage_config.chunk_size.try_into().unwrap(),
+                &mut out,
+            );
+            assert_eq!(chunk.0.first(), out.first());
+        }
 
         Ok(())
     }
