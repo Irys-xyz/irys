@@ -5,9 +5,7 @@ use irys_types::{IrysBlockHeader, StorageConfig};
 
 use crate::{
     block_index_service::BlockIndexReadGuard,
-    block_tree_service::{
-        BlockTreeService, ValidationResult, ValidationResultMessage,
-    },
+    block_tree_service::{BlockTreeService, ValidationResult, ValidationResultMessage},
     block_validation::poa_is_valid,
     epoch_service::PartitionAssignmentsReadGuard,
 };

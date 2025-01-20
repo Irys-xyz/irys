@@ -17,7 +17,8 @@ use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
     Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
-    IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
+    IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
+    H256, U256,
 };
 use nodit::interval::ii;
 use openssl::sha;
@@ -96,7 +97,7 @@ impl BlockProducerActor {
             difficulty_config,
             vdf_config,
             vdf_steps_guard,
-            block_tree_guard
+            block_tree_guard,
         }
     }
 }
@@ -176,7 +177,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     return None;
                 }
             };
-          
+
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
                 warn!("Solution for old step number {}, previous block step number {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number);
                 return None;

@@ -419,13 +419,13 @@ pub async fn start_irys_node(
                 // let _ = wait_for_packing(packing_actor_addr.clone(), None).await;
 
                 debug!("Packing complete");
-                
 
                 // Let the partition actors know about the genesis difficulty
                 let broadcast_mining_service = BroadcastMiningService::from_registry();
                 broadcast_mining_service
                     .send(BroadcastDifficultyUpdate(
-                        latest_block.clone()
+                        latest_block
+                            .clone()
                             .map(|b| Arc::new(b))
                             .unwrap_or(arc_genesis.clone()),
                     ))
@@ -439,7 +439,10 @@ pub async fn start_irys_node(
 
                 let vdf_config2 = vdf_config.clone();
                 let seed = seed.map_or(arc_genesis.vdf_limiter_info.output, |seed| seed.0);
-                let vdf_reset_seed = latest_block.map_or_else(|| arc_genesis.vdf_limiter_info.seed, |b| b.vdf_limiter_info.seed);
+                let vdf_reset_seed = latest_block.map_or_else(
+                    || arc_genesis.vdf_limiter_info.seed,
+                    |b| b.vdf_limiter_info.seed,
+                );
 
                 info!(
                     "Starting VDF thread seed {:?} reset_seed {:?}",
