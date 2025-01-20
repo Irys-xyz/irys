@@ -112,6 +112,12 @@ impl BlockIndex<Initialized> {
         self.items.get(block_height)
     }
 
+    /// Retrieves the most recent [`BlockIndexItem`] from the block index by block height
+    pub fn get_latest_item(&self) -> Option<&BlockIndexItem> {
+        if self.items.len() == 0 { return None };
+        self.items.get(self.items.len() - 1)
+    }
+
     /// Pushes a new [`BlockIndexItem`] onto the items array
     pub fn push_item(&mut self, block_index_item: &BlockIndexItem) {
         let mut items_vec = self.items.to_vec();

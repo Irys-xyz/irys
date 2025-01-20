@@ -1,3 +1,4 @@
+use irys_database::database;
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, ArbiterService, Registry};
 use irys_actors::{
@@ -148,13 +149,22 @@ pub async fn start_irys_node(
     let arc_genesis = Arc::new(irys_genesis);
 
     let mut storage_modules: StorageModuleVec = Vec::new();
+
+    let mut at_genesis = false;
+    let mut latest_block_index = None;
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
         let mut idx = BlockIndex::default();
         if !CONFIG.persist_data_on_restart {
             idx = idx.reset(&arc_config.clone())?
         }
-        idx.init(arc_config.clone()).await.unwrap()
+        let i = idx.init(arc_config.clone()).await.unwrap();
+
+        at_genesis = i.get_item(0).is_none();
+        latest_block_index = i.get_latest_item().map(|ii| ii.clone());
+
+        i
     }));
+
 
     let reth_chainspec = arc_config
         .clone()
@@ -184,36 +194,46 @@ pub async fn start_irys_node(
                 let db = DatabaseProvider(reth_node.provider.database.db.clone());
                 let vdf_config = VDFStepsConfig::default();
 
+                let latest_block = latest_block_index.map(|b| database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash).unwrap().unwrap());
+
                 // Initialize the epoch_service actor to handle partition ledger assignments
                 let config = EpochServiceConfig {
                     storage_config: storage_config.clone(),
-                    ..Default::default()
+                    ..EpochServiceConfig::default()
                 };
 
                 let miner_address = node_config.mining_signer.address();
+
+                // Initialize the block_index actor and tell it about the genesis block
+                let block_index_actor =
+                BlockIndexService::new(block_index.clone(), storage_config.clone());
+                Registry::set(block_index_actor.start());
+                let block_index_actor_addr = BlockIndexService::from_registry();
+                if at_genesis {
+                    let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
+                    db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
+                        .unwrap();
+                    match block_index_actor_addr.send(msg).await {
+                        Ok(_) => info!("Genesis block indexed"),
+                        Err(_) => panic!("Failed to index genesis block"),
+                    } 
+                }
+                            
+
+
                 let mut epoch_service = EpochServiceActor::new(Some(config));
                 epoch_service.initialize(&db).await;
                 let epoch_service_actor_addr = epoch_service.start();
 
-                // Initialize the block_index actor and tell it about the genesis block
-                let block_index_actor =
-                    BlockIndexService::new(block_index.clone(), storage_config.clone());
-                Registry::set(block_index_actor.start());
-                let block_index_actor_addr = BlockIndexService::from_registry();
-                let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
-                db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
-                    .unwrap();
-                match block_index_actor_addr.send(msg).await {
-                    Ok(_) => info!("Genesis block indexed"),
-                    Err(_) => panic!("Failed to index genesis block"),
+                if at_genesis {
+                    // Tell the epoch_service to initialize the ledgers
+                    let msg = NewEpochMessage(arc_genesis.clone());
+                    match epoch_service_actor_addr.send(msg).await {
+                        Ok(_) => info!("Genesis Epoch tasks complete."),
+                        Err(_) => panic!("Failed to perform genesis epoch tasks"),
+                    }                    
                 }
 
-                // Tell the epoch_service to initialize the ledgers
-                let msg = NewEpochMessage(arc_genesis.clone());
-                match epoch_service_actor_addr.send(msg).await {
-                    Ok(_) => info!("Genesis Epoch tasks complete."),
-                    Err(_) => panic!("Failed to perform genesis epoch tasks"),
-                }
 
                 // Retrieve ledger assignments
                 let ledgers_guard = epoch_service_actor_addr
@@ -243,8 +263,10 @@ pub async fn start_irys_node(
                     .unwrap();
 
                 // For Genesis we create the storage_modules and their files
-                initialize_storage_files(&arc_config.storage_module_dir(), &storage_module_infos)
-                    .unwrap();
+                if at_genesis {
+                  initialize_storage_files(&arc_config.storage_module_dir(), &storage_module_infos)
+                    .unwrap();  
+                }
 
                 // Create a list of storage modules wrapping the storage files
                 for info in storage_module_infos {
@@ -354,7 +376,7 @@ pub async fn start_irys_node(
 
                 // Let the partition actors know about the genesis difficulty
                 let broadcast_mining_service = BroadcastMiningService::from_registry();
-                broadcast_mining_service.do_send(BroadcastDifficultyUpdate(arc_genesis.clone()));
+                broadcast_mining_service.do_send(BroadcastDifficultyUpdate(latest_block.map(|b| Arc::new(b)).unwrap_or(arc_genesis.clone())));
 
                 let part_actors_clone = part_actors.clone();
 
