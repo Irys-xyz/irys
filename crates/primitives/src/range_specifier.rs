@@ -3,7 +3,7 @@
 use std::ops::Div;
 
 use alloy_primitives::{aliases::U200, B256};
-use eyre::eyre;
+use eyre::{eyre, OptionExt};
 use ruint::Uint;
 use serde::{Deserialize, Serialize};
 
@@ -125,7 +125,8 @@ impl PdAccessListArgSerde for ChunkRangeSpecifier {
         Self: Sized,
     {
         Ok(ChunkRangeSpecifier {
-            partition_index: U200::from_le_bytes::<25>(bytes[0..=24].try_into()?),
+            partition_index: U200::try_from_le_slice(bytes[0..=24].try_into()?)
+                .ok_or_eyre("U200 out of bounds")?,
             offset: u32::from_le_bytes(bytes[25..=28].try_into()?),
             chunk_count: u16::from_le_bytes(bytes[29..=30].try_into()?),
         })
@@ -213,29 +214,6 @@ pub struct ByteRangeSpecifier {
                            // pub reserved: [u8; 20], // 20 bytes, unused (for now)
 }
 
-impl ByteRangeSpecifier {
-    pub fn translate_offset(&mut self, chunk_size: u64, offset: u64) -> eyre::Result<()> {
-        let full_offset: u64 = offset
-            .checked_add(u64::try_from(self.byte_offset)?)
-            .ok_or_else(|| eyre!("Offset addition overflow"))?;
-
-        let additional_chunks = full_offset.div(chunk_size);
-        let new_chunk_offset = self
-            .chunk_offset
-            .checked_add(
-                u16::try_from(additional_chunks).map_err(|_| eyre!("Chunk offset overflow"))?,
-            )
-            .ok_or_else(|| eyre!("Chunk offset addition overflow"))?;
-
-        let new_byte_offset = U18::try_from(full_offset % chunk_size)
-            .map_err(|_| eyre!("Byte offset conversion error"))?;
-
-        self.chunk_offset = new_chunk_offset;
-        self.byte_offset = new_byte_offset;
-        Ok(())
-    }
-}
-
 impl PdAccessListArgSerde for ByteRangeSpecifier {
     fn get_type() -> PdAccessListArgsTypeId {
         PdAccessListArgsTypeId::ByteRead
@@ -256,12 +234,37 @@ impl PdAccessListArgSerde for ByteRangeSpecifier {
     where
         Self: Sized,
     {
+        let len_buf = bytes[6..=10].try_into()?;
         Ok(ByteRangeSpecifier {
             index: bytes[0],
             chunk_offset: u16::from_le_bytes(bytes[1..=2].try_into()?),
-            byte_offset: U18::from_le_bytes::<3>(bytes[3..=5].try_into()?),
-            length: U34::from_le_bytes::<5>(bytes[6..=10].try_into()?),
+            byte_offset: U18::try_from_le_slice(bytes[3..=5].try_into()?)
+                .ok_or_eyre("U18 out of bounds")?,
+            length: U34::try_from_le_slice(len_buf).ok_or_eyre("U34 out of bounds")?,
         })
+    }
+}
+
+impl ByteRangeSpecifier {
+    pub fn translate_offset(&mut self, chunk_size: u64, offset: u64) -> eyre::Result<()> {
+        let full_offset: u64 = offset
+            .checked_add(u64::try_from(self.byte_offset)?)
+            .ok_or_else(|| eyre!("Offset addition overflow"))?;
+
+        let additional_chunks = full_offset.div(chunk_size);
+        let new_chunk_offset = self
+            .chunk_offset
+            .checked_add(
+                u16::try_from(additional_chunks).map_err(|_| eyre!("Chunk offset overflow"))?,
+            )
+            .ok_or_else(|| eyre!("Chunk offset addition overflow"))?;
+
+        let new_byte_offset = U18::try_from(full_offset % chunk_size)
+            .map_err(|_| eyre!("Byte offset conversion error"))?;
+
+        self.chunk_offset = new_chunk_offset;
+        self.byte_offset = new_byte_offset;
+        Ok(())
     }
 }
 
@@ -307,7 +310,6 @@ mod bytes_range_specifier_tests {
         U18::try_from(1_u32 << 18).expect_err("value should overflow");
         U34::try_from(1_u64 << 34).expect_err("value should overflow");
     }
-    use super::*;
 
     #[test]
     fn test_translate_offset_within_chunk() -> eyre::Result<()> {
