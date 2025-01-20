@@ -57,9 +57,7 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
 impl IrysNodeConfig {
     pub fn mainnet() -> IrysNodeConfig {
         IrysNodeConfig {
-            mining_signer: IrysSigner::mainnet_from_slice(
-                &decode_hex(&CONFIG.mining_key[2..]).unwrap(),
-            ),
+            mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(&CONFIG.mining_key).unwrap()),
             instance_number: 1,
             base_directory: env::current_dir()
                 .expect("Unable to determine working dir, aborting")

@@ -27,8 +27,6 @@ pub fn run_vdf(
     let mut reset_seed = initial_reset_seed;
     info!("VDF thread started");
     let nonce_limiter_reset_frequency = config.vdf_reset_frequency as u64;
-    // TODO: replace this with some sync channel, now Waiting for miners to be ready
-    std::thread::sleep(Duration::from_secs(10));
 
     loop {
         let now = Instant::now();

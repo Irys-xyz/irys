@@ -612,7 +612,8 @@ impl EpochServiceActor {
         module_infos.extend(submit_infos);
 
         // Sort the active capacity partitions by hash
-        let capacity_partitions: Vec<H256> = pa.capacity_partitions.keys().copied().collect();
+        let mut capacity_partitions: Vec<H256> = pa.capacity_partitions.keys().copied().collect();
+        capacity_partitions.sort_unstable();
 
         // Add initial capacity partition config
         let cap_part = capacity_partitions.first().unwrap();
