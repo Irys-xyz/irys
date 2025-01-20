@@ -70,7 +70,7 @@ pub const CONFIG: Config = load_toml!(
         persist_data_on_restart: false,
         num_confirmations_for_finality: 6,
         mining_key: "",
-        num_capacity_partitions: -1
+        num_capacity_partitions: 0
     }
 );
 
