@@ -318,7 +318,7 @@ impl EpochServiceActor {
             let num_partitions = num_data_partitions
                 + Self::get_num_capacity_partitions(num_data_partitions, &self.config);
 
-            self.add_capacity_partitions(num_partitions);
+            self.add_capacity_partitions(CONFIG.num_capacity_partitions.unwrap_or(num_partitions));
         }
     }
 
