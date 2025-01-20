@@ -1497,7 +1497,7 @@ mod tests {
         // The tip does change here, even though it's not part of the longest
         // chain, this seems like a bug
         println!("tip: {} after mark_tip()", cache.tip);
-        assert_eq!(reorg, true);
+        assert!(reorg);
 
         assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
         // Although b13 becomes the tip, it's not included in the longest_chain_cache.
@@ -1751,7 +1751,7 @@ mod tests {
         cache: &BlockTreeCache,
     ) -> eyre::Result<()> {
         if let Some((block_entry, _, _)) = cache.get_earliest_not_onchain_in_longest_chain() {
-            let chain_state = &block_entry.chain_state;
+            let c_s = &block_entry.chain_state;
 
             ensure!(
                 block_entry.block.block_hash == *block_hash,
@@ -1761,9 +1761,9 @@ mod tests {
             );
 
             ensure!(
-                chain_state == chain_state,
+                chain_state == c_s,
                 "Wrong validation_state found: {:?}",
-                chain_state
+                c_s
             );
         } else {
             if let ChainState::NotOnchain(_) = chain_state {
