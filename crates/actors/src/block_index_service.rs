@@ -1,4 +1,4 @@
-use crate::{calculate_chunks_added, BlockConfirmedMessage};
+use crate::{calculate_chunks_added, BlockConfirmedMessage, BlockFinalizedMessage};
 use actix::prelude::*;
 use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
@@ -206,19 +206,17 @@ impl BlockIndexService {
     }
 }
 
-impl Handler<BlockConfirmedMessage> for BlockIndexService {
-    type Result = ();
-
-    // TODO: We are treating confirmed blocks like finalized blocks here when we
-    // can receive multiple confirmed blocks on different forks we'll have to
-    // listen to a FinalizedBlockMessage
-    fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        // Access the block header through msg.0
-        let irys_block_header = &msg.0;
-        let all_txs = &msg.1;
+impl Handler<BlockFinalizedMessage> for BlockIndexService {
+    type Result = Result<(), ()>;
+    fn handle(&mut self, msg: BlockFinalizedMessage, _: &mut Context<Self>) -> Self::Result {
+        // Collect working variables to move into the closure
+        let block = msg.block_header;
+        let all_txs = msg.all_txs;
 
         // Do something with the block
-        self.add_finalized_block(irys_block_header, all_txs);
+        self.add_finalized_block(&block, &all_txs);
+
+        Ok(())
     }
 }
 

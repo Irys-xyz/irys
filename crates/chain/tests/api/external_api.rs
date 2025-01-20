@@ -286,10 +286,13 @@ async fn external_api() -> eyre::Result<()> {
 
     // Send the block confirmed message
     let block = Arc::new(irys_block);
-    let txs = Arc::new(tx_headers);
-    let block_confirm_message = BlockConfirmedMessage(block.clone(), Arc::clone(&txs));
+    let txs: Arc<Vec<irys_types::IrysTransactionHeader>> = Arc::new(tx_headers);
+    let block_finalized_message = BlockFinalizedMessage {
+        block_header: block.clone(),
+        all_txs: Arc::clone(&txs),
+    };
 
-    block_index_addr.do_send(block_confirm_message.clone());
+    block_index_addr.do_send(block_finalized_message.clone());
 
     // Send the block finalized message
     let chunk_migration_service = ChunkMigrationService::new(
