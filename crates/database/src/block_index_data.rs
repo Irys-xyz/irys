@@ -121,9 +121,12 @@ impl BlockIndex<Initialized> {
     /// Pushes a new [`BlockIndexItem`] onto the items array
     pub fn push_item(&mut self, block_index_item: &BlockIndexItem) {
         let mut items_vec = self.items.to_vec();
+        let config = self.config.as_ref().unwrap().as_ref();
+        // TODO: improve this, storing in file each item
+        append_item(block_index_item, config).unwrap();
         items_vec.push(block_index_item.clone());
         self.items = items_vec.into();
-    }
+    }    
 
     /// For a given byte offset in a ledger, what block was responsible for adding
     /// that byte to the data ledger?
@@ -307,7 +310,7 @@ fn ensure_path_exists(config: &IrysNodeConfig) -> eyre::Result<()> {
 }
 
 #[allow(dead_code)]
-fn append_item(item: BlockIndexItem, config: &IrysNodeConfig) -> io::Result<()> {
+fn append_item(item: &BlockIndexItem, config: &IrysNodeConfig) -> io::Result<()> {
     let path = config.block_index_dir().join(FILE_NAME);
     let mut file = OpenOptions::new().append(true).open(path)?;
     file.write_all(&item.to_bytes())?;

@@ -7,6 +7,7 @@ use irys_types::{
 };
 use openssl::sha;
 use reth_db::Database;
+use tracing::info;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock, RwLockReadGuard},
@@ -318,7 +319,9 @@ impl EpochServiceActor {
             let num_partitions = num_data_partitions
                 + Self::get_num_capacity_partitions(num_data_partitions, &self.config);
 
-            self.add_capacity_partitions(CONFIG.num_capacity_partitions.unwrap_or(num_partitions));
+            // TODO: put back next line after fixing optionals in toml file
+            //  self.add_capacity_partitions(CONFIG.num_capacity_partitions.unwrap_or(num_partitions));
+            self.add_capacity_partitions(num_partitions);
         }
     }
 

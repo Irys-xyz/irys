@@ -6,7 +6,7 @@ use irys_actors::{
 use irys_types::{block_production::Seed, vdf_config::VDFStepsConfig, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
-use std::sync::mpsc::Receiver;
+use std::{sync::mpsc::Receiver, time::Duration};
 use std::time::Instant;
 use tracing::{debug, info};
 
@@ -27,6 +27,9 @@ pub fn run_vdf(
     let mut reset_seed = initial_reset_seed;
     info!("VDF thread started");
     let nonce_limiter_reset_frequency = config.vdf_reset_frequency as u64;
+    // TODO: replace this with some sync channel, now Waiting for miners to be ready
+    std::thread::sleep(Duration::from_secs(10));
+
     loop {
         let now = Instant::now();
 

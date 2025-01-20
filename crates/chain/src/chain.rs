@@ -155,10 +155,17 @@ pub async fn start_irys_node(
         if !CONFIG.persist_data_on_restart {
             debug!("Reseting block index");
             idx = idx.reset(&arc_config.clone())?
+        } else {
+            debug!("Not reseting block index");            
         }
         let i = idx.init(arc_config.clone()).await.unwrap();
 
         at_genesis = i.get_item(0).is_none();
+        if at_genesis {
+            debug!("At genesis!")
+        } else {
+            debug!("Not at genesis!")
+        }
         latest_block_index = i.get_latest_item().map(|ii| ii.clone());
 
         i
@@ -214,7 +221,7 @@ pub async fn start_irys_node(
                     } 
                 }
                             
-
+                debug!("AT GENESIS {}", at_genesis);
 
                 let mut epoch_service = EpochServiceActor::new(Some(config));
                 epoch_service.initialize(&db).await;

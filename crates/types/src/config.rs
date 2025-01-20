@@ -39,7 +39,8 @@ pub struct Config {
     /// - No number of confirmations is secure against attackers with >50% hashpower
     pub num_confirmations_for_finality: u32,
     pub mining_key: &'static str,
-    pub num_capacity_partitions: Option<u64>
+    // TODO: enable this after fixing option in toml
+    //pub num_capacity_partitions: Option<u64>
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 1;
@@ -69,7 +70,7 @@ pub const CONFIG: Config = load_toml!(
         persist_data_on_restart: false,
         num_confirmations_for_finality: 6,
         mining_key: "",
-        num_capacity_partitions: None
+        //num_capacity_partitions: None
     }
 );
 
