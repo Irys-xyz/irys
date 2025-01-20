@@ -7,7 +7,7 @@ use irys_types::{block_production::Seed, vdf_config::VDFStepsConfig, H256List, H
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::time::Instant;
-use std::{sync::mpsc::Receiver, time::Duration};
+use std::sync::mpsc::Receiver;
 use tracing::{debug, info};
 
 pub fn run_vdf(
