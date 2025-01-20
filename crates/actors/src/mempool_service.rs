@@ -11,7 +11,6 @@ use irys_types::{
     IrysTransactionHeader, H256,
 };
 use irys_types::{DataRoot, StorageConfig, CONFIG, U256};
-use reth::rpc::api::eth::helpers::fee;
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;

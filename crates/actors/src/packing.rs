@@ -13,7 +13,7 @@ use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_
 use irys_packing::capacity_pack_range_cuda_c;
 
 use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
-use irys_types::{split_interval, PartitionChunkRange, StorageConfig, CHUNK_SIZE};
+use irys_types::{PartitionChunkRange, StorageConfig};
 use reth::tasks::TaskExecutor;
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
 use tracing::{debug, warn};

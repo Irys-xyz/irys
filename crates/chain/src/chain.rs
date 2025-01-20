@@ -13,7 +13,7 @@ use irys_actors::{
     },
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
-    packing::{wait_for_packing, PackingActor, PackingRequest},
+    packing::{PackingActor, PackingRequest},
     vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
     ActorAddresses,
 };

@@ -4,7 +4,6 @@ use std::{env, fs, num::ParseIntError, path::PathBuf};
 use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;
 use irys_types::{irys::IrysSigner, Address, CONFIG};
-use reth_chainspec::ChainSpecBuilder;
 use tracing::info;
 
 pub mod chain;

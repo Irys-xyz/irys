@@ -1,5 +1,5 @@
 use actix::{
-    Actor, Addr, ArbiterService, Context, Handler, Message, MessageResponse, SystemRegistry,
+    Actor, ArbiterService, Context, Handler, Message, MessageResponse,
 };
 use eyre::{Error, Result};
 use irys_database::{data_ledger::*, database};
@@ -14,7 +14,6 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
-use tracing::info;
 
 use crate::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
 
