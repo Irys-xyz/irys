@@ -21,7 +21,6 @@ use irys_types::{
     Address, BlockHash, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
     IrysTransactionId, H256, U256,
 };
-use reth::rpc::types::Block;
 use reth_db::{transaction::DbTx, Database};
 use tracing::error;
 

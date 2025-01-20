@@ -33,7 +33,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, StorageConfig, UnpackedChunk,
     };
     use rand::Rng;
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
     use tokio::time::sleep;
     use tracing::{debug, info};
 

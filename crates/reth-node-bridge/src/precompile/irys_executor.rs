@@ -23,7 +23,7 @@ use reth_node_api::{
 };
 use reth_node_ethereum::{node::EthereumPayloadBuilder, EthEvmConfig, EthExecutorProvider};
 use reth_primitives::{Header, TransactionSigned};
-use revm::{precompile::u64_to_address, ContextPrecompile};
+use revm::ContextPrecompile;
 use revm_primitives::StatefulPrecompile;
 use std::sync::Arc;
 use tracing::info;

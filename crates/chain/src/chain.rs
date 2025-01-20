@@ -3,7 +3,7 @@ use actix::{Actor, ArbiterService, Registry};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
-    block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
+    block_producer::{BlockProducerActor, RegisterBlockProducerMessage},
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
@@ -13,7 +13,7 @@ use irys_actors::{
     },
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
-    packing::{wait_for_packing, PackingActor, PackingRequest},
+    packing::{PackingActor, PackingRequest},
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
     ActorAddresses, BlockFinalizedMessage,

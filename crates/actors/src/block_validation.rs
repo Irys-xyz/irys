@@ -303,7 +303,6 @@ pub fn poa_is_valid(
 mod tests {
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-        block_producer::BlockConfirmedMessage,
         epoch_service::{
             EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
             GetPartitionAssignmentsGuardMessage, NewEpochMessage,

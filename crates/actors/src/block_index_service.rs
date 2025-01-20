@@ -1,4 +1,4 @@
-use crate::{calculate_chunks_added, BlockConfirmedMessage, BlockFinalizedMessage};
+use crate::{calculate_chunks_added, BlockFinalizedMessage};
 use actix::prelude::*;
 use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};

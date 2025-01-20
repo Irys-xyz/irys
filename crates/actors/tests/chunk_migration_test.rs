@@ -7,7 +7,6 @@ use std::{
 
 use {
     irys_actors::block_index_service::BlockIndexService,
-    irys_actors::block_producer::BlockConfirmedMessage,
     irys_actors::mempool_service::{ChunkIngressMessage, MempoolService, TxIngressMessage},
 };
 
