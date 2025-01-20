@@ -273,6 +273,10 @@ pub fn poa_is_valid(
         );
 
         if entropy_chunk != poa.chunk.0 {
+            if poa.chunk.0.len() <= 32 {
+                debug!("Chunk PoA:{:?}", poa.chunk.0);
+                debug!("Entropy  :{:?}", entropy_chunk);
+            }
             return Err(eyre::eyre!(
                 "PoA capacity chunk mismatch {:?} /= {:?}",
                 entropy_chunk.first(),

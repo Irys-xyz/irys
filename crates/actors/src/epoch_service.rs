@@ -14,6 +14,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
+use tracing::info;
 
 use crate::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
 
@@ -325,7 +326,12 @@ impl EpochServiceActor {
             let num_partitions = num_data_partitions
                 + Self::get_num_capacity_partitions(num_data_partitions, &self.config);
 
-            self.add_capacity_partitions(num_partitions);
+            let num_cap_parts = if CONFIG.num_capacity_partitions == -1 {
+                num_partitions
+            } else {
+                CONFIG.num_capacity_partitions
+            };
+            self.add_capacity_partitions(num_cap_parts);
         }
     }
 
