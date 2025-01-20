@@ -2,7 +2,12 @@ use actix::prelude::*;
 use nodit::{interval::ii, InclusiveInterval, Interval};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque, fs::{self, File}, io::{Read, Write}, path::PathBuf, sync::{Arc, RwLock, RwLockReadGuard}, time::Duration
+    collections::VecDeque,
+    fs::{self, File},
+    io::{Read, Write},
+    path::PathBuf,
+    sync::{Arc, RwLock, RwLockReadGuard},
+    time::Duration,
 };
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -15,7 +20,7 @@ const FILE_NAME: &str = "vdf.dat";
 pub struct VdfState {
     /// last global step stored
     pub global_step: u64,
-    pub max_seeds_num: usize,    
+    pub max_seeds_num: usize,
     pub seeds: VecDeque<Seed>,
 }
 
@@ -70,7 +75,7 @@ impl VdfState {
                 .collect::<Vec<H256>>(),
         ))
     }
-    
+
     /// Saves the VdfState to a file
     pub fn save_to_file(&self, path: PathBuf) -> eyre::Result<()> {
         fs::create_dir_all(path.clone())?;
@@ -103,17 +108,16 @@ impl Default for VdfService {
 }
 
 impl VdfService {
-    /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available 
+    /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
     pub fn new(capacity: usize, vdf_steps_path: Option<PathBuf>) -> Self {
         let vdf_state_default = VdfState {
             global_step: 0,
             seeds: VecDeque::with_capacity(capacity),
             max_seeds_num: capacity,
         };
-        let vdf_state = vdf_steps_path.
-            map_or(vdf_state_default.clone(),
-            |path| VdfState::load_from_file(path.join(FILE_NAME)).unwrap_or(vdf_state_default)
-        );
+        let vdf_state = vdf_steps_path.map_or(vdf_state_default.clone(), |path| {
+            VdfState::load_from_file(path.join(FILE_NAME)).unwrap_or(vdf_state_default)
+        });
 
         Self(Arc::new(RwLock::new(vdf_state)))
     }

@@ -114,7 +114,9 @@ impl BlockIndex<Initialized> {
 
     /// Retrieves the most recent [`BlockIndexItem`] from the block index by block height
     pub fn get_latest_item(&self) -> Option<&BlockIndexItem> {
-        if self.items.len() == 0 { return None };
+        if self.items.len() == 0 {
+            return None;
+        };
         self.items.get(self.items.len() - 1)
     }
 
@@ -126,7 +128,7 @@ impl BlockIndex<Initialized> {
         append_item(block_index_item, config).unwrap();
         items_vec.push(block_index_item.clone());
         self.items = items_vec.into();
-    }    
+    }
 
     /// For a given byte offset in a ledger, what block was responsible for adding
     /// that byte to the data ledger?

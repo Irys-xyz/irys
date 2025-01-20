@@ -6,8 +6,8 @@ use irys_actors::{
 use irys_types::{block_production::Seed, vdf_config::VDFStepsConfig, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
-use std::{sync::mpsc::Receiver, time::Duration};
 use std::time::Instant;
+use std::{sync::mpsc::Receiver, time::Duration};
 use tracing::{debug, info};
 
 pub fn run_vdf(
@@ -145,7 +145,7 @@ mod tests {
 
         let vdf_config = VDFStepsConfig {
             vdf_reset_frequency: 2, // so to validation get into reset point
-            vdf_difficulty: 1,                // go quicker
+            vdf_difficulty: 1,      // go quicker
             ..VDFStepsConfig::default()
         };
 

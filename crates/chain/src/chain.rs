@@ -1,4 +1,3 @@
-use irys_database::database;
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, ArbiterService, Registry};
 use irys_actors::{
@@ -20,6 +19,7 @@ use irys_actors::{
 };
 use irys_api_server::{run_server, ApiState};
 use irys_config::IrysNodeConfig;
+use irys_database::database;
 use irys_packing::{PackingType, PACKING_TYPE};
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
@@ -156,7 +156,7 @@ pub async fn start_irys_node(
             debug!("Reseting block index");
             idx = idx.reset(&arc_config.clone())?
         } else {
-            debug!("Not reseting block index");            
+            debug!("Not reseting block index");
         }
         let i = idx.init(arc_config.clone()).await.unwrap();
 
@@ -170,7 +170,6 @@ pub async fn start_irys_node(
 
         i
     }));
-
 
     let reth_chainspec = arc_config
         .clone()
@@ -195,7 +194,11 @@ pub async fn start_irys_node(
                 let db = DatabaseProvider(reth_node.provider.database.db.clone());
                 let vdf_config = VDFStepsConfig::default();
 
-                let latest_block = latest_block_index.map(|b| database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash).unwrap().unwrap());
+                let latest_block = latest_block_index.map(|b| {
+                    database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
+                        .unwrap()
+                        .unwrap()
+                });
 
                 // Initialize the epoch_service actor to handle partition ledger assignments
                 let config = EpochServiceConfig {
@@ -208,7 +211,7 @@ pub async fn start_irys_node(
 
                 // Initialize the block_index actor and tell it about the genesis block
                 let block_index_actor =
-                BlockIndexService::new(block_index.clone(), storage_config.clone());
+                    BlockIndexService::new(block_index.clone(), storage_config.clone());
                 Registry::set(block_index_actor.start());
                 let block_index_actor_addr = BlockIndexService::from_registry();
                 if at_genesis {
@@ -218,9 +221,9 @@ pub async fn start_irys_node(
                     match block_index_actor_addr.send(msg).await {
                         Ok(_) => info!("Genesis block indexed"),
                         Err(_) => panic!("Failed to index genesis block"),
-                    } 
+                    }
                 }
-                            
+
                 debug!("AT GENESIS {}", at_genesis);
 
                 let mut epoch_service = EpochServiceActor::new(Some(config));
@@ -233,9 +236,8 @@ pub async fn start_irys_node(
                     match epoch_service_actor_addr.send(msg).await {
                         Ok(_) => info!("Genesis Epoch tasks complete."),
                         Err(_) => panic!("Failed to perform genesis epoch tasks"),
-                    }                    
+                    }
                 }
-
 
                 // Retrieve ledger assignments
                 let ledgers_guard = epoch_service_actor_addr
@@ -266,8 +268,11 @@ pub async fn start_irys_node(
 
                 // For Genesis we create the storage_modules and their files
                 if at_genesis {
-                  initialize_storage_files(&arc_config.storage_module_dir(), &storage_module_infos)
-                    .unwrap();  
+                    initialize_storage_files(
+                        &arc_config.storage_module_dir(),
+                        &storage_module_infos,
+                    )
+                    .unwrap();
                 }
 
                 // Create a list of storage modules wrapping the storage files
@@ -308,15 +313,17 @@ pub async fn start_irys_node(
                 let block_tree_actor = BlockTreeService::new(db.clone(), &arc_genesis);
                 Registry::set(block_tree_actor.start());
 
-                let vdf_step_path = if !CONFIG.persist_data_on_restart { None }
-                    else { Some(node_config.vdf_steps_dir()) };
+                let vdf_step_path = if !CONFIG.persist_data_on_restart {
+                    None
+                } else {
+                    Some(node_config.vdf_steps_dir())
+                };
                 let vdf_service_actor = VdfService::new(1000, vdf_step_path);
                 let vdf_service = vdf_service_actor.start();
                 Registry::set(vdf_service.clone()); // register it as a service
 
                 let vdf_steps_guard: VdfStepsReadGuard =
                     vdf_service.send(GetVdfStateMessage).await.unwrap();
-
 
                 let (global_step_number, seed) = vdf_steps_guard.read().get_last_step_and_seed();
 
@@ -386,7 +393,11 @@ pub async fn start_irys_node(
 
                 // Let the partition actors know about the genesis difficulty
                 let broadcast_mining_service = BroadcastMiningService::from_registry();
-                broadcast_mining_service.do_send(BroadcastDifficultyUpdate(latest_block.map(|b| Arc::new(b)).unwrap_or(arc_genesis.clone())));
+                broadcast_mining_service.do_send(BroadcastDifficultyUpdate(
+                    latest_block
+                        .map(|b| Arc::new(b))
+                        .unwrap_or(arc_genesis.clone()),
+                ));
 
                 let part_actors_clone = part_actors.clone();
 

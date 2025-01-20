@@ -32,7 +32,7 @@ impl Default for IrysNodeConfig {
         let base_dir = env::current_dir()
             .expect("Unable to determine working dir, aborting")
             .join(".irys");
-        
+
         if fs::exists(&base_dir).unwrap_or(false) && !CONFIG.persist_data_on_restart {
             // remove existing data directory as storage modules are packed with a different miner_signer generated next
             info!("Removing .irys folder {:?}", &base_dir);
