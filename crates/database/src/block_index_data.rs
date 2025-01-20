@@ -114,7 +114,9 @@ impl BlockIndex<Initialized> {
 
     /// Retrieves the most recent [`BlockIndexItem`] from the block index by block height
     pub fn get_latest_item(&self) -> Option<&BlockIndexItem> {
-        if self.items.len() == 0 { return None };
+        if self.items.len() == 0 {
+            return None;
+        };
         self.items.get(self.items.len() - 1)
     }
 
