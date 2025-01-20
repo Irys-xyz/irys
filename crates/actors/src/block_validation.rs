@@ -570,12 +570,12 @@ mod tests {
         // Send the block confirmed message
         let block = Arc::new(irys_block);
         let txs = Arc::new(tx_headers);
-        let block_confirm_message = BlockFinalizedMessage {
+        let block_finalized_message = BlockFinalizedMessage {
             block_header: block.clone(),
             all_txs: Arc::clone(&txs),
         };
 
-        match block_index_addr.send(block_confirm_message.clone()).await {
+        match block_index_addr.send(block_finalized_message.clone()).await {
             Ok(_) => info!("Second block indexed"),
             Err(_) => panic!("Failed to index second block"),
         };
