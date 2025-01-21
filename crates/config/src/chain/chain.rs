@@ -1,5 +1,5 @@
-use irys_primitives::{Genesis, U256};
-use irys_types::{IrysBlockHeader, CONFIG};
+use irys_primitives::{Genesis, GenesisAccount, U256};
+use irys_types::{Address, IrysBlockHeader, CONFIG};
 use once_cell::sync::{Lazy, OnceCell};
 use reth_chainspec::EthereumHardfork::{
     ArrowGlacier, Berlin, Byzantium, Cancun, Constantinople, Dao, Frontier, GrayGlacier, Homestead,
@@ -7,6 +7,7 @@ use reth_chainspec::EthereumHardfork::{
 };
 use reth_chainspec::{BaseFeeParams, BaseFeeParamsKind, Chain, ChainSpec, ForkCondition};
 use reth_primitives::constants::ETHEREUM_BLOCK_GAS_LIMIT;
+use reth_primitives::revm_primitives::hex;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -19,7 +20,17 @@ pub static IRYS_MAINNET: Lazy<Arc<ChainSpec>> = Lazy::new(|| {
         // TODO: A proper genesis block
         genesis: Genesis {
             gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,
-            alloc: BTreeMap::new(),
+            alloc: {
+                let mut map = BTreeMap::new();
+                map.insert(
+                    Address::from_slice(hex::decode("04f4906afe11aafed5501a64e45e9afb0415f1e2315e7fa8d8b46c8691eed2ad3ea4004e206e7b14cd995c99ab84be0a14e0cbd20e1a4c2b1a491952e5d8867d42").unwrap().as_slice()),
+                    GenesisAccount {
+                        balance: U256::from(690000000000000000_u128),
+                        ..Default::default()
+                    },
+                );
+                map
+            },
             ..Default::default()
         },
         genesis_hash: OnceCell::new(),
