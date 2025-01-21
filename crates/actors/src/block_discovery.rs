@@ -35,7 +35,7 @@ pub struct BlockDiscoveryActor {
 /// When a block is discovered, either produced locally or received from
 /// a network peer, this message is broadcast.
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
+#[rtype(result = "Result<(), ()>")]
 pub struct BlockDiscoveredMessage(pub Arc<IrysBlockHeader>);
 
 /// Sent when a discovered block is pre-validated
@@ -74,8 +74,8 @@ impl BlockDiscoveryActor {
 }
 
 impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
-    type Result = ();
-    fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Context<Self>) -> Self::Result {
+    type Result = ResponseFuture<Result<(), ()>>;
+    fn handle(&mut self, msg: BlockDiscoveredMessage, ctx: &mut Context<Self>) -> Self::Result {
         // Validate discovered block
         let new_block_header = msg.0;
         let prev_block_hash = new_block_header.previous_block_hash;
@@ -90,7 +90,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     "Failed to get block header for hash {}: {:?}",
                     prev_block_hash, other
                 );
-                return;
+                return Box::pin(async move { Err(()) });
             }
         };
 
@@ -118,7 +118,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             Ok(txs) => txs,
             Err(e) => {
                 error!("Failed to collect submit tx headers: {}", e);
-                return;
+                return Box::pin(async move { Err(()) });
             }
         };
 
@@ -145,7 +145,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             Ok(txs) => txs,
             Err(e) => {
                 error!("Failed to collect publish tx headers: {}", e);
-                return;
+                return Box::pin(async move { Err(()) });
             }
         };
 
@@ -154,7 +154,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 Some(proofs) => proofs,
                 None => {
                     error!("Ingress proofs missing");
-                    return;
+                    return Box::pin(async move { Err(()) });
                 }
             };
 
@@ -162,7 +162,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             for (i, tx_header) in publish_txs.iter().enumerate() {
                 if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
                     error!("Invalid ingress proof signature: {}", e);
-                    return;
+                    return Box::pin(async move { Err(()) });
                 }
             }
         }
@@ -173,8 +173,12 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let block_index_guard = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = BlockTreeService::from_registry();
-        let storage_config = &self.storage_config;
-        let difficulty_config = &self.difficulty_config;
+        let storage_config = self.storage_config.clone();
+        let difficulty_config = self.difficulty_config.clone();
+        let vdf_config = self.vdf_config.clone();
+        let vdf_steps_guard = self.vdf_steps_guard.clone();
+        let db = self.db.clone();
+        let block_header: IrysBlockHeader = (*new_block_header).clone();
 
         info!(
             "Validating block height: {} step: {} output: {} prev output: {}",
@@ -183,35 +187,39 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             new_block_header.vdf_limiter_info.output,
             new_block_header.vdf_limiter_info.prev_output
         );
+        Box::pin(async move {
+            match prevalidate_block(
+                block_header,
+                previous_block_header,
+                block_index_guard,
+                partitions_guard,
+                storage_config,
+                difficulty_config,
+                vdf_config,
+                vdf_steps_guard,
+                new_block_header.miner_address,
+            )
+            .await
+            {
+                Ok(_) => {
+                    info!("Block is valid, sending to block tree");
 
-        match prevalidate_block(
-            &new_block_header,
-            &previous_block_header,
-            &block_index_guard,
-            &partitions_guard,
-            storage_config,
-            difficulty_config,
-            &self.vdf_config,
-            &self.vdf_steps_guard,
-            &new_block_header.miner_address,
-        ) {
-            Ok(_) => {
-                info!("Block is valid, sending to block tree");
+                    db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
+                        .unwrap();
 
-                self.db
-                    .update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
-                    .unwrap();
-
-                let mut all_txs = submit_txs;
-                all_txs.extend_from_slice(&publish_txs);
-                block_tree_addr.do_send(BlockPreValidatedMessage(
-                    new_block_header,
-                    Arc::new(all_txs),
-                ));
+                    let mut all_txs = submit_txs;
+                    all_txs.extend_from_slice(&publish_txs);
+                    block_tree_addr.do_send(BlockPreValidatedMessage(
+                        new_block_header,
+                        Arc::new(all_txs),
+                    ));
+                    Ok(())
+                }
+                Err(err) => {
+                    error!("Block validation error {:?}", err);
+                    Err(())
+                }
             }
-            Err(err) => {
-                error!("Block validation error {:?}", err);
-            }
-        }
+        })
     }
 }

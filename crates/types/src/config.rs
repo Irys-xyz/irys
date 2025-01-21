@@ -61,7 +61,7 @@ pub const CONFIG: Config = load_toml!(
         num_checkpoints_in_vdf_step: 25, // 25 checkpoints 40 ms each = 1000 ms
         vdf_sha_1s: 530_000,
         entropy_packing_iterations: 22_500_000,
-        irys_chain_id: 69727973, // "irys" in ascii
+        irys_chain_id: 1275, // mainnet chainID (testnet is 1270)
         capacity_scalar: 100,
         num_blocks_in_epoch: 100,
         submit_ledger_epoch_length: 5,

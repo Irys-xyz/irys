@@ -14,16 +14,16 @@ use openssl::sha;
 use tracing::{debug, info};
 
 /// Full pre-validation steps for a block
-pub fn prevalidate_block(
-    block: &IrysBlockHeader,
-    previous_block: &IrysBlockHeader,
-    block_index_guard: &BlockIndexReadGuard,
-    partitions_guard: &PartitionAssignmentsReadGuard,
-    storage_config: &StorageConfig,
-    difficulty_config: &DifficultyAdjustmentConfig,
-    vdf_config: &VDFStepsConfig,
-    steps_guard: &VdfStepsReadGuard,
-    miner_address: &Address,
+pub async fn prevalidate_block(
+    block: IrysBlockHeader,
+    previous_block: IrysBlockHeader,
+    block_index_guard: BlockIndexReadGuard,
+    partitions_guard: PartitionAssignmentsReadGuard,
+    storage_config: StorageConfig,
+    difficulty_config: DifficultyAdjustmentConfig,
+    vdf_config: VDFStepsConfig,
+    steps_guard: VdfStepsReadGuard,
+    miner_address: Address,
 ) -> eyre::Result<()> {
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
         return Err(eyre::eyre!(
@@ -32,22 +32,22 @@ pub fn prevalidate_block(
     }
 
     // Check prev_output (vdf)
-    prev_output_is_valid(block, previous_block)?;
+    prev_output_is_valid(&block, &previous_block)?;
 
     // Check the difficulty
-    difficulty_is_valid(block, previous_block, difficulty_config)?;
+    difficulty_is_valid(&block, &previous_block, &difficulty_config)?;
 
     // Check the cumulative difficulty
-    cumulative_difficulty_is_valid(block, previous_block)?;
+    cumulative_difficulty_is_valid(&block, &previous_block)?;
 
     // Check the solution_hash
-    solution_hash_is_valid(block)?;
+    solution_hash_is_valid(&block)?;
 
     // Recall range check
-    recall_recall_range_is_valid(block, storage_config, steps_guard)?;
+    recall_recall_range_is_valid(&block, &storage_config, &steps_guard)?;
 
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config)?;
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config).await?;
 
     Ok(())
 }
