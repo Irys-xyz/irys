@@ -82,7 +82,11 @@ impl Handler<BroadcastMiningSeed> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
-        info!("Mining: {:?}", msg.seed);
+        info!(
+            "Broadcast Mining: {:?} subs: {}",
+            msg.seed,
+            &self.subscribers.len()
+        );
         self.subscribers.retain(|addr| addr.connected());
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());
