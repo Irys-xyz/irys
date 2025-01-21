@@ -12,7 +12,7 @@ use irys_actors::{
         GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage, NewEpochMessage,
     },
     mempool_service::MempoolService,
-    mining::{self, PartitionMiningActor},
+    mining::{PartitionMiningActor},
     packing::{PackingActor, PackingRequest},
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
