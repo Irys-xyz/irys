@@ -23,7 +23,11 @@ pub static IRYS_MAINNET: Lazy<Arc<ChainSpec>> = Lazy::new(|| {
             alloc: {
                 let mut map = BTreeMap::new();
                 map.insert(
-                    Address::from_slice(hex::decode("04f4906afe11aafed5501a64e45e9afb0415f1e2315e7fa8d8b46c8691eed2ad3ea4004e206e7b14cd995c99ab84be0a14e0cbd20e1a4c2b1a491952e5d8867d42").unwrap().as_slice()),
+                    Address::from_slice(
+                        hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
+                            .unwrap()
+                            .as_slice(),
+                    ),
                     GenesisAccount {
                         balance: U256::from(690000000000000000_u128),
                         ..Default::default()
