@@ -1,5 +1,5 @@
 use actix::prelude::*;
-use irys_database::{block_header_by_hash, BlockIndex};
+use irys_database::block_header_by_hash;
 use nodit::{interval::ii, InclusiveInterval, Interval};
 use reth_db::Database;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use irys_types::{block_production::Seed, DatabaseProvider, H256List, H256};
 
-use crate::{block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard};
+use crate::block_index_service::BlockIndexReadGuard;
 
 const FILE_NAME: &str = "vdf.dat";
 
