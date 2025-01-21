@@ -58,7 +58,7 @@ use crate::vdf::run_vdf;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 
 pub async fn start() -> eyre::Result<IrysNodeCtx> {
-    let config: IrysNodeConfig = IrysNodeConfig{
+    let config: IrysNodeConfig = IrysNodeConfig {
         mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(&CONFIG.mining_key).unwrap()),
         ..IrysNodeConfig::default()
     };
