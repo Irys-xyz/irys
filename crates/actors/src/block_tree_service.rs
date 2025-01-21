@@ -443,7 +443,9 @@ impl BlockTreeCache {
 
         let tx = db.tx().unwrap();
 
-        let start = block_index.num_blocks().saturating_sub(BLOCK_CACHE_DEPTH);
+        let start = block_index
+            .num_blocks()
+            .saturating_sub(BLOCK_CACHE_DEPTH - 1);
         let end = block_index.num_blocks();
 
         // Initialize cache with the start block
@@ -607,9 +609,9 @@ impl BlockTreeCache {
         let prev_hash = block.previous_block_hash;
 
         debug!(
-            "adding validated block - height: {} hash: {}",
+            "adding validated block - hash: {} height: {}",
+            block.block_hash.0.to_base58(),
             block.height,
-            block.block_hash.0.to_base58()
         );
 
         // Verify parent is validated
