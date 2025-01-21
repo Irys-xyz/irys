@@ -514,7 +514,6 @@ pub async fn start_irys_node(
 
                 // Wait for vdf thread to finish & save steps
                 vdf_thread_handler.join().unwrap();
-                vdf_steps_guard.save(node_config.vdf_steps_dir()).unwrap();
             });
         })?;
 
