@@ -16,7 +16,7 @@ use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::Transac
 use irys_storage::ii;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
+    block_production::Seed, block_production::SolutionContext, irys::IrysSigner, serialization::*,
     vdf_config::VDFStepsConfig, Address, H256List, IrysTransaction, StorageConfig, CONFIG, H256,
 };
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
@@ -92,6 +92,11 @@ pub async fn capacity_chunk_solution(
 
     debug!("Chunk mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_addr, 0, partition_hash, storage_config.entropy_packing_iterations, storage_config.chunk_size);
 
+    let max: irys_types::serialization::U256 = irys_types::serialization::U256::MAX;
+    let mut le_bytes = [0u8; 32];
+    max.to_little_endian(&mut le_bytes);
+    let solution_hash = H256(le_bytes);
+
     SolutionContext {
         partition_hash,
         chunk_offset: recall_range_idx as u32 * storage_config.num_chunks_in_recall_range as u32,
@@ -100,6 +105,7 @@ pub async fn capacity_chunk_solution(
         vdf_step: step_num,
         checkpoints: H256List(checkpoints),
         seed: Seed(steps[1]),
+        solution_hash,
         ..Default::default()
     }
 }

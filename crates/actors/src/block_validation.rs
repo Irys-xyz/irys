@@ -314,8 +314,8 @@ mod tests {
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
-        irys::IrysSigner, Address, Base64, H256List, IrysTransaction, IrysTransactionHeader,
-        Signature, TransactionLedger, H256, U256,
+        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, H256List,
+        IrysTransaction, IrysTransactionHeader, Signature, TransactionLedger, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tracing::log::LevelFilter;
@@ -323,7 +323,17 @@ mod tests {
 
     use super::*;
 
-    fn init_logger() {
+    pub(super) struct TestContext {
+        pub block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+        pub block_index_actor: Addr<BlockIndexService>,
+        pub partitions_guard: PartitionAssignmentsReadGuard,
+        pub storage_config: StorageConfig,
+        pub miner_address: Address,
+        pub partition_hash: H256,
+        pub partition_assignment: PartitionAssignment,
+    }
+
+    async fn init() -> TestContext {
         let _ = env_logger::builder()
             // Include all events in tests
             .filter_level(LevelFilter::max())
@@ -331,103 +341,17 @@ mod tests {
             .is_test(true)
             // Ignore errors initializing the logger if tests race to configure it
             .try_init();
-    }
 
-    // TODO @ernius: fix this !
-    #[ignore]
-    #[actix::test]
-    async fn poa_test_3_complete_txs() {
-        let chunk_size: usize = 32;
-        // Create a bunch of TX chunks
-        let data_chunks = vec![
-            vec![[0; 32], [1; 32], [2; 32]], // tx0
-            vec![[3; 32], [4; 32], [5; 32]], // tx1
-            vec![[6; 32], [7; 32], [8; 32]], // tx2
-        ];
-
-        // Create a bunch of signed TX from the chunks
-        // Loop though all the data_chunks and create wrapper tx for them
-        let signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
-        let mut txs: Vec<IrysTransaction> = Vec::new();
-
-        for chunks in &data_chunks {
-            let mut data: Vec<u8> = Vec::new();
-            for chunk in chunks {
-                data.extend_from_slice(chunk);
-            }
-            let tx = signer.create_transaction(data, None).unwrap();
-            let tx = signer.sign_transaction(tx).unwrap();
-            txs.push(tx);
-        }
-
-        for poa_tx_num in 0..3 {
-            for poa_chunk_num in 0..3 {
-                let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
-                poa_test(
-                    &txs,
-                    &mut poa_chunk,
-                    poa_tx_num,
-                    poa_chunk_num,
-                    9,
-                    chunk_size,
-                )
-                .await;
-            }
-        }
-    }
-
-    // TODO @ernius: fix this !
-    #[ignore]
-    #[actix::test]
-    async fn poa_not_complete_last_chunk_test() {
-        let chunk_size: usize = 32;
-
-        // Create a signed TX from the chunks
-        let signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
-        let mut txs: Vec<IrysTransaction> = Vec::new();
-
-        let data = vec![3; 40]; //32 + 8 last incomplete chunk
-        let tx = signer.create_transaction(data.clone(), None).unwrap();
-        let tx = signer.sign_transaction(tx).unwrap();
-        txs.push(tx);
-
-        let poa_tx_num = 0;
-
-        for poa_chunk_num in 0..2 {
-            let mut poa_chunk: Vec<u8> = data[poa_chunk_num * chunk_size
-                ..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())]
-                .to_vec();
-            poa_test(
-                &txs,
-                &mut poa_chunk,
-                poa_tx_num,
-                poa_chunk_num,
-                2,
-                chunk_size,
-            )
-            .await;
-        }
-    }
-
-    async fn poa_test(
-        txs: &Vec<IrysTransaction>,
-        poa_chunk: &mut Vec<u8>,
-        poa_tx_num: usize,
-        poa_chunk_num: usize,
-        total_chunks_in_tx: usize,
-        chunk_size: usize,
-    ) {
-        init_logger();
-        // Initialize genesis block at height 0
         let mut genesis_block = IrysBlockHeader::new();
         genesis_block.height = 0;
         let arc_genesis = Arc::new(genesis_block);
 
         let miner_address = Address::random();
+        let chunk_size = 32;
 
         // Create epoch service with random miner address
         let storage_config = StorageConfig {
-            chunk_size: chunk_size.try_into().unwrap(),
+            chunk_size: chunk_size,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_in_slot: 1,
@@ -486,8 +410,8 @@ mod tests {
             all_txs: Arc::new(vec![]),
         };
 
-        let block_index_addr = BlockIndexService::from_registry();
-        match block_index_addr.send(msg).await {
+        let block_index_actor = BlockIndexService::from_registry();
+        match block_index_actor.send(msg).await {
             Ok(_) => info!("Genesis block indexed"),
             Err(_) => panic!("Failed to index genesis block"),
         }
@@ -499,17 +423,114 @@ mod tests {
 
         debug!("Partition assignment {:?}", partition_assignment);
 
+        TestContext {
+            block_index,
+            block_index_actor,
+            partitions_guard,
+            storage_config,
+            miner_address,
+            partition_hash,
+            partition_assignment,
+        }
+    }
+
+    #[actix::test]
+    async fn poa_test_3_complete_txs() {
+        let chunk_size: usize = 32;
+        let context = init().await;
+        // Create a bunch of TX chunks
+        let data_chunks = vec![
+            vec![[0; 32], [1; 32], [2; 32]], // tx0
+            vec![[3; 32], [4; 32], [5; 32]], // tx1
+            vec![[6; 32], [7; 32], [8; 32]], // tx2
+        ];
+
+        // Create a bunch of signed TX from the chunks
+        // Loop though all the data_chunks and create wrapper tx for them
+        let signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
+        let mut txs: Vec<IrysTransaction> = Vec::new();
+
+        for chunks in &data_chunks {
+            let mut data: Vec<u8> = Vec::new();
+            for chunk in chunks {
+                data.extend_from_slice(chunk);
+            }
+            let tx = signer.create_transaction(data, None).unwrap();
+            let tx = signer.sign_transaction(tx).unwrap();
+            txs.push(tx);
+        }
+
+        for poa_tx_num in 0..3 {
+            for poa_chunk_num in 0..3 {
+                let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
+                poa_test(
+                    &context,
+                    &txs,
+                    &mut poa_chunk,
+                    poa_tx_num,
+                    poa_chunk_num,
+                    9,
+                    chunk_size,
+                )
+                .await;
+            }
+        }
+    }
+
+    #[actix::test]
+    async fn poa_not_complete_last_chunk_test() {
+        let context = init().await;
+        let chunk_size: usize = 32;
+
+        // Create a signed TX from the chunks
+        let signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
+        let mut txs: Vec<IrysTransaction> = Vec::new();
+
+        let data = vec![3; 40]; //32 + 8 last incomplete chunk
+        let tx = signer.create_transaction(data.clone(), None).unwrap();
+        let tx = signer.sign_transaction(tx).unwrap();
+        txs.push(tx);
+
+        let poa_tx_num = 0;
+
+        for poa_chunk_num in 0..2 {
+            let mut poa_chunk: Vec<u8> = data[poa_chunk_num * chunk_size
+                ..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())]
+                .to_vec();
+            poa_test(
+                &context,
+                &txs,
+                &mut poa_chunk,
+                poa_tx_num,
+                poa_chunk_num,
+                2,
+                chunk_size,
+            )
+            .await;
+        }
+    }
+
+    async fn poa_test(
+        context: &TestContext,
+        txs: &Vec<IrysTransaction>,
+        poa_chunk: &mut Vec<u8>,
+        poa_tx_num: usize,
+        poa_chunk_num: usize,
+        total_chunks_in_tx: usize,
+        chunk_size: usize,
+    ) {
+        // Initialize genesis block at height 0
         let height: u64;
         {
-            height = block_index.read().unwrap().num_blocks();
+            height = context.block_index.read().unwrap().num_blocks();
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(
-            miner_address,
+            context.miner_address,
             (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64,
-            partition_hash.into(),
-            config.storage_config.entropy_packing_iterations,
+            context.partition_hash.into(),
+            context.storage_config.entropy_packing_iterations,
             chunk_size,
             &mut entropy_chunk,
         );
@@ -532,18 +553,18 @@ mod tests {
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 as u32,
             recall_chunk_index: 0,
-            partition_hash,
+            partition_hash: context.partition_hash,
         };
 
         // Create a block from the tx
         let irys_block = IrysBlockHeader {
             height,
-            reward_address: miner_address,
+            reward_address: context.miner_address,
             poa: poa.clone(),
             block_hash: H256::zero(),
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(4000),
-            miner_address,
+            miner_address: context.miner_address,
             signature: Signature::test_signature().into(),
             timestamp: 1000,
             ledgers: vec![
@@ -575,19 +596,24 @@ mod tests {
             all_txs: Arc::clone(&txs),
         };
 
-        match block_index_addr.send(block_finalized_message.clone()).await {
+        match context
+            .block_index_actor
+            .send(block_finalized_message.clone())
+            .await
+        {
             Ok(_) => info!("Second block indexed"),
             Err(_) => panic!("Failed to index second block"),
         };
 
-        let block_index_guard = block_index_addr
+        let block_index_guard = context
+            .block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
             .unwrap();
 
-        let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
-            * storage_config.num_partitions_in_slot
-            * storage_config.num_chunks_in_partition
+        let ledger_chunk_offset = context.partition_assignment.slot_index.unwrap() as u64
+            * context.storage_config.num_partitions_in_slot
+            * context.storage_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
 
         assert_eq!(
@@ -611,9 +637,9 @@ mod tests {
         let poa_valid = poa_is_valid(
             &poa,
             &block_index_guard,
-            &partitions_guard,
-            &storage_config,
-            &miner_address,
+            &context.partitions_guard,
+            &context.storage_config,
+            &context.miner_address,
         );
 
         assert!(poa_valid.is_ok(), "PoA should be valid");

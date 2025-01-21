@@ -195,7 +195,11 @@ impl BlockIndexService {
             println!("block_height, block_time(ms), difficulty");
             for entry in &self.block_log {
                 let duration = if let Some(pe) = prev_entry {
-                    Duration::from_millis((entry.timestamp - pe.timestamp) as u64)
+                    if entry.timestamp >= pe.timestamp {
+                        Duration::from_millis((entry.timestamp - pe.timestamp) as u64)
+                    } else {
+                        Duration::from_millis(0)
+                    }
                 } else {
                     Duration::from_millis(0)
                 };
