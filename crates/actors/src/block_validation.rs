@@ -595,11 +595,7 @@ mod tests {
             all_txs: Arc::clone(&txs),
         };
 
-<<<<<<< HEAD
-        match context.block_index_actor.send(block_confirm_message.clone()).await {
-=======
-        match block_index_addr.send(block_finalized_message.clone()).await {
->>>>>>> master
+        match context.block_index_actor.send(block_finalized_message.clone()).await {
             Ok(_) => info!("Second block indexed"),
             Err(_) => panic!("Failed to index second block"),
         };
