@@ -199,9 +199,9 @@ pub async fn start_irys_node(
         .name("actor-main-thread".to_string())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
-            let rt: actix_rt::Runtime = actix_rt::Runtime::new().unwrap();
+            //let rt: actix_rt::Runtime = actix_rt::Runtime::new().unwrap();
             let node_config = arc_config_copy.clone();
-            rt.block_on(async move {
+            actix::System::new().block_on(async move {
                 // the RethNodeHandle doesn't *need* to be Arc, but it will reduce the copy cost
                 let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
                 let db = DatabaseProvider(reth_node.provider.database.db.clone());
