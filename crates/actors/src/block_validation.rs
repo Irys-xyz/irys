@@ -323,7 +323,7 @@ mod tests {
 
     use super::*;
 
-    pub struct TestContext {
+    pub(super) struct TestContext {
         pub block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         pub block_index_actor: Addr<BlockIndexService>,
         pub partitions_guard: PartitionAssignmentsReadGuard,
