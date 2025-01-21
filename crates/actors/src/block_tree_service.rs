@@ -453,7 +453,11 @@ impl BlockTreeCache {
         let start_block = block_header_by_hash(&tx, &start_block_hash)
             .unwrap()
             .unwrap();
-        debug!("starting cache block: {}", start_block_hash.0.to_base58());
+        debug!(
+            "block tree start block - hash: {} height: {}",
+            start_block_hash.0.to_base58(),
+            start_block.height
+        );
         let mut cache = Self::new(&start_block);
 
         // Add remaining blocks

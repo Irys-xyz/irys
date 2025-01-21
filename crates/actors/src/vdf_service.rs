@@ -116,6 +116,9 @@ impl VdfService {
                     for step in block.vdf_limiter_info.steps.0.iter().rev() {
                         seeds.push_front(Seed(*step));
                         steps_remaining -= 1;
+                        if steps_remaining == 0 {
+                            break;
+                        }
                     }
                     // get the previous block
                     block = block_header_by_hash(&tx, &block.previous_block_hash)
