@@ -1,13 +1,11 @@
 //! This crate provides functions and utilities for VDF (Verifiable Delay Function) operations,
 //! including checkpoint validation and seed application.
 
-use actix::Arbiter;
-use irys_types::{config, H256List, VDFLimiterInfo, VDFStepsConfig, H256, U256};
+use irys_types::{H256List, VDFLimiterInfo, VDFStepsConfig, H256, U256};
 
 use openssl::sha;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
-use tokio::sync::oneshot;
 use tracing::{error, info};
 
 /// Derives a salt value from the `step_number` for checkpoint hashing

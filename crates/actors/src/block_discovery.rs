@@ -4,7 +4,7 @@ use crate::{
     vdf_service::VdfStepsReadGuard,
 };
 use actix::prelude::*;
-use irys_database::{block_header_by_hash, submodule::db, tx_header_by_txid, Ledger};
+use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
 use irys_types::{
     DatabaseProvider, DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader,
     StorageConfig, VDFStepsConfig,
