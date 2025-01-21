@@ -445,7 +445,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .unwrap();
 
             let block = Arc::new(irys_block);
-            block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await.unwrap();
+            let _ = block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await.unwrap();
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));

@@ -5598,6 +5598,8 @@ dependencies = [
 name = "irys-vdf"
 version = "0.1.0"
 dependencies = [
+ "actix",
+ "actix-rt",
  "assert_matches",
  "env_logger",
  "eyre",
