@@ -314,7 +314,8 @@ mod tests {
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, H256List, IrysTransaction, IrysTransactionHeader, Signature, TransactionLedger, H256, U256
+        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, H256List,
+        IrysTransaction, IrysTransactionHeader, Signature, TransactionLedger, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tracing::log::LevelFilter;
@@ -429,7 +430,7 @@ mod tests {
             storage_config,
             miner_address,
             partition_hash,
-            partition_assignment
+            partition_assignment,
         }
     }
 
@@ -595,12 +596,17 @@ mod tests {
             all_txs: Arc::clone(&txs),
         };
 
-        match context.block_index_actor.send(block_finalized_message.clone()).await {
+        match context
+            .block_index_actor
+            .send(block_finalized_message.clone())
+            .await
+        {
             Ok(_) => info!("Second block indexed"),
             Err(_) => panic!("Failed to index second block"),
         };
 
-        let block_index_guard = context.block_index_actor
+        let block_index_guard = context
+            .block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
             .unwrap();

@@ -96,7 +96,7 @@ pub async fn capacity_chunk_solution(
     let mut le_bytes = [0u8; 32];
     max.to_little_endian(&mut le_bytes);
     let solution_hash = H256(le_bytes);
-    
+
     SolutionContext {
         partition_hash,
         chunk_offset: recall_range_idx as u32 * storage_config.num_chunks_in_recall_range as u32,
