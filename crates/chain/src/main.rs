@@ -22,7 +22,7 @@ async fn main() -> eyre::Result<()> {
         .finish()
         .try_init();
 
-    let handle = start(IrysNodeConfig::mainnet()).await?;
+    let handle = start(IrysNodeConfig::default()).await?;
     handle.actor_addresses.start_mining()?;
     std::thread::park();
 

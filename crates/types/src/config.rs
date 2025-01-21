@@ -67,9 +67,9 @@ pub const CONFIG: Config = load_toml!(
         submit_ledger_epoch_length: 5,
         num_partitions_per_slot: 1,
         num_writes_before_sync: 5,
-        persist_data_on_restart: false,
+        persist_data_on_restart: true,
         num_confirmations_for_finality: 6,
-        mining_key: "",
+        mining_key: "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0", // Burner PrivateKey (PK)
         num_capacity_partitions: 0
     }
 );

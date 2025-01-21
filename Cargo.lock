@@ -5345,6 +5345,7 @@ dependencies = [
  "alloy-primitives",
  "arbitrary",
  "assert_matches",
+ "base58",
  "bytes",
  "eyre",
  "irys-config",

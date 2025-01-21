@@ -22,7 +22,8 @@
 			"args": [],
 			"cwd": "${workspaceFolder}",
 			"env": {
-				"RUST_BACKTRACE": "1"
+				"RUST_BACKTRACE": "1",
+				"RUST_LOG": "irys_actors::block_tree_service=debug,irys_chain::chain=debug"
 			}
 		},
 		{

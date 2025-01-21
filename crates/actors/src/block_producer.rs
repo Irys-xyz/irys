@@ -18,7 +18,7 @@ use irys_types::{
     next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
     Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
     IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
-    CONFIG, H256, U256,
+    H256, U256,
 };
 use nodit::interval::ii;
 use openssl::sha;
@@ -29,7 +29,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
-    block_index_service::{BlockIndexService, GetLatestBlockIndexMessage},
+    block_tree_service::BlockTreeReadGuard,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::{GetBestMempoolTxs, MempoolService},
@@ -64,6 +64,8 @@ pub struct BlockProducerActor {
     pub vdf_config: VDFStepsConfig,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
+    /// Get the head of the chain
+    pub block_tree_guard: BlockTreeReadGuard,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -83,6 +85,7 @@ impl BlockProducerActor {
         difficulty_config: DifficultyAdjustmentConfig,
         vdf_config: VDFStepsConfig,
         vdf_steps_guard: VdfStepsReadGuard,
+        block_tree_guard: BlockTreeReadGuard,
     ) -> Self {
         Self {
             db,
@@ -94,6 +97,7 @@ impl BlockProducerActor {
             difficulty_config,
             vdf_config,
             vdf_steps_guard,
+            block_tree_guard,
         }
     }
 }
@@ -135,6 +139,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let db = self.db.clone();
         let difficulty_config = self.difficulty_config.clone();
         let chunk_size = self.storage_config.chunk_size;
+        let block_tree_guard = self.block_tree_guard.clone();
 
         // let self_addr = ctx.address();
         // let storage_config = self.storage_config.clone();
@@ -142,35 +147,36 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let vdf_steps = self.vdf_steps_guard.clone();
 
         AtomicResponse::new(Box::pin( async move {
-            // Acquire lock and check that the height hasn't changed identifying a race condition
-            // TEMP: This demonstrates how to get the block height from the block_index_actor
-            let block_index_addr = BlockIndexService::from_registry();
-            let latest_block = block_index_addr
-                .send(GetLatestBlockIndexMessage {})
-                .await
-                .unwrap();
+            // Get the current head of the longest chain, from the block_tree, to build off of
+            let (canonical_blocks, _not_onchain_count) = block_tree_guard.read().get_canonical_chain();
+            let (latest_block_hash, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
+
+            let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, &latest_block_hash)) {
+                Ok(Some(header)) => header,
+                Ok(None) => {
+                    error!("No block header found for hash {}", latest_block_hash);
+                    return None;
+                },
+                Err(e) => {
+                    error!("Failed to get previous block header: {}", e);
+                    return None;
+                }
+            };
 
             // Retrieve the previous block header and hash
             let prev_block_header: IrysBlockHeader;
-            let prev_block_hash: H256;
-
-            if let Some(block_item) = latest_block {
-                prev_block_hash = block_item.block_hash;
-                prev_block_header = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash)) {
-                    Ok(Some(header)) => header,
-                    Ok(None) => {
-                        error!("No block header found for hash {}", prev_block_hash);
-                        return None;
-                    },
-                    Err(e) => {
-                        error!("Failed to get previous block header: {}", e);
-                        return None;
-                    }
-                };
-            } else {
-                error!("No previous block header found");
-                return None;
-            }
+            let prev_block_hash = block_item.block_hash;
+            prev_block_header = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash)) {
+                Ok(Some(header)) => header,
+                Ok(None) => {
+                    error!("No block header found for hash {}", prev_block_hash);
+                    return None;
+                },
+                Err(e) => {
+                    error!("Failed to get previous block header: {}", e);
+                    return None;
+                }
+            };
 
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
                 warn!("Solution for old step number {}, previous block step number {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number);

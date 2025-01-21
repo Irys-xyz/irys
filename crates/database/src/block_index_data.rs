@@ -2,6 +2,7 @@
 //! block height.
 use crate::data_ledger::Ledger;
 use actix::dev::MessageResponse;
+use base58::ToBase58;
 use eyre::Result;
 use irys_config::IrysNodeConfig;
 use irys_types::H256;
@@ -170,6 +171,16 @@ impl BlockIndex<Initialized> {
         };
 
         Ok((index, &self.items[index]))
+    }
+
+    pub fn print_items(&self) {
+        for height in 0..self.num_blocks() as usize {
+            println!(
+                "height: {} hash: {}",
+                height,
+                self.get_item(height).unwrap().block_hash.0.to_base58()
+            );
+        }
     }
 }
 

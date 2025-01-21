@@ -3,8 +3,8 @@ use actix::{Actor, ArbiterService, Registry};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
-    block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
-    block_tree_service::BlockTreeService,
+    block_producer::{BlockProducerActor, RegisterBlockProducerMessage},
+    block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
     epoch_service::{
@@ -13,9 +13,10 @@ use irys_actors::{
     },
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
-    packing::{wait_for_packing, PackingActor, PackingRequest},
+    packing::{PackingActor, PackingRequest},
+    validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
-    ActorAddresses,
+    ActorAddresses, BlockFinalizedMessage,
 };
 use irys_api_server::{run_server, ApiState};
 use irys_config::IrysNodeConfig;
@@ -155,10 +156,10 @@ pub async fn start_irys_node(
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
         let mut idx = BlockIndex::default();
         if !CONFIG.persist_data_on_restart {
-            debug!("Reseting block index");
+            debug!("Resetting block index");
             idx = idx.reset(&arc_config.clone())?
         } else {
-            debug!("Not reseting block index");
+            debug!("Not resetting block index");
         }
         let i = idx.init(arc_config.clone()).await.unwrap();
 
@@ -222,7 +223,10 @@ pub async fn start_irys_node(
                 Registry::set(block_index_actor.start());
                 let block_index_actor_addr = BlockIndexService::from_registry();
                 if at_genesis {
-                    let msg = BlockConfirmedMessage(arc_genesis.clone(), Arc::new(vec![]));
+                    let msg = BlockFinalizedMessage {
+                        block_header: arc_genesis.clone(),
+                        all_txs: Arc::new(vec![]),
+                    };
                     db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
                         .unwrap();
                     match block_index_actor_addr.send(msg).await {
@@ -315,10 +319,25 @@ pub async fn start_irys_node(
                 );
                 Registry::set(chunk_migration_service.start());
 
+                let validation_service = ValidationService::new(
+                    block_index_guard.clone(),
+                    partition_assignments_guard.clone(),
+                    storage_config.clone(),
+                    vdf_config.clone(),
+                );
+                Registry::set(validation_service.start());
+
                 let (_new_seed_tx, _new_seed_rx) = mpsc::channel::<H256>();
 
-                let block_tree_actor = BlockTreeService::new(db.clone(), &arc_genesis);
-                Registry::set(block_tree_actor.start());
+                let block_tree_service =
+                    BlockTreeService::new(db.clone(), block_index.clone(), &miner_address);
+                Registry::set(block_tree_service.start());
+                let block_tree_service = BlockTreeService::from_registry();
+
+                let block_tree_guard = block_tree_service
+                    .send(GetBlockTreeGuardMessage)
+                    .await
+                    .unwrap();
 
                 let vdf_step_path = if !CONFIG.persist_data_on_restart {
                     None
@@ -355,6 +374,7 @@ pub async fn start_irys_node(
                     difficulty_adjustment_config.clone(),
                     vdf_config.clone(),
                     vdf_steps_guard.clone(),
+                    block_tree_guard.clone(),
                 );
                 let block_producer_addr = block_producer_actor.start();
                 let block_tree = BlockTreeService::from_registry();
@@ -400,13 +420,13 @@ pub async fn start_irys_node(
                 // let _ = wait_for_packing(packing_actor_addr.clone(), None).await;
 
                 debug!("Packing complete");
-                
 
                 // Let the partition actors know about the genesis difficulty
                 let broadcast_mining_service = BroadcastMiningService::from_registry();
                 broadcast_mining_service
                     .send(BroadcastDifficultyUpdate(
-                        latest_block.clone()
+                        latest_block
+                            .clone()
                             .map(|b| Arc::new(b))
                             .unwrap_or(arc_genesis.clone()),
                     ))
@@ -420,7 +440,10 @@ pub async fn start_irys_node(
 
                 let vdf_config2 = vdf_config.clone();
                 let seed = seed.map_or(arc_genesis.vdf_limiter_info.output, |seed| seed.0);
-                let vdf_reset_seed = latest_block.map_or_else(|| arc_genesis.vdf_limiter_info.seed, |b| b.vdf_limiter_info.seed);
+                let vdf_reset_seed = latest_block.map_or_else(
+                    || arc_genesis.vdf_limiter_info.seed,
+                    |b| b.vdf_limiter_info.seed,
+                );
 
                 info!(
                     "Starting VDF thread seed {:?} reset_seed {:?}",

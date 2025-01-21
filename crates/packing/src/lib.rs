@@ -3,8 +3,7 @@ use std::ops::BitXor;
 pub use irys_c::{capacity, capacity_single};
 
 use irys_types::{
-    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CHUNK_SIZE,
-    CONFIG,
+    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CONFIG,
 };
 
 #[cfg(feature = "nvidia")]
@@ -147,7 +146,7 @@ pub fn capacity_pack_range_with_data_cuda_c(
     partition_hash: PartitionHash,
     iterations: Option<u32>,
 ) {
-    let num_chunks: u32 = data.len() as u32 / CHUNK_SIZE as u32;
+    let num_chunks: u32 = data.len() as u32 / CONFIG.chunk_size as u32;
     let mut entropy: Vec<u8> = Vec::with_capacity(data.len());
     capacity_pack_range_cuda_c(
         num_chunks,
@@ -271,8 +270,8 @@ mod tests {
         rng.fill(&mut partition_hash[..]);
         let iterations = 2 * CONFIG.chunk_size as u32;
 
-        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
-        let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
+        let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
 
         let now = Instant::now();
 
@@ -290,15 +289,15 @@ mod tests {
             chunk_offset + 1,
             partition_hash,
             iterations,
-            CHUNK_SIZE as usize,
+            CONFIG.chunk_size as usize,
             &mut chunk2,
         );
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
-        let mut c_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
-        let mut c_chunk2 = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut c_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
+        let mut c_chunk2 = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
         let now = Instant::now();
 
         capacity_pack_range_c(
@@ -323,7 +322,7 @@ mod tests {
         assert_eq!(chunk, c_chunk, "C chunks should be equal");
         assert_eq!(chunk2, c_chunk2, "Second C chunks should be equal");
 
-        let mut c_chunk_cuda = Vec::<u8>::with_capacity(2 * CHUNK_SIZE as usize);
+        let mut c_chunk_cuda = Vec::<u8>::with_capacity(2 * CONFIG.chunk_size as usize);
         let now = Instant::now();
 
         capacity_pack_range_cuda_c(
@@ -340,12 +339,12 @@ mod tests {
 
         assert_eq!(
             chunk,
-            c_chunk_cuda[0..CHUNK_SIZE as usize].to_vec(),
+            c_chunk_cuda[0..CONFIG.chunk_size as usize].to_vec(),
             "CUDA chunk should be equal"
         );
         assert_eq!(
             chunk2,
-            c_chunk_cuda[CHUNK_SIZE as usize..(2 * CHUNK_SIZE) as usize].to_vec(),
+            c_chunk_cuda[CONFIG.chunk_size as usize..(2 * CONFIG.chunk_size) as usize].to_vec(),
             "Second CUDA chunk should be equal"
         );
     }
@@ -375,7 +374,7 @@ mod tests {
         let rnd_chunk_pos = rng.gen_range(0..num_chunks);
         let mut rnd_chunk = chunks[rnd_chunk_pos].clone();
 
-        let iterations = Some(2 * CHUNK_SIZE as u32);
+        let iterations = Some(2 * CONFIG.chunk_size as u32);
         let now = Instant::now();
 
         capacity_pack_range_with_data_c(
@@ -397,7 +396,7 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
-            CHUNK_SIZE as usize,
+            CONFIG.chunk_size as usize,
         );
 
         let elapsed = now.elapsed();
@@ -431,19 +430,19 @@ mod tests {
         rng.fill(&mut partition_hash);
 
         let num_chunks: usize = 512;
-        let mut chunks: Vec<u8> = Vec::with_capacity(num_chunks * CHUNK_SIZE as usize);
+        let mut chunks: Vec<u8> = Vec::with_capacity(num_chunks * CONFIG.chunk_size as usize);
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
         for _i in 0..num_chunks {
-            let mut chunk = [0u8; CHUNK_SIZE as usize];
+            let mut chunk = [0u8; CONFIG.chunk_size as usize];
             rng.fill_bytes(&mut chunk);
             chunks_rust.push(chunk.to_vec());
-            for j in 0..CHUNK_SIZE as usize {
+            for j in 0..CONFIG.chunk_size as usize {
                 chunks.push(chunk[j]);
             }
         }
 
-        let iterations = Some(2 * CHUNK_SIZE as u32);
+        let iterations = Some(2 * CONFIG.chunk_size as u32);
         let now = Instant::now();
 
         capacity_pack_range_with_data_cuda_c(
@@ -464,16 +463,19 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
-            CHUNK_SIZE as usize,
+            CONFIG.chunk_size as usize,
         );
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
         for i in 0..num_chunks {
-            for j in 0..CHUNK_SIZE as usize {
+            for j in 0..CONFIG.chunk_size as usize {
                 //println!("chunk {} pos {}", i, j);
-                assert_eq!(chunks_rust[i][j], chunks[i * CHUNK_SIZE as usize + j]);
+                assert_eq!(
+                    chunks_rust[i][j],
+                    chunks[i * CONFIG.chunk_size as usize + j]
+                );
             }
         }
     }

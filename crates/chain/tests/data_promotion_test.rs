@@ -18,7 +18,7 @@ use tracing::{debug, error};
 #[cfg(test)]
 #[actix_web::test]
 async fn data_promotion_test() {
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
 
     use actix_web::{
         middleware::Logger,

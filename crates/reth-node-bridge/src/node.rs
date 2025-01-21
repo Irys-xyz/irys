@@ -39,7 +39,6 @@ use crate::{
     precompile::irys_executor::{
         IrysEvmConfig, IrysExecutorBuilder, IrysPayloadBuilder, PrecompileStateProvider,
     },
-    rpc::{AccountStateExt, AccountStateExtApiServer},
 };
 
 // use crate::node_launcher::CustomNodeLauncher;

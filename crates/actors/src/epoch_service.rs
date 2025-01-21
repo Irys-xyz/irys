@@ -1,6 +1,4 @@
-use actix::{
-    Actor, Addr, ArbiterService, Context, Handler, Message, MessageResponse, SystemRegistry,
-};
+use actix::{Actor, ArbiterService, Context, Handler, Message, MessageResponse};
 use eyre::{Error, Result};
 use irys_database::{data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
@@ -14,7 +12,6 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
-use tracing::info;
 
 use crate::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
 
@@ -615,7 +612,8 @@ impl EpochServiceActor {
         module_infos.extend(submit_infos);
 
         // Sort the active capacity partitions by hash
-        let capacity_partitions: Vec<H256> = pa.capacity_partitions.keys().copied().collect();
+        let mut capacity_partitions: Vec<H256> = pa.capacity_partitions.keys().copied().collect();
+        capacity_partitions.sort_unstable();
 
         // Add initial capacity partition config
         let cap_part = capacity_partitions.first().unwrap();
