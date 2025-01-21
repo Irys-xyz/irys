@@ -104,6 +104,11 @@ impl BlockProducerActor {
 
 impl Actor for BlockProducerActor {
     type Context = Context<Self>;
+
+    fn started(&mut self, ctx: &mut Self::Context) {
+        println!("block_producer actor started!");
+        // Or do any initialization you need
+    }
 }
 
 #[derive(Message, Debug)]
@@ -445,7 +450,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .unwrap();
 
             let block = Arc::new(irys_block);
-            block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await.unwrap();
+            block_discovery_addr.do_send(BlockDiscoveredMessage(block.clone()));
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
