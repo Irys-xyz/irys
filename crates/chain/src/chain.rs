@@ -12,14 +12,14 @@ use irys_actors::{
         GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage, NewEpochMessage,
     },
     mempool_service::MempoolService,
-    mining::PartitionMiningActor,
+    mining::{self, PartitionMiningActor},
     packing::{PackingActor, PackingRequest},
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
     ActorAddresses, BlockFinalizedMessage,
 };
 use irys_api_server::{run_server, ApiState};
-use irys_config::IrysNodeConfig;
+use irys_config::{decode_hex, IrysNodeConfig};
 use irys_database::database;
 use irys_packing::{PackingType, PACKING_TYPE};
 pub use irys_reth_node_bridge::node::{
@@ -57,7 +57,12 @@ use tokio::{
 use crate::vdf::run_vdf;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 
-pub async fn start(config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
+pub async fn start() -> eyre::Result<IrysNodeCtx> {
+    let config: IrysNodeConfig = IrysNodeConfig{
+        mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(&CONFIG.mining_key).unwrap()),
+        ..IrysNodeConfig::default()
+    };
+
     let storage_config = StorageConfig {
         chunk_size: CONFIG.chunk_size,
         num_chunks_in_partition: CONFIG.num_chunks_in_partition,
