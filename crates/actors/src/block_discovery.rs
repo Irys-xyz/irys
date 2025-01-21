@@ -79,7 +79,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         // Validate discovered block
         let new_block_header = msg.0;
         let prev_block_hash = new_block_header.previous_block_hash;
-        
 
         let previous_block_header = match self
             .db
@@ -179,7 +178,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let vdf_config = self.vdf_config.clone();
         let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();
-        let block_header: IrysBlockHeader =  (*new_block_header).clone();
+        let block_header: IrysBlockHeader = (*new_block_header).clone();
 
         info!(
             "Validating block height: {} step: {} output: {} prev output: {}",
@@ -205,8 +204,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 Ok(_) => {
                     info!("Block is valid, sending to block tree");
 
-                    db
-                        .update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
+                    db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
                         .unwrap();
 
                     let mut all_txs = submit_txs;

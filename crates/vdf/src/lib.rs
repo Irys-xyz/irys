@@ -177,7 +177,7 @@ pub async fn last_step_checkpoints_is_valid(
         (global_step_number - 1) as u64,
     ));
     let config = config.clone();
-    
+
     let test = actix_rt::task::spawn_blocking(move || {
         // Limit threads number to avoid overloading the system using configuration limit
         let pool = rayon::ThreadPoolBuilder::new()
@@ -205,7 +205,8 @@ pub async fn last_step_checkpoints_is_valid(
                 .collect::<Vec<H256>>()
         });
         test
-    }).await?;
+    })
+    .await?;
 
     // println!("test{}: {}", 0, Base64::from(test[0].to_vec()));
     // println!("test{}: {}", 24, Base64::from(test[24].to_vec()));
