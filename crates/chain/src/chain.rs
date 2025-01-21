@@ -368,7 +368,9 @@ pub async fn start_irys_node(
                     vdf_config: vdf_config.clone(),
                     vdf_steps_guard: vdf_steps_guard.clone(),
                 };
-                let block_discovery_addr = block_discovery_actor.start();
+
+                let arb = actix::Arbiter::new();
+                let block_discovery_addr = BlockDiscoveryActor::start_in_arbiter(&arb.handle(), |_| block_discovery_actor);
 
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
@@ -382,7 +384,10 @@ pub async fn start_irys_node(
                     vdf_steps_guard.clone(),
                     block_tree_guard.clone(),
                 );
-                let block_producer_addr = block_producer_actor.start();
+
+                let arb = actix::Arbiter::new();
+                let block_producer_addr = BlockProducerActor::start_in_arbiter(&arb.handle(), |_| block_producer_actor);
+
                 let block_tree = BlockTreeService::from_registry();
                 block_tree
                     .send(RegisterBlockProducerMessage(block_producer_addr.clone()))
