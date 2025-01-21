@@ -12,7 +12,7 @@ use irys_actors::{
         GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage, NewEpochMessage,
     },
     mempool_service::MempoolService,
-    mining::{PartitionMiningActor},
+    mining::PartitionMiningActor,
     packing::{PackingActor, PackingRequest},
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
@@ -349,7 +349,8 @@ pub async fn start_irys_node(
                 } else {
                     Some(node_config.vdf_steps_dir())
                 };
-                let vdf_service_actor = VdfService::new(1000, vdf_step_path);
+                let vdf_service_actor =
+                    VdfService::new(1000, Some(block_index_guard.clone()), Some(db.clone()));
                 let vdf_service = vdf_service_actor.start();
                 Registry::set(vdf_service.clone()); // register it as a service
 
@@ -451,8 +452,8 @@ pub async fn start_irys_node(
                 );
 
                 info!(
-                    "Starting VDF thread seed {:?} reset_seed {:?}",
-                    seed, arc_genesis.vdf_limiter_info.seed
+                    "Starting VDF thread seed {:?} reset_seed {:?} step_number: {:?}",
+                    seed, arc_genesis.vdf_limiter_info.seed, global_step_number
                 );
 
                 let vdf_thread_handler = std::thread::spawn(move || {
