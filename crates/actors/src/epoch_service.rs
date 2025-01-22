@@ -575,7 +575,7 @@ impl EpochServiceActor {
     /// Configure storage modules for genesis partition assignments
     pub fn get_genesis_storage_module_infos(
         &self,
-        paths: impl IntoIterator<Item = impl Into<PathBuf>>,
+        _paths: impl IntoIterator<Item = impl Into<PathBuf>>,
     ) -> Vec<StorageModuleInfo> {
         let ledgers = self.ledgers.read().unwrap();
         let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
