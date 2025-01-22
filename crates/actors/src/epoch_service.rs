@@ -575,12 +575,14 @@ impl EpochServiceActor {
     /// Configure storage modules for genesis partition assignments
     pub fn get_genesis_storage_module_infos(
         &self,
-        _paths: impl IntoIterator<Item = impl Into<PathBuf>>,
+        paths: impl IntoIterator<Item = PathBuf>,
     ) -> Vec<StorageModuleInfo> {
         let ledgers = self.ledgers.read().unwrap();
         let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
 
         let pa = self.partition_assignments.read().unwrap();
+
+        let mut paths = paths.into_iter();
 
         // Configure publish ledger storage
         let mut module_infos = ledgers
@@ -591,9 +593,15 @@ impl EpochServiceActor {
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
-                submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx).into())],
+                submodules: vec![(
+                    ie(0, num_part_chunks),
+                    paths.next().unwrap_or(format!("submodule_{}", idx).into()),
+                )],
             })
             .collect::<Vec<_>>();
+
+        println!("module_infos:");
+        println!("{:?}", module_infos);
 
         let idx_start = module_infos.len();
 
@@ -608,10 +616,15 @@ impl EpochServiceActor {
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
                 submodules: vec![(
                     ie(0, num_part_chunks),
-                    format!("submodule_{}", idx_start + idx).into(),
+                    paths
+                        .next()
+                        .unwrap_or(format!("submodule_{}", idx_start + idx).into()),
                 )],
             })
             .collect::<Vec<_>>();
+
+        println!("submit_infos:");
+        println!("{:?}", submit_infos);
 
         module_infos.extend(submit_infos);
 
