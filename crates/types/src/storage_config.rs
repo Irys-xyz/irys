@@ -23,7 +23,7 @@ pub struct StorageConfig {
     /// Number of sha256 iterations required to pack a chunk
     pub entropy_packing_iterations: u32,
     /// Number of confirmations before storing tx data in `StorageModule`s
-    pub num_confirmations_for_finality: u32,
+    pub chunk_migration_depth: u32,
 }
 
 impl Default for StorageConfig {
@@ -37,7 +37,7 @@ impl Default for StorageConfig {
             min_writes_before_sync: CONFIG.num_writes_before_sync,
             // TODO: revert this back
             entropy_packing_iterations: 1_000, /* PACKING_SHA_1_5_S */
-            num_confirmations_for_finality: CONFIG.num_confirmations_for_finality,
+            chunk_migration_depth: CONFIG.chunk_migration_depth,
         }
     }
 }

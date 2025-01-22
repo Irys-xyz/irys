@@ -37,7 +37,7 @@ pub struct Config {
     /// - 6 confirmations protects against attackers with <25% hashpower
     /// - 20 confirmations protects against attackers with <40% hashpower
     /// - No number of confirmations is secure against attackers with >50% hashpower
-    pub num_confirmations_for_finality: u32,
+    pub chunk_migration_depth: u32,
     pub mining_key: &'static str,
     // TODO: enable this after fixing option in toml
     pub num_capacity_partitions: Option<u64>,
@@ -68,7 +68,7 @@ pub const CONFIG: Config = load_toml!(
         num_partitions_per_slot: 1,
         num_writes_before_sync: 5,
         persist_data_on_restart: true,
-        num_confirmations_for_finality: 6,
+        chunk_migration_depth: 3,
         mining_key: "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0", // Burner PrivateKey (PK)
         num_capacity_partitions: None,
     }

@@ -335,7 +335,7 @@ mod tests {
             miner_address: mining_address,
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1,
-            num_confirmations_for_finality: 1, // Testnet / single node config
+            chunk_migration_depth: 1, // Testnet / single node config
         };
 
         let infos = vec![StorageModuleInfo {
