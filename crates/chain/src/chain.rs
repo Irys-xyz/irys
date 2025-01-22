@@ -156,8 +156,8 @@ pub async fn start_irys_node(
 
     let mut storage_modules: StorageModuleVec = Vec::new();
 
-    let mut at_genesis = false;
-    let mut latest_block_index = None;
+    let at_genesis;
+    let latest_block_index;
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
         let mut idx = BlockIndex::default();
         if !CONFIG.persist_data_on_restart {

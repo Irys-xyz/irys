@@ -394,7 +394,7 @@ mod tests {
         let _ = storage_module.sync_pending_chunks();
 
         let mining_broadcaster = BroadcastMiningService::new();
-        let mining_broadcaster_addr = mining_broadcaster.start();
+        let _mining_broadcaster_addr = mining_broadcaster.start();
 
         let vdf_service = VdfService::from_registry();
         let vdf_steps_guard: VdfStepsReadGuard =

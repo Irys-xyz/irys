@@ -49,6 +49,7 @@ pub struct PackingConfig {
     /// Max. number of packing threads for CPU packing
     concurrency: u16,
     /// Max. number of chunks send to GPU packing
+    #[allow(unused)]
     max_chunks: u32,
 }
 impl Default for PackingConfig {

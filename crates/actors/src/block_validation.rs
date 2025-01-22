@@ -17,13 +17,13 @@ use tracing::{debug, info};
 pub async fn prevalidate_block(
     block: IrysBlockHeader,
     previous_block: IrysBlockHeader,
-    block_index_guard: BlockIndexReadGuard,
-    partitions_guard: PartitionAssignmentsReadGuard,
+    _block_index_guard: BlockIndexReadGuard,
+    _partitions_guard: PartitionAssignmentsReadGuard,
     storage_config: StorageConfig,
     difficulty_config: DifficultyAdjustmentConfig,
     vdf_config: VDFStepsConfig,
     steps_guard: VdfStepsReadGuard,
-    miner_address: Address,
+    _miner_address: Address,
 ) -> eyre::Result<()> {
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
         return Err(eyre::eyre!(

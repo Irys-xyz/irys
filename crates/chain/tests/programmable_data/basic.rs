@@ -234,7 +234,7 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
         None
     });
 
-    let start_offset = future_or_mine_on_timeout(
+    let _start_offset = future_or_mine_on_timeout(
         node.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
