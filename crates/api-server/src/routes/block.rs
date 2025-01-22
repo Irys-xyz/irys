@@ -7,6 +7,7 @@ use actix_web::{
 use irys_database::database;
 use irys_types::{IrysBlockHeader, H256};
 use reth_db::Database;
+use actix::SystemService;
 
 pub async fn get_block(
     state: web::Data<ApiState>,

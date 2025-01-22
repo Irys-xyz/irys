@@ -1,5 +1,5 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, ArbiterService, Registry, SystemRegistry};
+use actix::{Actor, ArbiterService, Registry, System, SystemRegistry};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -25,7 +25,7 @@ use irys_packing::{PackingType, PACKING_TYPE};
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
-
+use actix::SystemService;
 use irys_storage::{
     initialize_storage_files,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
@@ -47,7 +47,7 @@ use std::{
     sync::{mpsc, Arc, OnceLock, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, Instrument};
 
 use tokio::{
     runtime::Handle,
@@ -225,6 +225,7 @@ pub async fn start_irys_node(
                 // Initialize the block_index actor and tell it about the genesis block
                 let block_index_actor =
                     BlockIndexService::new(block_index.clone(), storage_config.clone());
+            
                 SystemRegistry::set(block_index_actor.start());
                 let block_index_actor_addr = BlockIndexService::from_registry();
                 if at_genesis {

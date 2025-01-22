@@ -310,7 +310,7 @@ mod tests {
         BlockFinalizedMessage,
     };
     use actix::prelude::*;
-    use dev::Registry;
+    use dev::{Registry, SystemRegistry};
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{

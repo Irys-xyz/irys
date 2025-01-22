@@ -82,9 +82,7 @@ impl Actor for BlockTreeService {
 /// Adds this actor the the local service registry
 impl Supervised for BlockTreeService {}
 
-impl SystemService for BlockTreeService {}
-
-impl ArbiterService for BlockTreeService {
+impl SystemService for BlockTreeService {
     fn service_started(&mut self, ctx: &mut Context<Self>) {
         println!("service started: block_tree (Default)");
     }
@@ -136,7 +134,7 @@ impl BlockTreeService {
             combined
         };
 
-        let chunk_migration = <ChunkMigrationService as actix::SystemService>::from_registry();
+        let chunk_migration = ChunkMigrationService::from_registry();
         let block_index = <BlockIndexService as actix::SystemService>::from_registry();
         let block_finalized_message = BlockFinalizedMessage {
             block_header: Arc::new(block_header),

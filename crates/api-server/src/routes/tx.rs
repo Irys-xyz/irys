@@ -11,6 +11,7 @@ use irys_types::{u64_stringify, IrysTransactionHeader, H256};
 use log::info;
 use reth_db::Database;
 use serde::{Deserialize, Serialize};
+use actix::SystemService;
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `IrysTransactionHeader` type,

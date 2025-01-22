@@ -49,9 +49,8 @@ impl Actor for ValidationService {
 /// Allows this actor to live in the the local service registry
 impl Supervised for ValidationService {}
 
-impl SystemService for ValidationService {}
 
-impl ArbiterService for ValidationService {
+impl SystemService for ValidationService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("service started: block_index");
     }

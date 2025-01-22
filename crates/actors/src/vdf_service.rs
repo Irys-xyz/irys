@@ -150,9 +150,7 @@ impl VdfService {
 
 impl Supervised for VdfService {}
 
-impl SystemService for VdfService {}
-
-impl ArbiterService for VdfService {
+impl SystemService for VdfService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {}
 }
 

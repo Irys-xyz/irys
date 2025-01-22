@@ -45,9 +45,7 @@ impl Actor for MempoolService {
 /// Allows this actor to live in the the local service registry
 impl Supervised for MempoolService {}
 
-impl SystemService for MempoolService {}
-
-impl ArbiterService for MempoolService {
+impl SystemService for MempoolService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("mempool_service started");
     }
