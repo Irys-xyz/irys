@@ -495,18 +495,6 @@ pub struct BlockConfirmedMessage(
     pub Arc<Vec<IrysTransactionHeader>>,
 );
 
-impl Handler<BlockConfirmedMessage> for BlockProducerActor {
-    type Result = ();
-    fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        // Access the block header through msg.0
-        let block = &msg.0;
-        let all_txs = &msg.1;
-
-        // Do something with the block
-        info!("Block height: {} num tx: {}", block.height, all_txs.len());
-    }
-}
-
 /// Similar to [`BlockConfirmedMessage`] (but takes ownership of parameters) and
 /// acts as a placeholder for when the node will maintain a block tree of
 /// confirmed blocks and produce finalized blocks for the canonical chain when
