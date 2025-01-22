@@ -178,6 +178,8 @@ mod tests {
         );
 
         let app_state = ApiState {
+            reth_provider: None,
+            block_tree: None,
             db: DatabaseProvider(arc_db.clone()),
             mempool: mempool_addr,
             chunk_provider: Arc::new(chunk_provider),
@@ -234,6 +236,8 @@ mod tests {
         );
 
         let app_state = ApiState {
+            reth_provider: None,
+            block_tree: None,
             db: DatabaseProvider(db_arc.clone()),
             mempool: mempool_addr,
             chunk_provider: Arc::new(chunk_provider),

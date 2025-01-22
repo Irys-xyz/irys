@@ -61,6 +61,8 @@ async fn api_end_to_end_test(chunk_size: usize) {
     handle.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
+        reth_provider: None,
+        block_tree: None,
         db: handle.db,
         mempool: handle.actor_addresses.mempool,
         chunk_provider: handle.chunk_provider.clone(),

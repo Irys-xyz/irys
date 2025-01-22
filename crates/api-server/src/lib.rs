@@ -11,7 +11,8 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 
-use irys_actors::mempool_service::MempoolService;
+use irys_actors::{block_tree_service::BlockTreeReadGuard, mempool_service::MempoolService};
+use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::app_state::DatabaseProvider;
 use routes::{block, get_chunk, index, network_config, post_chunk, price, proxy::proxy, tx};
@@ -22,6 +23,10 @@ pub struct ApiState {
     pub mempool: Addr<MempoolService>,
     pub chunk_provider: Arc<ChunkProvider>,
     pub db: DatabaseProvider,
+    // TODO: slim this down to what we actually use - beware the types!
+    // TODO: remove the Option<>
+    pub reth_provider: Option<RethNodeProvider>,
+    pub block_tree: Option<BlockTreeReadGuard>,
 }
 
 pub fn routes() -> impl HttpServiceFactory {
@@ -125,6 +130,8 @@ async fn post_tx_and_chunks_golden_path() {
         db: DatabaseProvider(arc_db.clone()),
         mempool: mempool_addr,
         chunk_provider: Arc::new(chunk_provider),
+        reth_provider: None,
+        block_tree: None,
     };
 
     // Initialize the app
