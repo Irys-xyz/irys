@@ -1,8 +1,8 @@
 use derive_syn_parse::Parse;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
-use std::{env, fs};
+use quote::{quote, ToTokens};
+use std::{collections::HashSet, env, fs};
 use syn::{parse2, parse_quote, Error, Expr, ExprStruct, Ident, Lit, LitStr, Result, Token};
 
 #[proc_macro]
@@ -58,6 +58,25 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
         }
     };
 
+    let optional_fields = default_value
+        .fields
+        .iter()
+        .filter(|f| {
+            f.expr
+                .to_token_stream()
+                .to_string()
+                .trim()
+                .starts_with("Option")
+        })
+        .map(|f| match &f.member {
+            syn::Member::Named(ident) => Ok(ident.clone()),
+            syn::Member::Unnamed(_) => Err(syn::Error::new_spanned(
+                f,
+                "Unnamed fields are not supported.",
+            )),
+        })
+        .collect::<Result<HashSet<_>>>()?; // Propagate the error with `?`
+
     // Read and parse the TOML file
     let toml_content = match fs::read_to_string(&file_path) {
         Ok(content) => content,
@@ -81,6 +100,7 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
 
     // Generate struct literal from TOML
     let mut fields = vec![];
+    let mut used_fields = HashSet::new();
     if let toml::Value::Table(table) = toml_data {
         for (key, value) in table {
             if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -112,12 +132,19 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
             };
 
             fields.push(quote!(#field_ident: #field_value));
+            used_fields.insert(field_ident);
         }
     } else {
         return Err(Error::new_spanned(
             env_var,
             "Top-level TOML structure must be a table.",
         ));
+    }
+
+    for field in optional_fields {
+        if !used_fields.contains(&field) {
+            fields.push(quote!(#field: None));
+        }
     }
 
     let generated = quote! {
