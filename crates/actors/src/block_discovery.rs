@@ -209,10 +209,13 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
                     let mut all_txs = submit_txs;
                     all_txs.extend_from_slice(&publish_txs);
-                    block_tree_addr.do_send(BlockPreValidatedMessage(
-                        new_block_header,
-                        Arc::new(all_txs),
-                    ));
+                    block_tree_addr
+                        .send(BlockPreValidatedMessage(
+                            new_block_header,
+                            Arc::new(all_txs),
+                        ))
+                        .await
+                        .unwrap();
                     Ok(())
                 }
                 Err(err) => {
