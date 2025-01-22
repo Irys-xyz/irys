@@ -148,6 +148,7 @@ impl IrysBlockHeader {
             ledgers: vec![
                 // Permanent Publish Ledger
                 TransactionLedger {
+                    ledger_id: 0, // Publish ledger_id
                     tx_root: H256::zero(),
                     tx_ids,
                     max_chunk_offset: 0,
@@ -156,6 +157,7 @@ impl IrysBlockHeader {
                 },
                 // Term Submit Ledger
                 TransactionLedger {
+                    ledger_id: 1, // Submit ledger_id
                     tx_root: H256::zero(),
                     tx_ids: H256List::new(),
                     max_chunk_offset: 0,
@@ -308,9 +310,13 @@ pub type TxRoot = H256;
 #[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Compact, Arbitrary)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionLedger {
+    /// Unique identifier for this ledger, maps to discriminant in `Ledger` enum
+    pub ledger_id: u32,
+    /// Root of the merkle tree built from the ledger transaction data_roots
     pub tx_root: H256,
     /// List of transaction ids included in the block
     pub tx_ids: H256List,
+    /// The size of this ledger (in chunks) since genesis
     #[serde(default, with = "u64_stringify")]
     pub max_chunk_offset: u64,
     /// This ledger expires after how many epochs
@@ -399,6 +405,7 @@ mod tests {
             signature: Signature::test_signature().into(),
             timestamp: 1622543200,
             ledgers: vec![TransactionLedger {
+                ledger_id: 0, // Publish ledger_id
                 tx_root: H256::zero(),
                 tx_ids,
                 proofs: None,
@@ -485,6 +492,7 @@ mod tests {
             signature: Signature::test_signature().into(),
             timestamp: 1622543200,
             ledgers: vec![TransactionLedger {
+                ledger_id: 0, // Publish ledger_id
                 tx_root: H256::zero(),
                 tx_ids,
                 max_chunk_offset: 100,

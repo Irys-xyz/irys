@@ -19,7 +19,7 @@ use irys_actors::{
     block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
 };
 use irys_config::IrysNodeConfig;
-use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized};
+use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized, Ledger};
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
@@ -214,6 +214,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
         ledgers: vec![
             // Permanent Publish Ledger
             TransactionLedger {
+                ledger_id: Ledger::Publish.into(),
                 tx_root: H256::zero(),
                 tx_ids: H256List(Vec::new()),
                 max_chunk_offset: 0,
@@ -222,6 +223,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
             },
             // Term Submit Ledger
             TransactionLedger {
+                ledger_id: Ledger::Submit.into(),
                 tx_root: TransactionLedger::merklize_tx_root(&tx_headers).0,
                 tx_ids: H256List(data_tx_ids.clone()),
                 max_chunk_offset: 0,

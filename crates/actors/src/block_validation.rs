@@ -570,6 +570,7 @@ mod tests {
             ledgers: vec![
                 // Permanent Publish Ledger
                 TransactionLedger {
+                    ledger_id: Ledger::Publish.into(),
                     tx_root: H256::zero(),
                     tx_ids: H256List(Vec::new()),
                     max_chunk_offset: 0,
@@ -578,6 +579,7 @@ mod tests {
                 },
                 // Term Submit Ledger
                 TransactionLedger {
+                    ledger_id: Ledger::Submit.into(),
                     tx_root,
                     tx_ids: H256List(data_tx_ids.clone()),
                     max_chunk_offset: 9,

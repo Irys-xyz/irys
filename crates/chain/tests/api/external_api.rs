@@ -21,7 +21,7 @@ use irys_config::IrysNodeConfig;
 use irys_database::{
     open_or_create_db,
     tables::{IngressProofs, IrysTables},
-    BlockIndex, Initialized,
+    BlockIndex, Initialized, Ledger,
 };
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -264,6 +264,7 @@ async fn external_api() -> eyre::Result<()> {
         ledgers: vec![
             // Permanent Publish Ledger
             TransactionLedger {
+                ledger_id: Ledger::Publish.into(),
                 tx_root: H256::zero(),
                 tx_ids: H256List(Vec::new()),
                 max_chunk_offset: 0,
@@ -272,6 +273,7 @@ async fn external_api() -> eyre::Result<()> {
             },
             // Term Submit Ledger
             TransactionLedger {
+                ledger_id: Ledger::Submit.into(),
                 tx_root: TransactionLedger::merklize_tx_root(&tx_headers).0,
                 tx_ids: H256List(data_tx_ids.clone()),
                 max_chunk_offset: 0,

@@ -229,6 +229,12 @@ impl Ledger {
     }
 }
 
+impl From<Ledger> for u32 {
+    fn from(ledger: Ledger) -> u32 {
+        ledger as u32
+    }
+}
+
 impl TryFrom<u64> for Ledger {
     type Error = &'static str;
 
@@ -353,12 +359,16 @@ impl Index<Ledger> for Vec<TransactionLedger> {
     type Output = TransactionLedger;
 
     fn index(&self, ledger: Ledger) -> &Self::Output {
-        &self[ledger as usize]
+        self.iter()
+            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
+            .expect("No transaction ledger found for given ledger type")
     }
 }
 
 impl IndexMut<Ledger> for Vec<TransactionLedger> {
     fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
-        &mut self[ledger as usize]
+        self.iter_mut()
+            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
+            .expect("No transaction ledger found for given ledger type")
     }
 }

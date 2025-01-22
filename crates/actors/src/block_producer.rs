@@ -351,6 +351,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 ledgers: vec![
                     // Permanent Publish Ledger
                     TransactionLedger {
+                        ledger_id: Ledger::Publish.into(),
                         tx_root: TransactionLedger::merklize_tx_root(&publish_txs).0,
                         tx_ids: H256List(publish_txids.clone()),
                         max_chunk_offset: publish_max_chunk_offset,
@@ -359,6 +360,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     },
                     // Term Submit Ledger
                     TransactionLedger {
+                        ledger_id: Ledger::Submit.into(),
                         tx_root: TransactionLedger::merklize_tx_root(&submit_txs).0,
                         tx_ids: H256List(submit_txids.clone()),
                         max_chunk_offset: submit_max_chunk_offset,
