@@ -79,33 +79,36 @@ impl Handler<RequestValidationMessage> for ValidationService {
         let vdf_info = block.vdf_limiter_info.clone();
         let poa = block.poa.clone();
 
-        // Spawn both validations in separate thread pools
+        // Spawn VDF validation first
         let vdf_future =
             tokio::task::spawn_blocking(move || vdf_steps_are_valid(&vdf_info, &vdf_config));
 
-        let poa_future = tokio::task::spawn_blocking(move || {
-            poa_is_valid(
-                &poa,
-                &block_index_guard,
-                &partitions_guard,
-                &storage_config,
-                &miner_address,
-            )
-        });
-
-        // Wait for both results before processing next message
+        // Wait for results before processing next message
         ctx.wait(
             async move {
-                let (vdf_result, poa_result) = futures::join!(vdf_future, poa_future);
+                let validation_result = match vdf_future.await.unwrap() {
+                    Ok(_) => {
+                        // VDF passed, now spawn and run PoA validation
+                        let poa_future = tokio::task::spawn_blocking(move || {
+                            poa_is_valid(
+                                &poa,
+                                &block_index_guard,
+                                &partitions_guard,
+                                &storage_config,
+                                &miner_address,
+                            )
+                        });
 
-                let validation_result = match (vdf_result.unwrap(), poa_result.unwrap()) {
-                    (Ok(_), Ok(_)) => ValidationResult::Valid,
-                    (Err(e), _) => {
-                        error!("VDF validation failed: {}", e);
-                        ValidationResult::Invalid
+                        match poa_future.await.unwrap() {
+                            Ok(_) => ValidationResult::Valid,
+                            Err(e) => {
+                                error!("PoA validation failed: {}", e);
+                                ValidationResult::Invalid
+                            }
+                        }
                     }
-                    (_, Err(e)) => {
-                        error!("PoA validation failed: {}", e);
+                    Err(e) => {
+                        error!("VDF validation failed: {}", e);
                         ValidationResult::Invalid
                     }
                 };
