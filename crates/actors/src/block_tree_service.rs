@@ -336,7 +336,12 @@ fn get_ledger_tx_headers<T: DbTx>(
 /// Number of blocks to retain in cache from chain head
 const BLOCK_CACHE_DEPTH: u64 = 50;
 
-type ChainCacheEntry = (BlockHash, Vec<IrysTransactionId>, Vec<IrysTransactionId>); // (block_hash, publish_txs, submit_txs)
+type ChainCacheEntry = (
+    BlockHash,
+    u64,
+    Vec<IrysTransactionId>,
+    Vec<IrysTransactionId>,
+); // (block_hash, height, publish_txs, submit_txs)
 
 #[derive(Debug)]
 pub struct BlockTreeCache {
@@ -428,6 +433,7 @@ impl BlockTreeCache {
         let longest_chain_cache = (
             vec![(
                 block_hash,
+                height,
                 block.ledgers[Ledger::Publish].tx_ids.0.clone(), // Publish ledger txs
                 block.ledgers[Ledger::Submit].tx_ids.0.clone(),  // Submit ledger txs
             )],
@@ -744,7 +750,7 @@ impl BlockTreeCache {
                     // Include OnChain blocks in pairs
                     let publish_txs = entry.block.ledgers[Ledger::Publish].tx_ids.0.clone();
                     let submit_txs = entry.block.ledgers[Ledger::Submit].tx_ids.0.clone();
-                    pairs.push((current, publish_txs, submit_txs));
+                    pairs.push((current, entry.block.height, publish_txs, submit_txs));
 
                     if blocks_to_collect == 0 {
                         break;
@@ -756,7 +762,7 @@ impl BlockTreeCache {
                 ChainState::Validated(_) | ChainState::NotOnchain(_) => {
                     let publish_txs = entry.block.ledgers[Ledger::Publish].tx_ids.0.clone();
                     let submit_txs = entry.block.ledgers[Ledger::Submit].tx_ids.0.clone();
-                    pairs.push((current, publish_txs, submit_txs));
+                    pairs.push((current, entry.block.height, publish_txs, submit_txs));
                     not_onchain_count += 1;
 
                     if blocks_to_collect == 0 {
@@ -1875,7 +1881,10 @@ mod tests {
         cache: &BlockTreeCache,
     ) -> eyre::Result<()> {
         let (canonical_blocks, not_onchain_count) = cache.get_canonical_chain();
-        let actual_blocks: Vec<_> = canonical_blocks.iter().map(|(hash, _, _)| *hash).collect();
+        let actual_blocks: Vec<_> = canonical_blocks
+            .iter()
+            .map(|(hash, _, _, _)| *hash)
+            .collect();
 
         ensure!(
             actual_blocks

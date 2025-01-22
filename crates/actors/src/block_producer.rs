@@ -154,7 +154,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
             let (canonical_blocks, _not_onchain_count) = block_tree_guard.read().get_canonical_chain();
-            let (latest_block_hash, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
+            let (latest_block_hash, _height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
 
             let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, &latest_block_hash)) {
                 Ok(Some(header)) => header,
