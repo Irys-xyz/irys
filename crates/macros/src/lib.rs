@@ -2,7 +2,7 @@ use derive_syn_parse::Parse;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens};
-use std::{collections::HashSet, env, fs};
+use std::{collections::HashSet, env, fs, option};
 use syn::{parse2, parse_quote, Error, Expr, ExprStruct, Ident, Lit, LitStr, Result, Token};
 
 #[proc_macro]
@@ -62,11 +62,8 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
         .fields
         .iter()
         .filter(|f| {
-            f.expr
-                .to_token_stream()
-                .to_string()
-                .trim()
-                .starts_with("Option")
+            let st = f.expr.to_token_stream().to_string();
+            st.contains("None") || st.contains("Some")
         })
         .map(|f| match &f.member {
             syn::Member::Named(ident) => Ok(ident.clone()),
@@ -131,7 +128,11 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
                 }
             };
 
-            fields.push(quote!(#field_ident: #field_value));
+            if optional_fields.contains(&field_ident) {
+                fields.push(quote!(#field_ident: Some(#field_value)));
+            } else {
+                fields.push(quote!(#field_ident: #field_value));
+            }
             used_fields.insert(field_ident);
         }
     } else {

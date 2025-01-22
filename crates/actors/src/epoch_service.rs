@@ -323,12 +323,7 @@ impl EpochServiceActor {
             let num_partitions = num_data_partitions
                 + Self::get_num_capacity_partitions(num_data_partitions, &self.config);
 
-            let num_cap_parts = if CONFIG.num_capacity_partitions == 0 {
-                num_partitions
-            } else {
-                CONFIG.num_capacity_partitions
-            };
-            self.add_capacity_partitions(num_cap_parts);
+            self.add_capacity_partitions(CONFIG.num_capacity_partitions.unwrap_or(num_partitions));
         }
     }
 
