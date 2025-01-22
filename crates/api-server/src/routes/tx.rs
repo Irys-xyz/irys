@@ -225,8 +225,8 @@ mod tests {
             Arc::new(Vec::new()).to_vec(),
         );
         SystemRegistry::set(mempool_service.start());
-        let mempool_addr = MempoolService::from_registry();
-
+        let mempool_addr = <MempoolService as actix::SystemService>::from_registry();        
+        
         let chunk_provider = ChunkProvider::new(
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
