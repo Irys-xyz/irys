@@ -55,7 +55,7 @@ async fn external_api() -> eyre::Result<()> {
         entropy_packing_iterations: 1,
         num_confirmations_for_finality: 1, // Testnet / single node config
     };
-    let chunk_size = storage_config.chunk_size;
+    let _chunk_size = storage_config.chunk_size;
 
     // Create StorageModules for testing
     // TODO: once @DanMacDonald fixes promotion, switch back configs & ledger_num in JS test
