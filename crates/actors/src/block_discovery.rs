@@ -75,7 +75,7 @@ impl BlockDiscoveryActor {
 
 impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
     type Result = ResponseFuture<Result<(), ()>>;
-    fn handle(&mut self, msg: BlockDiscoveredMessage, ctx: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // Validate discovered block
         let new_block_header = msg.0;
         let prev_block_hash = new_block_header.previous_block_hash;
