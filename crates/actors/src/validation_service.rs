@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use actix::{Actor, ArbiterService, Context, Handler, Message, Supervised};
-use irys_types::{IrysBlockHeader, StorageConfig, VDFStepsConfig};
+use actix::{Actor, ArbiterService, Context, Handler, Message, ResponseFuture, Supervised};
+use irys_types::{vdf_config, IrysBlockHeader, StorageConfig, VDFStepsConfig};
 use irys_vdf::vdf_steps_are_valid;
 use tracing::error;
 
@@ -56,49 +56,53 @@ impl ArbiterService for ValidationService {
 }
 
 #[derive(Message, Debug)]
-#[rtype(result = "()")]
+#[rtype(result = "Result<(), ()>")]
 pub struct RequestValidationMessage(pub Arc<IrysBlockHeader>);
 
 impl Handler<RequestValidationMessage> for ValidationService {
-    type Result = ();
+    type Result = ResponseFuture<Result<(), ()>>;
 
     fn handle(&mut self, msg: RequestValidationMessage, _ctx: &mut Self::Context) -> Self::Result {
         if self.partition_assignments_guard.is_none() || self.block_index_guard.is_none() {
             panic!("vdf_service is not initialized");
         }
 
-        let block = msg.0;
+        let block = (*msg.0).clone();
         let block_index_guard = self.block_index_guard.clone().unwrap();
         let partitions_guard = self.partition_assignments_guard.clone().unwrap();
-        let storage_config = &self.storage_config;
-        let miner_address = &block.miner_address;
+        let storage_config = self.storage_config.clone();
+        let miner_address = block.miner_address.clone();
+        let block_tree_service = BlockTreeService::from_registry().clone();
+        let vdf_config = self.vdf_config.clone();
 
         // Check both validations and combine results
-        let validation_result = match (
-            vdf_steps_are_valid(&block.vdf_limiter_info, &self.vdf_config),
-            poa_is_valid(
-                &block.poa,
-                &block_index_guard,
-                &partitions_guard,
-                storage_config,
-                miner_address,
-            ),
-        ) {
-            (Ok(_), Ok(_)) => ValidationResult::Valid,
-            (Err(e), _) => {
-                error!("VDF validation failed: {}", e);
-                ValidationResult::Invalid
-            }
-            (_, Err(e)) => {
-                error!("PoA validation failed: {}", e);
-                ValidationResult::Invalid
-            }
-        };
-
-        let block_tree_service = BlockTreeService::from_registry();
-        block_tree_service.do_send(ValidationResultMessage {
-            block_hash: block.block_hash,
-            validation_result,
-        });
+        Box::pin(async move {
+            let validation_result = match (
+                vdf_steps_are_valid(&block.vdf_limiter_info, &vdf_config).await,
+                poa_is_valid(
+                    &block.poa,
+                    &block_index_guard,
+                    &partitions_guard,
+                    &storage_config,
+                    &miner_address,
+                ),
+            ) {
+                (Ok(_), Ok(_)) => ValidationResult::Valid,
+                (Err(e), _) => {
+                    error!("VDF validation failed: {}", e);
+                    ValidationResult::Invalid
+                }
+                (_, Err(e)) => {
+                    error!("PoA validation failed: {}", e);
+                    ValidationResult::Invalid
+                }
+            };
+            
+            block_tree_service.do_send(ValidationResultMessage {
+                block_hash: block.block_hash,
+                validation_result,
+            });
+            Ok(())
+        })
     }
 }
