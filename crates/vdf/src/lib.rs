@@ -125,7 +125,7 @@ pub fn vdf_sha_verification(
 /// 4. Comparing computed results against provided checkpoints
 ///
 /// Returns Ok(()) if checkpoints are valid, Err otherwise with details of mismatches.
-pub fn last_step_checkpoints_is_valid(
+pub async fn last_step_checkpoints_is_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VDFStepsConfig,
 ) -> eyre::Result<()> {
@@ -174,32 +174,37 @@ pub fn last_step_checkpoints_is_valid(
         config,
         (global_step_number - 1) as u64,
     ));
+    let config = config.clone();
 
-    // Limit threads number to avoid overloading the system using configuration limit
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(config.vdf_parallel_verification_thread_limit)
-        .build()
-        .unwrap();
+    let test = actix_rt::task::spawn_blocking(move || {
+        // Limit threads number to avoid overloading the system using configuration limit
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.vdf_parallel_verification_thread_limit)
+            .build()
+            .unwrap();
 
-    let num_iterations = config.vdf_difficulty;
-    let test: Vec<H256> = pool.install(|| {
-        (0..config.num_checkpoints_in_vdf_step)
-            .into_par_iter()
-            .map(|i| {
-                let mut salt_buff: [u8; 32] = [0; 32];
-                (start_salt + i).to_little_endian(&mut salt_buff);
-                let mut seed = cp[i];
-                let mut hasher = Sha256::new();
+        let num_iterations = config.vdf_difficulty;
+        let test: Vec<H256> = pool.install(|| {
+            (0..config.num_checkpoints_in_vdf_step)
+                .into_par_iter()
+                .map(|i| {
+                    let mut salt_buff: [u8; 32] = [0; 32];
+                    (start_salt + i).to_little_endian(&mut salt_buff);
+                    let mut seed = cp[i];
+                    let mut hasher = Sha256::new();
 
-                for _ in 0..num_iterations {
-                    hasher.update(salt_buff);
-                    hasher.update(seed.as_bytes());
-                    seed = H256(hasher.finalize_reset().into());
-                }
-                seed
-            })
-            .collect::<Vec<H256>>()
-    });
+                    for _ in 0..num_iterations {
+                        hasher.update(salt_buff);
+                        hasher.update(seed.as_bytes());
+                        seed = H256(hasher.finalize_reset().into());
+                    }
+                    seed
+                })
+                .collect::<Vec<H256>>()
+        });
+        test
+    })
+    .await?;
 
     // println!("test{}: {}", 0, Base64::from(test[0].to_vec()));
     // println!("test{}: {}", 24, Base64::from(test[24].to_vec()));

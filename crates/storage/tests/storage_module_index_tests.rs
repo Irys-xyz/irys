@@ -40,13 +40,13 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ii(0, 4), "hdd0".to_string()),   // 0 to 4 inclusive
-                (ii(5, 9), "hdd1".to_string()),   // 5 to 9 inclusive
-                (ii(10, 19), "hdd2".to_string()), // 10 to 19 inclusive
+                (ii(0, 4), "hdd0".into()),   // 0 to 4 inclusive
+                (ii(5, 9), "hdd1".into()),   // 5 to 9 inclusive
+                (ii(10, 19), "hdd2".into()), // 10 to 19 inclusive
             ],
         },
         StorageModuleInfo {
@@ -54,12 +54,12 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
             submodules: vec![
-                (ii(0, 9), "hdd3".to_string()),   // 0 to 9 inclusive
-                (ii(10, 19), "hdd4".to_string()), // 10 to 19 inclusive
+                (ii(0, 9), "hdd3".into()),   // 0 to 9 inclusive
+                (ii(10, 19), "hdd4".into()), // 10 to 19 inclusive
             ],
         },
         StorageModuleInfo {
@@ -67,11 +67,11 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(2), // Submit Ledger Slot 2
             }),
             submodules: vec![
-                (ii(0, 19), "hdd5".to_string()), // 0 to 19 inclusive
+                (ii(0, 19), "hdd5".into()), // 0 to 19 inclusive
             ],
         },
     ];

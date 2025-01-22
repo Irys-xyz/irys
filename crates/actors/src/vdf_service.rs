@@ -1,18 +1,19 @@
 use actix::prelude::*;
+use irys_database::block_header_by_hash;
 use nodit::{interval::ii, InclusiveInterval, Interval};
+use reth_db::Database;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
-    fs::{self, File},
-    io::{Read, Write},
-    path::PathBuf,
     sync::{Arc, RwLock, RwLockReadGuard},
     time::Duration,
 };
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use irys_types::{block_production::Seed, H256List, H256};
+use irys_types::{block_production::Seed, DatabaseProvider, H256List, H256};
+
+use crate::block_index_service::BlockIndexReadGuard;
 
 const FILE_NAME: &str = "vdf.dat";
 
@@ -75,51 +76,75 @@ impl VdfState {
                 .collect::<Vec<H256>>(),
         ))
     }
-
-    /// Saves the VdfState to a file
-    pub fn save_to_file(&self, path: PathBuf) -> eyre::Result<()> {
-        fs::create_dir_all(path.clone())?;
-        let file = path.clone().join(FILE_NAME);
-        info!("Storing vdf steps in file {:?} ...", &file);
-        let serialized = serde_json::to_string(self)?;
-        let mut file = File::create(file)?;
-        file.write_all(serialized.as_bytes())?;
-        Ok(())
-    }
-
-    /// Loads VdfState from a file
-    pub fn load_from_file(path: PathBuf) -> eyre::Result<Self> {
-        info!("Loading vdf steps from file {:?} ...", path);
-        let mut file = File::open(path)?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
-        let state: VdfState = serde_json::from_str(&contents)?;
-        Ok(state)
-    }
 }
 
 #[derive(Debug)]
-pub struct VdfService(pub Arc<RwLock<VdfState>>);
+pub struct VdfService {
+    pub vdf_state: Arc<RwLock<VdfState>>,
+}
 
 impl Default for VdfService {
     fn default() -> Self {
-        Self::new(1000, None)
+        Self::new(1000, None, None)
     }
 }
 
 impl VdfService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
-    pub fn new(capacity: usize, vdf_steps_path: Option<PathBuf>) -> Self {
-        let vdf_state_default = VdfState {
-            global_step: 0,
-            seeds: VecDeque::with_capacity(capacity),
-            max_seeds_num: capacity,
+    pub fn new(
+        capacity: usize,
+        block_index: Option<BlockIndexReadGuard>,
+        db: Option<DatabaseProvider>,
+    ) -> Self {
+        let latest_block_hash = if let Some(bi) = block_index {
+            bi.read().get_latest_item().map(|item| item.block_hash)
+        } else {
+            None
         };
-        let vdf_state = vdf_steps_path.map_or(vdf_state_default.clone(), |path| {
-            VdfState::load_from_file(path.join(FILE_NAME)).unwrap_or(vdf_state_default)
-        });
 
-        Self(Arc::new(RwLock::new(vdf_state)))
+        let vdf_state = if let Some(block_hash) = latest_block_hash {
+            if let Some(db) = db {
+                let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
+                let tx = db.tx().unwrap();
+
+                let mut block = block_header_by_hash(&tx, &block_hash).unwrap().unwrap();
+                let global_step_number = block.vdf_limiter_info.global_step_number;
+                let mut steps_remaining = capacity;
+
+                while steps_remaining > 0 && block.height > 0 {
+                    // get all the steps out of the block
+                    for step in block.vdf_limiter_info.steps.0.iter().rev() {
+                        seeds.push_front(Seed(*step));
+                        steps_remaining -= 1;
+                        if steps_remaining == 0 {
+                            break;
+                        }
+                    }
+                    // get the previous block
+                    block = block_header_by_hash(&tx, &block.previous_block_hash)
+                        .unwrap()
+                        .unwrap();
+                }
+
+                VdfState {
+                    global_step: global_step_number,
+                    seeds,
+                    max_seeds_num: capacity,
+                }
+            } else {
+                panic!("Can't initialize VdfService without a DatabaseProvider");
+            }
+        } else {
+            VdfState {
+                global_step: 0,
+                seeds: VecDeque::with_capacity(capacity),
+                max_seeds_num: capacity,
+            }
+        };
+
+        Self {
+            vdf_state: Arc::new(RwLock::new(vdf_state)),
+        }
     }
 }
 
@@ -148,7 +173,7 @@ impl Handler<VdfSeed> for VdfService {
     type Result = ();
 
     fn handle(&mut self, msg: VdfSeed, _ctx: &mut Context<Self>) -> Self::Result {
-        self.0.write().unwrap().push_step(msg.0);
+        self.vdf_state.write().unwrap().push_step(msg.0);
     }
 }
 
@@ -165,11 +190,6 @@ impl VdfStepsReadGuard {
     /// Read access to internal steps queue
     pub fn read(&self) -> RwLockReadGuard<'_, VdfState> {
         self.0.read().unwrap()
-    }
-
-    /// Store steps in file
-    pub fn save(&self, path: PathBuf) -> eyre::Result<()> {
-        self.0.write().unwrap().save_to_file(path)
     }
 
     /// Try to read steps interval pooling a max. of 10 times waiting for interval to be available
@@ -200,7 +220,7 @@ impl Handler<GetVdfStateMessage> for VdfService {
     type Result = VdfStepsReadGuard; // Return guard directly
 
     fn handle(&mut self, _msg: GetVdfStateMessage, _ctx: &mut Self::Context) -> Self::Result {
-        VdfStepsReadGuard::new(self.0.clone())
+        VdfStepsReadGuard::new(self.vdf_state.clone())
     }
 }
 
@@ -211,7 +231,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf() {
-        let addr = VdfService::new(4, None).start();
+        let addr = VdfService::new(4, None, None).start();
 
         // Send 8 seeds 1,2..,8 (capacity is 4)
         for i in 0..8 {

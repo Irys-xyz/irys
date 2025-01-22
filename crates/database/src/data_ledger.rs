@@ -1,13 +1,20 @@
 use irys_types::{Compact, TransactionLedger, CONFIG, H256};
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
-
+/// Manages the global ledger state within the epoch service, tracking:
+/// - All ledger types (Publish, Submit, etc.)
+/// - Their associated partitions
+/// - Expiration status of term-based ledgers
+///
+/// This provides a complete view of the protocol's data storage and
+/// validation state at any given time.
 /// A slot in a data ledger containing one or more partition hashes
+
 #[derive(Debug, Clone)]
 pub struct LedgerSlot {
     /// Assigned partition hashes
     pub partitions: Vec<H256>,
-    /// Flag marking weather this partition is expired or not
+    /// Flag marking weather this ledger slot is expired or not
     pub is_expired: bool,
     /// Block height of most recently added transaction data (chunks)
     pub last_height: u64,
@@ -18,8 +25,8 @@ pub struct LedgerSlot {
 pub struct PermanentLedger {
     /// Sequential ledger slots containing partition assignments
     pub slots: Vec<LedgerSlot>,
-    /// Unique index of this ledger within its block
-    pub ledger_num: usize,
+    /// Unique identifier for this ledger, see `Ledger` enum
+    pub ledger_id: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -27,8 +34,8 @@ pub struct PermanentLedger {
 pub struct TermLedger {
     /// Sequential ledger slots containing partition assignments  
     pub slots: Vec<LedgerSlot>,
-    /// Unique index of this ledger within its block
-    pub ledger_num: usize,
+    /// Unique identifier for this ledger, see `Ledger` enum
+    pub ledger_id: u32,
     /// Number of epochs slots in this ledger exist for
     pub epoch_length: u64,
 }
@@ -40,21 +47,21 @@ impl Default for PermanentLedger {
 }
 
 impl PermanentLedger {
-    /// Constructs a permanent ledger, always with `ledger_num`: 0
+    /// Constructs a permanent ledger, always with Ledger::Publish as the id
     pub const fn new() -> Self {
         Self {
             slots: Vec::new(),
-            ledger_num: 0,
+            ledger_id: Ledger::Publish as u32,
         }
     }
 }
 
 impl TermLedger {
     /// Creates a term ledger with specified index and duration
-    pub const fn new(ledger_num: usize, epoch_length: u64) -> Self {
+    pub const fn new(ledger: Ledger, epoch_length: u64) -> Self {
         Self {
             slots: Vec::new(),
-            ledger_num,
+            ledger_id: ledger as u32,
             epoch_length,
         }
     }
@@ -97,7 +104,7 @@ pub trait LedgerCore {
     fn slot_count(&self) -> usize;
 
     /// Unique index of this ledger within its block
-    fn ledger_num(&self) -> usize;
+    fn ledger_id(&self) -> u32;
 
     /// Adds slots to the ledger, reserving space for partitions
     fn allocate_slots(&mut self, slots: u64) -> u64;
@@ -112,8 +119,8 @@ impl LedgerCore for PermanentLedger {
     fn slot_count(&self) -> usize {
         self.slots.len()
     }
-    fn ledger_num(&self) -> usize {
-        self.ledger_num
+    fn ledger_id(&self) -> u32 {
+        self.ledger_id as u32
     }
     fn allocate_slots(&mut self, slots: u64) -> u64 {
         let mut num_partitions_added = 0;
@@ -152,8 +159,8 @@ impl LedgerCore for TermLedger {
     fn slot_count(&self) -> usize {
         self.slots.len()
     }
-    fn ledger_num(&self) -> usize {
-        self.ledger_num
+    fn ledger_id(&self) -> u32 {
+        self.ledger_id
     }
     fn allocate_slots(&mut self, slots: u64) -> u64 {
         let mut num_partitions_added = 0;
@@ -189,7 +196,7 @@ impl LedgerCore for TermLedger {
     }
 }
 
-/// Names for each of the ledgers as well as their `ledger_num` discriminant
+/// Names for each of the ledgers as well as their `ledger_id` discriminant
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Ledger {
@@ -232,10 +239,16 @@ impl Ledger {
     }
 }
 
-impl TryFrom<u64> for Ledger {
+impl From<Ledger> for u32 {
+    fn from(ledger: Ledger) -> u32 {
+        ledger as u32
+    }
+}
+
+impl TryFrom<u32> for Ledger {
     type Error = &'static str;
 
-    fn try_from(value: u64) -> Result<Self, Self::Error> {
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Publish),
             1 => Ok(Self::Submit),
@@ -263,7 +276,7 @@ impl Ledgers {
         Self {
             perm: PermanentLedger::new(),
             term: vec![TermLedger::new(
-                Ledger::Submit as usize,
+                Ledger::Submit,
                 CONFIG.submit_ledger_epoch_length,
             )],
         }
@@ -334,8 +347,8 @@ impl Ledgers {
 impl Index<Ledger> for Ledgers {
     type Output = dyn LedgerCore;
 
-    fn index(&self, ledger_num: Ledger) -> &Self::Output {
-        match ledger_num {
+    fn index(&self, ledger: Ledger) -> &Self::Output {
+        match ledger {
             Ledger::Publish => &self.perm,
             Ledger::Submit => &self.term[0],
         }
@@ -344,8 +357,8 @@ impl Index<Ledger> for Ledgers {
 
 // Implement IndexMut to retrieve a LedgerCore by its Ledger name
 impl IndexMut<Ledger> for Ledgers {
-    fn index_mut(&mut self, ledger_num: Ledger) -> &mut Self::Output {
-        match ledger_num {
+    fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
+        match ledger {
             Ledger::Publish => &mut self.perm,
             Ledger::Submit => &mut self.term[0],
         }
@@ -356,12 +369,16 @@ impl Index<Ledger> for Vec<TransactionLedger> {
     type Output = TransactionLedger;
 
     fn index(&self, ledger: Ledger) -> &Self::Output {
-        &self[ledger as usize]
+        self.iter()
+            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
+            .expect("No transaction ledger found for given ledger type")
     }
 }
 
 impl IndexMut<Ledger> for Vec<TransactionLedger> {
     fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
-        &mut self[ledger as usize]
+        self.iter_mut()
+            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
+            .expect("No transaction ledger found for given ledger type")
     }
 }

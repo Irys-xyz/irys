@@ -19,7 +19,7 @@ use irys_actors::{
     block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
 };
 use irys_config::IrysNodeConfig;
-use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized};
+use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized, Ledger};
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
@@ -57,11 +57,11 @@ async fn finalize_block_test() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ii(0, 5), "sm1".to_string()), // 0 to 5 inclusive
+                (ii(0, 5), "sm1".into()), // 0 to 5 inclusive
             ],
         },
         StorageModuleInfo {
@@ -69,11 +69,11 @@ async fn finalize_block_test() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
             submodules: vec![
-                (ii(0, 5), "sm2".to_string()), // 0 to 5 inclusive
+                (ii(0, 5), "sm2".into()), // 0 to 5 inclusive
             ],
         },
     ];
@@ -202,7 +202,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
             tx_path: None,
             data_path: None,
             chunk: Base64::from_str("").unwrap(),
-            ledger_num: None,
+            ledger_id: None,
             partition_chunk_offset: 0,
             recall_chunk_index: 0,
             partition_hash: PartitionHash::zero(),
@@ -214,16 +214,18 @@ async fn finalize_block_test() -> eyre::Result<()> {
         ledgers: vec![
             // Permanent Publish Ledger
             TransactionLedger {
+                ledger_id: Ledger::Publish.into(),
                 tx_root: H256::zero(),
-                txids: H256List(Vec::new()),
+                tx_ids: H256List(Vec::new()),
                 max_chunk_offset: 0,
                 expires: None,
                 proofs: None,
             },
             // Term Submit Ledger
             TransactionLedger {
+                ledger_id: Ledger::Submit.into(),
                 tx_root: TransactionLedger::merklize_tx_root(&tx_headers).0,
-                txids: H256List(data_tx_ids.clone()),
+                tx_ids: H256List(data_tx_ids.clone()),
                 max_chunk_offset: 0,
                 expires: Some(1622543200),
                 proofs: None,

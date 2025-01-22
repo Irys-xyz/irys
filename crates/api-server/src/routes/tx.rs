@@ -89,7 +89,7 @@ pub async fn get_tx_local_start_offset(
     let tx_id: H256 = path.into_inner();
     info!("Get tx data metadata by tx_id: {}", tx_id);
     let tx_header = get_tx_header(&state, tx_id)?;
-    let ledger = Ledger::try_from(tx_header.ledger_num).unwrap();
+    let ledger = Ledger::try_from(tx_header.ledger_id).unwrap();
 
     match state
         .chunk_provider

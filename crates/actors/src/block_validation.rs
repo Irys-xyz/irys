@@ -14,16 +14,16 @@ use openssl::sha;
 use tracing::{debug, info};
 
 /// Full pre-validation steps for a block
-pub fn prevalidate_block(
-    block: &IrysBlockHeader,
-    previous_block: &IrysBlockHeader,
-    block_index_guard: &BlockIndexReadGuard,
-    partitions_guard: &PartitionAssignmentsReadGuard,
-    storage_config: &StorageConfig,
-    difficulty_config: &DifficultyAdjustmentConfig,
-    vdf_config: &VDFStepsConfig,
-    steps_guard: &VdfStepsReadGuard,
-    miner_address: &Address,
+pub async fn prevalidate_block(
+    block: IrysBlockHeader,
+    previous_block: IrysBlockHeader,
+    block_index_guard: BlockIndexReadGuard,
+    partitions_guard: PartitionAssignmentsReadGuard,
+    storage_config: StorageConfig,
+    difficulty_config: DifficultyAdjustmentConfig,
+    vdf_config: VDFStepsConfig,
+    steps_guard: VdfStepsReadGuard,
+    miner_address: Address,
 ) -> eyre::Result<()> {
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
         return Err(eyre::eyre!(
@@ -32,22 +32,22 @@ pub fn prevalidate_block(
     }
 
     // Check prev_output (vdf)
-    prev_output_is_valid(block, previous_block)?;
+    prev_output_is_valid(&block, &previous_block)?;
 
     // Check the difficulty
-    difficulty_is_valid(block, previous_block, difficulty_config)?;
+    difficulty_is_valid(&block, &previous_block, &difficulty_config)?;
 
     // Check the cumulative difficulty
-    cumulative_difficulty_is_valid(block, previous_block)?;
+    cumulative_difficulty_is_valid(&block, &previous_block)?;
 
     // Check the solution_hash
-    solution_hash_is_valid(block)?;
+    solution_hash_is_valid(&block)?;
 
     // Recall range check
-    recall_recall_range_is_valid(block, storage_config, steps_guard)?;
+    recall_recall_range_is_valid(&block, &storage_config, &steps_guard)?;
 
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config)?;
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config).await?;
 
     Ok(())
 }
@@ -184,8 +184,8 @@ pub fn poa_is_valid(
 ) -> eyre::Result<()> {
     debug!("PoA validating mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_address, poa.partition_chunk_offset, poa.partition_hash, config.entropy_packing_iterations, config.chunk_size);
     // data chunk
-    if let (Some(data_path), Some(tx_path), Some(ledger_num)) =
-        (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_num)
+    if let (Some(data_path), Some(tx_path), Some(ledger_id)) =
+        (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_id)
     {
         // partition data -> ledger data
         let partition_assignment = partitions_guard
@@ -199,7 +199,7 @@ pub fn poa_is_valid(
             + poa.partition_chunk_offset as u64;
 
         // ledger data -> block
-        let ledger = Ledger::try_from(ledger_num).unwrap();
+        let ledger = Ledger::try_from(ledger_id).unwrap();
 
         let bb = block_index_guard
             .read()
@@ -263,10 +263,10 @@ pub fn poa_is_valid(
 
         if poa_chunk_hash != data_path_result.leaf_hash {
             return Err(eyre::eyre!(
-                "PoA chunk hash mismatch\n{:?}\nleaf_hash: {:?}\nledger_num: {}\nledger_chunk_offset: {}",
+                "PoA chunk hash mismatch\n{:?}\nleaf_hash: {:?}\nledger_id: {}\nledger_chunk_offset: {}",
                 poa_chunk,
                 data_path_result.leaf_hash,
-                ledger_num,
+                ledger_id,
                 ledger_chunk_offset
             ));
         }
@@ -549,7 +549,7 @@ mod tests {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
             chunk: Base64(poa_chunk.clone()),
-            ledger_num: Some(1),
+            ledger_id: Some(1),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 as u32,
             recall_chunk_index: 0,
@@ -570,16 +570,18 @@ mod tests {
             ledgers: vec![
                 // Permanent Publish Ledger
                 TransactionLedger {
+                    ledger_id: Ledger::Publish.into(),
                     tx_root: H256::zero(),
-                    txids: H256List(Vec::new()),
+                    tx_ids: H256List(Vec::new()),
                     max_chunk_offset: 0,
                     expires: None,
                     proofs: None,
                 },
                 // Term Submit Ledger
                 TransactionLedger {
+                    ledger_id: Ledger::Submit.into(),
                     tx_root,
-                    txids: H256List(data_tx_ids.clone()),
+                    tx_ids: H256List(data_tx_ids.clone()),
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
                     proofs: None,

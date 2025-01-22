@@ -282,22 +282,22 @@ async fn data_promotion_test() {
 
     if block_tx1.block_hash == block_tx2.block_hash {
         // Extract the transaction order
-        let txid_1 = block_tx1.ledgers[Ledger::Publish].txids.0[0];
-        let txid_2 = block_tx1.ledgers[Ledger::Publish].txids.0[1];
+        let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
+        let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[1];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
         println!("1:{}", block_tx1);
     } else {
         if block_tx1.height > block_tx2.height {
-            let txid_1 = block_tx2.ledgers[Ledger::Publish].txids.0[0];
-            let txid_2 = block_tx1.ledgers[Ledger::Publish].txids.0[0];
+            let txid_1 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
+            let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
             first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
             next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
             println!("1:{}", block_tx2);
             println!("2:{}", block_tx1);
         } else {
-            let txid_1 = block_tx1.ledgers[Ledger::Publish].txids.0[0];
-            let txid_2 = block_tx2.ledgers[Ledger::Publish].txids.0[0];
+            let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
+            let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
             first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
             next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
             println!("1:{}", block_tx1);
@@ -468,7 +468,7 @@ fn get_block_parent(txid: H256, ledger: Ledger, db: &DatabaseProvider) -> Option
 
     // Loop tough all the blocks and find the one that contains the txid
     for block_header in block_headers.values() {
-        if block_header.ledgers[ledger].txids.0.contains(&txid) {
+        if block_header.ledgers[ledger].tx_ids.0.contains(&txid) {
             return Some(IrysBlockHeader::from(block_header.clone()));
         }
     }
