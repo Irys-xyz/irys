@@ -112,8 +112,8 @@ async fn post_tx_and_chunks_golden_path() {
         storage_config.clone(),
         Arc::new(Vec::new()).to_vec(),
     );
-    Registry::set(mempool_service.start());
-    let mempool_addr = MempoolService::from_registry();
+    SystemRegistry::set(mempool_service.start());
+    let mempool_addr = <MempoolService as actix::SystemService>::from_registry();
 
     let chunk_provider = ChunkProvider::new(
         storage_config.clone(),

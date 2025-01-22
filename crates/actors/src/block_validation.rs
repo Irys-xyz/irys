@@ -403,7 +403,7 @@ mod tests {
         ));
 
         let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
-        Registry::set(block_index_actor.start());
+        SystemRegistry::set(block_index_actor.start());
 
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),

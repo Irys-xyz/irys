@@ -396,7 +396,7 @@ mod tests {
         let mining_broadcaster = BroadcastMiningService::new();
         let mining_broadcaster_addr = mining_broadcaster.start();
 
-        let vdf_service = VdfService::from_registry();
+        let vdf_service = <VdfService as actix::SystemService>::from_registry();
         let vdf_steps_guard: VdfStepsReadGuard =
             vdf_service.send(GetVdfStateMessage).await.unwrap();
 

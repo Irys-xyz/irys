@@ -1,5 +1,5 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, ArbiterService, Registry};
+use actix::{Actor, ArbiterService, Registry, SystemRegistry};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -225,7 +225,7 @@ pub async fn start_irys_node(
                 // Initialize the block_index actor and tell it about the genesis block
                 let block_index_actor =
                     BlockIndexService::new(block_index.clone(), storage_config.clone());
-                Registry::set(block_index_actor.start());
+                SystemRegistry::set(block_index_actor.start());
                 let block_index_actor_addr = BlockIndexService::from_registry();
                 if at_genesis {
                     let msg = BlockFinalizedMessage {
@@ -313,8 +313,8 @@ pub async fn start_irys_node(
                     storage_config.clone(),
                     storage_modules.clone(),
                 );
-                Registry::set(mempool_service.start());
-                let mempool_addr = MempoolService::from_registry();
+                SystemRegistry::set(mempool_service.start());
+                let mempool_addr = <MempoolService as actix::SystemService>::from_registry();
 
                 let chunk_migration_service = ChunkMigrationService::new(
                     block_index.clone(),
@@ -322,7 +322,7 @@ pub async fn start_irys_node(
                     storage_modules.clone(),
                     db.clone(),
                 );
-                Registry::set(chunk_migration_service.start());
+                SystemRegistry::set(chunk_migration_service.start());
 
                 let validation_service = ValidationService::new(
                     block_index_guard.clone(),
@@ -330,14 +330,14 @@ pub async fn start_irys_node(
                     storage_config.clone(),
                     vdf_config.clone(),
                 );
-                Registry::set(validation_service.start());
+                SystemRegistry::set(validation_service.start());
 
                 let (_new_seed_tx, _new_seed_rx) = mpsc::channel::<H256>();
 
                 let block_tree_service =
                     BlockTreeService::new(db.clone(), block_index.clone(), &miner_address);
-                Registry::set(block_tree_service.start());
-                let block_tree_service = BlockTreeService::from_registry();
+                SystemRegistry::set(block_tree_service.start());
+                let block_tree_service = <BlockTreeService as actix::SystemService>::from_registry();
 
                 let block_tree_guard = block_tree_service
                     .send(GetBlockTreeGuardMessage)
@@ -352,7 +352,7 @@ pub async fn start_irys_node(
                 let vdf_service_actor =
                     VdfService::new(1000, Some(block_index_guard.clone()), Some(db.clone()));
                 let vdf_service = vdf_service_actor.start();
-                Registry::set(vdf_service.clone()); // register it as a service
+                SystemRegistry::set(vdf_service.clone()); // register it as a service
 
                 let vdf_steps_guard: VdfStepsReadGuard =
                     vdf_service.send(GetVdfStateMessage).await.unwrap();
@@ -388,7 +388,7 @@ pub async fn start_irys_node(
                 let arb = actix::Arbiter::new();
                 let block_producer_addr = BlockProducerActor::start_in_arbiter(&arb.handle(), |_| block_producer_actor);
 
-                let block_tree = BlockTreeService::from_registry();
+                let block_tree = <BlockTreeService as actix::SystemService>::from_registry();
                 block_tree
                     .send(RegisterBlockProducerMessage(block_producer_addr.clone()))
                     .await

@@ -1,4 +1,4 @@
-use actix::{Actor, ArbiterService, Context, Handler, Message, Supervised};
+use actix::{Actor, ArbiterService, Context, Handler, Message, Supervised, SystemService};
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::db_cache::data_size_to_chunk_count;
@@ -44,6 +44,8 @@ impl Actor for MempoolService {
 
 /// Allows this actor to live in the the local service registry
 impl Supervised for MempoolService {}
+
+impl SystemService for MempoolService {}
 
 impl ArbiterService for MempoolService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {

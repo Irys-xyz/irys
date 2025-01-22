@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use actix::{Actor, ArbiterService, Context, Handler, Message, Supervised};
+use actix::{Actor, ArbiterService, Context, Handler, Message, Supervised, SystemService};
 use irys_types::{IrysBlockHeader, StorageConfig, VDFStepsConfig};
 use irys_vdf::vdf_steps_are_valid;
 use tracing::error;
@@ -49,6 +49,8 @@ impl Actor for ValidationService {
 /// Allows this actor to live in the the local service registry
 impl Supervised for ValidationService {}
 
+impl SystemService for ValidationService {}
+
 impl ArbiterService for ValidationService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("service started: block_index");
@@ -95,7 +97,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
             }
         };
 
-        let block_tree_service = BlockTreeService::from_registry();
+        let block_tree_service = <BlockTreeService as actix::SystemService>::from_registry();
         block_tree_service.do_send(ValidationResultMessage {
             block_hash: block.block_hash,
             validation_result,

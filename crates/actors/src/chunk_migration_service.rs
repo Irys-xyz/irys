@@ -60,6 +60,8 @@ impl ChunkMigrationService {
 /// Adds this actor the the local service registry
 impl Supervised for ChunkMigrationService {}
 
+impl SystemService for ChunkMigrationService {}
+
 impl ArbiterService for ChunkMigrationService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("chunk_migration service started");

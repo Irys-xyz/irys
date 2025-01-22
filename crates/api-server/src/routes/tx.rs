@@ -125,7 +125,7 @@ mod tests {
     use crate::routes;
 
     use super::*;
-    use actix::{Actor, ArbiterService, Registry};
+    use actix::{Actor, ArbiterService, Registry, SystemRegistry};
     use actix_web::{middleware::Logger, test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
@@ -168,8 +168,8 @@ mod tests {
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
-        Registry::set(mempool_service.start());
-        let mempool_addr = MempoolService::from_registry();
+        SystemRegistry::set(mempool_service.start());
+        let mempool_addr = <MempoolService as actix::SystemService>::from_registry();
 
         let chunk_provider = ChunkProvider::new(
             storage_config.clone(),
@@ -224,7 +224,7 @@ mod tests {
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
-        Registry::set(mempool_service.start());
+        SystemRegistry::set(mempool_service.start());
         let mempool_addr = MempoolService::from_registry();
 
         let chunk_provider = ChunkProvider::new(
