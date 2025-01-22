@@ -89,7 +89,7 @@ async fn post_tx_and_chunks_golden_path() {
     std::env::set_var("RUST_LOG", "trace");
 
     use ::irys_database::{config::get_data_dir, open_or_create_db};
-    use actix::{Actor, ArbiterService, Registry};
+    use actix::{Actor, ArbiterService, Registry, SystemRegistry};
     use actix_web::{middleware::Logger, test};
     use awc::http::StatusCode;
     use irys_actors::mempool_service::MempoolService;
