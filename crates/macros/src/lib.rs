@@ -207,9 +207,6 @@ fn test_load_toml_valid() {
     env::remove_var(env_var_name);
 }
 
-#[cfg(test)]
-use quote::ToTokens;
-
 #[test]
 fn test_load_toml_default() {
     let input = quote! {
