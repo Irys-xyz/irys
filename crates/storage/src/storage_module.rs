@@ -34,7 +34,7 @@ use std::{
 };
 use tracing::{debug, info};
 
-type SubmodulePath = String;
+type SubmodulePath = PathBuf;
 
 // In-memory chunk data indexed by offset within partition
 type ChunkMap = BTreeMap<PartitionChunkOffset, (ChunkBytes, ChunkType)>;
@@ -928,9 +928,9 @@ mod tests {
             id: 0,
             partition_assignment: None,
             submodules: vec![
-                (ii(0, 4), "hdd0-4TB".to_string()),  // 0 to 4 inclusive
-                (ii(5, 9), "hdd1-4TB".to_string()),  // 5 to 9 inclusive
-                (ii(10, 19), "hdd-8TB".to_string()), // 10 to 19 inclusive
+                (ii(0, 4), "hdd0-4TB".into()),  // 0 to 4 inclusive
+                (ii(5, 9), "hdd1-4TB".into()),  // 5 to 9 inclusive
+                (ii(10, 19), "hdd-8TB".into()), // 10 to 19 inclusive
             ],
         }];
 
@@ -1049,7 +1049,7 @@ mod tests {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
             submodules: vec![
-                (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
+                (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         }];
 

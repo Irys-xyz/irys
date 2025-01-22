@@ -620,7 +620,7 @@ mod tests {
                 slot_index: Some(0),
             }),
             submodules: vec![
-                (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
+                (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         };
         initialize_storage_files(&base_path, &vec![storage_module_info.clone()])?;

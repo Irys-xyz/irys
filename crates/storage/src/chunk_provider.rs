@@ -159,10 +159,7 @@ mod tests {
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
-            submodules: vec![
-                (ie(0, 50), "hdd0".to_string()),
-                (ie(50, 100), "hdd1".to_string()),
-            ],
+            submodules: vec![(ie(0, 50), "hdd0".into()), (ie(50, 100), "hdd1".into())],
         }];
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);

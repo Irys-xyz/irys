@@ -61,7 +61,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ii(0, 5), "sm1".to_string()), // 0 to 5 inclusive
+                (ii(0, 5), "sm1".into()), // 0 to 5 inclusive
             ],
         },
         StorageModuleInfo {
@@ -73,7 +73,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
             submodules: vec![
-                (ii(0, 5), "sm2".to_string()), // 0 to 5 inclusive
+                (ii(0, 5), "sm2".into()), // 0 to 5 inclusive
             ],
         },
     ];
