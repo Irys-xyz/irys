@@ -10,6 +10,7 @@ use openssl::sha;
 use reth_db::Database;
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 
@@ -208,7 +209,7 @@ impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
         _msg: GetGenesisStorageModulesMessage,
         _ctx: &mut Self::Context,
     ) -> Self::Result {
-        self.get_genesis_storage_module_infos()
+        self.get_genesis_storage_module_infos([] as [PathBuf; 0])
     }
 }
 
@@ -572,7 +573,10 @@ impl EpochServiceActor {
     }
 
     /// Configure storage modules for genesis partition assignments
-    pub fn get_genesis_storage_module_infos(&self) -> Vec<StorageModuleInfo> {
+    pub fn get_genesis_storage_module_infos(
+        &self,
+        paths: impl IntoIterator<Item = impl Into<PathBuf>>,
+    ) -> Vec<StorageModuleInfo> {
         let ledgers = self.ledgers.read().unwrap();
         let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
 
@@ -777,7 +781,7 @@ mod tests {
 
         println!("{:?}", ledgers.read());
 
-        let infos = epoch_service.get_genesis_storage_module_infos();
+        let infos = epoch_service.get_genesis_storage_module_infos([] as [PathBuf; 0]);
         println!("{:#?}", infos);
     }
 
