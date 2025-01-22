@@ -11,12 +11,12 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 
+use actix::SystemRegistry;
 use irys_actors::mempool_service::MempoolService;
 use irys_storage::ChunkProvider;
 use irys_types::app_state::DatabaseProvider;
 use routes::{block, get_chunk, index, network_config, post_chunk, price, proxy::proxy, tx};
 use tracing::debug;
-use actix::SystemRegistry;
 
 #[derive(Clone)]
 pub struct ApiState {

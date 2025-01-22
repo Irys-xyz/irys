@@ -228,7 +228,7 @@ async fn external_api() -> eyre::Result<()> {
     // Create a block_index actor
     let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
     SystemRegistry::set(block_index_actor.start());
-    let block_index_addr =  BlockIndexService::from_registry();
+    let block_index_addr = BlockIndexService::from_registry();
 
     let height: u64;
     {

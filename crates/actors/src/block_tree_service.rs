@@ -208,7 +208,7 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeService {
 
         if add_result.is_ok() {
             // Schedule block for full validation regardless of origin
-            let validation_service =  ValidationService::from_registry();
+            let validation_service = ValidationService::from_registry();
             validation_service.do_send(RequestValidationMessage(block.clone()));
 
             // Update block state to reflect scheduled validation

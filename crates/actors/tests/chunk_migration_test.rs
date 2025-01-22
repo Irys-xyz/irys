@@ -13,6 +13,7 @@ use {
 use assert_matches::assert_matches;
 
 use actix::prelude::*;
+use actix::SystemService;
 use chunk::TxRelativeChunkOffset;
 use dev::SystemRegistry;
 use irys_actors::{
@@ -29,7 +30,6 @@ use irys_types::{
 };
 use reth::{revm::primitives::B256, tasks::TaskManager};
 use tracing::info;
-use actix::SystemService;
 
 #[actix::test]
 async fn finalize_block_test() -> eyre::Result<()> {
