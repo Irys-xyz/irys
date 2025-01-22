@@ -33,6 +33,17 @@ pub static IRYS_MAINNET: Lazy<Arc<ChainSpec>> = Lazy::new(|| {
                         ..Default::default()
                     },
                 );
+                map.insert(
+                    Address::from_slice(
+                        hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
+                            .unwrap()
+                            .as_slice(),
+                    ),
+                    GenesisAccount {
+                        balance: U256::from(90000000000000000000_u128),
+                        ..Default::default()
+                    },
+                );
                 map
             },
             ..Default::default()
