@@ -1,6 +1,6 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::SystemService;
-use actix::{Actor, ArbiterService, Registry, System, SystemRegistry};
+use actix::{Actor, ArbiterService, SystemRegistry};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -47,7 +47,7 @@ use std::{
     sync::{mpsc, Arc, OnceLock, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, error, info, Instrument};
+use tracing::{debug, error, info};
 
 use tokio::{
     runtime::Handle,

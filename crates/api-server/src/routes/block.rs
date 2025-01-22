@@ -1,6 +1,5 @@
 use crate::error::ApiError;
 use crate::ApiState;
-use actix::SystemService;
 use actix_web::{
     web::{self, Json},
     Result,
