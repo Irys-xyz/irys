@@ -43,7 +43,7 @@ pub struct Config {
     pub num_capacity_partitions: u64,
 }
 
-pub const DEFAULT_BLOCK_TIME: u64 = 1;
+pub const DEFAULT_BLOCK_TIME: u64 = 5;
 
 pub const CONFIG: Config = load_toml!(
     "CONFIG_TOML_PATH",
