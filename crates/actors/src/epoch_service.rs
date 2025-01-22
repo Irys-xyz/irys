@@ -1,6 +1,7 @@
 use actix::{Actor, ArbiterService, Context, Handler, Message, MessageResponse};
+use base58::ToBase58;
 use eyre::{Error, Result};
-use irys_database::{data_ledger::*, database};
+use irys_database::{block_header_by_hash, data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
@@ -12,8 +13,11 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
+use tracing::error;
 
-use crate::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
+use crate::block_index_service::{
+    BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage,
+};
 
 /// Allows for overriding of the consensus parameters for ledgers and partitions
 #[derive(Debug, Clone)]
@@ -265,13 +269,38 @@ impl EpochServiceActor {
                         database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
                             .unwrap()
                             .unwrap();
-                    self.perform_epoch_tasks(Arc::new(block_header)).unwrap();
+                    match self.perform_epoch_tasks(Arc::new(block_header)) {
+                        Ok(_) => (),
+                        Err(e) => {
+                            self.print_items(read_guard.clone(), db.clone());
+                            panic!("{:?}", e);
+                        }
+                    }
                     block_index += self.config.num_blocks_in_epoch;
                 }
                 None => {
                     break;
                 }
             }
+
+            // print out the block_list at startup (debugging)
+            // self.print_items(read_guard.clone(), db.clone());
+        }
+    }
+
+    fn print_items(&self, block_index_guard: BlockIndexReadGuard, db: DatabaseProvider) {
+        let rg = block_index_guard.read();
+        let tx = db.tx().unwrap();
+        for i in 0..rg.num_blocks() {
+            let item = rg.get_item(i as usize).unwrap();
+            let block_hash = item.block_hash;
+            let block = block_header_by_hash(&tx, &block_hash).unwrap().unwrap();
+            println!(
+                "index: {} height: {} hash: {}",
+                i,
+                block.height,
+                block_hash.0.to_base58()
+            );
         }
     }
 
@@ -282,6 +311,10 @@ impl EpochServiceActor {
     ) -> Result<(), EpochServiceError> {
         // Validate this is an epoch block height
         if new_epoch_block.height % CONFIG.num_blocks_in_epoch != 0 {
+            error!(
+                "Not an epoch block height: {} num_blocks_in_epoch: {}",
+                new_epoch_block.height, CONFIG.num_blocks_in_epoch
+            );
             return Err(EpochServiceError::NotAnEpochBlock);
         }
 

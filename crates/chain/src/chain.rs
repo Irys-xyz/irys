@@ -334,8 +334,12 @@ pub async fn start_irys_node(
 
                 let (_new_seed_tx, _new_seed_rx) = mpsc::channel::<H256>();
 
-                let block_tree_service =
-                    BlockTreeService::new(db.clone(), block_index.clone(), &miner_address);
+                let block_tree_service = BlockTreeService::new(
+                    db.clone(),
+                    block_index.clone(),
+                    &miner_address,
+                    block_index_guard.clone(),
+                );
                 Registry::set(block_tree_service.start());
                 let block_tree_service = BlockTreeService::from_registry();
 

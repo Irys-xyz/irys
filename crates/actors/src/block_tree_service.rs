@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     block_discovery::BlockPreValidatedMessage,
-    block_index_service::BlockIndexService,
+    block_index_service::{BlockIndexReadGuard, BlockIndexService},
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
     chunk_migration_service::ChunkMigrationService,
     mempool_service::MempoolService,
@@ -73,6 +73,8 @@ pub struct BlockTreeService {
     pub cache: Option<Arc<RwLock<BlockTreeCache>>>,
     /// The wallet address of the local miner
     pub miner_address: Address,
+    /// Read view of the block_index
+    pub block_index_guard: Option<BlockIndexReadGuard>,
 }
 
 impl Actor for BlockTreeService {
@@ -94,6 +96,7 @@ impl BlockTreeService {
         db: DatabaseProvider,
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         miner_address: &Address,
+        block_index_guard: BlockIndexReadGuard,
     ) -> Self {
         let cache = BlockTreeCache::initialize_from_list(block_index, db.clone());
 
@@ -102,6 +105,7 @@ impl BlockTreeService {
             block_producer: None,
             cache: Some(Arc::new(RwLock::new(cache))),
             miner_address: *miner_address,
+            block_index_guard: Some(block_index_guard),
         }
     }
 
@@ -122,6 +126,17 @@ impl BlockTreeService {
                 return Err(eyre::eyre!("Failed to get previous block header: {}", e));
             }
         };
+
+        let block_index_guard = self.block_index_guard.clone().unwrap();
+        let binding = block_index_guard.read();
+        let item = binding.get_latest_item().unwrap();
+
+        // Skip if block is already finalized - this occurs during node restart
+        // when block_tree initializes from block_index and previous blocks are
+        // already finalized
+        if item.block_hash == block_header.block_hash {
+            return Ok(());
+        }
 
         // Get all the transactions for the finalized block, error if not found
         // TODO: Eventually abstract this for support of `n` ledgers
