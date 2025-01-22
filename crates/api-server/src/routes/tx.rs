@@ -125,7 +125,7 @@ mod tests {
     use crate::routes;
 
     use super::*;
-    use actix::{Actor, ArbiterService, Registry, SystemRegistry};
+    use actix::{Actor, SystemRegistry};
     use actix_web::{middleware::Logger, test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
