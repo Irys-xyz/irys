@@ -135,7 +135,7 @@ impl BlockTreeService {
         };
 
         let chunk_migration = ChunkMigrationService::from_registry();
-        let block_index = <BlockIndexService as actix::SystemService>::from_registry();
+        let block_index = BlockIndexService::from_registry();
         let block_finalized_message = BlockFinalizedMessage {
             block_header: Arc::new(block_header),
             all_txs: Arc::new(all_txs),
@@ -208,7 +208,7 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeService {
 
         if add_result.is_ok() {
             // Schedule block for full validation regardless of origin
-            let validation_service =  <ValidationService as actix::SystemService>::from_registry();
+            let validation_service =  ValidationService::from_registry();
             validation_service.do_send(RequestValidationMessage(block.clone()));
 
             // Update block state to reflect scheduled validation
@@ -257,7 +257,7 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
                         // If we have a new tip, let the node know about it
                         let block_confirm_message =
                             BlockConfirmedMessage(arc_block.clone(), arc_all_tx);
-                        let mempool = <MempoolService as actix::SystemService>::from_registry();
+                        let mempool = MempoolService::from_registry();
 
                         if let Some(block_producer) = &self.block_producer {
                             block_producer.do_send(block_confirm_message.clone());

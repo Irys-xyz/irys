@@ -96,7 +96,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
             }
         };
 
-        let block_tree_service = <BlockTreeService as actix::SystemService>::from_registry();
+        let block_tree_service = BlockTreeService::from_registry();
         block_tree_service.do_send(ValidationResultMessage {
             block_hash: block.block_hash,
             validation_result,

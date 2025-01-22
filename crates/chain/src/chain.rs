@@ -315,7 +315,7 @@ pub async fn start_irys_node(
                     storage_modules.clone(),
                 );
                 SystemRegistry::set(mempool_service.start());
-                let mempool_addr = <MempoolService as actix::SystemService>::from_registry();
+                let mempool_addr = MempoolService::from_registry();
 
                 let chunk_migration_service = ChunkMigrationService::new(
                     block_index.clone(),
@@ -338,7 +338,7 @@ pub async fn start_irys_node(
                 let block_tree_service =
                     BlockTreeService::new(db.clone(), block_index.clone(), &miner_address);
                 SystemRegistry::set(block_tree_service.start());
-                let block_tree_service = <BlockTreeService as actix::SystemService>::from_registry();
+                let block_tree_service = BlockTreeService::from_registry();
 
                 let block_tree_guard = block_tree_service
                     .send(GetBlockTreeGuardMessage)
@@ -389,7 +389,7 @@ pub async fn start_irys_node(
                 let arb = actix::Arbiter::new();
                 let block_producer_addr = BlockProducerActor::start_in_arbiter(&arb.handle(), |_| block_producer_actor);
 
-                let block_tree = <BlockTreeService as actix::SystemService>::from_registry();
+                let block_tree = BlockTreeService::from_registry();
                 block_tree
                     .send(RegisterBlockProducerMessage(block_producer_addr.clone()))
                     .await

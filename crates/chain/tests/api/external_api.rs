@@ -140,7 +140,7 @@ async fn external_api() -> eyre::Result<()> {
         storage_modules.clone(),
     );
     SystemRegistry::set(mempool_service.start());
-    let mempool_addr = <MempoolService as actix::SystemService>::from_registry();
+    let mempool_addr = MempoolService::from_registry();
 
     // Create a block_index
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
@@ -228,7 +228,7 @@ async fn external_api() -> eyre::Result<()> {
     // Create a block_index actor
     let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
     SystemRegistry::set(block_index_actor.start());
-    let block_index_addr =  <BlockIndexService as actix::SystemService>::from_registry();
+    let block_index_addr =  BlockIndexService::from_registry();
 
     let height: u64;
     {
@@ -305,7 +305,7 @@ async fn external_api() -> eyre::Result<()> {
         block_header: block.clone(),
         all_txs: txs.clone(),
     };
-    let chunk_migration_addr = <ChunkMigrationService as actix::SystemService>::from_registry();
+    let chunk_migration_addr = ChunkMigrationService::from_registry();
     let _res = chunk_migration_addr.send(block_finalized_message).await?;
 
     // Check to see if the chunks are in the StorageModules

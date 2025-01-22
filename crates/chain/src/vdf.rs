@@ -153,7 +153,7 @@ mod tests {
         init_tracing();
 
         let broadcast_mining_service = BroadcastMiningService::from_registry();
-        let vdf_service = <VdfService as actix::SystemService>::from_registry();
+        let vdf_service = VdfService::from_registry();
         let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();
 
         let vdf_config2 = vdf_config.clone();
