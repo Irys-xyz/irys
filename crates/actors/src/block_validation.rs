@@ -184,8 +184,8 @@ pub fn poa_is_valid(
 ) -> eyre::Result<()> {
     debug!("PoA validating mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_address, poa.partition_chunk_offset, poa.partition_hash, config.entropy_packing_iterations, config.chunk_size);
     // data chunk
-    if let (Some(data_path), Some(tx_path), Some(ledger_num)) =
-        (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_num)
+    if let (Some(data_path), Some(tx_path), Some(ledger_id)) =
+        (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_id)
     {
         // partition data -> ledger data
         let partition_assignment = partitions_guard
@@ -199,7 +199,7 @@ pub fn poa_is_valid(
             + poa.partition_chunk_offset as u64;
 
         // ledger data -> block
-        let ledger = Ledger::try_from(ledger_num).unwrap();
+        let ledger = Ledger::try_from(ledger_id).unwrap();
 
         let bb = block_index_guard
             .read()
@@ -263,10 +263,10 @@ pub fn poa_is_valid(
 
         if poa_chunk_hash != data_path_result.leaf_hash {
             return Err(eyre::eyre!(
-                "PoA chunk hash mismatch\n{:?}\nleaf_hash: {:?}\nledger_num: {}\nledger_chunk_offset: {}",
+                "PoA chunk hash mismatch\n{:?}\nleaf_hash: {:?}\nledger_id: {}\nledger_chunk_offset: {}",
                 poa_chunk,
                 data_path_result.leaf_hash,
-                ledger_num,
+                ledger_id,
                 ledger_chunk_offset
             ));
         }
@@ -549,7 +549,7 @@ mod tests {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
             chunk: Base64(poa_chunk.clone()),
-            ledger_num: Some(1),
+            ledger_id: Some(1),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 as u32,
             recall_chunk_index: 0,

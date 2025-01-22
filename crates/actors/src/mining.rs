@@ -343,7 +343,7 @@ mod tests {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
                 miner_address: mining_address,
-                ledger_num: Some(0),
+                ledger_id: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![

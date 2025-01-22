@@ -69,8 +69,8 @@ impl ChunkProvider {
             .iter()
             .filter(|sm| {
                 sm.partition_assignment
-                    .and_then(|sm| sm.ledger_num)
-                    .map_or(false, |ledger_num| ledger_num == ledger as u64)
+                    .and_then(|sm| sm.ledger_id)
+                    .map_or(false, |ledger_id| ledger_id == ledger as u32)
             })
             .collect::<Vec<_>>();
 
@@ -115,8 +115,8 @@ impl ChunkProvider {
             .iter()
             .filter(|sm| {
                 sm.partition_assignment
-                    .and_then(|sm| sm.ledger_num)
-                    .map_or(false, |ledger_num| ledger_num == ledger as u64)
+                    .and_then(|sm| sm.ledger_id)
+                    .map_or(false, |ledger_id| ledger_id == ledger as u32)
             })
             .collect::<Vec<_>>();
 

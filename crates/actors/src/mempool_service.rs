@@ -616,7 +616,7 @@ mod tests {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: PartitionHash::zero(),
                 miner_address: Address::random(),
-                ledger_num: Some(0),
+                ledger_id: Some(0),
                 slot_index: Some(0),
             }),
             submodules: vec![

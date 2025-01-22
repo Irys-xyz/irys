@@ -314,7 +314,7 @@ mod tests {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
                 miner_address: mining_address,
-                ledger_num: None,
+                ledger_id: None,
                 slot_index: None,
             }),
             submodules: vec![

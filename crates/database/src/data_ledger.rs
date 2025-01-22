@@ -47,7 +47,7 @@ impl Default for PermanentLedger {
 }
 
 impl PermanentLedger {
-    /// Constructs a permanent ledger, always with `ledger_num`: 0
+    /// Constructs a permanent ledger, always with Ledger::Publish as the id
     pub const fn new() -> Self {
         Self {
             slots: Vec::new(),
@@ -196,7 +196,7 @@ impl LedgerCore for TermLedger {
     }
 }
 
-/// Names for each of the ledgers as well as their `ledger_num` discriminant
+/// Names for each of the ledgers as well as their `ledger_id` discriminant
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Ledger {
@@ -242,10 +242,10 @@ impl From<Ledger> for u32 {
     }
 }
 
-impl TryFrom<u64> for Ledger {
+impl TryFrom<u32> for Ledger {
     type Error = &'static str;
 
-    fn try_from(value: u64) -> Result<Self, Self::Error> {
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Publish),
             1 => Ok(Self::Submit),
@@ -344,8 +344,8 @@ impl Ledgers {
 impl Index<Ledger> for Ledgers {
     type Output = dyn LedgerCore;
 
-    fn index(&self, ledger_num: Ledger) -> &Self::Output {
-        match ledger_num {
+    fn index(&self, ledger: Ledger) -> &Self::Output {
+        match ledger {
             Ledger::Publish => &self.perm,
             Ledger::Submit => &self.term[0],
         }
@@ -354,8 +354,8 @@ impl Index<Ledger> for Ledgers {
 
 // Implement IndexMut to retrieve a LedgerCore by its Ledger name
 impl IndexMut<Ledger> for Ledgers {
-    fn index_mut(&mut self, ledger_num: Ledger) -> &mut Self::Output {
-        match ledger_num {
+    fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
+        match ledger {
             Ledger::Publish => &mut self.perm,
             Ledger::Submit => &mut self.term[0],
         }

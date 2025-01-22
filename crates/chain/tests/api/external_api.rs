@@ -89,7 +89,7 @@ async fn external_api() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
@@ -101,7 +101,7 @@ async fn external_api() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
             submodules: vec![
@@ -252,7 +252,7 @@ async fn external_api() -> eyre::Result<()> {
             tx_path: None,
             data_path: None,
             chunk: Base64::from_str("").unwrap(),
-            ledger_num: None,
+            ledger_id: None,
             partition_chunk_offset: 0,
             partition_hash: PartitionHash::zero(),
             recall_chunk_index: 0,
