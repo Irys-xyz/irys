@@ -11,7 +11,7 @@ use irys_types::{
 };
 use reth_db::Database;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
