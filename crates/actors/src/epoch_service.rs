@@ -834,7 +834,7 @@ mod tests {
             miner_address: Address::random(),
             min_writes_before_sync: 1,
             entropy_packing_iterations: CONFIG.entropy_packing_iterations,
-            num_confirmations_for_finality: 1, // Testnet / single node config
+            chunk_migration_depth: 1, // Testnet / single node config
         };
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;
 

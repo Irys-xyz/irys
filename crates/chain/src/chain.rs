@@ -71,7 +71,7 @@ pub async fn start() -> eyre::Result<IrysNodeCtx> {
         miner_address: config.mining_signer.address(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: CONFIG.entropy_packing_iterations,
-        num_confirmations_for_finality: CONFIG.num_confirmations_for_finality, // Testnet / single node config
+        chunk_migration_depth: CONFIG.chunk_migration_depth, // Testnet / single node config
     };
 
     start_irys_node(config, storage_config).await
@@ -86,7 +86,7 @@ pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeC
         miner_address: config.mining_signer.address(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
-        num_confirmations_for_finality: 1, // Testnet / single node config
+        chunk_migration_depth: 1, // Testnet / single node config
     };
 
     start_irys_node(config, storage_config).await
@@ -106,7 +106,7 @@ pub async fn start_for_testing_default(
 
     let storage_config = StorageConfig {
         miner_address: miner_signer.address(), // just in case to keep the same miner address
-        num_confirmations_for_finality: 1,     // Testnet / single node config
+        chunk_migration_depth: 1,              // Testnet / single node config
         ..storage_config
     };
 
@@ -339,6 +339,7 @@ pub async fn start_irys_node(
                     block_index.clone(),
                     &miner_address,
                     block_index_guard.clone(),
+                    storage_config.clone(),
                 );
                 Registry::set(block_tree_service.start());
                 let block_tree_service = BlockTreeService::from_registry();
@@ -387,11 +388,6 @@ pub async fn start_irys_node(
                     block_tree_guard.clone(),
                 );
                 let block_producer_addr = block_producer_actor.start();
-                let block_tree = BlockTreeService::from_registry();
-                block_tree
-                    .send(RegisterBlockProducerMessage(block_producer_addr.clone()))
-                    .await
-                    .unwrap();
 
                 let mut part_actors = Vec::new();
 

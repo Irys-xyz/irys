@@ -34,6 +34,43 @@ use std::{
 };
 use tracing::{debug, info};
 
+// Layers of abstraction
+//
+// +------------------+
+// |       Node       |
+// |  +------------+  |  +--------------------------+
+// |  | Partition1 |<----| Storage Module A         |<--+ Submodule i
+// |  +------------+  |  +--------------------------+
+// |                  |
+// |  +------------+  |  +--------------------------+
+// |  | Partition2 |<----| Storage Module B         |<--+ Submodule i
+// |  +------------+  |  |                          |<--+ Submodule ii
+// |                  |  +--------------------------+
+// |                  |
+// |  +------------+  |  +--------------------------+
+// |  | unpledged  |<----| Storage Module C         |<--+ Submodule i
+// |  +------------+  |  |                          |<--+ Submodule ii
+// |                  |  |                          |<--+ Submodule iii
+// |                  |  +--------------------------+
+// +------------------+
+//
+// Node Level:
+// - Node operates only on partitions, identified by partition_hash
+// - Each partition contains CONFIG.num_chunks_in_partition chunks
+// - Partition hashes map to Ledger slots, or capacity partitions lis in the epoch_service
+//
+// Storage Module Level:
+// - Manages reading/writing of chunks (0..CONFIG.num_chunks_in_partition) for a partition
+// - Can operate across multiple physical drives via submodules
+// - Typical deployment: Single 16TB HDD submodule per partition
+// - Alternative setup: Multiple smaller drives (e.g. 4x 4TB) as submodules
+//
+// Submodule Level:
+// - Owned and managed exclusively by Storage Modules
+// - Invisible to rest of application
+// - Storage Module handles chunk offset mapping to appropriate submodule
+//
+
 type SubmodulePath = PathBuf;
 
 // In-memory chunk data indexed by offset within partition
@@ -332,16 +369,20 @@ impl StorageModule {
         // Query overlapping intervals from storage map
         let intervals = self.intervals.read().unwrap();
         let iter = intervals.overlapping(chunk_range);
+        // Clip overlapped intervals to requested range and read chunks
         for (interval, chunk_type) in iter {
-            if *chunk_type != ChunkType::Uninitialized {
-                // For each chunk in the interval
-                for chunk_offset in interval.start()..=interval.end() {
-                    // Read the chunk from disk
-                    let bytes = self.read_chunk_internal(chunk_offset)?;
+            if *chunk_type == ChunkType::Uninitialized {
+                continue;
+            }
 
-                    // Add it to the ChunkMap
-                    chunk_map.insert(chunk_offset, (bytes, chunk_type.clone()));
-                }
+            // Get intersection with requested range
+            let start = chunk_range.start().max(interval.start());
+            let end = chunk_range.end().min(interval.end());
+
+            // Read chunks in clipped range
+            for chunk_offset in start..=end {
+                let bytes = self.read_chunk_internal(chunk_offset)?;
+                chunk_map.insert(chunk_offset, (bytes, chunk_type.clone()));
             }
         }
         Ok(chunk_map)
@@ -1031,6 +1072,14 @@ mod tests {
                 (4, (data1_chunk.clone(), ChunkType::Data)),
                 (5, (data2_chunk.clone(), ChunkType::Data))
             ]
+        );
+
+        // Make sure read_chunks does not return adjacent/touching chunks
+        let chunks = storage_module.read_chunks(ii(4, 4)).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks.into_iter().collect::<Vec<_>>(),
+            [(4, (data1_chunk.clone(), ChunkType::Data)),]
         );
 
         // Load up the intervals from file
