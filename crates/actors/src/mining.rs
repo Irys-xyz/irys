@@ -343,11 +343,11 @@ mod tests {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
                 miner_address: mining_address,
-                ledger_num: Some(0),
+                ledger_id: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ie(0, chunk_count), "hdd0".to_string()), // 0 to 3 inclusive, 4 chunks
+                (ie(0, chunk_count), "hdd0".into()), // 0 to 3 inclusive, 4 chunks
             ],
         }];
 

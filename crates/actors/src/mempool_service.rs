@@ -616,11 +616,11 @@ mod tests {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: PartitionHash::zero(),
                 miner_address: Address::random(),
-                ledger_num: Some(0),
+                ledger_id: Some(0),
                 slot_index: Some(0),
             }),
             submodules: vec![
-                (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
+                (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         };
         initialize_storage_files(&base_path, &vec![storage_module_info.clone()])?;

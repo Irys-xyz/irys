@@ -314,11 +314,11 @@ mod tests {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
                 miner_address: mining_address,
-                ledger_num: None,
+                ledger_id: None,
                 slot_index: None,
             }),
             submodules: vec![
-                (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
+                (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         }];
 

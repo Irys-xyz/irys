@@ -40,10 +40,10 @@ pub struct Config {
     pub num_confirmations_for_finality: u32,
     pub mining_key: &'static str,
     // TODO: enable this after fixing option in toml
-    pub num_capacity_partitions: u64,
+    pub num_capacity_partitions: Option<u64>,
 }
 
-pub const DEFAULT_BLOCK_TIME: u64 = 1;
+pub const DEFAULT_BLOCK_TIME: u64 = 5;
 
 pub const CONFIG: Config = load_toml!(
     "CONFIG_TOML_PATH",
@@ -70,7 +70,7 @@ pub const CONFIG: Config = load_toml!(
         persist_data_on_restart: true,
         num_confirmations_for_finality: 6,
         mining_key: "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0", // Burner PrivateKey (PK)
-        num_capacity_partitions: 0
+        num_capacity_partitions: None,
     }
 );
 

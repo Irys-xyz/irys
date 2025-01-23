@@ -40,7 +40,7 @@ pub static IRYS_MAINNET: Lazy<Arc<ChainSpec>> = Lazy::new(|| {
                             .as_slice(),
                     ),
                     GenesisAccount {
-                        balance: U256::from(90000000000000000000_u128),
+                        balance: U256::from(1_000_000_000_000_000_000_000_000_u128),
                         ..Default::default()
                     },
                 );

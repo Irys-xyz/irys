@@ -34,7 +34,7 @@ use std::{
 };
 use tracing::{debug, info};
 
-type SubmodulePath = String;
+type SubmodulePath = PathBuf;
 
 // In-memory chunk data indexed by offset within partition
 type ChunkMap = BTreeMap<PartitionChunkOffset, (ChunkBytes, ChunkType)>;
@@ -869,8 +869,8 @@ pub fn get_overlapped_storage_modules(
         .filter(|module| {
             module
                 .partition_assignment
-                .and_then(|pa| pa.ledger_num)
-                .map_or(false, |num| num == ledger as u64)
+                .and_then(|pa| pa.ledger_id)
+                .map_or(false, |id| id == ledger as u32)
                 && module
                     .get_storage_module_range()
                     .map_or(false, |range| range.overlaps(tx_chunk_range))
@@ -891,8 +891,8 @@ pub fn get_storage_module_at_offset(
         .find(|module| {
             module
                 .partition_assignment
-                .and_then(|pa| pa.ledger_num)
-                .map_or(false, |num| num == ledger as u64)
+                .and_then(|pa| pa.ledger_id)
+                .map_or(false, |id| id == ledger as u32)
                 && module
                     .get_storage_module_range()
                     .map_or(false, |range| range.contains_point(chunk_offset))
@@ -928,9 +928,9 @@ mod tests {
             id: 0,
             partition_assignment: None,
             submodules: vec![
-                (ii(0, 4), "hdd0-4TB".to_string()),  // 0 to 4 inclusive
-                (ii(5, 9), "hdd1-4TB".to_string()),  // 5 to 9 inclusive
-                (ii(10, 19), "hdd-8TB".to_string()), // 10 to 19 inclusive
+                (ii(0, 4), "hdd0-4TB".into()),  // 0 to 4 inclusive
+                (ii(5, 9), "hdd1-4TB".into()),  // 5 to 9 inclusive
+                (ii(10, 19), "hdd-8TB".into()), // 10 to 19 inclusive
             ],
         }];
 
@@ -1049,7 +1049,7 @@ mod tests {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
             submodules: vec![
-                (ii(0, 4), "hdd0-4TB".to_string()), // 0 to 4 inclusive
+                (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         }];
 

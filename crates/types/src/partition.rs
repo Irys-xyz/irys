@@ -14,7 +14,7 @@ pub struct PartitionAssignment {
     /// Address of the miner pledged to store it
     pub miner_address: Address,
     /// If assigned to a ledger, the ledger number
-    pub ledger_num: Option<u64>,
+    pub ledger_id: Option<u32>,
     /// If assigned to a ledger, the index in the ledger
     pub slot_index: Option<usize>,
 }
@@ -24,7 +24,7 @@ impl Default for PartitionAssignment {
         Self {
             partition_hash: PartitionHash::zero(),
             miner_address: Address::ZERO,
-            ledger_num: Some(0),
+            ledger_id: Some(0),
             slot_index: Some(0),
         }
     }

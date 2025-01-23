@@ -183,7 +183,7 @@ mod tests {
             data_size: 1024,
             term_fee: 100,
             perm_fee: Some(1),
-            ledger_num: 0,
+            ledger_id: 0,
             bundle_format: Some(0),
             chain_id: CONFIG.irys_chain_id,
             version: 0,

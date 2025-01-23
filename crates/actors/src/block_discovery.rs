@@ -188,19 +188,23 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             new_block_header.vdf_limiter_info.prev_output
         );
         Box::pin(async move {
-            match prevalidate_block(
-                block_header,
-                previous_block_header,
-                block_index_guard,
-                partitions_guard,
-                storage_config,
-                difficulty_config,
-                vdf_config,
-                vdf_steps_guard,
-                new_block_header.miner_address,
-            )
-            .await
-            {
+            let block_header_clone = new_block_header.clone(); // Clone before moving
+
+            let validation_future = tokio::task::spawn_blocking(move || {
+                prevalidate_block(
+                    block_header,
+                    previous_block_header,
+                    block_index_guard,
+                    partitions_guard,
+                    storage_config,
+                    difficulty_config,
+                    vdf_config,
+                    vdf_steps_guard,
+                    block_header_clone.miner_address, // Use clone in validation
+                )
+            });
+
+            match validation_future.await.unwrap().await {
                 Ok(_) => {
                     info!("Block is valid, sending to block tree");
 
@@ -209,10 +213,13 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
                     let mut all_txs = submit_txs;
                     all_txs.extend_from_slice(&publish_txs);
-                    block_tree_addr.do_send(BlockPreValidatedMessage(
-                        new_block_header,
-                        Arc::new(all_txs),
-                    ));
+                    block_tree_addr
+                        .send(BlockPreValidatedMessage(
+                            new_block_header,
+                            Arc::new(all_txs),
+                        ))
+                        .await
+                        .unwrap();
                     Ok(())
                 }
                 Err(err) => {

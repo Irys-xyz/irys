@@ -21,7 +21,7 @@ use irys_config::IrysNodeConfig;
 use irys_database::{
     open_or_create_db,
     tables::{IngressProofs, IrysTables},
-    BlockIndex, Initialized,
+    BlockIndex, Initialized, Ledger,
 };
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -89,11 +89,11 @@ async fn external_api() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ii(0, 5), "sm1".to_string()), // 0 to 5 inclusive
+                (ii(0, 5), "sm1".into()), // 0 to 5 inclusive
             ],
         },
         StorageModuleInfo {
@@ -101,11 +101,11 @@ async fn external_api() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
             submodules: vec![
-                (ii(0, 5), "sm2".to_string()), // 0 to 5 inclusive
+                (ii(0, 5), "sm2".into()), // 0 to 5 inclusive
             ],
         },
     ];
@@ -252,7 +252,7 @@ async fn external_api() -> eyre::Result<()> {
             tx_path: None,
             data_path: None,
             chunk: Base64::from_str("").unwrap(),
-            ledger_num: None,
+            ledger_id: None,
             partition_chunk_offset: 0,
             partition_hash: PartitionHash::zero(),
             recall_chunk_index: 0,
@@ -264,6 +264,7 @@ async fn external_api() -> eyre::Result<()> {
         ledgers: vec![
             // Permanent Publish Ledger
             TransactionLedger {
+                ledger_id: Ledger::Publish.into(),
                 tx_root: H256::zero(),
                 tx_ids: H256List(Vec::new()),
                 max_chunk_offset: 0,
@@ -272,6 +273,7 @@ async fn external_api() -> eyre::Result<()> {
             },
             // Term Submit Ledger
             TransactionLedger {
+                ledger_id: Ledger::Submit.into(),
                 tx_root: TransactionLedger::merklize_tx_root(&tx_headers).0,
                 tx_ids: H256List(data_tx_ids.clone()),
                 max_chunk_offset: 0,
