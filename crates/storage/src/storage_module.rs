@@ -813,16 +813,58 @@ impl StorageModule {
 /// - the _intervals.json, resetting the storage module state
 ///
 /// Used primarily for testing storage initialization
-pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleInfo>) -> Result<()> {
-    debug!(target: "irys::storage_module", base_path=?base_path, "Initializing storage files" );
-    // Create base storage directory if it doesn't exist
-    fs::create_dir_all(base_path.clone())?;
+pub fn initialize_storage_files(
+    base_path: &PathBuf,
+    infos: &Vec<StorageModuleInfo>,
+    submodule_paths: &Vec<PathBuf>,
+) -> Result<()> {
+    tracing::info!(target: "irys::storage_module", base_path=?base_path, "Initializing storage files" );
+    let using_paths = !submodule_paths.is_empty();
+    let num_submodules: usize = infos.iter().map(|s| s.submodules.len()).sum();
+    tracing::info!("expecting {} declared submodules", num_submodules);
+    if using_paths {
+        tracing::info!("Using sym-links to configured submodule paths");
+        if num_submodules != submodule_paths.len() {
+            return Err(eyre!(
+                "Expected {} submodule paths based on current config, got {} paths",
+                num_submodules,
+                submodule_paths.len()
+            ));
+        }
+        if !CONFIG.persist_data_on_restart {
+            tracing::info!("Clearing existing submodules (persist_data_on_restart=false)...");
+            for path in submodule_paths {
+                if path.exists() {
+                    tracing::info!("Removing {:?}", path);
+                    fs::remove_dir_all(path)?;
+                }
+                tracing::info!("Creating {:?}", path);
+                fs::create_dir_all(path)?;
+            }
+        }
+    } else {
+        tracing::info!("Storing submodules in-place in {}", base_path.display());
+        // Create base storage directory if it doesn't exist
+        fs::create_dir_all(base_path.clone())?;
+    }
 
     for (idx, info) in infos.iter().enumerate() {
         // Create subdirectories for each range
         for (_, dir) in info.submodules.clone() {
             let path = base_path.join(dir);
-            fs::create_dir_all(&path)?;
+            if using_paths {
+                let symlink = submodule_paths.get(idx).unwrap();
+                if symlink.exists() {
+                    fs::remove_dir_all(symlink)?;
+                }
+                fs::create_dir_all(symlink)?;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&path, symlink)?;
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_dir(&path, symlink)?;
+            } else {
+                fs::create_dir_all(&path)?;
+            }
 
             // Create empty data file if it doesn't exist
             let data_file = path.join("chunks.dat");
@@ -978,7 +1020,7 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        let _ = initialize_storage_files(&base_path, &infos);
+        let _ = initialize_storage_files(&base_path, &infos, &vec![]);
 
         // Verify the StorageModuleInfo file was crated in the base path
         let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();
@@ -1105,7 +1147,7 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        initialize_storage_files(&base_path, &infos)?;
+        initialize_storage_files(&base_path, &infos, &vec![])?;
 
         // Override the default StorageModule config for testing
         let config = StorageConfig {

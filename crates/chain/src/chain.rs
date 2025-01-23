@@ -287,6 +287,7 @@ pub async fn start_irys_node(
                     initialize_storage_files(
                         &arc_config.storage_module_dir(),
                         &storage_module_infos,
+                        &vec![],
                     )
                     .unwrap();
                 }
