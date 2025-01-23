@@ -5334,6 +5334,7 @@ dependencies = [
  "reth-chainspec",
  "reth-primitives",
  "serde",
+ "toml",
  "tracing",
 ]
 
