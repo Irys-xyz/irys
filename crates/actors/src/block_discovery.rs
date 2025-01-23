@@ -35,7 +35,7 @@ pub struct BlockDiscoveryActor {
 /// When a block is discovered, either produced locally or received from
 /// a network peer, this message is broadcast.
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "Result<(), ()>")]
+#[rtype(result = "eyre::Result<()>")]
 pub struct BlockDiscoveredMessage(pub Arc<IrysBlockHeader>);
 
 /// Sent when a discovered block is pre-validated
@@ -74,8 +74,8 @@ impl BlockDiscoveryActor {
 }
 
 impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
-    type Result = ResponseFuture<Result<(), ()>>;
-    fn handle(&mut self, msg: BlockDiscoveredMessage, ctx: &mut Context<Self>) -> Self::Result {
+    type Result = ResponseFuture<eyre::Result<()>>;
+    fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // Validate discovered block
         let new_block_header = msg.0;
         let prev_block_hash = new_block_header.previous_block_hash;
@@ -86,11 +86,10 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         {
             Ok(Some(header)) => header,
             other => {
-                error!(
-                    "Failed to get block header for hash {}: {:?}",
-                    prev_block_hash, other
-                );
-                return Box::pin(async move { Err(()) });
+                return Box::pin(async move { 
+                    Err(eyre::eyre!("Failed to get block header for hash {}: {:?}",
+                    prev_block_hash, other)) 
+                });
             }
         };
 
@@ -117,8 +116,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         {
             Ok(txs) => txs,
             Err(e) => {
-                error!("Failed to collect submit tx headers: {}", e);
-                return Box::pin(async move { Err(()) });
+                return Box::pin(async move { Err(eyre::eyre!("Failed to collect submit tx headers: {}", e)) });
             }
         };
 
@@ -144,8 +142,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         {
             Ok(txs) => txs,
             Err(e) => {
-                error!("Failed to collect publish tx headers: {}", e);
-                return Box::pin(async move { Err(()) });
+                return Box::pin(async move { Err(eyre::eyre!("Failed to collect publish tx headers: {}", e)) });
             }
         };
 
@@ -153,16 +150,14 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             let publish_proofs = match &new_block_header.ledgers[Ledger::Publish].proofs {
                 Some(proofs) => proofs,
                 None => {
-                    error!("Ingress proofs missing");
-                    return Box::pin(async move { Err(()) });
+                    return Box::pin(async move { Err(eyre::eyre!("Ingress proofs missing")) });
                 }
             };
 
             // Pre-Validate the ingress-proof by verifying the signature
             for (i, tx_header) in publish_txs.iter().enumerate() {
                 if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
-                    error!("Invalid ingress proof signature: {}", e);
-                    return Box::pin(async move { Err(()) });
+                    return Box::pin(async move { Err(eyre::eyre!("Invalid ingress proof signature: {}", e)) });
                 }
             }
         }
@@ -223,8 +218,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     Ok(())
                 }
                 Err(err) => {
-                    error!("Block validation error {:?}", err);
-                    Err(())
+                    Err(eyre::eyre!("Block validation error {:?}", err))
                 }
             }
         })
