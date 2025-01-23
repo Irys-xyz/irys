@@ -7,6 +7,7 @@ use std::{
 use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
+use base58::ToBase58;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
     Ledger,
@@ -458,7 +459,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-            info!("Finished producing block height: {}, hash: {}", &block_height, &block_hash);
+            info!("Finished producing block hash: {}, height: {}", &block_hash.0.to_base58(),&block_height);
 
             Some((block.clone(), exec_payload))
         }
