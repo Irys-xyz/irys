@@ -49,7 +49,7 @@ async fn data_promotion_test() {
         miner_address: miner_signer.address(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
-        num_confirmations_for_finality: 1, // Testnet / single node config
+        chunk_migration_depth: 1, // Testnet / single node config
     };
 
     let temp_dir = setup_tracing_and_temp_dir(Some("data_promotion_test"), false);

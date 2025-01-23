@@ -10,7 +10,10 @@ use eyre::eyre;
 use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
 
 #[cfg(feature = "nvidia")]
-use irys_packing::capacity_pack_range_cuda_c;
+use {
+    irys_packing::capacity_pack_range_cuda_c,
+    irys_types::{split_interval, CHUNK_SIZE},
+};
 
 use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
 use irys_types::{PartitionChunkRange, StorageConfig};
@@ -144,12 +147,11 @@ impl PackingActor {
                             );
 
                             debug!(target: "irys::packing", "Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
-                            // computation is done, release semaphore
-                            drop(permit);
                             // write the chunk
                             //debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.id);
                             storage_module.write_chunk(i, out, ChunkType::Entropy);
                             let _ = storage_module.sync_pending_chunks();
+                            drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                         });
                     }
                 }
@@ -188,9 +190,9 @@ impl PackingActor {
                                     .to_vec(),
                                 ChunkType::Entropy,
                             );
+                            let _ = storage_module.sync_pending_chunks();
                         }
                     }
-                    let _ = storage_module.sync_pending_chunks();
                 }
                 _ => unimplemented!(),
             }
