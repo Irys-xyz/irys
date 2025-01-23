@@ -931,10 +931,12 @@ impl IrysNode {
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
-        let latest_known_block_height = block_index
+        let current_tree_tip = block_tree_guard.read().tip;
+        let latest_known_block_height = block_tree_guard
             .read()
-            .expect("to have an access to the block index")
-            .latest_height() as usize;
+            .get_block(&current_tree_tip)
+            .map(|block| block.height)
+            .unwrap_or(1);
 
         let gossip_service_handle = gossip_service.run(
             mempool_facade,
@@ -946,7 +948,7 @@ impl IrysNode {
             service_senders.vdf_seed.clone(),
             gossip_listener,
             true,
-            latest_known_block_height,
+            latest_known_block_height as usize,
         )?;
 
         // set up the price oracle

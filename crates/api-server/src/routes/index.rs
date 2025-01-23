@@ -19,6 +19,7 @@ pub struct NodeInfo {
     pub block_index_height: u64,
     pub blocks: u64,
     pub is_syncing: bool,
+    current_sync_height: usize,
 }
 
 pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
@@ -36,6 +37,7 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         block_index_height,
         blocks: blocks as u64,
         is_syncing: state.sync_state.is_syncing(),
+        current_sync_height: state.sync_state.sync_height(),
     };
 
     HttpResponse::Ok()

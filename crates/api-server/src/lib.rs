@@ -1,5 +1,7 @@
 pub mod error;
 pub mod routes;
+use std::sync::Arc;
+
 use actix::Addr;
 use actix_cors::Cors;
 use actix_web::dev::Server;
