@@ -1074,6 +1074,14 @@ mod tests {
             ]
         );
 
+        // Make sure read_chunks does not return adjacent/touching chunks
+        let chunks = storage_module.read_chunks(ii(4, 4)).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks.into_iter().collect::<Vec<_>>(),
+            [(4, (data1_chunk.clone(), ChunkType::Data)),]
+        );
+
         // Load up the intervals from file
         let intervals = read_intervals_file(storage_module.intervals_file.clone()).unwrap();
 
