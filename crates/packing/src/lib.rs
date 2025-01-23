@@ -164,14 +164,17 @@ pub fn capacity_pack_range_with_data_cuda_c(
 #[derive(PartialEq)]
 pub enum PackingType {
     CPU,
-    #[allow(unused)]
     #[cfg(feature = "nvidia")]
     CUDA,
     #[allow(unused)]
     AMD,
 }
 
-pub const PACKING_TYPE: PackingType = PackingType::CPU; //PackingType::CUDA;
+#[cfg(not(feature = "nvidia"))]
+pub const PACKING_TYPE: PackingType = PackingType::CPU;
+
+#[cfg(feature = "nvidia")]
+pub const PACKING_TYPE: PackingType = PackingType::CUDA;
 
 /// 2D Packing Rust implementation
 pub fn capacity_pack_range_with_data(

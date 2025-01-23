@@ -10,7 +10,10 @@ use eyre::eyre;
 use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
 
 #[cfg(feature = "nvidia")]
-use irys_packing::capacity_pack_range_cuda_c;
+use {
+    irys_packing::capacity_pack_range_cuda_c,
+    irys_types::{split_interval, CHUNK_SIZE},
+};
 
 use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
 use irys_types::{PartitionChunkRange, StorageConfig};

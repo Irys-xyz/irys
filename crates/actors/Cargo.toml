@@ -43,5 +43,5 @@ base58.workspace = true
 [lints]
 workspace = true
 
-[feature]
+[features]
 nvidia = ["irys-packing/nvidia"]
