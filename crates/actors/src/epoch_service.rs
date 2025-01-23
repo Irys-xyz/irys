@@ -213,7 +213,7 @@ impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
         _msg: GetGenesisStorageModulesMessage,
         _ctx: &mut Self::Context,
     ) -> Self::Result {
-        self.get_genesis_storage_module_infos([] as [PathBuf; 0])
+        self.get_genesis_storage_module_infos()
     }
 }
 
@@ -597,16 +597,11 @@ impl EpochServiceActor {
     }
 
     /// Configure storage modules for genesis partition assignments
-    pub fn get_genesis_storage_module_infos(
-        &self,
-        paths: impl IntoIterator<Item = PathBuf>,
-    ) -> Vec<StorageModuleInfo> {
+    pub fn get_genesis_storage_module_infos(&self) -> Vec<StorageModuleInfo> {
         let ledgers = self.ledgers.read().unwrap();
         let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
 
         let pa = self.partition_assignments.read().unwrap();
-
-        let mut paths = paths.into_iter();
 
         // Configure publish ledger storage
         let mut module_infos = ledgers
@@ -617,10 +612,7 @@ impl EpochServiceActor {
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
-                submodules: vec![(
-                    ie(0, num_part_chunks),
-                    paths.next().unwrap_or(format!("submodule_{}", idx).into()),
-                )],
+                submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx).into())],
             })
             .collect::<Vec<_>>();
 
@@ -640,9 +632,7 @@ impl EpochServiceActor {
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
                 submodules: vec![(
                     ie(0, num_part_chunks),
-                    paths
-                        .next()
-                        .unwrap_or(format!("submodule_{}", idx_start + idx).into()),
+                    format!("submodule_{}", idx_start + idx).into(),
                 )],
             })
             .collect::<Vec<_>>();
@@ -815,7 +805,7 @@ mod tests {
 
         println!("{:?}", ledgers.read());
 
-        let infos = epoch_service.get_genesis_storage_module_infos([] as [PathBuf; 0]);
+        let infos = epoch_service.get_genesis_storage_module_infos();
         println!("{:#?}", infos);
     }
 
