@@ -144,7 +144,6 @@ impl PackingActor {
                             );
 
                             debug!(target: "irys::packing", "Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
-                            debug!(target: "irys::packing", "chunk {:?}", out);
                             // computation is done, release semaphore
                             drop(permit);
                             // write the chunk
