@@ -69,7 +69,7 @@ pub async fn run_server(app_state: ApiState) {
             .route("/", web::to(proxy))
             .wrap(Cors::permissive())
     })
-    .bind(("0.0.0.0", 8080))
+    .bind(("0.0.0.0", 80))
     .unwrap()
     .run()
     .await
