@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     block_discovery::BlockPreValidatedMessage,
-    block_index_service::BlockIndexService,
+    block_index_service::{BlockIndexReadGuard, BlockIndexService},
     block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
     chunk_migration_service::ChunkMigrationService,
     mempool_service::MempoolService,
@@ -73,6 +73,8 @@ pub struct BlockTreeService {
     pub cache: Option<Arc<RwLock<BlockTreeCache>>>,
     /// The wallet address of the local miner
     pub miner_address: Address,
+    /// Read view of the block_index
+    pub block_index_guard: Option<BlockIndexReadGuard>,
 }
 
 impl Actor for BlockTreeService {
@@ -94,6 +96,7 @@ impl BlockTreeService {
         db: DatabaseProvider,
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         miner_address: &Address,
+        block_index_guard: BlockIndexReadGuard,
     ) -> Self {
         let cache = BlockTreeCache::initialize_from_list(block_index, db.clone());
 
@@ -102,6 +105,7 @@ impl BlockTreeService {
             block_producer: None,
             cache: Some(Arc::new(RwLock::new(cache))),
             miner_address: *miner_address,
+            block_index_guard: Some(block_index_guard),
         }
     }
 
@@ -122,6 +126,17 @@ impl BlockTreeService {
                 return Err(eyre::eyre!("Failed to get previous block header: {}", e));
             }
         };
+
+        let block_index_guard = self.block_index_guard.clone().unwrap();
+        let binding = block_index_guard.read();
+        let item = binding.get_latest_item().unwrap();
+
+        // Skip if block is already finalized - this occurs during node restart
+        // when block_tree initializes from block_index and previous blocks are
+        // already finalized
+        if item.block_hash == block_header.block_hash {
+            return Ok(());
+        }
 
         // Get all the transactions for the finalized block, error if not found
         // TODO: Eventually abstract this for support of `n` ledgers
@@ -296,7 +311,7 @@ fn get_ledger_tx_headers<T: DbTx>(
     ledger: Ledger,
 ) -> Option<Vec<IrysTransactionHeader>> {
     match block_header.ledgers[ledger]
-        .txids
+        .tx_ids
         .iter()
         .map(|txid| {
             tx_header_by_txid(tx, txid)
@@ -321,7 +336,12 @@ fn get_ledger_tx_headers<T: DbTx>(
 /// Number of blocks to retain in cache from chain head
 const BLOCK_CACHE_DEPTH: u64 = 50;
 
-type ChainCacheEntry = (BlockHash, Vec<IrysTransactionId>, Vec<IrysTransactionId>); // (block_hash, publish_txs, submit_txs)
+type ChainCacheEntry = (
+    BlockHash,
+    u64,
+    Vec<IrysTransactionId>,
+    Vec<IrysTransactionId>,
+); // (block_hash, height, publish_txs, submit_txs)
 
 #[derive(Debug)]
 pub struct BlockTreeCache {
@@ -413,8 +433,9 @@ impl BlockTreeCache {
         let longest_chain_cache = (
             vec![(
                 block_hash,
-                block.ledgers[Ledger::Publish].txids.0.clone(), // Publish ledger txs
-                block.ledgers[Ledger::Submit].txids.0.clone(),  // Submit ledger txs
+                height,
+                block.ledgers[Ledger::Publish].tx_ids.0.clone(), // Publish ledger txs
+                block.ledgers[Ledger::Submit].tx_ids.0.clone(),  // Submit ledger txs
             )],
             0,
         );
@@ -485,7 +506,7 @@ impl BlockTreeCache {
     ) -> Result<Vec<IrysTransactionHeader>, eyre::Report> {
         // Collect submit transactions
         let submit_txs = block.ledgers[Ledger::Submit]
-            .txids
+            .tx_ids
             .iter()
             .map(|txid| {
                 db.view_eyre(|tx| tx_header_by_txid(tx, txid))
@@ -501,7 +522,7 @@ impl BlockTreeCache {
 
         // Collect publish transactions
         let publish_txs = block.ledgers[Ledger::Publish]
-            .txids
+            .tx_ids
             .iter()
             .map(|txid| {
                 db.view_eyre(|tx| tx_header_by_txid(tx, txid))
@@ -727,9 +748,9 @@ impl BlockTreeCache {
 
                 ChainState::Onchain => {
                     // Include OnChain blocks in pairs
-                    let publish_txs = entry.block.ledgers[Ledger::Publish].txids.0.clone();
-                    let submit_txs = entry.block.ledgers[Ledger::Submit].txids.0.clone();
-                    pairs.push((current, publish_txs, submit_txs));
+                    let publish_txs = entry.block.ledgers[Ledger::Publish].tx_ids.0.clone();
+                    let submit_txs = entry.block.ledgers[Ledger::Submit].tx_ids.0.clone();
+                    pairs.push((current, entry.block.height, publish_txs, submit_txs));
 
                     if blocks_to_collect == 0 {
                         break;
@@ -739,9 +760,9 @@ impl BlockTreeCache {
 
                 // For Validated or other NotOnchain states
                 ChainState::Validated(_) | ChainState::NotOnchain(_) => {
-                    let publish_txs = entry.block.ledgers[Ledger::Publish].txids.0.clone();
-                    let submit_txs = entry.block.ledgers[Ledger::Submit].txids.0.clone();
-                    pairs.push((current, publish_txs, submit_txs));
+                    let publish_txs = entry.block.ledgers[Ledger::Publish].tx_ids.0.clone();
+                    let submit_txs = entry.block.ledgers[Ledger::Submit].tx_ids.0.clone();
+                    pairs.push((current, entry.block.height, publish_txs, submit_txs));
                     not_onchain_count += 1;
 
                     if blocks_to_collect == 0 {
@@ -1123,11 +1144,11 @@ mod tests {
         // Adding `b1` again shouldn't change the state because it is confirmed
         // onchain
         let mut b1_test = b1.clone();
-        b1_test.ledgers[Ledger::Submit].txids.push(H256::random());
+        b1_test.ledgers[Ledger::Submit].tx_ids.push(H256::random());
         assert_matches!(cache.add_block(&b1_test, all_tx.clone()), Ok(_));
         assert_eq!(
             cache.get_block(&b1.block_hash).unwrap().ledgers[Ledger::Submit]
-                .txids
+                .tx_ids
                 .len(),
             0
         );
@@ -1136,7 +1157,7 @@ mod tests {
                 .get_by_solution_hash(&b1.solution_hash, &H256::random(), U256::one(), U256::one())
                 .unwrap()
                 .ledgers[Ledger::Submit]
-                .txids
+                .tx_ids
                 .len(),
             0
         );
@@ -1164,10 +1185,10 @@ mod tests {
 
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
-        b2.ledgers[Ledger::Submit].txids.push(txid.clone());
+        b2.ledgers[Ledger::Submit].tx_ids.push(txid.clone());
         assert_matches!(cache.add_block(&b2, all_tx.clone()), Ok(_));
         assert_eq!(
-            cache.get_block(&b2.block_hash).unwrap().ledgers[Ledger::Submit].txids[0],
+            cache.get_block(&b2.block_hash).unwrap().ledgers[Ledger::Submit].tx_ids[0],
             txid
         );
         assert_eq!(
@@ -1175,7 +1196,7 @@ mod tests {
                 .get_by_solution_hash(&b2.solution_hash, &H256::random(), U256::one(), U256::one())
                 .unwrap()
                 .ledgers[Ledger::Submit]
-                .txids[0],
+                .tx_ids[0],
             txid
         );
         assert_eq!(
@@ -1183,7 +1204,7 @@ mod tests {
                 .get_by_solution_hash(&b2.solution_hash, &b1.block_hash, U256::one(), U256::one())
                 .unwrap()
                 .ledgers[Ledger::Submit]
-                .txids[0],
+                .tx_ids[0],
             txid
         );
 
@@ -1860,7 +1881,10 @@ mod tests {
         cache: &BlockTreeCache,
     ) -> eyre::Result<()> {
         let (canonical_blocks, not_onchain_count) = cache.get_canonical_chain();
-        let actual_blocks: Vec<_> = canonical_blocks.iter().map(|(hash, _, _)| *hash).collect();
+        let actual_blocks: Vec<_> = canonical_blocks
+            .iter()
+            .map(|(hash, _, _, _)| *hash)
+            .collect();
 
         ensure!(
             actual_blocks

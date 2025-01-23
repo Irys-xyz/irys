@@ -117,7 +117,7 @@ pub struct IrysBlockHeader {
 
 impl IrysBlockHeader {
     pub fn new() -> Self {
-        let txids = H256List::new();
+        let tx_ids = H256List::new();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
         // Create a sample IrysBlockHeader object with mock data
@@ -140,7 +140,7 @@ impl IrysBlockHeader {
                 partition_hash: PartitionHash::zero(),
                 partition_chunk_offset: 0,
                 recall_chunk_index: 0,
-                ledger_num: None,
+                ledger_id: None,
             },
             reward_address: Address::ZERO,
             signature: Signature::test_signature().into(),
@@ -148,16 +148,18 @@ impl IrysBlockHeader {
             ledgers: vec![
                 // Permanent Publish Ledger
                 TransactionLedger {
+                    ledger_id: 0, // Publish ledger_id
                     tx_root: H256::zero(),
-                    txids,
+                    tx_ids,
                     max_chunk_offset: 0,
                     expires: None,
                     proofs: None,
                 },
                 // Term Submit Ledger
                 TransactionLedger {
+                    ledger_id: 1, // Submit ledger_id
                     tx_root: H256::zero(),
-                    txids: H256List::new(),
+                    tx_ids: H256List::new(),
                     max_chunk_offset: 0,
                     expires: Some(1622543200),
                     proofs: None,
@@ -186,7 +188,7 @@ impl IrysBlockHeader {
         write_optional_ref(buf, &self.poa.data_path);
         // we use the chunk hash instead of the data
         buf.extend_from_slice(&hash_sha256(&self.poa.chunk.0)?);
-        write_optional(buf, &self.poa.ledger_num);
+        write_optional(buf, &self.poa.ledger_id);
         buf.extend_from_slice(&self.poa.partition_chunk_offset.to_le_bytes());
         buf.extend_from_slice(self.poa.partition_hash.as_bytes());
         //
@@ -264,6 +266,18 @@ trait WriteBytes {
 }
 
 // Implementation for integer types
+impl WriteBytes for u32 {
+    fn write_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.to_le_bytes());
+    }
+}
+
+impl WriteBytes for &u32 {
+    fn write_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&(**self).to_le_bytes());
+    }
+}
+
 impl WriteBytes for u64 {
     fn write_bytes(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.to_le_bytes());
@@ -298,7 +312,7 @@ pub struct PoaData {
     pub data_path: Option<Base64>,
     pub chunk: Base64,
     pub recall_chunk_index: u32,
-    pub ledger_num: Option<u64>,
+    pub ledger_id: Option<u32>,
     pub partition_chunk_offset: u32,
     pub partition_hash: PartitionHash,
 }
@@ -308,9 +322,13 @@ pub type TxRoot = H256;
 #[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Compact, Arbitrary)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionLedger {
+    /// Unique identifier for this ledger, maps to discriminant in `Ledger` enum
+    pub ledger_id: u32,
+    /// Root of the merkle tree built from the ledger transaction data_roots
     pub tx_root: H256,
     /// List of transaction ids included in the block
-    pub txids: H256List,
+    pub tx_ids: H256List,
+    /// The size of this ledger (in chunks) since genesis
     #[serde(default, with = "u64_stringify")]
     pub max_chunk_offset: u64,
     /// This ledger expires after how many epochs
@@ -371,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_irys_block_header_serialization() {
-        let txids = H256List::new();
+        let tx_ids = H256List::new();
 
         // Create a sample IrysBlockHeader object with mock data
         let mut header = IrysBlockHeader {
@@ -393,14 +411,15 @@ mod tests {
                 partition_hash: H256::zero(),
                 partition_chunk_offset: 0,
                 recall_chunk_index: 0,
-                ledger_num: None,
+                ledger_id: None,
             },
             reward_address: Address::ZERO,
             signature: Signature::test_signature().into(),
             timestamp: 1622543200,
             ledgers: vec![TransactionLedger {
+                ledger_id: 0, // Publish ledger_id
                 tx_root: H256::zero(),
-                txids,
+                tx_ids,
                 proofs: None,
                 max_chunk_offset: 100,
                 expires: Some(1622543200),
@@ -457,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_irys_block_header_signing() {
-        let txids = H256List::new();
+        let tx_ids = H256List::new();
 
         // Create a sample IrysBlockHeader object with mock data
         let mut header = IrysBlockHeader {
@@ -479,14 +498,15 @@ mod tests {
                 partition_hash: H256::zero(),
                 partition_chunk_offset: 0,
                 recall_chunk_index: 0,
-                ledger_num: None,
+                ledger_id: None,
             },
             reward_address: Address::ZERO,
             signature: Signature::test_signature().into(),
             timestamp: 1622543200,
             ledgers: vec![TransactionLedger {
+                ledger_id: 0, // Publish ledger_id
                 tx_root: H256::zero(),
-                txids,
+                tx_ids,
                 max_chunk_offset: 100,
                 expires: Some(1622543200),
                 proofs: None,

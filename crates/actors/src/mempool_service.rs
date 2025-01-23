@@ -417,12 +417,12 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
         let block = &msg.0;
         let all_txs = &msg.1;
 
-        for txid in block.ledgers[Ledger::Submit].txids.iter() {
+        for txid in block.ledgers[Ledger::Submit].tx_ids.iter() {
             // Remove the submit tx from the pending valid_tx pool
             self.valid_tx.remove(txid);
         }
 
-        let published_txids = &block.ledgers[Ledger::Publish].txids.0;
+        let published_txids = &block.ledgers[Ledger::Publish].tx_ids.0;
 
         // Loop though the promoted transactions and remove their ingress proofs
         // from the mempool. In the future on a multi node network we may keep
@@ -439,7 +439,7 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
                 })
                 .unwrap();
 
-            for (i, txid) in block.ledgers[Ledger::Publish].txids.0.iter().enumerate() {
+            for (i, txid) in block.ledgers[Ledger::Publish].tx_ids.0.iter().enumerate() {
                 // Retrieve the promoted transactions header
                 let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
                     Ok(Some(header)) => header,
@@ -616,7 +616,7 @@ mod tests {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: PartitionHash::zero(),
                 miner_address: Address::random(),
-                ledger_num: Some(0),
+                ledger_id: Some(0),
                 slot_index: Some(0),
             }),
             submodules: vec![

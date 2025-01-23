@@ -1,6 +1,7 @@
 use actix::{Actor, ArbiterService, Context, Handler, Message, MessageResponse};
+use base58::ToBase58;
 use eyre::{Error, Result};
-use irys_database::{data_ledger::*, database};
+use irys_database::{block_header_by_hash, data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
@@ -13,8 +14,11 @@ use std::{
     path::PathBuf,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
+use tracing::error;
 
-use crate::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
+use crate::block_index_service::{
+    BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage,
+};
 
 /// Allows for overriding of the consensus parameters for ledgers and partitions
 #[derive(Debug, Clone)]
@@ -266,13 +270,38 @@ impl EpochServiceActor {
                         database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
                             .unwrap()
                             .unwrap();
-                    self.perform_epoch_tasks(Arc::new(block_header)).unwrap();
+                    match self.perform_epoch_tasks(Arc::new(block_header)) {
+                        Ok(_) => (),
+                        Err(e) => {
+                            self.print_items(read_guard.clone(), db.clone());
+                            panic!("{:?}", e);
+                        }
+                    }
                     block_index += self.config.num_blocks_in_epoch;
                 }
                 None => {
                     break;
                 }
             }
+
+            // print out the block_list at startup (debugging)
+            // self.print_items(read_guard.clone(), db.clone());
+        }
+    }
+
+    fn print_items(&self, block_index_guard: BlockIndexReadGuard, db: DatabaseProvider) {
+        let rg = block_index_guard.read();
+        let tx = db.tx().unwrap();
+        for i in 0..rg.num_blocks() {
+            let item = rg.get_item(i as usize).unwrap();
+            let block_hash = item.block_hash;
+            let block = block_header_by_hash(&tx, &block_hash).unwrap().unwrap();
+            println!(
+                "index: {} height: {} hash: {}",
+                i,
+                block.height,
+                block_hash.0.to_base58()
+            );
         }
     }
 
@@ -283,6 +312,10 @@ impl EpochServiceActor {
     ) -> Result<(), EpochServiceError> {
         // Validate this is an epoch block height
         if new_epoch_block.height % CONFIG.num_blocks_in_epoch != 0 {
+            error!(
+                "Not an epoch block height: {} num_blocks_in_epoch: {}",
+                new_epoch_block.height, CONFIG.num_blocks_in_epoch
+            );
             return Err(EpochServiceError::NotAnEpochBlock);
         }
 
@@ -315,8 +348,8 @@ impl EpochServiceActor {
             // Create a scope for the write lock to expire with
             {
                 let mut ledgers = self.ledgers.write().unwrap();
-                for ledger_num in Ledger::iter() {
-                    num_data_partitions += ledgers[ledger_num].allocate_slots(1);
+                for ledger in Ledger::iter() {
+                    num_data_partitions += ledgers[ledger].allocate_slots(1);
                 }
             }
 
@@ -324,12 +357,7 @@ impl EpochServiceActor {
             let num_partitions = num_data_partitions
                 + Self::get_num_capacity_partitions(num_data_partitions, &self.config);
 
-            let num_cap_parts = if CONFIG.num_capacity_partitions == 0 {
-                num_partitions
-            } else {
-                CONFIG.num_capacity_partitions
-            };
-            self.add_capacity_partitions(num_cap_parts);
+            self.add_capacity_partitions(CONFIG.num_capacity_partitions.unwrap_or(num_partitions));
         }
     }
 
@@ -352,11 +380,11 @@ impl EpochServiceActor {
     /// Loops though all the ledgers both perm and term, checking to see if any
     /// require additional ledger slots added to accommodate data ingress.
     fn allocate_additional_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
-        for ledger_num in Ledger::iter() {
-            let part_slots = self.calculate_additional_slots(new_epoch_block, ledger_num);
+        for ledger in Ledger::iter() {
+            let part_slots = self.calculate_additional_slots(new_epoch_block, ledger);
             {
                 let mut ledgers = self.ledgers.write().unwrap();
-                ledgers[ledger_num].allocate_slots(part_slots);
+                ledgers[ledger].allocate_slots(part_slots);
             }
         }
     }
@@ -489,7 +517,7 @@ impl EpochServiceActor {
                 PartitionAssignment {
                     partition_hash: *partition_hash,
                     miner_address: self.config.storage_config.miner_address,
-                    ledger_num: None,
+                    ledger_id: None,
                     slot_index: None,
                 },
             );
@@ -503,7 +531,7 @@ impl EpochServiceActor {
         // Convert data partition to capacity partition if it exists
         if let Some(mut assignment) = pa.data_partitions.remove(&partition_hash) {
             // Clear ledger assignment
-            assignment.ledger_num = None;
+            assignment.ledger_id = None;
             assignment.slot_index = None;
 
             // Add to capacity pool
@@ -521,29 +549,25 @@ impl EpochServiceActor {
     ) {
         let mut pa = self.partition_assignments.write().unwrap();
         if let Some(mut assignment) = pa.capacity_partitions.remove(&partition_hash) {
-            assignment.ledger_num = Some(ledger as u64);
+            assignment.ledger_id = Some(ledger as u32);
             assignment.slot_index = Some(slot_index);
             pa.data_partitions.insert(partition_hash, assignment);
         }
     }
 
-    /// For a given ledger indicated by `ledger_num`, calculate the number of
+    /// For a given ledger indicated by `Ledger`, calculate the number of
     /// partition slots to add to the ledger based on remaining capacity
     /// and data ingress this epoch
-    fn calculate_additional_slots(
-        &self,
-        new_epoch_block: &IrysBlockHeader,
-        ledger_num: Ledger,
-    ) -> u64 {
+    fn calculate_additional_slots(&self, new_epoch_block: &IrysBlockHeader, ledger: Ledger) -> u64 {
         let num_slots: u64;
         {
             let ledgers = self.ledgers.read().unwrap();
-            let ledger = &ledgers[ledger_num];
+            let ledger = &ledgers[ledger];
             num_slots = ledger.slot_count() as u64;
         }
         let partition_chunk_count = self.config.storage_config.num_chunks_in_partition;
         let max_chunk_capacity = num_slots * partition_chunk_count;
-        let ledger_size = new_epoch_block.ledgers[ledger_num as usize].max_chunk_offset;
+        let ledger_size = new_epoch_block.ledgers[ledger as usize].max_chunk_offset;
 
         // Add capacity slots if ledger usage exceeds 50% of partition size from max capacity
         let add_capacity_threshold = max_chunk_capacity - partition_chunk_count / 2;
@@ -704,9 +728,6 @@ mod tests {
                 config.storage_config.num_partitions_in_slot
             );
 
-            let pub_ledger_num = Ledger::Publish as u64;
-            let sub_ledger_num = Ledger::Submit as u64;
-
             // Verify data partition assignments match _PUBLISH_ ledger slots
             for (slot_idx, slot) in pub_slots.iter().enumerate() {
                 let pa = epoch_service.partition_assignments.read().unwrap();
@@ -720,7 +741,7 @@ mod tests {
                         assignment,
                         &PartitionAssignment {
                             partition_hash,
-                            ledger_num: Some(pub_ledger_num),
+                            ledger_id: Some(Ledger::Publish.into()),
                             slot_index: Some(slot_idx),
                             miner_address,
                         }
@@ -745,7 +766,7 @@ mod tests {
                         assignment,
                         &PartitionAssignment {
                             partition_hash,
-                            ledger_num: Some(sub_ledger_num),
+                            ledger_id: Some(Ledger::Publish.into()),
                             slot_index: Some(slot_idx),
                             miner_address,
                         }
@@ -778,7 +799,7 @@ mod tests {
                     ass,
                     &PartitionAssignment {
                         partition_hash: *partition_hash,
-                        ledger_num: None,
+                        ledger_id: None,
                         slot_index: None,
                         miner_address
                     }

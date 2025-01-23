@@ -85,7 +85,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
         let db = Arc::new(self.db.clone().unwrap());
 
         // Extract transactions for each ledger
-        let submit_tx_count = block.ledgers[Ledger::Submit].txids.len();
+        let submit_tx_count = block.ledgers[Ledger::Submit].tx_ids.len();
         let submit_txs = all_txs[..submit_tx_count].to_vec();
         let publish_txs = all_txs[submit_tx_count..].to_vec();
 
@@ -286,8 +286,8 @@ fn find_storage_module(
         module
             .partition_assignment
             .as_ref()
-            .and_then(|pa| pa.ledger_num)
-            .filter(|&num| num == ledger as u64)
+            .and_then(|pa| pa.ledger_id)
+            .filter(|&id| id == ledger as u32)
             // Then check offset range
             .and_then(|_| module.get_storage_module_range().ok())
             .filter(|range| range.contains_point(ledger_offset))

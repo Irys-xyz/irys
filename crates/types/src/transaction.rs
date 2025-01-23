@@ -56,8 +56,7 @@ pub struct IrysTransactionHeader {
     pub term_fee: u64,
 
     /// Destination ledger for the transaction, default is 0 - Permanent Ledger
-    #[serde(with = "string_u64")]
-    pub ledger_num: u64,
+    pub ledger_id: u32,
 
     /// EVM chain ID - used to prevent cross-chain replays
     #[serde(with = "string_u64")]
@@ -151,7 +150,7 @@ impl Default for IrysTransactionHeader {
             data_size: 0,
             term_fee: 0,
             perm_fee: None,
-            ledger_num: 0,
+            ledger_id: 0,
             bundle_format: None,
             version: 0,
             chain_id: CONFIG.irys_chain_id,
@@ -196,7 +195,7 @@ mod tests {
             data_size: 1024,
             term_fee: 100,
             perm_fee: Some(200),
-            ledger_num: 1,
+            ledger_id: 1,
             bundle_format: None,
             chain_id: CONFIG.irys_chain_id,
             version: 0,
@@ -234,7 +233,7 @@ mod tests {
             term_fee: 100,
             // perm_fee: Some(200),
             perm_fee: None,
-            ledger_num: 0,
+            ledger_id: 0,
             chain_id: CONFIG.irys_chain_id,
             bundle_format: None,
             version: 0,

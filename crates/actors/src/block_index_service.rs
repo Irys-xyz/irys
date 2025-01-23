@@ -133,7 +133,7 @@ impl BlockIndexService {
         let chunk_size = self.storage_config.chunk_size;
 
         // Extract just the transactions referenced in the submit ledger
-        let submit_tx_count = block.ledgers[Ledger::Submit].txids.len();
+        let submit_tx_count = block.ledgers[Ledger::Submit].tx_ids.len();
         let submit_txs = &all_txs[..submit_tx_count];
 
         // Extract just the transactions referenced in the publish ledger

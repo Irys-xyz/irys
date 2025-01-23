@@ -40,7 +40,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
@@ -54,7 +54,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
             submodules: vec![
@@ -67,7 +67,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
                 miner_address: storage_config.miner_address,
-                ledger_num: Some(1),
+                ledger_id: Some(1),
                 slot_index: Some(2), // Submit Ledger Slot 2
             }),
             submodules: vec![

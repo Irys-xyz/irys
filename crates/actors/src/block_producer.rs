@@ -154,7 +154,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
             let (canonical_blocks, _not_onchain_count) = block_tree_guard.read().get_canonical_chain();
-            let (latest_block_hash, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
+            let (latest_block_hash, _height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
 
             let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, &latest_block_hash)) {
                 Ok(Some(header)) => header,
@@ -301,11 +301,11 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let block_hash = hash_sha256(&current_timestamp.to_le_bytes());
 
             // Use the partition hash to figure out what ledger it belongs to
-            let ledger_num = epoch_service_addr
+            let ledger_id = epoch_service_addr
                 .send(GetPartitionAssignmentMessage(solution.partition_hash))
                 .await
                 .unwrap()
-                .and_then(|pa| pa.ledger_num);
+                .and_then(|pa| pa.ledger_id);
 
 
             let poa = PoaData {
@@ -313,7 +313,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 data_path: solution.data_path.map(Base64),
                 chunk: Base64(solution.chunk),
                 recall_chunk_index: solution.recall_chunk_index,
-                ledger_num,
+                ledger_id,
                 partition_chunk_offset: solution.chunk_offset,
                 partition_hash: solution.partition_hash,
             };
@@ -351,16 +351,18 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 ledgers: vec![
                     // Permanent Publish Ledger
                     TransactionLedger {
+                        ledger_id: Ledger::Publish.into(),
                         tx_root: TransactionLedger::merklize_tx_root(&publish_txs).0,
-                        txids: H256List(publish_txids.clone()),
+                        tx_ids: H256List(publish_txids.clone()),
                         max_chunk_offset: publish_max_chunk_offset,
                         expires: None,
                         proofs: opt_proofs,
                     },
                     // Term Submit Ledger
                     TransactionLedger {
+                        ledger_id: Ledger::Submit.into(),
                         tx_root: TransactionLedger::merklize_tx_root(&submit_txs).0,
-                        txids: H256List(submit_txids.clone()),
+                        tx_ids: H256List(submit_txids.clone()),
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),
                         proofs: None,
@@ -450,7 +452,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .unwrap();
 
             let block = Arc::new(irys_block);
-            block_discovery_addr.do_send(BlockDiscoveredMessage(block.clone()));
+            block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await.unwrap().unwrap();
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));

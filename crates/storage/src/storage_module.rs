@@ -301,7 +301,8 @@ impl StorageModule {
                 {
                     let ie = ii(chunk_offset, chunk_offset);
                     let mut intervals = self.intervals.write().unwrap();
-                    let _ = intervals.insert_overwrite(ie, chunk_type);
+                    let _ = intervals.cut(ie);
+                    let _ = intervals.insert_merge_touching_if_values_equal(ie, chunk_type);
                 }
             }
 
@@ -869,8 +870,8 @@ pub fn get_overlapped_storage_modules(
         .filter(|module| {
             module
                 .partition_assignment
-                .and_then(|pa| pa.ledger_num)
-                .map_or(false, |num| num == ledger as u64)
+                .and_then(|pa| pa.ledger_id)
+                .map_or(false, |id| id == ledger as u32)
                 && module
                     .get_storage_module_range()
                     .map_or(false, |range| range.overlaps(tx_chunk_range))
@@ -891,8 +892,8 @@ pub fn get_storage_module_at_offset(
         .find(|module| {
             module
                 .partition_assignment
-                .and_then(|pa| pa.ledger_num)
-                .map_or(false, |num| num == ledger as u64)
+                .and_then(|pa| pa.ledger_id)
+                .map_or(false, |id| id == ledger as u32)
                 && module
                     .get_storage_module_range()
                     .map_or(false, |range| range.contains_point(chunk_offset))
