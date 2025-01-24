@@ -48,12 +48,12 @@ pub struct PackingActor {
 #[derive(Debug, Clone)]
 /// configuration for the packing actor
 pub struct PackingConfig {
-    poll_duration: Duration,
+    pub poll_duration: Duration,
     /// Max. number of packing threads for CPU packing
-    concurrency: u16,
+    pub concurrency: u16,
     /// Max. number of chunks send to GPU packing
     #[allow(unused)]
-    max_chunks: u32,
+    pub max_chunks: u32,
 }
 impl Default for PackingConfig {
     fn default() -> Self {
