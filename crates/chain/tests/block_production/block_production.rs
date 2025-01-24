@@ -56,8 +56,7 @@ pub async fn capacity_chunk_solution(
 
     // calculate last step checkpoints
     let mut hasher = Sha256::new();
-    let mut salt =
-        irys_types::U256::from(step_number_to_salt_number(vdf_config, step_num - 1_u64));
+    let mut salt = irys_types::U256::from(step_number_to_salt_number(vdf_config, step_num - 1_u64));
     let mut seed = steps[0];
 
     let mut checkpoints: Vec<H256> = vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];

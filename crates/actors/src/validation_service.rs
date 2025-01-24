@@ -65,7 +65,10 @@ impl Handler<RequestValidationMessage> for ValidationService {
     type Result = ();
 
     fn handle(&mut self, msg: RequestValidationMessage, ctx: &mut Self::Context) -> Self::Result {
-        assert!(!(self.partition_assignments_guard.is_none() || self.block_index_guard.is_none()), "vdf_service is not initialized");
+        assert!(
+            !(self.partition_assignments_guard.is_none() || self.block_index_guard.is_none()),
+            "vdf_service is not initialized"
+        );
 
         let block = msg.0;
         let block_index_guard = self.block_index_guard.clone().unwrap();

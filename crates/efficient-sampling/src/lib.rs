@@ -40,8 +40,7 @@ impl Ranges {
     }
 
     pub fn get_last_recall_range(self) -> Option<usize> {
-        self.last_recall_ranges
-            .get(&self.last_step_num).copied()
+        self.last_recall_ranges.get(&self.last_step_num).copied()
     }
 
     /// Picks next random (using seed as entropy) range idx in [0..NUM_RECALL_RANGES_IN_PARTITION-1] interval

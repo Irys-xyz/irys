@@ -170,7 +170,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
 
             // Retrieve the previous block header and hash
-            
+
             let prev_block_hash = block_item.block_hash;
             let prev_block_header: IrysBlockHeader = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash)) {
                 Ok(Some(header)) => header,
