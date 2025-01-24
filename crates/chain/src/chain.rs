@@ -467,7 +467,6 @@ pub async fn start_irys_node(
                             break;
                         }
                     }
-                    
 
                     run_vdf(
                         vdf_config2,
