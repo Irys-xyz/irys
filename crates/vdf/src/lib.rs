@@ -116,10 +116,10 @@ pub fn vdf_sha_verification(
     checkpoints
 }
 
-/// Validates VDF last_step_checkpoints in parallel across available cores.
+/// Validates VDF `last_step_checkpoints` in parallel across available cores.
 ///
-/// Takes a VDFLimiterInfo from a block header and verifies each checkpoint by:
-/// 1. Getting initial seed from previous vdf step or prev_output
+/// Takes a `VDFLimiterInfo` from a block header and verifies each checkpoint by:
+/// 1. Getting initial seed from previous vdf step or `prev_output`
 /// 2. Applying entropy if at a reset step
 /// 3. Computing checkpoints in parallel using configured thread limit
 /// 4. Comparing computed results against provided checkpoints

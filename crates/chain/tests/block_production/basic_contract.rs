@@ -118,8 +118,8 @@ where
         let poa_solution = capacity_chunk_solution(
             node_ctx.config.mining_signer.address(),
             vdf_steps_guard.clone(),
-            &vdf_config,
-            &storage_config,
+            vdf_config,
+            storage_config,
         )
         .await;
         let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;

@@ -31,7 +31,7 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
     let struct_ident = default_value.path.segments.last().unwrap().ident.clone();
 
     // Retrieve the environment variable
-    let file_path = match env::var(&env_var.value()) {
+    let file_path = match env::var(env_var.value()) {
         Ok(path) => path,
         Err(_) => {
             // Use the provided default if the environment variable is not set
