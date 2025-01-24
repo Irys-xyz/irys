@@ -616,9 +616,6 @@ impl EpochServiceActor {
             })
             .collect::<Vec<_>>();
 
-        println!("module_infos:");
-        println!("{:?}", module_infos);
-
         let idx_start = module_infos.len();
 
         // Configure submit ledger storage
@@ -636,9 +633,6 @@ impl EpochServiceActor {
                 )],
             })
             .collect::<Vec<_>>();
-
-        println!("submit_infos:");
-        println!("{:?}", submit_infos);
 
         module_infos.extend(submit_infos);
 
