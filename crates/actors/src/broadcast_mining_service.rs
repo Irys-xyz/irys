@@ -54,7 +54,7 @@ impl Actor for BroadcastMiningService {
 impl Supervised for BroadcastMiningService {}
 
 impl ArbiterService for BroadcastMiningService {
-    fn service_started(&mut self, ctx: &mut Context<Self>) {
+    fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("service started: broadcast_mining (Default)");
     }
 }

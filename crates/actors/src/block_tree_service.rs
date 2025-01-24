@@ -85,7 +85,7 @@ impl Actor for BlockTreeService {
 impl Supervised for BlockTreeService {}
 
 impl ArbiterService for BlockTreeService {
-    fn service_started(&mut self, ctx: &mut Context<Self>) {
+    fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("service started: block_tree (Default)");
     }
 }
@@ -254,7 +254,7 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeService {
         let block = msg.0;
         let all_txs = msg.1;
         let block_hash = &block.block_hash;
-        let finalized_block_hash = block.previous_block_hash;
+        let _finalized_block_hash = block.previous_block_hash;
 
         let binding = self.cache.clone().unwrap();
         let mut cache = binding.write().unwrap();
@@ -1838,7 +1838,7 @@ mod tests {
         let mut cache = BlockTreeCache::new(&b11);
         let b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(cache.add_block(&b12, all_tx.clone()), Ok(_));
-        let b13 = extend_chain(random_block(U256::one()), &b11);
+        let _b13 = extend_chain(random_block(U256::one()), &b11);
         println!("---");
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
 
