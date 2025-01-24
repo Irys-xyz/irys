@@ -86,9 +86,12 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         {
             Ok(Some(header)) => header,
             other => {
-                return Box::pin(async move { 
-                    Err(eyre::eyre!("Failed to get block header for hash {}: {:?}",
-                    prev_block_hash, other)) 
+                return Box::pin(async move {
+                    Err(eyre::eyre!(
+                        "Failed to get block header for hash {}: {:?}",
+                        prev_block_hash,
+                        other
+                    ))
                 });
             }
         };
@@ -116,7 +119,9 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         {
             Ok(txs) => txs,
             Err(e) => {
-                return Box::pin(async move { Err(eyre::eyre!("Failed to collect submit tx headers: {}", e)) });
+                return Box::pin(async move {
+                    Err(eyre::eyre!("Failed to collect submit tx headers: {}", e))
+                });
             }
         };
 
@@ -142,7 +147,9 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         {
             Ok(txs) => txs,
             Err(e) => {
-                return Box::pin(async move { Err(eyre::eyre!("Failed to collect publish tx headers: {}", e)) });
+                return Box::pin(async move {
+                    Err(eyre::eyre!("Failed to collect publish tx headers: {}", e))
+                });
             }
         };
 
@@ -157,7 +164,9 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             // Pre-Validate the ingress-proof by verifying the signature
             for (i, tx_header) in publish_txs.iter().enumerate() {
                 if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
-                    return Box::pin(async move { Err(eyre::eyre!("Invalid ingress proof signature: {}", e)) });
+                    return Box::pin(async move {
+                        Err(eyre::eyre!("Invalid ingress proof signature: {}", e))
+                    });
                 }
             }
         }
@@ -217,9 +226,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         .unwrap();
                     Ok(())
                 }
-                Err(err) => {
-                    Err(eyre::eyre!("Block validation error {:?}", err))
-                }
+                Err(err) => Err(eyre::eyre!("Block validation error {:?}", err)),
             }
         })
     }
