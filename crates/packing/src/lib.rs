@@ -110,7 +110,9 @@ pub fn capacity_pack_range_cuda_c(
     partition_hash: PartitionHash,
     iterations: Option<u32>,
     entropy: &mut Vec<u8>,
-) {
+) -> u32 {
+    use std::result;
+
     let mining_addr_len = mining_address.len();
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
@@ -120,8 +122,9 @@ pub fn capacity_pack_range_cuda_c(
     let entropy_ptr = entropy.as_ptr() as *mut u8;
     let chain_id: u64 = CONFIG.irys_chain_id;
 
+    let mut result: u32 = 1;
     unsafe {
-        capacity_cuda::compute_entropy_chunks_cuda(
+        result = capacity_cuda::compute_entropy_chunks_cuda(
             mining_addr,
             mining_addr_len,
             chunk_offset,
@@ -135,6 +138,7 @@ pub fn capacity_pack_range_cuda_c(
 
         entropy.set_len(entropy.capacity());
     }
+    result
 }
 
 #[cfg(feature = "nvidia")]
@@ -328,7 +332,7 @@ mod tests {
         let mut c_chunk_cuda = Vec::<u8>::with_capacity(2 * CONFIG.chunk_size as usize);
         let now = Instant::now();
 
-        capacity_pack_range_cuda_c(
+        let result = capacity_pack_range_cuda_c(
             2,
             mining_address,
             chunk_offset,
@@ -336,6 +340,12 @@ mod tests {
             Some(iterations),
             &mut c_chunk_cuda,
         );
+
+        println!("CUDA result: {}", result);
+
+        if result != 0 {
+            panic!("CUDA error");
+        }
 
         let elapsed = now.elapsed();
         println!("C CUDA implementation: {:.2?}", elapsed);

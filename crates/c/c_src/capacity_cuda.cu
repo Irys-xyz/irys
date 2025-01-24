@@ -9,7 +9,7 @@
 
 // Max threads - this is the maximum number of threads per block for the GPU
 // This is a constant defined by the GPU architecture.
-#define THREADS_PER_BLOCK 5 // TODO @ernius: how to correctly setup this parameter ?
+#define THREADS_PER_BLOCK 10 // TODO @ernius: how to correctly setup this parameter ?
 #define NUM_HASHES (DATA_CHUNK_SIZE / PACKING_HASH_SIZE)
 #define INPUT_SIZE PACKING_HASH_SIZE
 
@@ -133,22 +133,27 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
     // We need to allocate memory for each layer here, as kernel/device functions can't allocate any
     // additional memory, so we need to prepare it for them.
     if (cudaMalloc(&d_chunks, DATA_CHUNK_SIZE * chunks_count) != cudaSuccess) {
+        printf("cudaMalloc failed\n");
         return CUDA_ERROR;
     }
 
     if (cudaMalloc(&d_chunk_id, CHUNK_ID_LEN) != cudaSuccess) {
+        printf("cudaMalloc failed\n");        
         return CUDA_ERROR;
     }
 
     if (cudaMemcpy(d_chunk_id, mining_addr, mining_addr_size, cudaMemcpyHostToDevice) != cudaSuccess) {
+        printf("cudaMalloc failed\n");        
         return CUDA_ERROR;
     }
 
     if (cudaMemcpy(d_chunk_id + mining_addr_size, partition_hash, partition_hash_size, cudaMemcpyHostToDevice) != cudaSuccess) {
+        printf("cudaMalloc failed\n");        
         return CUDA_ERROR;
     }
 
     if (cudaMemcpy(d_chunk_id + mining_addr_size + partition_hash_size, &chain_id, sizeof(uint64_t), cudaMemcpyHostToDevice) != cudaSuccess) {
+        printf("cudaMalloc failed\n");  
         return CUDA_ERROR;
     }
 
@@ -159,11 +164,13 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
     // Check for errors after kernel launch
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
+        printf("CUDA failed, error code %d\n", err);  
         return CUDA_KERNEL_LAUNCH_FAILED;
     }
 
     cudaError_t errm = cudaMemcpy(chunks, d_chunks, DATA_CHUNK_SIZE * chunks_count, cudaMemcpyDeviceToHost);
     if (errm != cudaSuccess) {
+        printf("cudaMalloc failed\n");          
         return CUDA_ERROR;
     }
 
