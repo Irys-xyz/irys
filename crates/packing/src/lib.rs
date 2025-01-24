@@ -211,7 +211,7 @@ pub fn capacity_pack_range_with_data_c(
     partition_hash: PartitionHash,
     iterations: Option<u32>,
 ) {
-    let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize); 
+    let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
     data.iter_mut().enumerate().for_each(|(pos, chunk)| {
         capacity_pack_range_c(
             mining_address,
@@ -251,7 +251,6 @@ mod tests {
     use rand::{Rng, RngCore};
     use std::time::*;
 
-
     // Enable with CUDA hardware
     #[cfg(feature = "nvidia")]
     #[test]
@@ -264,7 +263,7 @@ mod tests {
         let iterations = 2 * CHUNK_SIZE as u32;
 
         // Please do not change CHUNK_SIZE to CHUNK_SIZE as this compares with C implementation that uses harcoded 256KB
-        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize); 
+        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
         let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
 
         let now = Instant::now();
@@ -466,10 +465,7 @@ mod tests {
         for i in 0..num_chunks {
             for j in 0..CHUNK_SIZE as usize {
                 //println!("chunk {} pos {}", i, j);
-                assert_eq!(
-                    chunks_rust[i][j],
-                    chunks[i * CHUNK_SIZE as usize + j]
-                );
+                assert_eq!(chunks_rust[i][j], chunks[i * CHUNK_SIZE as usize + j]);
             }
         }
     }

@@ -41,7 +41,7 @@ pub struct Config {
     pub mining_key: &'static str,
     // TODO: enable this after fixing option in toml
     pub num_capacity_partitions: Option<u64>,
-    pub port: u16
+    pub port: u16,
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 5;
