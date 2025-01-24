@@ -172,7 +172,7 @@ pub struct StorageSubmodulesConfig {
 impl StorageSubmodulesConfig {
     pub fn from_toml(path: impl AsRef<Path>) -> eyre::Result<Self> {
         let contents = fs::read_to_string(path)?;
-        let config: StorageSubmodulesConfig = toml::from_str(&contents)?;
+        let config: Self = toml::from_str(&contents)?;
         Ok(config)
     }
 
@@ -192,7 +192,7 @@ thread_local! {
             tracing::info!("Creating default storage submodules config at {:?}", config_path);
             let default_config = StorageSubmodulesConfig::default();
             let toml = toml::to_string(&default_config).expect("Failed to serialize default storage submodules config");
-            fs::write(&config_path, toml).expect(format!("Failed to write default storage submodules config to {}", config_path.display()).as_str());
+            fs::write(&config_path, toml).unwrap_or_else(|_| panic!("Failed to write default storage submodules config to {}", config_path.display()));
             return default_config;
         }
         StorageSubmodulesConfig::from_toml(config_path).unwrap() // we want to see the toml parsing error if there is one

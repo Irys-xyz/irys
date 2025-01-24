@@ -11,7 +11,6 @@ use openssl::sha;
 use reth_db::Database;
 use std::{
     collections::HashMap,
-    path::PathBuf,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tracing::error;
