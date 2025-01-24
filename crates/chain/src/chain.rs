@@ -457,6 +457,17 @@ pub async fn start_irys_node(
                 );
 
                 let vdf_thread_handler = std::thread::spawn(move || {
+                    // Setup core affinity
+                    let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
+                    for core in core_ids {
+                        let success = core_affinity::set_for_current(core);
+                        if success {
+                            info!("VDF thread pinned to core {:?}", core);
+                            break;
+                        }
+                    }
+                    
+
                     run_vdf(
                         vdf_config2,
                         global_step_number,
