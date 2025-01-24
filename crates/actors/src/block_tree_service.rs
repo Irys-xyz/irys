@@ -7,7 +7,7 @@ use std::{
 use crate::{
     block_discovery::BlockPreValidatedMessage,
     block_index_service::{BlockIndexReadGuard, BlockIndexService},
-    block_producer::{BlockConfirmedMessage, BlockProducerActor, RegisterBlockProducerMessage},
+    block_producer::BlockConfirmedMessage,
     chunk_migration_service::ChunkMigrationService,
     mempool_service::MempoolService,
     validation_service::{RequestValidationMessage, ValidationService},

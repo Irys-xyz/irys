@@ -26,7 +26,7 @@ use openssl::sha;
 use reth::revm::primitives::B256;
 use reth_db::cursor::*;
 use reth_db::Database;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},

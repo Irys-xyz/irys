@@ -3,7 +3,7 @@ use actix::{Actor, ArbiterService, Registry};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
-    block_producer::{BlockProducerActor, RegisterBlockProducerMessage},
+    block_producer::BlockProducerActor,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
