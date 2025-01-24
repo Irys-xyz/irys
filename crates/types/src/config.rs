@@ -41,6 +41,7 @@ pub struct Config {
     pub mining_key: &'static str,
     // TODO: enable this after fixing option in toml
     pub num_capacity_partitions: Option<u64>,
+    pub port: u16
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 5;
@@ -71,6 +72,7 @@ pub const CONFIG: Config = load_toml!(
         chunk_migration_depth: 1, // Number of confirmations before moving chunks to storage modules
         mining_key: "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0", // Burner PrivateKey (PK)
         num_capacity_partitions: None,
+        port: 80
     }
 );
 

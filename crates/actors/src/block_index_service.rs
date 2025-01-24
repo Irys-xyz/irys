@@ -47,7 +47,7 @@ impl Handler<GetBlockIndexGuardMessage> for BlockIndexService {
             error!("block_index service not initialized");
         }
         let binding = self.block_index.clone().unwrap();
-        BlockIndexReadGuard::new(binding.clone())
+        BlockIndexReadGuard::new(binding)
     }
 }
 

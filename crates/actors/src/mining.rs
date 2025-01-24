@@ -41,8 +41,8 @@ impl PartitionMiningActor {
             _database_provider,
             block_producer_actor: block_producer_addr,
             ranges: Ranges::new(
-                (&storage_module.storage_config.num_chunks_in_partition
-                    / &storage_module.storage_config.num_chunks_in_recall_range)
+                (storage_module.storage_config.num_chunks_in_partition
+                    / storage_module.storage_config.num_chunks_in_recall_range)
                     .try_into()
                     .expect("Recall ranges number exceeds usize representation"),
             ),

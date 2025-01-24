@@ -87,3 +87,4 @@ alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true
 alloy-provider.workspace = true
+core_affinity = "0.8.1"

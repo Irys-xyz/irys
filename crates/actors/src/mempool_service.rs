@@ -26,7 +26,7 @@ use crate::block_producer::BlockConfirmedMessage;
 #[derive(Debug, Default)]
 pub struct MempoolService {
     db: Option<DatabaseProvider>,
-    /// Temporary mempool stubs - will replace with proper data models - DMac
+    /// Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
     /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
     /// instead of the actor executor runtime, while also providing some `QoL`
