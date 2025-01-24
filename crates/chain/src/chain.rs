@@ -19,7 +19,7 @@ use irys_actors::{
     ActorAddresses, BlockFinalizedMessage,
 };
 use irys_api_server::{run_server, ApiState};
-use irys_config::{decode_hex, IrysNodeConfig};
+use irys_config::{decode_hex, IrysNodeConfig, STORAGE_SUBMODULES_CONFIG};
 use irys_database::database;
 use irys_packing::{PackingType, PACKING_TYPE};
 pub use irys_reth_node_bridge::node::{
@@ -156,8 +156,8 @@ pub async fn start_irys_node(
 
     let mut storage_modules: StorageModuleVec = Vec::new();
 
-    let mut at_genesis = false;
-    let mut latest_block_index = None;
+    let at_genesis;
+    let latest_block_index;
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
         let mut idx = BlockIndex::default();
         if !CONFIG.persist_data_on_restart {
@@ -287,6 +287,7 @@ pub async fn start_irys_node(
                     initialize_storage_files(
                         &arc_config.storage_module_dir(),
                         &storage_module_infos,
+                        &STORAGE_SUBMODULES_CONFIG.with(|config| config.submodule_paths.clone()),
                     )
                     .unwrap();
                 }
@@ -466,7 +467,6 @@ pub async fn start_irys_node(
                             break;
                         }
                     }
-                    
 
                     run_vdf(
                         vdf_config2,

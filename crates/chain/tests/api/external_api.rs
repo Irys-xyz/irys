@@ -55,7 +55,7 @@ async fn external_api() -> eyre::Result<()> {
         entropy_packing_iterations: 1,
         chunk_migration_depth: 1, // Testnet / single node config
     };
-    let chunk_size = storage_config.chunk_size;
+    let _chunk_size = storage_config.chunk_size;
 
     // Create StorageModules for testing
     // TODO: once @DanMacDonald fixes promotion, switch back configs & ledger_num in JS test
@@ -113,7 +113,7 @@ async fn external_api() -> eyre::Result<()> {
     let tmp_dir = setup_tracing_and_temp_dir(Some("chunk_migration_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
     info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
-    let _ = initialize_storage_files(&base_path, &storage_module_infos);
+    let _ = initialize_storage_files(&base_path, &storage_module_infos, &vec![]);
 
     // Create a Vec initialized storage modules
     let mut storage_modules: Vec<Arc<StorageModule>> = Vec::new();
@@ -203,7 +203,7 @@ async fn external_api() -> eyre::Result<()> {
     // now we wait for an ingress proof to be generated for this tx (automatic once all chunks have been uploaded)
 
     let ingress_proof = loop {
-        // don't reuse the tx! it has read isolation (won't see anything commited after it's creation)
+        // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
         let ro_tx = &arc_db.tx().unwrap();
         match ro_tx.get::<IngressProofs>(recv_tx.data_root).unwrap() {
             Some(ip) => break ip,

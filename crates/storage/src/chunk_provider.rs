@@ -166,7 +166,7 @@ mod tests {
         let base_path = tmp_dir.path().to_path_buf();
         let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
         let arc_db = DatabaseProvider(Arc::new(db));
-        initialize_storage_files(&base_path, &infos)?;
+        initialize_storage_files(&base_path, &infos, &vec![])?;
 
         // Override the default StorageModule config for testing
         let config = StorageConfig {

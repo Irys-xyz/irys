@@ -6,6 +6,8 @@ use irys_types::{
     partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CONFIG,
 };
 
+use irys_types::CHUNK_SIZE; // do not change where is used for CONFIG.chunk_size as this is hardcoded in C implementation
+
 #[cfg(feature = "nvidia")]
 pub use irys_c::capacity_cuda;
 
@@ -110,7 +112,9 @@ pub fn capacity_pack_range_cuda_c(
     partition_hash: PartitionHash,
     iterations: Option<u32>,
     entropy: &mut Vec<u8>,
-) {
+) -> u32 {
+    use std::result;
+
     let mining_addr_len = mining_address.len();
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
@@ -120,8 +124,9 @@ pub fn capacity_pack_range_cuda_c(
     let entropy_ptr = entropy.as_ptr() as *mut u8;
     let chain_id: u64 = CONFIG.irys_chain_id;
 
+    let mut result: u32 = 1;
     unsafe {
-        capacity_cuda::compute_entropy_chunks_cuda(
+        result = capacity_cuda::compute_entropy_chunks_cuda(
             mining_addr,
             mining_addr_len,
             chunk_offset,
@@ -135,6 +140,7 @@ pub fn capacity_pack_range_cuda_c(
 
         entropy.set_len(entropy.capacity());
     }
+    result
 }
 
 #[cfg(feature = "nvidia")]
@@ -146,7 +152,7 @@ pub fn capacity_pack_range_with_data_cuda_c(
     partition_hash: PartitionHash,
     iterations: Option<u32>,
 ) {
-    let num_chunks: u32 = data.len() as u32 / CONFIG.chunk_size as u32;
+    let num_chunks: u32 = data.len() as u32 / CHUNK_SIZE as u32; // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
     let mut entropy: Vec<u8> = Vec::with_capacity(data.len());
     capacity_pack_range_cuda_c(
         num_chunks,
@@ -187,26 +193,18 @@ pub fn capacity_pack_range_with_data(
 ) {
     let iterations: u32 = iterations.unwrap_or(CONFIG.entropy_packing_iterations);
 
-    match PACKING_TYPE {
-        PackingType::CPU => {
-            let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
-            data.iter_mut().enumerate().for_each(|(pos, chunk)| {
-                capacity_single::compute_entropy_chunk(
-                    mining_address,
-                    chunk_offset + pos as u64,
-                    partition_hash.0,
-                    iterations,
-                    chunk_size,
-                    &mut entropy_chunk,
-                );
-                xor_vec_u8_arrays_in_place(chunk, &entropy_chunk);
-            })
-        }
-        // PackingType::CUDA => {
-        //     capacity_pack_range_with_data_cuda_c(data, mining_address, chunk_offset, partition_hash, iterations)
-        // }
-        _ => unimplemented!(),
-    }
+    let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+    data.iter_mut().enumerate().for_each(|(pos, chunk)| {
+        capacity_single::compute_entropy_chunk(
+            mining_address,
+            chunk_offset + pos as u64,
+            partition_hash.0,
+            iterations,
+            chunk_size,
+            &mut entropy_chunk,
+        );
+        xor_vec_u8_arrays_in_place(chunk, &entropy_chunk);
+    })
 }
 
 /// 2D Packing C implementation
@@ -217,22 +215,17 @@ pub fn capacity_pack_range_with_data_c(
     partition_hash: PartitionHash,
     iterations: Option<u32>,
 ) {
-    match PACKING_TYPE {
-        PackingType::CPU => {
-            let mut entropy_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
-            data.iter_mut().enumerate().for_each(|(pos, chunk)| {
-                capacity_pack_range_c(
-                    mining_address,
-                    chunk_offset + pos as u64,
-                    partition_hash,
-                    iterations,
-                    &mut entropy_chunk,
-                );
-                xor_vec_u8_arrays_in_place(chunk, &entropy_chunk);
-            })
-        }
-        _ => unimplemented!(),
-    }
+    let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+    data.iter_mut().enumerate().for_each(|(pos, chunk)| {
+        capacity_pack_range_c(
+            mining_address,
+            chunk_offset + pos as u64,
+            partition_hash,
+            iterations,
+            &mut entropy_chunk,
+        );
+        xor_vec_u8_arrays_in_place(chunk, &entropy_chunk);
+    })
 }
 
 #[inline]
@@ -271,10 +264,11 @@ mod tests {
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-        let iterations = 2 * CONFIG.chunk_size as u32;
+        let iterations = 2 * CHUNK_SIZE as u32;
 
-        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
-        let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
+        // Please do not change CHUNK_SIZE to CHUNK_SIZE as this compares with C implementation that uses harcoded 256KB
+        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
 
         let now = Instant::now();
 
@@ -283,7 +277,7 @@ mod tests {
             chunk_offset,
             partition_hash,
             iterations,
-            CONFIG.chunk_size as usize,
+            CHUNK_SIZE as usize,
             &mut chunk,
         );
 
@@ -292,15 +286,15 @@ mod tests {
             chunk_offset + 1,
             partition_hash,
             iterations,
-            CONFIG.chunk_size as usize,
+            CHUNK_SIZE as usize,
             &mut chunk2,
         );
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
-        let mut c_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
-        let mut c_chunk2 = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
+        let mut c_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut c_chunk2 = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
         let now = Instant::now();
 
         capacity_pack_range_c(
@@ -325,10 +319,10 @@ mod tests {
         assert_eq!(chunk, c_chunk, "C chunks should be equal");
         assert_eq!(chunk2, c_chunk2, "Second C chunks should be equal");
 
-        let mut c_chunk_cuda = Vec::<u8>::with_capacity(2 * CONFIG.chunk_size as usize);
+        let mut c_chunk_cuda = Vec::<u8>::with_capacity(2 * CHUNK_SIZE as usize);
         let now = Instant::now();
 
-        capacity_pack_range_cuda_c(
+        let result = capacity_pack_range_cuda_c(
             2,
             mining_address,
             chunk_offset,
@@ -337,24 +331,30 @@ mod tests {
             &mut c_chunk_cuda,
         );
 
+        println!("CUDA result: {}", result);
+
+        if result != 0 {
+            panic!("CUDA error");
+        }
+
         let elapsed = now.elapsed();
         println!("C CUDA implementation: {:.2?}", elapsed);
 
         assert_eq!(
             chunk,
-            c_chunk_cuda[0..CONFIG.chunk_size as usize].to_vec(),
+            c_chunk_cuda[0..CHUNK_SIZE as usize].to_vec(),
             "CUDA chunk should be equal"
         );
         assert_eq!(
             chunk2,
-            c_chunk_cuda[CONFIG.chunk_size as usize..(2 * CONFIG.chunk_size) as usize].to_vec(),
+            c_chunk_cuda[CHUNK_SIZE as usize..(2 * CHUNK_SIZE) as usize].to_vec(),
             "Second CUDA chunk should be equal"
         );
     }
 
     #[test]
     fn test_bench_chunks_packing() {
-        let mut rng = rand::thread_rng();
+        let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash: [u8; SHA_HASH_SIZE] = [0; SHA_HASH_SIZE];
@@ -365,7 +365,7 @@ mod tests {
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
         for _i in 0..num_chunks {
-            let mut chunk = [0u8; CONFIG.chunk_size as usize];
+            let mut chunk = [0u8; CHUNK_SIZE as usize]; // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
             rng.fill_bytes(&mut chunk);
             chunks.push(chunk.to_vec());
             chunks_rust.push(chunk.to_vec());
@@ -377,7 +377,7 @@ mod tests {
         let rnd_chunk_pos = rng.gen_range(0..num_chunks);
         let mut rnd_chunk = chunks[rnd_chunk_pos].clone();
 
-        let iterations = Some(2 * CONFIG.chunk_size as u32);
+        let iterations = Some(2 * CHUNK_SIZE as u32);
         let now = Instant::now();
 
         capacity_pack_range_with_data_c(
@@ -399,7 +399,7 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
-            CONFIG.chunk_size as usize,
+            CHUNK_SIZE as usize,
         );
 
         let elapsed = now.elapsed();
@@ -408,7 +408,7 @@ mod tests {
         assert_eq!(chunks, chunks_rust, "Rust and C packing should be equal");
 
         // calculate entropy for choosen random chunk
-        let mut entropy_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size.try_into().unwrap());
+        let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
         capacity_pack_range_c(
             mining_address,
             chunk_offset + rnd_chunk_pos as u64,
@@ -433,19 +433,19 @@ mod tests {
         rng.fill(&mut partition_hash);
 
         let num_chunks: usize = 512;
-        let mut chunks: Vec<u8> = Vec::with_capacity(num_chunks * CONFIG.chunk_size as usize);
+        let mut chunks: Vec<u8> = Vec::with_capacity(num_chunks * CHUNK_SIZE as usize); // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
         for _i in 0..num_chunks {
-            let mut chunk = [0u8; CONFIG.chunk_size as usize];
+            let mut chunk = [0u8; CHUNK_SIZE as usize];
             rng.fill_bytes(&mut chunk);
             chunks_rust.push(chunk.to_vec());
-            for j in 0..CONFIG.chunk_size as usize {
+            for j in 0..CHUNK_SIZE as usize {
                 chunks.push(chunk[j]);
             }
         }
 
-        let iterations = Some(2 * CONFIG.chunk_size as u32);
+        let iterations = Some(2 * CHUNK_SIZE as u32);
         let now = Instant::now();
 
         capacity_pack_range_with_data_cuda_c(
@@ -466,19 +466,16 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
-            CONFIG.chunk_size as usize,
+            CHUNK_SIZE as usize,
         );
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
         for i in 0..num_chunks {
-            for j in 0..CONFIG.chunk_size as usize {
+            for j in 0..CHUNK_SIZE as usize {
                 //println!("chunk {} pos {}", i, j);
-                assert_eq!(
-                    chunks_rust[i][j],
-                    chunks[i * CONFIG.chunk_size as usize + j]
-                );
+                assert_eq!(chunks_rust[i][j], chunks[i * CHUNK_SIZE as usize + j]);
             }
         }
     }

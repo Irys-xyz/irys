@@ -70,7 +70,7 @@ mod tests {
         capacity_single::{self, SHA_HASH_SIZE},
     };
     use irys_primitives::Address;
-    use irys_types::CONFIG;
+    use irys_types::{CHUNK_SIZE, CONFIG};
     use rand;
     use rand::Rng;
     use std::time::Instant;
@@ -129,9 +129,9 @@ mod tests {
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-        let iterations = CONFIG.entropy_packing_iterations;
+        let iterations = 1_000;
 
-        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
+        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
 
         let now = Instant::now();
 
@@ -147,7 +147,7 @@ mod tests {
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
-        let mut c_chunk = Vec::<u8>::with_capacity(CONFIG.chunk_size as usize);
+        let mut c_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
 
         let mining_addr_len = mining_address.len(); // note: might not line up with capacity? that should be fine...
         let partition_hash_len = partition_hash.len();

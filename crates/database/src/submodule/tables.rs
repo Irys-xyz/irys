@@ -3,7 +3,7 @@ use irys_types::{
     TxPathHash, H256,
 };
 use reth_codecs::Compact;
-use reth_db::{tables, Database};
+use reth_db::tables;
 use reth_db::{HasName, HasTableType, TableType, TableViewer};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -59,6 +59,7 @@ mod tests {
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use reth_db::cursor::*;
         use reth_db::transaction::*;
+        use reth_db::*;
 
         let temp_dir = setup_tracing_and_temp_dir(Some("test_offset_range_queries"), false);
 

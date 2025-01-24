@@ -52,6 +52,7 @@ pub struct PackingConfig {
     /// Max. number of packing threads for CPU packing
     concurrency: u16,
     /// Max. number of chunks send to GPU packing
+    #[allow(unused)]
     max_chunks: u32,
 }
 impl Default for PackingConfig {
@@ -325,7 +326,7 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        initialize_storage_files(&base_path, &infos)?;
+        initialize_storage_files(&base_path, &infos, &vec![])?;
 
         // Override the default StorageModule config for testing
         let storage_config = StorageConfig {
