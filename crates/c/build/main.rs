@@ -20,10 +20,9 @@ fn main() {
     capacity::build_capacity(&c_src, &include_dir);
     capacity::bind_capacity(&c_src);
 
-    if std::env::var("CARGO_FEATURE_NVIDIA").is_ok() {
-        capacity::build_capacity_cuda(&c_src, &include_dir);
-        capacity::bind_capacity_cuda(&c_src);
-    }
+    capacity::build_capacity_cuda(&c_src, &include_dir);
+    capacity::bind_capacity_cuda(&c_src);
+
 }
 
 // build from src

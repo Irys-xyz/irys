@@ -404,8 +404,8 @@ impl StorageModule {
             .unwrap();
 
         // Calculate file offset and prepare buffer
-        let chunk_size = self.storage_config.chunk_size as u32;
-        let file_offset = (chunk_offset - interval.start()) * chunk_size;
+        let chunk_size = self.storage_config.chunk_size;
+        let file_offset = (chunk_offset - interval.start()) as u64 * chunk_size;
         let mut buf = vec![0u8; chunk_size as usize];
 
         // Read chunk from file
