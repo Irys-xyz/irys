@@ -38,13 +38,12 @@ pub fn read_bytes_range_by_index(
 ) -> PrecompileResult {
     let ReadBytesRangeByIndexArgs { index } = ReadBytesRangeByIndexArgs::decode(call_data)?;
     // read the first bytes range
-    let bytes_range = access_lists
+    let bytes_range = *access_lists
         .byte_reads
         .get(index as usize)
         .ok_or(PrecompileErrors::Error(PrecompileError::Other(
             "Internal error - unable to parse access list".to_owned(),
-        )))?
-        .clone();
+        )))?;
     read_bytes_range(bytes_range, gas_limit, env, state_provider, access_lists)
 }
 
@@ -85,13 +84,12 @@ pub fn read_partial_byte_range(
         PrecompileErrors::Error(PrecompileError::Other("Invalid calldata".to_owned()))
     })?;
 
-    let mut bytes_range = access_lists
+    let mut bytes_range = *access_lists
         .byte_reads
         .get(index as usize)
         .ok_or(PrecompileErrors::Error(PrecompileError::Other(
             "Internal error - unable to parse access list".to_owned(),
-        )))?
-        .clone();
+        )))?;
 
     // add the provided offset and length to the existing bytes range
     // this seems weird, but the API is envisioned as each byte range being a tx/region of interest, so these calls would allow for efficient relative indexing.
@@ -101,15 +99,11 @@ pub fn read_partial_byte_range(
             offset as u64,
         )
         .map_err(|_| {
-            PrecompileErrors::Error(PrecompileError::Other(format!(
-                "Internal error - unable to apply offset to byte range",
-            )))
+            PrecompileErrors::Error(PrecompileError::Other("Internal error - unable to apply offset to byte range".to_string()))
         })?;
 
     bytes_range.length = U34::try_from(length).map_err(|_| {
-        PrecompileErrors::Error(PrecompileError::Other(format!(
-            "Internal error - unable to use new length",
-        )))
+        PrecompileErrors::Error(PrecompileError::Other("Internal error - unable to use new length".to_string()))
     })?;
 
     read_bytes_range(bytes_range, gas_limit, env, state_provider, access_lists)
@@ -218,9 +212,7 @@ pub fn read_bytes_range(
 
     // bounds check - as the impl is basic (i.e reads all chunks regardless of requested bytes range), this automatically accounts for the chunk range bounds
     if offset + truncated_len > bytes.len() {
-        return Err(PrecompileErrors::Error(PrecompileError::Other(format!(
-            "Offset + len is outside of the requested chunk range",
-        ))));
+        return Err(PrecompileErrors::Error(PrecompileError::Other("Offset + len is outside of the requested chunk range".to_string())));
     }
     let extracted: Bytes = bytes.drain(offset..offset + truncated_len).collect();
 

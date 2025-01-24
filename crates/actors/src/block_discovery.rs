@@ -178,7 +178,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = BlockTreeService::from_registry();
         let storage_config = self.storage_config.clone();
-        let difficulty_config = self.difficulty_config.clone();
+        let difficulty_config = self.difficulty_config;
         let vdf_config = self.vdf_config.clone();
         let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();

@@ -59,7 +59,7 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 
 pub async fn start() -> eyre::Result<IrysNodeCtx> {
     let config: IrysNodeConfig = IrysNodeConfig {
-        mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(&CONFIG.mining_key).unwrap()),
+        mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(CONFIG.mining_key).unwrap()),
         ..IrysNodeConfig::default()
     };
 
@@ -174,7 +174,7 @@ pub async fn start_irys_node(
         } else {
             debug!("Not at genesis!")
         }
-        latest_block_index = i.get_latest_item().map(|ii| ii.clone());
+        latest_block_index = i.get_latest_item().cloned();
 
         i
     }));
@@ -368,7 +368,7 @@ pub async fn start_irys_node(
                     block_index_guard: block_index_guard.clone(),
                     partition_assignments_guard: partition_assignments_guard.clone(),
                     storage_config: storage_config.clone(),
-                    difficulty_config: difficulty_adjustment_config.clone(),
+                    difficulty_config: difficulty_adjustment_config,
                     db: db.clone(),
                     vdf_config: vdf_config.clone(),
                     vdf_steps_guard: vdf_steps_guard.clone(),
@@ -382,7 +382,7 @@ pub async fn start_irys_node(
                     epoch_service_actor_addr.clone(),
                     reth_node.clone(),
                     storage_config.clone(),
-                    difficulty_adjustment_config.clone(),
+                    difficulty_adjustment_config,
                     vdf_config.clone(),
                     vdf_steps_guard.clone(),
                     block_tree_guard.clone(),
@@ -433,7 +433,7 @@ pub async fn start_irys_node(
                     .send(BroadcastDifficultyUpdate(
                         latest_block
                             .clone()
-                            .map(|b| Arc::new(b))
+                            .map(Arc::new)
                             .unwrap_or(arc_genesis.clone()),
                     ))
                     .await

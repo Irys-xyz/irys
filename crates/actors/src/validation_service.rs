@@ -28,7 +28,7 @@ pub struct ValidationService {
 
 impl ValidationService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory
-    pub fn new(
+    pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
         storage_config: StorageConfig,
@@ -37,13 +37,13 @@ impl ValidationService {
         Self {
             block_index_guard: Some(block_index_guard),
             partition_assignments_guard: Some(partition_assignments_guard),
-            storage_config: storage_config,
-            vdf_config: vdf_config,
+            storage_config,
+            vdf_config,
         }
     }
 }
 
-/// ValidationService is an Actor
+/// `ValidationService` is an Actor
 impl Actor for ValidationService {
     type Context = Context<Self>;
 }
@@ -65,15 +65,13 @@ impl Handler<RequestValidationMessage> for ValidationService {
     type Result = ();
 
     fn handle(&mut self, msg: RequestValidationMessage, ctx: &mut Self::Context) -> Self::Result {
-        if self.partition_assignments_guard.is_none() || self.block_index_guard.is_none() {
-            panic!("vdf_service is not initialized");
-        }
+        assert!(!(self.partition_assignments_guard.is_none() || self.block_index_guard.is_none()), "vdf_service is not initialized");
 
         let block = msg.0;
         let block_index_guard = self.block_index_guard.clone().unwrap();
         let partitions_guard = self.partition_assignments_guard.clone().unwrap();
         let storage_config = self.storage_config.clone();
-        let miner_address = block.miner_address.clone();
+        let miner_address = block.miner_address;
         let vdf_config = self.vdf_config.clone();
         let block_hash = block.block_hash;
         let vdf_info = block.vdf_limiter_info.clone();

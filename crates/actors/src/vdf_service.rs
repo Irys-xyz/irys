@@ -27,7 +27,7 @@ pub struct VdfState {
 
 impl VdfState {
     pub fn get_last_step_and_seed(&self) -> (u64, Option<Seed>) {
-        (self.global_step, self.seeds.back().map(|seed| seed.clone()))
+        (self.global_step, self.seeds.back().cloned())
     }
 
     /// Push new seed, and removing oldest one if is full
@@ -72,7 +72,7 @@ impl VdfState {
         Ok(H256List(
             self.seeds
                 .range(start..=end)
-                .map(|seed| seed.0.clone())
+                .map(|seed| seed.0)
                 .collect::<Vec<H256>>(),
         ))
     }

@@ -118,7 +118,7 @@ impl BlockIndex<Initialized> {
         if self.items.len() == 0 {
             return None;
         };
-        self.items.get(self.items.len() - 1)
+        self.items.last()
     }
 
     /// Pushes a new [`BlockIndexItem`] onto the items array

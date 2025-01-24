@@ -104,8 +104,8 @@ impl IrysTransactionHeader {
     pub fn signature_hash(&self) -> [u8; 32] {
         let mut bytes = Vec::new();
         self.encode_for_signing(&mut bytes);
-        let prehash = keccak256(&bytes).0;
-        prehash
+        
+        keccak256(&bytes).0
     }
 
     /// Validates the transaction signature by:

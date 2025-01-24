@@ -143,7 +143,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
-        let difficulty_config = self.difficulty_config.clone();
+        let difficulty_config = self.difficulty_config;
         let chunk_size = self.storage_config.chunk_size;
         let block_tree_guard = self.block_tree_guard.clone();
 
@@ -157,7 +157,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let (canonical_blocks, _not_onchain_count) = block_tree_guard.read().get_canonical_chain();
             let (latest_block_hash, _height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
 
-            let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, &latest_block_hash)) {
+            let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash)) {
                 Ok(Some(header)) => header,
                 Ok(None) => {
                     error!("No block header found for hash {}", latest_block_hash);
@@ -170,9 +170,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
 
             // Retrieve the previous block header and hash
-            let prev_block_header: IrysBlockHeader;
+            
             let prev_block_hash = block_item.block_hash;
-            prev_block_header = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash)) {
+            let prev_block_header: IrysBlockHeader = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash)) {
                 Ok(Some(header)) => header,
                 Ok(None) => {
                     error!("No block header found for hash {}", prev_block_hash);
@@ -337,7 +337,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 height: block_height,
                 diff,
                 cumulative_diff: cumulative_difficulty,
-                last_diff_timestamp: last_diff_timestamp,
+                last_diff_timestamp,
                 solution_hash: solution.solution_hash,
                 previous_solution_hash: H256::zero(),
                 last_epoch_hash: H256::random(),
@@ -454,9 +454,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             let block = Arc::new(irys_block);
             match block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await {
-                Ok(res) => if res.is_err() {
-                    panic!("Newly produced block failed pre-validation. ")
-                },
+                Ok(res) => assert!(res.is_ok(), "Newly produced block failed pre-validation. "),
                 Err(e) => panic!("Could not deliver BlockDiscoveredMessage: {}", e),
             }
 

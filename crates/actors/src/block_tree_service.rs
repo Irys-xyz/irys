@@ -35,18 +35,18 @@ pub struct BlockTreeReadGuard {
 }
 
 impl BlockTreeReadGuard {
-    /// Creates a new `ReadGard` for the block_tree cache
+    /// Creates a new `ReadGard` for the `block_tree` cache
     pub const fn new(block_tree_cache: Arc<RwLock<BlockTreeCache>>) -> Self {
         Self { block_tree_cache }
     }
 
-    /// Accessor method to get a read guard for the block_tree cache
+    /// Accessor method to get a read guard for the `block_tree` cache
     pub fn read(&self) -> RwLockReadGuard<'_, BlockTreeCache> {
         self.block_tree_cache.read().unwrap()
     }
 }
 
-/// Retrieve a read only reference to the block_tree's cache
+/// Retrieve a read only reference to the `block_tree`'s cache
 #[derive(Message, Debug)]
 #[rtype(result = "BlockTreeReadGuard")]
 pub struct GetBlockTreeGuardMessage;
@@ -71,7 +71,7 @@ pub struct BlockTreeService {
     pub cache: Option<Arc<RwLock<BlockTreeCache>>>,
     /// The wallet address of the local miner
     pub miner_address: Address,
-    /// Read view of the block_index
+    /// Read view of the `block_index`
     pub block_index_guard: Option<BlockIndexReadGuard>,
     /// Global storage config
     pub storage_config: StorageConfig,
@@ -91,7 +91,7 @@ impl ArbiterService for BlockTreeService {
 }
 
 impl BlockTreeService {
-    /// Initializes a BlockTreeActor without a block_producer address
+    /// Initializes a `BlockTreeActor` without a `block_producer` address
     pub fn new(
         db: DatabaseProvider,
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
@@ -106,7 +106,7 @@ impl BlockTreeService {
             cache: Some(Arc::new(RwLock::new(cache))),
             miner_address: *miner_address,
             block_index_guard: Some(block_index_guard),
-            storage_config: storage_config,
+            storage_config,
         }
     }
 
@@ -152,8 +152,8 @@ impl BlockTreeService {
             all_txs: Arc::new(all_txs),
         };
 
-        let _ = block_index.do_send(block_finalized_message.clone());
-        let _ = chunk_migration.do_send(block_finalized_message.clone());
+        block_index.do_send(block_finalized_message.clone());
+        chunk_migration.do_send(block_finalized_message);
         Ok(())
     }
 
@@ -168,7 +168,7 @@ impl BlockTreeService {
 
     /// Checks if a block that is `chunk_migration_depth` blocks behind `arc_block`
     /// should be finalized. If eligible, sends finalization message unless block
-    /// is already in block_index. Panics if the block_tree and block_index are
+    /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
     fn try_notify_services_of_block_finalization(
         &self,
@@ -208,14 +208,12 @@ impl BlockTreeService {
         // Verify block isn't already finalized
         let binding = self.block_index_guard.clone().unwrap();
         let bi = binding.read();
-        if bi.num_blocks() > finalized_height {
-            if bi.num_blocks() > finalized_height {
-                let finalized = bi.get_item(finalized_height as usize).unwrap();
-                if finalized.block_hash == finalized_hash {
-                    return;
-                }
-                panic!("Block tree and index out of sync");
+        if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
+            let finalized = bi.get_item(finalized_height as usize).unwrap();
+            if finalized.block_hash == finalized_hash {
+                return;
             }
+            panic!("Block tree and index out of sync");
         }
 
         if let Err(_) = self.send_storage_finalized_message(finalized_hash) {
@@ -244,9 +242,9 @@ pub struct ValidationResultMessage {
 /// Handles pre-validated blocks received from the validation service.
 ///
 /// The handling differs based on whether the block was produced locally:
-/// - For locally mined blocks: Added as BlockState::Unknown to allow chain extension
+/// - For locally mined blocks: Added as `BlockState::Unknown` to allow chain extension
 ///   while validation is pending
-/// - For peer blocks: Added normally via add_block
+/// - For peer blocks: Added normally via `add_block`
 ///
 /// After adding the block, it's scheduled for full validation and the previous
 /// block is marked for storage finalization.
@@ -266,7 +264,7 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeService {
             // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
             // extension while full validation is still pending. This prevents blocking
             // new block production while validation completes.
-            cache.add_validated_block((*block).clone(), BlockState::Unknown, all_txs.clone())
+            cache.add_validated_block((*block).clone(), BlockState::Unknown, all_txs)
         } else {
             // For blocks from peers: Add via standard path requiring validation
             cache.add_block(&block, all_txs)
@@ -279,7 +277,7 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeService {
 
             // Update block state to reflect scheduled validation
             if cache
-                .mark_block_as_validation_scheduled(&block_hash)
+                .mark_block_as_validation_scheduled(block_hash)
                 .is_err()
             {
                 error!("Unable to mark block as ValidationScheduled");
@@ -303,7 +301,6 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
         match validation_result {
             ValidationResult::Invalid => {
                 error!("{} INVALID BLOCK", block_hash.0.to_base58());
-                return;
             }
             ValidationResult::Valid => {
                 let binding = self.cache.clone().unwrap();
@@ -330,7 +327,7 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
                 let all_tx = block_entry.all_tx.clone();
 
                 // Now do mutable operations
-                if let Ok(_) = cache.mark_tip(&block_hash) {
+                if cache.mark_tip(&block_hash).is_ok() {
                     self.notify_services_of_block_confirmation(&arc_block, all_tx);
                 }
 
@@ -411,13 +408,13 @@ pub struct BlockEntry {
     children: HashSet<H256>,
 }
 
-/// Represents the ChainState of a block, is it Onchain? or a valid fork?
-#[derive(Debug, PartialEq, Clone)]
+/// Represents the `ChainState` of a block, is it Onchain? or a valid fork?
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ChainState {
     /// Block is confirmed and part of the main chain
     Onchain,
     /// Block is validated but may not be on the main chain
-    /// For locally produced blocks, can have ValidationScheduled `BlockState`
+    /// For locally produced blocks, can have `ValidationScheduled` `BlockState`
     /// while maintaining `ChainState` validity
     Validated(BlockState),
     /// Block exists but is awaiting block validation
@@ -425,7 +422,7 @@ pub enum ChainState {
 }
 
 /// Represents the validation state of a block, independent of its `ChainState`
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum BlockState {
     /// Initial state, validation not yet started
     Unknown,
@@ -456,7 +453,7 @@ impl BlockTreeCache {
         // and part of the canonical chain
         let block_entry = BlockEntry {
             block: block.clone(),
-            all_tx: all_tx,
+            all_tx,
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
@@ -614,7 +611,7 @@ impl BlockTreeCache {
             hash,
             BlockEntry {
                 block: block.clone(),
-                all_tx: all_tx,
+                all_tx,
                 chain_state: status,
                 timestamp: SystemTime::now(),
                 children: HashSet::new(),
@@ -656,9 +653,9 @@ impl BlockTreeCache {
     ///
     /// During development, this function allows flexibility in the validation state
     /// of locally produced blocks. While blocks received from peers must have a
-    /// BlockState::ValidBlock before being considered part of the longest chain,
-    /// blocks produced by the local node can be added as ChainState::Validated
-    /// but have have their BlockState overridden.This enables the node to
+    /// `BlockState::ValidBlock` before being considered part of the longest chain,
+    /// blocks produced by the local node can be added as `ChainState::Validated`
+    /// but have have their `BlockState` overridden.This enables the node to
     /// continue building the chain while still performing complete validation
     /// checks, helping catch any validation errors during development without
     /// halting chain progress of the local node.
@@ -739,7 +736,7 @@ impl BlockTreeCache {
         let children = self
             .blocks
             .get(block_hash)
-            .map(|entry| entry.children.iter().cloned().collect::<Vec<_>>())
+            .map(|entry| entry.children.iter().copied().collect::<Vec<_>>())
             .ok_or_else(|| eyre::eyre!("Block not found"))?;
 
         // Recursively remove all children first
@@ -774,8 +771,7 @@ impl BlockTreeCache {
         while let Some(entry) = self.blocks.get(&current) {
             match &entry.chain_state {
                 // For blocks awaiting initial validation, restart chain from parent
-                ChainState::NotOnchain(BlockState::Unknown)
-                | ChainState::NotOnchain(BlockState::ValidationScheduled) => {
+                ChainState::NotOnchain(BlockState::Unknown | BlockState::ValidationScheduled) => {
                     // Reset everything and continue from parent block
                     pairs.clear();
                     not_onchain_count = 0;
@@ -904,10 +900,10 @@ impl BlockTreeCache {
         block_hash: &BlockHash,
     ) -> eyre::Result<()> {
         if let Some(entry) = self.blocks.get_mut(block_hash) {
-            if let ChainState::NotOnchain(BlockState::Unknown) = entry.chain_state {
+            if entry.chain_state == ChainState::NotOnchain(BlockState::Unknown) {
                 entry.chain_state = ChainState::NotOnchain(BlockState::ValidationScheduled);
                 self.update_longest_chain_cache();
-            } else if let ChainState::Validated(BlockState::Unknown) = entry.chain_state {
+            } else if entry.chain_state == ChainState::Validated(BlockState::Unknown) {
                 entry.chain_state = ChainState::Validated(BlockState::ValidationScheduled);
                 self.update_longest_chain_cache();
             }
@@ -917,7 +913,7 @@ impl BlockTreeCache {
 
     pub fn mark_block_as_valid(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
         if let Some(entry) = self.blocks.get_mut(block_hash) {
-            if let ChainState::NotOnchain(BlockState::ValidationScheduled) = entry.chain_state {
+            if entry.chain_state == ChainState::NotOnchain(BlockState::ValidationScheduled) {
                 entry.chain_state = ChainState::NotOnchain(BlockState::ValidBlock);
                 self.update_longest_chain_cache();
             }
@@ -995,7 +991,7 @@ impl BlockTreeCache {
     }
 
     /// Get the earliest unvalidated block from the longest chain
-    /// Relies on the longest_chain_cache
+    /// Relies on the `longest_chain_cache`
     pub fn get_earliest_not_onchain_in_longest_chain(
         &self,
     ) -> Option<(&BlockEntry, Vec<&IrysBlockHeader>, SystemTime)> {
@@ -1027,9 +1023,9 @@ impl BlockTreeCache {
 
     /// Gets block with matching solution hash, excluding specified block.
     /// Returns a block meeting these requirements:
-    /// - Has matching solution_hash
+    /// - Has matching `solution_hash`
     /// - Is not the excluded block
-    /// - Either has same cumulative_diff as input or meets double-signing criteria
+    /// - Either has same `cumulative_diff` as input or meets double-signing criteria
     pub fn get_by_solution_hash(
         &self,
         solution_hash: &H256,
@@ -1103,7 +1099,7 @@ impl BlockTreeCache {
             };
 
             // Clone hashes to avoid borrow issues during removal
-            let hashes: Vec<_> = hashes.iter().cloned().collect();
+            let hashes: Vec<_> = hashes.iter().copied().collect();
 
             for hash in hashes {
                 if let Some(entry) = self.blocks.get(&hash) {
@@ -1227,7 +1223,7 @@ mod tests {
 
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
-        b2.ledgers[Ledger::Submit].tx_ids.push(txid.clone());
+        b2.ledgers[Ledger::Submit].tx_ids.push(txid);
         assert_matches!(cache.add_block(&b2, all_tx.clone()), Ok(_));
         assert_eq!(
             cache.get_block(&b2.block_hash).unwrap().ledgers[Ledger::Submit].tx_ids[0],
@@ -1851,7 +1847,7 @@ mod tests {
 
         // Now add the subsequent block, but as awaitingValidation
         assert_matches!(
-            cache.add_validated_block(b12.clone(), BlockState::ValidationScheduled, all_tx.clone()),
+            cache.add_validated_block(b12.clone(), BlockState::ValidationScheduled, all_tx),
             Ok(())
         );
         assert_matches!(check_longest_chain(&[&b11, &b12], 1, &cache), Ok(_));
@@ -1877,7 +1873,7 @@ mod tests {
         block
     }
 
-    fn extend_chain(
+    const fn extend_chain(
         mut new_block: IrysBlockHeader,
         previous_block: &IrysBlockHeader,
     ) -> IrysBlockHeader {
@@ -1908,10 +1904,8 @@ mod tests {
                 "Wrong validation_state found: {:?}",
                 c_s
             );
-        } else {
-            if let ChainState::NotOnchain(_) = chain_state {
-                return Err(eyre::eyre!("No unvalidated blocks found in longest chain"));
-            }
+        } else if let ChainState::NotOnchain(_) = chain_state {
+            return Err(eyre::eyre!("No unvalidated blocks found in longest chain"));
         }
 
         Ok(())

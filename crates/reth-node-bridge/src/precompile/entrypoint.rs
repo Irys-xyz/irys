@@ -24,9 +24,7 @@ fn programmable_data_precompile(
     state_provider: &PrecompileStateProvider,
 ) -> PrecompileResult {
     if call_data.is_empty() {
-        return Err(PrecompileError::Other(format!(
-            "Invalid empty calldata (function selector required)",
-        ))
+        return Err(PrecompileError::Other("Invalid empty calldata (function selector required)".to_string())
         .into());
     }
 
