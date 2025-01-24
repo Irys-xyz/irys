@@ -285,22 +285,20 @@ async fn data_promotion_test() {
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
         println!("1:{}", block_tx1);
+    } else if block_tx1.height > block_tx2.height {
+        let txid_1 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
+        let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
+        first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
+        next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
+        println!("1:{}", block_tx2);
+        println!("2:{}", block_tx1);
     } else {
-        if block_tx1.height > block_tx2.height {
-            let txid_1 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-            let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-            first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-            next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-            println!("1:{}", block_tx2);
-            println!("2:{}", block_tx1);
-        } else {
-            let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-            let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-            first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-            next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-            println!("1:{}", block_tx1);
-            println!("2:{}", block_tx2);
-        }
+        let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
+        let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
+        first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
+        next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
+        println!("1:{}", block_tx1);
+        println!("2:{}", block_tx2);
     }
 
     // ==============================

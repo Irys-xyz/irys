@@ -291,7 +291,7 @@ where
     ) -> eyre::Result<(Self::EVM, Self::Executor)> {
         let provider = ctx.irys_ext.clone().unwrap().provider;
 
-        let precompile_state_provider = PrecompileStateProvider { provider: provider };
+        let precompile_state_provider = PrecompileStateProvider { provider };
 
         let evm_config = IrysEvmConfig {
             inner: EthEvmConfig::new(ctx.chain_spec()),

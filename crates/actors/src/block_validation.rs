@@ -83,7 +83,7 @@ pub fn difficulty_is_valid(
         last_diff_timestamp,
         current_timestamp,
         current_difficulty,
-        &difficulty_config,
+        difficulty_config,
     );
 
     if diff == block.diff {
@@ -96,7 +96,7 @@ pub fn difficulty_is_valid(
 /// Validates if a block's cumulative difficulty equals the previous cumulative difficulty
 /// plus the expected hashes from its new difficulty. Returns Ok if valid.
 ///
-/// Note: Requires valid block difficulty - call difficulty_is_valid() first.
+/// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
 pub fn cumulative_difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
@@ -114,7 +114,7 @@ pub fn cumulative_difficulty_is_valid(
 
 /// Checks to see if the `solution_hash` exceeds the difficulty threshold
 ///
-/// Note: Requires valid block difficulty - call difficulty_is_valid() first.
+/// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
 pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
@@ -170,11 +170,11 @@ pub fn get_recall_range(
     irys_efficient_sampling::get_recall_range(
         num_recall_ranges_in_partition as usize,
         &steps,
-        &partition_hash,
+        partition_hash,
     )
 }
 
-/// Returns Ok if the provided PoA is valid, Err otherwise
+/// Returns Ok if the provided `PoA` is valid, Err otherwise
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
@@ -351,7 +351,7 @@ mod tests {
 
         // Create epoch service with random miner address
         let storage_config = StorageConfig {
-            chunk_size: chunk_size,
+            chunk_size,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_in_slot: 1,
