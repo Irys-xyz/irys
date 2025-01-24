@@ -146,7 +146,7 @@ impl PackingActor {
                                 &mut out,
                             );
 
-                            //debug!(target: "irys::packing", "Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                            debug!(target: "irys::packing", "Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
                             // write the chunk
                             //debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.id);
                             storage_module.write_chunk(i, out, ChunkType::Entropy);
@@ -234,7 +234,7 @@ impl Handler<PackingRequest> for PackingActor {
     type Result = ();
 
     fn handle(&mut self, msg: PackingRequest, _ctx: &mut Self::Context) -> Self::Result {
-        //debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.start(), &msg.chunk_range.end(), &msg.storage_module.id);
+        debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.start(), &msg.chunk_range.end(), &msg.storage_module.id);
         self.pending_jobs.write().unwrap().push_back(msg);
     }
 }
