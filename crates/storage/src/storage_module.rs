@@ -844,24 +844,27 @@ pub fn initialize_storage_files(
         }
     } else {
         tracing::info!("Storing submodules in-place in {}", base_path.display());
-        // Create base storage directory if it doesn't exist
-        fs::create_dir_all(base_path.clone())?;
     }
+
+    // Create base storage directory if it doesn't exist
+    fs::create_dir_all(base_path.clone())?;
 
     for (idx, info) in infos.iter().enumerate() {
         // Create subdirectories for each range
         for (_, dir) in info.submodules.clone() {
             let path = base_path.join(dir);
             if using_paths {
-                let symlink = submodule_paths.get(idx).unwrap();
-                if symlink.exists() {
-                    fs::remove_dir_all(symlink)?;
+                let dest = submodule_paths.get(idx).unwrap();
+                if dest.exists() {
+                    fs::remove_dir_all(&dest)?;
                 }
-                fs::create_dir_all(symlink)?;
+                fs::create_dir_all(&dest)?;
+                tracing::info!("Creating symlink from {:?} to {:?}", path, dest);
+                debug_assert!(dest.exists());
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(&path, symlink)?;
+                std::os::unix::fs::symlink(&dest, &path)?;
                 #[cfg(windows)]
-                std::os::windows::fs::symlink_dir(&path, symlink)?;
+                std::os::windows::fs::symlink_dir(&dest, &path)?;
             } else {
                 fs::create_dir_all(&path)?;
             }
