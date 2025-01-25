@@ -5533,6 +5533,7 @@ dependencies = [
  "derive_more 1.0.0",
  "eyre",
  "futures",
+ "irys-config",
  "irys-database",
  "irys-packing",
  "irys-testing-utils",

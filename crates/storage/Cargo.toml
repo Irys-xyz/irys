@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 openssl.workspace = true
 nodit.workspace = true
+irys-config.workspace = true
 eyre.workspace = true
 serde.workspace = true
 irys-types.workspace = true

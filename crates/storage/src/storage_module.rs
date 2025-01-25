@@ -1,5 +1,6 @@
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, OptionExt, Result};
+use irys_config::STORAGE_SUBMODULES_CONFIG;
 use irys_database::{
     submodule::{
         add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
@@ -813,81 +814,46 @@ impl StorageModule {
 /// - the _intervals.json, resetting the storage module state
 ///
 /// Used primarily for testing storage initialization
-pub fn initialize_storage_files(
-    base_path: &PathBuf,
-    infos: &Vec<StorageModuleInfo>,
-    submodule_paths: &Vec<PathBuf>,
-) -> Result<()> {
+pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleInfo>) -> Result<()> {
     tracing::info!(target: "irys::storage_module", base_path=?base_path, "Initializing storage files" );
-    let using_paths = !submodule_paths.is_empty();
-    let num_submodules: usize = infos.iter().map(|s| s.submodules.len()).sum();
-    tracing::info!("expecting {} declared submodules", num_submodules);
-    if using_paths {
-        tracing::info!("Using sym-links to configured submodule paths");
-        if num_submodules != submodule_paths.len() {
-            return Err(eyre!(
-                "Expected {} submodule paths based on current config, got {} paths",
-                num_submodules,
-                submodule_paths.len()
-            ));
-        }
-        if !CONFIG.persist_data_on_restart {
-            tracing::info!("Clearing existing submodules (persist_data_on_restart=false)...");
-            for path in submodule_paths {
-                if path.exists() {
-                    tracing::info!("Removing {:?}", path);
-                    fs::remove_dir_all(path)?;
-                }
-                tracing::info!("Creating {:?}", path);
-                fs::create_dir_all(path)?;
-            }
-        }
-    } else {
-        tracing::info!("Storing submodules in-place in {}", base_path.display());
-    }
+    let num_submodule_infos: usize = infos.iter().map(|s| s.submodules.len()).sum();
+    tracing::info!("expecting {} declared submodules", num_submodule_infos);
 
     // Create base storage directory if it doesn't exist
     fs::create_dir_all(base_path.clone())?;
 
     for (idx, info) in infos.iter().enumerate() {
-        // Create subdirectories for each range
         for (_, dir) in info.submodules.clone() {
-            let path = base_path.join(dir);
-            if using_paths {
-                let dest = submodule_paths.get(idx).unwrap();
-                if dest.exists() {
-                    fs::remove_dir_all(&dest)?;
-                }
-                fs::create_dir_all(&dest)?;
-                tracing::info!("Creating symlink from {:?} to {:?}", path, dest);
-                debug_assert!(dest.exists());
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&dest, &path)?;
-                #[cfg(windows)]
-                std::os::windows::fs::symlink_dir(&dest, &path)?;
+            let mut sm_path = base_path.join(dir);
+            if STORAGE_SUBMODULES_CONFIG.is_using_hardcoded_paths {
+                // Create subdirectories for each submodule if we're using hard coded submodules
+                fs::create_dir_all(&sm_path)?;
             } else {
-                fs::create_dir_all(&path)?;
+                // Create symlinks for each submodule if user provides paths
+                let submodule_paths = &STORAGE_SUBMODULES_CONFIG.submodule_paths;
+                let dest = submodule_paths.get(idx).unwrap();
+
+                fs::create_dir_all(&dest)?;
+                if let Some(filename) = dest.components().last() {
+                    sm_path = base_path.join(filename.as_os_str());
+                    if sm_path.exists() == false {
+                        tracing::info!("Creating symlink from {:?} to {:?}", sm_path, dest);
+                        debug_assert!(dest.exists());
+                        #[cfg(unix)]
+                        std::os::unix::fs::symlink(&dest, &sm_path)?;
+                        #[cfg(windows)]
+                        std::os::windows::fs::symlink_dir(&dest, &sm_path)?;
+                    }
+                }
             }
 
-            // Create empty data file if it doesn't exist
-            let data_file = path.join("chunks.dat");
-            if !data_file.exists() {
-                fs::File::create(data_file)?;
-            }
-        }
+            // Create empty chunks data file if it doesn't exist
+            let data_path = sm_path.join("chunks.dat");
+            fs::File::create(data_path)?;
 
-        // Create a StorageModuleInfo file in the base path for each module
-        let info_path = base_path.join(format!("StorageModule_{}.json", idx));
-        write_info_file(&info_path, &info).unwrap();
-
-        let path = format!(
-            "{}StorageModule_{}_intervals.json",
-            base_path.display(),
-            infos[0].id
-        );
-        let path = Path::new(&path);
-        if path.exists() && !CONFIG.persist_data_on_restart {
-            fs::remove_file(path).unwrap();
+            // Create a StorageModuleInfo file in the base path for each module
+            let info_path = base_path.join(format!("StorageModule_{}.json", idx));
+            write_info_file(&info_path, &info).unwrap();
         }
     }
 
@@ -1023,7 +989,7 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        let _ = initialize_storage_files(&base_path, &infos, &vec![]);
+        let _ = initialize_storage_files(&base_path, &infos);
 
         // Verify the StorageModuleInfo file was crated in the base path
         let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();
@@ -1150,7 +1116,7 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        initialize_storage_files(&base_path, &infos, &vec![])?;
+        initialize_storage_files(&base_path, &infos)?;
 
         // Override the default StorageModule config for testing
         let config = StorageConfig {

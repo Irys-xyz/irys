@@ -326,7 +326,7 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        initialize_storage_files(&base_path, &infos, &vec![])?;
+        initialize_storage_files(&base_path, &infos)?;
 
         // Override the default StorageModule config for testing
         let storage_config = StorageConfig {
