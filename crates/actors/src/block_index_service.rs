@@ -69,7 +69,7 @@ pub struct BlockIndexService {
 /// Allows this actor to live in the the local service registry
 impl Supervised for BlockIndexService {}
 
-impl ArbiterService for BlockIndexService {
+impl SystemService for BlockIndexService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("service started: block_index");
     }

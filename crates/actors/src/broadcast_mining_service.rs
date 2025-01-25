@@ -53,7 +53,7 @@ impl Actor for BroadcastMiningService {
 /// Adds this actor the the local service registry
 impl Supervised for BroadcastMiningService {}
 
-impl ArbiterService for BroadcastMiningService {
+impl SystemService for BroadcastMiningService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("service started: broadcast_mining (Default)");
     }

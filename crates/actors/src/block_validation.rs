@@ -12,6 +12,7 @@ use irys_types::{
 use irys_vdf::last_step_checkpoints_is_valid;
 use openssl::sha;
 use tracing::{debug, info};
+use actix::SystemService;
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -309,7 +310,7 @@ mod tests {
         },
         BlockFinalizedMessage,
     };
-    use actix::prelude::*;
+    use actix::{prelude::*, SystemRegistry};
     use dev::Registry;
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
@@ -403,7 +404,7 @@ mod tests {
         ));
 
         let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
-        Registry::set(block_index_actor.start());
+        SystemRegistry::set(block_index_actor.start());
 
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),

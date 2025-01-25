@@ -91,7 +91,7 @@ async fn post_tx_and_chunks_golden_path() {
     std::env::set_var("RUST_LOG", "trace");
 
     use ::irys_database::{config::get_data_dir, open_or_create_db};
-    use actix::{Actor, ArbiterService, Registry};
+    use actix::{Actor, ArbiterService, Registry, SystemRegistry};
     use actix_web::{middleware::Logger, test};
     use awc::http::StatusCode;
     use irys_actors::mempool_service::MempoolService;
@@ -114,7 +114,7 @@ async fn post_tx_and_chunks_golden_path() {
         storage_config.clone(),
         Arc::new(Vec::new()).to_vec(),
     );
-    Registry::set(mempool_service.start());
+    SystemRegistry::set(mempool_service.start());
     let mempool_addr = MempoolService::from_registry();
 
     let chunk_provider = ChunkProvider::new(
