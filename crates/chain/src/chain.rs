@@ -406,7 +406,8 @@ pub async fn start_irys_node(
                         false, // do not start mining automatically
                         vdf_steps_guard.clone(),
                     );
-                    part_actors.push(partition_mining_actor.start());
+                    let part_arbiter = Arbiter::new();
+                    part_actors.push(PartitionMiningActor::start_in_arbiter(&part_arbiter.handle(), |_| partition_mining_actor));
                 }
 
                 // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
