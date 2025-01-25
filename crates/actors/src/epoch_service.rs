@@ -1,6 +1,7 @@
 use actix::{Actor, ArbiterService, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
+use irys_config::STORAGE_SUBMODULES_CONFIG;
 use irys_database::{block_header_by_hash, data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
@@ -10,7 +11,7 @@ use irys_types::{
 use openssl::sha;
 use reth_db::Database;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tracing::error;
@@ -601,6 +602,7 @@ impl EpochServiceActor {
         let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
 
         let pa = self.partition_assignments.read().unwrap();
+        let sm_paths = &STORAGE_SUBMODULES_CONFIG.submodule_paths;
 
         // Configure publish ledger storage
         let mut module_infos = ledgers
@@ -611,7 +613,7 @@ impl EpochServiceActor {
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
-                submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx).into())],
+                submodules: vec![(ie(0, num_part_chunks), sm_paths[idx].clone())],
             })
             .collect::<Vec<_>>();
 
@@ -626,10 +628,7 @@ impl EpochServiceActor {
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx_start + idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
-                submodules: vec![(
-                    ie(0, num_part_chunks),
-                    format!("submodule_{}", idx_start + idx).into(),
-                )],
+                submodules: vec![(ie(0, num_part_chunks), sm_paths[idx_start + idx].clone())],
             })
             .collect::<Vec<_>>();
 
@@ -638,17 +637,21 @@ impl EpochServiceActor {
         // Sort the active capacity partitions by hash
         let mut capacity_partitions: Vec<H256> = pa.capacity_partitions.keys().copied().collect();
         capacity_partitions.sort_unstable();
+        let mut cap_parts: VecDeque<H256> = capacity_partitions.into();
 
         // Add initial capacity partition config
-        let cap_part = capacity_partitions.first().unwrap();
-        let idx = module_infos.len();
-        let cap_info = StorageModuleInfo {
-            id: idx,
-            partition_assignment: Some(*pa.capacity_partitions.get(cap_part).unwrap()),
-            submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx).into())],
-        };
+        let start_idx = module_infos.len();
 
-        module_infos.push(cap_info);
+        for i in start_idx..sm_paths.len() {
+            let cap_part = cap_parts.pop_front().unwrap();
+            let sm_info = StorageModuleInfo {
+                id: i,
+                partition_assignment: Some(*pa.capacity_partitions.get(&cap_part).unwrap()),
+                submodules: vec![(ie(0, num_part_chunks), sm_paths[i].clone())],
+            };
+            module_infos.push(sm_info);
+        }
+
         module_infos
     }
 }
