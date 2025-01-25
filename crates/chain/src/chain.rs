@@ -25,7 +25,7 @@ use irys_packing::{PackingType, PACKING_TYPE};
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
-use actix::SystemService;
+use actix::{SystemService, Arbiter};
 
 use irys_storage::{
     initialize_storage_files,
@@ -314,7 +314,8 @@ pub async fn start_irys_node(
                     storage_config.clone(),
                     storage_modules.clone(),
                 );
-                SystemRegistry::set(mempool_service.start());
+                let mempool_arbiter = Arbiter::new();
+                SystemRegistry::set(MempoolService::start_in_arbiter(&mempool_arbiter.handle(), |_| mempool_service));
                 let mempool_addr = MempoolService::from_registry();
 
                 let chunk_migration_service = ChunkMigrationService::new(
@@ -331,7 +332,8 @@ pub async fn start_irys_node(
                     storage_config.clone(),
                     vdf_config.clone(),
                 );
-                SystemRegistry::set(validation_service.start());
+                let validation_arbiter = Arbiter::new();
+                SystemRegistry::set(ValidationService::start_in_arbiter(&validation_arbiter.handle(), |_| validation_service));
 
                 let (_new_seed_tx, _new_seed_rx) = mpsc::channel::<H256>();
 
@@ -342,7 +344,8 @@ pub async fn start_irys_node(
                     block_index_guard.clone(),
                     storage_config.clone(),
                 );
-                SystemRegistry::set(block_tree_service.start());
+                let block_tree_arbiter = Arbiter::new();
+                SystemRegistry::set(BlockTreeService::start_in_arbiter(&block_tree_arbiter.handle(), |_| block_tree_service));
                 let block_tree_service = BlockTreeService::from_registry();
 
                 let block_tree_guard = block_tree_service
@@ -374,8 +377,10 @@ pub async fn start_irys_node(
                     vdf_config: vdf_config.clone(),
                     vdf_steps_guard: vdf_steps_guard.clone(),
                 };
-                let block_discovery_addr = block_discovery_actor.start();
+                let block_discovery_arbiter = Arbiter::new();
+                let block_discovery_addr = BlockDiscoveryActor::start_in_arbiter(&block_discovery_arbiter.handle(), |_| block_discovery_actor);
 
+                let block_producer_arbiter = Arbiter::new();
                 let block_producer_actor = BlockProducerActor::new(
                     db.clone(),
                     mempool_addr.clone(),
@@ -388,7 +393,7 @@ pub async fn start_irys_node(
                     vdf_steps_guard.clone(),
                     block_tree_guard.clone(),
                 );
-                let block_producer_addr = block_producer_actor.start();
+                let block_producer_addr = BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| block_producer_actor);
 
                 let mut part_actors = Vec::new();
 
@@ -429,7 +434,8 @@ pub async fn start_irys_node(
                 debug!("Packing complete");
 
                 // Let the partition actors know about the genesis difficulty
-                let broadcast_mining_service = BroadcastMiningService::from_registry();
+                let broadcast_arbiter = Arbiter::new();
+                let broadcast_mining_service = BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| BroadcastMiningService::default());
                 broadcast_mining_service
                     .send(BroadcastDifficultyUpdate(
                         latest_block
