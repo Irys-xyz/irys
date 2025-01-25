@@ -19,7 +19,7 @@ use irys_actors::{
     ActorAddresses, BlockFinalizedMessage,
 };
 use irys_api_server::{run_server, ApiState};
-use irys_config::{decode_hex, IrysNodeConfig, STORAGE_SUBMODULES_CONFIG};
+use irys_config::{decode_hex, IrysNodeConfig, StorageSubmodulesConfig, STORAGE_SUBMODULES_CONFIG};
 use irys_database::database;
 use irys_packing::{PackingType, PACKING_TYPE};
 pub use irys_reth_node_bridge::node::{
@@ -44,6 +44,7 @@ use reth::{
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c};
 use reth_db::{Database as _, HasName, HasTableType};
 use std::{
+    fs,
     sync::{mpsc, Arc, OnceLock, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -62,6 +63,13 @@ pub async fn start() -> eyre::Result<IrysNodeCtx> {
         mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(CONFIG.mining_key).unwrap()),
         ..IrysNodeConfig::default()
     };
+
+    let base_dir = &config.base_directory;
+    if fs::exists(base_dir).unwrap_or(false) && !CONFIG.persist_data_on_restart {
+        // remove existing data directory as storage modules are packed with a different miner_signer generated next
+        info!("Removing .irys folder {:?}", base_dir);
+        fs::remove_dir_all(base_dir).expect("Unable to remove .irys folder");
+    }
 
     let storage_config = StorageConfig {
         chunk_size: CONFIG.chunk_size,
@@ -159,13 +167,7 @@ pub async fn start_irys_node(
     let at_genesis;
     let latest_block_index;
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
-        let mut idx = BlockIndex::default();
-        if !CONFIG.persist_data_on_restart {
-            debug!("Resetting block index");
-            idx = idx.reset(&arc_config.clone())?
-        } else {
-            debug!("Not resetting block index");
-        }
+        let idx = BlockIndex::default();
         let i = idx.init(arc_config.clone()).await.unwrap();
 
         at_genesis = i.get_item(0).is_none();
@@ -194,6 +196,8 @@ pub async fn start_irys_node(
 
     // clone as this gets `move`d into the thread
     let irys_provider_1 = irys_provider.clone();
+
+    StorageSubmodulesConfig::load();
 
     std::thread::Builder::new()
         .name("actor-main-thread".to_string())
@@ -287,7 +291,6 @@ pub async fn start_irys_node(
                     initialize_storage_files(
                         &arc_config.storage_module_dir(),
                         &storage_module_infos,
-                        &STORAGE_SUBMODULES_CONFIG.with(|config| config.submodule_paths.clone()),
                     )
                     .unwrap();
                 }
