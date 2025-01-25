@@ -400,6 +400,7 @@ pub async fn start_irys_node(
                 // Let the partition actors know about the genesis difficulty
                 let broadcast_arbiter = Arbiter::new();
                 let broadcast_mining_service = BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| BroadcastMiningService::default());
+                SystemRegistry::set(broadcast_mining_service.clone());
                 broadcast_mining_service
                     .send(BroadcastDifficultyUpdate(
                         latest_block
