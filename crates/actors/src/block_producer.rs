@@ -431,7 +431,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .update_forkchoice(v1_payload.parent_hash, v1_payload.block_hash)
                 .await
                 .unwrap();
-            info!("UPDATED FORKCHOICE");
+            
             let block = Arc::new(irys_block);
             match block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await {
                 Ok(Ok(_)) => Ok(()),
