@@ -397,6 +397,19 @@ pub async fn start_irys_node(
 
                 let mut part_actors = Vec::new();
 
+                // Let the partition actors know about the genesis difficulty
+                let broadcast_arbiter = Arbiter::new();
+                let broadcast_mining_service = BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| BroadcastMiningService::default());
+                broadcast_mining_service
+                    .send(BroadcastDifficultyUpdate(
+                        latest_block
+                            .clone()
+                            .map(Arc::new)
+                            .unwrap_or(arc_genesis.clone()),
+                    ))
+                    .await
+                    .unwrap();
+
                 for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
@@ -433,19 +446,6 @@ pub async fn start_irys_node(
                 // let _ = wait_for_packing(packing_actor_addr.clone(), None).await;
 
                 debug!("Packing complete");
-
-                // Let the partition actors know about the genesis difficulty
-                let broadcast_arbiter = Arbiter::new();
-                let broadcast_mining_service = BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| BroadcastMiningService::default());
-                broadcast_mining_service
-                    .send(BroadcastDifficultyUpdate(
-                        latest_block
-                            .clone()
-                            .map(Arc::new)
-                            .unwrap_or(arc_genesis.clone()),
-                    ))
-                    .await
-                    .unwrap();
 
                 let part_actors_clone = part_actors.clone();
 
