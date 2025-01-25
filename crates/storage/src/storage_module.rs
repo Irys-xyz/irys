@@ -847,13 +847,19 @@ pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleIn
                 }
             }
 
-            // Create empty chunks data file if it doesn't exist
-            let data_path = sm_path.join("chunks.dat");
-            fs::File::create(data_path)?;
-
-            // Create a StorageModuleInfo file in the base path for each module
+            // First check to see if we have an existing "StorageModule_X.json"
             let info_path = base_path.join(format!("StorageModule_{}.json", idx));
-            write_info_file(&info_path, &info).unwrap();
+            if info_path.exists() == false {
+                // Create a StorageModuleInfo file for the submodule
+                write_info_file(&info_path, &info).unwrap();
+            }
+
+            // Next check to see if the storage module path has a chunks.data
+            let data_path = sm_path.join("chunks.dat");
+            if data_path.exists() == false {
+                // Create empty chunks data file if it doesn't exist
+                fs::File::create(data_path)?;
+            }
         }
     }
 

@@ -286,14 +286,10 @@ pub async fn start_irys_node(
                     .await
                     .unwrap();
 
-                // For Genesis we create the storage_modules and their files
-                if at_genesis {
-                    initialize_storage_files(
-                        &arc_config.storage_module_dir(),
-                        &storage_module_infos,
-                    )
+                // Initializes Storage Module metadata files
+                // Creates new files for any missing submodules while preserving existing ones
+                initialize_storage_files(&arc_config.storage_module_dir(), &storage_module_infos)
                     .unwrap();
-                }
 
                 // Create a list of storage modules wrapping the storage files
                 for info in storage_module_infos {
