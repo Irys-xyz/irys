@@ -238,7 +238,14 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {
-        self.difficulty = msg.0.diff;
+        let new_diff = msg.0.diff;
+        debug!(
+            "updating difficulty target: from {} to {} (diff: {})",
+            &self.difficulty,
+            &new_diff,
+            &self.difficulty.abs_diff(new_diff)
+        );
+        self.difficulty = new_diff;
     }
 }
 

@@ -2,6 +2,7 @@ use crate::{
     block_index_service::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number, vdf_service::VdfStepsReadGuard,
 };
+use base58::ToBase58;
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
@@ -12,7 +13,6 @@ use irys_types::{
 use irys_vdf::last_step_checkpoints_is_valid;
 use openssl::sha;
 use tracing::{debug, info};
-use actix::SystemService;
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -26,6 +26,11 @@ pub async fn prevalidate_block(
     steps_guard: VdfStepsReadGuard,
     _miner_address: Address,
 ) -> eyre::Result<()> {
+    debug!(
+        "Prevalidating block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
         return Err(eyre::eyre!(
             "Invalid block: chunk hash distinct from PoA chunk hash"
@@ -34,21 +39,52 @@ pub async fn prevalidate_block(
 
     // Check prev_output (vdf)
     prev_output_is_valid(&block, &previous_block)?;
+    debug!(
+        "prev_output_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
 
     // Check the difficulty
     difficulty_is_valid(&block, &previous_block, &difficulty_config)?;
 
+    debug!(
+        "difficulty_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
+
     // Check the cumulative difficulty
     cumulative_difficulty_is_valid(&block, &previous_block)?;
+    debug!(
+        "cumulative_difficulty_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
 
     // Check the solution_hash
     solution_hash_is_valid(&block)?;
+    debug!(
+        "solution_hash_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
 
     // Recall range check
     recall_recall_range_is_valid(&block, &storage_config, &steps_guard)?;
+    debug!(
+        "recall_recall_range_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
 
     // We only check last_step_checkpoints during pre-validation
     last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config).await?;
+    debug!(
+        "last_step_checkpoints_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
 
     Ok(())
 }
@@ -61,7 +97,9 @@ pub fn prev_output_is_valid(
         Ok(())
     } else {
         Err(eyre::eyre!(
-            "vdf_limiter.prev_output does not match previous blocks vdf_limiter.output"
+            "vdf_limiter.prev_output ({}) does not match previous blocks vdf_limiter.output ({})",
+            &block.vdf_limiter_info.prev_output,
+            &previous_block.vdf_limiter_info.output
         ))
     }
 }
@@ -90,7 +128,11 @@ pub fn difficulty_is_valid(
     if diff == block.diff {
         Ok(())
     } else {
-        Err(eyre::eyre!("Invalid difficulty"))
+        Err(eyre::eyre!(
+            "Invalid difficulty (expected {} got {})",
+            &diff,
+            &block.diff
+        ))
     }
 }
 
@@ -109,7 +151,11 @@ pub fn cumulative_difficulty_is_valid(
     if cumulative_diff == block.cumulative_diff {
         Ok(())
     } else {
-        Err(eyre::eyre!("Invalid cumulative_difficulty"))
+        Err(eyre::eyre!(
+            "Invalid cumulative_difficulty (expected {}, got {})",
+            &cumulative_diff,
+            &block.cumulative_diff
+        ))
     }
 }
 
@@ -123,7 +169,11 @@ pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
     if solution_diff >= block.diff {
         Ok(())
     } else {
-        Err(eyre::eyre!("Invalid solution_hash"))
+        Err(eyre::eyre!(
+            "Invalid solution_hash - expected difficulty >={}, got {} (diff: {})",
+            &block.diff,
+            &solution_diff & block.diff.abs_diff(solution_diff)
+        ))
     }
 }
 
