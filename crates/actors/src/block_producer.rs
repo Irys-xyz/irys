@@ -431,12 +431,18 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .update_forkchoice(v1_payload.parent_hash, v1_payload.block_hash)
                 .await
                 .unwrap();
-
+            
             let block = Arc::new(irys_block);
             match block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await {
                 Ok(Ok(_)) => Ok(()),
-                Ok(Err(res)) => Err(eyre!("Newly produced block {} ({}) failed pre-validation - {:?}", &block.block_hash.0.to_base58(), &block.height, res)),
-                Err(e) => Err(eyre!("Could not deliver BlockDiscoveredMessage for block {} ({}) : {:?}", &block.block_hash.0.to_base58(), &block.height, e)),
+                Ok(Err(res)) => {
+                    error!("Newly produced block {} ({}) failed pre-validation - {:?}", &block.block_hash.0.to_base58(), &block.height, res);
+                    Err(eyre!("Newly produced block {} ({}) failed pre-validation - {:?}", &block.block_hash.0.to_base58(), &block.height, res))
+                },
+                Err(e) => {
+                    error!("Could not deliver BlockDiscoveredMessage for block {} ({}) : {:?}", &block.block_hash.0.to_base58(), &block.height, e);
+                    Err(eyre!("Could not deliver BlockDiscoveredMessage for block {} ({}) : {:?}", &block.block_hash.0.to_base58(), &block.height, e))
+                }
             }?;
 
             if is_difficulty_updated {

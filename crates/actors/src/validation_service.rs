@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use actix::AsyncContext;
+use actix::{AsyncContext, SystemService};
 use actix::{Actor, ArbiterService, Context, Handler, Message, Supervised, WrapFuture};
 use irys_types::{IrysBlockHeader, StorageConfig, VDFStepsConfig};
 use irys_vdf::vdf_steps_are_valid;
@@ -51,7 +51,7 @@ impl Actor for ValidationService {
 /// Allows this actor to live in the the local service registry
 impl Supervised for ValidationService {}
 
-impl ArbiterService for ValidationService {
+impl SystemService for ValidationService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("service started: block_index");
     }

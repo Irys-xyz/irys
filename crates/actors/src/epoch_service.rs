@@ -14,6 +14,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tracing::error;
+use actix::SystemService;
 
 use crate::block_index_service::{
     BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage,
