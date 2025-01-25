@@ -15,9 +15,6 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber)?;
-
     StorageSubmodulesConfig::load();
 
     // TODO: fix this, we used to await the reth node exit future but can't anymore
