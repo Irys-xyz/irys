@@ -135,9 +135,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             solution.chunk.len(),
         );
 
-        if solution.chunk.len() <= 32 {
-            info!("Chunk:{:?}", solution.chunk)
-        }
 
         let mempool_addr = self.mempool_addr.clone();
         let block_discovery_addr = self.block_discovery_addr.clone();
