@@ -27,6 +27,7 @@ use reth::revm::primitives::B256;
 use reth_db::cursor::*;
 use reth_db::Database;
 use tracing::{error, info, warn};
+use eyre::eyre;
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
@@ -113,13 +114,15 @@ impl Actor for BlockProducerActor {
 }
 
 #[derive(Message, Debug)]
-#[rtype(result = "Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>")]
+#[rtype(result = "eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>>")]
 /// Announce to the node a mining solution has been found.
 pub struct SolutionFoundMessage(pub SolutionContext);
 
 impl Handler<SolutionFoundMessage> for BlockProducerActor {
-    type Result =
-        AtomicResponse<Self, Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>>;
+    type Result = AtomicResponse<
+        Self,
+        eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>>,
+    >;
 
     fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
         let solution = msg.0;
@@ -155,38 +158,29 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
             let (canonical_blocks, _not_onchain_count) = block_tree_guard.read().get_canonical_chain();
-            let (latest_block_hash, _height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
+            let (latest_block_hash, prev_block_height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
+            info!("Starting block production, previous block: {} ({})", &latest_block_hash, &prev_block_height);
 
             let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash)) {
-                Ok(Some(header)) => header,
-                Ok(None) => {
-                    error!("No block header found for hash {}", latest_block_hash);
-                    return None;
-                },
-                Err(e) => {
-                    error!("Failed to get previous block header: {}", e);
-                    return None;
-                }
-            };
+                Ok(Some(header)) => Ok(header),
+                Ok(None) => 
+                    Err(eyre!("No block header found for hash {}", latest_block_hash)),
+                Err(e) =>  Err(eyre!("Failed to get previous block header: {}", e))
+            }?;
 
             // Retrieve the previous block header and hash
 
             let prev_block_hash = block_item.block_hash;
             let prev_block_header: IrysBlockHeader = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash)) {
-                Ok(Some(header)) => header,
-                Ok(None) => {
-                    error!("No block header found for hash {}", prev_block_hash);
-                    return None;
-                },
-                Err(e) => {
-                    error!("Failed to get previous block header: {}", e);
-                    return None;
-                }
-            };
+                Ok(Some(header)) => Ok(header),
+                Ok(None) => 
+                    Err(eyre!("No block header found for block {} ({}) ", prev_block_hash.0.to_base58(), prev_block_height)),
+                Err(e) => 
+                   Err(eyre!("Failed to get previous block {} ({}) header: {}", prev_block_hash.0.to_base58(), prev_block_height,  e)) 
+            }?;
 
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
                 warn!("Solution for old step number {}, previous block step number {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number);
-                return None;
             }
 
             // Get all the ingress proofs for data promotion
@@ -194,21 +188,21 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let mut publish_txids: Vec<H256> = Vec::new();
             let mut proofs: Vec<TxIngressProof> = Vec::new();
             {
-                let read_tx = db.tx().map_err(|e| {
-                    error!("Failed to create transaction: {}", e);
-                }).ok()?;
+                let read_tx = db.tx().map_err(|e| 
+                    eyre!("Failed to create DB transaction: {}", e)
+                )?;
 
-                let mut read_cursor = read_tx.new_cursor::<IngressProofs>().map_err(|e| {
-                    error!("Failed to create cursor: {}", e);
-                }).ok()?;
+                let mut read_cursor = read_tx.new_cursor::<IngressProofs>().map_err(|e| 
+                    eyre!("Failed to create DB read cursor: {}", e)
+                )?;
 
-                let walker = read_cursor.walk(None).map_err(|e| {
-                    error!("Failed to create walker: {}", e);
-                }).ok()?;
+                let walker = read_cursor.walk(None).map_err(|e| 
+                    eyre!("Failed to create DB read cursor walker: {}", e)
+                )?;
 
-                let ingress_proofs = walker.collect::<Result<HashMap<_, _>, _>>().map_err(|e| {
-                    error!("Failed to collect results: {}", e);
-                }).ok()?;
+                let ingress_proofs = walker.collect::<Result<HashMap<_, _>, _>>().map_err(|e| 
+                    eyre!("Failed to collect ingress proofs from database: {}", e)
+                )?;
 
                 // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
                 for data_root in ingress_proofs.keys() {
@@ -322,13 +316,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
                 H256List::new()
             } else {
-                    match vdf_steps.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            error!("VDF step range {} unavailable while producing block, reason: {:?}, aborting", solution.vdf_step, e);
-                            return None
-                        }
-                    }
+                vdf_steps.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await
+                .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))?
             };
             steps.push(solution.seed.0);
 
@@ -382,13 +371,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
-            let context =  match RethNodeContext::new(reth.into()).await {
-                Ok(c) => c,
-                Err(_) => {
-                    error!("Reth node is unavailable!");
-                    return None
-                }
-            };
+            let context =  RethNodeContext::new(reth.into()).await.map_err(|e| eyre!("Error connecting to Reth - {}", e))?;
 
             let shadows = Shadows::new(
                 submit_txs
@@ -454,17 +437,18 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             let block = Arc::new(irys_block);
             match block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await {
-                Ok(res) => assert!(res.is_ok(), "Newly produced block failed pre-validation. "),
-                Err(e) => panic!("Could not deliver BlockDiscoveredMessage: {}", e),
-            }
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(res)) => Err(eyre!("Newly produced block {} ({}) failed pre-validation - {:?}", &block.block_hash.0.to_base58(), &block.height, res)),
+                Err(e) => Err(eyre!("Could not deliver BlockDiscoveredMessage for block {} ({}) : {:?}", &block.block_hash.0.to_base58(), &block.height, e)),
+            }?;
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-            info!("Finished producing block hash: {}, height: {}", &block_hash.0.to_base58(),&block_height);
+            info!("Finished producing block {}, ({})", &block_hash.0.to_base58(),&block_height);
 
-            Some((block.clone(), exec_payload))
+            Ok(Some((block.clone(), exec_payload)))
         }
         .into_actor(self),
         ))
