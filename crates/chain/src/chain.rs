@@ -19,7 +19,7 @@ use irys_actors::{
     ActorAddresses, BlockFinalizedMessage,
 };
 use irys_api_server::{run_server, ApiState};
-use irys_config::{decode_hex, IrysNodeConfig, StorageSubmodulesConfig, STORAGE_SUBMODULES_CONFIG};
+use irys_config::{decode_hex, IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
 use irys_packing::{PackingType, PACKING_TYPE};
 pub use irys_reth_node_bridge::node::{

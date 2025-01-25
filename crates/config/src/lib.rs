@@ -9,7 +9,6 @@ use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;
 use irys_types::{irys::IrysSigner, Address, CONFIG};
 use serde::{Deserialize, Serialize};
-use tracing::info;
 
 pub mod chain;
 

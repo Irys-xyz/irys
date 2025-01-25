@@ -17,7 +17,7 @@ use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset,
     LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize,
-    StorageConfig, TxPath, TxRelativeChunkOffset, UnpackedChunk, CONFIG, H256,
+    StorageConfig, TxPath, TxRelativeChunkOffset, UnpackedChunk, H256,
 };
 use nodit::{
     interval::{ie, ii},
