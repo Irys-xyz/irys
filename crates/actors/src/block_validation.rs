@@ -172,7 +172,8 @@ pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
         Err(eyre::eyre!(
             "Invalid solution_hash - expected difficulty >={}, got {} (diff: {})",
             &block.diff,
-            &solution_diff & block.diff.abs_diff(solution_diff)
+            &solution_diff,
+            &block.diff.abs_diff(solution_diff)
         ))
     }
 }
