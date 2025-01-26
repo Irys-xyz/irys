@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::CONFIG;
-use nodit::{interval::ie, InclusiveInterval, Interval};
+use nodit::{interval::{ie, ii}, InclusiveInterval, Interval};
 use serde::{Deserialize, Serialize};
 
 pub const MEGABYTE: usize = 1024 * 1024;
@@ -207,7 +207,7 @@ pub fn split_interval(
     if start > end {
         return Err(eyre::eyre!("Invalid interval bounds: [{}, {}]", start, end));
     } else if start == end {
-        return Ok(Vec::new());
+        return Ok(vec![PartitionChunkRange(ii(start, end))]);
     }
 
     let n = if (end - start + 1) % step == 0 {
@@ -239,6 +239,12 @@ mod tests {
 
     #[test]
     fn test_split_interval() {
+        // interval with just one element
+        let interval = PartitionChunkRange(ii(3, 3));
+        let splits = split_interval(&interval, 3).unwrap();
+        assert_eq!(splits.len(), 1);
+        assert_eq!(splits[0], PartitionChunkRange(ii(3, 3)));
+        
         // even interval
         let interval = PartitionChunkRange(ii(0, 3));
         let splits = split_interval(&interval, 3).unwrap();
@@ -266,11 +272,6 @@ mod tests {
         let interval = PartitionChunkRange(ie(0, 4));
         let splits = split_interval(&interval, 0);
         assert!(splits.is_err());
-
-        // empty interval,
-        let interval = PartitionChunkRange(ii(1, 1));
-        let splits = split_interval(&interval, 1).unwrap();
-        assert_eq!(splits.len(), 0);
 
         // even interval not starting in zero, all complete splits
         let interval = PartitionChunkRange(ii(2, 7));
