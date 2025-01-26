@@ -461,7 +461,7 @@ impl EpochServiceActor {
         capacity_partitions: &mut Vec<H256>,
         rng: &mut SimpleRNG,
     ) {
-        debug!("processing slot needs for ledger {:?}", &ledger);
+        debug!("Processing slot needs for ledger {:?}", &ledger);
         // Get slot needs for the specified ledger
         let slot_needs: Vec<(usize, usize)>;
         {
@@ -494,7 +494,7 @@ impl EpochServiceActor {
                 {
                     let mut ledgers = self.ledgers.write().unwrap();
                     debug!(
-                        "adding partition {} to slot {} for  {:?}",
+                        "Assigning partition hash {} to slot {} for  {:?}",
                         &partition_hash, &slot_index, &ledger
                     );
 
