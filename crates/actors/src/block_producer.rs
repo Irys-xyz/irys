@@ -8,6 +8,7 @@ use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
 use base58::ToBase58;
+use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
     Ledger,
@@ -27,7 +28,6 @@ use reth::revm::primitives::B256;
 use reth_db::cursor::*;
 use reth_db::Database;
 use tracing::{error, info, warn};
-use eyre::eyre;
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
@@ -135,7 +135,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             solution.chunk.len(),
         );
 
-
         let mempool_addr = self.mempool_addr.clone();
         let block_discovery_addr = self.block_discovery_addr.clone();
         let epoch_service_addr = self.epoch_service.clone();
@@ -160,7 +159,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash)) {
                 Ok(Some(header)) => Ok(header),
-                Ok(None) => 
+                Ok(None) =>
                     Err(eyre!("No block header found for hash {}", latest_block_hash)),
                 Err(e) =>  Err(eyre!("Failed to get previous block header: {}", e))
             }?;
@@ -170,9 +169,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let prev_block_hash = block_item.block_hash;
             let prev_block_header: IrysBlockHeader = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash)) {
                 Ok(Some(header)) => Ok(header),
-                Ok(None) => 
+                Ok(None) =>
                     Err(eyre!("No block header found for block {} ({}) ", prev_block_hash.0.to_base58(), prev_block_height)),
-                Err(e) => 
+                Err(e) =>
                    Err(eyre!("Failed to get previous block {} ({}) header: {}", prev_block_hash.0.to_base58(), prev_block_height,  e)) 
             }?;
 
@@ -185,19 +184,19 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let mut publish_txids: Vec<H256> = Vec::new();
             let mut proofs: Vec<TxIngressProof> = Vec::new();
             {
-                let read_tx = db.tx().map_err(|e| 
+                let read_tx = db.tx().map_err(|e|
                     eyre!("Failed to create DB transaction: {}", e)
                 )?;
 
-                let mut read_cursor = read_tx.new_cursor::<IngressProofs>().map_err(|e| 
+                let mut read_cursor = read_tx.new_cursor::<IngressProofs>().map_err(|e|
                     eyre!("Failed to create DB read cursor: {}", e)
                 )?;
 
-                let walker = read_cursor.walk(None).map_err(|e| 
+                let walker = read_cursor.walk(None).map_err(|e|
                     eyre!("Failed to create DB read cursor walker: {}", e)
                 )?;
 
-                let ingress_proofs = walker.collect::<Result<HashMap<_, _>, _>>().map_err(|e| 
+                let ingress_proofs = walker.collect::<Result<HashMap<_, _>, _>>().map_err(|e|
                     eyre!("Failed to collect ingress proofs from database: {}", e)
                 )?;
 
@@ -431,7 +430,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .update_forkchoice(v1_payload.parent_hash, v1_payload.block_hash)
                 .await
                 .unwrap();
-            
+
             let block = Arc::new(irys_block);
             match block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await {
                 Ok(Ok(_)) => Ok(()),
