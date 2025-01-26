@@ -33,7 +33,7 @@ mod tests {
     use crate::routes;
 
     use super::*;
-    use actix::{Actor, ArbiterService, Registry};
+    use actix::{Actor, ArbiterService, Registry, SystemRegistry, SystemService as _};
     use actix_web::{middleware::Logger, test, App, Error};
     use awc::http::StatusCode;
     use base58::ToBase58;
