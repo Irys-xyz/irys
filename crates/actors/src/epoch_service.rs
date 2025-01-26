@@ -1,3 +1,4 @@
+use actix::SystemService;
 use actix::{Actor, ArbiterService, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
@@ -14,7 +15,6 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tracing::error;
-use actix::SystemService;
 
 use crate::block_index_service::{
     BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage,

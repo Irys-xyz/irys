@@ -8,6 +8,7 @@ use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
 use base58::ToBase58;
+use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
     Ledger,
@@ -27,7 +28,6 @@ use reth::revm::primitives::B256;
 use reth_db::cursor::*;
 use reth_db::Database;
 use tracing::{error, info, warn};
-use eyre::eyre;
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
@@ -134,7 +134,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             solution.tx_path.is_none(),
             solution.chunk.len(),
         );
-
 
         let mempool_addr = self.mempool_addr.clone();
         let block_discovery_addr = self.block_discovery_addr.clone();
