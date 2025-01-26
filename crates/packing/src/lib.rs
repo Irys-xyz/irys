@@ -113,7 +113,7 @@ pub fn capacity_pack_range_cuda_c(
     iterations: Option<u32>,
     entropy: &mut Vec<u8>,
 ) -> u32 {
-    use std::result;
+    
 
     let mining_addr_len = mining_address.len();
     let partition_hash_len = partition_hash.0.len();

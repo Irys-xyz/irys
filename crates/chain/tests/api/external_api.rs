@@ -11,7 +11,7 @@ use {
 };
 
 use actix::prelude::*;
-use dev::{Registry, SystemRegistry};
+use dev::SystemRegistry;
 use irys_actors::{
     block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
     mempool_service::GetBestMempoolTxs,
