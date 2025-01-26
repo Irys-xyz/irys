@@ -4,7 +4,10 @@ use std::{
 };
 
 use crate::CONFIG;
-use nodit::{interval::{ie, ii}, InclusiveInterval, Interval};
+use nodit::{
+    interval::{ie, ii},
+    InclusiveInterval, Interval,
+};
 use serde::{Deserialize, Serialize};
 
 pub const MEGABYTE: usize = 1024 * 1024;
@@ -244,7 +247,7 @@ mod tests {
         let splits = split_interval(&interval, 3).unwrap();
         assert_eq!(splits.len(), 1);
         assert_eq!(splits[0], PartitionChunkRange(ii(3, 3)));
-        
+
         // even interval
         let interval = PartitionChunkRange(ii(0, 3));
         let splits = split_interval(&interval, 3).unwrap();

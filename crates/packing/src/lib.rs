@@ -113,8 +113,6 @@ pub fn capacity_pack_range_cuda_c(
     iterations: Option<u32>,
     entropy: &mut Vec<u8>,
 ) -> u32 {
-    
-
     let mining_addr_len = mining_address.len();
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
