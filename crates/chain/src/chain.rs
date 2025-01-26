@@ -1,5 +1,5 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, ArbiterService, Registry, System, SystemRegistry};
+use actix::{Actor, ArbiterService, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
@@ -14,7 +14,7 @@ use irys_actors::{
     },
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
-    packing::{PackingActor, PackingConfig, PackingRequest},
+    packing::{PackingActor, PackingRequest},
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
     ActorAddresses, BlockFinalizedMessage,
@@ -245,15 +245,6 @@ pub async fn start_irys_node(
                 let mut epoch_service = EpochServiceActor::new(Some(config));
                 epoch_service.initialize(&db).await;
                 let epoch_service_actor_addr = epoch_service.start();
-
-                if at_genesis {
-                    // Tell the epoch_service to initialize the ledgers
-                    let msg = NewEpochMessage(arc_genesis.clone());
-                    match epoch_service_actor_addr.send(msg).await {
-                        Ok(_) => info!("Genesis Epoch tasks complete."),
-                        Err(_) => panic!("Failed to perform genesis epoch tasks"),
-                    }
-                }
 
                 // Retrieve ledger assignments
                 let ledgers_guard = epoch_service_actor_addr

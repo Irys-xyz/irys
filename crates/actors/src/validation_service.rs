@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use actix::{AsyncContext, SystemService};
 use actix::{Actor, ArbiterService, Context, Handler, Message, Supervised, WrapFuture};
+use actix::{AsyncContext, SystemService};
 use irys_types::{IrysBlockHeader, StorageConfig, VDFStepsConfig};
 use irys_vdf::vdf_steps_are_valid;
 

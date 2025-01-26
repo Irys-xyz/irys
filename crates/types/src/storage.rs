@@ -4,7 +4,10 @@ use std::{
 };
 
 use crate::CONFIG;
-use nodit::{interval::ie, InclusiveInterval, Interval};
+use nodit::{
+    interval::{ie, ii},
+    InclusiveInterval, Interval,
+};
 use serde::{Deserialize, Serialize};
 
 pub const MEGABYTE: usize = 1024 * 1024;
@@ -204,8 +207,10 @@ pub fn split_interval(
     let start = interval.start();
     let end = interval.end();
 
-    if start >= end {
+    if start > end {
         return Err(eyre::eyre!("Invalid interval bounds: [{}, {}]", start, end));
+    } else if start == end {
+        return Ok(vec![PartitionChunkRange(ii(start, end))]);
     }
 
     let n = if (end - start + 1) % step == 0 {
@@ -219,7 +224,7 @@ pub fn split_interval(
     for i in 0..n {
         let interval_start = start + i as u32 * step;
         let interval_end = if i == n - 1 {
-            end + 1 // exclusive end, last chunk could not be full
+            end + 1 // exclusive end, last chunk may not be full
         } else {
             start + (i as u32 + 1) * step
         };
@@ -227,4 +232,79 @@ pub fn split_interval(
         intervals.push(PartitionChunkRange(ie(interval_start, interval_end)));
     }
     Ok(intervals)
+}
+
+#[cfg(test)]
+mod tests {
+    use nodit::interval::ii;
+
+    use super::*;
+
+    #[test]
+    fn test_split_interval() {
+        // interval with just one element
+        let interval = PartitionChunkRange(ii(3, 3));
+        let splits = split_interval(&interval, 3).unwrap();
+        assert_eq!(splits.len(), 1);
+        assert_eq!(splits[0], PartitionChunkRange(ii(3, 3)));
+
+        // even interval
+        let interval = PartitionChunkRange(ii(0, 3));
+        let splits = split_interval(&interval, 3).unwrap();
+        assert_eq!(splits.len(), 2);
+        assert_eq!(splits[0], PartitionChunkRange(ii(0, 2)));
+        assert_eq!(splits[1], PartitionChunkRange(ii(3, 3)));
+
+        // odd interval
+        let interval = PartitionChunkRange(ii(0, 4));
+        let splits = split_interval(&interval, 1).unwrap();
+        assert_eq!(splits.len(), 5);
+        assert_eq!(splits[0], PartitionChunkRange(ii(0, 0)));
+        assert_eq!(splits[1], PartitionChunkRange(ii(1, 1)));
+        assert_eq!(splits[2], PartitionChunkRange(ii(2, 2)));
+        assert_eq!(splits[3], PartitionChunkRange(ii(3, 3)));
+        assert_eq!(splits[4], PartitionChunkRange(ii(4, 4)));
+
+        // odd interval, with step size bigger than it
+        let interval = PartitionChunkRange(ie(0, 4));
+        let splits = split_interval(&interval, 8).unwrap();
+        assert_eq!(splits.len(), 1);
+        assert_eq!(splits[0], PartitionChunkRange(ie(0, 4)));
+
+        // zero step error
+        let interval = PartitionChunkRange(ie(0, 4));
+        let splits = split_interval(&interval, 0);
+        assert!(splits.is_err());
+
+        // even interval not starting in zero, all complete splits
+        let interval = PartitionChunkRange(ii(2, 7));
+        let splits = split_interval(&interval, 3).unwrap();
+        assert_eq!(splits.len(), 2);
+        assert_eq!(splits[0], PartitionChunkRange(ii(2, 4)));
+        assert_eq!(splits[1], PartitionChunkRange(ii(5, 7)));
+
+        // odd interval not starting in zero, not all complete splits
+        let interval = PartitionChunkRange(ii(3, 6));
+        let splits = split_interval(&interval, 1).unwrap();
+        assert_eq!(splits.len(), 4);
+        assert_eq!(splits[0], PartitionChunkRange(ii(3, 3)));
+        assert_eq!(splits[1], PartitionChunkRange(ii(4, 4)));
+        assert_eq!(splits[2], PartitionChunkRange(ii(5, 5)));
+        assert_eq!(splits[3], PartitionChunkRange(ii(6, 6)));
+
+        // odd interval not starting in zero not all complete
+        let interval = PartitionChunkRange(ii(5, 8));
+        let splits = split_interval(&interval, 3).unwrap();
+        assert_eq!(splits.len(), 2);
+        assert_eq!(splits[0], PartitionChunkRange(ii(5, 7)));
+        assert_eq!(splits[1], PartitionChunkRange(ii(8, 8)));
+
+        // even interval not starting in zero, odd intervals, not all complete splits
+        let interval = PartitionChunkRange(ii(3, 7));
+        let splits = split_interval(&interval, 2).unwrap();
+        assert_eq!(splits.len(), 3);
+        assert_eq!(splits[0], PartitionChunkRange(ii(3, 4)));
+        assert_eq!(splits[1], PartitionChunkRange(ii(5, 6)));
+        assert_eq!(splits[2], PartitionChunkRange(ii(7, 7)));
+    }
 }
