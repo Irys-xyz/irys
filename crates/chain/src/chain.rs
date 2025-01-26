@@ -1,5 +1,5 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, ArbiterService, Registry, System, SystemRegistry};
+use actix::{Actor, ArbiterService, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
@@ -14,7 +14,7 @@ use irys_actors::{
     },
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
-    packing::{PackingActor, PackingConfig, PackingRequest},
+    packing::{PackingActor, PackingRequest},
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
     ActorAddresses, BlockFinalizedMessage,

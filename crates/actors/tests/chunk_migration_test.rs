@@ -14,7 +14,6 @@ use assert_matches::assert_matches;
 
 use actix::{prelude::*, SystemRegistry};
 use chunk::TxRelativeChunkOffset;
-use dev::Registry;
 use irys_actors::{
     block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
 };
