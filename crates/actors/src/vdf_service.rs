@@ -91,11 +91,10 @@ impl Default for VdfService {
 
 impl VdfService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
-    pub fn new(
-        block_index: Option<BlockIndexReadGuard>,
-        db: Option<DatabaseProvider>,
-    ) -> Self {
-        let capacity = (CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range).try_into().unwrap();
+    pub fn new(block_index: Option<BlockIndexReadGuard>, db: Option<DatabaseProvider>) -> Self {
+        let capacity = (CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range)
+            .try_into()
+            .unwrap();
 
         let latest_block_hash = if let Some(bi) = block_index {
             bi.read().get_latest_item().map(|item| item.block_hash)
@@ -236,7 +235,7 @@ mod tests {
         service.vdf_state.write().unwrap().seeds = VecDeque::with_capacity(4);
         service.vdf_state.write().unwrap().max_seeds_num = 4;
         let addr = service.start();
-        
+
         // Send 8 seeds 1,2..,8 (capacity is 4)
         for i in 0..8 {
             addr.send(VdfSeed(Seed(H256([(i + 1) as u8; 32]))))
