@@ -210,7 +210,7 @@ impl PackingActor {
                             }
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                         });
-                        debug!(target: "irys::packing::update", "CUDA Packed chunks {} - {} for SM {} partition_hash {} mining_address {} iterations {} -----------------------------------------------------------------------------------------------------", chunk_range_split.start(), chunk_range_split.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                        debug!(target: "irys::packing::update", "CUDA Packed chunks {} - {} for SM {} partition_hash {} mining_address {} iterations {}", chunk_range_split.start(), chunk_range_split.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                     }
                 }
                 _ => unimplemented!(),
