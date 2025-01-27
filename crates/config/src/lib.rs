@@ -199,19 +199,13 @@ pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesCon
         const FILENAME: &str = ".irys_storage_submodules.toml";
 
         let node_config = IrysNodeConfig::default();
-
-        let mut is_using_hardcoded_paths = false;
-        let home_dir: PathBuf = if let Ok(irys_env) = env::var("IRYS_ENV") {
-            println!("IRYS_ENV: {}", irys_env);
-            env::var("HOME")
-                .expect("Failed to get home directory")
-                .into()
-        } else {
-            is_using_hardcoded_paths = true;
-            node_config.instance_directory()
-        };
-
+        let home_dir = node_config.instance_directory();
         let config_path = Path::new(&home_dir).join(FILENAME);
+
+        // let home_dir = env::var("HOME")
+        //     .expect("Failed to get home directory")
+        //     .into();
+
         if config_path.exists() {
             tracing::info!("Loading storage submodules config from {:?}", config_path);
         } else {
@@ -220,17 +214,13 @@ pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesCon
                 config_path
             );
 
-            let config = if is_using_hardcoded_paths {
-                StorageSubmodulesConfig {
-                    is_using_hardcoded_paths: true,
-                    submodule_paths: vec![
-                        Path::new(&home_dir).join("storage_modules/submodule_0"),
-                        Path::new(&home_dir).join("storage_modules/submodule_1"),
-                        Path::new(&home_dir).join("storage_modules/submodule_2"),
-                    ],
-                }
-            } else {
-                StorageSubmodulesConfig::default()
+            let config = StorageSubmodulesConfig {
+                is_using_hardcoded_paths: true, // Note, this field is added to the config when hard-coding modules
+                submodule_paths: vec![
+                    Path::new(&home_dir).join("storage_modules/submodule_0"),
+                    Path::new(&home_dir).join("storage_modules/submodule_1"),
+                    Path::new(&home_dir).join("storage_modules/submodule_2"),
+                ],
             };
 
             let toml = toml::to_string(&config)

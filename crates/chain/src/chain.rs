@@ -141,6 +141,8 @@ pub async fn start_irys_node(
 ) -> eyre::Result<IrysNodeCtx> {
     info!("Using directory {:?}", &node_config.base_directory);
 
+    StorageSubmodulesConfig::load();
+
     if PACKING_TYPE != PackingType::CPU && storage_config.chunk_size != CHUNK_SIZE {
         error!("GPU packing only supports chunk size {}!", CHUNK_SIZE)
     }
@@ -197,8 +199,6 @@ pub async fn start_irys_node(
 
     // clone as this gets `move`d into the thread
     let irys_provider_1 = irys_provider.clone();
-
-    StorageSubmodulesConfig::load();
 
     std::thread::Builder::new()
         .name("actor-main-thread".to_string())
