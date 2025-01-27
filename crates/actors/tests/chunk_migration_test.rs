@@ -12,9 +12,8 @@ use {
 
 use assert_matches::assert_matches;
 
-use actix::prelude::*;
+use actix::{prelude::*, SystemRegistry};
 use chunk::TxRelativeChunkOffset;
-use dev::Registry;
 use irys_actors::{
     block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
 };
@@ -143,7 +142,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
         storage_config.clone(),
         storage_modules.clone(),
     );
-    Registry::set(mempool_service.start());
+    SystemRegistry::set(mempool_service.start());
     let mempool_addr = MempoolService::from_registry();
 
     // Send tx headers to mempool
@@ -173,7 +172,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
 
     // Create a block_index actor
     let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
-    Registry::set(block_index_actor.start());
+    SystemRegistry::set(block_index_actor.start());
     let block_index_addr = BlockIndexService::from_registry();
 
     let height: u64;

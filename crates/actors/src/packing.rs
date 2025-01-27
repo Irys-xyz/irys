@@ -121,6 +121,7 @@ impl PackingActor {
                 entropy_packing_iterations,
                 ..
             } = storage_module.storage_config;
+            let storage_module_id = storage_module.id;
 
             match PACKING_TYPE {
                 PackingType::CPU => {
@@ -147,14 +148,19 @@ impl PackingActor {
                                 &mut out,
                             );
 
-                            debug!(target: "irys::packing", "Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                            debug!(target: "irys::packing::progress", "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                             // write the chunk
                             //debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.id);
                             storage_module.write_chunk(i, out, ChunkType::Entropy);
                             let _ = storage_module.sync_pending_chunks();
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                         });
+
+                        if i % 1000 == 0 {
+                            debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", chunk_range.start(), &i, chunk_range.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                        }
                     }
+                    debug!(target: "irys::packing::done", "CPU Packed chunk {} - {} for SM {} partition_hash {} mining_address {} iterations {}",  chunk_range.start(),chunk_range.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                 }
                 #[cfg(feature = "nvidia")]
                 PackingType::CUDA => {
@@ -193,6 +199,7 @@ impl PackingActor {
                             );
                             let _ = storage_module.sync_pending_chunks();
                         }
+                        debug!(target: "irys::packing::update", "CUDA Packed chunks {} - {} for SM {} partition_hash {} mining_address {} iterations {}", chunk_range_split.start(), chunk_range_split.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                     }
                 }
                 _ => unimplemented!(),

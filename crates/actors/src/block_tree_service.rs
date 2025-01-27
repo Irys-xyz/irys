@@ -84,7 +84,7 @@ impl Actor for BlockTreeService {
 /// Adds this actor the the local service registry
 impl Supervised for BlockTreeService {}
 
-impl ArbiterService for BlockTreeService {
+impl SystemService for BlockTreeService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("service started: block_tree (Default)");
     }

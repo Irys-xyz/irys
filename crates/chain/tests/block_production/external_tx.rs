@@ -100,7 +100,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
             .actor_addresses
             .block_producer
             .send(SolutionFoundMessage(SolutionContext::default()))
-            .await?
+            .await??
             .unwrap();
 
         //check reth for built block

@@ -175,7 +175,7 @@ async fn test_blockprod() -> eyre::Result<()> {
         .actor_addresses
         .block_producer
         .send(SolutionFoundMessage(poa_solution))
-        .await?
+        .await??
         .unwrap();
 
     for receipt in reth_exec_env.shadow_receipts {
@@ -277,7 +277,7 @@ async fn mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
             .actor_addresses
             .block_producer
             .send(SolutionFoundMessage(poa_solution.clone()));
-        let (block, reth_exec_env) = fut.await?.unwrap();
+        let (block, reth_exec_env) = fut.await??.unwrap();
 
         //check reth for built block
         let reth_block = reth_context
@@ -321,7 +321,7 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
         .actor_addresses
         .block_producer
         .send(SolutionFoundMessage(poa_solution))
-        .await?
+        .await??
         .unwrap();
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
@@ -455,7 +455,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .actor_addresses
         .block_producer
         .send(SolutionFoundMessage(poa_solution))
-        .await?
+        .await??
         .unwrap();
 
     for receipt in reth_exec_env.shadow_receipts {
