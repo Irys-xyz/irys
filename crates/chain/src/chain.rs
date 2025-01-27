@@ -141,6 +141,15 @@ pub async fn start_irys_node(
 ) -> eyre::Result<IrysNodeCtx> {
     info!("Using directory {:?}", &node_config.base_directory);
 
+    // Delete the .irys folder if we are not persisting data on restart
+    let base_dir = node_config.instance_directory();
+    if fs::exists(&base_dir).unwrap_or(false) && !CONFIG.persist_data_on_restart {
+        // remove existing data directory as storage modules are packed with a different miner_signer generated next
+        info!("Removing .irys folder {:?}", &base_dir);
+        fs::remove_dir_all(&base_dir).expect("Unable to remove .irys folder");
+    }
+
+    // Autogenerates the  ".irys_storage_submodules.toml" in dev mode
     StorageSubmodulesConfig::load();
 
     if PACKING_TYPE != PackingType::CPU && storage_config.chunk_size != CHUNK_SIZE {
@@ -279,8 +288,12 @@ pub async fn start_irys_node(
 
                 // Initializes Storage Module metadata files
                 // Creates new files for any missing submodules while preserving existing ones
-                initialize_storage_files(&arc_config.storage_module_dir(), &storage_module_infos)
-                    .unwrap();
+                initialize_storage_files(
+                    &arc_config.storage_module_dir(),
+                    &storage_module_infos,
+                    &storage_config,
+                )
+                .unwrap();
 
                 // Create a list of storage modules wrapping the storage files
                 for info in storage_module_infos {

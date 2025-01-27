@@ -623,7 +623,11 @@ mod tests {
                 (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         };
-        initialize_storage_files(&base_path, &vec![storage_module_info.clone()])?;
+        initialize_storage_files(
+            &base_path,
+            &vec![storage_module_info.clone()],
+            &storage_config,
+        )?;
 
         // Override the default StorageModule config for testing
         let config = StorageConfig {

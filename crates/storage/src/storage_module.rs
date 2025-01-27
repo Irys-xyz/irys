@@ -1,3 +1,4 @@
+use base58::ToBase58;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, OptionExt, Result};
 use irys_config::STORAGE_SUBMODULES_CONFIG;
@@ -15,7 +16,7 @@ use irys_types::{
     app_state::DatabaseProvider,
     get_leaf_proof,
     partition::{PartitionAssignment, PartitionHash},
-    Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset,
+    Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset,
     LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize,
     StorageConfig, TxPath, TxRelativeChunkOffset, UnpackedChunk, H256,
 };
@@ -111,6 +112,35 @@ pub struct StorageModuleInfo {
     pub partition_assignment: Option<PartitionAssignment>,
     /// Range of chunk offsets and path for each submodule
     pub submodules: Vec<(Interval<u32>, SubmodulePath)>,
+}
+
+impl StorageModuleInfo {
+    /// Loads the [`StorageModuleInfo`] from a JSON file at the given path
+    pub fn from_json(path: impl AsRef<Path>) -> eyre::Result<Self> {
+        let contents = fs::read_to_string(path)?;
+        let config: Self = serde_json::from_str(&contents)?;
+        Ok(config)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackingParams {
+    pub packing_address: Address,
+    pub partition_hash: H256,
+}
+
+impl PackingParams {
+    /// Loads the [`PackingParams`] from a TOML file at the given path
+    pub fn from_toml(path: impl AsRef<Path>) -> eyre::Result<Self> {
+        let contents = fs::read_to_string(path)?;
+        let config: Self = toml::from_str(&contents)?;
+        Ok(config)
+    }
+
+    pub fn write_to_disk(&self, path: &Path) {
+        let toml = toml::to_string(self).expect("Able to serialize config");
+        fs::write(&path, toml).unwrap_or_else(|_| panic!("Failed to write config to {:?}", path));
+    }
 }
 
 /// Manages chunk storage on a single physical drive
@@ -814,7 +844,11 @@ impl StorageModule {
 /// - the _intervals.json, resetting the storage module state
 ///
 /// Used primarily for testing storage initialization
-pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleInfo>) -> Result<()> {
+pub fn initialize_storage_files(
+    base_path: &PathBuf,
+    infos: &Vec<StorageModuleInfo>,
+    storage_config: &StorageConfig,
+) -> Result<()> {
     tracing::info!(target: "irys::storage_module", base_path=?base_path, "Initializing storage files" );
     let num_submodule_infos: usize = infos.iter().map(|s| s.submodules.len()).sum();
     tracing::info!("expecting {} declared submodules", num_submodule_infos);
@@ -822,9 +856,20 @@ pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleIn
     // Create base storage directory if it doesn't exist
     fs::create_dir_all(base_path.clone())?;
 
+    // Start by removing all the submodule symlinks if they exist
+    fs::read_dir(base_path)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_symlink()).unwrap_or(false))
+        .for_each(|e| {
+            println!("{:?}", e.path());
+            fs::remove_dir_all(e.path()).unwrap()
+        });
+
     for (idx, info) in infos.iter().enumerate() {
         for (_, dir) in info.submodules.clone() {
             let mut sm_path = base_path.join(dir);
+
+            // Hardcoded config vs. user config
             if STORAGE_SUBMODULES_CONFIG.is_using_hardcoded_paths {
                 // Create subdirectories for each submodule if we're using hard coded submodules
                 fs::create_dir_all(&sm_path)?;
@@ -836,18 +881,15 @@ pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleIn
                 fs::create_dir_all(&dest)?;
                 if let Some(filename) = dest.components().last() {
                     sm_path = base_path.join(filename.as_os_str());
-                    if sm_path.exists() == false {
-                        tracing::info!("Creating symlink from {:?} to {:?}", sm_path, dest);
-                        debug_assert!(dest.exists());
-                        #[cfg(unix)]
-                        std::os::unix::fs::symlink(&dest, &sm_path)?;
-                        #[cfg(windows)]
-                        std::os::windows::fs::symlink_dir(&dest, &sm_path)?;
-                    }
+                    tracing::info!("Creating symlink from {:?} to {:?}", sm_path, dest);
+                    debug_assert!(dest.exists());
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&dest, &sm_path)?;
+                    #[cfg(windows)]
+                    std::os::windows::fs::symlink_dir(&dest, &sm_path)?;
                 }
             }
 
-            // First check to see if we have an existing "StorageModule_X.json"
             let info_path = base_path.join(format!("StorageModule_{}.json", idx));
             if info_path.exists() == false {
                 // Create a StorageModuleInfo file for the submodule
@@ -855,10 +897,28 @@ pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleIn
             }
 
             // Next check to see if the storage module path has a chunks.data
+            let params = PackingParams {
+                packing_address: storage_config.miner_address,
+                partition_hash: info.partition_assignment.unwrap().partition_hash,
+            };
             let data_path = sm_path.join("chunks.dat");
             if data_path.exists() == false {
                 // Create empty chunks data file if it doesn't exist
                 fs::File::create(data_path)?;
+            }
+
+            let params_path = sm_path.join("packing_params.toml");
+            if params_path.exists() == false {
+                params.write_to_disk(&params_path);
+            } else {
+                // Load the packing params and check to see if they match
+                let params = PackingParams::from_toml(params_path).expect("packing params to load");
+                let pa = info.partition_assignment.unwrap();
+                if params.packing_address != storage_config.miner_address
+                    || params.partition_hash != pa.partition_hash
+                {
+                    panic!("Configured StorageModuleInfo does not match submodule packing");
+                }
             }
         }
     }
@@ -906,7 +966,7 @@ pub fn write_info_file(path: &Path, info: &StorageModuleInfo) -> eyre::Result<()
         .open(path)
         .unwrap_or_else(|_| panic!("Failed to open: {}", path.display()));
 
-    info_file.write_all(serde_json::to_string(&*info)?.as_bytes())?;
+    info_file.write_all(serde_json::to_string_pretty(&*info)?.as_bytes())?;
     Ok(())
 }
 
@@ -1037,11 +1097,6 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        let _ = initialize_storage_files(&base_path, &infos);
-
-        // Verify the StorageModuleInfo file was crated in the base path
-        let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();
-        assert_eq!(file_infos, infos[0]);
 
         // Override the default StorageModule config for testing
         let config = StorageConfig {
@@ -1050,6 +1105,12 @@ mod tests {
             num_chunks_in_partition: 20,
             ..Default::default()
         };
+
+        let _ = initialize_storage_files(&base_path, &infos, &config);
+
+        // Verify the StorageModuleInfo file was crated in the base path
+        let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();
+        assert_eq!(file_infos, infos[0]);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
@@ -1164,7 +1225,6 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        initialize_storage_files(&base_path, &infos)?;
 
         // Override the default StorageModule config for testing
         let config = StorageConfig {
@@ -1173,6 +1233,8 @@ mod tests {
             num_chunks_in_partition: 5,
             ..Default::default()
         };
+
+        initialize_storage_files(&base_path, &infos, &config)?;
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];

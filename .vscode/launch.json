@@ -17,12 +17,16 @@
 				"filter": {
 					"name": "irys",
 					"kind": "bin"
+				},
+				"env": {
+					// Because configs are comp time macros, set the correct env for the config you want during build
+					// "IRYS_ENV": "testnet",
 				}
 			},
 			"args": [],
 			"cwd": "${workspaceFolder}",
 			"env": {
-				"IRYS_ENV": "testnet",
+				// "IRYS_ENV": "testnet",
 				"RUST_BACKTRACE": "1",
 				"RUST_LOG": "irys_actors::epoch_service=ERROR,irys_actors::block_tree_service=debug,irys_chain::chain=debug,irys_actors::vdf_service=ERROR,irys_actors::broadcast_mining_service=ERROR,irys_actors::mining=ERROR,irys_actors::block_producer=debug"
 			}

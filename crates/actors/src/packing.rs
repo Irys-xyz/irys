@@ -331,10 +331,6 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
-        let base_path = tmp_dir.path().to_path_buf();
-        initialize_storage_files(&base_path, &infos)?;
-
         // Override the default StorageModule config for testing
         let storage_config = StorageConfig {
             min_writes_before_sync: 1,
@@ -342,6 +338,10 @@ mod tests {
             num_chunks_in_partition: 5,
             ..Default::default()
         };
+
+        let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        initialize_storage_files(&base_path, &infos, &storage_config)?;
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];

@@ -363,7 +363,7 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        let _ = initialize_storage_files(&base_path, &infos);
+        let _ = initialize_storage_files(&base_path, &infos, &storage_config);
 
         // Verify the StorageModuleInfo file was crated in the base path
         let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();

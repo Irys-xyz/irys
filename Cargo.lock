@@ -5545,6 +5545,7 @@ dependencies = [
  "reth-db",
  "serde",
  "serde_json",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
