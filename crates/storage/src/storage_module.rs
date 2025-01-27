@@ -364,14 +364,6 @@ impl StorageModule {
             for (chunk_offset, (bytes, chunk_type)) in write_batch {
                 self.write_chunk_internal(chunk_offset, bytes, chunk_type.clone())?;
                 pending.remove(&chunk_offset); // Clean up written chunks
-
-                // update the storage intervals
-                {
-                    let ie = ii(chunk_offset, chunk_offset);
-                    let mut intervals = self.intervals.write().unwrap();
-                    let _ = intervals.cut(ie);
-                    let _ = intervals.insert_merge_touching_if_values_equal(ie, chunk_type);
-                }
             }
 
             {
@@ -758,12 +750,8 @@ impl StorageModule {
         // If successful, update the StorageModules interval state
         let mut intervals = self.intervals.write().unwrap();
         let chunk_interval = ii(chunk_offset, chunk_offset);
-        let _ = intervals
-            .insert_merge_touching_if_values_equal(chunk_interval, chunk_type.clone())
-            .unwrap_or_else(|_| {
-                let _ = intervals.insert_overwrite(chunk_interval, chunk_type);
-                chunk_interval // Return original interval, but it's discarded by outer _
-            });
+        let _ = intervals.cut(chunk_interval);
+        let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, chunk_type);
         Ok(())
     }
 
