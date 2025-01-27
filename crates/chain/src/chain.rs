@@ -10,7 +10,7 @@ use irys_actors::{
     chunk_migration_service::ChunkMigrationService,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
-        GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage, NewEpochMessage,
+        GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
     },
     mempool_service::MempoolService,
     mining::PartitionMiningActor,

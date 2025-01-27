@@ -1,5 +1,6 @@
 use clap::{command, Parser};
 use irys_chain::chain::start;
+use irys_config::StorageSubmodulesConfig;
 use reth_tracing::tracing_subscriber::fmt::SubscriberBuilder;
 use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
