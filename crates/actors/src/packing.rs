@@ -178,28 +178,39 @@ impl PackingActor {
                             chunk_range_split.end()
                         );
                         let num_chunks = chunk_range_split.end() - chunk_range_split.start() + 1;
-                        let mut out: Vec<u8> = Vec::with_capacity(
-                            (num_chunks * chunk_size as u32).try_into().unwrap(),
-                        );
-                        capacity_pack_range_cuda_c(
-                            num_chunks,
-                            mining_address,
-                            chunk_range_split.start() as u64,
-                            partition_hash,
-                            Some(entropy_packing_iterations),
-                            &mut out,
-                        );
-                        for i in 0..num_chunks {
-                            storage_module.write_chunk(
-                                chunk_range_split.start() + i,
-                                out[(i * chunk_size as u32) as usize
-                                    ..((i + 1) * chunk_size as u32) as usize]
-                                    .to_vec(),
-                                ChunkType::Entropy,
+                        let storage_module = storage_module.clone();
+                        let chunk_range_split = chunk_range_split.clone();
+
+                        let semaphore: Arc<Semaphore> = self.semaphore.clone();
+                        // wait for the permit before spawning the thread
+                        let permit = semaphore.acquire_owned().await.unwrap();
+
+                        self.task_executor.spawn_blocking(async move {
+                            let mut out: Vec<u8> = Vec::with_capacity(
+                                (num_chunks * chunk_size as u32).try_into().unwrap(),
                             );
-                            let _ = storage_module.sync_pending_chunks();
-                        }
-                        debug!(target: "irys::packing::update", "CUDA Packed chunks {} - {} for SM {} partition_hash {} mining_address {} iterations {}", chunk_range_split.start(), chunk_range_split.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
+
+                            capacity_pack_range_cuda_c(
+                                num_chunks,
+                                mining_address,
+                                chunk_range_split.start() as u64,
+                                partition_hash,
+                                Some(entropy_packing_iterations),
+                                &mut out,
+                            );
+                            for i in 0..num_chunks {
+                                storage_module.write_chunk(
+                                    chunk_range_split.start() + i,
+                                    out[(i * chunk_size as u32) as usize
+                                        ..((i + 1) * chunk_size as u32) as usize]
+                                        .to_vec(),
+                                    ChunkType::Entropy,
+                                );
+                                let _ = storage_module.sync_pending_chunks();
+                            }
+                            drop(permit); // drop after chunk write so the SM can apply backpressure to packing
+                        });
+                        debug!(target: "irys::packing::update", "CUDA Packed chunks {} - {} for SM {} partition_hash {} mining_address {} iterations {} -----------------------------------------------------------------------------------------------------", chunk_range_split.start(), chunk_range_split.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                     }
                 }
                 _ => unimplemented!(),
