@@ -354,7 +354,7 @@ pub async fn start_irys_node(
                     .unwrap();
 
                 let vdf_service_actor =
-                    VdfService::new(10_000, Some(block_index_guard.clone()), Some(db.clone()));
+                    VdfService::new(Some(block_index_guard.clone()), Some(db.clone()));
                 let vdf_service = vdf_service_actor.start();
                 SystemRegistry::set(vdf_service.clone()); // register it as a service
 
