@@ -199,8 +199,8 @@ pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesCon
         const FILENAME: &str = ".irys_storage_submodules.toml";
 
         let node_config = IrysNodeConfig::default();
-        let home_dir = node_config.instance_directory();
-        let config_path = Path::new(&home_dir).join(FILENAME);
+        let target_dir = node_config.instance_directory();
+        let config_path = Path::new(&target_dir).join(FILENAME);
 
         // let home_dir = env::var("HOME")
         //     .expect("Failed to get home directory")
@@ -215,16 +215,19 @@ pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesCon
             );
 
             let config = StorageSubmodulesConfig {
-                is_using_hardcoded_paths: true, // Note, this field is added to the config when hard-coding modules
+                is_using_hardcoded_paths: true, // Note, this field is added to the config when hard-coding submodules
                 submodule_paths: vec![
-                    Path::new(&home_dir).join("storage_modules/submodule_0"),
-                    Path::new(&home_dir).join("storage_modules/submodule_1"),
-                    Path::new(&home_dir).join("storage_modules/submodule_2"),
+                    Path::new(&target_dir).join("storage_modules/submodule_0"),
+                    Path::new(&target_dir).join("storage_modules/submodule_1"),
+                    Path::new(&target_dir).join("storage_modules/submodule_2"),
                 ],
             };
 
+            // Serialize the config as a toml
             let toml = toml::to_string(&config)
                 .expect("Failed to serialize default storage submodules config");
+
+            // Write it to disk
             fs::write(&config_path, toml).unwrap_or_else(|_| {
                 panic!(
                     "Failed to write default storage submodules config to {}",
@@ -233,5 +236,7 @@ pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesCon
             });
             return config;
         }
-        StorageSubmodulesConfig::from_toml(config_path).unwrap() // we want to see the toml parsing error if there is one
+
+        // Initialize a new instance from that toml to ensure is parses
+        StorageSubmodulesConfig::from_toml(config_path).unwrap()
     });
