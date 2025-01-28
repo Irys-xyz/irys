@@ -30,7 +30,7 @@ pub async fn get_block(
                 err: String::from("block tree error"),
             })?;
             let guard = block_tree_guard.read();
-            guard.tip.clone()
+            guard.tip
         }
         BlockParam::BlockHeight(height) => 'outer: {
             let block_tree_guard = state.block_tree.clone().ok_or(ApiError::Internal {
@@ -47,7 +47,7 @@ pub async fn get_block(
                         false => None,
                     });
             if let Some(hash) = in_block_tree {
-                break 'outer hash.clone();
+                break 'outer *hash;
             }
             // get from block index
             let block_index_guard = state.block_index.clone().ok_or(ApiError::Internal {

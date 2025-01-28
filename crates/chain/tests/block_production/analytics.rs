@@ -213,14 +213,14 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             }
 
             // create a new tx, upload *some* of it's chunks
-            (*tx, *data_bytes) = generate_tx(&a);
+            (*tx, *data_bytes) = generate_tx(a);
 
             *num_chunks_uploaded = simple_rng
                 .next_range((tx.chunks.len() + 1).try_into().unwrap())
                 .try_into()
                 .unwrap();
 
-            upload_header(&tx).await.unwrap();
+            upload_header(tx).await.unwrap();
 
             for (tx_chunk_offset, chunk_node) in
                 tx.chunks.iter().take(*num_chunks_uploaded).enumerate()
