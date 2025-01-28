@@ -92,7 +92,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             miner_address: config.mining_signer.address(),
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1_000,
-            num_confirmations_for_finality: 1, // Testnet / single node config
+            chunk_migration_depth: 1, // Testnet / single node config
         },
     )
     .await?;
@@ -278,6 +278,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             .block_producer
             .send(SolutionFoundMessage(poa_solution))
             .await?
+            .unwrap()
             .unwrap();
         info!("Finished step {}", &i);
     }
