@@ -387,7 +387,7 @@ pub struct BlockTreeCache {
     solutions: HashMap<H256, HashSet<BlockHash>>,
 
     // Current tip
-    tip: BlockHash,
+    pub tip: BlockHash,
 
     // Track max cumulative difficulty
     max_cumulative_difficulty: (U256, BlockHash), // (difficulty, block_hash)

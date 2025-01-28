@@ -123,6 +123,8 @@ pub enum ChunkIngressError {
     InvalidProof,
     /// The data hash does not match the chunk data
     InvalidDataHash,
+    /// This chunk is for an unknown transaction
+    UnknownTransaction,
     /// Only the last chunk in a `data_root` tree can be less than `CHUNK_SIZE`
     InvalidChunkSize,
     /// Some database error occurred when reading or writing the chunk
@@ -223,7 +225,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         let cached_data_root =
             irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
                 .map_err(|_| ChunkIngressError::DatabaseError)? // Convert DatabaseError to ChunkIngressError
-                .ok_or(ChunkIngressError::InvalidDataHash)?; // Handle None case by converting it to an error
+                .ok_or(ChunkIngressError::UnknownTransaction)?; // Handle None case by converting it to an error
 
         // Next validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash

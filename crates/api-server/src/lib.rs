@@ -11,7 +11,11 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 
-use irys_actors::mempool_service::MempoolService;
+use irys_actors::{
+    block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
+    mempool_service::MempoolService,
+};
+use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, CONFIG};
 use routes::{block, get_chunk, index, network_config, post_chunk, price, proxy::proxy, tx};
@@ -22,6 +26,11 @@ pub struct ApiState {
     pub mempool: Addr<MempoolService>,
     pub chunk_provider: Arc<ChunkProvider>,
     pub db: DatabaseProvider,
+    // TODO: slim this down to what we actually use - beware the types!
+    // TODO: remove the Option<>
+    pub reth_provider: Option<RethNodeProvider>,
+    pub block_tree: Option<BlockTreeReadGuard>,
+    pub block_index: Option<BlockIndexReadGuard>,
 }
 
 pub fn routes() -> impl HttpServiceFactory {
@@ -31,7 +40,7 @@ pub fn routes() -> impl HttpServiceFactory {
             "/network/config",
             web::get().to(network_config::get_network_config),
         )
-        .route("/block/{block_hash}", web::get().to(block::get_block))
+        .route("/block/{block_tag}", web::get().to(block::get_block))
         .route(
             "/chunk/data_root/{ledger_id}/{data_root}/{offset}",
             web::get().to(get_chunk::get_chunk_by_data_root_offset),
@@ -127,6 +136,9 @@ async fn post_tx_and_chunks_golden_path() {
         db: DatabaseProvider(arc_db.clone()),
         mempool: mempool_addr,
         chunk_provider: Arc::new(chunk_provider),
+        reth_provider: None,
+        block_tree: None,
+        block_index: None,
     };
 
     // Initialize the app

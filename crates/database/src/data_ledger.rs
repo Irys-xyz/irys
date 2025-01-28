@@ -226,8 +226,11 @@ impl Ledger {
         *self as u32
     }
 
-    // Takes "perm" or some term e.g. "1year"
+    // Takes "perm" or some term e.g. "1year", or an integer ID
     pub fn from_url(s: &str) -> eyre::Result<Self> {
+        if let Ok(ledger_id) = s.parse::<u32>() {
+            return Ledger::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
+        }
         match s {
             "perm" => eyre::Result::Ok(Self::Publish),
             "5days" => eyre::Result::Ok(Self::Submit),

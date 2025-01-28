@@ -519,7 +519,7 @@ pub async fn start_irys_node(
 
                 let _ = irys_node_handle_sender.send(IrysNodeCtx {
                     actor_addresses: actor_addresses.clone(),
-                    reth_handle: reth_node,
+                    reth_handle: reth_node.clone(),
                     db: db.clone(),
                     config: arc_config.clone(),
                     chunk_provider: arc_chunk_provider.clone(),
@@ -533,6 +533,9 @@ pub async fn start_irys_node(
                     mempool: mempool_addr,
                     chunk_provider: arc_chunk_provider.clone(),
                     db,
+                    reth_provider: Some(reth_node.clone()),
+                    block_tree: Some(block_tree_guard.clone()),
+                    block_index: Some(block_index_guard.clone()),
                 })
                 .await;
 

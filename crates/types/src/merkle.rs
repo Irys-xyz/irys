@@ -6,6 +6,7 @@ use borsh::BorshDeserialize;
 use borsh_derive::BorshDeserialize;
 use eyre::eyre;
 use eyre::Error;
+use eyre::OptionExt as _;
 use openssl::sha;
 
 use crate::Base64;
@@ -413,7 +414,9 @@ pub fn generate_data_root(mut nodes: Vec<Node>) -> Result<Node, Error> {
     while nodes.len() > 1 {
         nodes = build_layer(nodes)?;
     }
-    let root = nodes.pop().unwrap();
+    let root = nodes
+        .pop()
+        .ok_or_eyre("At least one data node is required")?;
     Ok(root)
 }
 

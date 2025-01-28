@@ -10,11 +10,10 @@ use std::{
 
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
-    partition::PartitionHash, resolve_proofs, u64_stringify, Arbitrary, Base64, Compact,
-    DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader, Proof,
-    Signature, H256, U256,
+    partition::PartitionHash, resolve_proofs, string_u128, u64_stringify, Arbitrary, Base64,
+    Compact, DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader,
+    Proof, Signature, H256, U256,
 };
-
 use alloy_primitives::{keccak256, Address, B256};
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +70,8 @@ pub struct IrysBlockHeader {
     pub cumulative_diff: U256,
 
     /// timestamp (in milliseconds) since UNIX_EPOCH of the last difficulty adjustment
+    #[serde(with = "string_u128")]
+    ///
     pub last_diff_timestamp: u128,
 
     /// The solution hash for the block hash(chunk_bytes + partition_chunk_offset + mining_seed)
@@ -103,6 +104,7 @@ pub struct IrysBlockHeader {
     pub signature: IrysSignature,
 
     /// timestamp (in milliseconds) since UNIX_EPOCH of when the block was discovered/produced
+    #[serde(with = "string_u128")]
     pub timestamp: u128,
 
     /// A list of transaction ledgers, one for each active data ledger
