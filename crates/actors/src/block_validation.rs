@@ -2,6 +2,7 @@ use crate::{
     block_index_service::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number, vdf_service::VdfStepsReadGuard,
 };
+use base58::ToBase58;
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
@@ -17,14 +18,19 @@ use tracing::{debug, info};
 pub async fn prevalidate_block(
     block: IrysBlockHeader,
     previous_block: IrysBlockHeader,
-    block_index_guard: BlockIndexReadGuard,
-    partitions_guard: PartitionAssignmentsReadGuard,
+    _block_index_guard: BlockIndexReadGuard,
+    _partitions_guard: PartitionAssignmentsReadGuard,
     storage_config: StorageConfig,
     difficulty_config: DifficultyAdjustmentConfig,
     vdf_config: VDFStepsConfig,
     steps_guard: VdfStepsReadGuard,
-    miner_address: Address,
+    _miner_address: Address,
 ) -> eyre::Result<()> {
+    debug!(
+        "Prevalidating block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
         return Err(eyre::eyre!(
             "Invalid block: chunk hash distinct from PoA chunk hash"
@@ -33,21 +39,52 @@ pub async fn prevalidate_block(
 
     // Check prev_output (vdf)
     prev_output_is_valid(&block, &previous_block)?;
+    debug!(
+        "prev_output_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
 
     // Check the difficulty
     difficulty_is_valid(&block, &previous_block, &difficulty_config)?;
 
+    debug!(
+        "difficulty_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
+
     // Check the cumulative difficulty
     cumulative_difficulty_is_valid(&block, &previous_block)?;
+    debug!(
+        "cumulative_difficulty_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
 
     // Check the solution_hash
     solution_hash_is_valid(&block)?;
+    debug!(
+        "solution_hash_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
 
     // Recall range check
     recall_recall_range_is_valid(&block, &storage_config, &steps_guard)?;
+    debug!(
+        "recall_recall_range_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
 
     // We only check last_step_checkpoints during pre-validation
     last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config).await?;
+    debug!(
+        "last_step_checkpoints_is_valid for block {} ({})",
+        &block.block_hash.0.to_base58(),
+        &block.height
+    );
 
     Ok(())
 }
@@ -60,7 +97,9 @@ pub fn prev_output_is_valid(
         Ok(())
     } else {
         Err(eyre::eyre!(
-            "vdf_limiter.prev_output does not match previous blocks vdf_limiter.output"
+            "vdf_limiter.prev_output ({}) does not match previous blocks vdf_limiter.output ({})",
+            &block.vdf_limiter_info.prev_output,
+            &previous_block.vdf_limiter_info.output
         ))
     }
 }
@@ -83,20 +122,24 @@ pub fn difficulty_is_valid(
         last_diff_timestamp,
         current_timestamp,
         current_difficulty,
-        &difficulty_config,
+        difficulty_config,
     );
 
     if diff == block.diff {
         Ok(())
     } else {
-        Err(eyre::eyre!("Invalid difficulty"))
+        Err(eyre::eyre!(
+            "Invalid difficulty (expected {} got {})",
+            &diff,
+            &block.diff
+        ))
     }
 }
 
 /// Validates if a block's cumulative difficulty equals the previous cumulative difficulty
 /// plus the expected hashes from its new difficulty. Returns Ok if valid.
 ///
-/// Note: Requires valid block difficulty - call difficulty_is_valid() first.
+/// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
 pub fn cumulative_difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
@@ -108,13 +151,17 @@ pub fn cumulative_difficulty_is_valid(
     if cumulative_diff == block.cumulative_diff {
         Ok(())
     } else {
-        Err(eyre::eyre!("Invalid cumulative_difficulty"))
+        Err(eyre::eyre!(
+            "Invalid cumulative_difficulty (expected {}, got {})",
+            &cumulative_diff,
+            &block.cumulative_diff
+        ))
     }
 }
 
 /// Checks to see if the `solution_hash` exceeds the difficulty threshold
 ///
-/// Note: Requires valid block difficulty - call difficulty_is_valid() first.
+/// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
 pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
@@ -122,7 +169,12 @@ pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
     if solution_diff >= block.diff {
         Ok(())
     } else {
-        Err(eyre::eyre!("Invalid solution_hash"))
+        Err(eyre::eyre!(
+            "Invalid solution_hash - expected difficulty >={}, got {} (diff: {})",
+            &block.diff,
+            &solution_diff,
+            &block.diff.abs_diff(solution_diff)
+        ))
     }
 }
 
@@ -170,11 +222,11 @@ pub fn get_recall_range(
     irys_efficient_sampling::get_recall_range(
         num_recall_ranges_in_partition as usize,
         &steps,
-        &partition_hash,
+        partition_hash,
     )
 }
 
-/// Returns Ok if the provided PoA is valid, Err otherwise
+/// Returns Ok if the provided `PoA` is valid, Err otherwise
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
@@ -309,8 +361,8 @@ mod tests {
         },
         BlockFinalizedMessage,
     };
-    use actix::prelude::*;
-    use dev::Registry;
+    use actix::{prelude::*, SystemRegistry};
+
     use irys_config::IrysNodeConfig;
     use irys_database::{BlockIndex, Initialized};
     use irys_types::{
@@ -351,14 +403,14 @@ mod tests {
 
         // Create epoch service with random miner address
         let storage_config = StorageConfig {
-            chunk_size: chunk_size,
+            chunk_size,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_in_slot: 1,
             miner_address,
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1_000,
-            num_confirmations_for_finality: 1, // Testnet / single node config
+            chunk_migration_depth: 1, // Testnet / single node config
         };
 
         let config = EpochServiceConfig {
@@ -403,7 +455,7 @@ mod tests {
         ));
 
         let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
-        Registry::set(block_index_actor.start());
+        SystemRegistry::set(block_index_actor.start());
 
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),

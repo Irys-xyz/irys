@@ -38,9 +38,9 @@ pub enum PdAccessListArg {
 
 impl PdAccessListArg {
     pub fn type_id(&self) -> PdAccessListArgsTypeId {
-        match self {
-            &PdAccessListArg::ChunkRead(_) => PdAccessListArgsTypeId::ChunkRead,
-            &PdAccessListArg::ByteRead(_) => PdAccessListArgsTypeId::ByteRead,
+        match *self {
+            PdAccessListArg::ChunkRead(_) => PdAccessListArgsTypeId::ChunkRead,
+            PdAccessListArg::ByteRead(_) => PdAccessListArgsTypeId::ByteRead,
         }
     }
 

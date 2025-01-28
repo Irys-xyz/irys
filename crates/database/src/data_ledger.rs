@@ -47,7 +47,7 @@ impl Default for PermanentLedger {
 }
 
 impl PermanentLedger {
-    /// Constructs a permanent ledger, always with Ledger::Publish as the id
+    /// Constructs a permanent ledger, always with `Ledger::Publish` as the id
     pub const fn new() -> Self {
         Self {
             slots: Vec::new(),
@@ -120,7 +120,7 @@ impl LedgerCore for PermanentLedger {
         self.slots.len()
     }
     fn ledger_id(&self) -> u32 {
-        self.ledger_id as u32
+        self.ledger_id
     }
     fn allocate_slots(&mut self, slots: u64) -> u64 {
         let mut num_partitions_added = 0;
@@ -227,21 +227,21 @@ impl Ledger {
     }
 
     // Takes "perm" or some term e.g. "1year", or an integer ID
-    pub fn from_url(s: &str) -> eyre::Result<Ledger> {
+    pub fn from_url(s: &str) -> eyre::Result<Self> {
         if let Ok(ledger_id) = s.parse::<u32>() {
             return Ledger::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
         }
         match s {
-            "perm" => eyre::Result::Ok(Ledger::Publish),
-            "5days" => eyre::Result::Ok(Ledger::Submit),
+            "perm" => eyre::Result::Ok(Self::Publish),
+            "5days" => eyre::Result::Ok(Self::Submit),
             _ => Err(eyre::eyre!("Ledger {} not supported", s)),
         }
     }
 }
 
 impl From<Ledger> for u32 {
-    fn from(ledger: Ledger) -> u32 {
-        ledger as u32
+    fn from(ledger: Ledger) -> Self {
+        ledger as Self
     }
 }
 

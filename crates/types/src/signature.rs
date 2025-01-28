@@ -196,7 +196,7 @@ mod tests {
         };
         let transaction = irys_signer.sign_transaction(transaction)?;
         assert!(transaction.header.signature.validate_signature(
-            transaction.signature_hash().into(),
+            transaction.signature_hash(),
             Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice())
         ));
         let decoded_js_sig = Signature::try_from(&hex::decode(JS_SIGNATURE)?[..])?;

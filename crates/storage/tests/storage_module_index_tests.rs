@@ -28,7 +28,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         miner_address: Address::random(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1,
-        num_confirmations_for_finality: 1, // Testnet / single node config
+        chunk_migration_depth: 1, // Testnet / single node config
     };
     let chunk_size = storage_config.chunk_size;
 
@@ -80,7 +80,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let base_path = tmp_dir.path().to_path_buf();
     info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
 
-    let _ = initialize_storage_files(&base_path, &storage_module_infos);
+    let _ = initialize_storage_files(&base_path, &storage_module_infos, &vec![]);
 
     let mut storage_modules: Vec<Arc<StorageModule>> = Vec::new();
 

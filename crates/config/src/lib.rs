@@ -1,9 +1,14 @@
 //! Crate dedicated to the `IrysNodeConfig` to avoid depdendency cycles
-use std::{env, fs, num::ParseIntError, path::PathBuf};
+use std::{
+    env, fs,
+    num::ParseIntError,
+    path::{Path, PathBuf},
+};
 
 use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;
 use irys_types::{irys::IrysSigner, Address, CONFIG};
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 pub mod chain;
@@ -55,9 +60,9 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
 }
 
 impl IrysNodeConfig {
-    pub fn mainnet() -> IrysNodeConfig {
-        IrysNodeConfig {
-            mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(&CONFIG.mining_key).unwrap()),
+    pub fn mainnet() -> Self {
+        Self {
+            mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(CONFIG.mining_key).unwrap()),
             instance_number: 1,
             base_directory: env::current_dir()
                 .expect("Unable to determine working dir, aborting")
@@ -158,3 +163,60 @@ impl IrysNodeConfig {
 
 pub const PRICE_PER_CHUNK_PERM: u128 = 10000;
 pub const PRICE_PER_CHUNK_5_EPOCH: u128 = 10;
+
+/// Subsystem allowing for the configuration of storage submodules via a handy TOML file
+///
+/// Storage submodule path mappings are now governed by a `~/.irys_storage_modules.toml` file.
+/// This file is automatically created if it does not exist when the node starts, and is
+/// populated with `submodule_paths` set to an empty array by default.
+///
+/// If `submodule_paths` is empty, everything works the way it normally would with submodules
+/// stored inline within the `.irys` `storage_modules` directory.
+///
+/// If `submodule_paths` has items, they are expected to be paths to directories that can be
+/// mounted as submodules. If these are specified, the number of paths in `submodule_paths`
+/// must exactly match the number of expected submodules based on the current storage config,
+/// or an error will be thrown and the process will abort. During storage initialization,
+/// symlinks will be created within the `storage_modules` directory mapping the regular storage
+/// location for each submodule to the `submodule_paths` in the order they are specified.
+///
+/// The TOML config can be accessed via the `STORAGE_SUBMODULES_CONFIG` thread-local, and is
+/// lazily initialized on first access based on the contents of `~/.irys_storage_modules.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StorageSubmodulesConfig {
+    pub submodule_paths: Vec<PathBuf>,
+}
+
+impl StorageSubmodulesConfig {
+    /// Loads the [`StorageSubmodulesConfig`] from a TOML file at the given path
+    pub fn from_toml(path: impl AsRef<Path>) -> eyre::Result<Self> {
+        let contents = fs::read_to_string(path)?;
+        let config: Self = toml::from_str(&contents)?;
+        Ok(config)
+    }
+
+    /// Forces the lazy loading of the [`STORAGE_SUBMODULES_CONFIG`] thread-local, possibly
+    /// panicking if the config is not valid (but not if it doesn't exist, in which case a
+    /// default config will be created).
+    pub fn load() {
+        let _ = STORAGE_SUBMODULES_CONFIG.with(|config| config.submodule_paths.len());
+    }
+}
+
+thread_local! {
+    pub static STORAGE_SUBMODULES_CONFIG: once_cell::unsync::Lazy::<StorageSubmodulesConfig> = once_cell::unsync::Lazy::new(|| {
+        const FILENAME: &str = ".irys_storage_modules.toml";
+        let home_dir = env::var("HOME").expect("Failed to get home directory");
+        let config_path = Path::new(&home_dir).join(FILENAME);
+        if config_path.exists() {
+            tracing::info!("Loading storage submodules config from {:?}", config_path);
+        } else {
+            tracing::info!("Creating default storage submodules config at {:?}", config_path);
+            let default_config = StorageSubmodulesConfig::default();
+            let toml = toml::to_string(&default_config).expect("Failed to serialize default storage submodules config");
+            fs::write(&config_path, toml).unwrap_or_else(|_| panic!("Failed to write default storage submodules config to {}", config_path.display()));
+            return default_config;
+        }
+        StorageSubmodulesConfig::from_toml(config_path).unwrap() // we want to see the toml parsing error if there is one
+    });
+}

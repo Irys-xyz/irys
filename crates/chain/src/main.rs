@@ -1,5 +1,6 @@
 use clap::{command, Parser};
 use irys_chain::chain::start;
+use irys_config::StorageSubmodulesConfig;
 use reth_tracing::tracing_subscriber::fmt::SubscriberBuilder;
 use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -14,6 +15,8 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    StorageSubmodulesConfig::load();
+
     // TODO: fix this, we used to await the reth node exit future but can't anymore
     // so we need another near-infinite blocking future
     let _ = SubscriberBuilder::default()

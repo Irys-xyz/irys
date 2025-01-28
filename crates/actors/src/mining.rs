@@ -27,6 +27,9 @@ pub struct PartitionMiningActor {
     steps_guard: VdfStepsReadGuard,
 }
 
+/// Allows this actor to live in the the local service registry
+impl Supervised for PartitionMiningActor {}
+
 impl PartitionMiningActor {
     pub fn new(
         mining_address: Address,
@@ -41,8 +44,8 @@ impl PartitionMiningActor {
             _database_provider,
             block_producer_actor: block_producer_addr,
             ranges: Ranges::new(
-                (&storage_module.storage_config.num_chunks_in_partition
-                    / &storage_module.storage_config.num_chunks_in_recall_range)
+                (storage_module.storage_config.num_chunks_in_partition
+                    / storage_module.storage_config.num_chunks_in_recall_range)
                     .try_into()
                     .expect("Recall ranges number exceeds usize representation"),
             ),
@@ -235,7 +238,14 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {
-        self.difficulty = msg.0.diff;
+        let new_diff = msg.0.diff;
+        debug!(
+            "updating difficulty target: from {} to {} (diff: {})",
+            &self.difficulty,
+            &new_diff,
+            &self.difficulty.abs_diff(new_diff)
+        );
+        self.difficulty = new_diff;
     }
 }
 
@@ -335,7 +345,7 @@ mod tests {
             miner_address: mining_address,
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1,
-            num_confirmations_for_finality: 1, // Testnet / single node config
+            chunk_migration_depth: 1, // Testnet / single node config
         };
 
         let infos = vec![StorageModuleInfo {
@@ -353,7 +363,7 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        let _ = initialize_storage_files(&base_path, &infos);
+        let _ = initialize_storage_files(&base_path, &infos, &vec![]);
 
         // Verify the StorageModuleInfo file was crated in the base path
         let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();
@@ -394,7 +404,7 @@ mod tests {
         let _ = storage_module.sync_pending_chunks();
 
         let mining_broadcaster = BroadcastMiningService::new();
-        let mining_broadcaster_addr = mining_broadcaster.start();
+        let _mining_broadcaster_addr = mining_broadcaster.start();
 
         let vdf_service = VdfService::from_registry();
         let vdf_steps_guard: VdfStepsReadGuard =

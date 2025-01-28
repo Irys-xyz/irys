@@ -9,7 +9,7 @@ use irys_database::{
     },
     Ledger,
 };
-use irys_packing::packing_xor_vec_u8;
+use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_types::{
     app_state::DatabaseProvider,
     get_leaf_proof,
@@ -33,6 +33,43 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 use tracing::{debug, info};
+
+// Layers of abstraction
+//
+// +------------------+
+// |       Node       |
+// |  +------------+  |  +--------------------------+
+// |  | Partition1 |<----| Storage Module A         |<--+ Submodule i
+// |  +------------+  |  +--------------------------+
+// |                  |
+// |  +------------+  |  +--------------------------+
+// |  | Partition2 |<----| Storage Module B         |<--+ Submodule i
+// |  +------------+  |  |                          |<--+ Submodule ii
+// |                  |  +--------------------------+
+// |                  |
+// |  +------------+  |  +--------------------------+
+// |  | unpledged  |<----| Storage Module C         |<--+ Submodule i
+// |  +------------+  |  |                          |<--+ Submodule ii
+// |                  |  |                          |<--+ Submodule iii
+// |                  |  +--------------------------+
+// +------------------+
+//
+// Node Level:
+// - Node operates only on partitions, identified by partition_hash
+// - Each partition contains CONFIG.num_chunks_in_partition chunks
+// - Partition hashes map to Ledger slots, or capacity partitions lis in the epoch_service
+//
+// Storage Module Level:
+// - Manages reading/writing of chunks (0..CONFIG.num_chunks_in_partition) for a partition
+// - Can operate across multiple physical drives via submodules
+// - Typical deployment: Single 16TB HDD submodule per partition
+// - Alternative setup: Multiple smaller drives (e.g. 4x 4TB) as submodules
+//
+// Submodule Level:
+// - Owned and managed exclusively by Storage Modules
+// - Invisible to rest of application
+// - Storage Module handles chunk offset mapping to appropriate submodule
+//
 
 type SubmodulePath = PathBuf;
 
@@ -301,7 +338,8 @@ impl StorageModule {
                 {
                     let ie = ii(chunk_offset, chunk_offset);
                     let mut intervals = self.intervals.write().unwrap();
-                    let _ = intervals.insert_overwrite(ie, chunk_type);
+                    let _ = intervals.cut(ie);
+                    let _ = intervals.insert_merge_touching_if_values_equal(ie, chunk_type);
                 }
             }
 
@@ -331,16 +369,20 @@ impl StorageModule {
         // Query overlapping intervals from storage map
         let intervals = self.intervals.read().unwrap();
         let iter = intervals.overlapping(chunk_range);
+        // Clip overlapped intervals to requested range and read chunks
         for (interval, chunk_type) in iter {
-            if *chunk_type != ChunkType::Uninitialized {
-                // For each chunk in the interval
-                for chunk_offset in interval.start()..=interval.end() {
-                    // Read the chunk from disk
-                    let bytes = self.read_chunk_internal(chunk_offset)?;
+            if *chunk_type == ChunkType::Uninitialized {
+                continue;
+            }
 
-                    // Add it to the ChunkMap
-                    chunk_map.insert(chunk_offset, (bytes, chunk_type.clone()));
-                }
+            // Get intersection with requested range
+            let start = chunk_range.start().max(interval.start());
+            let end = chunk_range.end().min(interval.end());
+
+            // Read chunks in clipped range
+            for chunk_offset in start..=end {
+                let bytes = self.read_chunk_internal(chunk_offset)?;
+                chunk_map.insert(chunk_offset, (bytes, chunk_type.clone()));
             }
         }
         Ok(chunk_map)
@@ -362,8 +404,8 @@ impl StorageModule {
             .unwrap();
 
         // Calculate file offset and prepare buffer
-        let chunk_size = self.storage_config.chunk_size as u32;
-        let file_offset = (chunk_offset - interval.start()) * chunk_size;
+        let chunk_size = self.storage_config.chunk_size;
+        let file_offset = (chunk_offset as u64 - interval.start() as u64) * chunk_size;
         let mut buf = vec![0u8; chunk_size as usize];
 
         // Read chunk from file
@@ -771,8 +813,39 @@ impl StorageModule {
 /// - the _intervals.json, resetting the storage module state
 ///
 /// Used primarily for testing storage initialization
-pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleInfo>) -> Result<()> {
-    debug!(target: "irys::storage_module", base_path=?base_path, "Initializing storage files" );
+pub fn initialize_storage_files(
+    base_path: &PathBuf,
+    infos: &Vec<StorageModuleInfo>,
+    submodule_paths: &Vec<PathBuf>,
+) -> Result<()> {
+    tracing::info!(target: "irys::storage_module", base_path=?base_path, "Initializing storage files" );
+    let using_paths = !submodule_paths.is_empty();
+    let num_submodules: usize = infos.iter().map(|s| s.submodules.len()).sum();
+    tracing::info!("expecting {} declared submodules", num_submodules);
+    if using_paths {
+        tracing::info!("Using sym-links to configured submodule paths");
+        if num_submodules != submodule_paths.len() {
+            return Err(eyre!(
+                "Expected {} submodule paths based on current config, got {} paths",
+                num_submodules,
+                submodule_paths.len()
+            ));
+        }
+        if !CONFIG.persist_data_on_restart {
+            tracing::info!("Clearing existing submodules (persist_data_on_restart=false)...");
+            for path in submodule_paths {
+                if path.exists() {
+                    tracing::info!("Removing {:?}", path);
+                    fs::remove_dir_all(path)?;
+                }
+                tracing::info!("Creating {:?}", path);
+                fs::create_dir_all(path)?;
+            }
+        }
+    } else {
+        tracing::info!("Storing submodules in-place in {}", base_path.display());
+    }
+
     // Create base storage directory if it doesn't exist
     fs::create_dir_all(base_path.clone())?;
 
@@ -780,7 +853,21 @@ pub fn initialize_storage_files(base_path: &PathBuf, infos: &Vec<StorageModuleIn
         // Create subdirectories for each range
         for (_, dir) in info.submodules.clone() {
             let path = base_path.join(dir);
-            fs::create_dir_all(&path)?;
+            if using_paths {
+                let dest = submodule_paths.get(idx).unwrap();
+                if dest.exists() {
+                    fs::remove_dir_all(&dest)?;
+                }
+                fs::create_dir_all(&dest)?;
+                tracing::info!("Creating symlink from {:?} to {:?}", path, dest);
+                debug_assert!(dest.exists());
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&dest, &path)?;
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_dir(&dest, &path)?;
+            } else {
+                fs::create_dir_all(&path)?;
+            }
 
             // Create empty data file if it doesn't exist
             let data_file = path.join("chunks.dat");
@@ -912,6 +999,48 @@ pub const fn checked_add_i32_u64(a: i32, b: u64) -> Option<u64> {
     }
 }
 
+// TODO: expand this, right now it's very specific
+pub fn find_invalid_packing_starts(sm: Arc<StorageModule>) -> Vec<u32> {
+    let mut invalid_starts = vec![];
+    for range in sm.get_intervals(ChunkType::Entropy) {
+        // binary search through packing, figuring out where the bad packing range starts
+        // we assume the packing will have a clear cut line where the invalid packing starts
+        let mut left = range.start();
+        let mut right = range.end();
+
+        while left < right {
+            let mid = left + (right - left) / 2;
+
+            if validate_packing_at_point(&sm, mid).is_ok_and(|r| r) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        if left != range.start() {
+            invalid_starts.push(left - 1)
+        }
+    }
+    invalid_starts
+}
+
+pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::Result<bool> {
+    let chunk = sm.read_chunk_internal(point)?;
+    let chunk_size = sm.storage_config.chunk_size;
+    let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
+
+    compute_entropy_chunk(
+        sm.storage_config.miner_address,
+        point as u64,
+        sm.partition_hash().unwrap().0,
+        sm.storage_config.entropy_packing_iterations,
+        chunk_size.try_into()?,
+        &mut out,
+    );
+
+    Ok(out == chunk)
+}
+
 //==============================================================================
 // Tests
 //------------------------------------------------------------------------------
@@ -936,7 +1065,7 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        let _ = initialize_storage_files(&base_path, &infos);
+        let _ = initialize_storage_files(&base_path, &infos, &vec![]);
 
         // Verify the StorageModuleInfo file was crated in the base path
         let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();
@@ -1032,6 +1161,14 @@ mod tests {
             ]
         );
 
+        // Make sure read_chunks does not return adjacent/touching chunks
+        let chunks = storage_module.read_chunks(ii(4, 4)).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks.into_iter().collect::<Vec<_>>(),
+            [(4, (data1_chunk.clone(), ChunkType::Data)),]
+        );
+
         // Load up the intervals from file
         let intervals = read_intervals_file(storage_module.intervals_file.clone()).unwrap();
 
@@ -1055,7 +1192,7 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        initialize_storage_files(&base_path, &infos)?;
+        initialize_storage_files(&base_path, &infos, &vec![])?;
 
         // Override the default StorageModule config for testing
         let config = StorageConfig {

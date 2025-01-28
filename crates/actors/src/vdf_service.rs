@@ -11,7 +11,7 @@ use std::{
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use irys_types::{block_production::Seed, DatabaseProvider, H256List, H256};
+use irys_types::{block_production::Seed, DatabaseProvider, H256List, CONFIG, H256};
 
 use crate::block_index_service::BlockIndexReadGuard;
 
@@ -27,7 +27,7 @@ pub struct VdfState {
 
 impl VdfState {
     pub fn get_last_step_and_seed(&self) -> (u64, Option<Seed>) {
-        (self.global_step, self.seeds.back().map(|seed| seed.clone()))
+        (self.global_step, self.seeds.back().cloned())
     }
 
     /// Push new seed, and removing oldest one if is full
@@ -72,7 +72,7 @@ impl VdfState {
         Ok(H256List(
             self.seeds
                 .range(start..=end)
-                .map(|seed| seed.0.clone())
+                .map(|seed| seed.0)
                 .collect::<Vec<H256>>(),
         ))
     }
@@ -85,17 +85,17 @@ pub struct VdfService {
 
 impl Default for VdfService {
     fn default() -> Self {
-        Self::new(1000, None, None)
+        Self::new(None, None)
     }
 }
 
 impl VdfService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
-    pub fn new(
-        capacity: usize,
-        block_index: Option<BlockIndexReadGuard>,
-        db: Option<DatabaseProvider>,
-    ) -> Self {
+    pub fn new(block_index: Option<BlockIndexReadGuard>, db: Option<DatabaseProvider>) -> Self {
+        let capacity = (CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range)
+            .try_into()
+            .unwrap();
+
         let latest_block_hash = if let Some(bi) = block_index {
             bi.read().get_latest_item().map(|item| item.block_hash)
         } else {
@@ -150,7 +150,7 @@ impl VdfService {
 
 impl Supervised for VdfService {}
 
-impl ArbiterService for VdfService {
+impl SystemService for VdfService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {}
 }
 
@@ -231,7 +231,10 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf() {
-        let addr = VdfService::new(4, None, None).start();
+        let service = VdfService::new(None, None);
+        service.vdf_state.write().unwrap().seeds = VecDeque::with_capacity(4);
+        service.vdf_state.write().unwrap().max_seeds_num = 4;
+        let addr = service.start();
 
         // Send 8 seeds 1,2..,8 (capacity is 4)
         for i in 0..8 {

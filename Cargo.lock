@@ -2471,6 +2471,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "core_affinity"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "622892f5635ce1fc38c8f16dfc938553ed64af482edb5e150bf4caedbfcb2304"
+dependencies = [
+ "libc",
+ "num_cpus",
+ "winapi",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5279,6 +5290,7 @@ dependencies = [
  "base64-url",
  "bytes",
  "clap",
+ "core_affinity",
  "derive_more 1.0.0",
  "env_logger",
  "eyre",
@@ -5334,6 +5346,7 @@ dependencies = [
  "reth-chainspec",
  "reth-primitives",
  "serde",
+ "toml",
  "tracing",
 ]
 

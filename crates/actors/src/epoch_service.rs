@@ -1,3 +1,4 @@
+use actix::SystemService;
 use actix::{Actor, ArbiterService, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
@@ -13,7 +14,8 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
-use tracing::error;
+
+use tracing::{debug, error, trace, warn};
 
 use crate::block_index_service::{
     BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage,
@@ -270,7 +272,7 @@ impl EpochServiceActor {
                             .unwrap()
                             .unwrap();
                     match self.perform_epoch_tasks(Arc::new(block_header)) {
-                        Ok(_) => (),
+                        Ok(_) => debug!("Processed epoch block {}", &block_index),
                         Err(e) => {
                             self.print_items(read_guard.clone(), db.clone());
                             panic!("{:?}", e);
@@ -318,6 +320,11 @@ impl EpochServiceActor {
             return Err(EpochServiceError::NotAnEpochBlock);
         }
 
+        debug!(
+            "Performing epoch tasks for {} ({})",
+            &new_epoch_block.block_hash, &new_epoch_block.height
+        );
+
         self.try_genesis_init(&new_epoch_block);
 
         // Future: Validate partition assignments against stake/pledge
@@ -338,6 +345,7 @@ impl EpochServiceActor {
     /// if none exist
     fn try_genesis_init(&mut self, new_epoch_block: &IrysBlockHeader) {
         if self.all_active_partitions.is_empty() && new_epoch_block.height == 0 {
+            debug!("Performing genesis init");
             // Store the genesis epoch hash
             self.last_epoch_hash = new_epoch_block.last_epoch_hash;
 
@@ -348,6 +356,7 @@ impl EpochServiceActor {
             {
                 let mut ledgers = self.ledgers.write().unwrap();
                 for ledger in Ledger::iter() {
+                    debug!("Allocating 1 slot for {:?}", &ledger);
                     num_data_partitions += ledgers[ledger].allocate_slots(1);
                 }
             }
@@ -356,7 +365,16 @@ impl EpochServiceActor {
             let num_partitions = num_data_partitions
                 + Self::get_num_capacity_partitions(num_data_partitions, &self.config);
 
-            self.add_capacity_partitions(CONFIG.num_capacity_partitions.unwrap_or(num_partitions));
+            self.add_capacity_partitions(std::cmp::max(
+                CONFIG.num_capacity_partitions.unwrap_or(num_partitions),
+                num_partitions,
+            ));
+        } else {
+            debug!(
+                "Skipping genesis init - active parts empty? {}, epoch height: {}",
+                self.all_active_partitions.is_empty(),
+                new_epoch_block.height
+            );
         }
     }
 
@@ -383,6 +401,7 @@ impl EpochServiceActor {
             let part_slots = self.calculate_additional_slots(new_epoch_block, ledger);
             {
                 let mut ledgers = self.ledgers.write().unwrap();
+                debug!("Allocating {} slots for ledger {:?}", &part_slots, &ledger);
                 ledgers[ledger].allocate_slots(part_slots);
             }
         }
@@ -392,6 +411,7 @@ impl EpochServiceActor {
     /// the number of partitions the protocol should be managing and allocates
     /// additional partitions (and their state) as needed.
     fn allocate_additional_capacity(&mut self) {
+        debug!("Allocating additional capacity");
         // Calculate total number of active partitions based on the amount of data stored
         let total_parts: u64;
         {
@@ -412,6 +432,7 @@ impl EpochServiceActor {
     /// Visits all of the slots in all of the ledgers and see if the need
     /// capacity partitions assigned to maintain their replica counts
     fn backfill_missing_partitions(&mut self) {
+        debug!("Backfilling missing partitions...");
         // Start with a sorted list of capacity partitions (sorted by hash)
         let mut capacity_partitions: Vec<H256>;
         {
@@ -441,6 +462,7 @@ impl EpochServiceActor {
         capacity_partitions: &mut Vec<H256>,
         rng: &mut SimpleRNG,
     ) {
+        debug!("Processing slot needs for ledger {:?}", &ledger);
         // Get slot needs for the specified ledger
         let slot_needs: Vec<(usize, usize)>;
         {
@@ -453,6 +475,10 @@ impl EpochServiceActor {
         for (slot_index, num_needed) in slot_needs {
             for _ in 0..num_needed {
                 if capacity_count == 0 {
+                    warn!(
+                        "No available capacity partitions (needs {}) for slot {} of ledger {:?}",
+                        &num_needed, &slot_index, &ledger
+                    );
                     break; // Exit if no more available hashes
                 }
 
@@ -468,6 +494,11 @@ impl EpochServiceActor {
                 // in the ledger
                 {
                     let mut ledgers = self.ledgers.write().unwrap();
+                    debug!(
+                        "Assigning partition hash {} to slot {} for  {:?}",
+                        &partition_hash, &slot_index, &ledger
+                    );
+
                     ledgers.push_partition_to_slot(ledger, slot_index, partition_hash);
                 }
             }
@@ -500,9 +531,15 @@ impl EpochServiceActor {
             None => &self.last_epoch_hash,
         };
 
+        debug!("Adding {} capacity partitions", &parts_to_add);
         // Compute the partition hashes for all of the added partitions
         for _i in 0..parts_to_add {
             let next_part_hash = H256(hash_sha256(&prev_partition_hash.0).unwrap());
+            trace!(
+                "Adding partition with hash: {} (prev: {})",
+                next_part_hash.0.to_base58(),
+                prev_partition_hash.0.to_base58()
+            );
             self.all_active_partitions.push(next_part_hash);
             prev_partition_hash = next_part_hash;
         }
@@ -546,6 +583,12 @@ impl EpochServiceActor {
         ledger: Ledger,
         slot_index: usize,
     ) {
+        debug!(
+            "Assigning partition {} to slot {} of ledger {:?}",
+            &partition_hash.0.to_base58(),
+            &slot_index,
+            &ledger
+        );
         let mut pa = self.partition_assignments.write().unwrap();
         if let Some(mut assignment) = pa.capacity_partitions.remove(&partition_hash) {
             assignment.ledger_id = Some(ledger as u32);
@@ -817,7 +860,7 @@ mod tests {
             miner_address: Address::random(),
             min_writes_before_sync: 1,
             entropy_packing_iterations: CONFIG.entropy_packing_iterations,
-            num_confirmations_for_finality: 1, // Testnet / single node config
+            chunk_migration_depth: 1, // Testnet / single node config
         };
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;
 

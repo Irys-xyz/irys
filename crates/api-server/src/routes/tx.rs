@@ -60,7 +60,7 @@ pub async fn get_tx_header_api(
 ) -> Result<Json<IrysTransactionHeader>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx by tx_id: {}", tx_id);
-    get_tx_header(&state, tx_id).and_then(|header| Ok(web::Json(header)))
+    get_tx_header(&state, tx_id).map(web::Json)
 }
 
 pub fn get_tx_header(
@@ -103,7 +103,7 @@ pub async fn get_tx_local_start_offset(
             err: String::from("Transaction data isn't stored by this node"),
         }),
         Ok(Some(offsets)) => {
-            let offset = offsets.get(0).copied().ok_or(ApiError::Internal {
+            let offset = offsets.first().copied().ok_or(ApiError::Internal {
                 err: String::from("ChunkProvider error"), // the ChunkProvider should only return a Some if the vec has at least one element
             })?;
             Ok(web::Json(TxOffset {
@@ -125,7 +125,7 @@ mod tests {
     use crate::routes;
 
     use super::*;
-    use actix::{Actor, ArbiterService, Registry};
+    use actix::{Actor, ArbiterService, SystemRegistry, SystemService as _};
     use actix_web::{middleware::Logger, test, App, Error};
     use base58::ToBase58;
     use database::open_or_create_db;
@@ -168,7 +168,7 @@ mod tests {
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
-        Registry::set(mempool_service.start());
+        SystemRegistry::set(mempool_service.start());
         let mempool_addr = MempoolService::from_registry();
 
         let chunk_provider = ChunkProvider::new(
@@ -227,7 +227,7 @@ mod tests {
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
-        Registry::set(mempool_service.start());
+        SystemRegistry::set(mempool_service.start());
         let mempool_addr = MempoolService::from_registry();
 
         let chunk_provider = ChunkProvider::new(

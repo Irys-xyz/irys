@@ -3,6 +3,14 @@ edition = "2021"
 name = "irys-chain"
 version = "0.1.0"
 
+[[bin]]
+name = "irys"
+path = "src/main.rs"
+
+
+[features]
+nvidia = ["irys-actors/nvidia"]
+
 
 [dependencies]
 # Irys
@@ -79,6 +87,4 @@ alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true
 alloy-provider.workspace = true
-[[bin]]
-name = "irys"
-path = "src/main.rs"
+core_affinity = "0.8.1"

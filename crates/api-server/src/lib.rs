@@ -17,9 +17,9 @@ use irys_actors::{
 };
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
-use irys_types::app_state::DatabaseProvider;
+use irys_types::{app_state::DatabaseProvider, CONFIG};
 use routes::{block, get_chunk, index, network_config, post_chunk, price, proxy::proxy, tx};
-use tracing::debug;
+use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -60,6 +60,8 @@ pub fn routes() -> impl HttpServiceFactory {
 }
 
 pub async fn run_server(app_state: ApiState) {
+    info!("Starting API server on port {}", CONFIG.port);
+
     HttpServer::new(move || {
         let awc_client = awc::Client::new();
         App::new()
@@ -78,7 +80,7 @@ pub async fn run_server(app_state: ApiState) {
             .route("/", web::to(proxy))
             .wrap(Cors::permissive())
     })
-    .bind(("0.0.0.0", 8080))
+    .bind(("0.0.0.0", CONFIG.port))
     .unwrap()
     .run()
     .await
@@ -98,7 +100,7 @@ async fn post_tx_and_chunks_golden_path() {
     std::env::set_var("RUST_LOG", "trace");
 
     use ::irys_database::{config::get_data_dir, open_or_create_db};
-    use actix::{Actor, ArbiterService, Registry};
+    use actix::{Actor, SystemRegistry, SystemService as _};
     use actix_web::{middleware::Logger, test};
     use awc::http::StatusCode;
     use irys_actors::mempool_service::MempoolService;
@@ -121,7 +123,7 @@ async fn post_tx_and_chunks_golden_path() {
         storage_config.clone(),
         Arc::new(Vec::new()).to_vec(),
     );
-    Registry::set(mempool_service.start());
+    SystemRegistry::set(mempool_service.start());
     let mempool_addr = MempoolService::from_registry();
 
     let chunk_provider = ChunkProvider::new(

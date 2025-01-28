@@ -1,4 +1,4 @@
-use actix::{Actor, ArbiterService, Context, Handler, Message, Supervised};
+use actix::{Actor, Context, Handler, Message, Supervised, SystemService};
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::db_cache::data_size_to_chunk_count;
@@ -26,7 +26,7 @@ use crate::block_producer::BlockConfirmedMessage;
 #[derive(Debug, Default)]
 pub struct MempoolService {
     db: Option<DatabaseProvider>,
-    /// Temporary mempool stubs - will replace with proper data models - DMac
+    /// Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
     /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
     /// instead of the actor executor runtime, while also providing some `QoL`
@@ -45,7 +45,7 @@ impl Actor for MempoolService {
 /// Allows this actor to live in the the local service registry
 impl Supervised for MempoolService {}
 
-impl ArbiterService for MempoolService {
+impl SystemService for MempoolService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("mempool_service started");
     }
@@ -625,7 +625,7 @@ mod tests {
                 (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         };
-        initialize_storage_files(&base_path, &vec![storage_module_info.clone()])?;
+        initialize_storage_files(&base_path, &vec![storage_module_info.clone()], &vec![])?;
 
         // Override the default StorageModule config for testing
         let config = StorageConfig {

@@ -56,8 +56,7 @@ pub async fn capacity_chunk_solution(
 
     // calculate last step checkpoints
     let mut hasher = Sha256::new();
-    let mut salt =
-        irys_types::U256::from(step_number_to_salt_number(&vdf_config, step_num - 1 as u64));
+    let mut salt = irys_types::U256::from(step_number_to_salt_number(vdf_config, step_num - 1_u64));
     let mut seed = steps[0];
 
     let mut checkpoints: Vec<H256> = vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
@@ -176,7 +175,7 @@ async fn test_blockprod() -> eyre::Result<()> {
         .actor_addresses
         .block_producer
         .send(SolutionFoundMessage(poa_solution))
-        .await?
+        .await??
         .unwrap();
 
     for receipt in reth_exec_env.shadow_receipts {
@@ -278,7 +277,7 @@ async fn mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
             .actor_addresses
             .block_producer
             .send(SolutionFoundMessage(poa_solution.clone()));
-        let (block, reth_exec_env) = fut.await?.unwrap();
+        let (block, reth_exec_env) = fut.await??.unwrap();
 
         //check reth for built block
         let reth_block = reth_context
@@ -322,7 +321,7 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
         .actor_addresses
         .block_producer
         .send(SolutionFoundMessage(poa_solution))
-        .await?
+        .await??
         .unwrap();
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
@@ -456,7 +455,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .actor_addresses
         .block_producer
         .send(SolutionFoundMessage(poa_solution))
-        .await?
+        .await??
         .unwrap();
 
     for receipt in reth_exec_env.shadow_receipts {

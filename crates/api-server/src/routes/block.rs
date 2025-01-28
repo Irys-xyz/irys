@@ -190,7 +190,7 @@ mod tests {
     use crate::routes;
 
     use super::*;
-    use actix::{Actor, ArbiterService, Registry};
+    use actix::{Actor, ArbiterService, SystemRegistry, SystemService as _};
     use actix_web::{middleware::Logger, test, App, Error};
     use awc::http::StatusCode;
     use base58::ToBase58;
@@ -238,7 +238,7 @@ mod tests {
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
-        Registry::set(mempool_service.start());
+        SystemRegistry::set(mempool_service.start());
         let mempool_addr = MempoolService::from_registry();
         let chunk_provider = ChunkProvider::new(
             storage_config.clone(),
@@ -294,7 +294,7 @@ mod tests {
             storage_config.clone(),
             Arc::new(Vec::new()).to_vec(),
         );
-        Registry::set(mempool_service.start());
+        SystemRegistry::set(mempool_service.start());
         let mempool_addr = MempoolService::from_registry();
         let chunk_provider = ChunkProvider::new(
             storage_config.clone(),
