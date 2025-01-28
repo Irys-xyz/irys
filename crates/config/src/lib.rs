@@ -224,18 +224,21 @@ pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesCon
 
         // Clear out any leftover storage module infos from a non default config
         // (but leave the intervals)
-        fs::read_dir(instance_dir.join("storage_modules"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let binding = e.file_name();
-                let name = binding.to_string_lossy();
-                name.starts_with("StorageModule_")
-                    && name.ends_with(".json")
-                    && !name.contains("_intervals")
-                    && name[14..name.len() - 5].parse::<u32>().is_ok()
-            })
-            .for_each(|e| fs::remove_file(e.path()).unwrap());
+        let sm_path = instance_dir.join("storage_modules");
+        if sm_path.exists() {
+            fs::read_dir(instance_dir.join("storage_modules"))
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let binding = e.file_name();
+                    let name = binding.to_string_lossy();
+                    name.starts_with("StorageModule_")
+                        && name.ends_with(".json")
+                        && !name.contains("_intervals")
+                        && name[14..name.len() - 5].parse::<u32>().is_ok()
+                })
+                .for_each(|e| fs::remove_file(e.path()).unwrap());
+        }
 
         // Try .irys directory config in dev environment
         if config_path_local.exists() {

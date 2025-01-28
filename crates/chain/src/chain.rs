@@ -1,5 +1,5 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, ArbiterService, System, SystemRegistry};
+use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
@@ -64,13 +64,6 @@ pub async fn start() -> eyre::Result<IrysNodeCtx> {
         mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(CONFIG.mining_key).unwrap()),
         ..IrysNodeConfig::default()
     };
-
-    let base_dir = &config.base_directory;
-    if fs::exists(base_dir).unwrap_or(false) && !CONFIG.persist_data_on_restart {
-        // remove existing data directory as storage modules are packed with a different miner_signer generated next
-        info!("Removing .irys folder {:?}", base_dir);
-        fs::remove_dir_all(base_dir).expect("Unable to remove .irys folder");
-    }
 
     let storage_config = StorageConfig {
         chunk_size: CONFIG.chunk_size,
@@ -143,7 +136,7 @@ pub async fn start_irys_node(
 
     // Delete the .irys folder if we are not persisting data on restart
     let base_dir = node_config.instance_directory();
-    if fs::exists(&base_dir).unwrap_or(false) && !CONFIG.persist_data_on_restart {
+    if fs::exists(&base_dir).unwrap_or(false) && CONFIG.reset_state_on_restart {
         // remove existing data directory as storage modules are packed with a different miner_signer generated next
         info!("Removing .irys folder {:?}", &base_dir);
         fs::remove_dir_all(&base_dir).expect("Unable to remove .irys folder");
