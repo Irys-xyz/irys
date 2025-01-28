@@ -4,10 +4,12 @@ use std::{
     time::Duration,
 };
 
-use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
+use actix::{Actor, Addr, Context, Handler, Message, MessageResponse, Recipient};
 
 use eyre::eyre;
 use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
+
+use crate::mining::MiningControl;
 
 #[cfg(feature = "nvidia")]
 use {
@@ -26,6 +28,7 @@ use tracing::{debug, warn};
 pub struct PackingRequest {
     pub storage_module: Arc<StorageModule>,
     pub chunk_range: PartitionChunkRange,
+    pub packing_ready: Option<Recipient<MiningControl>>,
 }
 
 pub type PackingJobs = Arc<RwLock<VecDeque<PackingRequest>>>;
@@ -85,7 +88,7 @@ impl PackingActor {
     async fn process_jobs(self) {
         loop {
             // block as the compiler can't reason about explicit read guard drops with Send bounds apparently
-            let front = {
+            let front: Option<PackingRequest> = {
                 let pending_read_guard = self.pending_jobs.read().unwrap();
                 pending_read_guard.front().cloned()
             };
@@ -103,6 +106,7 @@ impl PackingActor {
             let PackingRequest {
                 storage_module,
                 chunk_range,
+                packing_ready,
             } = next_range;
 
             let assignment = match storage_module.partition_assignment {
@@ -216,6 +220,10 @@ impl PackingActor {
                 _ => unimplemented!(),
             }
 
+            packing_ready.map(|r| { 
+                debug!(target: "irys::packing", "Notifying mining control for SM {} --------------------------------------------------------------------------------------------- ", &storage_module_id);
+                r.do_send(MiningControl(true)) 
+            });
             // Remove from queue once complete
             let _ = self.pending_jobs.write().unwrap().pop_front();
         }
@@ -365,6 +373,7 @@ mod tests {
         let request = PackingRequest {
             storage_module: storage_module.clone(),
             chunk_range: ii(0, 3).into(),
+            packing_ready: None,
         };
         // Create an instance of the mempool actor
         let task_manager = TaskManager::current();

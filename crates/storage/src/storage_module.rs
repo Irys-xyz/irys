@@ -436,6 +436,21 @@ impl StorageModule {
         set.into_iter().collect::<Vec<_>>()
     }
 
+    /// Gets all chunk intervals in a given storage state, merging adjacent ranges
+    ///
+    /// Returns a NoditSet containing the merged intervals for efficient range operations
+    pub fn get_all_intervals(&self) -> Vec<Interval<u32>> {
+        let intervals = self.intervals.read().unwrap();
+        let mut set = NoditSet::new();
+        for (interval, ct) in intervals.iter() {
+            let _ = set.insert_merge_touching_or_overlapping(interval.clone());
+        }
+        // NoditSet is a BTreeMap underneath, meaning collecting them into a vec
+        // is done in ascending key order.
+        set.into_iter().collect::<Vec<_>>()
+    }
+
+
     /// Queues chunk data for later disk write. Chunks are batched for efficiency
     /// and written during periodic sync operations.
     pub fn write_chunk(

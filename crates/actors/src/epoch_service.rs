@@ -4,6 +4,7 @@ use base58::ToBase58;
 use eyre::{Error, Result};
 use irys_database::{block_header_by_hash, data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
+use irys_types::H256List;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     DatabaseProvider, IrysBlockHeader, SimpleRNG, StorageConfig, CONFIG, H256,
@@ -20,6 +21,7 @@ use tracing::{debug, error, trace, warn};
 use crate::block_index_service::{
     BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage,
 };
+use crate::broadcast_mining_service::{BroadcastExpiration, BroadcastMiningService};
 
 /// Allows for overriding of the consensus parameters for ledgers and partitions
 #[derive(Debug, Clone)]
@@ -387,6 +389,10 @@ impl EpochServiceActor {
             let mut ledgers = self.ledgers.write().unwrap();
             expired_hashes = ledgers.get_expired_partition_hashes(epoch_height);
         }
+
+        let mining_broadcaster_addr = BroadcastMiningService::from_registry();
+        debug!("Broadcasting expiration of partitions: {:?}--------------------------------------------------------------------------------------------------", &expired_hashes);
+        mining_broadcaster_addr.do_send(BroadcastExpiration(H256List(expired_hashes.clone())));
 
         // Update expired data partitions assignments marking them as capacity partitions
         for partition_hash in expired_hashes {

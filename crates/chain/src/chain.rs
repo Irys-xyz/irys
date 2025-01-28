@@ -242,6 +242,14 @@ pub async fn start_irys_node(
 
                 debug!("AT GENESIS {}", at_genesis);
 
+                // need to start before the epoch service, as epoch service calls from_registry that triggers broadcast mining service initialization
+                let broadcast_arbiter = Arbiter::new();
+                let broadcast_mining_service =
+                    BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
+                        BroadcastMiningService::default()
+                    });
+                SystemRegistry::set(broadcast_mining_service.clone());
+
                 let mut epoch_service = EpochServiceActor::new(Some(config));
                 epoch_service.initialize(&db).await;
                 let epoch_service_actor_addr = epoch_service.start();
@@ -396,20 +404,18 @@ pub async fn start_irys_node(
                         block_producer_actor
                     });
 
-                let broadcast_arbiter = Arbiter::new();
-                let broadcast_mining_service =
-                    BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
-                        BroadcastMiningService::default()
-                    });
-                SystemRegistry::set(broadcast_mining_service.clone());
-
                 let mut part_actors = Vec::new();
+
+                let packing_actor_addr =
+                    PackingActor::new(Handle::current(), reth_node.task_executor.clone(), None)
+                        .start();
 
                 for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
                         db.clone(),
                         block_producer_addr.clone().recipient(),
+                        packing_actor_addr.clone().recipient(),
                         sm.clone(),
                         false, // do not start mining automatically
                         vdf_steps_guard.clone(),
@@ -424,9 +430,6 @@ pub async fn start_irys_node(
                 // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
                 tokio::task::yield_now().await;
 
-                let packing_actor_addr =
-                    PackingActor::new(Handle::current(), reth_node.task_executor.clone(), None)
-                        .start();
                 // request packing for uninitialized ranges
                 for sm in &storage_modules {
                     let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
@@ -437,6 +440,7 @@ pub async fn start_irys_node(
                             packing_actor_addr.do_send(PackingRequest {
                                 storage_module: sm.clone(),
                                 chunk_range: (*interval).into(),
+                                packing_ready: None,
                             })
                         })
                         .collect::<Vec<()>>();

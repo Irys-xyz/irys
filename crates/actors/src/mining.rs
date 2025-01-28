@@ -1,16 +1,17 @@
 use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
-    BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe,
+    BroadcastDifficultyUpdate, BroadcastExpiration, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe
 };
+use crate::packing::{self, PackingRequest};
 use crate::vdf_service::VdfStepsReadGuard;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use irys_efficient_sampling::Ranges;
-use irys_storage::{ie, ii, StorageModule};
+use irys_storage::{ie, ii, storage_module, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
-use irys_types::{Address, H256List, PartitionChunkOffset};
+use irys_types::{Address, H256List, PartitionChunkOffset, PartitionChunkRange};
 use openssl::sha;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -20,6 +21,7 @@ pub struct PartitionMiningActor {
     mining_address: Address,
     _database_provider: DatabaseProvider,
     block_producer_actor: Recipient<SolutionFoundMessage>,
+    packing_actor: Recipient<PackingRequest>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
     difficulty: U256,
@@ -35,6 +37,7 @@ impl PartitionMiningActor {
         mining_address: Address,
         _database_provider: DatabaseProvider,
         block_producer_addr: Recipient<SolutionFoundMessage>,
+        packing_actor: Recipient<PackingRequest>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStepsReadGuard,
@@ -43,6 +46,7 @@ impl PartitionMiningActor {
             mining_address,
             _database_provider,
             block_producer_actor: block_producer_addr,
+            packing_actor,
             ranges: Ranges::new(
                 (storage_module.storage_config.num_chunks_in_partition
                     / storage_module.storage_config.num_chunks_in_recall_range)
@@ -249,6 +253,27 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
     }
 }
 
+impl Handler<BroadcastExpiration> for PartitionMiningActor {
+    type Result = ();
+
+    fn handle(&mut self, msg: BroadcastExpiration, ctx: &mut Context<Self>) {
+        self.storage_module.partition_hash().map(|partition_hash| {
+            if msg.0.0.contains(&partition_hash) {
+                self.should_mine = false;
+                self.storage_module.get_all_intervals().iter().for_each(|interval| {
+                    self.packing_actor.do_send(
+                            PackingRequest{
+                                storage_module: self.storage_module.clone(),
+                                chunk_range: PartitionChunkRange(*interval), 
+                                packing_ready: Some(ctx.address().recipient())
+                            });
+                });
+                debug!("expired partition hash {} -----------------------------------------------------------------------------------------------------------------------", partition_hash);
+            }    
+        });
+    }
+}
+
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 /// Message type for controlling mining
@@ -266,7 +291,7 @@ impl Handler<MiningControl> for PartitionMiningActor {
     fn handle(&mut self, control: MiningControl, _ctx: &mut Context<Self>) -> Self::Result {
         let should_mine = control.into_inner();
         debug!(
-            "Setting should_mine to {} from {}",
+            "Setting should_mine to {} from {} -------------------------------------------------------------------------------------------------------------------------------------",
             &self.should_mine, &should_mine
         );
         self.should_mine = should_mine
@@ -285,7 +310,9 @@ mod tests {
     };
     use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
     use crate::mining::{PartitionMiningActor, Seed};
+    use crate::packing::PackingActor;
     use crate::vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard};
+    use actix::actors::mocker::Mocker;
     use actix::{Actor, Addr, ArbiterService, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
@@ -326,8 +353,12 @@ mod tests {
                 lck.replace(solution);
             }
 
-            let inner_result = None::<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>;
+            let inner_result: eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> = Ok(None);
             Box::new(Some(inner_result)) as Box<dyn Any>
+        }));
+
+        let packing = Mocker::<PackingActor>::mock(Box::new(move |msg, _ctx| {
+            Box::new(Some(())) as Box<dyn Any>
         }));
 
         let block_producer_actor_addr: Addr<BlockProducerMockActor> = mocked_block_producer.start();
@@ -414,6 +445,7 @@ mod tests {
             mining_address,
             database_provider.clone(),
             mocked_addr.0,
+            packing.start().recipient(),
             storage_module,
             true,
             vdf_steps_guard.clone(),

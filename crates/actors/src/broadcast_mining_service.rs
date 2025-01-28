@@ -30,6 +30,12 @@ pub struct BroadcastMiningSeed {
 #[rtype(result = "()")]
 pub struct BroadcastDifficultyUpdate(pub Arc<IrysBlockHeader>);
 
+/// Send the latest difficulty update to all the `PartitionMiningActors`
+#[derive(Message, Debug, Clone)]
+#[rtype(result = "()")]
+pub struct BroadcastExpiration(pub H256List);
+
+
 /// Broadcaster actor
 #[derive(Debug, Default)]
 pub struct BroadcastMiningService {
@@ -99,6 +105,18 @@ impl Handler<BroadcastDifficultyUpdate> for BroadcastMiningService {
 
     fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {
         self.subscribers.retain(|addr| addr.connected());
+        for subscriber in &self.subscribers {
+            subscriber.do_send(msg.clone());
+        }
+    }
+}
+
+impl Handler<BroadcastExpiration> for BroadcastMiningService {
+    type Result = ();
+
+    fn handle(&mut self, msg: BroadcastExpiration, _: &mut Context<Self>) {
+        self.subscribers.retain(|addr| addr.connected());
+        debug!("Broadcasting Expiration: {:?} -------------------------------------------------------------------------------------------------------------------------------------", msg);
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());
         }
