@@ -41,6 +41,7 @@ irys-efficient-sampling = { path = "./crates/efficient-sampling" }
 #
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
+rayon = "1"
 actix = "0.13.5"
 actix-rt = "2.10.0"
 actix-web = "4.9.0"

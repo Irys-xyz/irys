@@ -36,6 +36,7 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
     vdf_config::VDFStepsConfig, StorageConfig, CHUNK_SIZE, CONFIG, H256,
 };
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
@@ -428,7 +429,7 @@ pub async fn start_irys_node(
                     PackingActor::new(Handle::current(), reth_node.task_executor.clone(), None)
                         .start();
                 // request packing for uninitialized ranges
-                for sm in &storage_modules {
+                storage_modules.par_iter().for_each(|sm| {
                     let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
                     debug!("ranges to pack: {:?}", &uninitialized);
                     let _ = uninitialized
@@ -440,7 +441,7 @@ pub async fn start_irys_node(
                             })
                         })
                         .collect::<Vec<()>>();
-                }
+                });
                 // let _ = wait_for_packing(packing_actor_addr.clone(), None).await;
 
                 debug!("Packing complete");

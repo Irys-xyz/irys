@@ -5315,6 +5315,7 @@ dependencies = [
  "openssl",
  "rand",
  "rand_chacha",
+ "rayon",
  "reth",
  "reth-cli-runner",
  "reth-codecs",
