@@ -179,6 +179,7 @@ mod tests {
 
         let app_state = ApiState {
             reth_provider: None,
+            block_index: None,
             block_tree: None,
             db: DatabaseProvider(arc_db.clone()),
             mempool: mempool_addr,
@@ -237,6 +238,7 @@ mod tests {
 
         let app_state = ApiState {
             reth_provider: None,
+            block_index: None,
             block_tree: None,
             db: DatabaseProvider(db_arc.clone()),
             mempool: mempool_addr,

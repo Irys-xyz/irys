@@ -10,7 +10,9 @@ use irys_actors::block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage
 use irys_database::database;
 use irys_types::{IrysBlockHeader, H256};
 use reth::{
-    primitives::Header, providers::BlockReader, revm::primitives::alloy_primitives::TxHash,
+    primitives::{BlockHashOrNumber, Header},
+    providers::{BlockReader, TransactionVariant},
+    revm::primitives::alloy_primitives::TxHash,
 };
 use reth_db::Database;
 use serde::{Deserialize, Serialize};
@@ -34,7 +36,39 @@ pub async fn get_block(
             let guard = block_tree_guard.read();
             guard.tip.clone()
         }
-        BlockParam::Finalized | BlockParam::Pending | BlockParam::BlockHeight(_) => {
+        BlockParam::BlockHeight(height) => 'outer: {
+            let block_tree_guard = state.block_tree.clone().ok_or(ApiError::Internal {
+                err: String::from("block tree error"),
+            })?;
+            let guard = block_tree_guard.read();
+            let canon_chain = guard.get_canonical_chain();
+            let in_block_tree =
+                canon_chain
+                    .0
+                    .iter()
+                    .find_map(|(hash, hght, _, _)| match *hght == height {
+                        true => Some(hash),
+                        false => None,
+                    });
+            if let Some(hash) = in_block_tree {
+                break 'outer hash.clone();
+            }
+            // get from block index
+            let block_index_guard = state.block_index.clone().ok_or(ApiError::Internal {
+                err: String::from("block index error"),
+            })?;
+            let guard = block_index_guard.read();
+            let r = guard
+                .get_item(height.try_into().map_err(|_| ApiError::Internal {
+                    err: String::from("Block height out of range"),
+                })?)
+                .ok_or(ApiError::ErrNoId {
+                    id: path.to_string(),
+                    err: String::from("Invalid block height"),
+                })?;
+            r.block_hash
+        }
+        BlockParam::Finalized | BlockParam::Pending => {
             return Err(ApiError::Internal {
                 err: String::from("Unsupported tag"),
             });
@@ -89,13 +123,13 @@ fn get_block_by_hash(
         .body
         .transactions
         .iter()
-        .map(|tx| tx.hash)
+        .map(|tx| tx.hash())
         .collect::<Vec<TxHash>>();
 
     let cbh = CombinedBlockHeader {
         irys: irys_header,
         execution: ExecutionHeader {
-            header: reth_block.header,
+            header: reth_block.header.clone(),
             transactions: exec_txs,
         },
     };
@@ -108,8 +142,8 @@ fn get_block_by_hash(
 
 pub struct CombinedBlockHeader {
     #[serde(flatten)]
-    irys: IrysBlockHeader,
-    execution: ExecutionHeader,
+    pub irys: IrysBlockHeader,
+    pub execution: ExecutionHeader,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -117,8 +151,8 @@ pub struct CombinedBlockHeader {
 
 pub struct ExecutionHeader {
     #[serde(flatten)]
-    header: Header,
-    transactions: Vec<TxHash>,
+    pub header: Header,
+    pub transactions: Vec<TxHash>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -214,6 +248,7 @@ mod tests {
 
         let app_state = ApiState {
             reth_provider: None,
+            block_index: None,
             block_tree: None,
             db: DatabaseProvider(db_arc.clone()),
             mempool: mempool_addr,
@@ -269,6 +304,7 @@ mod tests {
 
         let app_state = ApiState {
             reth_provider: None,
+            block_index: None,
             block_tree: None,
             db: DatabaseProvider(db_arc.clone()),
             mempool: mempool_addr,

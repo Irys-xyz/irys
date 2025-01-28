@@ -512,6 +512,7 @@ pub async fn start_irys_node(
                     db,
                     reth_provider: Some(reth_node.clone()),
                     block_tree: Some(block_tree_guard.clone()),
+                    block_index: Some(block_index_guard.clone()),
                 })
                 .await;
 

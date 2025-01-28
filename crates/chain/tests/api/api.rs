@@ -62,6 +62,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
     let app_state = ApiState {
         reth_provider: None,
+        block_index: None,
         block_tree: None,
         db: handle.db,
         mempool: handle.actor_addresses.mempool,

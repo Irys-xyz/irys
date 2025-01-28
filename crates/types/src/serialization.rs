@@ -612,6 +612,24 @@ pub mod optional_string_u64 {
     }
 }
 
+pub mod string_u128 {
+    use super::*;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string_or_number_to_int(deserializer)
+    }
+
+    pub fn serialize<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+}
+
 fn string_or_number_to_int<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
