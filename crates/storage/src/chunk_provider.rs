@@ -148,7 +148,7 @@ mod tests {
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, storage_config, Base64, LedgerChunkRange,
+        irys::IrysSigner, partition::PartitionAssignment, Base64, LedgerChunkRange,
         TransactionLedger, UnpackedChunk,
     };
     use nodit::interval::{ie, ii};

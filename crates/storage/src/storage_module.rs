@@ -1,4 +1,3 @@
-use base58::ToBase58;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, OptionExt, Result};
 use irys_config::STORAGE_SUBMODULES_CONFIG;
