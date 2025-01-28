@@ -17,7 +17,7 @@ use {
 
 use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
 use irys_types::{PartitionChunkRange, StorageConfig};
-use reth::tasks::TaskExecutor;
+use reth::{revm::primitives::HashMap, tasks::TaskExecutor};
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
 
@@ -30,6 +30,8 @@ pub struct PackingRequest {
 
 pub type PackingJobs = Arc<RwLock<VecDeque<PackingRequest>>>;
 
+pub type PackingSemaphore = HashMap<usize, Arc<Semaphore>>;
+
 #[derive(Debug, Clone)]
 /// Packing actor state
 pub struct PackingActor {
@@ -39,8 +41,8 @@ pub struct PackingActor {
     task_executor: TaskExecutor,
     /// list of all the pending packing jobs
     pending_jobs: PackingJobs,
-    /// semaphore to control concurrency
-    semaphore: Arc<Semaphore>,
+    /// semaphore to control concurrency -- sm_id => semaphore
+    semaphore: PackingSemaphore,
     /// packing process configuration
     config: PackingConfig,
 }
@@ -70,14 +72,20 @@ impl PackingActor {
     pub fn new(
         actix_runtime_handle: Handle,
         task_executor: TaskExecutor,
+        storage_module_ids: Vec<usize>,
         config: Option<PackingConfig>,
     ) -> Self {
         let config = config.unwrap_or_default();
+        let semaphore = storage_module_ids
+            .into_iter()
+            .map(|s| (s, Arc::new(Semaphore::new(config.concurrency.into()))))
+            .collect();
+
         Self {
             actix_runtime_handle,
             task_executor,
             pending_jobs: Arc::new(RwLock::new(VecDeque::with_capacity(32))),
-            semaphore: Arc::new(Semaphore::new(config.concurrency.into())),
+            semaphore: semaphore,
             config,
         }
     }
@@ -122,6 +130,7 @@ impl PackingActor {
                 ..
             } = storage_module.storage_config;
             let storage_module_id = storage_module.id;
+            let semaphore = self.semaphore.get(&storage_module_id).unwrap();
 
             match PACKING_TYPE {
                 PackingType::CPU => {
@@ -132,8 +141,8 @@ impl PackingActor {
 
                         // TODO: have stateful executor threads / an arena for entropy chunks so we don't have to allocate chunks all over the place when we can just re-use
                         // TODO: improve this! use wakers instead of polling, allow for work-stealing, use a dedicated thread pool w/ lower priorities etc.
-                        let semaphore: Arc<Semaphore> = self.semaphore.clone();
                         let storage_module = storage_module.clone();
+                        let semaphore = semaphore.clone();
                         // wait for the permit before spawning the thread
                         let permit = semaphore.acquire_owned().await.unwrap();
                         //debug!(target: "irys::packing", "Packing chunk {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
@@ -181,7 +190,7 @@ impl PackingActor {
                         let storage_module = storage_module.clone();
                         let chunk_range_split = chunk_range_split.clone();
 
-                        let semaphore: Arc<Semaphore> = self.semaphore.clone();
+                        let semaphore = self.semaphore.clone().as_ref().get(&storage_module_id).unwrap().clone();
                         // wait for the permit before spawning the thread
                         let permit = semaphore.acquire_owned().await.unwrap();
 
@@ -265,7 +274,7 @@ pub struct GetInternals();
 #[derive(Debug, MessageResponse, Clone)]
 pub struct Internals {
     pending_jobs: PackingJobs,
-    semaphore: Arc<Semaphore>,
+    semaphore: PackingSemaphore,
     config: PackingConfig,
 }
 
@@ -291,11 +300,12 @@ pub async fn wait_for_packing(
         loop {
             if internals.pending_jobs.read().unwrap().len() == 0 {
                 // try to get all the semaphore permits - this is how we know that the packing is done
-                let _permit = internals
+                let _permit = futures::future::join_all(internals
                     .semaphore
-                    .acquire_many(internals.config.concurrency as u32)
+                    .iter()
+                    .map(|(_, s)| s.as_ref().clone().acquire_many(internals.config.concurrency as u32)))
                     .await
-                    .unwrap();
+                    .iter().map(|r| r.unwrap());
                 break Some(());
             } else {
                 sleep(Duration::from_millis(100)).await
@@ -369,7 +379,10 @@ mod tests {
         // Create an instance of the mempool actor
         let task_manager = TaskManager::current();
 
-        let packing = PackingActor::new(Handle::current(), task_manager.executor(), None);
+        let sm_ids = vec![storage_module.id];
+
+
+        let packing = PackingActor::new(Handle::current(), task_manager.executor(), sm_ids, None);
 
         let packing_addr = packing.start();
 
