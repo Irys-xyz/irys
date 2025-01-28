@@ -2,7 +2,7 @@ use std::str::from_utf8;
 use std::time::Duration;
 
 use actix_http::StatusCode;
-use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
+use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_network::EthereumWallet;
 use alloy_provider::Provider;
@@ -12,34 +12,19 @@ use alloy_signer_local::PrivateKeySigner;
 use irys_types::UnpackedChunk;
 use rand::Rng;
 
-use eyre::eyre;
-use irys_actors::{
-    block_producer::SolutionFoundMessage, block_validation, mempool_service::TxIngressMessage,
-    vdf_service::VdfStepsReadGuard,
-};
-use irys_chain::chain::start_for_testing;
+use irys_actors::block_producer::SolutionFoundMessage;
 use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
-use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
-use irys_storage::ii;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    block_production::{Seed, SolutionContext},
     irys::IrysSigner,
-    serialization::*,
-    vdf_config::VDFStepsConfig,
-    Address, H256List, IrysTransaction, SimpleRNG, StorageConfig, CONFIG, H256,
+    serialization::*, IrysTransaction, SimpleRNG, StorageConfig, CONFIG,
 };
-use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use k256::ecdsa::SigningKey;
-use reth::{providers::BlockReader, rpc::types::TransactionRequest};
-use reth_db::Database;
-use reth_primitives::{
-    irys_primitives::{IrysTxId, ShadowResult},
-    GenesisAccount,
-};
-use sha2::{Digest, Sha256};
+use reth::rpc::types::TransactionRequest;
+use reth_primitives::GenesisAccount;
+use sha2::Digest;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
