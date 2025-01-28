@@ -35,6 +35,7 @@ pub struct ApiState {
 
 pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
+        .route("/execution-rpc", web::to(proxy))
         .route("/info", web::get().to(index::info_route))
         .route(
             "/network/config",
@@ -77,7 +78,7 @@ pub async fn run_server(app_state: ApiState) {
                     }),
             )
             .service(routes())
-            .route("/", web::to(proxy))
+            .route("/", web::get().to(index::info_route))
             .wrap(Cors::permissive())
     })
     .bind(("0.0.0.0", CONFIG.port))
