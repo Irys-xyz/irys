@@ -99,6 +99,26 @@ impl<E: EngineTypes> EngineApiContext<E> {
         .await?;
         Ok(())
     }
+
+    /// Sends forkchoice update to the engine api
+    pub async fn update_forkchoice_full(
+        &self,
+        current_head: B256,
+        new_safe_head: B256,
+        finalized: Option<B256>,
+    ) -> eyre::Result<()> {
+        EngineApiClient::<E>::fork_choice_updated_v1_irys(
+            &self.engine_api_client,
+            ForkchoiceState {
+                head_block_hash: new_safe_head,
+                safe_block_hash: current_head,
+                finalized_block_hash: finalized.unwrap_or(B256::ZERO),
+            },
+            None,
+        )
+        .await?;
+        Ok(())
+    }
     pub async fn update_forkchoice_payload_attr(
         &self,
         current_head: B256,

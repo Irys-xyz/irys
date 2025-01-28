@@ -402,7 +402,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             let exec_payload = context
                 .engine_api
-                .build_payload_v1_irys(B256::ZERO, payload_attrs)
+                .build_payload_v1_irys(prev_block_header.evm_block_hash, payload_attrs)
                 .await
                 .unwrap();
 
@@ -427,7 +427,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // make the built evm payload canonical
             context
                 .engine_api
-                .update_forkchoice(v1_payload.parent_hash, v1_payload.block_hash)
+                .update_forkchoice_full(v1_payload.parent_hash, v1_payload.block_hash, None)
                 .await
                 .unwrap();
 
