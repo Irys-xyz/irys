@@ -303,9 +303,9 @@ pub async fn wait_for_packing(
                 let _permit = futures::future::join_all(internals
                     .semaphore
                     .iter()
-                    .map(|(_, s)| s.as_ref().clone().acquire_many(internals.config.concurrency as u32)))
+                    .map(|(_, s)| s.as_ref().acquire_many(internals.config.concurrency as u32)))
                     .await
-                    .iter().map(|r| r.unwrap());
+                    .iter().map(|r| r.as_ref().unwrap());
                 break Some(());
             } else {
                 sleep(Duration::from_millis(100)).await
