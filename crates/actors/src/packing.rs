@@ -31,7 +31,7 @@ pub struct PackingRequest {
 pub type AtomicPackingJobQueue = Arc<RwLock<VecDeque<PackingRequest>>>;
 pub type PackingJobsBySM = HashMap<usize, AtomicPackingJobQueue>;
 
-pub type PackingSemaphore = HashMap<usize, Arc<Semaphore>>;
+pub type PackingSemaphores = HashMap<usize, Arc<Semaphore>>;
 
 #[derive(Debug, Clone)]
 /// Packing actor state
@@ -43,7 +43,7 @@ pub struct PackingActor {
     /// list of all the pending packing jobs
     pending_jobs: PackingJobsBySM,
     /// semaphore to control concurrency -- sm_id => semaphore
-    semaphore: PackingSemaphore,
+    semaphore: PackingSemaphores,
     /// packing process configuration
     config: PackingConfig,
 }
@@ -283,7 +283,7 @@ pub struct GetInternals();
 #[derive(Debug, MessageResponse, Clone)]
 pub struct Internals {
     pending_jobs: PackingJobsBySM,
-    semaphore: PackingSemaphore,
+    semaphore: PackingSemaphores,
     config: PackingConfig,
 }
 
