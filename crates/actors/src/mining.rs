@@ -26,6 +26,7 @@ pub struct PartitionMiningActor {
     difficulty: U256,
     ranges: Ranges,
     steps_guard: VdfStepsReadGuard,
+    skip_to: Option<u64>
 }
 
 /// Allows this actor to live in the the local service registry
@@ -56,6 +57,7 @@ impl PartitionMiningActor {
             should_mine: start_mining,
             difficulty: U256::zero(),
             steps_guard,
+            skip_to: None
         }
     }
 
@@ -212,6 +214,24 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         let seed = msg.seed;
         if !self.should_mine {
             debug!("Mining disabled, skipping seed {:?}", seed);
+            return;
+        }
+
+        let current_step = self.vdf_state.as_ref().read().unwrap().global_step;
+
+        if let Some(skip_to) = self.skip_to {
+            if skip_to < current_step {
+                info!("Storage module {} is skipping {} step as it's behind", self.storage_module.id, msg.global_step);
+            } else {
+                self.skip_to = None;
+            }
+        }
+
+        let lag = current_step - msg.global_step;
+
+        if lag > 3 {
+            self.skip_to = Some(msg.global_step);
+            warn!("Storage module {} is {} steps behind in mining. Skipping.", self.storage_module.id, lag);
             return;
         }
 
