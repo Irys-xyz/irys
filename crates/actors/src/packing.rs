@@ -17,7 +17,7 @@ use {
 
 use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
 use irys_types::{PartitionChunkRange, StorageConfig};
-use reth::{tasks::TaskExecutor};
+use reth::tasks::TaskExecutor;
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
 
@@ -85,7 +85,6 @@ impl PackingActor {
             .iter()
             .map(|s| (*s, Arc::new(RwLock::new(VecDeque::with_capacity(32)))))
             .collect();
-
 
         Self {
             actix_runtime_handle,
@@ -255,8 +254,11 @@ impl Actor for PackingActor {
     fn start(self) -> actix::Addr<Self> {
         let keys = self.pending_jobs.keys().cloned().collect::<Vec<usize>>();
         for key in keys {
-            self.actix_runtime_handle
-                .spawn(Self::process_jobs(self.clone(), key, self.pending_jobs.get(&key).unwrap().clone()));
+            self.actix_runtime_handle.spawn(Self::process_jobs(
+                self.clone(),
+                key,
+                self.pending_jobs.get(&key).unwrap().clone(),
+            ));
         }
 
         Context::new().run(self)
@@ -272,7 +274,13 @@ impl Handler<PackingRequest> for PackingActor {
 
     fn handle(&mut self, msg: PackingRequest, _ctx: &mut Self::Context) -> Self::Result {
         debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.start(), &msg.chunk_range.end(), &msg.storage_module.id);
-        self.pending_jobs.get(&msg.storage_module.id).unwrap().as_ref().write().unwrap().push_back(msg);
+        self.pending_jobs
+            .get(&msg.storage_module.id)
+            .unwrap()
+            .as_ref()
+            .write()
+            .unwrap()
+            .push_back(msg);
     }
 }
 
@@ -308,14 +316,20 @@ pub async fn wait_for_packing(
     tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(10)), async {
         loop {
             // Counts all jobs in all job queues
-            if internals.pending_jobs.values().fold(0, |acc, x| acc + x.as_ref().read().unwrap().len()) == 0 {
+            if internals
+                .pending_jobs
+                .values()
+                .fold(0, |acc, x| acc + x.as_ref().read().unwrap().len())
+                == 0
+            {
                 // try to get all the semaphore permits - this is how we know that the packing is done
-                let _permit = futures::future::join_all(internals
-                    .semaphore
-                    .iter()
-                    .map(|(_, s)| s.as_ref().acquire_many(internals.config.concurrency as u32)))
+                let _permit =
+                    futures::future::join_all(internals.semaphore.iter().map(|(_, s)| {
+                        s.as_ref().acquire_many(internals.config.concurrency as u32)
+                    }))
                     .await
-                    .iter().map(|r| r.as_ref().unwrap());
+                    .iter()
+                    .map(|r| r.as_ref().unwrap());
                 break Some(());
             } else {
                 sleep(Duration::from_millis(100)).await
@@ -390,7 +404,6 @@ mod tests {
         let task_manager = TaskManager::current();
 
         let sm_ids = vec![storage_module.id];
-
 
         let packing = PackingActor::new(Handle::current(), task_manager.executor(), sm_ids, None);
 

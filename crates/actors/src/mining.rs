@@ -228,7 +228,10 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         let lag = current_step - msg.global_step;
 
         if lag >= 3 {
-            warn!("Storage module {} is {} steps behind in mining. Skipping.", self.storage_module.id, lag);
+            warn!(
+                "Storage module {} is {} steps behind in mining. Skipping.",
+                self.storage_module.id, lag
+            );
             return;
         }
 
@@ -429,8 +432,8 @@ mod tests {
         let vdf_service = VdfService::from_registry();
         let vdf_steps_guard: VdfStepsReadGuard =
             vdf_service.send(GetVdfStateMessage).await.unwrap();
-        
-        let atomic_global_step_number = Arc::new(RwLock::new(0));  
+
+        let atomic_global_step_number = Arc::new(RwLock::new(0));
 
         let partition_mining_actor = PartitionMiningActor::new(
             mining_address,

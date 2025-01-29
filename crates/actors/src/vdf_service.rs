@@ -101,17 +101,20 @@ impl VdfService {
 
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
     pub fn from_atomic_state(vdf_state: AtomicVdfState) -> Self {
-        Self {
-            vdf_state,
-        }
+        Self { vdf_state }
     }
 
-
-    pub fn create_state(block_index: Option<BlockIndexReadGuard>, db: Option<DatabaseProvider>) -> VdfState {
+    pub fn create_state(
+        block_index: Option<BlockIndexReadGuard>,
+        db: Option<DatabaseProvider>,
+    ) -> VdfState {
         // set up a minimum cache size of 10_000 steps for testing purposes, chunks number can be very low in testing setups so may need more cached steps than strictly efficient sampling needs.
-        let capacity = std::cmp::max(10_000, (CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range)
-            .try_into()
-            .unwrap());
+        let capacity = std::cmp::max(
+            10_000,
+            (CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range)
+                .try_into()
+                .unwrap(),
+        );
 
         let latest_block_hash = if let Some(bi) = block_index {
             bi.read().get_latest_item().map(|item| item.block_hash)
