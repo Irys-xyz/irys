@@ -145,7 +145,7 @@ impl VdfService {
                         .unwrap()
                         .unwrap();
                 }
-
+                info!("Initializing vdf service from block's info in step number {}", global_step_number);
                 VdfState {
                     global_step: global_step_number,
                     seeds,
@@ -155,6 +155,7 @@ impl VdfService {
                 panic!("Can't initialize VdfService without a DatabaseProvider");
             }
         } else {
+            info!("No block index found, initializing VdfState from zero");
             VdfState {
                 global_step: 0,
                 seeds: VecDeque::with_capacity(capacity),

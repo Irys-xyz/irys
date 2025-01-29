@@ -215,7 +215,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
             return;
         }
 
-        let current_step = self.atomic_global_step_number.read().unwrap().clone();
+        let current_step = self.atomic_global_step_number.load(std::sync::atomic::Ordering::Relaxed);
 
         debug!(
             "Mining partition {} with seed {:?} step number {} current step {}",
@@ -322,6 +322,7 @@ mod tests {
     };
     use irys_types::{H256List, IrysBlockHeader};
     use std::any::Any;
+    use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
     use tokio::time::sleep;
@@ -433,7 +434,7 @@ mod tests {
         let vdf_steps_guard: VdfStepsReadGuard =
             vdf_service.send(GetVdfStateMessage).await.unwrap();
 
-        let atomic_global_step_number = Arc::new(RwLock::new(0));
+        let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
         let partition_mining_actor = PartitionMiningActor::new(
             mining_address,

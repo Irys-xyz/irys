@@ -44,6 +44,7 @@ use reth::{
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c};
 use reth_db::{Database as _, HasName, HasTableType};
+use std::sync::atomic::AtomicU64;
 use std::{
     sync::{mpsc, Arc, OnceLock, RwLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -365,6 +366,7 @@ pub async fn start_irys_node(
                     vdf_service.send(GetVdfStateMessage).await.unwrap();
 
                 let (global_step_number, seed) = vdf_steps_guard.read().get_last_step_and_seed();
+                info!("Starting at global step number: {}", global_step_number);
 
                 let block_discovery_actor = BlockDiscoveryActor {
                     block_index_guard: block_index_guard.clone(),
@@ -408,7 +410,7 @@ pub async fn start_irys_node(
 
                 let mut part_actors = Vec::new();
 
-                let atomic_global_step_number = Arc::new(RwLock::new(global_step_number));
+                let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
 
                 for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(
