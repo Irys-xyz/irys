@@ -3,10 +3,10 @@ use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     vdf_service::{VdfSeed, VdfService},
 };
-use irys_types::{block_production::Seed, vdf_config::VDFStepsConfig, H256List, H256, U256};
+use irys_types::{block_production::Seed, vdf_config::{VDFStepsConfig, AtomicVdfStepNumber}, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
-use std::sync::mpsc::Receiver;
+use std::sync::{mpsc::Receiver, Arc, RwLock};
 use std::time::Instant;
 use tracing::{debug, info};
 
@@ -19,6 +19,7 @@ pub fn run_vdf(
     shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
     vdf_service: Addr<VdfService>,
+    atomic_vdf_global_step: AtomicVdfStepNumber
 ) {
     let mut hasher = Sha256::new();
     let mut hash: H256 = seed;
@@ -46,6 +47,7 @@ pub fn run_vdf(
         );
 
         global_step_number += 1;
+        *(atomic_vdf_global_step.write().unwrap()) = global_step_number;
 
         let elapsed = now.elapsed();
         debug!("Vdf step duration: {:.2?}", elapsed);
@@ -160,6 +162,8 @@ mod tests {
         let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
+        let atomic_global_step_number = Arc::new(RwLock::new(0));
+
         let vdf_thread_handler = std::thread::spawn(move || {
             run_vdf(
                 vdf_config2,
@@ -170,6 +174,7 @@ mod tests {
                 shutdown_rx,
                 broadcast_mining_service,
                 vdf_service,
+                atomic_global_step_number,
             )
         });
 

@@ -15,8 +15,6 @@ use irys_types::{block_production::Seed, DatabaseProvider, H256List, CONFIG, H25
 
 use crate::block_index_service::BlockIndexReadGuard;
 
-const FILE_NAME: &str = "vdf.dat";
-
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,9 +108,10 @@ impl VdfService {
 
 
     pub fn create_state(block_index: Option<BlockIndexReadGuard>, db: Option<DatabaseProvider>) -> VdfState {
-        let capacity = (CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range)
+        // set up a minimum cache size of 10_000 steps for testing purposes, chunks number can be very low in testing setups so may need more cached steps than strictly efficient sampling needs.
+        let capacity = std::cmp::max(10_000, (CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range)
             .try_into()
-            .unwrap();
+            .unwrap());
 
         let latest_block_hash = if let Some(bi) = block_index {
             bi.read().get_latest_item().map(|item| item.block_hash)

@@ -1,4 +1,8 @@
+use std::sync::{Arc, RwLock};
+
 use crate::*;
+
+pub type AtomicVdfStepNumber = Arc<RwLock<u64>>;
 
 /// Allows for overriding of the vdf steps generation parameters
 #[derive(Debug, Clone)]

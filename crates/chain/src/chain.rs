@@ -356,7 +356,7 @@ pub async fn start_irys_node(
 
                 let vdf_state = Arc::new(RwLock::new(VdfService::create_state(Some(block_index_guard.clone()), Some(db.clone()))));
                 let vdf_service_actor =
-                    VdfService::from_atomic_state(vdf_state.clone());
+                    VdfService::from_atomic_state(vdf_state);
                 let vdf_service = vdf_service_actor.start();
                 SystemRegistry::set(vdf_service.clone()); // register it as a service
 
@@ -407,15 +407,17 @@ pub async fn start_irys_node(
 
                 let mut part_actors = Vec::new();
 
+                let atomic_global_step_number = Arc::new(RwLock::new(global_step_number));
+
                 for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
                         db.clone(),
                         block_producer_addr.clone().recipient(),
-                        vdf_state.clone(),
                         sm.clone(),
                         false, // do not start mining automatically
                         vdf_steps_guard.clone(),
+                        atomic_global_step_number.clone(),
                     );
                     let part_arbiter = Arbiter::new();
                     part_actors.push(PartitionMiningActor::start_in_arbiter(
@@ -498,6 +500,7 @@ pub async fn start_irys_node(
                         shutdown_rx,
                         broadcast_mining_service.clone(),
                         vdf_service.clone(),
+                        atomic_global_step_number.clone(),
                     )
                 });
 
