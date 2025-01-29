@@ -1,4 +1,7 @@
-use actix::{Actor, Context, Handler, Message, ResponseFuture, Supervised, SystemService};
+use actix::{
+    Actor, ActorTryFutureExt as _, AtomicResponse, Context, Handler, Message, ResponseFuture,
+    Supervised, SystemService, WrapFuture,
+};
 use eyre::{eyre, OptionExt};
 use futures::TryFutureExt;
 use irys_database::database;
@@ -127,12 +130,12 @@ pub struct ForkChoiceUpdateMessage {
 }
 
 impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
-    type Result = ResponseFuture<eyre::Result<()>>;
+    type Result = AtomicResponse<Self, eyre::Result<()>>;
 
     fn handle(&mut self, msg: ForkChoiceUpdateMessage, _ctx: &mut Self::Context) -> Self::Result {
         let handle = self.handle.clone();
         let db = self.db.clone();
-        return Box::pin(
+        return AtomicResponse::new(Box::pin(
             async move {
                 let handle = handle.ok_or_eyre("Reth service is uninitialized!")?;
                 let db = db.ok_or_eyre("Reth service is uninitialized!")?;
@@ -161,10 +164,11 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
                     .await?;
                 Ok(())
             }
-            .map_err(|e| {
+            .into_actor(self)
+            .map_err(|e, _, _| {
                 error!("Error updating reth forkchoice: {}", &e);
                 e
             }),
-        );
+        ));
     }
 }
