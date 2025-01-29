@@ -408,11 +408,11 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
 }
 
 impl Handler<BlockConfirmedMessage> for MempoolService {
-    type Result = ();
+    type Result = eyre::Result<()>;
     fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         if self.db.is_none() {
             error!("mempool_service is uninitialized");
-            return;
+            return Err(eyre!("mempool_service is uninitialized"));
         }
 
         // Access the block header through msg.0
@@ -489,6 +489,7 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
             block.height,
             all_txs.len()
         );
+        Ok(())
     }
 }
 

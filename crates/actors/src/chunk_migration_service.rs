@@ -1,4 +1,5 @@
 use actix::prelude::*;
+use eyre::eyre;
 use irys_database::{
     cached_chunk_by_chunk_offset,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
@@ -10,7 +11,6 @@ use irys_types::{
     LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxRelativeChunkOffset,
     UnpackedChunk, H256,
 };
-
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
 use tracing::error;
@@ -67,13 +67,13 @@ impl SystemService for ChunkMigrationService {
 }
 
 impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
-    type Result = ResponseFuture<Result<(), ()>>;
+    type Result = ResponseFuture<eyre::Result<()>>;
 
     fn handle(&mut self, msg: BlockFinalizedMessage, _: &mut Context<Self>) -> Self::Result {
         // Early return if not initialized
         if self.block_index.is_none() || self.db.is_none() {
             error!("chunk_migration service not initialized");
-            return Box::pin(async move { Err(()) });
+            return Box::pin(async move { Err(eyre!("chunk_migration service not initialized")) });
         }
 
         // Collect working variables to move into the closure
@@ -99,7 +99,9 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
                 chunk_size,
                 &storage_modules,
                 &db,
-            )?;
+            )
+            // TODO: fix this & child functions so they forward errors?
+            .map_err(|_| eyre!("Unexpected error processing submit ledger transactions"))?;
 
             // Process Publish ledger transactions
             process_ledger_transactions(
@@ -110,7 +112,8 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
                 chunk_size,
                 &storage_modules,
                 &db,
-            )?;
+            )
+            .map_err(|_| eyre!("Unexpected error processing publish ledger transactions"))?;
 
             Ok(())
         })

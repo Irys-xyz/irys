@@ -420,16 +420,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             irys_block.evm_block_hash = block_hash;
 
-            // TODO: Irys block header building logic
-
-            // TODO: Commit block to DB and send to networking layer
-
-            // make the built evm payload canonical
-            context
-                .engine_api
-                .update_forkchoice_full(v1_payload.parent_hash, v1_payload.block_hash, None)
-                .await
-                .unwrap();
 
             let block = Arc::new(irys_block);
             match block_discovery_addr.send(BlockDiscoveredMessage(block.clone())).await {
@@ -443,6 +433,14 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     Err(eyre!("Could not deliver BlockDiscoveredMessage for block {} ({}) : {:?}", &block.block_hash.0.to_base58(), &block.height, e))
                 }
             }?;
+
+            // make this the new head, add the parent as confirmed.
+            // we also update head, confirmed, and finalized as part of block validation.
+            context
+                .engine_api
+                .update_forkchoice_full(block_hash, Some(v1_payload.parent_hash), None)
+                .await
+                .unwrap();
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
@@ -479,7 +477,7 @@ pub fn calculate_chunks_added(txs: &[IrysTransactionHeader], chunk_size: u64) ->
 /// This works for bootstrap node mining, but eventually blocks will be received
 /// from peers and confirmed and their tx will be negotiated though the mempool.
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
+#[rtype(result = "eyre::Result<()>")]
 pub struct BlockConfirmedMessage(
     pub Arc<IrysBlockHeader>,
     pub Arc<Vec<IrysTransactionHeader>>,
@@ -491,7 +489,7 @@ pub struct BlockConfirmedMessage(
 ///  enough confirmations have occurred. Chunks are moved from the in-memory
 /// index to the storage modules when a block is finalized.
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "Result<(), ()>")]
+#[rtype(result = "eyre::Result<()>")]
 pub struct BlockFinalizedMessage {
     /// Block being finalized
     pub block_header: Arc<IrysBlockHeader>,

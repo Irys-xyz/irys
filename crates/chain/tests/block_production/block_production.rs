@@ -111,6 +111,7 @@ pub async fn capacity_chunk_solution(
 
 #[tokio::test]
 async fn test_blockprod() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();

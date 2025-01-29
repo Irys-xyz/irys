@@ -5191,6 +5191,7 @@ dependencies = [
  "base64-url",
  "env_logger",
  "eyre",
+ "futures",
  "irys-config",
  "irys-database",
  "irys-efficient-sampling",

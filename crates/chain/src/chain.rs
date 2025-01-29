@@ -1,7 +1,7 @@
-use irys_actors::vdf_service::VdfState;
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, ArbiterService, System, SystemRegistry};
+use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
+use irys_actors::reth_service::RethServiceActor;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -141,7 +141,7 @@ pub async fn start_irys_node(
     let (reth_handle_sender, reth_handle_receiver) =
         oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
     let (irys_node_handle_sender, irys_node_handle_receiver) = oneshot::channel::<IrysNodeCtx>();
-    let mut irys_genesis = node_config.chainspec_builder.genesis();
+    let (reth_chainspec, mut irys_genesis) = node_config.chainspec_builder.build();
     let arc_config = Arc::new(node_config);
     let mut difficulty_adjustment_config = CONFIG.clone().into();
 
@@ -181,13 +181,6 @@ pub async fn start_irys_node(
         i
     }));
 
-    let reth_chainspec = arc_config
-        .clone()
-        .chainspec_builder
-        .reth_builder
-        .clone()
-        .build();
-
     let cloned_arc = arc_config.clone();
 
     // Spawn thread and runtime for actors
@@ -222,6 +215,16 @@ pub async fn start_irys_node(
 
                 let miner_address = node_config.mining_signer.address();
                 debug!("Miner address {:?}", miner_address);
+
+                let reth_service = RethServiceActor {
+                    handle: Some(reth_node.clone()),
+                    db: Some(db.clone()),
+                };
+                let reth_arbiter = Arbiter::new();
+                SystemRegistry::set(RethServiceActor::start_in_arbiter(
+                    &reth_arbiter.handle(),
+                    |_| reth_service,
+                ));
 
                 // Initialize the block_index actor and tell it about the genesis block
                 let block_index_actor =
@@ -354,9 +357,11 @@ pub async fn start_irys_node(
                     .await
                     .unwrap();
 
-                let vdf_state = Arc::new(RwLock::new(VdfService::create_state(Some(block_index_guard.clone()), Some(db.clone()))));
-                let vdf_service_actor =
-                    VdfService::from_atomic_state(vdf_state.clone());
+                let vdf_state = Arc::new(RwLock::new(VdfService::create_state(
+                    Some(block_index_guard.clone()),
+                    Some(db.clone()),
+                )));
+                let vdf_service_actor = VdfService::from_atomic_state(vdf_state.clone());
                 let vdf_service = vdf_service_actor.start();
                 SystemRegistry::set(vdf_service.clone()); // register it as a service
 
@@ -429,9 +434,13 @@ pub async fn start_irys_node(
 
                 let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
 
-                let packing_actor_addr =
-                    PackingActor::new(Handle::current(), reth_node.task_executor.clone(),sm_ids, None)
-                        .start();
+                let packing_actor_addr = PackingActor::new(
+                    Handle::current(),
+                    reth_node.task_executor.clone(),
+                    sm_ids,
+                    None,
+                )
+                .start();
                 // request packing for uninitialized ranges
                 for sm in &storage_modules {
                     let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
