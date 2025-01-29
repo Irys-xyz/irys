@@ -135,7 +135,7 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
     fn handle(&mut self, msg: ForkChoiceUpdateMessage, _ctx: &mut Self::Context) -> Self::Result {
         let handle = self.handle.clone();
         let db = self.db.clone();
-        return AtomicResponse::new(Box::pin(
+        AtomicResponse::new(Box::pin(
             async move {
                 let handle = handle.ok_or_eyre("Reth service is uninitialized!")?;
                 let db = db.ok_or_eyre("Reth service is uninitialized!")?;
@@ -145,7 +145,7 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
                     confirmed_hash,
                     finalized_hash,
                 } = RethServiceActor::resolve_irys_block_hashes(db, msg).map_err(|e| {
-                    error!("Error updating reth forkchoice - {}", &e);
+                    error!("Error updating reth with forkchoice {:?} - {}", &msg, &e);
                     e
                 })?;
 
@@ -156,19 +156,25 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
 
                 let context = RethNodeContext::new(handle.into())
                     .await
-                    .map_err(|e| eyre!("Error connecting to Reth - {}", e))?;
+                    .map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
 
                 context
                     .engine_api
                     .update_forkchoice_full(head_hash, confirmed_hash, finalized_hash)
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        eyre!("Error updating reth with forkchoice {:?} - {}", &msg, &e)
+                    })?;
                 Ok(())
             }
             .into_actor(self)
-            .map_err(|e, _, _| {
-                error!("Error updating reth forkchoice: {}", &e);
-                e
+            .map_err(|e: eyre::Error, _, _| {
+                error!(
+                    "Error processing RethServiceActor ForkChoiceUpdateMessage: {}",
+                    &e
+                );
+                std::process::abort();
             }),
-        ));
+        ))
     }
 }
