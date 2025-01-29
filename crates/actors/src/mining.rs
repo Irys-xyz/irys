@@ -215,7 +215,9 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
             return;
         }
 
-        let current_step = self.atomic_global_step_number.load(std::sync::atomic::Ordering::Relaxed);
+        let current_step = self
+            .atomic_global_step_number
+            .load(std::sync::atomic::Ordering::Relaxed);
 
         debug!(
             "Mining partition {} with seed {:?} step number {} current step {}",

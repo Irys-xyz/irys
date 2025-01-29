@@ -52,7 +52,7 @@ pub fn run_vdf(
 
         global_step_number += 1;
         atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
-        
+
         let elapsed = now.elapsed();
         debug!("Vdf step duration: {:.2?}", elapsed);
 
@@ -96,7 +96,10 @@ mod tests {
     use irys_types::*;
     use irys_vdf::{vdf_sha_verification, vdf_steps_are_valid};
     use nodit::interval::ii;
-    use std::{sync::{atomic::AtomicU64, mpsc, Arc}, time::Duration};
+    use std::{
+        sync::{atomic::AtomicU64, mpsc, Arc},
+        time::Duration,
+    };
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
 

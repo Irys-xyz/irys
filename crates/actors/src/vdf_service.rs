@@ -145,7 +145,10 @@ impl VdfService {
                         .unwrap()
                         .unwrap();
                 }
-                info!("Initializing vdf service from block's info in step number {}", global_step_number);
+                info!(
+                    "Initializing vdf service from block's info in step number {}",
+                    global_step_number
+                );
                 VdfState {
                     global_step: global_step_number,
                     seeds,
