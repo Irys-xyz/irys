@@ -222,6 +222,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         if let Some(skip_to) = self.skip_to {
             if skip_to < current_step {
                 info!("Storage module {} is skipping {} step as it's behind", self.storage_module.id, msg.global_step);
+                return;
             } else {
                 self.skip_to = None;
             }
