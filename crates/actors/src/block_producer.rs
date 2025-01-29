@@ -176,7 +176,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             }?;
 
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-                warn!("Solution for old step number {}, previous block step number {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number);
+                return Err(eyre!("Skipping solution for old step number {}, previous block step number {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number));
             }
 
             // Get all the ingress proofs for data promotion

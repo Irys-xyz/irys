@@ -2,7 +2,7 @@ use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
     BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe,
 };
-use crate::vdf_service::VdfStepsReadGuard;
+use crate::vdf_service::{AtomicVdfState, VdfState, VdfStepsReadGuard};
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use irys_efficient_sampling::Ranges;
@@ -12,7 +12,7 @@ use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{Address, H256List, PartitionChunkOffset};
 use openssl::sha;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
@@ -21,10 +21,12 @@ pub struct PartitionMiningActor {
     _database_provider: DatabaseProvider,
     block_producer_actor: Recipient<SolutionFoundMessage>,
     storage_module: Arc<StorageModule>,
+    vdf_state: AtomicVdfState,
     should_mine: bool,
     difficulty: U256,
     ranges: Ranges,
     steps_guard: VdfStepsReadGuard,
+    skip_to: Option<u64>
 }
 
 /// Allows this actor to live in the the local service registry
@@ -35,6 +37,7 @@ impl PartitionMiningActor {
         mining_address: Address,
         _database_provider: DatabaseProvider,
         block_producer_addr: Recipient<SolutionFoundMessage>,
+        vdf_state: AtomicVdfState,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStepsReadGuard,
@@ -43,6 +46,7 @@ impl PartitionMiningActor {
             mining_address,
             _database_provider,
             block_producer_actor: block_producer_addr,
+            vdf_state: vdf_state,
             ranges: Ranges::new(
                 (storage_module.storage_config.num_chunks_in_partition
                     / storage_module.storage_config.num_chunks_in_recall_range)
@@ -53,6 +57,7 @@ impl PartitionMiningActor {
             should_mine: start_mining,
             difficulty: U256::zero(),
             steps_guard,
+            skip_to: None
         }
     }
 
@@ -209,6 +214,25 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         let seed = msg.seed;
         if !self.should_mine {
             debug!("Mining disabled, skipping seed {:?}", seed);
+            return;
+        }
+
+        let current_step = self.vdf_state.as_ref().read().unwrap().global_step;
+
+        if let Some(skip_to) = self.skip_to {
+            if msg.global_step < skip_to {
+                info!("Storage module {} is skipping {} step as it's behind", self.storage_module.id, msg.global_step);
+                return;
+            } else {
+                self.skip_to = None;
+            }
+        }
+
+        let lag = current_step - msg.global_step;
+
+        if lag >= 2 {
+            self.skip_to = Some(current_step);
+            warn!("Storage module {} is {} steps behind in mining. Skipping.", self.storage_module.id, lag);
             return;
         }
 
@@ -409,11 +433,14 @@ mod tests {
         let vdf_service = VdfService::from_registry();
         let vdf_steps_guard: VdfStepsReadGuard =
             vdf_service.send(GetVdfStateMessage).await.unwrap();
+        
+
 
         let partition_mining_actor = PartitionMiningActor::new(
             mining_address,
             database_provider.clone(),
             mocked_addr.0,
+            vdf_steps_guard.into_inner_cloned(),
             storage_module,
             true,
             vdf_steps_guard.clone(),

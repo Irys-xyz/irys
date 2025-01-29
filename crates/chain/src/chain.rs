@@ -1,3 +1,4 @@
+use irys_actors::vdf_service::VdfState;
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, ArbiterService, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
@@ -353,8 +354,9 @@ pub async fn start_irys_node(
                     .await
                     .unwrap();
 
+                let vdf_state = Arc::new(RwLock::new(VdfService::create_state(Some(block_index_guard.clone()), Some(db.clone()))));
                 let vdf_service_actor =
-                    VdfService::new(Some(block_index_guard.clone()), Some(db.clone()));
+                    VdfService::from_atomic_state(vdf_state.clone());
                 let vdf_service = vdf_service_actor.start();
                 SystemRegistry::set(vdf_service.clone()); // register it as a service
 
@@ -410,6 +412,7 @@ pub async fn start_irys_node(
                         miner_address,
                         db.clone(),
                         block_producer_addr.clone().recipient(),
+                        vdf_state.clone(),
                         sm.clone(),
                         false, // do not start mining automatically
                         vdf_steps_guard.clone(),
@@ -424,8 +427,10 @@ pub async fn start_irys_node(
                 // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
                 tokio::task::yield_now().await;
 
+                let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
+
                 let packing_actor_addr =
-                    PackingActor::new(Handle::current(), reth_node.task_executor.clone(), None)
+                    PackingActor::new(Handle::current(), reth_node.task_executor.clone(),sm_ids, None)
                         .start();
                 // request packing for uninitialized ranges
                 for sm in &storage_modules {
