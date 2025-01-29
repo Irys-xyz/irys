@@ -17,6 +17,8 @@ use crate::block_index_service::BlockIndexReadGuard;
 
 const FILE_NAME: &str = "vdf.dat";
 
+pub type AtomicVdfState = Arc<RwLock<VdfState>>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VdfState {
     /// last global step stored
@@ -80,7 +82,7 @@ impl VdfState {
 
 #[derive(Debug)]
 pub struct VdfService {
-    pub vdf_state: Arc<RwLock<VdfState>>,
+    pub vdf_state: AtomicVdfState,
 }
 
 impl Default for VdfService {
@@ -92,6 +94,22 @@ impl Default for VdfService {
 impl VdfService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
     pub fn new(block_index: Option<BlockIndexReadGuard>, db: Option<DatabaseProvider>) -> Self {
+        let vdf_state = Self::create_state(block_index, db);
+
+        Self {
+            vdf_state: Arc::new(RwLock::new(vdf_state)),
+        }
+    }
+
+    /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
+    pub fn from_atomic_state(vdf_state: AtomicVdfState) -> Self {
+        Self {
+            vdf_state,
+        }
+    }
+
+
+    pub fn create_state(block_index: Option<BlockIndexReadGuard>, db: Option<DatabaseProvider>) -> VdfState {
         let capacity = (CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range)
             .try_into()
             .unwrap();
@@ -102,7 +120,7 @@ impl VdfService {
             None
         };
 
-        let vdf_state = if let Some(block_hash) = latest_block_hash {
+        if let Some(block_hash) = latest_block_hash {
             if let Some(db) = db {
                 let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
                 let tx = db.tx().unwrap();
@@ -140,10 +158,6 @@ impl VdfService {
                 seeds: VecDeque::with_capacity(capacity),
                 max_seeds_num: capacity,
             }
-        };
-
-        Self {
-            vdf_state: Arc::new(RwLock::new(vdf_state)),
         }
     }
 }
@@ -179,12 +193,16 @@ impl Handler<VdfSeed> for VdfService {
 
 /// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
-pub struct VdfStepsReadGuard(Arc<RwLock<VdfState>>);
+pub struct VdfStepsReadGuard(AtomicVdfState);
 
 impl VdfStepsReadGuard {
     /// Creates a new `ReadGard` for Ledgers
     pub const fn new(state: Arc<RwLock<VdfState>>) -> Self {
         Self(state)
+    }
+
+    pub fn into_inner_cloned(&self) -> AtomicVdfState {
+        self.0.clone()
     }
 
     /// Read access to internal steps queue
