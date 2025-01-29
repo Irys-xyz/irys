@@ -186,6 +186,17 @@ impl StorageSubmodulesConfig {
     pub fn from_toml(path: impl AsRef<Path>) -> eyre::Result<Self> {
         let contents = fs::read_to_string(path)?;
         let config: Self = toml::from_str(&contents)?;
+
+        let submodule_count = config.submodule_paths.len();
+        if submodule_count < 3 {
+            // Eventually this should be based off the genesis config, but
+            // hard coded for now to help debug config / env issues.
+            panic!(
+                "Insufficient submodules: found {}, but minimum of 3 required in .irys_submodules.toml for chain initialization",
+                submodule_count
+            );
+        }
+
         Ok(config)
     }
 
@@ -196,12 +207,12 @@ impl StorageSubmodulesConfig {
 }
 
 /// Configure storage submodule paths:
-/// - In deployed envs (IRYS_ENV set): Try HOME/.irys_storage_submodules.toml first
-/// - Otherwise: Use/create .irys/<instance id>/.irys_storage_submodules.toml
+/// - In deployed envs (IRYS_ENV set): Try HOME/.irys_submodules.toml first
+/// - Otherwise: Use/create .irys/<instance id>/.irys_submodules.toml
 /// - Default: Create config with hardcoded submodule paths in .irys
 pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesConfig> =
     once_cell::sync::Lazy::new(|| {
-        const FILENAME: &str = ".irys_storage_submodules.toml";
+        const FILENAME: &str = ".irys_submodules.toml";
         let node_config = IrysNodeConfig::default();
         let instance_dir = node_config.instance_directory();
         let home_dir = env::var("HOME").expect("Failed to get home directory");
@@ -210,20 +221,22 @@ pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesCon
         let config_path_local = Path::new(&instance_dir).join(FILENAME);
         let config_path_home = Path::new(&home_dir).join(FILENAME);
 
-        // Try HOME directory config in deployed environments
-        if is_deployed {
-            if config_path_home.exists() {
-                // Remove the .irys directory config so there's no confusion
-                if config_path_local.exists() {
-                    fs::remove_file(config_path_local).expect("able to delete file");
-                }
-                tracing::info!("Loading config from {:?}", config_path_home);
-                return StorageSubmodulesConfig::from_toml(config_path_home).unwrap();
-            }
-        }
+        // Create base `storage_modules` directory if it doesn't exist
+        let base_path = instance_dir.join("storage_modules");
+        fs::create_dir_all(base_path.clone()).expect("to create storage_modules directory");
 
-        // Clear out any leftover storage module infos from a non default config
-        // (but leave the intervals)
+        // Start by removing all symlinks from the `storage_modules` dir
+        fs::read_dir(base_path.clone())
+            .expect("to read storage_modules dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_symlink()).unwrap_or(false))
+            .for_each(|e| {
+                println!("{:?}", e.path());
+                fs::remove_dir_all(e.path()).unwrap()
+            });
+
+        // Clear out any leftover `StorageModule_*.json` files from the legacy config
+        // (but leave the intervals, StorageModule::new() will consume them)
         let sm_path = instance_dir.join("storage_modules");
         if sm_path.exists() {
             fs::read_dir(instance_dir.join("storage_modules"))
@@ -240,29 +253,82 @@ pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesCon
                 .for_each(|e| fs::remove_file(e.path()).unwrap());
         }
 
-        // Try .irys directory config in dev environment
-        if config_path_local.exists() {
-            return StorageSubmodulesConfig::from_toml(config_path_local).unwrap();
+        // Try HOME directory config in deployed environments
+        if is_deployed {
+            if config_path_home.exists() {
+                // Remove the .irys directory config so there's no confusion
+                if config_path_local.exists() {
+                    fs::remove_file(config_path_local).expect("able to delete file");
+
+                    // Also delete any old style intervals files so they don't get copied to the symlinked submodules
+                    fs::read_dir(instance_dir.join("storage_modules"))
+                        .unwrap()
+                        .filter_map(|e| e.ok())
+                        .filter(|e| {
+                            let binding = e.file_name();
+                            let name = binding.to_string_lossy();
+                            name.starts_with("StorageModule_") && name.ends_with("_intervals.json")
+                        })
+                        .for_each(|e| fs::remove_file(e.path()).unwrap());
+                }
+                tracing::info!("Loading config from {:?}", config_path_home);
+                let config = StorageSubmodulesConfig::from_toml(config_path_home).unwrap();
+
+                // Create symlinks for each submodule if user provides paths
+                let submodule_paths = &config.submodule_paths;
+                for idx in 0..submodule_paths.len() {
+                    let dest = submodule_paths.get(idx).unwrap();
+                    if let Some(filename) = dest.components().last() {
+                        let sm_path = base_path.join(filename.as_os_str());
+
+                        // Check if path exists and is a directory (not a symlink)
+                        if sm_path.exists() && sm_path.is_dir() && !sm_path.is_symlink() {
+                            fs::remove_dir_all(&sm_path).expect("to remove existing directory");
+                        }
+
+                        tracing::info!("Creating symlink from {:?} to {:?}", sm_path, dest);
+                        debug_assert!(dest.exists());
+
+                        #[cfg(unix)]
+                        std::os::unix::fs::symlink(&dest, &sm_path).expect("to create symlink");
+                        #[cfg(windows)]
+                        std::os::windows::fs::symlink_dir(&dest, &sm_path)
+                            .expect("to create symlink");
+                    }
+                }
+
+                return config;
+            }
         }
 
-        // Create default config with hardcoded paths in dev if none exists
-        tracing::info!("Creating default config at {:?}", config_path_local);
-        let config = StorageSubmodulesConfig {
-            is_using_hardcoded_paths: true,
-            submodule_paths: vec![
-                Path::new(&instance_dir).join("storage_modules/submodule_0"),
-                Path::new(&instance_dir).join("storage_modules/submodule_1"),
-                Path::new(&instance_dir).join("storage_modules/submodule_2"),
-            ],
-        };
+        // Try .irys directory config in dev/local environment
+        if config_path_local.exists() {
+            return StorageSubmodulesConfig::from_toml(config_path_local).unwrap();
+        } else {
+            // Create default config with hardcoded paths in dev if none exists
+            tracing::info!("Creating default config at {:?}", config_path_local);
+            let config = StorageSubmodulesConfig {
+                is_using_hardcoded_paths: true,
+                submodule_paths: vec![
+                    Path::new(&instance_dir).join("storage_modules/submodule_0"),
+                    Path::new(&instance_dir).join("storage_modules/submodule_1"),
+                    Path::new(&instance_dir).join("storage_modules/submodule_2"),
+                ],
+            };
 
-        // Write and verify config
-        fs::create_dir_all(instance_dir).expect(".irys config dir can be created");
-        let toml = toml::to_string(&config).expect("Able to serialize config");
-        fs::write(&config_path_local, toml).unwrap_or_else(|_| {
-            panic!("Failed to write config to {}", config_path_local.display())
-        });
+            // Write and verify config
+            fs::create_dir_all(instance_dir).expect(".irys config dir can be created");
+            let toml = toml::to_string(&config).expect("Able to serialize config");
+            fs::write(&config_path_local, toml).unwrap_or_else(|_| {
+                panic!("Failed to write config to {}", config_path_local.display())
+            });
 
-        // Load the config to verify it parses
-        StorageSubmodulesConfig::from_toml(config_path_local).unwrap()
+            // Ensure the submodule paths exist, StorageModule::new() will do the rest
+            for path in &config.submodule_paths {
+                fs::create_dir_all(path).expect("to create submodule dir");
+            }
+
+            // Load the config to verify it parses
+            StorageSubmodulesConfig::from_toml(config_path_local).unwrap()
+        }
     });

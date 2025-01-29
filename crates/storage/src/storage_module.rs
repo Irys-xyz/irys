@@ -1,5 +1,6 @@
+use base58::ToBase58;
 use derive_more::derive::{Deref, DerefMut};
-use eyre::{eyre, OptionExt, Result};
+use eyre::{eyre, Context, OptionExt, Result};
 use irys_config::STORAGE_SUBMODULES_CONFIG;
 use irys_database::{
     submodule::{
@@ -33,7 +34,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 // Layers of abstraction
 //
@@ -98,8 +99,6 @@ pub struct StorageModule {
     submodules: SubmoduleMap,
     /// Runtime configuration parameters
     pub storage_config: StorageConfig,
-    /// Persistent file handle
-    intervals_file: Arc<Mutex<File>>,
 }
 
 /// On-disk metadata for StorageModule persistence
@@ -122,10 +121,12 @@ impl StorageModuleInfo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackingParams {
     pub packing_address: Address,
-    pub partition_hash: H256,
+    pub partition_hash: Option<H256>,
+    pub ledger: Option<u32>,
+    pub slot: Option<usize>,
 }
 
 impl PackingParams {
@@ -145,10 +146,12 @@ impl PackingParams {
 /// Manages chunk storage on a single physical drive
 #[derive(Debug)]
 pub struct StorageSubmodule {
-    /// Persistent storage handle
-    file: Arc<Mutex<File>>,
     /// Persistent database env
     pub db: DatabaseProvider,
+    /// Persistent storage handle
+    file: Arc<Mutex<File>>,
+    /// Intervals file handle
+    intervals_file: Arc<Mutex<File>>,
 }
 
 /// Defines how chunk data is processed and stored
@@ -192,11 +195,13 @@ impl StorageModule {
         storage_module_info: &StorageModuleInfo,
         storage_config: StorageConfig,
     ) -> eyre::Result<Self> {
-        let mut map = NoditMap::new();
-        let mut intervals = StorageIntervals::new();
+        let mut submodule_map = NoditMap::new();
+        let mut global_intervals = StorageIntervals::new();
 
-        for (interval, dir) in storage_module_info.submodules.clone() {
+        // Initialize the submodules from the StorageModuleInfo
+        for (submodule_interval, dir) in storage_module_info.submodules.clone() {
             let sub_base_path = base_path.join(dir);
+
             // Get a file handle to the chunks.data file in the submodule
             let path = sub_base_path.join("chunks.dat");
             let chunks_file: Arc<Mutex<File>> = Arc::new(Mutex::new(
@@ -217,35 +222,91 @@ impl StorageModule {
             let submodule_db_path = sub_base_path.join("db");
             let submodule_db = create_or_open_submodule_db(&submodule_db_path).map_err(|e| {
                 eyre!(
-                    "Failed to open submodule database: {} - {}",
+                    "Failed to create or open submodule database: {} - {}",
                     submodule_db_path.display(),
                     e
                 )
             })?;
 
-            map.insert_strict(
-                interval.clone(),
-                StorageSubmodule {
-                    file: chunks_file,
-                    db: DatabaseProvider(Arc::new(submodule_db)),
-                },
-            )
-            .map_err(|e| {
-                eyre!(
-                    "Failed to insert submodule over interval: {}-{}, {:?}",
-                    interval.start(),
-                    interval.end(),
-                    e
-                )
-            })?;
+            let params_path = sub_base_path.join("packing_params.toml");
+            if params_path.exists() == false {
+                let mut params = PackingParams {
+                    packing_address: storage_config.miner_address,
+                    ..Default::default()
+                };
+                if let Some(pa) = storage_module_info.partition_assignment {
+                    params.partition_hash = Some(pa.partition_hash);
+                    params.ledger = pa.ledger_id;
+                    params.slot = pa.slot_index;
+                }
+                params.write_to_disk(&params_path);
+            } else {
+                // Load the packing params and check to see if they match
+                let params = PackingParams::from_toml(params_path).expect("packing params to load");
+                let pa = storage_module_info.partition_assignment.unwrap();
+                if params.packing_address != storage_config.miner_address {
+                    panic!(
+                        "Active mining address: {} does not match partition packing address {}",
+                        storage_config.miner_address, params.packing_address
+                    );
+                }
+                if params.partition_hash != Some(pa.partition_hash) {
+                    panic!(
+                        "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
+                        This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
+                        assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
+                        pa.partition_hash.0.to_base58(),
+                        params.partition_hash.unwrap().0.to_base58(),
+                    );
+                }
+            }
 
-            let _ =
-                intervals.insert_merge_touching_if_values_equal(interval, ChunkType::Uninitialized);
+            let intervals_file_path = sub_base_path.join("intervals.json");
+            let submodules_intervals_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&intervals_file_path)
+                .wrap_err_with(|| {
+                    format!(
+                        "Failed to create or open intervals file at {}",
+                        path.display()
+                    )
+                })?;
+
+            // Ensure the intervals.json has a default range
+            ensure_default_intervals(&submodule_interval, &submodules_intervals_file)
+                .expect("to ensure default intervals exist for submodule");
+
+            // The submodule_map maps submodule intervals to specific instance of StorageSubmodule
+            // that maintains system resources connected to the files in that submodule
+            submodule_map
+                .insert_strict(
+                    submodule_interval.clone(),
+                    StorageSubmodule {
+                        file: chunks_file,
+                        db: DatabaseProvider(Arc::new(submodule_db)),
+                        intervals_file: Arc::new(Mutex::new(submodules_intervals_file)),
+                    },
+                )
+                .map_err(|e| {
+                    eyre!(
+                        "Failed to insert submodule over interval: {}-{}, {:?}",
+                        submodule_interval.start(),
+                        submodule_interval.end(),
+                        e
+                    )
+                })?;
+
+            // Initially just mark the global intervals as Uninitialized for this submodules interval
+            let _ = global_intervals.insert_merge_touching_if_values_equal(
+                submodule_interval,
+                ChunkType::Uninitialized,
+            );
         }
 
         // TODO: if there are any gaps, or the range doesn't cover a full module range panic
-
-        let gaps = intervals
+        let gaps = global_intervals
             .gaps_untrimmed(ii(0, u32::MAX))
             .collect::<Vec<_>>();
         let expected = vec![ii(storage_config.num_chunks_in_partition as u32, u32::MAX)];
@@ -257,39 +318,37 @@ impl StorageModule {
             ));
         }
 
-        let path = base_path.join(format!(
+        // This is temporary to help migrate testnet to the new config schema
+        // If there are intervals at the StorageModule level, write them to the submodules and delete the global file
+        let json_path: PathBuf = base_path.join(format!(
             "StorageModule_{}_intervals.json",
             storage_module_info.id
         ));
+        match Self::read_global_intervals_file(&json_path) {
+            Ok(intervals) => {
+                let arc_intervals = Arc::new(RwLock::new(intervals));
+                // Split the intervals across submodules
+                if Self::write_intervals_to_submodules(&arc_intervals, &submodule_map).is_err() {
+                    panic!("could not update submodule intervals file");
+                }
 
-        let intervals_file = Arc::new(Mutex::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true) // Optional: creates file if it doesn't exist
-                .open(&path)
-                .map_err(|e| {
-                    eyre!(
-                        "Failed to create or open interval file: {} - {}",
-                        path.display(),
-                        e
-                    )
-                })?,
-        ));
-
-        // Attempt to restore intervals from the intervals file.
-        if let Ok(ints) = read_intervals_file(intervals_file.clone()) {
-            intervals = ints;
+                // Remove the global file as it is now deprecated
+                fs::remove_file(json_path)
+                    .expect("to be able to remove deprecated StorageModule intervals file");
+            }
+            Err(_) => {}
         }
+
+        // Attempt to load a global set of intervals from the submodules
+        let loaded_intervals = Self::load_intervals_from_submodules(&submodule_map);
 
         Ok(StorageModule {
             id: storage_module_info.id,
             partition_assignment: storage_module_info.partition_assignment,
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
-            intervals: Arc::new(RwLock::new(intervals)),
-            submodules: map,
+            intervals: Arc::new(RwLock::new(loaded_intervals)),
+            submodules: submodule_map,
             storage_config,
-            intervals_file,
         })
     }
 
@@ -361,21 +420,86 @@ impl StorageModule {
         if !write_batch.is_empty() {
             let mut pending = arc.write().unwrap();
             for (chunk_offset, (bytes, chunk_type)) in write_batch {
+                // self.intervals are updated by write_chunk_internal()
                 self.write_chunk_internal(chunk_offset, bytes, chunk_type.clone())?;
                 pending.remove(&chunk_offset); // Clean up written chunks
             }
 
             {
                 // Save the updated intervals
-                let mut file = self.intervals_file.lock().unwrap();
-                let intervals = self.intervals.read().unwrap();
-                file.set_len(0)?;
-                file.seek(SeekFrom::Start(0))?;
-                file.write_all(serde_json::to_string(&*intervals)?.as_bytes())?;
+                if Self::write_intervals_to_submodules(&self.intervals, &self.submodules).is_err() {
+                    error!("Could not update submodule interval files");
+                }
             }
         }
 
         Ok(())
+    }
+
+    fn write_intervals_to_submodules(
+        intervals: &Arc<RwLock<StorageIntervals>>,
+        submodules: &SubmoduleMap,
+    ) -> eyre::Result<()> {
+        let intervals = intervals.read().unwrap();
+        // Loop though each of the submodule ranges
+        for (submodule_interval, submodule) in submodules.iter() {
+            // Split out the ChunkType intervals that overlap the submodule interval
+            let mut working_copy = intervals.clone();
+            let cut_iter = working_copy.cut(*submodule_interval);
+
+            // Write them to the submodules disk
+            if let Ok(mut submodule_intervals) = NoditMap::from_iter_strict(cut_iter) {
+                // Make sure the there is at least one interval spanning the submodule range
+                if submodule_intervals.is_empty() {
+                    submodule_intervals
+                        .insert_merge_touching_if_values_equal(
+                            *submodule_interval,
+                            ChunkType::Uninitialized,
+                        )
+                        .expect("to insert a default range to the submodule intervals");
+                }
+
+                let mut file = submodule.intervals_file.lock().unwrap();
+                // let intervals = self.intervals.read().unwrap();
+                file.set_len(0)?;
+                file.seek(SeekFrom::Start(0))?;
+                file.write_all(serde_json::to_string(&submodule_intervals)?.as_bytes())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn load_intervals_from_submodules(submodules: &SubmoduleMap) -> StorageIntervals {
+        let mut global_intervals = StorageIntervals::new();
+        for (_, submodule) in submodules.iter() {
+            let file = submodule
+                .intervals_file
+                .lock()
+                .expect("to lock the submodule intervals file mutex");
+            let submodule_intervals =
+                read_intervals_file(&file).expect("to read submodule intervals file");
+
+            for (interval, chunk_type) in submodule_intervals {
+                global_intervals
+                    .insert_merge_touching_if_values_equal(interval, chunk_type)
+                    .expect("to insert interval into global intervals map");
+            }
+        }
+        global_intervals
+    }
+
+    #[deprecated(
+        since = "0.1",
+        note = "Intervals now stored per-submodule rather than globally. Use read_submodule_intervals() for new format."
+    )]
+    fn read_global_intervals_file(path: &PathBuf) -> eyre::Result<StorageIntervals> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .wrap_err_with(|| format!("Failed to open intervals file at {}", path.display()))?;
+
+        read_intervals_file(&file)
     }
 
     /// Reads chunks from the specified range and returns their data and storage state
@@ -853,7 +977,7 @@ pub fn initialize_storage_files(
         });
 
     for (idx, info) in infos.iter().enumerate() {
-        for (_, dir) in info.submodules.clone() {
+        for (submodule_interval, dir) in info.submodules.clone() {
             let mut sm_path = base_path.join(dir);
 
             // Hardcoded config vs. user config
@@ -884,10 +1008,6 @@ pub fn initialize_storage_files(
             }
 
             // Next check to see if the storage module path has a chunks.data
-            let params = PackingParams {
-                packing_address: storage_config.miner_address,
-                partition_hash: info.partition_assignment.unwrap().partition_hash,
-            };
             let data_path = sm_path.join("chunks.dat");
             if data_path.exists() == false {
                 // Create empty chunks data file if it doesn't exist
@@ -896,20 +1016,72 @@ pub fn initialize_storage_files(
 
             let params_path = sm_path.join("packing_params.toml");
             if params_path.exists() == false {
+                let mut params = PackingParams {
+                    packing_address: storage_config.miner_address,
+                    ..Default::default()
+                };
+                if let Some(pa) = info.partition_assignment {
+                    params.partition_hash = Some(pa.partition_hash);
+                    params.ledger = pa.ledger_id;
+                    params.slot = pa.slot_index;
+                }
                 params.write_to_disk(&params_path);
             } else {
                 // Load the packing params and check to see if they match
                 let params = PackingParams::from_toml(params_path).expect("packing params to load");
                 let pa = info.partition_assignment.unwrap();
-                if params.packing_address != storage_config.miner_address
-                    || params.partition_hash != pa.partition_hash
-                {
-                    panic!("Configured StorageModuleInfo does not match submodule packing");
+                if params.packing_address != storage_config.miner_address {
+                    panic!(
+                        "Active mining address: {} does not match partition packing address {}",
+                        storage_config.miner_address, params.packing_address
+                    );
+                }
+                if params.partition_hash != Some(pa.partition_hash) {
+                    panic!(
+                        "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
+                        This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
+                        assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
+                        pa.partition_hash.0.to_base58(),
+                        params.partition_hash.unwrap().0.to_base58(),
+                    );
                 }
             }
+
+            let submodule_intervals_path = sm_path.join("intervals.json");
+            let intervals_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&submodule_intervals_path)
+                .wrap_err_with(|| {
+                    format!(
+                        "Failed to create or open intervals file at {}",
+                        submodule_intervals_path.display()
+                    )
+                })?;
+
+            ensure_default_intervals(&submodule_interval, &intervals_file)
+                .expect("to write default intervals");
         }
     }
 
+    Ok(())
+}
+
+fn ensure_default_intervals(
+    submodule_interval: &Interval<u32>,
+    mut file: &File,
+) -> eyre::Result<()> {
+    let mut intervals = StorageIntervals::new();
+    intervals
+        .insert_merge_touching_if_values_equal(*submodule_interval, ChunkType::Uninitialized)
+        .expect("to insert a default interval to the submodule intervals");
+
+    let file_size = file.metadata()?.len();
+    if file_size == 0 {
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(serde_json::to_string(&intervals)?.as_bytes())?;
+    }
     Ok(())
 }
 
@@ -917,8 +1089,7 @@ pub fn initialize_storage_files(
 ///
 /// Loads the stored interval mapping that tracks chunk states.
 /// Expects a JSON-formatted file containing StorageIntervals.
-pub fn read_intervals_file(intervals_file: Arc<Mutex<File>>) -> eyre::Result<StorageIntervals> {
-    let mut file = intervals_file.lock().unwrap();
+pub fn read_intervals_file(mut file: &File) -> eyre::Result<StorageIntervals> {
     let size = file.metadata().unwrap().len() as usize;
 
     if size == 0 {
@@ -1190,7 +1361,7 @@ mod tests {
         );
 
         // Load up the intervals from file
-        let intervals = read_intervals_file(storage_module.intervals_file.clone()).unwrap();
+        let intervals = StorageModule::load_intervals_from_submodules(&storage_module.submodules);
 
         let file_intervals = intervals.into_iter().collect::<Vec<_>>();
         let ints = storage_module.intervals.read().unwrap();
@@ -1221,7 +1392,7 @@ mod tests {
             ..Default::default()
         };
 
-        initialize_storage_files(&base_path, &infos, &config)?;
+        // initialize_storage_files(&base_path, &infos, &config)?;
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];

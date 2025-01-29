@@ -28,7 +28,6 @@ pub use irys_reth_node_bridge::node::{
 };
 
 use irys_storage::{
-    initialize_storage_files,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
@@ -142,7 +141,7 @@ pub async fn start_irys_node(
         fs::remove_dir_all(&base_dir).expect("Unable to remove .irys folder");
     }
 
-    // Autogenerates the  ".irys_storage_submodules.toml" in dev mode
+    // Autogenerates the ".irys_submodules.toml" in dev mode
     StorageSubmodulesConfig::load();
 
     if PACKING_TYPE != PackingType::CPU && storage_config.chunk_size != CHUNK_SIZE {
@@ -278,15 +277,6 @@ pub async fn start_irys_node(
                     .send(GetGenesisStorageModulesMessage)
                     .await
                     .unwrap();
-
-                // Initializes Storage Module metadata files
-                // Creates new files for any missing submodules while preserving existing ones
-                initialize_storage_files(
-                    &arc_config.storage_module_dir(),
-                    &storage_module_infos,
-                    &storage_config,
-                )
-                .unwrap();
 
                 // Create a list of storage modules wrapping the storage files
                 for info in storage_module_infos {
