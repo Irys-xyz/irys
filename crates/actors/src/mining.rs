@@ -220,7 +220,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         let current_step = self.vdf_state.as_ref().read().unwrap().global_step;
 
         if let Some(skip_to) = self.skip_to {
-            if skip_to < current_step {
+            if msg.global_step < skip_to {
                 info!("Storage module {} is skipping {} step as it's behind", self.storage_module.id, msg.global_step);
                 return;
             } else {
