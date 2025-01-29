@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use eyre::eyre;
 use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
@@ -49,12 +46,14 @@ impl Default for PackingConfig {
 pub struct PackingService {
     sender: mpsc::Sender<PackingRequest>,
     semaphore: Arc<Semaphore>,
+    max_permits: usize, // Added manual tracking for max permits
 }
 
 impl PackingService {
     pub fn new(config: PackingConfig) -> Self {
         let (sender, receiver) = mpsc::channel(config.num_storage_modules);
         let semaphore = Arc::new(Semaphore::new(config.concurrency));
+        let max_permits = config.concurrency; // Store the max permits manually
 
         let worker = Worker {
             receiver,
@@ -64,7 +63,11 @@ impl PackingService {
 
         tokio::spawn(worker.run());
 
-        Self { sender, semaphore }
+        Self {
+            sender,
+            semaphore,
+            max_permits,
+        }
     }
 
     /// **Centralized entrypoint function** to submit work from any thread.
@@ -92,7 +95,7 @@ impl PackingService {
         let timeout = timeout.unwrap_or(Duration::from_secs(10));
         tokio::time::timeout(timeout, async {
             loop {
-                if self.semaphore.available_permits() == self.semaphore.max_permits() {
+                if self.semaphore.available_permits() == self.max_permits {
                     break;
                 }
                 sleep(Duration::from_millis(100)).await;
@@ -151,7 +154,7 @@ impl Worker {
         match PACKING_TYPE {
             PackingType::CPU => {
                 for i in chunk_range.start()..=chunk_range.end() {
-                    let storage_module = storage_module.clone();
+                    let storage_module_clone = Arc::clone(&storage_module); // Fix: Clone before move
 
                     spawn_blocking(move || {
                         let mut out = vec![0; chunk_size as usize];
@@ -164,8 +167,8 @@ impl Worker {
                             &mut out,
                         );
 
-                        storage_module.write_chunk(i, out, ChunkType::Entropy);
-                        storage_module.sync_pending_chunks().ok();
+                        storage_module_clone.write_chunk(i, out, ChunkType::Entropy);
+                        storage_module_clone.sync_pending_chunks().ok();
                     });
 
                     if i % 1000 == 0 {
@@ -183,9 +186,7 @@ impl Worker {
                 assert_eq!(chunk_size, CHUNK_SIZE, "Chunk size mismatch");
                 for chunk_range_split in split_interval(&chunk_range, config.max_chunks).unwrap() {
                     let num_chunks = chunk_range_split.end() - chunk_range_split.start() + 1;
-                    let storage_module = storage_module.clone();
-                    let partition_hash = partition_hash;
-                    let mining_address = mining_address;
+                    let storage_module_clone = Arc::clone(&storage_module); // Fix: Clone before move
 
                     spawn_blocking(move || {
                         let mut out = vec![0; (num_chunks * chunk_size as u32) as usize];
@@ -200,12 +201,12 @@ impl Worker {
 
                         for i in 0..num_chunks {
                             let offset = (i * chunk_size as u32) as usize;
-                            storage_module.write_chunk(
+                            storage_module_clone.write_chunk(
                                 chunk_range_split.start() + i,
                                 out[offset..offset + chunk_size as usize].to_vec(),
                                 ChunkType::Entropy,
                             );
-                            storage_module.sync_pending_chunks().ok();
+                            storage_module_clone.sync_pending_chunks().ok();
                         }
                     });
                 }
