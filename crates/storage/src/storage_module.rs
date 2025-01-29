@@ -1,7 +1,6 @@
 use base58::ToBase58;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, Context, OptionExt, Result};
-use irys_config::STORAGE_SUBMODULES_CONFIG;
 use irys_database::{
     submodule::{
         add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
@@ -960,110 +959,7 @@ pub fn initialize_storage_files(
     infos: &Vec<StorageModuleInfo>,
     storage_config: &StorageConfig,
 ) -> Result<()> {
-    tracing::info!(target: "irys::storage_module", base_path=?base_path, "Initializing storage files" );
-    let num_submodule_infos: usize = infos.iter().map(|s| s.submodules.len()).sum();
-    tracing::info!("expecting {} declared submodules", num_submodule_infos);
-
-    // Create base storage directory if it doesn't exist
-    fs::create_dir_all(base_path.clone())?;
-
-    // Start by removing all the submodule symlinks if they exist
-    fs::read_dir(base_path)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_symlink()).unwrap_or(false))
-        .for_each(|e| {
-            println!("{:?}", e.path());
-            fs::remove_dir_all(e.path()).unwrap()
-        });
-
-    for (idx, info) in infos.iter().enumerate() {
-        for (submodule_interval, dir) in info.submodules.clone() {
-            let mut sm_path = base_path.join(dir);
-
-            // Hardcoded config vs. user config
-            if STORAGE_SUBMODULES_CONFIG.is_using_hardcoded_paths {
-                // Create subdirectories for each submodule if we're using hard coded submodules
-                fs::create_dir_all(&sm_path)?;
-            } else {
-                // Create symlinks for each submodule if user provides paths
-                let submodule_paths = &STORAGE_SUBMODULES_CONFIG.submodule_paths;
-                let dest = submodule_paths.get(idx).unwrap();
-
-                fs::create_dir_all(&dest)?;
-                if let Some(filename) = dest.components().last() {
-                    sm_path = base_path.join(filename.as_os_str());
-                    tracing::info!("Creating symlink from {:?} to {:?}", sm_path, dest);
-                    debug_assert!(dest.exists());
-                    #[cfg(unix)]
-                    std::os::unix::fs::symlink(&dest, &sm_path)?;
-                    #[cfg(windows)]
-                    std::os::windows::fs::symlink_dir(&dest, &sm_path)?;
-                }
-            }
-
-            let info_path = base_path.join(format!("StorageModule_{}.json", idx));
-            if info_path.exists() == false {
-                // Create a StorageModuleInfo file for the submodule
-                write_info_file(&info_path, &info).unwrap();
-            }
-
-            // Next check to see if the storage module path has a chunks.data
-            let data_path = sm_path.join("chunks.dat");
-            if data_path.exists() == false {
-                // Create empty chunks data file if it doesn't exist
-                fs::File::create(data_path)?;
-            }
-
-            let params_path = sm_path.join("packing_params.toml");
-            if params_path.exists() == false {
-                let mut params = PackingParams {
-                    packing_address: storage_config.miner_address,
-                    ..Default::default()
-                };
-                if let Some(pa) = info.partition_assignment {
-                    params.partition_hash = Some(pa.partition_hash);
-                    params.ledger = pa.ledger_id;
-                    params.slot = pa.slot_index;
-                }
-                params.write_to_disk(&params_path);
-            } else {
-                // Load the packing params and check to see if they match
-                let params = PackingParams::from_toml(params_path).expect("packing params to load");
-                let pa = info.partition_assignment.unwrap();
-                if params.packing_address != storage_config.miner_address {
-                    panic!(
-                        "Active mining address: {} does not match partition packing address {}",
-                        storage_config.miner_address, params.packing_address
-                    );
-                }
-                if params.partition_hash != Some(pa.partition_hash) {
-                    panic!(
-                        "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
-                        This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
-                        assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
-                        pa.partition_hash.0.to_base58(),
-                        params.partition_hash.unwrap().0.to_base58(),
-                    );
-                }
-            }
-
-            let submodule_intervals_path = sm_path.join("intervals.json");
-            let intervals_file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(&submodule_intervals_path)
-                .wrap_err_with(|| {
-                    format!(
-                        "Failed to create or open intervals file at {}",
-                        submodule_intervals_path.display()
-                    )
-                })?;
-
-            ensure_default_intervals(&submodule_interval, &intervals_file)
-                .expect("to write default intervals");
-        }
-    }
+    // TODO: Remove this method when ready to update all the tests
 
     Ok(())
 }
