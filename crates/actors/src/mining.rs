@@ -231,7 +231,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
         let lag = current_step - msg.global_step;
 
         if lag > 3 {
-            self.skip_to = Some(msg.global_step);
+            self.skip_to = Some(current_step);
             warn!("Storage module {} is {} steps behind in mining. Skipping.", self.storage_module.id, lag);
             return;
         }
