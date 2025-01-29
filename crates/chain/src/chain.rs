@@ -1,7 +1,6 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, ArbiterService, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
-use irys_actors::vdf_service::VdfState;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},

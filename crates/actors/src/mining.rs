@@ -2,7 +2,7 @@ use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
     BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe,
 };
-use crate::vdf_service::{AtomicVdfState, VdfState, VdfStepsReadGuard};
+use crate::vdf_service::VdfStepsReadGuard;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use irys_efficient_sampling::Ranges;

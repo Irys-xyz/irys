@@ -10,7 +10,7 @@ use irys_types::{
 };
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
-use std::sync::{mpsc::Receiver, Arc, RwLock};
+use std::sync::mpsc::Receiver;
 use std::time::Instant;
 use tracing::{debug, info};
 
