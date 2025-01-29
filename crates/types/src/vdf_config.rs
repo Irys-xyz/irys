@@ -1,4 +1,8 @@
+use std::sync::{atomic::AtomicU64, Arc};
+
 use crate::*;
+
+pub type AtomicVdfStepNumber = Arc<AtomicU64>;
 
 /// Allows for overriding of the vdf steps generation parameters
 #[derive(Debug, Clone)]

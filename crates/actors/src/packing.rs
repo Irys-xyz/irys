@@ -195,12 +195,7 @@ impl PackingActor {
                         let storage_module = storage_module.clone();
                         let chunk_range_split = chunk_range_split.clone();
 
-                        let semaphore = self
-                            .semaphore
-                            .clone()
-                            .get(&storage_module_id)
-                            .unwrap()
-                            .clone();
+                        let semaphore = self.semaphore.get(&storage_module_id).unwrap().clone();
                         // wait for the permit before spawning the thread
                         let permit = semaphore.acquire_owned().await.unwrap();
 

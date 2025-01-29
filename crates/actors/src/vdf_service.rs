@@ -15,8 +15,6 @@ use irys_types::{block_production::Seed, DatabaseProvider, H256List, CONFIG, H25
 
 use crate::block_index_service::BlockIndexReadGuard;
 
-const FILE_NAME: &str = "vdf.dat";
-
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,16 +101,20 @@ impl VdfService {
 
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
     pub fn from_atomic_state(vdf_state: AtomicVdfState) -> Self {
-        Self {
-            vdf_state,
-        }
+        Self { vdf_state }
     }
 
-
-    pub fn create_state(block_index: Option<BlockIndexReadGuard>, db: Option<DatabaseProvider>) -> VdfState {
-        let capacity = (CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range)
-            .try_into()
-            .unwrap();
+    pub fn create_state(
+        block_index: Option<BlockIndexReadGuard>,
+        db: Option<DatabaseProvider>,
+    ) -> VdfState {
+        // set up a minimum cache size of 10_000 steps for testing purposes, chunks number can be very low in testing setups so may need more cached steps than strictly efficient sampling needs.
+        let capacity = std::cmp::max(
+            10_000,
+            (CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range)
+                .try_into()
+                .unwrap(),
+        );
 
         let latest_block_hash = if let Some(bi) = block_index {
             bi.read().get_latest_item().map(|item| item.block_hash)
@@ -143,7 +145,10 @@ impl VdfService {
                         .unwrap()
                         .unwrap();
                 }
-
+                info!(
+                    "Initializing vdf service from block's info in step number {}",
+                    global_step_number
+                );
                 VdfState {
                     global_step: global_step_number,
                     seeds,
@@ -153,6 +158,7 @@ impl VdfService {
                 panic!("Can't initialize VdfService without a DatabaseProvider");
             }
         } else {
+            info!("No block index found, initializing VdfState from zero");
             VdfState {
                 global_step: 0,
                 seeds: VecDeque::with_capacity(capacity),
