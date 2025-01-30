@@ -1,18 +1,14 @@
 use actix::prelude::*;
 use irys_database::block_header_by_hash;
 use irys_vdf::vdf_state::{AtomicVdfState, VdfState, VdfStepsReadGuard};
-use nodit::{interval::ii, InclusiveInterval, Interval};
 use reth_db::Database;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
-    sync::{Arc, RwLock, RwLockReadGuard},
-    time::Duration,
+    sync::{Arc, RwLock},
 };
-use tokio::time::sleep;
-use tracing::{info, warn};
+use tracing::info;
 
-use irys_types::{block_production::Seed, DatabaseProvider, H256List, CONFIG, H256};
+use irys_types::{block_production::Seed, DatabaseProvider, CONFIG};
 
 use crate::block_index_service::BlockIndexReadGuard;
 

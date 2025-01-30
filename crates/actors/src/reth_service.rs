@@ -1,5 +1,5 @@
 use actix::{
-    Actor, ActorTryFutureExt as _, AtomicResponse, Context, Handler, Message, ResponseFuture,
+    Actor, ActorTryFutureExt as _, AtomicResponse, Context, Handler, Message,
     Supervised, SystemService, WrapFuture,
 };
 use eyre::{eyre, OptionExt};
