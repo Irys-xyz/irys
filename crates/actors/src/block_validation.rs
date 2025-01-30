@@ -6,12 +6,12 @@ use base58::ToBase58;
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_types::{
     calculate_difficulty, next_cumulative_diff, storage_config::StorageConfig, validate_path,
     Address, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, VDFStepsConfig, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
+use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
 use tracing::{debug, info};
 

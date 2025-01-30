@@ -27,7 +27,6 @@ use irys_packing::{PackingType, PACKING_TYPE};
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_storage::{
     initialize_storage_files,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
@@ -37,6 +36,7 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
     vdf_config::VDFStepsConfig, StorageConfig, CHUNK_SIZE, CONFIG, H256,
 };
+use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,

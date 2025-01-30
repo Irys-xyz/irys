@@ -234,7 +234,11 @@ pub async fn last_step_checkpoints_is_valid(
 /// # Returns
 ///
 /// - `bool` - `true` if the steps are valid, false otherwise.
-pub fn vdf_steps_are_valid(vdf_info: &VDFLimiterInfo, config: &VDFStepsConfig, vdf_steps_guard: VdfStepsReadGuard) -> eyre::Result<()> {
+pub fn vdf_steps_are_valid(
+    vdf_info: &VDFLimiterInfo,
+    config: &VDFStepsConfig,
+    vdf_steps_guard: VdfStepsReadGuard,
+) -> eyre::Result<()> {
     info!(
         "Checking seed {:?} reset_seed {:?}",
         vdf_info.prev_output, vdf_info.seed
@@ -242,7 +246,7 @@ pub fn vdf_steps_are_valid(vdf_info: &VDFLimiterInfo, config: &VDFStepsConfig, v
 
     let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1 as u64;
     let end: u64 = vdf_info.global_step_number;
-    
+
     match vdf_steps_guard.read().get_steps(ii(start, end)) {
         Ok(steps) => {
             debug!("Validating VDF steps from VdfStepsReadGuard!");
@@ -254,7 +258,7 @@ pub fn vdf_steps_are_valid(vdf_info: &VDFLimiterInfo, config: &VDFStepsConfig, v
                 return Ok(())
             }
         },
-        Err(err) => 
+        Err(err) =>
             debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err)
     };
 

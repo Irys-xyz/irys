@@ -3,8 +3,8 @@ use std::sync::Arc;
 use actix::{Actor, ArbiterService, Context, Handler, Message, Supervised, WrapFuture};
 use actix::{AsyncContext, SystemService};
 use irys_types::{IrysBlockHeader, StorageConfig, VDFStepsConfig};
-use irys_vdf::vdf_steps_are_valid;
 use irys_vdf::vdf_state::VdfStepsReadGuard;
+use irys_vdf::vdf_steps_are_valid;
 use tracing::error;
 
 use crate::{
@@ -86,8 +86,9 @@ impl Handler<RequestValidationMessage> for ValidationService {
         let vdf_steps_guard = self.vdf_steps_guard.clone().unwrap();
 
         // Spawn VDF validation first
-        let vdf_future =
-            tokio::task::spawn_blocking(move || vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_steps_guard));
+        let vdf_future = tokio::task::spawn_blocking(move || {
+            vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_steps_guard)
+        });
 
         // Wait for results before processing next message
         ctx.wait(
