@@ -7,7 +7,6 @@ use alloy_signer_local::LocalSigner;
 use eyre::eyre;
 use irys_actors::{
     block_producer::SolutionFoundMessage, block_validation, mempool_service::TxIngressMessage,
-    vdf_service::VdfStepsReadGuard,
 };
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
@@ -16,10 +15,10 @@ use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::Transac
 use irys_storage::ii;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    block_production::Seed, block_production::SolutionContext, irys::IrysSigner, serialization::*,
+    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     vdf_config::VDFStepsConfig, Address, H256List, IrysTransaction, StorageConfig, CONFIG, H256,
 };
-use irys_vdf::{step_number_to_salt_number, vdf_sha};
+use irys_vdf::{step_number_to_salt_number, vdf_sha,vdf_state::VdfStepsReadGuard};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use reth_db::Database;

@@ -1,7 +1,6 @@
 use crate::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeService,
     block_validation::prevalidate_block, epoch_service::PartitionAssignmentsReadGuard,
-    vdf_service::VdfStepsReadGuard,
 };
 use actix::prelude::*;
 use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
@@ -9,6 +8,7 @@ use irys_types::{
     DatabaseProvider, DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader,
     StorageConfig, VDFStepsConfig,
 };
+use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
 use std::sync::Arc;
 use tracing::info;

@@ -92,9 +92,9 @@ pub fn run_vdf(
 mod tests {
     use super::*;
     use actix::*;
-    use irys_actors::vdf_service::{GetVdfStateMessage, VdfStepsReadGuard};
+    use irys_actors::vdf_service::GetVdfStateMessage;
     use irys_types::*;
-    use irys_vdf::{vdf_sha_verification, vdf_steps_are_valid};
+    use irys_vdf::{vdf_sha_verification, vdf_state::VdfStepsReadGuard, vdf_steps_are_valid};
     use nodit::interval::ii;
     use std::{
         sync::{atomic::AtomicU64, mpsc, Arc},
@@ -228,7 +228,7 @@ mod tests {
         };
 
         assert!(
-            vdf_steps_are_valid(&vdf_info, &vdf_config).is_ok(),
+            vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_steps).is_ok(),
             "Invalid VDF"
         );
 

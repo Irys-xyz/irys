@@ -2,7 +2,6 @@ use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
     BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe,
 };
-use crate::vdf_service::VdfStepsReadGuard;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use irys_efficient_sampling::Ranges;
@@ -11,6 +10,7 @@ use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{Address, AtomicVdfStepNumber, H256List, PartitionChunkOffset};
+use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -310,7 +310,7 @@ mod tests {
     };
     use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
     use crate::mining::{PartitionMiningActor, Seed};
-    use crate::vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard};
+    use crate::vdf_service::{GetVdfStateMessage, VdfService};
     use actix::{Actor, Addr, ArbiterService, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
@@ -323,6 +323,7 @@ mod tests {
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
     use irys_types::{H256List, IrysBlockHeader};
+    use irys_vdf::vdf_state::VdfStepsReadGuard;
     use std::any::Any;
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
