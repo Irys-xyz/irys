@@ -10,6 +10,7 @@ use crate::{
     block_producer::BlockConfirmedMessage,
     chunk_migration_service::ChunkMigrationService,
     mempool_service::MempoolService,
+    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     validation_service::{RequestValidationMessage, ValidationService},
     BlockFinalizedMessage,
 };
@@ -159,10 +160,25 @@ impl BlockTreeService {
 
     fn notify_services_of_block_confirmation(
         &self,
-        block: &Arc<IrysBlockHeader>,
+        tip_hash: BlockHash,
+        confirmed_block: &Arc<IrysBlockHeader>,
         all_tx: Arc<Vec<IrysTransactionHeader>>,
     ) {
-        let msg = BlockConfirmedMessage(block.clone(), all_tx);
+        debug!(
+            "JESSEDEBUG confirming irys block {} ({})",
+            &confirmed_block.evm_block_hash, &confirmed_block.height
+        );
+        if let Err(e) = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
+            head_hash: BlockHashType::Irys(tip_hash),
+            confirmed_hash: Some(BlockHashType::Evm(confirmed_block.evm_block_hash)),
+            finalized_hash: None,
+        }) {
+            panic!(
+                "Unable to send confirmation FCU message to reth for {}: {}",
+                &tip_hash, &e
+            )
+        }
+        let msg = BlockConfirmedMessage(confirmed_block.clone(), all_tx);
         MempoolService::from_registry().do_send(msg);
     }
 
@@ -214,6 +230,18 @@ impl BlockTreeService {
                 return;
             }
             panic!("Block tree and index out of sync");
+        }
+        debug!(
+            "JESSEDEBUG finalizing irys block {} ({})",
+            &finalized_hash, &finalized_height
+        );
+
+        if let Err(e) = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
+            head_hash: BlockHashType::Irys(cache.tip),
+            confirmed_hash: None,
+            finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
+        }) {
+            panic!("Unable to send finalisation message to reth: {}", &e)
         }
 
         if let Err(_) = self.send_storage_finalized_message(finalized_hash) {
@@ -328,7 +356,7 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
 
                 // Now do mutable operations
                 if cache.mark_tip(&block_hash).is_ok() {
-                    self.notify_services_of_block_confirmation(&arc_block, all_tx);
+                    self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
                 }
 
                 // Handle block finalization
@@ -891,6 +919,14 @@ impl BlockTreeCache {
             block_hash.0.to_base58(),
             block.height
         );
+
+        RethServiceActor::from_registry()
+            .try_send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Irys(*block_hash),
+                confirmed_hash: None,
+                finalized_hash: None,
+            })
+            .map_err(|e| eyre::eyre!("Error sending FCU to reth service - {}", &e))?;
 
         Ok(old_tip != *block_hash)
     }

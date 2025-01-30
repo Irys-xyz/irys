@@ -211,7 +211,7 @@ impl BlockIndexService {
 }
 
 impl Handler<BlockFinalizedMessage> for BlockIndexService {
-    type Result = Result<(), ()>;
+    type Result = eyre::Result<()>;
     fn handle(&mut self, msg: BlockFinalizedMessage, _: &mut Context<Self>) -> Self::Result {
         // Collect working variables to move into the closure
         let block = msg.block_header;

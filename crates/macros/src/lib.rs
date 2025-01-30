@@ -33,11 +33,11 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
     // Retrieve the environment variable
     let file_path = match env::var(env_var.value()) {
         Ok(path) => {
-            println!("USING CONFIG FILE: {}", path);
+            // println!("USING CONFIG FILE: {}", path);
             path
         }
         Err(_) => {
-            println!("USING DEFAULT CONFIG");
+            // println!("USING DEFAULT CONFIG");
             // Use the provided default if the environment variable is not set
             let mut default_value = default_value;
             default_value.fields = default_value

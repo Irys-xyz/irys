@@ -408,11 +408,11 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
 }
 
 impl Handler<BlockConfirmedMessage> for MempoolService {
-    type Result = ();
+    type Result = eyre::Result<()>;
     fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         if self.db.is_none() {
             error!("mempool_service is uninitialized");
-            return;
+            return Err(eyre!("mempool_service is uninitialized"));
         }
 
         // Access the block header through msg.0
@@ -489,6 +489,7 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
             block.height,
             all_txs.len()
         );
+        Ok(())
     }
 }
 
@@ -625,7 +626,11 @@ mod tests {
                 (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         };
-        initialize_storage_files(&base_path, &vec![storage_module_info.clone()], &vec![])?;
+        initialize_storage_files(
+            &base_path,
+            &vec![storage_module_info.clone()],
+            &storage_config,
+        )?;
 
         // Override the default StorageModule config for testing
         let config = StorageConfig {

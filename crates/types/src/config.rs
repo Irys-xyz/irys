@@ -29,7 +29,7 @@ pub struct Config {
     pub num_writes_before_sync: u64,
     /// If `true`, the ledger will be persisted on disk when the node restarts. Otherwise the
     /// entire state of the node will reset to genesis upon restart.
-    pub persist_data_on_restart: bool,
+    pub reset_state_on_restart: bool,
     // Longest chain consensus
     /// Number of block confirmations required before considering data final.
     ///
@@ -68,7 +68,7 @@ pub const CONFIG: Config = load_toml!(
         submit_ledger_epoch_length: 5,
         num_partitions_per_slot: 1,
         num_writes_before_sync: 5,
-        persist_data_on_restart: true,
+        reset_state_on_restart: false,
         chunk_migration_depth: 1, // Number of confirmations before moving chunks to storage modules
         mining_key: "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0", // Burner PrivateKey (PK)
         num_capacity_partitions: None,
