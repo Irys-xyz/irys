@@ -201,6 +201,9 @@ impl StorageModule {
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
             let sub_base_path = base_path.join(dir);
 
+            println!("{:?}", sub_base_path);
+            fs::create_dir_all(&sub_base_path)?; // Ensure the directory exists (for component tests)
+
             // Get a file handle to the chunks.data file in the submodule
             let path = sub_base_path.join("chunks.dat");
             let chunks_file: Arc<Mutex<File>> = Arc::new(Mutex::new(
@@ -1162,13 +1165,14 @@ mod tests {
 
         let _ = initialize_storage_files(&base_path, &infos, &config);
 
-        // Verify the StorageModuleInfo file was crated in the base path
-        let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();
-        assert_eq!(file_infos, infos[0]);
-
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
         let storage_module = StorageModule::new(&base_path, storage_module_info, config)?;
+
+        // Verify the packing params file was crated in the submodule
+        let params_path = base_path.join("hdd0-4TB").join("packing_params.toml");
+        let params = PackingParams::from_toml(params_path).expect("packing params to load");
+        assert_eq!(params.partition_hash, None);
 
         // Verify the entire storage module range is uninitialized
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
