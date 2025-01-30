@@ -22,6 +22,7 @@ use irys_types::{
     IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
     H256, U256,
 };
+use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::revm::primitives::B256;
@@ -35,7 +36,6 @@ use crate::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::{GetBestMempoolTxs, MempoolService},
-    vdf_service::VdfStepsReadGuard,
 };
 
 /// Used to mock up a `BlockProducerActor`

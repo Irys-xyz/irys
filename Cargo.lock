@@ -5620,6 +5620,7 @@ dependencies = [
  "irys-config",
  "irys-testing-utils",
  "irys-types",
+ "nodit",
  "openssl",
  "rand",
  "rand_chacha",

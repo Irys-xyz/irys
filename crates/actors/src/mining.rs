@@ -2,7 +2,7 @@ use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
     BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe,
 };
-use crate::vdf_service::VdfStepsReadGuard;
+use irys_vdf::vdf_state::VdfStepsReadGuard;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use irys_efficient_sampling::Ranges;
@@ -310,7 +310,8 @@ mod tests {
     };
     use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
     use crate::mining::{PartitionMiningActor, Seed};
-    use crate::vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard};
+    use crate::vdf_service::{GetVdfStateMessage, VdfService};
+    use irys_vdf::vdf_state::VdfStepsReadGuard;
     use actix::{Actor, Addr, ArbiterService, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};

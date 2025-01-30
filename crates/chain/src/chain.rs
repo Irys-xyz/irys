@@ -17,7 +17,7 @@ use irys_actors::{
     mining::PartitionMiningActor,
     packing::{PackingActor, PackingRequest},
     validation_service::ValidationService,
-    vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard},
+    vdf_service::{GetVdfStateMessage, VdfService},
     ActorAddresses, BlockFinalizedMessage,
 };
 use irys_api_server::{run_server, ApiState};
@@ -27,7 +27,7 @@ use irys_packing::{PackingType, PACKING_TYPE};
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
-
+use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_storage::{
     initialize_storage_files,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
@@ -340,18 +340,6 @@ pub async fn start_irys_node(
                 );
                 SystemRegistry::set(chunk_migration_service.start());
 
-                let validation_service = ValidationService::new(
-                    block_index_guard.clone(),
-                    partition_assignments_guard.clone(),
-                    storage_config.clone(),
-                    vdf_config.clone(),
-                );
-                let validation_arbiter = Arbiter::new();
-                SystemRegistry::set(ValidationService::start_in_arbiter(
-                    &validation_arbiter.handle(),
-                    |_| validation_service,
-                ));
-
                 let (_new_seed_tx, _new_seed_rx) = mpsc::channel::<H256>();
 
                 let block_tree_service = BlockTreeService::new(
@@ -384,6 +372,19 @@ pub async fn start_irys_node(
 
                 let vdf_steps_guard: VdfStepsReadGuard =
                     vdf_service.send(GetVdfStateMessage).await.unwrap();
+
+                let validation_service = ValidationService::new(
+                    block_index_guard.clone(),
+                    partition_assignments_guard.clone(),
+                    vdf_steps_guard.clone(),
+                    storage_config.clone(),
+                    vdf_config.clone(),
+                );
+                let validation_arbiter = Arbiter::new();
+                SystemRegistry::set(ValidationService::start_in_arbiter(
+                    &validation_arbiter.handle(),
+                    |_| validation_service,
+                ));
 
                 let (global_step_number, seed) = vdf_steps_guard.read().get_last_step_and_seed();
                 info!("Starting at global step number: {}", global_step_number);

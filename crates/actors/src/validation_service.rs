@@ -4,7 +4,7 @@ use actix::{Actor, ArbiterService, Context, Handler, Message, Supervised, WrapFu
 use actix::{AsyncContext, SystemService};
 use irys_types::{IrysBlockHeader, StorageConfig, VDFStepsConfig};
 use irys_vdf::vdf_steps_are_valid;
-
+use irys_vdf::vdf_state::VdfStepsReadGuard;
 use tracing::error;
 
 use crate::{
@@ -20,6 +20,8 @@ pub struct ValidationService {
     pub block_index_guard: Option<BlockIndexReadGuard>,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: Option<PartitionAssignmentsReadGuard>,
+    /// VDF steps read guard
+    pub vdf_steps_guard: Option<VdfStepsReadGuard>,
     /// Reference to global storage config for node
     pub storage_config: StorageConfig,
     /// Network settings for VDF steps
@@ -31,12 +33,14 @@ impl ValidationService {
     pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
+        vdf_steps_guard: VdfStepsReadGuard,
         storage_config: StorageConfig,
         vdf_config: VDFStepsConfig,
     ) -> Self {
         Self {
             block_index_guard: Some(block_index_guard),
             partition_assignments_guard: Some(partition_assignments_guard),
+            vdf_steps_guard: Some(vdf_steps_guard),
             storage_config,
             vdf_config,
         }
@@ -79,10 +83,11 @@ impl Handler<RequestValidationMessage> for ValidationService {
         let block_hash = block.block_hash;
         let vdf_info = block.vdf_limiter_info.clone();
         let poa = block.poa.clone();
+        let vdf_steps_guard = self.vdf_steps_guard.clone().unwrap();
 
         // Spawn VDF validation first
         let vdf_future =
-            tokio::task::spawn_blocking(move || vdf_steps_are_valid(&vdf_info, &vdf_config));
+            tokio::task::spawn_blocking(move || vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_steps_guard));
 
         // Wait for results before processing next message
         ctx.wait(

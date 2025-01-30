@@ -3,10 +3,14 @@
 
 use irys_types::{H256List, VDFLimiterInfo, VDFStepsConfig, H256, U256};
 
+use nodit::interval::ii;
 use openssl::sha;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
-use tracing::{error, info};
+use tracing::{debug, error, info};
+use vdf_state::VdfStepsReadGuard;
+
+pub mod vdf_state;
 
 /// Derives a salt value from the `step_number` for checkpoint hashing
 ///
@@ -230,11 +234,29 @@ pub async fn last_step_checkpoints_is_valid(
 /// # Returns
 ///
 /// - `bool` - `true` if the steps are valid, false otherwise.
-pub fn vdf_steps_are_valid(vdf_info: &VDFLimiterInfo, config: &VDFStepsConfig) -> eyre::Result<()> {
+pub fn vdf_steps_are_valid(vdf_info: &VDFLimiterInfo, config: &VDFStepsConfig, vdf_steps_guard: VdfStepsReadGuard) -> eyre::Result<()> {
     info!(
         "Checking seed {:?} reset_seed {:?}",
         vdf_info.prev_output, vdf_info.seed
     );
+
+    let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1 as u64;
+    let end: u64 = vdf_info.global_step_number;
+    
+    match vdf_steps_guard.read().get_steps(ii(start, end)) {
+        Ok(steps) => {
+            debug!("Validating VDF steps from VdfStepsReadGuard!");
+            if steps != vdf_info.steps {
+                warn_mismatches(&steps, &vdf_info.steps);
+                return Err(eyre::eyre!("VDF steps are invalid!"));
+            } else {
+                // Do not need to check last step checkpoints here, were checked in pre validation
+                return Ok(())
+            }
+        },
+        Err(err) => 
+            debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err)
+    };
 
     let reset_seed = vdf_info.seed;
 
