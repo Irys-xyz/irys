@@ -320,27 +320,6 @@ impl StorageModule {
             ));
         }
 
-        // This is temporary to help migrate testnet to the new config schema
-        // If there are intervals at the StorageModule level, write them to the submodules and delete the global file
-        let json_path: PathBuf = base_path.join(format!(
-            "StorageModule_{}_intervals.json",
-            storage_module_info.id
-        ));
-        match Self::read_global_intervals_file(&json_path) {
-            Ok(intervals) => {
-                let arc_intervals = Arc::new(RwLock::new(intervals));
-                // Split the intervals across submodules
-                if Self::write_intervals_to_submodules(&arc_intervals, &submodule_map).is_err() {
-                    panic!("could not update submodule intervals file");
-                }
-
-                // Remove the global file as it is now deprecated
-                fs::remove_file(json_path)
-                    .expect("to be able to remove deprecated StorageModule intervals file");
-            }
-            Err(_) => {}
-        }
-
         // Attempt to load a global set of intervals from the submodules
         let loaded_intervals = Self::load_intervals_from_submodules(&submodule_map);
 
@@ -488,20 +467,6 @@ impl StorageModule {
             }
         }
         global_intervals
-    }
-
-    #[deprecated(
-        since = "0.1",
-        note = "Intervals now stored per-submodule rather than globally. Use read_submodule_intervals() for new format."
-    )]
-    fn read_global_intervals_file(path: &PathBuf) -> eyre::Result<StorageIntervals> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .wrap_err_with(|| format!("Failed to open intervals file at {}", path.display()))?;
-
-        read_intervals_file(&file)
     }
 
     /// Reads chunks from the specified range and returns their data and storage state
