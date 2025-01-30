@@ -911,27 +911,6 @@ impl StorageModule {
     }
 }
 
-/// Creates required storage directory structure and empty data files
-///
-/// Creates:
-/// - Base directory
-/// - Subdirectories for each range
-/// - Empty chunks.dat files in each subdirectory
-///
-/// Deletes:
-/// - the _intervals.json, resetting the storage module state
-///
-/// Used primarily for testing storage initialization
-pub fn initialize_storage_files(
-    base_path: &PathBuf,
-    infos: &Vec<StorageModuleInfo>,
-    storage_config: &StorageConfig,
-) -> Result<()> {
-    // TODO: Remove this method when ready to update all the tests
-
-    Ok(())
-}
-
 fn ensure_default_intervals(
     submodule_interval: &Interval<u32>,
     mut file: &File,
@@ -1127,8 +1106,6 @@ mod tests {
             num_chunks_in_partition: 20,
             ..Default::default()
         };
-
-        let _ = initialize_storage_files(&base_path, &infos, &config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];

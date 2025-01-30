@@ -584,7 +584,7 @@ mod tests {
     use assert_matches::assert_matches;
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_packing::xor_vec_u8_arrays_in_place;
-    use irys_storage::{ii, initialize_storage_files, ChunkType, StorageModule, StorageModuleInfo};
+    use irys_storage::{ii, ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         irys::IrysSigner,
@@ -626,11 +626,6 @@ mod tests {
                 (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         };
-        initialize_storage_files(
-            &base_path,
-            &vec![storage_module_info.clone()],
-            &storage_config,
-        )?;
 
         // Override the default StorageModule config for testing
         let config = StorageConfig {
