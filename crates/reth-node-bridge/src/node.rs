@@ -266,8 +266,8 @@ pub async fn run_node<T: HasName + HasTableType>(
     // from ext/reth/bin/reth/src/main.rs
 
     let engine_tree_config = TreeConfig::default()
-        .with_persistence_threshold(engine_args.persistence_threshold)
-        .with_memory_block_buffer_target(engine_args.memory_block_buffer_target);
+        .with_persistence_threshold(0 /* engine_args.persistence_threshold */) // always persist to disk
+        .with_memory_block_buffer_target(0 /* engine_args.memory_block_buffer_target */);
 
     let handle =
         builder

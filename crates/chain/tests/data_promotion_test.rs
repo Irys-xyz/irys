@@ -80,6 +80,9 @@ async fn data_promotion_test() {
     node_context.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
+        reth_provider: None,
+        block_index: None,
+        block_tree: None,
         db: node_context.db.clone(),
         mempool: node_context.actor_addresses.mempool,
         chunk_provider: node_context.chunk_provider.clone(),

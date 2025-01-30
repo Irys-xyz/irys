@@ -11,11 +11,11 @@ use std::{
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use irys_types::{block_production::Seed, DatabaseProvider, H256List, H256};
+use irys_types::{block_production::Seed, DatabaseProvider, H256List, CONFIG, H256};
 
 use crate::block_index_service::BlockIndexReadGuard;
 
-const FILE_NAME: &str = "vdf.dat";
+pub type AtomicVdfState = Arc<RwLock<VdfState>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VdfState {
@@ -80,29 +80,49 @@ impl VdfState {
 
 #[derive(Debug)]
 pub struct VdfService {
-    pub vdf_state: Arc<RwLock<VdfState>>,
+    pub vdf_state: AtomicVdfState,
 }
 
 impl Default for VdfService {
     fn default() -> Self {
-        Self::new(1000, None, None)
+        Self::new(None, None)
     }
 }
 
 impl VdfService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
-    pub fn new(
-        capacity: usize,
+    pub fn new(block_index: Option<BlockIndexReadGuard>, db: Option<DatabaseProvider>) -> Self {
+        let vdf_state = Self::create_state(block_index, db);
+
+        Self {
+            vdf_state: Arc::new(RwLock::new(vdf_state)),
+        }
+    }
+
+    /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
+    pub fn from_atomic_state(vdf_state: AtomicVdfState) -> Self {
+        Self { vdf_state }
+    }
+
+    pub fn create_state(
         block_index: Option<BlockIndexReadGuard>,
         db: Option<DatabaseProvider>,
-    ) -> Self {
+    ) -> VdfState {
+        // set up a minimum cache size of 10_000 steps for testing purposes, chunks number can be very low in testing setups so may need more cached steps than strictly efficient sampling needs.
+        let capacity = std::cmp::max(
+            10_000,
+            (CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range)
+                .try_into()
+                .unwrap(),
+        );
+
         let latest_block_hash = if let Some(bi) = block_index {
             bi.read().get_latest_item().map(|item| item.block_hash)
         } else {
             None
         };
 
-        let vdf_state = if let Some(block_hash) = latest_block_hash {
+        if let Some(block_hash) = latest_block_hash {
             if let Some(db) = db {
                 let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
                 let tx = db.tx().unwrap();
@@ -125,7 +145,10 @@ impl VdfService {
                         .unwrap()
                         .unwrap();
                 }
-
+                info!(
+                    "Initializing vdf service from block's info in step number {}",
+                    global_step_number
+                );
                 VdfState {
                     global_step: global_step_number,
                     seeds,
@@ -135,15 +158,12 @@ impl VdfService {
                 panic!("Can't initialize VdfService without a DatabaseProvider");
             }
         } else {
+            info!("No block index found, initializing VdfState from zero");
             VdfState {
                 global_step: 0,
                 seeds: VecDeque::with_capacity(capacity),
                 max_seeds_num: capacity,
             }
-        };
-
-        Self {
-            vdf_state: Arc::new(RwLock::new(vdf_state)),
         }
     }
 }
@@ -179,12 +199,16 @@ impl Handler<VdfSeed> for VdfService {
 
 /// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
-pub struct VdfStepsReadGuard(Arc<RwLock<VdfState>>);
+pub struct VdfStepsReadGuard(AtomicVdfState);
 
 impl VdfStepsReadGuard {
     /// Creates a new `ReadGard` for Ledgers
     pub const fn new(state: Arc<RwLock<VdfState>>) -> Self {
         Self(state)
+    }
+
+    pub fn into_inner_cloned(&self) -> AtomicVdfState {
+        self.0.clone()
     }
 
     /// Read access to internal steps queue
@@ -231,7 +255,10 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf() {
-        let addr = VdfService::new(4, None, None).start();
+        let service = VdfService::new(None, None);
+        service.vdf_state.write().unwrap().seeds = VecDeque::with_capacity(4);
+        service.vdf_state.write().unwrap().max_seeds_num = 4;
+        let addr = service.start();
 
         // Send 8 seeds 1,2..,8 (capacity is 4)
         for i in 0..8 {

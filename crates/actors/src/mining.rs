@@ -10,7 +10,7 @@ use irys_storage::{ie, ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
-use irys_types::{Address, H256List, PartitionChunkOffset};
+use irys_types::{Address, AtomicVdfStepNumber, H256List, PartitionChunkOffset};
 use openssl::sha;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -25,6 +25,7 @@ pub struct PartitionMiningActor {
     difficulty: U256,
     ranges: Ranges,
     steps_guard: VdfStepsReadGuard,
+    atomic_global_step_number: AtomicVdfStepNumber,
 }
 
 /// Allows this actor to live in the the local service registry
@@ -38,6 +39,7 @@ impl PartitionMiningActor {
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStepsReadGuard,
+        atomic_global_step_number: AtomicVdfStepNumber,
     ) -> Self {
         Self {
             mining_address,
@@ -53,6 +55,7 @@ impl PartitionMiningActor {
             should_mine: start_mining,
             difficulty: U256::zero(),
             steps_guard,
+            atomic_global_step_number,
         }
     }
 
@@ -212,6 +215,28 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
             return;
         }
 
+        let current_step = self
+            .atomic_global_step_number
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        debug!(
+            "Mining partition {} with seed {:?} step number {} current step {}",
+            self.storage_module.partition_hash().unwrap(),
+            seed,
+            msg.global_step,
+            current_step
+        );
+
+        let lag = current_step - msg.global_step;
+
+        if lag >= 3 {
+            warn!(
+                "Storage module {} is {} steps behind in mining. Skipping.",
+                self.storage_module.id, lag
+            );
+            return;
+        }
+
         debug!(
             "Partition {} -- looking for solution with difficulty >= {}",
             self.storage_module.partition_hash().unwrap(),
@@ -299,6 +324,7 @@ mod tests {
     };
     use irys_types::{H256List, IrysBlockHeader};
     use std::any::Any;
+    use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
     use tokio::time::sleep;
@@ -410,6 +436,8 @@ mod tests {
         let vdf_steps_guard: VdfStepsReadGuard =
             vdf_service.send(GetVdfStateMessage).await.unwrap();
 
+        let atomic_global_step_number = Arc::new(AtomicU64::new(1));
+
         let partition_mining_actor = PartitionMiningActor::new(
             mining_address,
             database_provider.clone(),
@@ -417,6 +445,7 @@ mod tests {
             storage_module,
             true,
             vdf_steps_guard.clone(),
+            atomic_global_step_number,
         );
 
         let seed: Seed = Seed(H256::random());

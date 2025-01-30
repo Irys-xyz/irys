@@ -3,6 +3,7 @@ use actix_http::StatusCode;
 use alloy_core::primitives::aliases::U200;
 use alloy_core::primitives::U256;
 use alloy_eips::eip2930::AccessListItem;
+use alloy_eips::BlockNumberOrTag;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
@@ -11,11 +12,13 @@ use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_chain::chain::start_for_testing;
+use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{irys::IrysSigner, Address};
 use irys_types::{Base64, IrysTransactionHeader, UnpackedChunk};
 
 use k256::ecdsa::SigningKey;
+use reth::rpc::eth::EthApiServer;
 use reth_primitives::irys_primitives::precompile::IrysPrecompileOffsets;
 use reth_primitives::irys_primitives::range_specifier::{
     ByteRangeSpecifier, PdAccessListArgSerde, U18, U34,
@@ -92,7 +95,7 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
-        .on_http("http://localhost:8080".parse()?);
+        .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
 
     let deploy_builder =
         IrysProgrammableDataBasic::deploy_builder(alloy_provider.clone()).gas(29506173);
@@ -303,6 +306,31 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
     );
 
     assert_eq!(&message, &stored_message);
+
+    let context = RethNodeContext::new(node.reth_handle.into()).await?;
+
+    let latest = context
+        .rpc
+        .inner
+        .eth_api()
+        .block_by_number(BlockNumberOrTag::Latest, false)
+        .await?;
+
+    let safe = context
+        .rpc
+        .inner
+        .eth_api()
+        .block_by_number(BlockNumberOrTag::Safe, false)
+        .await?;
+
+    let finalized = context
+        .rpc
+        .inner
+        .eth_api()
+        .block_by_number(BlockNumberOrTag::Finalized, false)
+        .await?;
+
+    dbg!(latest, safe, finalized);
 
     Ok(())
 }

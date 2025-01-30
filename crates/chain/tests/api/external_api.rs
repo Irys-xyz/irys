@@ -158,6 +158,9 @@ async fn external_api() -> eyre::Result<()> {
     );
 
     let app_state = ApiState {
+        reth_provider: None,
+        block_index: None,
+        block_tree: None,
         db: arc_db.clone(),
         mempool: mempool_addr.clone(),
         chunk_provider: Arc::new(chunk_provider),
