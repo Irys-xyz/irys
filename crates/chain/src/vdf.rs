@@ -228,7 +228,7 @@ mod tests {
         };
 
         assert!(
-            vdf_steps_are_valid(&vdf_info, &vdf_config).is_ok(),
+            vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_steps).is_ok(),
             "Invalid VDF"
         );
 
