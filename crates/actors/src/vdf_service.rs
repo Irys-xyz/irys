@@ -147,6 +147,9 @@ impl Handler<GetVdfStateMessage> for VdfService {
 // Tests
 #[cfg(test)]
 mod tests {
+    use irys_storage::ii;
+    use irys_types::{H256List, H256};
+
     use super::*;
 
     #[actix_rt::test]
