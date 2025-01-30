@@ -1,6 +1,7 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
+use alloy_eips::BlockNumberOrTag;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
@@ -24,6 +25,7 @@ use irys_api_server::{run_server, ApiState};
 use irys_config::{decode_hex, IrysNodeConfig, STORAGE_SUBMODULES_CONFIG};
 use irys_database::database;
 use irys_packing::{PackingType, PACKING_TYPE};
+use irys_reth_node_bridge::adapter::node::RethNodeContext;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
@@ -37,6 +39,7 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
     vdf_config::VDFStepsConfig, StorageConfig, CHUNK_SIZE, CONFIG, H256,
 };
+use reth::rpc::eth::EthApiServer as _;
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
@@ -220,21 +223,61 @@ pub async fn start_irys_node(
                 let miner_address = node_config.mining_signer.address();
                 debug!("Miner address {:?}", miner_address);
 
-                let reth_service = RethServiceActor {
-                    handle: Some(reth_node.clone()),
-                    db: Some(db.clone()),
-                };
+                let reth_service = RethServiceActor::new(reth_node.clone(), db.clone());
                 let reth_arbiter = Arbiter::new();
                 SystemRegistry::set(RethServiceActor::start_in_arbiter(
                     &reth_arbiter.handle(),
                     |_| reth_service,
                 ));
 
-                // check we can access the EVM block specified by the latest block
+                debug!(
+                    "JESSEDEBUG setting head to block {} ({})",
+                    &latest_block.evm_block_hash, &latest_block.height
+                );
+
+                {
+                    let context = RethNodeContext::new(reth_node.clone().into())
+                        .await
+                        .map_err(|e| eyre::eyre!("Error connecting to Reth: {}", e))
+                        .unwrap();
+
+                    let latest = context
+                        .rpc
+                        .inner
+                        .eth_api()
+                        .block_by_number(BlockNumberOrTag::Latest, false)
+                        .await;
+
+                    let safe = context
+                        .rpc
+                        .inner
+                        .eth_api()
+                        .block_by_number(BlockNumberOrTag::Safe, false)
+                        .await;
+
+                    let finalized = context
+                        .rpc
+                        .inner
+                        .eth_api()
+                        .block_by_number(BlockNumberOrTag::Finalized, false)
+                        .await;
+
+                    debug!(
+                        "JESSEDEBUG FCU S latest {:?}, safe {:?}, finalized {:?}",
+                        &latest, &safe, &finalized
+                    );
+
+                    assert_eq!(
+                        latest.unwrap().unwrap().header.number,
+                        latest_block.height,
+                        "CRITICAL FAILURE: Reth is out of sync with Irys block index!"
+                    );
+                }
+
                 RethServiceActor::from_registry()
                     .send(ForkChoiceUpdateMessage {
                         head_hash: BlockHashType::Evm(latest_block.evm_block_hash),
-                        confirmed_hash: None,
+                        confirmed_hash: Some(BlockHashType::Evm(latest_block.evm_block_hash)),
                         finalized_hash: None,
                     })
                     .await
