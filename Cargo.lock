@@ -5534,6 +5534,7 @@ dependencies = [
  "derive_more 1.0.0",
  "eyre",
  "futures",
+ "irys-config",
  "irys-database",
  "irys-packing",
  "irys-testing-utils",
@@ -5545,6 +5546,7 @@ dependencies = [
  "reth-db",
  "serde",
  "serde_json",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]

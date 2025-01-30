@@ -164,6 +164,10 @@ impl BlockTreeService {
         confirmed_block: &Arc<IrysBlockHeader>,
         all_tx: Arc<Vec<IrysTransactionHeader>>,
     ) {
+        debug!(
+            "JESSEDEBUG confirming irys block {} ({})",
+            &confirmed_block.evm_block_hash, &confirmed_block.height
+        );
         if let Err(e) = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
             head_hash: BlockHashType::Irys(tip_hash),
             confirmed_hash: Some(BlockHashType::Evm(confirmed_block.evm_block_hash)),
@@ -227,6 +231,10 @@ impl BlockTreeService {
             }
             panic!("Block tree and index out of sync");
         }
+        debug!(
+            "JESSEDEBUG finalizing irys block {} ({})",
+            &finalized_hash, &finalized_height
+        );
 
         if let Err(e) = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
             head_hash: BlockHashType::Irys(cache.tip),

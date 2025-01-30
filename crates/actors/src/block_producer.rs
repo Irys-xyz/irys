@@ -25,10 +25,10 @@ use irys_types::{
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
 use openssl::sha;
-use reth::revm::primitives::B256;
+use reth::{revm::primitives::B256, rpc::eth::EthApiServer as _};
 use reth_db::cursor::*;
 use reth_db::Database;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
@@ -36,6 +36,7 @@ use crate::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::{GetBestMempoolTxs, MempoolService},
+    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
 };
 
 /// Used to mock up a `BlockProducerActor`
@@ -176,7 +177,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             }?;
 
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-                return Err(eyre!("Skipping solution for old step number {}, previous block step number {} for block {} ({}) ", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58(),  prev_block_height));
+                error!("Skipping solution for old step number {}, previous block step number {} for block {} ({}) ", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58(),  prev_block_height);
+                return Ok(None)
             }
 
             // Get all the ingress proofs for data promotion
@@ -400,6 +402,24 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 shadows: Some(shadows),
             };
 
+
+            // try to get block by hash
+            let parent = context
+            .rpc
+            .inner
+            .eth_api()
+            .block_by_hash(prev_block_header.evm_block_hash, false)
+            .await;
+
+            debug!("JESSEDEBUG parent block: {:?}", &parent);
+
+            // make sure the parent block is canonical on the reth side so we can built upon it
+            RethServiceActor::from_registry().send(ForkChoiceUpdateMessage{
+                head_hash: BlockHashType::Evm(prev_block_header.evm_block_hash),
+                confirmed_hash: None,
+                finalized_hash: None,
+            }).await??;
+
             let exec_payload = context
                 .engine_api
                 .build_payload_v1_irys(prev_block_header.evm_block_hash, payload_attrs)
@@ -434,8 +454,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 }
             }?;
 
-            // make this the new head
-            // note: also update head, confirmed, and finalized as part of the block validation -> block tree system
+            // we set the canon head here, as we produced this block, and this lets us build off of it
+            RethServiceActor::from_registry().send(ForkChoiceUpdateMessage{
+                head_hash: BlockHashType::Evm(block_hash),
+                confirmed_hash: None,
+                finalized_hash: None,
+            }).await??;
+
             // context
             //     .engine_api
             //     .update_forkchoice_full(block_hash, None, None)

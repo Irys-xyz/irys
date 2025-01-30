@@ -1,6 +1,7 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
+use alloy_eips::BlockNumberOrTag;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
@@ -21,14 +22,14 @@ use irys_actors::{
     ActorAddresses, BlockFinalizedMessage,
 };
 use irys_api_server::{run_server, ApiState};
-use irys_config::{decode_hex, IrysNodeConfig, STORAGE_SUBMODULES_CONFIG};
+use irys_config::{decode_hex, IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
 use irys_packing::{PackingType, PACKING_TYPE};
+use irys_reth_node_bridge::adapter::node::RethNodeContext;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 use irys_storage::{
-    initialize_storage_files,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
@@ -37,6 +38,7 @@ use irys_types::{
     vdf_config::VDFStepsConfig, StorageConfig, CHUNK_SIZE, CONFIG, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
+use reth::rpc::eth::EthApiServer as _;
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
@@ -47,6 +49,7 @@ use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c};
 use reth_db::{Database as _, HasName, HasTableType};
 use std::sync::atomic::AtomicU64;
 use std::{
+    fs,
     sync::{mpsc, Arc, OnceLock, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -135,6 +138,17 @@ pub async fn start_irys_node(
 ) -> eyre::Result<IrysNodeCtx> {
     info!("Using directory {:?}", &node_config.base_directory);
 
+    // Delete the .irys folder if we are not persisting data on restart
+    let base_dir = node_config.instance_directory();
+    if fs::exists(&base_dir).unwrap_or(false) && CONFIG.reset_state_on_restart {
+        // remove existing data directory as storage modules are packed with a different miner_signer generated next
+        info!("Removing .irys folder {:?}", &base_dir);
+        fs::remove_dir_all(&base_dir).expect("Unable to remove .irys folder");
+    }
+
+    // Autogenerates the ".irys_submodules.toml" in dev mode
+    StorageSubmodulesConfig::load();
+
     if PACKING_TYPE != PackingType::CPU && storage_config.chunk_size != CHUNK_SIZE {
         error!("GPU packing only supports chunk size {}!", CHUNK_SIZE)
     }
@@ -162,13 +176,7 @@ pub async fn start_irys_node(
     let at_genesis;
     let latest_block_index;
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
-        let mut idx = BlockIndex::default();
-        if !CONFIG.persist_data_on_restart {
-            debug!("Resetting block index");
-            idx = idx.reset(&arc_config.clone())?
-        } else {
-            debug!("Not resetting block index");
-        }
+        let idx = BlockIndex::default();
         let i = idx.init(arc_config.clone()).await.unwrap();
 
         at_genesis = i.get_item(0).is_none();
@@ -220,21 +228,61 @@ pub async fn start_irys_node(
                 let miner_address = node_config.mining_signer.address();
                 debug!("Miner address {:?}", miner_address);
 
-                let reth_service = RethServiceActor {
-                    handle: Some(reth_node.clone()),
-                    db: Some(db.clone()),
-                };
+                let reth_service = RethServiceActor::new(reth_node.clone(), db.clone());
                 let reth_arbiter = Arbiter::new();
                 SystemRegistry::set(RethServiceActor::start_in_arbiter(
                     &reth_arbiter.handle(),
                     |_| reth_service,
                 ));
 
-                // check we can access the EVM block specified by the latest block
+                debug!(
+                    "JESSEDEBUG setting head to block {} ({})",
+                    &latest_block.evm_block_hash, &latest_block.height
+                );
+
+                {
+                    let context = RethNodeContext::new(reth_node.clone().into())
+                        .await
+                        .map_err(|e| eyre::eyre!("Error connecting to Reth: {}", e))
+                        .unwrap();
+
+                    let latest = context
+                        .rpc
+                        .inner
+                        .eth_api()
+                        .block_by_number(BlockNumberOrTag::Latest, false)
+                        .await;
+
+                    let safe = context
+                        .rpc
+                        .inner
+                        .eth_api()
+                        .block_by_number(BlockNumberOrTag::Safe, false)
+                        .await;
+
+                    let finalized = context
+                        .rpc
+                        .inner
+                        .eth_api()
+                        .block_by_number(BlockNumberOrTag::Finalized, false)
+                        .await;
+
+                    debug!(
+                        "JESSEDEBUG FCU S latest {:?}, safe {:?}, finalized {:?}",
+                        &latest, &safe, &finalized
+                    );
+
+                    assert_eq!(
+                        latest.unwrap().unwrap().header.number,
+                        latest_block.height,
+                        "CRITICAL FAILURE: Reth is out of sync with Irys block index!"
+                    );
+                }
+
                 RethServiceActor::from_registry()
                     .send(ForkChoiceUpdateMessage {
                         head_hash: BlockHashType::Evm(latest_block.evm_block_hash),
-                        confirmed_hash: None,
+                        confirmed_hash: Some(BlockHashType::Evm(latest_block.evm_block_hash)),
                         finalized_hash: None,
                     })
                     .await
@@ -292,16 +340,6 @@ pub async fn start_irys_node(
                     .send(GetGenesisStorageModulesMessage)
                     .await
                     .unwrap();
-
-                // For Genesis we create the storage_modules and their files
-                if at_genesis {
-                    initialize_storage_files(
-                        &arc_config.storage_module_dir(),
-                        &storage_module_infos,
-                        &STORAGE_SUBMODULES_CONFIG.with(|config| config.submodule_paths.clone()),
-                    )
-                    .unwrap();
-                }
 
                 // Create a list of storage modules wrapping the storage files
                 for info in storage_module_infos {
