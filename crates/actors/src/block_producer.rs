@@ -434,13 +434,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 }
             }?;
 
-            // make this the new head, add the parent as confirmed.
-            // we also update head, confirmed, and finalized as part of block validation.
-            context
-                .engine_api
-                .update_forkchoice_full(block_hash, Some(v1_payload.parent_hash), None)
-                .await
-                .unwrap();
+            // make this the new head
+            // note: also update head, confirmed, and finalized as part of the block validation -> block tree system
+            // context
+            //     .engine_api
+            //     .update_forkchoice_full(block_hash, None, None)
+            //     .await
+            //     .unwrap();
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
