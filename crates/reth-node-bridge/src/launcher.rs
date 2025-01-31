@@ -17,6 +17,7 @@ use reth_engine_tree::{
     engine::{EngineApiRequest, EngineRequestHandler},
     tree::TreeConfig,
 };
+use reth_provider::BlockNumReader;
 use reth_engine_util::EngineMessageStreamExt;
 use reth_exex::ExExManagerHandle;
 use reth_network::{NetworkSyncUpdater, SyncState};
@@ -32,7 +33,12 @@ use reth_node_core::{
 use reth_node_events::{cl::ConsensusLayerHealthEvents, node};
 use reth_payload_primitives::PayloadBuilder;
 use reth_primitives::EthereumHardforks;
-use reth_provider::providers::{BlockchainProvider2, ProviderNodeTypes};
+use reth_provider::{
+    providers::{BlockchainProvider2, ProviderNodeTypes},
+    writer::UnifiedStorageWriter,
+    BlockHashReader as _, DatabaseProviderFactory as _, StaticFileProviderFactory as _,
+};
+use reth_provider::ProviderResult;
 use reth_rpc_engine_api::{capabilities::EngineCapabilities, EngineApi};
 use reth_tasks::TaskExecutor;
 use reth_tokio_util::EventSender;
@@ -63,6 +69,8 @@ pub struct CustomEngineNodeLauncher {
     pub engine_tree_config: TreeConfig,
 
     pub irys_provider: IrysRethProvider,
+
+    pub latest_irys_block_height: u64,
 }
 
 impl CustomEngineNodeLauncher {
@@ -72,11 +80,13 @@ impl CustomEngineNodeLauncher {
         data_dir: ChainPath<DataDirPath>,
         engine_tree_config: TreeConfig,
         irys_provider: IrysRethProvider,
+        latest_block: u64,
     ) -> Self {
         Self {
             ctx: LaunchContext::new(task_executor, data_dir),
             engine_tree_config,
             irys_provider,
+            latest_irys_block_height: latest_block,
         }
     }
 }
@@ -103,6 +113,7 @@ where
             ctx,
             engine_tree_config,
             irys_provider,
+            latest_irys_block_height,
         } = self;
         let NodeBuilderWithComponents {
             adapter: NodeTypesAdapter { database },
@@ -167,6 +178,36 @@ where
             // passing FullNodeTypes as type parameter here so that we can build
             // later the components.
             .with_blockchain_db::<T, _>(move |provider_factory| {
+
+                let result = || -> ProviderResult<()> {
+
+                let provider_rw =provider_factory.database_provider_rw()?;
+                let sf_provider =provider_factory.static_file_provider();
+                let bb = provider_rw.best_block_number()?;
+                debug!("JESSEDEBUG best block number is {}, irys is  {}", &bb, &latest_irys_block_height);
+
+                if bb <= latest_irys_block_height { 
+                    debug!("JESSEDEBUG skipping removal, best is {}, irys is  {}", &bb, &latest_irys_block_height);
+                    return Ok(())
+                };
+                error!("!!! REMOVING OUT OF SYNC BLOCK(s) !!! Reth-best is {}, Irys-head is {}, pruning all above irys-head...", &bb, &latest_irys_block_height);
+
+
+                // let new_tip_hash = provider_rw.block_hash(latest_irys_block_height).unwrap();
+                UnifiedStorageWriter::from(&provider_rw, &sf_provider).remove_blocks_above(latest_irys_block_height)?;
+                UnifiedStorageWriter::commit_unwind(provider_rw, sf_provider)?;
+                Ok(())
+                }();
+
+            match result 
+                {
+                    Err(e) => {
+                        error!("Error pruning: {}", &e);
+                    }
+                    Ok(_) => ()
+                };
+            
+
                 Ok(BlockchainProvider2::new(provider_factory)?)
             }, tree_config, canon_state_notification_sender)?
             .with_components(components_builder, on_component_initialized, Some(irys_ext.clone())).await?;

@@ -174,7 +174,11 @@ pub async fn start_irys_node(
     let mut storage_modules: StorageModuleVec = Vec::new();
 
     let at_genesis;
-    let latest_block_index;
+    let latest_block_index: Option<irys_database::BlockIndexItem>;
+
+    #[allow(unused_assignments)] // this does get read by passing it through to reth
+    let mut latest_block_height: u64 = 0;
+
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
         let idx = BlockIndex::default();
         let i = idx.init(arc_config.clone()).await.unwrap();
@@ -186,6 +190,18 @@ pub async fn start_irys_node(
             debug!("Not at genesis!")
         }
         latest_block_index = i.get_latest_item().cloned();
+        latest_block_height = i.latest_height();
+        debug!(
+            "Requesting prune until block height {}",
+            &latest_block_height
+        );
+
+        dbg!("BI len: {}", &i.items.len());
+
+        // // // trim the last block off the block index
+        // let trimmed_items = &i.items[0..i.items.len() - 4];
+        // irys_database::save_block_index(trimmed_items, &arc_config.clone())?;
+        // dbg!("written block index! {}", &trimmed_items.len());
 
         i
     }));
@@ -272,11 +288,11 @@ pub async fn start_irys_node(
                         &latest, &safe, &finalized
                     );
 
-                    assert_eq!(
-                        latest.unwrap().unwrap().header.number,
-                        latest_block.height,
-                        "CRITICAL FAILURE: Reth is out of sync with Irys block index!"
-                    );
+
+                    if latest.unwrap().unwrap().header.number != latest_block.height {
+                        error!("Reth is out of sync with Irys block index! recovery will be attempted.")
+                    };
+                    
                 }
 
                 RethServiceActor::from_registry()
@@ -626,7 +642,7 @@ pub async fn start_irys_node(
 
             tokio_runtime.block_on(run_to_completion_or_panic(
                 &mut task_manager,
-                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider)),
+                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider, latest_block_height)),
             )).unwrap();
         })?;
 
@@ -641,6 +657,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
     tables: &[T],
     sender: oneshot::Sender<FullNode<RethNode, RethNodeAddOns>>,
     irys_provider: IrysRethProvider,
+    latest_block: u64,
 ) -> eyre::Result<NodeExitReason> {
     let node_handle = irys_reth_node_bridge::run_node(
         Arc::new(chainspec),
@@ -648,6 +665,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
         irys_config,
         tables,
         irys_provider,
+        latest_block,
     )
     .await?;
     sender

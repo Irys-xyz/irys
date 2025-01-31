@@ -27,10 +27,10 @@ pub struct Initialized;
 #[derive(Debug)]
 pub struct BlockIndex<State = Uninitialized> {
     #[allow(dead_code)]
-    state: State,
+    pub state: State,
     /// Stored as a fixed size array with an Arc to allow multithreaded access
-    items: Arc<[BlockIndexItem]>,
-    config: Option<Arc<IrysNodeConfig>>,
+    pub items: Arc<[BlockIndexItem]>,
+    pub config: Option<Arc<IrysNodeConfig>>,
 }
 
 const FILE_NAME: &str = "index.dat";
@@ -106,6 +106,11 @@ impl BlockIndex<Initialized> {
     /// Retrieves the number of blocks in the index
     pub fn num_blocks(&self) -> u64 {
         self.items.len() as u64
+    }
+
+    /// Returns the latest block height stored by the block index
+    pub fn latest_height(&self) -> u64 {
+        (self.items.len().saturating_sub(1)) as u64
     }
 
     /// Retrieves a [`BlockIndexItem`] from the block index by block height
@@ -301,7 +306,7 @@ impl BlockIndexItem {
 }
 
 #[allow(dead_code)]
-fn save_block_index(
+pub fn save_block_index(
     block_index_items: &[BlockIndexItem],
     config: &IrysNodeConfig,
 ) -> io::Result<()> {

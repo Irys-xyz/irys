@@ -795,7 +795,7 @@ mod tests {
                         assignment,
                         &PartitionAssignment {
                             partition_hash,
-                            ledger_id: Some(Ledger::Publish.into()),
+                            ledger_id: Some(Ledger::Submit.into()),
                             slot_index: Some(slot_idx),
                             miner_address,
                         }
