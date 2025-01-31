@@ -491,7 +491,7 @@ impl StorageModule {
     }
 
     #[deprecated(
-        since = "0.1",
+        since = "0.1.0",
         note = "Intervals now stored per-submodule rather than globally. Use read_submodule_intervals() for new format."
     )]
     fn read_global_intervals_file(path: &PathBuf) -> eyre::Result<StorageIntervals> {

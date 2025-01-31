@@ -1,10 +1,11 @@
 //! Engine node related functionality.
 // this is the 'engine launcher'
 
+use alloy_primitives::BlockNumber;
 use alloy_rpc_types::engine::ClientVersionV1;
 use futures::{future::Either, stream, stream_select, StreamExt};
 use irys_storage::reth_provider::IrysRethProvider;
-use reth::{ payload::ExecutionPayloadValidator};
+use reth::payload::ExecutionPayloadValidator;
 use reth_beacon_consensus::{
     hooks::{EngineHooks, StaticFileHook},
     BeaconConsensusEngineHandle,
@@ -17,7 +18,6 @@ use reth_engine_tree::{
     engine::{EngineApiRequest, EngineRequestHandler},
     tree::TreeConfig,
 };
-use reth_provider::BlockNumReader;
 use reth_engine_util::EngineMessageStreamExt;
 use reth_exex::ExExManagerHandle;
 use reth_network::{NetworkSyncUpdater, SyncState};
@@ -30,12 +30,13 @@ use reth_node_core::{
     rpc::eth::{helpers::AddDevSigners, FullEthApiServer},
     version::{CARGO_PKG_VERSION, CLIENT_CODE, NAME_CLIENT, VERGEN_GIT_SHA},
 };
-use alloy_primitives::BlockNumber;
 use reth_node_events::{cl::ConsensusLayerHealthEvents, node};
 use reth_payload_primitives::PayloadBuilder;
 use reth_primitives::EthereumHardforks;
 use reth_provider::BlockExecutionWriter;
+use reth_provider::BlockNumReader;
 use reth_provider::ChainStateBlockReader;
+use reth_provider::ChainStateBlockWriter;
 use reth_provider::{
     providers::{BlockchainProvider2, ProviderNodeTypes},
     writer::UnifiedStorageWriter,
@@ -48,10 +49,8 @@ use reth_tracing::tracing::{debug, error, info, warn};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc::unbounded_channel, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use reth_provider::ChainStateBlockWriter;
 
 use reth_node_core::irys_ext::IrysExt;
-
 
 use reth_node_builder::{
     common::{Attached, LaunchContextWith, WithConfigs},
@@ -206,6 +205,7 @@ where
                 if *range.start() == 0 {
                     eyre::bail!("Cannot unwind genesis block");
                 }
+                warn!("\x1b[1;31mPRUNING BLOCKS {}..={}\x1b[0m", &range.start(), &range.end());
 
                 let highest_static_file_block = provider_factory
                 .static_file_provider()
@@ -260,7 +260,7 @@ where
                     error!("Error pruning: {}", &e);
                 }
                 Ok(true) => {
-                    debug!("Blocks have been pruned, restarting...");
+                    warn!("\x1b[1;31mBlocks have been pruned, restarting...\x1b[0m");
                     // we exit so that we make 100% sure no component is expecting the old state
                     std::process::exit(0);
                 }
@@ -557,6 +557,3 @@ where
         Ok(handle)
     }
 }
-
-
-

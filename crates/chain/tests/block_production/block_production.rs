@@ -18,7 +18,7 @@ use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     vdf_config::VDFStepsConfig, Address, H256List, IrysTransaction, StorageConfig, CONFIG, H256,
 };
-use irys_vdf::{step_number_to_salt_number, vdf_sha,vdf_state::VdfStepsReadGuard};
+use irys_vdf::{step_number_to_salt_number, vdf_sha, vdf_state::VdfStepsReadGuard};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use reth_db::Database;
