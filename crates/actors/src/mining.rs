@@ -314,9 +314,7 @@ mod tests {
     use actix::{Actor, Addr, ArbiterService, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
-    use irys_storage::{
-        ie, initialize_storage_files, read_info_file, StorageModule, StorageModuleInfo,
-    };
+    use irys_storage::{ie, PackingParams, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::{
         app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
@@ -390,16 +388,16 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        let _ = initialize_storage_files(&base_path, &infos, &storage_config);
-
-        // Verify the StorageModuleInfo file was crated in the base path
-        let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();
-        assert_eq!(file_infos, infos[0]);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
         let storage_module =
             Arc::new(StorageModule::new(&base_path, storage_module_info, storage_config).unwrap());
+
+        // Verify the packing params file was crated in the submodule
+        let params_path = base_path.join("hdd0").join("packing_params.toml");
+        let params = PackingParams::from_toml(params_path).expect("packing params to load");
+        assert_eq!(params.partition_hash, Some(partition_hash));
 
         // Pack the storage module
         storage_module.pack_with_zeros();
