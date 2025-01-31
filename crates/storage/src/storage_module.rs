@@ -1050,7 +1050,7 @@ pub fn find_invalid_packing_starts(sm: Arc<StorageModule>) -> Vec<u32> {
                 right = mid;
             }
         }
-        if left != range.start() {
+        if left != range.end() {
             invalid_starts.push(left - 1)
         }
     }
