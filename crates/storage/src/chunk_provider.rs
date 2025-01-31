@@ -2,7 +2,7 @@ use eyre::OptionExt;
 use irys_database::Ledger;
 use irys_types::{
     ChunkFormat, DataRoot, DatabaseProvider, LedgerChunkOffset, PackedChunk, StorageConfig,
-    TxRelativeChunkOffset,
+    TxChunkOffset,
 };
 use std::sync::Arc;
 
@@ -53,7 +53,7 @@ impl ChunkProvider {
         &self,
         ledger: Ledger,
         data_root: DataRoot,
-        data_tx_offset: TxRelativeChunkOffset,
+        data_tx_offset: TxChunkOffset,
     ) -> eyre::Result<Option<ChunkFormat>> {
         // TODO: read from the cache
 
@@ -81,8 +81,8 @@ impl ChunkProvider {
                 .0
                 .iter()
                 .filter_map(|so| {
-                    checked_add_i32_u64(*so, sm_range_start) // translate into ledger-relative space
-                    .map(|mapped_start| mapped_start + (data_tx_offset as u64))
+                    checked_add_i32_u64(so.value(), sm_range_start) // translate into ledger-relative space
+                    .map(|mapped_start| mapped_start + (data_tx_offset.value() as u64))
                 })
                 .collect::<Vec<_>>();
 
@@ -128,7 +128,7 @@ impl ChunkProvider {
                 .0
                 .iter()
                 .filter_map(|so| {
-                    checked_add_i32_u64(*so, sm_range_start) // translate into ledger-relative space
+                    checked_add_i32_u64(so.value(), sm_range_start) // translate into ledger-relative space
                 })
                 .collect::<Vec<_>>();
 
@@ -220,7 +220,7 @@ mod tests {
                 data_size: data_size as u64,
                 data_path: data_path.clone(),
                 bytes: chunk_bytes.clone(),
-                tx_offset: tx_chunk_offset as u32,
+                tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
             };
             storage_module.write_data_chunk(&chunk)?;
             unpacked_chunks.push(chunk);

@@ -198,7 +198,7 @@ async fn test_programmable_data_basic() -> eyre::Result<()> {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: tx_chunk_offset as u32,
+            tx_offset: (tx_chunk_offset as u32).into(),
         };
 
         // Make a POST request with JSON payload

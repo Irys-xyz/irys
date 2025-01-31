@@ -196,7 +196,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     data_size,
                     data_path,
                     bytes: Base64(data_bytes[min..max].to_vec()),
-                    tx_offset: tx_chunk_offset as u32,
+                    tx_offset: (tx_chunk_offset as u32).into(),
                 };
 
                 // Make a POST request with JSON payload
@@ -236,7 +236,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     data_size,
                     data_path,
                     bytes: Base64(data_bytes[min..max].to_vec()),
-                    tx_offset: tx_chunk_offset as u32,
+                    tx_offset: (tx_chunk_offset as u32).into(),
                 };
 
                 let resp = client

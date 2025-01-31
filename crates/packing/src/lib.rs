@@ -57,7 +57,7 @@ pub fn unpack_with_entropy(
     let data_size = packed_chunk.data_size;
     let num_chunks_in_tx = data_size.div_ceil(chunk_size_u64);
     // trim if this is the last chunk & if data_size isn't aligned to chunk_size
-    if (packed_chunk.tx_offset as u64) == num_chunks_in_tx - 1 {
+    if (packed_chunk.tx_offset.value() as u64) == num_chunks_in_tx - 1 {
         let trailing_bytes = data_size % chunk_size_u64;
         // 0 means this last chunk is a full chunk
         if trailing_bytes != 0 {
@@ -249,7 +249,7 @@ pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
 mod tests {
     use crate::capacity_single::SHA_HASH_SIZE;
     use crate::*;
-    use irys_types::H256;
+    use irys_types::{TxChunkOffset, H256};
     use rand::{Rng, RngCore};
     use std::time::*;
 
@@ -514,7 +514,7 @@ mod tests {
             data_size: data_size as u64,
             data_path: Base64(vec![]),
             bytes: Base64(packed_data.clone()),
-            tx_offset: 0,
+            tx_offset: TxChunkOffset::default(),
             packing_address: mining_address,
             partition_offset: chunk_offset as u32,
             partition_hash: H256::from(partition_hash),

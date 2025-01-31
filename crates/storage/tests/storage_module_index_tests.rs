@@ -342,7 +342,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 data_size: chunk_bytes.len() as u64,
                 data_path: Base64(proof.proof.clone()),
                 bytes: chunk_bytes,
-                tx_offset: i as u32,
+                tx_offset: (i as u32).into(),
             };
 
             let _ = db.update_eyre(|tx| cache_chunk(tx, &chunk));
@@ -382,7 +382,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                         }
 
                         // Request the chunk from the global db index by  data root & tx relative offset
-                        let res = cached_chunk_by_chunk_offset(tx, data_root, i).unwrap();
+                        let res = cached_chunk_by_chunk_offset(tx, data_root, i.into()).unwrap();
 
                         // Build a Chunk struct to store in the submodule
                         if let Some((_metadata, chunk)) = res {
@@ -394,7 +394,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                                 data_size: chunk_bytes.len() as u64,
                                 data_path: chunk.data_path,
                                 bytes: chunk_bytes,
-                                tx_offset: i,
+                                tx_offset: i.into(),
                             };
 
                             let res = storage_module.write_data_chunk(&chunk);
@@ -560,7 +560,7 @@ fn verify_data_root_start_offset(
                 .unwrap()
                 .expect("start offsets not found");
             assert_eq!(relative_start_offsets.0.len(), 1);
-            assert_eq!(relative_start_offsets.0[0], expected_offset);
+            assert_eq!(relative_start_offsets.0[0], expected_offset.into());
         })
         .unwrap();
 }

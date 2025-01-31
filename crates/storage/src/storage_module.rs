@@ -11,12 +11,7 @@ use irys_database::{
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_types::{
-    app_state::DatabaseProvider,
-    get_leaf_proof,
-    partition::{PartitionAssignment, PartitionHash},
-    Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset,
-    LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize,
-    StorageConfig, TxPath, TxRelativeChunkOffset, UnpackedChunk, CONFIG, H256,
+    app_state::DatabaseProvider, get_leaf_proof, partition::{PartitionAssignment, PartitionHash}, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize, StorageConfig, TxChunkOffset, TxPath, UnpackedChunk, CONFIG, H256
 };
 use nodit::{
     interval::{ie, ii},
@@ -490,7 +485,7 @@ impl StorageModule {
                         add_tx_path_hash_to_offset_index(tx, offset, Some(tx_path_hash.clone()))?;
                     }
                     // Also update the start offset by data_root index
-                    add_start_offset_to_data_root_index(tx, data_root, relative_offset)?;
+                    add_start_offset_to_data_root_index(tx, data_root, relative_offset.into())?;
                 }
                 Ok(())
             })?;
@@ -535,7 +530,7 @@ impl StorageModule {
 
         let mut write_offsets = vec![];
         for start_offset in start_offsets.0 {
-            let partition_offset = (start_offset + chunk.tx_offset as i32)
+            let partition_offset = (start_offset + chunk.tx_offset.value() as i32)
                 .try_into()
                 .map_err(|_| eyre::eyre!("Invalid negative offset: {}", chunk.tx_offset))?;
 
@@ -635,7 +630,7 @@ impl StorageModule {
         let nearest_start_offset = closest_offsets
             .0
             .iter()
-            .filter(|&&offset| offset <= partition_offset as i32)
+            .filter(|&&offset| offset.value() <= partition_offset as i32)
             .max()
             .copied()
             .ok_or_eyre("Could not find nearest_start_offset")?;
@@ -649,12 +644,12 @@ impl StorageModule {
         // overlap partition boundaries) we do our calculations with i64s to
         // account for negative nearest_start_offset
         let data_root_start_offset: LedgerChunkOffset =
-            (range.start() as i64 + nearest_start_offset as i64) as u64;
+            (range.start() as i64 + nearest_start_offset.value() as i64) as u64;
 
         // Finally the index of the chunk in the transaction can be calculated
         // using the ledger relative start_offset of the data_root and the
         // ledger_offset provided by the caller
-        let chunk_offset = (ledger_offset - data_root_start_offset) as TxRelativeChunkOffset;
+        let chunk_offset = TxChunkOffset::from(ledger_offset - data_root_start_offset);
 
         Ok(Some(PackedChunk {
             data_root,
@@ -1048,7 +1043,7 @@ pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::R
 mod tests {
     use super::*;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::H256;
+    use irys_types::{TxChunkOffset, H256};
     use nodit::interval::ii;
 
     #[test]
@@ -1221,7 +1216,7 @@ mod tests {
             data_size: chunk_data.len() as u64,
             data_path: data_path.clone().into(),
             bytes: chunk_data.into(),
-            tx_offset: 0,
+            tx_offset: TxChunkOffset::default(),
         };
 
         storage_module.write_data_chunk(&chunk)?;

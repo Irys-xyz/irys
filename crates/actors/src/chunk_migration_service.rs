@@ -8,7 +8,7 @@ use irys_database::{
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
     app_state::DatabaseProvider, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxRelativeChunkOffset,
+    LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxChunkOffset,
     UnpackedChunk, H256,
 };
 use reth_db::Database;
@@ -179,7 +179,7 @@ fn process_transaction_chunks(
 ) -> Result<(), ()> {
     for tx_chunk_offset in 0..num_chunks_in_tx {
         // Attempt to retrieve the cached chunk from the mempool
-        let chunk_info = match get_cached_chunk(db, data_root, tx_chunk_offset) {
+        let chunk_info = match get_cached_chunk(db, data_root, tx_chunk_offset.into()) {
             Ok(Some(info)) => info,
             _ => continue,
         };
@@ -190,7 +190,7 @@ fn process_transaction_chunks(
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
-            write_chunk_to_module(module, chunk_info, data_root, data_size, tx_chunk_offset)?;
+            write_chunk_to_module(module, chunk_info, data_root, data_size, tx_chunk_offset.into())?;
         }
     }
     Ok(())
@@ -274,7 +274,7 @@ fn update_storage_module_indexes(
 fn get_cached_chunk(
     db: &DatabaseProvider,
     data_root: DataRoot,
-    chunk_offset: TxRelativeChunkOffset,
+    chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
     db.view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
 }
@@ -303,7 +303,7 @@ fn write_chunk_to_module(
     chunk_info: (CachedChunkIndexMetadata, CachedChunk),
     data_root: DataRoot,
     data_size: u64,
-    chunk_offset: TxRelativeChunkOffset,
+    chunk_offset: TxChunkOffset,
 ) -> Result<(), ()> {
     let data_path = Base64::from(chunk_info.1.data_path.0.clone());
 

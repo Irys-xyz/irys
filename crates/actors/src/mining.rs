@@ -422,7 +422,7 @@ mod tests {
                 data_size: chunk_size,
                 data_path: data_path.to_vec().into(),
                 bytes: chunk_data.to_vec().into(),
-                tx_offset: tx_chunk_offset,
+                tx_offset: tx_chunk_offset.into(),
             };
             storage_module.write_data_chunk(&chunk).unwrap();
         }
