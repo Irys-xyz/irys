@@ -1,6 +1,7 @@
 //! This crate provides functions and utilities for VDF (Verifiable Delay Function) operations,
 //! including checkpoint validation and seed application.
 
+use base58::ToBase58;
 use irys_types::{H256List, VDFLimiterInfo, VDFStepsConfig, H256, U256};
 
 use nodit::interval::ii;
@@ -210,8 +211,14 @@ pub async fn last_step_checkpoints_is_valid(
     })
     .await?;
 
-    // println!("test{}: {}", 0, Base64::from(test[0].to_vec()));
-    // println!("test{}: {}", 24, Base64::from(test[24].to_vec()));
+    // TODO: Remove these only for debugging the test below
+    for (i, checkpoint) in checkpoint_hashes.iter().enumerate() {
+        println!("{}: {}", i, checkpoint.0.to_base58());
+    }
+
+    for (i, checkpoint) in test.iter().enumerate() {
+        println!("{}: {}", i, checkpoint.0.to_base58());
+    }
 
     let is_valid = test == vdf_info.last_step_checkpoints;
 
@@ -367,5 +374,76 @@ fn warn_mismatches(a: &H256List, b: &H256List) {
             "Mismatched hashes at index {}: expected {:?} got {:?}",
             index, a, b
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use base58::FromBase58;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_checkpoints_for_single_step_block() {
+        let vdf_info = VDFLimiterInfo {
+            output: to_hash("AEj76XfsPWoB2CjcDm3RXTwaM5AKs7SbWnkHR8umvgmW"),
+            global_step_number: 44398,
+            seed: to_hash("11111111111111111111111111111111"),
+            next_seed: to_hash("11111111111111111111111111111111"),
+            prev_output: to_hash("8oYs33LUVjtsB6rz6BRXBsVS48WbZJovgbyviKziV6ar"),
+            last_step_checkpoints: H256List(vec![
+                to_hash("5YGk1yQMi5TwLf2iHAaLWnS8iDSdzQEhm3fambxy5Syy"),
+                to_hash("FM8XvtafL5pEsMkwJZDEZpppQpbCWQHxSSijffSjHVaX"),
+                to_hash("6YcQjupYZRGN5fDmngnXLmtWbZUDU2Ur6kgH1N8pW4hX"),
+                to_hash("B85pKLNbsj2YysNk9gs3bHDJN6YuHWCAdjhV9x7WteJr"),
+                to_hash("9xH77QvzHDvmptkefM39NSU7dVNHHjUMw4Wyz31GXSbY"),
+                to_hash("mmkTrT6cDFsx8XzCCs8t7CHmAGbbepV2NA2fYH89ywp"),
+                to_hash("Df4f7UDTykXDLbPYPxiWX9HBndHnUEFhVB9hBmBGt4wb"),
+                to_hash("B7Rf1wEC8QLDfR3vD4fdVdvaHhbBz1Nd1r9KPpUbwrJp"),
+                to_hash("4BxEQ8GUBEWn5NQfSXuWiPPyW6gensivj2JQognZ8tKw"),
+                to_hash("G1N6N8nXLF4SCVkspJ5cbK7isxcHJqhoQMin99p7hvov"),
+                to_hash("F1JPya8vsK3JeCJNDTZhESqhr6BjUSVzvdiMzmaDbjHE"),
+                to_hash("5bJKjJMyNKBP42E8FuEYMPJeFXBFHvVN9d6nuTMNk1Gy"),
+                to_hash("4iHkRQrhRabYZtRuJhZkMTY9QX2cpM2RDN5s5d15oXtR"),
+                to_hash("3mmV4etPnrpCJZ1pXj2LbYaCX6L2ymbkZLnMMhQdAUUM"),
+                to_hash("3aqYUYxzQr2bgPPk4s81AdGS6ekEsZNsK4yYwy2Sc86m"),
+                to_hash("Fxz3fgD6e3VS2Ka5fWQ3rFqzNdSPxctX84MwrR8D9pw4"),
+                to_hash("3VALw7Y6pxCbGTuCBWFonWKnBakSYb3vCoVKHZWGD9gM"),
+                to_hash("8vE2CgMn4Est5rFjVTfBqe1fwUVZryKPAfxzx24iccxh"),
+                to_hash("HGRDCe81gGqF1FidJf6Mwt6GiYFyDyUkeLQUQxy72GeF"),
+                to_hash("3XYHLLZynkE4gL8cL1e4qmn6pg2vUCEbDL1ySVExZXnw"),
+                to_hash("93HH3c29jVch3n3jxSTAgveq4MPNJAsmKdBGL7u75twh"),
+                to_hash("3n4YuWzgTNpDy3PVQ2w8NwwhaY8ZQkx68UrSQeNG7Nad"),
+                to_hash("DnALYWSXJpJkzg4ucVqC71o6dLMz48uaLrM5EnbVJN5U"),
+                to_hash("B1fEtkY9wJ45SRAJhy7GfsML2Sbbjh5m56tzDWSw9EUA"),
+                to_hash("AEj76XfsPWoB2CjcDm3RXTwaM5AKs7SbWnkHR8umvgmW"),
+            ]),
+            steps: H256List(vec![to_hash(
+                "AEj76XfsPWoB2CjcDm3RXTwaM5AKs7SbWnkHR8umvgmW",
+            )]),
+            vdf_difficulty: None,
+            next_vdf_difficulty: None,
+        };
+        let config = VDFStepsConfig::default();
+
+        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+
+        println!(
+            "---\nsteps: {} last_checkpoint: {}\n seed: {}",
+            vdf_info.steps[0].0.to_base58(),
+            vdf_info
+                .last_step_checkpoints
+                .0
+                .last()
+                .unwrap()
+                .0
+                .to_base58(),
+            vdf_info.prev_output.0.to_base58()
+        );
+        println!("x: {:?}", x);
+    }
+
+    fn to_hash(base_58_hash: &str) -> H256 {
+        H256(base_58_hash.from_base58().unwrap().try_into().unwrap())
     }
 }

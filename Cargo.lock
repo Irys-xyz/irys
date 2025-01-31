@@ -5617,6 +5617,7 @@ dependencies = [
  "actix",
  "actix-rt",
  "assert_matches",
+ "base58",
  "env_logger",
  "eyre",
  "irys-config",
