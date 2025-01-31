@@ -196,6 +196,7 @@ pub async fn last_step_checkpoints_is_valid(
                     let mut salt_buff: [u8; 32] = [0; 32];
                     (start_salt + i).to_little_endian(&mut salt_buff);
                     let mut seed = cp[i];
+                    let tmp = seed.clone();
                     let mut hasher = Sha256::new();
 
                     for _ in 0..num_iterations {
@@ -203,6 +204,7 @@ pub async fn last_step_checkpoints_is_valid(
                         hasher.update(seed.as_bytes());
                         seed = H256(hasher.finalize_reset().into());
                     }
+                    println!("{}: {} -> {}", i, tmp.0.to_base58(), seed.0.to_base58());
                     seed
                 })
                 .collect::<Vec<H256>>()
@@ -212,10 +214,12 @@ pub async fn last_step_checkpoints_is_valid(
     .await?;
 
     // TODO: Remove these only for debugging the test below
+    println!("block checkpoints:");
     for (i, checkpoint) in checkpoint_hashes.iter().enumerate() {
         println!("{}: {}", i, checkpoint.0.to_base58());
     }
 
+    println!("\ntest checkpoints:");
     for (i, checkpoint) in test.iter().enumerate() {
         println!("{}: {}", i, checkpoint.0.to_base58());
     }
