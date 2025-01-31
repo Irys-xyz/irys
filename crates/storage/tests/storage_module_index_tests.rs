@@ -80,8 +80,6 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let base_path = tmp_dir.path().to_path_buf();
     info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
 
-    let _ = initialize_storage_files(&base_path, &storage_module_infos, &storage_config);
-
     let mut storage_modules: Vec<Arc<StorageModule>> = Vec::new();
 
     // Create a Vec initialized storage modules

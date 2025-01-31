@@ -25,6 +25,8 @@ tracing-subscriber.workspace = true
 tempfile.workspace = true
 openssl.workspace = true
 nodit.workspace = true
+hex.workspace = true
+base58.workspace = true
 
 [lints]
 workspace = true

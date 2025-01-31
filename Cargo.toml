@@ -102,6 +102,12 @@ reth-cli-util = { path = "./ext/reth/crates/cli/util" }
 reth-codecs = { path = "./ext/reth/crates/storage/codecs" }
 reth-codecs-derive = { path = "./ext/reth/crates/storage/codecs/derive" }
 reth-consensus = { path = "./ext/reth/crates/consensus/consensus" }
+reth-config = { path = "./ext/reth/crates/config" }
+reth-static-file = { path = "./ext/reth/crates/static-file/static-file" }
+reth-prune = { path = "./ext/reth/crates/prune/prune" }
+reth-stages = { path = "./ext/reth/crates/stages/stages" }
+reth-evm = { path = "./ext/reth/crates/evm" }
+reth-downloaders = { path = "./ext/reth/crates/net/downloaders" }
 reth-consensus-debug-client = { path = "./ext/reth/crates/consensus/debug-client" }
 reth-db = { path = "./ext/reth/crates/storage/db" }
 reth-db-api = { path = "./ext/reth/crates/storage/db-api" }

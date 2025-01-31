@@ -346,7 +346,7 @@ mod tests {
 
     use actix::Actor as _;
     use irys_packing::capacity_single::compute_entropy_chunk;
-    use irys_storage::{ii, initialize_storage_files, ChunkType, StorageModule, StorageModuleInfo};
+    use irys_storage::{ii, ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
@@ -386,7 +386,6 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        initialize_storage_files(&base_path, &infos, &storage_config)?;
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];

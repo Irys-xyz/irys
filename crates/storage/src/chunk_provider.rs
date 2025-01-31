@@ -142,8 +142,9 @@ impl ChunkProvider {
 
 #[cfg(test)]
 mod tests {
+    use crate::StorageModuleInfo;
+
     use super::*;
-    use crate::{initialize_storage_files, StorageModuleInfo};
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -174,8 +175,6 @@ mod tests {
             num_chunks_in_partition: 100,
             ..Default::default()
         };
-
-        initialize_storage_files(&base_path, &infos, &config)?;
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
