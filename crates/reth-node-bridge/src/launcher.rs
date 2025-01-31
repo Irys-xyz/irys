@@ -4,7 +4,7 @@
 use alloy_rpc_types::engine::ClientVersionV1;
 use futures::{future::Either, stream, stream_select, StreamExt};
 use irys_storage::reth_provider::IrysRethProvider;
-use reth::payload::ExecutionPayloadValidator;
+use reth::{ payload::ExecutionPayloadValidator};
 use reth_beacon_consensus::{
     hooks::{EngineHooks, StaticFileHook},
     BeaconConsensusEngineHandle,
@@ -22,7 +22,7 @@ use reth_engine_util::EngineMessageStreamExt;
 use reth_exex::ExExManagerHandle;
 use reth_network::{NetworkSyncUpdater, SyncState};
 use reth_network_api::{BlockDownloaderProvider, NetworkEventListenerProvider};
-use reth_node_api::{BuiltPayload, FullNodeTypes, NodeAddOns, NodeTypesWithEngine};
+use reth_node_api::{BuiltPayload, FullNodeTypes, NodeAddOns, NodeTypes, NodeTypesWithEngine};
 use reth_node_core::{
     dirs::{ChainPath, DataDirPath},
     exit::NodeExitFuture,
@@ -30,24 +30,28 @@ use reth_node_core::{
     rpc::eth::{helpers::AddDevSigners, FullEthApiServer},
     version::{CARGO_PKG_VERSION, CLIENT_CODE, NAME_CLIENT, VERGEN_GIT_SHA},
 };
+use alloy_primitives::BlockNumber;
 use reth_node_events::{cl::ConsensusLayerHealthEvents, node};
 use reth_payload_primitives::PayloadBuilder;
 use reth_primitives::EthereumHardforks;
+use reth_provider::BlockExecutionWriter;
+use reth_provider::ChainStateBlockReader;
 use reth_provider::{
     providers::{BlockchainProvider2, ProviderNodeTypes},
     writer::UnifiedStorageWriter,
     BlockHashReader as _, DatabaseProviderFactory as _, StaticFileProviderFactory as _,
 };
-use reth_provider::ProviderResult;
 use reth_rpc_engine_api::{capabilities::EngineCapabilities, EngineApi};
 use reth_tasks::TaskExecutor;
 use reth_tokio_util::EventSender;
-use reth_tracing::tracing::{debug, error, info};
+use reth_tracing::tracing::{debug, error, info, warn};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc::unbounded_channel, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use reth_provider::ChainStateBlockWriter;
 
 use reth_node_core::irys_ext::IrysExt;
+
 
 use reth_node_builder::{
     common::{Attached, LaunchContextWith, WithConfigs},
@@ -102,6 +106,7 @@ where
                     + FullEthApiServer
                     + AddDevSigners,
     >,
+    <Types as NodeTypes>::ChainSpec: EthChainSpec + EthereumHardforks,
 {
     type Node = NodeHandle<NodeAdapter<T, CB::Components>, AO>;
 
@@ -177,39 +182,93 @@ where
             .with_metrics_task()
             // passing FullNodeTypes as type parameter here so that we can build
             // later the components.
-            .with_blockchain_db::<T, _>(move |provider_factory| {
-
-                let result = || -> ProviderResult<()> {
-
-                let provider_rw =provider_factory.database_provider_rw()?;
-                let sf_provider =provider_factory.static_file_provider();
-                let bb = provider_rw.best_block_number()?;
-                debug!("JESSEDEBUG best block number is {}, irys is  {}", &bb, &latest_irys_block_height);
-
-                if bb <= latest_irys_block_height { 
-                    debug!("JESSEDEBUG skipping removal, best is {}, irys is  {}", &bb, &latest_irys_block_height);
-                    return Ok(())
-                };
-                error!("!!! REMOVING OUT OF SYNC BLOCK(s) !!! Reth-best is {}, Irys-head is {}, pruning all above irys-head...", &bb, &latest_irys_block_height);
-
-
-                // let new_tip_hash = provider_rw.block_hash(latest_irys_block_height).unwrap();
-                UnifiedStorageWriter::from(&provider_rw, &sf_provider).remove_blocks_above(latest_irys_block_height)?;
-                UnifiedStorageWriter::commit_unwind(provider_rw, sf_provider)?;
-                Ok(())
-                }();
-
-            match result 
-                {
-                    Err(e) => {
-                        error!("Error pruning: {}", &e);
-                    }
-                    Ok(_) => ()
-                };
-            
-
+            .with_blockchain_db::<T, _>(move |provider_factory| {            
                 Ok(BlockchainProvider2::new(provider_factory)?)
             }, tree_config, canon_state_notification_sender)?
+            // "inspect" fn to unwind blocks that are out of sync with Irys
+            .inspect(|this: &LaunchContextWith<Attached<WithConfigs<<Types as NodeTypes>::ChainSpec>, reth_node_builder::common::WithMeteredProviders<T>>>| {
+
+            let result = || -> eyre::Result<bool> {
+
+                let provider_factory = this.provider_factory();
+                let config = this.toml_config();
+                let provider = provider_factory.provider()?;
+                let last = provider.last_block_number()?;
+
+                let target = latest_irys_block_height;
+                
+                if target >= last {
+                    warn!("requesting to prune reth block ({}) ahead (or equal to) of current state ({})", &target, &last);
+                    return Ok(false)
+                }
+
+                let range = target+1..=last;
+                if *range.start() == 0 {
+                    eyre::bail!("Cannot unwind genesis block");
+                }
+
+                let highest_static_file_block = provider_factory
+                .static_file_provider()
+                .get_highest_static_files()
+                .max()
+                .filter(|highest_static_file_block| highest_static_file_block >= range.start());
+
+                if highest_static_file_block.is_some() /* || self.offline */ {
+                   /*  if self.offline {
+                        info!(target: "reth::cli", "Performing an unwind for offline-only data!");
+                    } */
+        
+                    if let Some(highest_static_file_block) = highest_static_file_block {
+                        info!(target: "reth::cli", ?range, ?highest_static_file_block, "Executing a pipeline unwind.");
+                    } else {
+                        info!(target: "reth::cli", ?range, "Executing a pipeline unwind.");
+                    }
+
+                    let mut pipeline = crate::prune_pipeline::build_pipeline(false, config.stages.clone(), config.prune.clone(), provider_factory.clone())?;
+
+        
+                    // Move all applicable data from database to static files.
+                    pipeline.move_to_static_files()?;
+        
+                    pipeline.unwind((*range.start()).saturating_sub(1), None)?;
+                } else {
+                    info!(target: "reth::cli", ?range, "Executing a database unwind.");
+                    let provider = provider_factory.provider_rw()?;
+        
+                    let _ = provider
+                        .take_block_and_execution_range(range.clone())
+                        .map_err(|err| eyre::eyre!("Transaction error on unwind: {err}"))?;
+        
+                    // update finalized block if needed
+                    let last_saved_finalized_block_number = provider.last_finalized_block_number()?;
+                    let range_min =
+                        range.clone().min().ok_or(eyre::eyre!("Could not fetch lower range end"))?;
+                    if last_saved_finalized_block_number.is_none() ||
+                        Some(range_min) < last_saved_finalized_block_number
+                    {
+                        provider.save_finalized_block_number(BlockNumber::from(range_min))?;
+                    }
+        
+                    provider.commit()?;
+                }
+                Ok(true)
+            }();
+            
+        match result 
+            {
+                Err(e) => {
+                    error!("Error pruning: {}", &e);
+                }
+                Ok(true) => {
+                    debug!("Blocks have been pruned, restarting...");
+                    // we exit so that we make 100% sure no component is expecting the old state
+                    std::process::exit(0);
+                }
+                Ok(false) => {
+                  ()
+                }
+            };
+            })          
             .with_components(components_builder, on_component_initialized, Some(irys_ext.clone())).await?;
 
         // spawn exexs
@@ -498,3 +557,6 @@ where
         Ok(handle)
     }
 }
+
+
+
