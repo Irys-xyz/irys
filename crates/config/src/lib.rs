@@ -235,41 +235,12 @@ pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesCon
                 fs::remove_dir_all(e.path()).unwrap()
             });
 
-        // Clear out any leftover `StorageModule_*.json` files from the legacy config
-        // (but leave the intervals, StorageModule::new() will consume them)
-        let sm_path = instance_dir.join("storage_modules");
-        if sm_path.exists() {
-            fs::read_dir(instance_dir.join("storage_modules"))
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    let binding = e.file_name();
-                    let name = binding.to_string_lossy();
-                    name.starts_with("StorageModule_")
-                        && name.ends_with(".json")
-                        && !name.contains("_intervals")
-                        && name[14..name.len() - 5].parse::<u32>().is_ok()
-                })
-                .for_each(|e| fs::remove_file(e.path()).unwrap());
-        }
-
         // Try HOME directory config in deployed environments
         if is_deployed {
             if config_path_home.exists() {
                 // Remove the .irys directory config so there's no confusion
                 if config_path_local.exists() {
                     fs::remove_file(config_path_local).expect("able to delete file");
-
-                    // Also delete any old style intervals files so they don't get copied to the symlinked submodules
-                    fs::read_dir(instance_dir.join("storage_modules"))
-                        .unwrap()
-                        .filter_map(|e| e.ok())
-                        .filter(|e| {
-                            let binding = e.file_name();
-                            let name = binding.to_string_lossy();
-                            name.starts_with("StorageModule_") && name.ends_with("_intervals.json")
-                        })
-                        .for_each(|e| fs::remove_file(e.path()).unwrap());
                 }
                 tracing::info!("Loading config from {:?}", config_path_home);
                 let config = StorageSubmodulesConfig::from_toml(config_path_home).unwrap();
