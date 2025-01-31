@@ -205,7 +205,7 @@ where
                 if *range.start() == 0 {
                     eyre::bail!("Cannot unwind genesis block");
                 }
-                warn!("\x1b[1;31mPRUNING BLOCKS {}..={}\x1b[0m", &range.start(), &range.end());
+                error!("\x1b[1;31m!!! REMOVING OUT OF SYNC BLOCK(s) !!! Reth head is {}, Irys head is {}, pruning Reth {}..={}...\x1b[0m", &last, &latest_irys_block_height,  &range.start(), &range.end());
 
                 let highest_static_file_block = provider_factory
                 .static_file_provider()
