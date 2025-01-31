@@ -164,7 +164,7 @@ pub async fn last_step_checkpoints_is_valid(
     let global_step_number: usize = vdf_info.global_step_number as usize;
 
     // If the vdf reset happened on this step, apply the entropy to the seed
-    if global_step_number - 1 % config.vdf_reset_frequency == 0 {
+    if (global_step_number > 0) && (global_step_number - 1 % config.vdf_reset_frequency == 0) {
         let reset_seed = vdf_info.seed;
         seed = apply_reset_seed(seed, reset_seed);
     }
