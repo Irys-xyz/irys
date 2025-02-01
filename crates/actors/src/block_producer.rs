@@ -28,7 +28,7 @@ use openssl::sha;
 use reth::{revm::primitives::B256, rpc::eth::EthApiServer as _};
 use reth_db::cursor::*;
 use reth_db::Database;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
@@ -177,7 +177,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             }?;
 
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-                error!("Skipping solution for old step number {}, previous block step number {} for block {} ({}) ", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58(),  prev_block_height);
+                warn!("Skipping solution for old step number {}, previous block step number {} for block {} ({}) ", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58(),  prev_block_height);
                 return Ok(None)
             }
 
