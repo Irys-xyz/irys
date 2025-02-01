@@ -202,6 +202,7 @@ pub async fn start_irys_node(
         // let trimmed_items = &i.items[0..i.items.len() - 1];
         // irys_database::save_block_index(trimmed_items, &arc_config.clone())?;
         // dbg!("written block index! {}", &trimmed_items.len());
+        // std::process::exit(0);
 
         i
     }));

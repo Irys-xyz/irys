@@ -164,10 +164,19 @@ pub async fn last_step_checkpoints_is_valid(
     let global_step_number: usize = vdf_info.global_step_number as usize;
 
     // If the vdf reset happened on this step, apply the entropy to the seed
-    if (global_step_number > 0) && (global_step_number - 1 % config.vdf_reset_frequency == 0) {
+    if (global_step_number > 0) && ((global_step_number - 1) % config.vdf_reset_frequency == 0) {
+        info!(
+            "Applying reset step: {} seed {:?}",
+            global_step_number, seed
+        );
         let reset_seed = vdf_info.seed;
         seed = apply_reset_seed(seed, reset_seed);
-    }
+    } else {
+        info!(
+            "Not applying reset step: {} seed {:?}",
+            global_step_number, seed
+        );
+    };
 
     // Insert the seed at the head of the checkpoint list
     checkpoint_hashes.0.insert(0, seed);
@@ -378,7 +387,12 @@ mod tests {
     use super::*;
     #[test]
     fn generate_next_vdf_step() {
-        let mut seed = H256(hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41").unwrap().try_into().unwrap());
+        let mut seed = H256(
+            hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
 
         let mut reset_seed = H256([0; 32]);
         print!("seed: {:?}\n", seed);
@@ -389,7 +403,7 @@ mod tests {
             &VDFStepsConfig::default(),
             start_step_number as u64,
         ));
-        
+
         let mut checkpoints: Vec<H256> = vec![H256::default(); 25];
 
         //seed = apply_reset_seed(seed, reset_seed);
@@ -422,8 +436,6 @@ mod tests {
         for (i, checkpoint) in checkpoints.iter().enumerate() {
             println!("{}: {:?}", i, checkpoint);
         }
-
-                
     }
 
     #[tokio::test]
@@ -476,11 +488,10 @@ mod tests {
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
-        
+
         if x.is_ok() {
             println!("Checkpoints are valid!");
         } else {
-            
             println!("Checkpoints are invalid!");
         }
 
@@ -507,39 +518,189 @@ mod tests {
     async fn test_checkpoints_for_single_step_block_reset_error() {
         // step: 44398 output: 0x893d
         let vdf_info = VDFLimiterInfo {
-            output: H256(hex::decode("d146d9bf9d6d1e5e1dde15b7fe11c72928d9809587758f1f9a343146dc0d60c4").unwrap().try_into().unwrap()),
+            output: H256(
+                hex::decode("d146d9bf9d6d1e5e1dde15b7fe11c72928d9809587758f1f9a343146dc0d60c4")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            ),
             global_step_number: 44400,
-            seed: H256(hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41").unwrap().try_into().unwrap()),
-            next_seed: H256(hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41").unwrap().try_into().unwrap()),
-            prev_output: H256(hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41").unwrap().try_into().unwrap()),
+            seed: H256(
+                hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            ),
+            next_seed: H256(
+                hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            ),
+            prev_output: H256(
+                hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            ),
             last_step_checkpoints: H256List(vec![
-                H256(hex::decode("01cbc7f0c9a0a9bc02f8de61c806c227865977f1288085a5ec8ee63f117f1441").unwrap().try_into().unwrap()),
-                H256(hex::decode("c9ae2ca12ebe463d076e58b36d79ed826e4cf1518bfa4497f9dd600efb149ef7").unwrap().try_into().unwrap()),
-                H256(hex::decode("a667ba60fcc78ff881be5a4362ee8ed620d40cd8e1f243a9d3784d49440ad568").unwrap().try_into().unwrap()),
-                H256(hex::decode("02bcafa19e4c87deafe4a774a627439199de1a6cdfcfe3fcb4f28c3904cab2db").unwrap().try_into().unwrap()),
-                H256(hex::decode("6e69f859b49d3dd83c3d8bf63b1343b6705e21baff18ea903274e5cf86df0942").unwrap().try_into().unwrap()),
-                H256(hex::decode("b9bb2804a759e32dc78d6e66bb9083524426bb21d401bba1d10be8720df1c2aa").unwrap().try_into().unwrap()),
-                H256(hex::decode("24047f41de57234304e8f9c417e860fa52efc6902f576b9f3ee5aab0500076d3").unwrap().try_into().unwrap()),
-                H256(hex::decode("14b032ad411fbb559be2601d6dbf58f0be199a8f1fbd727939691c6f628d66de").unwrap().try_into().unwrap()),
-                H256(hex::decode("f4e34ef580c5e603bcb89edd010d78a562999f556d7c5c042c2900a6a7a00dc7").unwrap().try_into().unwrap()),
-                H256(hex::decode("7a695bef7b4a042852515e4df71a9267131a3f68ee180ef003ba2a8769026d4e").unwrap().try_into().unwrap()),
-                H256(hex::decode("1d6a6344c7ef1b8a2b1f05755d576b44142d7390d6b8a874f5d52a15988027d1").unwrap().try_into().unwrap()),
-                H256(hex::decode("aa26de9d3a67fd78d38f98974dfaf7a095c8884363fe861750420e5bd564ceb0").unwrap().try_into().unwrap()),
-                H256(hex::decode("ce785db61216b15f4f81b4f2d61c04c340e8576aecc7db85a0e1e0f3092bbf71").unwrap().try_into().unwrap()),
-                H256(hex::decode("dd56b778c580cc446aae146209d48a76873ef55882b036e73f5ced4e0e630516").unwrap().try_into().unwrap()),
-                H256(hex::decode("03013a92e391d608d468e15bbea0517b0d1619b00d76a41ad9c8bcc93e90964a").unwrap().try_into().unwrap()),
-                H256(hex::decode("6e445f49a57953dfd586609dab877177cf02c21fbf93854dc69771a886e4a05b").unwrap().try_into().unwrap()),
-                H256(hex::decode("5cb45592f6fd08fdd29ad661a3202c5c8b6bab2694bfbd610435ad48db811eba").unwrap().try_into().unwrap()),
-                H256(hex::decode("96ecd10174dadd788f82850ae8b1d45bd17289133e2eb77e625eca1c8e5c0031").unwrap().try_into().unwrap()),
-                H256(hex::decode("046a20ecbbd60459c80d6c69ae1649e9cffc6faa037cd6c4a904365142812aae").unwrap().try_into().unwrap()),
-                H256(hex::decode("6f943113534cadafcc07cbf5d43703e88029f91af140c2cc595bcf17df9703fd").unwrap().try_into().unwrap()),
-                H256(hex::decode("72984524bd2c3e57f2f2e4d35ccf7d03febb23be91ec53d634cc28469d784fec").unwrap().try_into().unwrap()),
-                H256(hex::decode("32d91ef55df8b24dff40dd6131b7d962638f47d0ce37a73143734d5b39d71fd0").unwrap().try_into().unwrap()),
-                H256(hex::decode("e8ead73c39047f7a4b37f005fd5a83ee89493c35a17bf3fbf2176df4904d8acc").unwrap().try_into().unwrap()),
-                H256(hex::decode("88d48a1daf73a989503136fd9ed5633853e8554271ec69a94be52a45c8c13ad1").unwrap().try_into().unwrap()),
-                H256(hex::decode("d146d9bf9d6d1e5e1dde15b7fe11c72928d9809587758f1f9a343146dc0d60c4").unwrap().try_into().unwrap()),
+                H256(
+                    hex::decode("01cbc7f0c9a0a9bc02f8de61c806c227865977f1288085a5ec8ee63f117f1441")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("c9ae2ca12ebe463d076e58b36d79ed826e4cf1518bfa4497f9dd600efb149ef7")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("a667ba60fcc78ff881be5a4362ee8ed620d40cd8e1f243a9d3784d49440ad568")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("02bcafa19e4c87deafe4a774a627439199de1a6cdfcfe3fcb4f28c3904cab2db")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("6e69f859b49d3dd83c3d8bf63b1343b6705e21baff18ea903274e5cf86df0942")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("b9bb2804a759e32dc78d6e66bb9083524426bb21d401bba1d10be8720df1c2aa")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("24047f41de57234304e8f9c417e860fa52efc6902f576b9f3ee5aab0500076d3")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("14b032ad411fbb559be2601d6dbf58f0be199a8f1fbd727939691c6f628d66de")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("f4e34ef580c5e603bcb89edd010d78a562999f556d7c5c042c2900a6a7a00dc7")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("7a695bef7b4a042852515e4df71a9267131a3f68ee180ef003ba2a8769026d4e")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("1d6a6344c7ef1b8a2b1f05755d576b44142d7390d6b8a874f5d52a15988027d1")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("aa26de9d3a67fd78d38f98974dfaf7a095c8884363fe861750420e5bd564ceb0")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("ce785db61216b15f4f81b4f2d61c04c340e8576aecc7db85a0e1e0f3092bbf71")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("dd56b778c580cc446aae146209d48a76873ef55882b036e73f5ced4e0e630516")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("03013a92e391d608d468e15bbea0517b0d1619b00d76a41ad9c8bcc93e90964a")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("6e445f49a57953dfd586609dab877177cf02c21fbf93854dc69771a886e4a05b")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("5cb45592f6fd08fdd29ad661a3202c5c8b6bab2694bfbd610435ad48db811eba")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("96ecd10174dadd788f82850ae8b1d45bd17289133e2eb77e625eca1c8e5c0031")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("046a20ecbbd60459c80d6c69ae1649e9cffc6faa037cd6c4a904365142812aae")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("6f943113534cadafcc07cbf5d43703e88029f91af140c2cc595bcf17df9703fd")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("72984524bd2c3e57f2f2e4d35ccf7d03febb23be91ec53d634cc28469d784fec")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("32d91ef55df8b24dff40dd6131b7d962638f47d0ce37a73143734d5b39d71fd0")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("e8ead73c39047f7a4b37f005fd5a83ee89493c35a17bf3fbf2176df4904d8acc")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("88d48a1daf73a989503136fd9ed5633853e8554271ec69a94be52a45c8c13ad1")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                H256(
+                    hex::decode("d146d9bf9d6d1e5e1dde15b7fe11c72928d9809587758f1f9a343146dc0d60c4")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
             ]),
-            steps: H256List(vec![H256(hex::decode("d146d9bf9d6d1e5e1dde15b7fe11c72928d9809587758f1f9a343146dc0d60c4").unwrap().try_into().unwrap())]),
+            steps: H256List(vec![H256(
+                hex::decode("d146d9bf9d6d1e5e1dde15b7fe11c72928d9809587758f1f9a343146dc0d60c4")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            )]),
             vdf_difficulty: None,
             next_vdf_difficulty: None,
         };
@@ -551,11 +712,10 @@ mod tests {
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
-        
+
         if x.is_ok() {
             println!("Checkpoints are valid!");
         } else {
-            
             println!("Checkpoints are invalid!");
         }
 
@@ -573,5 +733,4 @@ mod tests {
         );
         println!("x: {:?}", x);
     }
-
 }
