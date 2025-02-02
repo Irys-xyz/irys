@@ -72,24 +72,26 @@ impl PartitionMiningActor {
         } else {
             debug!("Non consecutive Step {} need to reconstruct ranges", step);
             let reset_step = self.ranges.reset_step(step);
-            debug!("Near reset step is {} num recall ranges in partition {}", reset_step, self.ranges.num_recall_ranges_in_partition);
-            let start =
-                if reset_step > self.ranges.last_step_num + 1 {
-                    debug!(
-                        "Step {} is too far ahead of last processed step {}, reinitializing ranges ...",
-                        step, self.ranges.last_step_num
-                    );
-                    self.ranges.reinitialize();
-                    self.ranges.last_step_num = reset_step - 1;
-                    reset_step
-                } else {
-                    self.ranges.last_step_num + 1
-                };
+            debug!(
+                "Near reset step is {} num recall ranges in partition {}",
+                reset_step, self.ranges.num_recall_ranges_in_partition
+            );
+            let start = if reset_step > self.ranges.last_step_num + 1 {
+                debug!(
+                    "Step {} is too far ahead of last processed step {}, reinitializing ranges ...",
+                    step, self.ranges.last_step_num
+                );
+                self.ranges.reinitialize();
+                self.ranges.last_step_num = reset_step - 1;
+                reset_step
+            } else {
+                self.ranges.last_step_num + 1
+            };
             debug!("Getting stored steps from ({}..={})", start, step - 1);
             if start <= step - 1 {
                 let steps = vdf_steps.get_steps(ii(start, step - 1))?;
                 self.ranges.reconstruct(&steps, partition_hash);
-            };                
+            };
             Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         }
     }
@@ -337,7 +339,7 @@ mod tests {
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
     use irys_types::{partition, H256List, IrysBlockHeader};
-    use irys_vdf::vdf_state::{VdfStepsReadGuard, VdfState};
+    use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
     use std::any::Any;
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicU64;
@@ -345,7 +347,9 @@ mod tests {
     use std::time::Duration;
     use tokio::time::sleep;
 
-    fn get_mocked_block_producer(closure_arc: Arc<RwLock<Option<SolutionContext>>>) -> BlockProducerMockActor {
+    fn get_mocked_block_producer(
+        closure_arc: Arc<RwLock<Option<SolutionContext>>>,
+    ) -> BlockProducerMockActor {
         let closure_arc = closure_arc.clone();
         BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
             let solution_message: SolutionFoundMessage =
@@ -528,9 +532,9 @@ mod tests {
     #[actix_rt::test]
     async fn test_recall_range_reinit() {
         let mining_address = Address::random();
-        
+
         let partition_hash = H256::random();
-        
+
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
@@ -560,8 +564,9 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module = Arc::new(StorageModule::new(&base_path, storage_module_info, config.clone()).unwrap());
-        
+        let storage_module =
+            Arc::new(StorageModule::new(&base_path, storage_module_info, config.clone()).unwrap());
+
         let rwlock: RwLock<Option<SolutionContext>> = RwLock::new(None);
         let arc_rwlock = Arc::new(rwlock);
         let closure_arc = arc_rwlock.clone();
@@ -575,7 +580,7 @@ mod tests {
             max_seeds_num: 5,
             seeds: VecDeque::new(),
         };
-        
+
         let vdf_service = VdfService::from_atomic_state(Arc::new(RwLock::new(vdf_state))).start();
         let vdf_steps_guard: VdfStepsReadGuard =
             vdf_service.send(GetVdfStateMessage).await.unwrap();
@@ -583,16 +588,16 @@ mod tests {
         let hash: H256 = H256::random();
         vdf_service.do_send(VdfSeed(Seed(hash)));
         vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash)));                
-        vdf_service.do_send(VdfSeed(Seed(hash)));                
-        vdf_service.do_send(VdfSeed(Seed(hash))); //5                
-        // reset
+        vdf_service.do_send(VdfSeed(Seed(hash)));
+        vdf_service.do_send(VdfSeed(Seed(hash)));
+        vdf_service.do_send(VdfSeed(Seed(hash))); //5
+                                                  // reset
         vdf_service.do_send(VdfSeed(Seed(hash))); //6
         vdf_service.do_send(VdfSeed(Seed(hash))); //7
 
         sleep(Duration::from_secs(1)).await;
 
-        let atomic_global_step_number = Arc::new(AtomicU64::new(1));            
+        let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
         let mut partition_mining_actor = PartitionMiningActor::new(
             mining_address,
@@ -602,9 +607,11 @@ mod tests {
             false,
             vdf_steps_guard.clone(),
             atomic_global_step_number,
-        );        
+        );
 
-        let range = partition_mining_actor.get_recall_range(7, &hash, &partition_hash).unwrap();
+        let range = partition_mining_actor
+            .get_recall_range(7, &hash, &partition_hash)
+            .unwrap();
 
         let mut ranges = Ranges::new(5);
         ranges.get_recall_range(1, &hash, &partition_hash);

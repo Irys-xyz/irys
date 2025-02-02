@@ -112,7 +112,7 @@ impl Ranges {
         });
     }
 
-    pub fn reset_step(&mut self, step_num: u64) -> u64{
+    pub fn reset_step(&mut self, step_num: u64) -> u64 {
         reset_step(step_num, self.num_recall_ranges_in_partition as u64)
     }
 }
