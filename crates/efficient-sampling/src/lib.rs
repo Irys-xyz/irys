@@ -18,7 +18,7 @@ pub struct Ranges {
     /// last recall ranges by step number
     last_recall_ranges: HashMap<u64, usize>,
     /// num recall ranges in a partition, equal to ranges vector capacity
-    num_recall_ranges_in_partition: usize,
+    pub num_recall_ranges_in_partition: usize,
 }
 
 impl Ranges {
@@ -73,7 +73,7 @@ impl Ranges {
         range
     }
 
-    fn reinitialize(&mut self) {
+    pub fn reinitialize(&mut self) {
         info!("Reinitializing ranges");
         self.ranges.clear();
         for i in 0..self.num_recall_ranges_in_partition {
@@ -104,12 +104,16 @@ impl Ranges {
         }
     }
 
-    /// Reconstructs recall ranges from given seeds assuming last step number is the step of the first seed
+    /// Reconstructs recall ranges from given seeds assuming last step number + 1 is the step of the first seed
     pub fn reconstruct(&mut self, next_steps: &H256List, partition_hash: &H256) {
         let step = self.last_step_num;
         next_steps.0.iter().enumerate().for_each(|(i, seed)| {
             self.next_recall_range(step + 1 + i as u64, seed, partition_hash);
         });
+    }
+
+    pub fn reset_step(&mut self, step_num: u64) -> u64{
+        reset_step(step_num, self.num_recall_ranges_in_partition as u64)
     }
 }
 
@@ -151,6 +155,10 @@ pub fn get_recall_range(
 /// Get last step number where ranges were reinitialized
 pub fn reset_step_number(step_num: u64, config: &StorageConfig) -> u64 {
     let num_recall_ranges_in_partition = num_recall_ranges_in_partition(config);
+    reset_step(step_num, num_recall_ranges_in_partition)
+}
+
+pub fn reset_step(step_num: u64, num_recall_ranges_in_partition: u64) -> u64 {
     (step_num - 1) / num_recall_ranges_in_partition * num_recall_ranges_in_partition + 1
 }
 
