@@ -379,26 +379,6 @@ impl Ledgers {
             }
         }
     }
-
-    pub fn remove_partition_from_slot(
-        &mut self,
-        ledger: Ledger,
-        slot_index: usize,
-        partition_hash: &H256,
-    ) {
-        match ledger {
-            Ledger::Submit => {
-                self.term[0].slots[slot_index]
-                    .partitions
-                    .retain(|p| p != partition_hash);
-            }
-            Ledger::Publish => {
-                self.perm.slots[slot_index]
-                    .partitions
-                    .retain(|p| p != partition_hash);
-            }
-        }
-    }
 }
 
 // Implement Index to retrieve a LedgerCore by its Ledger name
