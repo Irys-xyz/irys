@@ -311,7 +311,13 @@ impl StorageModule {
         let gaps = global_intervals
             .gaps_untrimmed(ii(0, u32::MAX))
             .collect::<Vec<_>>();
-        let expected = vec![ii(storage_config.num_chunks_in_partition as u32, u32::MAX)];
+        let expected = vec![ii(
+            storage_config
+                .num_chunks_in_partition
+                .try_into()
+                .expect("Value exceeds u32::MAX"),
+            u32::MAX,
+        )];
         if &gaps != &expected {
             return Err(eyre!(
                 "Invalid storage module config, expected range {:?}, got range {:?}",
@@ -742,7 +748,7 @@ impl StorageModule {
 
         // Get chunk info and calculate index
         let range = self.get_storage_module_range()?;
-        let partition_offset = (ledger_offset - range.start()) as u32;
+        let partition_offset = (ledger_offset - range.start()).try_into().expect("Value exceeds u32::MAX");
         let closest_offsets = self.collect_start_offsets(data_root)?;
 
         let nearest_start_offset = closest_offsets
@@ -871,7 +877,10 @@ impl StorageModule {
         let storage_module_range = self.get_storage_module_range()?;
         let start = chunk_range.start() - storage_module_range.start();
         let end = chunk_range.end() - storage_module_range.start();
-        Ok(PartitionChunkRange(ii(start as u32, end as u32)))
+        Ok(PartitionChunkRange(ii(
+            start.try_into().expect("Value exceeds u32::MAX"),
+            end.try_into().expect("Value exceeds u32::MAX"),
+        )))
     }
 
     /// utility function to take a ledger relative offset and makes it

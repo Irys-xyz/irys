@@ -340,7 +340,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 data_size: chunk_bytes.len() as u64,
                 data_path: Base64(proof.proof.clone()),
                 bytes: chunk_bytes,
-                tx_offset: i as u32,
+                tx_offset: i.try_into().expect("Value exceeds u32::MAX"),
             };
 
             let _ = db.update_eyre(|tx| cache_chunk(tx, &chunk));
@@ -353,7 +353,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let mut ledger_offset: LedgerChunkOffset = 0;
     for tx in &txs {
         let data_root = tx.header.data_root;
-        let num_chunks = (tx.header.data_size / chunk_size) as u32;
+        let num_chunks = (tx.header.data_size / chunk_size).try_into().expect("Value exceeds u32::MAX");
 
         // Retrieve the partition assignments from the data root
         let hashes = db
@@ -537,7 +537,7 @@ fn calculate_tx_ranges(
         num_chunks_in_tx = (num_chunks_in_tx as i64 + partition_start) as u64;
     }
 
-    let partition_start = partition_start.max(0) as u32;
+    let partition_start = partition_start.max(0).try_into().expect("Value exceeds u32::MAX");
 
     let partition_range = PartitionChunkRange(ie(
         partition_start,

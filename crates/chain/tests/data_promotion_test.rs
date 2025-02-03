@@ -384,7 +384,7 @@ where
         data_size: tx.header.data_size,
         data_path: Base64(tx.proofs[chunk_index].proof.to_vec()),
         bytes: Base64(chunks[chunk_index].to_vec()),
-        tx_offset: chunk_index as u32,
+        tx_offset: chunk_index.try_into().expect("Value exceeds u32::MAX"),
     };
 
     let resp = test::call_service(
