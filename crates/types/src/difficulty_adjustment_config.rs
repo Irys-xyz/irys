@@ -114,7 +114,7 @@ pub fn calculate_difficulty(
     // Calculate difference
     let percent_diff = actual_block_time.abs_diff(target_block_time).as_millis() * 100
         / target_block_time.as_millis();
-    let min_threshold = (difficulty_config.min_adjustment_factor * dec![100.0])
+    let min_threshold: u128 = (difficulty_config.min_adjustment_factor * dec![100.0])
         .try_into()
         .unwrap();
 
@@ -122,7 +122,7 @@ pub fn calculate_difficulty(
         actual_block_time,
         target_block_time,
         percent_different: percent_diff as u32,
-        min_threshold: min_threshold as u32,
+        min_threshold: min_threshold.try_into().expect("Value exceeds u32::MAX"),
         is_adjusted: percent_diff > min_threshold,
     };
 

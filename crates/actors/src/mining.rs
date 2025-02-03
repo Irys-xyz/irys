@@ -100,7 +100,7 @@ impl PartitionMiningActor {
 
         // Starting chunk index within partition
         let start_chunk_offset =
-            recall_range_index as u32 * config.num_chunks_in_recall_range as u32;
+            (recall_range_index as u32).saturating_mul(config.num_chunks_in_recall_range as u32);
 
         // info!(
         //     "Recall range index {} start chunk index {}",
