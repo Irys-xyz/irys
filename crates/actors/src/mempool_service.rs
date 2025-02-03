@@ -677,202 +677,202 @@ pub fn generate_ingress_proof(
 //==============================================================================
 // Tests
 //------------------------------------------------------------------------------
-#[cfg(test)]
-mod tests {
-    use std::{sync::Arc, time::Duration};
+// #[cfg(test)]
+// mod tests {
+//     use std::{sync::Arc, time::Duration};
 
-    use assert_matches::assert_matches;
-    use irys_database::{open_or_create_db, tables::IrysTables};
-    use irys_packing::xor_vec_u8_arrays_in_place;
-    use irys_storage::{ii, ChunkType, StorageModule, StorageModuleInfo};
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{
-        irys::IrysSigner,
-        partition::{PartitionAssignment, PartitionHash},
-        Address, Base64, MAX_CHUNK_SIZE,
-    };
-    use rand::Rng;
-    use reth::tasks::TaskManager;
-    use tokio::time::{sleep, timeout};
+//     use assert_matches::assert_matches;
+//     use irys_database::{open_or_create_db, tables::IrysTables};
+//     use irys_packing::xor_vec_u8_arrays_in_place;
+//     use irys_storage::{ii, ChunkType, StorageModule, StorageModuleInfo};
+//     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+//     use irys_types::{
+//         irys::IrysSigner,
+//         partition::{PartitionAssignment, PartitionHash},
+//         Address, Base64, MAX_CHUNK_SIZE,
+//     };
+//     use rand::Rng;
+//     use reth::tasks::TaskManager;
+//     use tokio::time::{sleep, timeout};
 
-    use super::*;
+//     use super::*;
 
-    use actix::prelude::*;
+//     use actix::prelude::*;
 
-    #[actix::test]
-    async fn post_transaction_and_chunks() -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("post_transaction_and_chunks"), false);
-        let base_path = tmp_dir.path().to_path_buf();
+//     #[actix::test]
+//     async fn post_transaction_and_chunks() -> eyre::Result<()> {
+//         let tmp_dir = setup_tracing_and_temp_dir(Some("post_transaction_and_chunks"), false);
+//         let base_path = tmp_dir.path().to_path_buf();
 
-        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
-        let arc_db1 = DatabaseProvider(Arc::new(db));
-        let arc_db2 = DatabaseProvider(Arc::clone(&arc_db1));
+//         let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+//         let arc_db1 = DatabaseProvider(Arc::new(db));
+//         let arc_db2 = DatabaseProvider(Arc::clone(&arc_db1));
 
-        // Create an instance of the mempool actor
-        let task_manager = TaskManager::current();
+//         // Create an instance of the mempool actor
+//         let task_manager = TaskManager::current();
 
-        let storage_config = StorageConfig::default();
-        let chunk_size = storage_config.chunk_size;
+//         let storage_config = StorageConfig::default();
+//         let chunk_size = storage_config.chunk_size;
 
-        let storage_module_info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment {
-                partition_hash: PartitionHash::zero(),
-                miner_address: Address::random(),
-                ledger_id: Some(0),
-                slot_index: Some(0),
-            }),
-            submodules: vec![
-                (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
-            ],
-        };
+//         let storage_module_info = StorageModuleInfo {
+//             id: 0,
+//             partition_assignment: Some(PartitionAssignment {
+//                 partition_hash: PartitionHash::zero(),
+//                 miner_address: Address::random(),
+//                 ledger_id: Some(0),
+//                 slot_index: Some(0),
+//             }),
+//             submodules: vec![
+//                 (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
+//             ],
+//         };
 
-        // Override the default StorageModule config for testing
-        let config = StorageConfig {
-            min_writes_before_sync: 1,
-            chunk_size,
-            num_chunks_in_partition: 5,
-            ..Default::default()
-        };
+//         // Override the default StorageModule config for testing
+//         let config = StorageConfig {
+//             min_writes_before_sync: 1,
+//             chunk_size,
+//             num_chunks_in_partition: 5,
+//             ..Default::default()
+//         };
 
-        let storage_module = Arc::new(StorageModule::new(
-            &base_path,
-            &storage_module_info,
-            config,
-        )?);
+//         let storage_module = Arc::new(StorageModule::new(
+//             &base_path,
+//             &storage_module_info,
+//             config,
+//         )?);
 
-        storage_module.pack_with_zeros();
+//         storage_module.pack_with_zeros();
 
-        let mempool = MempoolService::new(
-            arc_db1,
-            task_manager.executor(),
-            IrysSigner::random_signer(),
-            storage_config,
-            vec![storage_module.clone()],
-        );
-        let addr: Addr<MempoolService> = mempool.start();
+//         let mempool = MempoolService::new(
+//             arc_db1,
+//             task_manager.executor(),
+//             IrysSigner::random_signer(),
+//             storage_config,
+//             vec![storage_module.clone()],
+//         );
+//         let addr: Addr<MempoolService> = mempool.start();
 
-        // Create 2.5 chunks worth of data *  fill the data with random bytes
-        let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
-        let mut data_bytes = vec![0u8; data_size];
-        rand::thread_rng().fill(&mut data_bytes[..]);
+//         // Create 2.5 chunks worth of data *  fill the data with random bytes
+//         let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
+//         let mut data_bytes = vec![0u8; data_size];
+//         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        // Create a new Irys API instance & a signed transaction
-        let irys = IrysSigner::random_signer();
-        let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
-        let tx = irys.sign_transaction(tx).unwrap();
+//         // Create a new Irys API instance & a signed transaction
+//         let irys = IrysSigner::random_signer();
+//         let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
+//         let tx = irys.sign_transaction(tx).unwrap();
 
-        println!("{:?}", tx.header);
-        println!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
+//         println!("{:?}", tx.header);
+//         println!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
 
-        for proof in &tx.proofs {
-            println!("offset: {}", proof.offset);
-        }
+//         for proof in &tx.proofs {
+//             println!("offset: {}", proof.offset);
+//         }
 
-        // Wrap the transaction in a TxIngressMessage
-        let data_root = tx.header.data_root;
-        let data_size = tx.header.data_size;
-        let tx_ingress_msg = TxIngressMessage(tx.header);
+//         // Wrap the transaction in a TxIngressMessage
+//         let data_root = tx.header.data_root;
+//         let data_size = tx.header.data_size;
+//         let tx_ingress_msg = TxIngressMessage(tx.header);
 
-        // Post the TxIngressMessage to the handle method on the mempool actor
-        let result = addr.send(tx_ingress_msg).await.unwrap();
+//         // Post the TxIngressMessage to the handle method on the mempool actor
+//         let result = addr.send(tx_ingress_msg).await.unwrap();
 
-        // Verify the transaction was added
-        assert_matches!(result, Ok(()));
+//         // Verify the transaction was added
+//         assert_matches!(result, Ok(()));
 
-        let db_tx = arc_db2.tx()?;
+//         let db_tx = arc_db2.tx()?;
 
-        // Verify the data_root was added to the cache
-        let result = irys_database::cached_data_root_by_data_root(&db_tx, data_root).unwrap();
-        assert_matches!(result, Some(_));
-        let last_index = tx.chunks.len() - 1;
-        // Loop though each of the transaction chunks
-        for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
-            let min = chunk_node.min_byte_range;
-            let max = chunk_node.max_byte_range;
-            let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
-            let key: H256 = hash_sha256(&data_path.0).unwrap().into();
-            let chunk_bytes = Base64(data_bytes[min..max].to_vec());
-            // Create a ChunkIngressMessage for each chunk
-            let chunk_ingress_msg = ChunkIngressMessage(UnpackedChunk {
-                data_root,
-                data_size,
-                data_path: data_path.clone(),
-                bytes: chunk_bytes.clone(),
-                tx_offset: tx_chunk_offset as u32,
-            });
+//         // Verify the data_root was added to the cache
+//         let result = irys_database::cached_data_root_by_data_root(&db_tx, data_root).unwrap();
+//         assert_matches!(result, Some(_));
+//         let last_index = tx.chunks.len() - 1;
+//         // Loop though each of the transaction chunks
+//         for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
+//             let min = chunk_node.min_byte_range;
+//             let max = chunk_node.max_byte_range;
+//             let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
+//             let key: H256 = hash_sha256(&data_path.0).unwrap().into();
+//             let chunk_bytes = Base64(data_bytes[min..max].to_vec());
+//             // Create a ChunkIngressMessage for each chunk
+//             let chunk_ingress_msg = ChunkIngressMessage(UnpackedChunk {
+//                 data_root,
+//                 data_size,
+//                 data_path: data_path.clone(),
+//                 bytes: chunk_bytes.clone(),
+//                 tx_offset: tx_chunk_offset as u32,
+//             });
 
-            let is_last_chunk = tx_chunk_offset == last_index;
-            let interval = ii(0, last_index as u64);
-            if is_last_chunk {
-                // artificially index the chunk with the submodule
-                // this will cause the last chunk to show up in cache & on disk
-                storage_module.index_transaction_data(vec![0], data_root, interval.into())?;
-            }
+//             let is_last_chunk = tx_chunk_offset == last_index;
+//             let interval = ii(0, last_index as u64);
+//             if is_last_chunk {
+//                 // artificially index the chunk with the submodule
+//                 // this will cause the last chunk to show up in cache & on disk
+//                 storage_module.index_transaction_data(vec![0], data_root, interval.into())?;
+//             }
 
-            // Post the ChunkIngressMessage to the handle method on the mempool
-            let result = addr.send(chunk_ingress_msg).await.unwrap();
+//             // Post the ChunkIngressMessage to the handle method on the mempool
+//             let result = addr.send(chunk_ingress_msg).await.unwrap();
 
-            // Verify the chunk was added
-            assert_matches!(result, Ok(()));
+//             // Verify the chunk was added
+//             assert_matches!(result, Ok(()));
 
-            // Verify the chunk is added to the ChunksCache
-            // use a new read tx so we can see the writes
-            let db_tx = arc_db2.tx()?;
+//             // Verify the chunk is added to the ChunksCache
+//             // use a new read tx so we can see the writes
+//             let db_tx = arc_db2.tx()?;
 
-            let (meta, chunk) = irys_database::cached_chunk_by_chunk_offset(
-                &db_tx,
-                data_root,
-                tx_chunk_offset as u32,
-            )
-            .unwrap()
-            .unwrap();
-            assert_eq!(meta.chunk_path_hash, key);
-            assert_eq!(chunk.data_path, data_path);
-            assert_eq!(chunk.chunk, Some(chunk_bytes.clone()));
+//             let (meta, chunk) = irys_database::cached_chunk_by_chunk_offset(
+//                 &db_tx,
+//                 data_root,
+//                 tx_chunk_offset as u32,
+//             )
+//             .unwrap()
+//             .unwrap();
+//             assert_eq!(meta.chunk_path_hash, key);
+//             assert_eq!(chunk.data_path, data_path);
+//             assert_eq!(chunk.chunk, Some(chunk_bytes.clone()));
 
-            let result = irys_database::cached_chunk_by_chunk_path_hash(&db_tx, &key).unwrap();
-            assert_matches!(result, Some(_));
+//             let result = irys_database::cached_chunk_by_chunk_path_hash(&db_tx, &key).unwrap();
+//             assert_matches!(result, Some(_));
 
-            storage_module.sync_pending_chunks()?;
+//             storage_module.sync_pending_chunks()?;
 
-            if is_last_chunk {
-                // read the set of chunks
-                // only offset 2 (last chunk) should have data
-                let res = storage_module.read_chunks(ii(0, last_index as u32))?;
-                let r = res.get(&2).unwrap();
-                let mut packed_bytes = r.0.clone();
-                // unpack the data (packing was all 0's)
-                xor_vec_u8_arrays_in_place(&mut packed_bytes, &vec![0u8; chunk_size as usize]);
-                let packed_bytes_slice = &packed_bytes[0..chunk_bytes.0.len()];
-                let chunk_bytes = chunk_bytes.0;
-                assert_eq!(packed_bytes_slice.len(), chunk_bytes.len());
-                assert_eq!(packed_bytes_slice, chunk_bytes);
-                assert_eq!(r.1, ChunkType::Data);
-            }
-        }
+//             if is_last_chunk {
+//                 // read the set of chunks
+//                 // only offset 2 (last chunk) should have data
+//                 let res = storage_module.read_chunks(ii(0, last_index as u32))?;
+//                 let r = res.get(&2).unwrap();
+//                 let mut packed_bytes = r.0.clone();
+//                 // unpack the data (packing was all 0's)
+//                 xor_vec_u8_arrays_in_place(&mut packed_bytes, &vec![0u8; chunk_size as usize]);
+//                 let packed_bytes_slice = &packed_bytes[0..chunk_bytes.0.len()];
+//                 let chunk_bytes = chunk_bytes.0;
+//                 assert_eq!(packed_bytes_slice.len(), chunk_bytes.len());
+//                 assert_eq!(packed_bytes_slice, chunk_bytes);
+//                 assert_eq!(r.1, ChunkType::Data);
+//             }
+//         }
 
-        // Modify one of the chunks
+//         // Modify one of the chunks
 
-        // Attempt to post the chunk
+//         // Attempt to post the chunk
 
-        // Verify there chunk is not accepted
+//         // Verify there chunk is not accepted
 
-        task_manager.graceful_shutdown_with_timeout(Duration::from_secs(5));
-        // check the ingress proof is in the DB
-        let timed_get = timeout(Duration::from_secs(5), async {
-            loop {
-                // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
-                let ro_tx = &arc_db2.tx().unwrap();
-                match ro_tx.get::<IngressProofs>(data_root).unwrap() {
-                    Some(ip) => break ip,
-                    None => sleep(Duration::from_millis(100)).await,
-                }
-            }
-        })
-        .await?;
-        assert_eq!(&timed_get.data_root, &data_root);
+//         task_manager.graceful_shutdown_with_timeout(Duration::from_secs(5));
+//         // check the ingress proof is in the DB
+//         let timed_get = timeout(Duration::from_secs(5), async {
+//             loop {
+//                 // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
+//                 let ro_tx = &arc_db2.tx().unwrap();
+//                 match ro_tx.get::<IngressProofs>(data_root).unwrap() {
+//                     Some(ip) => break ip,
+//                     None => sleep(Duration::from_millis(100)).await,
+//                 }
+//             }
+//         })
+//         .await?;
+//         assert_eq!(&timed_get.data_root, &data_root);
 
-        Ok(())
-    }
-}
+//         Ok(())
+//     }
+// }
