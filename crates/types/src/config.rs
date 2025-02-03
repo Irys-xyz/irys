@@ -42,6 +42,9 @@ pub struct Config {
     // TODO: enable this after fixing option in toml
     pub num_capacity_partitions: Option<u64>,
     pub port: u16,
+    /// the number of block a given anchor (tx or block hash) is valid for.
+    /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
+    pub anchor_expiry_depth: u8,
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 5;
@@ -72,7 +75,8 @@ pub const CONFIG: Config = load_toml!(
         chunk_migration_depth: 1, // Number of confirmations before moving chunks to storage modules
         mining_key: "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0", // Burner PrivateKey (PK)
         num_capacity_partitions: None,
-        port: 80
+        port: 8080,
+        anchor_expiry_depth: 50
     }
 );
 

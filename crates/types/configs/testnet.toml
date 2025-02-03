@@ -22,3 +22,4 @@ chunk_migration_depth = 1
 mining_key = "f57554aff54acd4cfaa084f45a7062d5869c8dbb789f7d6a883fade660960303"
 num_capacity_partitions = 0
 port = 8080
+anchor_expiry_depth = 50
