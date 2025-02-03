@@ -93,7 +93,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
-        .on_http("http://localhost:8080".parse()?);
+        .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
 
     let deploy_builder =
         IrysProgrammableDataBasic::deploy_builder(alloy_provider.clone()).gas(29506173);
