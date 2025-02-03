@@ -1,14 +1,8 @@
 use crate::utils::{mine_blocks, post_chunk};
-use actix_web::dev::{Service, ServiceResponse};
-use awc::{body::MessageBody, http::StatusCode};
+use awc::http::StatusCode;
 use irys_database::Ledger;
-use irys_packing::unpack;
-use irys_types::{
-    Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
-    StorageConfig, UnpackedChunk, H256,
-};
 
-use tracing::{debug, error};
+use tracing::debug;
 
 #[cfg(test)]
 #[actix_web::test]
@@ -26,15 +20,17 @@ async fn double_root_data_promotion_test() {
     use irys_actors::packing::wait_for_packing;
     use irys_api_server::{routes, ApiState};
     use irys_chain::start_for_testing;
+    use irys_database::{tables::IngressProofs, walk_all};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, StorageConfig};
+    use reth_db::Database as _;
     use reth_primitives::GenesisAccount;
     use tokio::time::sleep;
     use tracing::info;
 
-    use crate::utils::{get_block_parent, get_chunk, verify_published_chunk};
+    use crate::utils::{get_block_parent, get_chunk, mine_block, verify_published_chunk};
 
-    std::env::set_var("RUST_LOG", "debug");
+    // std::env::set_var("RUST_LOG", "debug");
 
     let chunk_size = 32; // 32Byte chunks
 
@@ -85,6 +81,8 @@ async fn double_root_data_promotion_test() {
     )
     .await
     .unwrap();
+
+    let block1 = mine_block(&node_context).await.unwrap().unwrap();
 
     // node_context.actor_addresses.start_mining().unwrap();
 
@@ -176,7 +174,7 @@ async fn double_root_data_promotion_test() {
             unconfirmed_tx.remove(0);
         }
 
-        mine_blocks(&node_context, 1).await.unwrap();
+        mine_block(&node_context).await.unwrap();
     }
 
     // Verify all transactions are confirmed
@@ -262,7 +260,7 @@ async fn double_root_data_promotion_test() {
                 println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
             }
         }
-        mine_blocks(&node_context, 1).await.unwrap();
+        mine_block(&node_context).await.unwrap();
         sleep(delay).await;
     }
 
@@ -342,9 +340,18 @@ async fn double_root_data_promotion_test() {
     verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
 
     // Part 2
+    debug!("PHASE 2");
 
-    // mine 3 blocks
-    mine_blocks(&node_context, 3).await.unwrap();
+    // mine 1 block
+    let blk = mine_block(&node_context).await.unwrap().unwrap();
+    debug!("P2 block {}", &blk.0.height);
+
+    // ensure the ingress proof still exists
+    let ingress_proofs = db
+        .view(|rtx| walk_all::<IngressProofs>(rtx))
+        .unwrap()
+        .unwrap();
+    assert_eq!(ingress_proofs.len(), 1);
 
     // same chunks as tx1
     let data_chunks = [vec![[10; 32], [20; 32], [30; 32]]];
@@ -361,7 +368,9 @@ async fn double_root_data_promotion_test() {
         }
         // we have to use a different signer so we get a unique txid for each transaction, despite the identical data_root
         let s = &signer2;
-        let tx = s.create_transaction(data, None).unwrap();
+        let tx = s
+            .create_transaction(data, Some(block1.0.block_hash))
+            .unwrap();
         let tx = s.sign_transaction(tx).unwrap();
         println!("tx[2] {}", tx.header.id.as_bytes().to_base58());
         txs.push(tx);
@@ -492,30 +501,6 @@ async fn double_root_data_promotion_test() {
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
     let first_tx_index: usize;
-    let next_tx_index: usize;
-
-    // if block_tx1.block_hash == block_tx2.block_hash {
-    //     // Extract the transaction order
-    //     let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-    //     // let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[1];
-    //     first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-    //     // next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-    //     println!("1:{}", block_tx1);
-    // } else if block_tx1.height > block_tx2.height {
-    //     let txid_1 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-    //     let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-    //     first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-    //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-    //     println!("1:{}", block_tx2);
-    //     println!("2:{}", block_tx1);
-    // } else {
-    //     let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-    //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-    //     first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-    //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-    //     println!("1:{}", block_tx1);
-    //     println!("2:{}", block_tx2);
-    // }
 
     let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
@@ -558,4 +543,12 @@ async fn double_root_data_promotion_test() {
     // verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
 
     // println!("\n{:?}", unpacked_chunk);
+
+    mine_blocks(&node_context, 5).await.unwrap();
+    // ensure the ingress proof is gone
+    let ingress_proofs = db
+        .view(|rtx| walk_all::<IngressProofs>(rtx))
+        .unwrap()
+        .unwrap();
+    assert_eq!(ingress_proofs.len(), 0);
 }

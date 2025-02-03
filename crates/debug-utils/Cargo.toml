@@ -1,0 +1,12 @@
+[package]
+name = "debug-utils"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+irys-database.workspace = true
+eyre.workspace = true
+
+[lints]
+workspace = true

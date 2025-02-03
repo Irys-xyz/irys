@@ -52,7 +52,7 @@ pub async fn post_chunk(
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal error: {:?}", err)))
             }
-            ChunkIngressError::Uninitialized => {
+            ChunkIngressError::ServiceUninitialized => {
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal service error: {:?}", err)))
             }

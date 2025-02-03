@@ -53,7 +53,7 @@ pub async fn post_tx(
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal database error: {:?}", err)))
             }
-            TxIngressError::Uninitialized => {
+            TxIngressError::ServiceUninitialized => {
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal service error: {:?}", err)))
             }

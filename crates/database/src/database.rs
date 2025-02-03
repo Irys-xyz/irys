@@ -14,10 +14,14 @@ use irys_types::{
     IrysTransactionId, TxRelativeChunkOffset, UnpackedChunk, MEGABYTE, U256,
 };
 use reth_db::cursor::DbDupCursorRO;
+use reth_db::mdbx::tx::Tx;
+use reth_db::mdbx::RO;
+use reth_db::table::Table;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::{
     create_db as reth_create_db,
+    cursor::*,
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     ClientVersion, DatabaseEnv, DatabaseError,
 };
@@ -238,6 +242,14 @@ pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U2
         .get::<PlainAccountState>(address)?
         .map(|a| U256::from_little_endian(a.balance.as_le_slice()))
         .unwrap_or(U256::from(0)))
+}
+
+pub fn walk_all<T: Table>(
+    read_tx: &Tx<RO>,
+) -> eyre::Result<Vec<(<T as Table>::Key, <T as Table>::Value)>> {
+    let mut read_cursor = read_tx.cursor_read::<T>()?;
+    let walker = read_cursor.walk(None)?;
+    Ok(walker.collect::<Result<Vec<_>, _>>()?)
 }
 
 #[cfg(test)]

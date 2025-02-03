@@ -11,7 +11,9 @@ use irys_types::{
 use irys_types::{StorageConfig, VDFStepsConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
+use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::time::sleep;
 use tracing::debug;
@@ -130,6 +132,26 @@ pub async fn mine_blocks(node_ctx: &IrysNodeCtx, blocks: usize) -> eyre::Result<
             .unwrap();
     }
     Ok(())
+}
+
+pub async fn mine_block(
+    node_ctx: &IrysNodeCtx,
+) -> eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> {
+    let storage_config = &node_ctx.storage_config;
+    let vdf_config = &node_ctx.vdf_config;
+    let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
+    let poa_solution = capacity_chunk_solution(
+        node_ctx.config.mining_signer.address(),
+        vdf_steps_guard.clone(),
+        vdf_config,
+        storage_config,
+    )
+    .await;
+    node_ctx
+        .actor_addresses
+        .block_producer
+        .send(SolutionFoundMessage(poa_solution.clone()))
+        .await?
 }
 
 /// Waits for the provided future to resolve, and if it doesn't after `timeout_duration`,

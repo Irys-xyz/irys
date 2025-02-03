@@ -99,7 +99,7 @@ pub enum TxIngressError {
     /// Some database error occurred
     DatabaseError,
     /// The service is uninitialized
-    Uninitialized,
+    ServiceUninitialized,
     /// Catch-all variant for other errors.
     Other(String),
 }
@@ -141,7 +141,7 @@ pub enum ChunkIngressError {
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
     /// The service is uninitialized
-    Uninitialized,
+    ServiceUninitialized,
     // Catch-all variant for other errors.
     Other(String),
 }
@@ -162,7 +162,7 @@ impl Handler<TxIngressMessage> for MempoolService {
 
     fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
         if self.db.is_none() {
-            return Err(TxIngressError::Uninitialized);
+            return Err(TxIngressError::ServiceUninitialized);
         }
 
         let tx = &tx_msg.0;
@@ -178,7 +178,10 @@ impl Handler<TxIngressMessage> for MempoolService {
             return Err(TxIngressError::Skipped);
         }
 
-        let db = self.db.clone().ok_or(TxIngressError::Uninitialized)?;
+        let db = self
+            .db
+            .clone()
+            .ok_or(TxIngressError::ServiceUninitialized)?;
         let read_tx = &db.tx().map_err(|_| TxIngressError::DatabaseError)?; // we use `&` here to make this a `temporary`, which means rust will automatically drop it when we're done using it, instead of at the end of a block like usual
 
         // validate the `anchor` value
@@ -187,11 +190,11 @@ impl Handler<TxIngressMessage> for MempoolService {
         let canon_chain = self
             .block_tree_read_guard
             .clone()
-            .ok_or(TxIngressError::Uninitialized)?
+            .ok_or(TxIngressError::ServiceUninitialized)?
             .read()
             .get_canonical_chain();
 
-        let (_, latest_height, _, _) = canon_chain.0.get(0).ok_or(TxIngressError::Other(
+        let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
             "unable to get canonical chain from block tree".to_string(),
         ))?;
 
@@ -409,14 +412,14 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             let canon_chain = self
                 .block_tree_read_guard
                 .clone()
-                .ok_or(ChunkIngressError::Uninitialized)?
+                .ok_or(ChunkIngressError::ServiceUninitialized)?
                 .read()
                 .get_canonical_chain();
 
             let (_, latest_height, _, _) = canon_chain
                 .0
-                .get(0)
-                .ok_or(ChunkIngressError::Uninitialized)?;
+                .last()
+                .ok_or(ChunkIngressError::ServiceUninitialized)?;
 
             let target_height = latest_height + CONFIG.anchor_expiry_depth as u64;
 
@@ -539,14 +542,6 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
                         );
                     }
 
-                    // // TODO: We may want to maintain two lists of IngressProofs
-                    // // those that have been recently promoted and those that are
-                    // // awaiting promotion. That would tidy up some of the logic
-                    // // around promotion.
-                    // if let Err(err) = mut_tx.delete::<IngressProofs>(tx_header.data_root, None) {
-                    //     error!("DatabaseError deleting ingress proof err: {}", err);
-                    // }
-
                     info!("Promoted tx:\n{:?}", tx_header);
                 }
 
@@ -564,16 +559,18 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
 
             let (_, latest_height, _, _) = canon_chain
                 .0
-                .get(0)
+                .last()
                 .ok_or(eyre!("mempool_service is uninitialized"))?;
-
-            let target_height = latest_height + CONFIG.anchor_expiry_depth as u64;
 
             let mut_tx = db.tx_mut()?;
             let mut cursor = mut_tx.cursor_write::<IngressProofLRU>()?;
             let mut walker = cursor.walk(None)?;
-            while let Some((k, v)) = walker.next().transpose()? {
-                if v < target_height {
+            while let Some((k, expiry_height)) = walker.next().transpose()? {
+                if expiry_height < *latest_height {
+                    debug!(
+                        "expiring ingress proof {} (expiry: {}, latest: {})",
+                        &k, &expiry_height, latest_height
+                    );
                     mut_tx.delete::<IngressProofLRU>(k, None)?;
                     mut_tx.delete::<IngressProofs>(k, None)?;
                 }
