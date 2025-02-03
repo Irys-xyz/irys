@@ -2,7 +2,7 @@ use actix::{Actor, Context, Handler, Message, Supervised, SystemService};
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::db_cache::data_size_to_chunk_count;
-use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
+use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofLRU, IngressProofs};
 use irys_database::{insert_tx_header, tx_header_by_txid, Ledger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
@@ -19,9 +19,10 @@ use reth_db::Database;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::block_producer::BlockConfirmedMessage;
+use crate::block_tree_service::BlockTreeReadGuard;
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug, Default)]
 pub struct MempoolService {
@@ -36,6 +37,7 @@ pub struct MempoolService {
     invalid_tx: Vec<H256>,
     storage_config: StorageConfig,
     storage_modules: StorageModuleVec,
+    block_tree_read_guard: Option<BlockTreeReadGuard>,
 }
 
 impl Actor for MempoolService {
@@ -60,6 +62,7 @@ impl MempoolService {
         signer: IrysSigner,
         storage_config: StorageConfig,
         storage_modules: StorageModuleVec,
+        block_tree_read_guard: BlockTreeReadGuard,
     ) -> Self {
         println!("service started: mempool");
         Self {
@@ -70,6 +73,7 @@ impl MempoolService {
             task_exec: Some(task_exec),
             storage_config,
             storage_modules,
+            block_tree_read_guard: Some(block_tree_read_guard),
         }
     }
 }
@@ -81,7 +85,7 @@ impl MempoolService {
 pub struct TxIngressMessage(pub IrysTransactionHeader);
 
 /// Reasons why Transaction Ingress might fail
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TxIngressError {
     /// The transaction's signature is invalid
     InvalidSignature,
@@ -89,6 +93,12 @@ pub enum TxIngressError {
     Unfunded,
     /// This transaction id is already in the cache
     Skipped,
+    /// Invalid anchor value (unknown or too old)
+    InvalidAnchor,
+    /// Some database error occurred
+    DatabaseError,
+    /// The service is uninitialized
+    Uninitialized,
     /// Catch-all variant for other errors.
     Other(String),
 }
@@ -117,7 +127,7 @@ impl ChunkIngressMessage {
 }
 
 /// Reasons why Transaction Ingress might fail
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ChunkIngressError {
     /// The `data_path/proof` provided with the chunk data is invalid
     InvalidProof,
@@ -129,6 +139,8 @@ pub enum ChunkIngressError {
     InvalidChunkSize,
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
+    /// The service is uninitialized
+    Uninitialized,
     // Catch-all variant for other errors.
     Other(String),
 }
@@ -149,9 +161,7 @@ impl Handler<TxIngressMessage> for MempoolService {
 
     fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
         if self.db.is_none() {
-            return Err(TxIngressError::Other(
-                "mempool_service not initialized".to_string(),
-            ));
+            return Err(TxIngressError::Uninitialized);
         }
 
         let tx = &tx_msg.0;
@@ -167,10 +177,37 @@ impl Handler<TxIngressMessage> for MempoolService {
             return Err(TxIngressError::Skipped);
         }
 
-        let db = self.db.clone().unwrap();
+        let db = self.db.clone().ok_or(TxIngressError::Uninitialized)?;
+        let read_tx = &db.tx().map_err(|_| TxIngressError::DatabaseError)?; // we use `&` here to make this a `temporary`, which means rust will automatically drop it when we're done using it, instead of at the end of a block like usual
 
-        // TODO: Don't unwrap here
-        if irys_database::get_account_balance(&db.tx().unwrap(), tx_msg.0.signer).unwrap()
+        // validate the `anchor` value
+        // it should be a block hash for a known, confirmed block (TODO: add tx hash support!)
+
+        let canon_chain = self
+            .block_tree_read_guard
+            .clone()
+            .ok_or(TxIngressError::Uninitialized)?
+            .read()
+            .get_canonical_chain();
+
+        let (_, latest_height, _, _) = canon_chain.0.get(0).ok_or(TxIngressError::Other(
+            "unable to get canonical chain from block tree".to_string(),
+        ))?;
+
+        match irys_database::block_header_by_hash(read_tx, &tx.anchor) {
+            // note: we use addition here as it's safer
+            Ok(Some(hdr)) if hdr.height + (CONFIG.anchor_expiry_depth as u64) >= *latest_height => {
+                debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id)
+            }
+            _ => {
+                self.invalid_tx.push(tx.id);
+                warn!("Invalid anchor value {} for tx {}", &tx.anchor, &tx.id);
+                return Err(TxIngressError::InvalidAnchor);
+            }
+        };
+
+        if irys_database::get_account_balance(read_tx, tx_msg.0.signer)
+            .map_err(|_| TxIngressError::DatabaseError)?
             < U256::from(tx_msg.0.total_fee())
         {
             return Err(TxIngressError::Unfunded);
@@ -191,7 +228,7 @@ impl Handler<TxIngressMessage> for MempoolService {
 
         // Cache the data_root in the database
 
-        let _ = self.db.clone().unwrap().update_eyre(|db_tx| {
+        let _ = db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, tx)?;
             irys_database::insert_tx_header(db_tx, tx)?;
             Ok(())
@@ -214,13 +251,10 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             ));
         }
 
+        let db = self.db.clone().unwrap();
+
         // Check to see if we have a cached data_root for this chunk
-        let read_tx = self
-            .db
-            .clone()
-            .unwrap()
-            .tx()
-            .map_err(|_| ChunkIngressError::DatabaseError)?;
+        let read_tx = db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let cached_data_root =
             irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
@@ -294,10 +328,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // TODO: fix all these unwraps!
         // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
 
-        self.db
-            .clone()
-            .unwrap()
-            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
+        db.update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         for sm in &self.storage_modules {
@@ -312,7 +343,9 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         let root_hash: H256 = root_hash.into();
 
         // check if we have generated an ingress proof for this tx already
-        // TODO: hook into whatever manages ingress proofs
+        // if we have, update it's expiry height
+
+        //  TODO: hook into whatever manages ingress proofs
         if read_tx
             .get::<IngressProofs>(root_hash)
             .map_err(|_| ChunkIngressError::DatabaseError)?
@@ -322,16 +355,12 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                 "We've already generated an ingress proof for data root {}",
                 &root_hash
             );
+
             return Ok(());
         };
 
         // check if we have all the chunks for this tx
-        let read_tx = self
-            .db
-            .clone()
-            .unwrap()
-            .tx()
-            .map_err(|_| ChunkIngressError::DatabaseError)?;
+        let read_tx = db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let mut cursor = read_tx
             .cursor_dup_read::<CachedChunksIndex>()
@@ -470,13 +499,51 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
                     );
                 }
 
-                // TODO: We may want to maintain two lists of IngressProofs
-                // those that have been recently promoted and those that are
-                // awaiting promotion. That would tidy up some of the logic
-                // around promotion.
-                if let Err(err) = mut_tx.delete::<IngressProofs>(tx_header.data_root, None) {
-                    error!("DatabaseError deleting ingress proof err: {}", err);
-                }
+                match irys_database::block_header_by_hash(read_tx, &tx.anchor) {
+                    // note: we use addition here as it's safer
+                    Ok(Some(hdr))
+                        if hdr.height + (CONFIG.anchor_expiry_depth as u64) >= *latest_height =>
+                    {
+                        debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id)
+                    }
+                    _ => {
+                        self.invalid_tx.push(tx.id);
+                        warn!("Invalid anchor value {} for tx {}", &tx.anchor, &tx.id);
+                        return Err(TxIngressError::InvalidAnchor);
+                    }
+                };
+
+                let canon_chain = self
+                    .block_tree_read_guard
+                    .clone()
+                    .ok_or(ChunkIngressError::Uninitialized)?
+                    .read()
+                    .get_canonical_chain();
+
+                let (_, latest_height, _, _) =
+                    canon_chain.0.get(0).ok_or(ChunkIngressError::Other(
+                        "unable to get canonical chain from block tree".to_string(),
+                    ))?;
+
+                // // todo: not sure how we can look up the specific anchor, so for now we just set the expiry to the maximum possible:
+                // // current height + anchor expiry depth
+                // // todo: move this to a specific mempool expiry/maintainence task
+                // let _ = db
+                //     .update(|tx| {
+                //         tx.put::<IngressProofLRU>(
+                //             root_hash,
+                //             latest_height + CONFIG.anchor_expiry_depth as u64,
+                //         )
+                //     })
+                //     .map_err(|_| ChunkIngressError::DatabaseError)?;
+
+                // // TODO: We may want to maintain two lists of IngressProofs
+                // // those that have been recently promoted and those that are
+                // // awaiting promotion. That would tidy up some of the logic
+                // // around promotion.
+                // if let Err(err) = mut_tx.delete::<IngressProofs>(tx_header.data_root, None) {
+                //     error!("DatabaseError deleting ingress proof err: {}", err);
+                // }
 
                 info!("Promoted tx:\n{:?}", tx_header);
             }

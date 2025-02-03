@@ -47,6 +47,16 @@ pub async fn post_tx(
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Failed to deliver transaction: {:?}", err)))
             }
+            TxIngressError::InvalidAnchor => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                .body(format!("Invalid Signature: {:?}", err))),
+            TxIngressError::DatabaseError => {
+                Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(format!("Internal database error: {:?}", err)))
+            }
+            TxIngressError::Uninitialized => {
+                Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(format!("Internal service error: {:?}", err)))
+            }
         };
     }
 

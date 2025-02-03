@@ -373,29 +373,6 @@ pub async fn start_irys_node(
                     // arc_module.pack_with_zeros();
                 }
 
-                let mempool_service = MempoolService::new(
-                    db.clone(),
-                    reth_node.task_executor.clone(),
-                    node_config.mining_signer.clone(),
-                    storage_config.clone(),
-                    storage_modules.clone(),
-                );
-                let mempool_arbiter = Arbiter::new();
-                SystemRegistry::set(MempoolService::start_in_arbiter(
-                    &mempool_arbiter.handle(),
-                    |_| mempool_service,
-                ));
-                let mempool_addr = MempoolService::from_registry();
-
-                let chunk_migration_service = ChunkMigrationService::new(
-                    block_index.clone(),
-                    storage_config.clone(),
-                    storage_modules.clone(),
-                    db.clone(),
-                );
-                SystemRegistry::set(chunk_migration_service.start());
-
-                let (_new_seed_tx, _new_seed_rx) = mpsc::channel::<H256>();
 
                 let block_tree_service = BlockTreeService::new(
                     db.clone(),
@@ -415,6 +392,30 @@ pub async fn start_irys_node(
                     .send(GetBlockTreeGuardMessage)
                     .await
                     .unwrap();
+
+
+                let mempool_service = MempoolService::new(
+                    db.clone(),
+                    reth_node.task_executor.clone(),
+                    node_config.mining_signer.clone(),
+                    storage_config.clone(),
+                    storage_modules.clone(),
+                    block_tree_guard.clone()
+                );
+                let mempool_arbiter = Arbiter::new();
+                SystemRegistry::set(MempoolService::start_in_arbiter(
+                    &mempool_arbiter.handle(),
+                    |_| mempool_service,
+                ));
+                let mempool_addr = MempoolService::from_registry();
+
+                let chunk_migration_service = ChunkMigrationService::new(
+                    block_index.clone(),
+                    storage_config.clone(),
+                    storage_modules.clone(),
+                    db.clone(),
+                );
+                SystemRegistry::set(chunk_migration_service.start());
 
                 let vdf_state = Arc::new(RwLock::new(VdfService::create_state(
                     Some(block_index_guard.clone()),
@@ -531,9 +532,10 @@ pub async fn start_irys_node(
                         })
                         .collect::<Vec<()>>();
                 }
+                
                 // let _ = wait_for_packing(packing_actor_addr.clone(), None).await;
+                // debug!("Packing complete");
 
-                debug!("Packing complete");
 
                 let part_actors_clone = part_actors.clone();
 
