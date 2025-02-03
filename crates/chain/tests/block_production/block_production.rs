@@ -29,84 +29,9 @@ use reth_primitives::{
 use sha2::{Digest, Sha256};
 use tokio::time::sleep;
 use tracing::{debug, info};
+
+use crate::utils::capacity_chunk_solution;
 /// Create a valid capacity PoA solution
-#[cfg(test)]
-pub async fn capacity_chunk_solution(
-    miner_addr: Address,
-    vdf_steps_guard: VdfStepsReadGuard,
-    vdf_config: &VDFStepsConfig,
-    storage_config: &StorageConfig,
-) -> SolutionContext {
-    let max_retries = 20;
-    let mut i = 1;
-    let initial_step_num = vdf_steps_guard.read().global_step;
-    let mut step_num: u64 = 0;
-    // wait to have at least 2 new steps
-    while i < max_retries && step_num < initial_step_num + 2 {
-        sleep(Duration::from_secs(1)).await;
-        step_num = vdf_steps_guard.read().global_step;
-        i += 1;
-    }
-
-    let steps: H256List = match vdf_steps_guard.read().get_steps(ii(step_num - 1, step_num)) {
-        Ok(s) => s,
-        Err(err) => panic!("Not enough vdf steps {:?}, waiting...", err),
-    };
-
-    // calculate last step checkpoints
-    let mut hasher = Sha256::new();
-    let mut salt = irys_types::U256::from(step_number_to_salt_number(vdf_config, step_num - 1_u64));
-    let mut seed = steps[0];
-
-    let mut checkpoints: Vec<H256> = vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
-
-    vdf_sha(
-        &mut hasher,
-        &mut salt,
-        &mut seed,
-        vdf_config.num_checkpoints_in_vdf_step,
-        vdf_config.vdf_difficulty,
-        &mut checkpoints,
-    );
-
-    let partition_hash = H256::zero();
-    let recall_range_idx = block_validation::get_recall_range(
-        step_num,
-        storage_config,
-        &vdf_steps_guard,
-        &partition_hash,
-    )
-    .unwrap();
-
-    let mut entropy_chunk = Vec::<u8>::with_capacity(storage_config.chunk_size as usize);
-    compute_entropy_chunk(
-        miner_addr,
-        recall_range_idx as u64 * storage_config.num_chunks_in_recall_range,
-        partition_hash.into(),
-        storage_config.entropy_packing_iterations,
-        storage_config.chunk_size as usize, // take it from storage config
-        &mut entropy_chunk,
-    );
-
-    debug!("Chunk mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_addr, 0, partition_hash, storage_config.entropy_packing_iterations, storage_config.chunk_size);
-
-    let max: irys_types::serialization::U256 = irys_types::serialization::U256::MAX;
-    let mut le_bytes = [0u8; 32];
-    max.to_little_endian(&mut le_bytes);
-    let solution_hash = H256(le_bytes);
-
-    SolutionContext {
-        partition_hash,
-        chunk_offset: recall_range_idx as u32 * storage_config.num_chunks_in_recall_range as u32,
-        mining_address: miner_addr,
-        chunk: entropy_chunk,
-        vdf_step: step_num,
-        checkpoints: H256List(checkpoints),
-        seed: Seed(steps[1]),
-        solution_hash,
-        ..Default::default()
-    }
-}
 
 #[tokio::test]
 async fn test_blockprod() -> eyre::Result<()> {

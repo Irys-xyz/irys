@@ -4,6 +4,7 @@ use std::{
     fs,
     num::ParseIntError,
     path::{Path, PathBuf},
+    str::FromStr as _,
 };
 
 use chain::chainspec::IrysChainSpecBuilder;
@@ -206,6 +207,9 @@ impl StorageSubmodulesConfig {
     }
 }
 
+/// Constant used to make sure .irys shows up in the right place all the time
+pub const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
+
 /// Configure storage submodule paths:
 /// - In deployed envs (IRYS_ENV set): Try HOME/.irys_submodules.toml first
 /// - Otherwise: Use/create .irys/<instance id>/.irys_submodules.toml
@@ -213,8 +217,13 @@ impl StorageSubmodulesConfig {
 pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesConfig> =
     once_cell::sync::Lazy::new(|| {
         const FILENAME: &str = ".irys_submodules.toml";
-        let node_config = IrysNodeConfig::default();
-        let instance_dir = node_config.instance_directory();
+        // let node_config = IrysNodeConfig::default();
+        // let instance_dir = node_config.instance_directory();
+
+        // hack for now until I can rework this entire thing
+        let instance_dir = PathBuf::from_str(CARGO_MANIFEST_DIR)
+            .unwrap()
+            .join("../../.irys/1");
         let home_dir = env::var("HOME").expect("Failed to get home directory");
 
         let is_deployed = env::var("IRYS_ENV").is_ok();

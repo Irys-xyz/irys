@@ -391,7 +391,7 @@ impl EpochServiceActor {
 
         // Update expired data partitions assignments marking them as capacity partitions
         for partition_hash in expired_hashes {
-            self.mark_partition_as_expired(partition_hash);
+            self.return_expired_partition_to_capacity(partition_hash);
         }
     }
 
@@ -563,15 +563,24 @@ impl EpochServiceActor {
 
     // Updates PartitionAssignment information about a partition hash, marking
     // it as expired (or unassigned to a slot in a data ledger)
-    fn mark_partition_as_expired(&mut self, partition_hash: H256) {
+    fn return_expired_partition_to_capacity(&mut self, partition_hash: H256) {
         let mut pa = self.partition_assignments.write().unwrap();
         // Convert data partition to capacity partition if it exists
         if let Some(mut assignment) = pa.data_partitions.remove(&partition_hash) {
+            {
+                // Remove the partition hash from the slots state
+                let ledger: Ledger = Ledger::try_from(assignment.ledger_id.unwrap()).unwrap();
+                let partition_hash = assignment.partition_hash;
+                let slot_index = assignment.slot_index.unwrap();
+                let mut write = self.ledgers.write().unwrap();
+                write.remove_partition_from_slot(ledger, slot_index, &partition_hash);
+            }
+
             // Clear ledger assignment
             assignment.ledger_id = None;
             assignment.slot_index = None;
 
-            // Add to capacity pool
+            // Return the partition hash to the capacity pool
             pa.capacity_partitions.insert(partition_hash, assignment);
         }
     }
