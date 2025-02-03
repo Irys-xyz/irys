@@ -128,7 +128,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: TxChunkOffset::from(index as u32),
+            tx_offset: TxChunkOffset::from(index.try_into().expect("Value exceeds u32::MAX")),
         };
 
         // Make a POST request with JSON payload

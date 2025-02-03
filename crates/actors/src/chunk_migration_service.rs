@@ -156,7 +156,8 @@ fn process_ledger_transactions(
     let mut prev_chunk_offset = block_range.start();
 
     for ((_txid, tx_path), (data_root, data_size)) in path_pairs {
-        let num_chunks_in_tx = data_size.div_ceil(chunk_size as u64) as u32;
+        let num_chunks_in_tx = TryInto::<u32>::try_into(data_size.div_ceil(chunk_size as u64))
+        .expect("Value exceeds u32::MAX");
         let tx_chunk_range = LedgerChunkRange(ie(
             prev_chunk_offset,
             prev_chunk_offset + num_chunks_in_tx as u64,

@@ -103,7 +103,8 @@ pub async fn capacity_chunk_solution(
 
     SolutionContext {
         partition_hash,
-        chunk_offset: recall_range_idx as u32 * storage_config.num_chunks_in_recall_range as u32,
+        chunk_offset: (recall_range_idx as u32)
+            .saturating_mul(storage_config.num_chunks_in_recall_range as u32),
         mining_address: miner_addr,
         chunk: entropy_chunk,
         vdf_step: step_num,

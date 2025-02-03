@@ -316,7 +316,8 @@ impl StorageModule {
             .gaps_untrimmed(partition_chunk_offset_ii!(0, u32::MAX))
             .collect::<Vec<_>>();
         let expected = vec![partition_chunk_offset_ii!(
-            storage_config.num_chunks_in_partition as u32,
+            TryInto::<u32>::try_into(storage_config.num_chunks_in_partition)
+                .expect("Value exceeds u32::MAX"),
             u32::MAX
         )];
         if &gaps != &expected {
@@ -918,7 +919,9 @@ impl StorageModule {
 
         // Get chunk info and calculate index
         let range = self.get_storage_module_range()?;
-        let partition_offset = PartitionChunkOffset::from(*(ledger_offset - range.start()));
+        let partition_offset = PartitionChunkOffset::from(
+            *(ledger_offset - range.start().try_into().expect("Value exceeds u32::MAX")),
+        );
         let closest_offsets = self.collect_start_offsets(data_root)?;
 
         let nearest_start_offset = closest_offsets
