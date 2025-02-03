@@ -183,7 +183,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // Get all the ingress proofs for data promotion
             let mut publish_txs: Vec<IrysTransactionHeader> = Vec::new();
-            let mut publish_txids: Vec<H256> = Vec::new();
             let mut proofs: Vec<TxIngressProof> = Vec::new();
             {
                 let read_tx = db.tx().map_err(|e|
@@ -202,10 +201,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     eyre!("Failed to collect ingress proofs from database: {}", e)
                 )?;
 
+
+                let mut publish_txids: Vec<H256> = Vec::new();
                 // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
                 for data_root in ingress_proofs.keys() {
                     let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
                     if let Some(cached_data_root) = cached_data_root {
+                        debug!("publishing {:?}", &cached_data_root.txid_set);
                         publish_txids.extend(cached_data_root.txid_set);
                     }
                 }
@@ -246,6 +248,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     }
                 }
             }
+
+            debug!("Publish transactions: {:?}", &publish_txs.iter().map(|h| h.id.0.to_base58()).collect::<Vec<_>>());
 
             // Publish Ledger Transactions
             let publish_chunks_added = calculate_chunks_added(&publish_txs, chunk_size);
@@ -341,7 +345,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     TransactionLedger {
                         ledger_id: Ledger::Publish.into(),
                         tx_root: TransactionLedger::merklize_tx_root(&publish_txs).0,
-                        tx_ids: H256List(publish_txids.clone()),
+                        tx_ids: H256List(publish_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
                         max_chunk_offset: publish_max_chunk_offset,
                         expires: None,
                         proofs: opt_proofs,

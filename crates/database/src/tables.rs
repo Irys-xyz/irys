@@ -111,6 +111,10 @@ tables! {
     /// Common case is a 1:1, but 1:N is possible
     table PartitionHashesByDataRoot<Key = DataRoot, Value = PartitionHashes>;
 
+    /// Maps an ingress proof (by data_root) to the latest possible height it could be used at, given known transactions.
+    /// this value is updated every time we receive a valid to-be-promoted transaction to (<height of anchor block> + ANCHOR_EXPIRY_DEPTH)
+    /// and is pruned if value > <current_height>
+    table IngressProofLRU<Key = DataRoot, Value = u64>;
 
 }
 

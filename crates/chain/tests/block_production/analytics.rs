@@ -23,11 +23,10 @@ use irys_types::{
 use k256::ecdsa::SigningKey;
 use reth::rpc::types::TransactionRequest;
 use reth_primitives::GenesisAccount;
-use sha2::Digest;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use crate::block_production::capacity_chunk_solution;
+use crate::utils::capacity_chunk_solution;
 
 // network simulation test for analytics
 #[ignore]

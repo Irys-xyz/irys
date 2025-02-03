@@ -18,15 +18,90 @@
 					"name": "irys",
 					"kind": "bin"
 				},
+			},
+			"args": [],
+			"cwd": "${workspaceFolder}",
+			"env": {
+				"RUST_BACKTRACE": "1",
+				"RUST_LOG": "debug,irys_actors::epoch_service=ERROR,irys_actors::block_tree_service=debug,irys_chain::chain=debug,irys_actors::vdf_service=ERROR,irys_actors::broadcast_mining_service=ERROR,irys_actors::mining=ERROR,irys_actors::block_producer=debug"
+			}
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug executable 'irys-chain' (release)",
+			// release is useful for debugging higher VDF step counts
+			"cargo": {
+				"args": [
+					"build",
+					"--bin=irys",
+					"--package=irys-chain",
+					"--release"
+				],
+				"filter": {
+					"name": "irys",
+					"kind": "bin"
+				},
+			},
+			"args": [],
+			"cwd": "${workspaceFolder}",
+			"env": {
+				"RUSTFLAGS": "-g",
+				"RUST_BACKTRACE": "1",
+				"RUST_LOG": "debug,irys_actors::epoch_service=ERROR,irys_actors::block_tree_service=debug,irys_chain::chain=debug,irys_actors::vdf_service=ERROR,irys_actors::broadcast_mining_service=ERROR,irys_actors::mining=ERROR,irys_actors::block_producer=debug"
+			}
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug irys-chain (testnet config release)",
+			"cargo": {
+				"args": [
+					"build",
+					"--bin=irys",
+					"--package=irys-chain",
+					"--release" // release so we can debug block production (the VDF is many times slower otherwise)
+				],
+				"filter": {
+					"name": "irys",
+					"kind": "bin"
+				},
 				"env": {
 					// Because configs are comp time macros, set the correct env for the config you want during build
-					// "IRYS_ENV": "testnet",
+					"IRYS_ENV": "testnet",
 				}
 			},
 			"args": [],
 			"cwd": "${workspaceFolder}",
 			"env": {
-				// "IRYS_ENV": "testnet",
+				"RUSTFLAGS": "-g",
+				"IRYS_ENV": "testnet",
+				"RUST_BACKTRACE": "1",
+				"RUST_LOG": "debug,irys::packing::progress=ERROR,irys_actors::epoch_service=ERROR,irys_actors::block_tree_service=debug,irys_chain::chain=debug,irys_actors::vdf_service=ERROR,irys_actors::broadcast_mining_service=ERROR,irys_actors::mining=ERROR,irys_actors::block_producer=debug"
+			}
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug irys-chain (CUDA packing release)",
+			"cargo": {
+				"args": [
+					"build",
+					"--bin=irys",
+					"--package=irys-chain",
+					"--release",
+					"--features",
+					"nvidia"
+				],
+				"filter": {
+					"name": "irys",
+					"kind": "bin"
+				}
+			},
+			"args": [],
+			"cwd": "${workspaceFolder}",
+			"env": {
+				"RUSTFLAGS": "-g",
 				"RUST_BACKTRACE": "1",
 				"RUST_LOG": "irys_actors::epoch_service=ERROR,irys_actors::block_tree_service=debug,irys_chain::chain=debug,irys_actors::vdf_service=ERROR,irys_actors::broadcast_mining_service=ERROR,irys_actors::mining=ERROR,irys_actors::block_producer=debug"
 			}
