@@ -73,7 +73,7 @@ impl PartitionMiningActor {
             debug!("Non consecutive Step {} need to reconstruct ranges", step);
             let reset_step = self.ranges.reset_step(step);
             debug!(
-                "Near reset step is {} num recall ranges in partition {}",
+                "Nearest reset step is {}, num recall ranges in partition: {}",
                 reset_step, self.ranges.num_recall_ranges_in_partition
             );
             let start = if reset_step > self.ranges.last_step_num + 1 {
