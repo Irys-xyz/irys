@@ -1,5 +1,3 @@
-use crate::block_production::basic_contract::future_or_mine_on_timeout;
-use crate::block_production::block_production::capacity_chunk_solution;
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_network::EthereumWallet;
@@ -22,6 +20,8 @@ use reth_primitives::{irys_primitives::precompile::IrysPrecompileOffsets, Genesi
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
+
+use crate::utils::{capacity_chunk_solution, future_or_mine_on_timeout};
 
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs

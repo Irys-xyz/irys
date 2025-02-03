@@ -12,6 +12,7 @@ use irys_types::{
 };
 use irys_types::{DataRoot, StorageConfig, CONFIG, U256};
 use reth::tasks::TaskExecutor;
+use reth_db::cursor::DbCursorRO;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
@@ -197,7 +198,30 @@ impl Handler<TxIngressMessage> for MempoolService {
         match irys_database::block_header_by_hash(read_tx, &tx.anchor) {
             // note: we use addition here as it's safer
             Ok(Some(hdr)) if hdr.height + (CONFIG.anchor_expiry_depth as u64) >= *latest_height => {
-                debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id)
+                debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id);
+                // update any associated ingress proofs
+                if let Ok(Some(old_expiry)) = read_tx.get::<IngressProofLRU>(tx.data_root) {
+                    let new_expiry = hdr.height + (CONFIG.anchor_expiry_depth as u64);
+                    debug!(
+                        "Updating ingress proof for data root {} expiry from {} -> {}",
+                        &tx.data_root, &old_expiry, &new_expiry
+                    );
+                    db.update(|write_tx| write_tx.put::<IngressProofLRU>(tx.data_root, new_expiry))
+                        .map_err(|e| {
+                            error!(
+                                "Error updating ingress proof expiry for {} - {}",
+                                &tx.data_root, &e
+                            );
+                            TxIngressError::DatabaseError
+                        })?
+                        .map_err(|e| {
+                            error!(
+                                "Error updating ingress proof expiry for {} - {}",
+                                &tx.data_root, &e
+                            );
+                            TxIngressError::DatabaseError
+                        })?
+                }
             }
             _ => {
                 self.invalid_tx.push(tx.id);
@@ -381,11 +405,26 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         if chunk_count == expected_chunk_count {
             // we *should* have all the chunks
             // dispatch a ingress proof task
+
+            let canon_chain = self
+                .block_tree_read_guard
+                .clone()
+                .ok_or(ChunkIngressError::Uninitialized)?
+                .read()
+                .get_canonical_chain();
+
+            let (_, latest_height, _, _) = canon_chain
+                .0
+                .get(0)
+                .ok_or(ChunkIngressError::Uninitialized)?;
+
+            let target_height = latest_height + CONFIG.anchor_expiry_depth as u64;
+
             let db1 = self.db.clone().unwrap();
             let signer1 = self.signer.clone().unwrap();
             self.task_exec.clone().unwrap().spawn_blocking(async move {
                 generate_ingress_proof(
-                    db1,
+                    db1.clone(),
                     root_hash,
                     cached_data_root.data_size,
                     chunk_size,
@@ -393,6 +432,9 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                 )
                 // TODO: handle results instead of unwrapping
                 .unwrap();
+                db1.update(|wtx| wtx.put::<IngressProofLRU>(root_hash, target_height))
+                    .unwrap()
+                    .unwrap();
             });
         }
 
@@ -439,124 +481,120 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
 impl Handler<BlockConfirmedMessage> for MempoolService {
     type Result = eyre::Result<()>;
     fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        if self.db.is_none() {
-            error!("mempool_service is uninitialized");
-            return Err(eyre!("mempool_service is uninitialized"));
-        }
+        || -> eyre::Result<()> {
+            let db = self.db.clone().ok_or_else(|| {
+                error!("mempool_service is uninitialized");
+                eyre!("mempool_service is uninitialized")
+            })?;
 
-        // Access the block header through msg.0
-        let block = &msg.0;
-        let all_txs = &msg.1;
+            // Access the block header through msg.0
+            let block = &msg.0;
+            let all_txs = &msg.1;
 
-        for txid in block.ledgers[Ledger::Submit].tx_ids.iter() {
-            // Remove the submit tx from the pending valid_tx pool
-            self.valid_tx.remove(txid);
-        }
-
-        let published_txids = &block.ledgers[Ledger::Publish].tx_ids.0;
-
-        // Loop though the promoted transactions and remove their ingress proofs
-        // from the mempool. In the future on a multi node network we may keep
-        // ingress proofs around longer to account for re-orgs, but for now
-        // we just remove them.
-        if !published_txids.is_empty() {
-            let mut_tx = self
-                .db
-                .clone()
-                .unwrap()
-                .tx_mut()
-                .map_err(|e| {
-                    error!("Failed to create mdbx transaction: {}", e);
-                })
-                .unwrap();
-
-            for (i, txid) in block.ledgers[Ledger::Publish].tx_ids.0.iter().enumerate() {
-                // Retrieve the promoted transactions header
-                let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
-                    Ok(Some(header)) => header,
-                    Ok(None) => {
-                        error!("No transaction header found for txid: {}", txid);
-                        continue;
-                    }
-                    Err(e) => {
-                        error!("Error fetching transaction header for txid {}: {}", txid, e);
-                        continue;
-                    }
-                };
-
-                // TODO: In a single node world there is only one ingress proof
-                // per promoted tx, but in the future there will be multiple proofs.
-                let proofs = block.ledgers[Ledger::Publish].proofs.as_ref().unwrap();
-                let proof = proofs.0[i].clone();
-                tx_header.ingress_proofs = Some(proof);
-
-                // Update the header record in the database to include the ingress
-                // proof, indicating it is promoted
-                if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
-                    error!(
-                        "Could not update transactions with ingress proofs - txid: {} err: {}",
-                        txid, err
-                    );
-                }
-
-                match irys_database::block_header_by_hash(read_tx, &tx.anchor) {
-                    // note: we use addition here as it's safer
-                    Ok(Some(hdr))
-                        if hdr.height + (CONFIG.anchor_expiry_depth as u64) >= *latest_height =>
-                    {
-                        debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id)
-                    }
-                    _ => {
-                        self.invalid_tx.push(tx.id);
-                        warn!("Invalid anchor value {} for tx {}", &tx.anchor, &tx.id);
-                        return Err(TxIngressError::InvalidAnchor);
-                    }
-                };
-
-                let canon_chain = self
-                    .block_tree_read_guard
-                    .clone()
-                    .ok_or(ChunkIngressError::Uninitialized)?
-                    .read()
-                    .get_canonical_chain();
-
-                let (_, latest_height, _, _) =
-                    canon_chain.0.get(0).ok_or(ChunkIngressError::Other(
-                        "unable to get canonical chain from block tree".to_string(),
-                    ))?;
-
-                // // todo: not sure how we can look up the specific anchor, so for now we just set the expiry to the maximum possible:
-                // // current height + anchor expiry depth
-                // // todo: move this to a specific mempool expiry/maintainence task
-                // let _ = db
-                //     .update(|tx| {
-                //         tx.put::<IngressProofLRU>(
-                //             root_hash,
-                //             latest_height + CONFIG.anchor_expiry_depth as u64,
-                //         )
-                //     })
-                //     .map_err(|_| ChunkIngressError::DatabaseError)?;
-
-                // // TODO: We may want to maintain two lists of IngressProofs
-                // // those that have been recently promoted and those that are
-                // // awaiting promotion. That would tidy up some of the logic
-                // // around promotion.
-                // if let Err(err) = mut_tx.delete::<IngressProofs>(tx_header.data_root, None) {
-                //     error!("DatabaseError deleting ingress proof err: {}", err);
-                // }
-
-                info!("Promoted tx:\n{:?}", tx_header);
+            for txid in block.ledgers[Ledger::Submit].tx_ids.iter() {
+                // Remove the submit tx from the pending valid_tx pool
+                self.valid_tx.remove(txid);
             }
 
-            let _ = mut_tx.commit();
-        }
+            let published_txids = &block.ledgers[Ledger::Publish].tx_ids.0;
 
-        info!(
-            "Removing confirmed tx - Block height: {} num tx: {}",
-            block.height,
-            all_txs.len()
-        );
-        Ok(())
+            // Loop though the promoted transactions and remove their ingress proofs
+            // from the mempool. In the future on a multi node network we may keep
+            // ingress proofs around longer to account for re-orgs, but for now
+            // we just remove them.
+            if !published_txids.is_empty() {
+                let mut_tx = db
+                    .tx_mut()
+                    .map_err(|e| {
+                        error!("Failed to create mdbx transaction: {}", e);
+                    })
+                    .unwrap();
+
+                for (i, txid) in block.ledgers[Ledger::Publish].tx_ids.0.iter().enumerate() {
+                    // Retrieve the promoted transactions header
+                    let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
+                        Ok(Some(header)) => header,
+                        Ok(None) => {
+                            error!("No transaction header found for txid: {}", txid);
+                            continue;
+                        }
+                        Err(e) => {
+                            error!("Error fetching transaction header for txid {}: {}", txid, e);
+                            continue;
+                        }
+                    };
+
+                    // TODO: In a single node world there is only one ingress proof
+                    // per promoted tx, but in the future there will be multiple proofs.
+                    let proofs = block.ledgers[Ledger::Publish].proofs.as_ref().unwrap();
+                    let proof = proofs.0[i].clone();
+                    tx_header.ingress_proofs = Some(proof);
+
+                    // Update the header record in the database to include the ingress
+                    // proof, indicating it is promoted
+                    if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
+                        error!(
+                            "Could not update transactions with ingress proofs - txid: {} err: {}",
+                            txid, err
+                        );
+                    }
+
+                    // // TODO: We may want to maintain two lists of IngressProofs
+                    // // those that have been recently promoted and those that are
+                    // // awaiting promotion. That would tidy up some of the logic
+                    // // around promotion.
+                    // if let Err(err) = mut_tx.delete::<IngressProofs>(tx_header.data_root, None) {
+                    //     error!("DatabaseError deleting ingress proof err: {}", err);
+                    // }
+
+                    info!("Promoted tx:\n{:?}", tx_header);
+                }
+
+                let _ = mut_tx.commit();
+            }
+
+            // prune ingress proofs
+
+            let canon_chain = self
+                .block_tree_read_guard
+                .clone()
+                .ok_or(eyre!("mempool_service is uninitialized"))?
+                .read()
+                .get_canonical_chain();
+
+            let (_, latest_height, _, _) = canon_chain
+                .0
+                .get(0)
+                .ok_or(eyre!("mempool_service is uninitialized"))?;
+
+            let target_height = latest_height + CONFIG.anchor_expiry_depth as u64;
+
+            let mut_tx = db.tx_mut()?;
+            let mut cursor = mut_tx.cursor_write::<IngressProofLRU>()?;
+            let mut walker = cursor.walk(None)?;
+            while let Some((k, v)) = walker.next().transpose()? {
+                if v < target_height {
+                    mut_tx.delete::<IngressProofLRU>(k, None)?;
+                    mut_tx.delete::<IngressProofs>(k, None)?;
+                }
+            }
+            mut_tx.commit()?;
+
+            info!(
+                "Removing confirmed tx - Block height: {} num tx: {}",
+                block.height,
+                all_txs.len()
+            );
+            Ok(())
+        }()
+        // closure so we can "catch" and log all errs, so we don't need to log and return an err everywhere
+        .map_err(|e| {
+            error!(
+                "Unexpected Mempool error while processing BlockConfirmedMessage: {}",
+                &e
+            );
+            e
+        })
     }
 }
 
@@ -634,9 +672,7 @@ pub fn generate_ingress_proof(
 
     ro_tx.commit()?;
 
-    let rw_tx = db.tx_mut()?;
-    rw_tx.put::<IngressProofs>(data_root, proof)?;
-    rw_tx.commit()?;
+    db.update(|rw_tx| rw_tx.put::<IngressProofs>(data_root, proof))??;
 
     Ok(())
 }
