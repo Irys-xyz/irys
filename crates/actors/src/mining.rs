@@ -65,34 +65,37 @@ impl PartitionMiningActor {
         seed: &H256,
         partition_hash: &H256,
     ) -> eyre::Result<u64> {
-        let vdf_steps = self.steps_guard.read();
-        if self.ranges.last_step_num + 1 >= step {
+        let next_ranges_step = self.ranges.last_step_num + 1; // next consecutive step expected to be calculated by ranges
+        if next_ranges_step >= step {
             debug!("Step {} already processed or next consecutive one", step);
             Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         } else {
-            debug!("Non consecutive Step {} need to reconstruct ranges", step);
+            debug!("Non consecutive step {} may need to reconstruct ranges", step);
+            // calculate the nearest step lower or equal to step where recall ranges are reinitialized, as this is the step from where ranges will be recalculated
             let reset_step = self.ranges.reset_step(step);
             debug!(
-                "Nearest reset step is {}, num recall ranges in partition: {}",
+                "Near reset step is {} num recall ranges in partition {}",
                 reset_step, self.ranges.num_recall_ranges_in_partition
             );
-            let start = if reset_step > self.ranges.last_step_num + 1 {
+            let start = if reset_step > next_ranges_step {
                 debug!(
                     "Step {} is too far ahead of last processed step {}, reinitializing ranges ...",
                     step, self.ranges.last_step_num
                 );
                 self.ranges.reinitialize();
-                self.ranges.last_step_num = reset_step - 1;
+                self.ranges.last_step_num = reset_step - 1; // advance last step number calculated by ranges to (reset_step - 1), so ranges next step will be reset_step line
                 reset_step
             } else {
-                self.ranges.last_step_num + 1
+                next_ranges_step
             };
-            debug!("Getting stored steps from ({}..={})", start, step - 1);
-            if start <= step - 1 {
-                let steps = vdf_steps.get_steps(ii(start, step - 1))?;
+            // check if we need to reconstruct steps, that is inverval start..=step-1 is not empty
+            if start <= step - 1 {  
+                debug!("Getting stored steps from ({}..={})", start, step - 1);
+                let vdf_steps = self.steps_guard.read();                
+                let steps = vdf_steps.get_steps(ii(start, step - 1))?; // -1 because last step is calculated in next get_recall_range call, with its corresponding argument seed
                 self.ranges.reconstruct(&steps, partition_hash);
             };
-            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
+            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64) // calculates step range
         }
     }
 
