@@ -587,9 +587,7 @@ mod tests {
     use irys_storage::{ii, initialize_storage_files, ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        irys::IrysSigner,
-        partition::{PartitionAssignment, PartitionHash},
-        Address, Base64, MAX_CHUNK_SIZE,
+        irys::IrysSigner, partition::{PartitionAssignment, PartitionHash}, Address, Base64, PartitionChunkOffset, MAX_CHUNK_SIZE
     };
     use rand::Rng;
     use reth::tasks::TaskManager;
@@ -623,7 +621,7 @@ mod tests {
                 slot_index: Some(0),
             }),
             submodules: vec![
-                (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
+                (ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4)), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         };
         initialize_storage_files(&base_path, &vec![storage_module_info.clone()], &vec![])?;
@@ -740,8 +738,8 @@ mod tests {
             if is_last_chunk {
                 // read the set of chunks
                 // only offset 2 (last chunk) should have data
-                let res = storage_module.read_chunks(ii(0, last_index as u32))?;
-                let r = res.get(&2).unwrap();
+                let res = storage_module.read_chunks(ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(last_index as u32)))?;
+                let r = res.get(&PartitionChunkOffset::from(2)).unwrap();
                 let mut packed_bytes = r.0.clone();
                 // unpack the data (packing was all 0's)
                 xor_vec_u8_arrays_in_place(&mut packed_bytes, &vec![0u8; chunk_size as usize]);

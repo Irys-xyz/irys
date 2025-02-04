@@ -137,9 +137,12 @@ impl PackingActor {
             let storage_module_id = storage_module.id;
             let semaphore = self.semaphore.get(&storage_module_id).unwrap();
 
+            let start_value=chunk_range.0.start().value();
+            let end_value=chunk_range.0.end().value();
+
             match PACKING_TYPE {
                 PackingType::CPU => {
-                    for i in chunk_range.start()..=chunk_range.end() {
+                    for i in start_value..=end_value{
                         // each semaphore permit corresponds to a single chunk to be packed, as we assume it'll use an entire CPU thread's worth of compute.
                         // when we implement GPU packing, this is where we need to fork the logic between the two methods - GPU can take larger contiguous segments
                         // whereas CPU will do this permit system
@@ -155,7 +158,7 @@ impl PackingActor {
                             let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
                             compute_entropy_chunk(
                                 mining_address,
-                                i as u64,
+                                u64::from(i),
                                 partition_hash.0,
                                 entropy_packing_iterations,
                                 chunk_size.try_into().unwrap(),
@@ -165,16 +168,16 @@ impl PackingActor {
                             debug!(target: "irys::packing::progress", "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                             // write the chunk
                             //debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.id);
-                            storage_module.write_chunk(i, out, ChunkType::Entropy);
+                            storage_module.write_chunk(i.into(), out, ChunkType::Entropy);
                             let _ = storage_module.sync_pending_chunks();
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                         });
 
                         if i % 1000 == 0 {
-                            debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", chunk_range.start(), &i, chunk_range.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                            debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", chunk_range.0.start(), &i, chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                         }
                     }
-                    debug!(target: "irys::packing::done", "CPU Packed chunk {} - {} for SM {} partition_hash {} mining_address {} iterations {}",  chunk_range.start(),chunk_range.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                    debug!(target: "irys::packing::done", "CPU Packed chunk {} - {} for SM {} partition_hash {} mining_address {} iterations {}",  chunk_range.0.start(),chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                 }
                 #[cfg(feature = "nvidia")]
                 PackingType::CUDA => {
@@ -273,7 +276,7 @@ impl Handler<PackingRequest> for PackingActor {
     type Result = ();
 
     fn handle(&mut self, msg: PackingRequest, _ctx: &mut Self::Context) -> Self::Result {
-        debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.start(), &msg.chunk_range.end(), &msg.storage_module.id);
+        debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.0.start(), &msg.chunk_range.0.end(), &msg.storage_module.id);
         self.pending_jobs
             .get(&msg.storage_module.id)
             .unwrap()
@@ -349,8 +352,7 @@ mod tests {
     use irys_storage::{ii, initialize_storage_files, ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        partition::{PartitionAssignment, PartitionHash},
-        Address, StorageConfig,
+        partition::{PartitionAssignment, PartitionHash}, Address, PartitionChunkOffset, StorageConfig
     };
     use reth::tasks::TaskManager;
     use tokio::runtime::Handle;
@@ -372,7 +374,7 @@ mod tests {
                 slot_index: None,
             }),
             submodules: vec![
-                (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
+                (ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4)), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         }];
 
@@ -416,11 +418,11 @@ mod tests {
         storage_module.sync_pending_chunks()?;
         // check that the chunks are marked as packed
         let intervals = storage_module.get_intervals(ChunkType::Entropy);
-        assert_eq!(intervals, vec![ii(0, 3)]);
-        let stored_entropy = storage_module.read_chunks(ii(0, 3))?;
+        assert_eq!(intervals, vec![ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(3))]);
+        let stored_entropy = storage_module.read_chunks(ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(3)))?;
         // verify the packing
         for i in 0..=3 {
-            let chunk = stored_entropy.get(&i).unwrap();
+            let chunk = stored_entropy.get(&PartitionChunkOffset::from(i)).unwrap();
 
             let mut out = Vec::with_capacity(storage_config.chunk_size.try_into().unwrap());
             compute_entropy_chunk(

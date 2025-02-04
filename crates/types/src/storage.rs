@@ -1,13 +1,16 @@
 use std::{
-    ops::{Deref, DerefMut},
+    fmt,
+    ops::{Add, Deref, DerefMut, Div, Rem, Sub},
     path::PathBuf,
 };
 
 use crate::CONFIG;
 use nodit::{
     interval::{ie, ii},
-    InclusiveInterval, Interval,
+    DiscreteFinite, InclusiveInterval, Interval, IntervalType,
 };
+use reth_codecs::Compact;
+use reth_db::table::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 pub const MEGABYTE: usize = 1024 * 1024;
@@ -15,35 +18,176 @@ pub const GIGABYTE: usize = MEGABYTE * 1024;
 pub const TERABYTE: usize = GIGABYTE * 1024;
 
 /// Partition relative chunk offsets
-pub type PartitionChunkOffset = u32;
+#[derive(
+    Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Compact,
+)]
+pub struct PartitionChunkOffset(u32);
 
+impl Decode for PartitionChunkOffset {
+    fn decode(value: &[u8]) -> Result<Self, reth_db::DatabaseError> {
+        if value.len() != 4 {
+            return Err(reth_db::DatabaseError::Other(
+                "Expected 4 bytes, got a different length".to_string(),
+            ));
+        }
+        // Attempt to convert the byte slice into a u32 (big-endian format)
+        let decoded_value = u32::from_be_bytes(
+            value
+                .try_into()
+                .map_err(|_| reth_db::DatabaseError::Decode)?,
+        );
+        Ok(PartitionChunkOffset(decoded_value))
+    }
+}
+impl Encode for PartitionChunkOffset {
+    type Encoded = [u8; std::mem::size_of::<PartitionChunkOffset>()];
+    fn encode(self) -> Self::Encoded {
+        self.0.to_be_bytes()
+    }
+}
+
+impl DiscreteFinite for PartitionChunkOffset {
+    const MIN: Self = PartitionChunkOffset(0);
+    const MAX: Self = PartitionChunkOffset(u32::MAX);
+    fn up(self) -> Option<Self> {
+        self.0.checked_add(1).map(PartitionChunkOffset)
+    }
+    fn down(self) -> Option<Self> {
+        self.0.checked_sub(1).map(PartitionChunkOffset)
+    }
+}
+impl PartitionChunkOffset {
+    pub fn value(&self) -> u32 {
+        self.0
+    }
+    pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
+        PartitionChunkOffset(u32::from_be_bytes(bytes))
+    }
+}
+impl From<PartitionChunkOffset> for u64 {
+    fn from(value: PartitionChunkOffset) -> Self {
+        value.0 as u64
+    }
+}
+impl From<PartitionChunkOffset> for u8 {
+    fn from(value: PartitionChunkOffset) -> Self {
+        value.0 as u8
+    }
+}
+impl Add<u32> for PartitionChunkOffset {
+    type Output = Self;
+    fn add(self, rhs: u32) -> Self::Output {
+        PartitionChunkOffset(self.0 + rhs)
+    }
+}
+impl Sub<PartitionChunkOffset> for PartitionChunkOffset {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self::Output {
+        PartitionChunkOffset(self.0 - rhs.0)
+    }
+}
+impl Sub<u32> for PartitionChunkOffset {
+    type Output = Self;
+    fn sub(self, rhs: u32) -> Self::Output {
+        PartitionChunkOffset(self.0 - rhs)
+    }
+}
+impl Div<PartitionChunkOffset> for PartitionChunkOffset {
+    type Output = Self;
+    fn div(self, rhs: Self) -> Self::Output {
+        PartitionChunkOffset(self.0 / rhs.0)
+    }
+}
+impl Div<u32> for PartitionChunkOffset {
+    type Output = Self;
+    fn div(self, rhs: u32) -> Self::Output {
+        PartitionChunkOffset(self.0 / rhs)
+    }
+}
+impl Rem<u32> for PartitionChunkOffset {
+    type Output = Self;
+    fn rem(self, rhs: u32) -> Self::Output {
+        PartitionChunkOffset(self.0 % rhs)
+    }
+}
+
+impl From<u8> for PartitionChunkOffset {
+    fn from(value: u8) -> Self {
+        PartitionChunkOffset(value.into())
+    }
+}
+impl From<u32> for PartitionChunkOffset {
+    fn from(value: u32) -> Self {
+        PartitionChunkOffset(value)
+    }
+}
+impl From<u64> for PartitionChunkOffset {
+    fn from(value: u64) -> Self {
+        PartitionChunkOffset(value as u32)
+    }
+}
+impl From<i32> for PartitionChunkOffset {
+    fn from(value: i32) -> Self {
+        PartitionChunkOffset(value as u32)
+    }
+}
+impl fmt::Display for PartitionChunkOffset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl TryFrom<PartitionChunkOffset> for usize {
+    type Error = &'static str;
+    fn try_from(value: PartitionChunkOffset) -> Result<Self, Self::Error> {
+        let value_u32 = value.0;
+        value_u32
+            .try_into()
+            .map_err(|_| "Conversion to usize failed")
+    }
+}
 /// Partition relative chunk interval/ranges
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct PartitionChunkRange(pub Interval<PartitionChunkOffset>);
 
 impl Deref for PartitionChunkRange {
     type Target = Interval<PartitionChunkOffset>;
-
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
-
-impl From<Interval<u32>> for PartitionChunkRange {
+impl From<Interval<PartitionChunkOffset>> for PartitionChunkRange {
     fn from(interval: Interval<PartitionChunkOffset>) -> Self {
         Self(interval)
     }
 }
-
-impl InclusiveInterval<u32> for PartitionChunkRange {
-    fn start(&self) -> u32 {
+impl InclusiveInterval<PartitionChunkOffset> for PartitionChunkRange {
+    fn start(&self) -> PartitionChunkOffset {
         self.0.start()
     }
-
-    fn end(&self) -> u32 {
+    fn end(&self) -> PartitionChunkOffset {
         self.0.end()
     }
 }
+impl InclusiveInterval<u32> for PartitionChunkRange {
+    fn start(&self) -> u32 {
+        self.0.start().0 // Extracts u32 from PartitionChunkOffset
+    }
+
+    fn end(&self) -> u32 {
+        self.0.end().0 // Extracts u32 from PartitionChunkOffset
+    }
+}
+impl From<Interval<u32>> for PartitionChunkRange {
+    fn from(interval: Interval<u32>) -> Self {
+        PartitionChunkRange(
+            ii(
+                PartitionChunkOffset::from(interval.start()),
+                PartitionChunkOffset::from(interval.end()),
+            ),
+        )
+    }
+}
+
 
 /// Ledger Relative chunk offsets
 pub type LedgerChunkOffset = u64;
@@ -213,7 +357,7 @@ pub fn split_interval(
         return Ok(vec![PartitionChunkRange(ii(start, end))]);
     }
 
-    let n = if (end - start + 1) % step == 0 {
+    let n = if (end - start + 1) % step == PartitionChunkOffset(0) {
         ((end - start + 1) / step).try_into().unwrap()
     } else {
         ((end - start + 1) / step + 1).try_into().unwrap()

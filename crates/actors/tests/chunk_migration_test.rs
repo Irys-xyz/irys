@@ -22,9 +22,7 @@ use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initializ
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, H256List,
-    IrysBlockHeader, IrysTransaction, IrysTransactionHeader, PoaData, Signature, StorageConfig,
-    TransactionLedger, UnpackedChunk, VDFLimiterInfo, H256, U256,
+    app_state::DatabaseProvider, chunk, irys::IrysSigner, partition::*, Address, Base64, H256List, IrysBlockHeader, IrysTransaction, IrysTransactionHeader, PartitionChunkOffset, PoaData, Signature, StorageConfig, TransactionLedger, UnpackedChunk, VDFLimiterInfo, H256, U256
 };
 use reth::{revm::primitives::B256, tasks::TaskManager};
 use tracing::info;
@@ -60,7 +58,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ii(0, 5), "sm1".into()), // 0 to 5 inclusive
+                (ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(5)), "sm1".into()), // 0 to 5 inclusive
             ],
         },
         StorageModuleInfo {
@@ -72,7 +70,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
             submodules: vec![
-                (ii(0, 5), "sm2".into()), // 0 to 5 inclusive
+                (ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(5)), "sm2".into()), // 0 to 5 inclusive
             ],
         },
     ];
@@ -265,11 +263,11 @@ async fn finalize_block_test() -> eyre::Result<()> {
     }
 
     // For each of the storage modules, makes sure they sync to disk
-    let chunks1 = storage_modules[0].read_chunks(ii(0, 5)).unwrap();
-    let chunks2 = storage_modules[1].read_chunks(ii(0, 5)).unwrap();
+    let chunks1 = storage_modules[0].read_chunks(ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(5))).unwrap();
+    let chunks2 = storage_modules[1].read_chunks(ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(5))).unwrap();
 
     for i in 0..=5 {
-        if let Some((chunk, chunk_type)) = chunks1.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks1.get(&PartitionChunkOffset::from(i)) {
             let preview = &chunk[..chunk.len().min(5)];
             info!(
                 "storage_module[0][{:?}]: {:?}... - {:?}",
@@ -280,7 +278,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
         }
     }
     for i in 0..=5 {
-        if let Some((chunk, chunk_type)) = chunks2.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks2.get(&PartitionChunkOffset::from(i)) {
             let preview = &chunk[..chunk.len().min(5)];
             info!(
                 "storage_module[1][{:?}]: {:?}... - {:?}",
@@ -293,7 +291,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
 
     // Test the chunks read back from the storage modules
     for i in 0..=5 {
-        if let Some((chunk, chunk_type)) = chunks1.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks1.get(&PartitionChunkOffset::from(i)) {
             let bytes = [i as u8; 32];
             assert_eq!(*chunk, bytes);
             assert_eq!(*chunk_type, ChunkType::Data);
@@ -302,7 +300,7 @@ async fn finalize_block_test() -> eyre::Result<()> {
     }
 
     for i in 0..=5 {
-        if let Some((chunk, chunk_type)) = chunks2.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks2.get(&PartitionChunkOffset::from(i)) {
             let bytes = [6 + i as u8; 32];
             if i <= 2 {
                 assert_eq!(*chunk, bytes);

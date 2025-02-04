@@ -108,8 +108,8 @@ impl PartitionMiningActor {
         // );
 
         let read_range = ie(
-            start_chunk_offset as u32,
-            start_chunk_offset + config.num_chunks_in_recall_range as u32,
+            PartitionChunkOffset::from(start_chunk_offset),
+            PartitionChunkOffset::from(start_chunk_offset + config.num_chunks_in_recall_range as u32),
         );
 
         // haven't tested this, but it looks correct
@@ -130,14 +130,14 @@ impl PartitionMiningActor {
         for (index, (_chunk_offset, (chunk_bytes, chunk_type))) in chunks.iter().enumerate() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
             let partition_chunk_offset =
-                (start_chunk_offset + index as u32) as PartitionChunkOffset;
+                PartitionChunkOffset::from((start_chunk_offset + index as u32));
 
             // Only include the tx_path and data_path for chunks that contain data
             let (tx_path, data_path) = match chunk_type {
                 irys_storage::ChunkType::Entropy => (None, None),
                 irys_storage::ChunkType::Data => self
                     .storage_module
-                    .read_tx_data_path(partition_chunk_offset as u64)?,
+                    .read_tx_data_path(u64::from(partition_chunk_offset))?,
                 irys_storage::ChunkType::Uninitialized => {
                     return Err(eyre::eyre!("Cannot mine uninitialized chunks"))
                 }
@@ -150,7 +150,7 @@ impl PartitionMiningActor {
 
             let mut hasher = sha::Sha256::new();
             hasher.update(chunk_bytes);
-            hasher.update(&partition_chunk_offset.to_le_bytes());
+            hasher.update(&partition_chunk_offset.value().to_le_bytes());
             hasher.update(mining_seed.as_bytes());
             let solution_hash = hasher.finish();
             let test_solution = hash_to_number(&solution_hash);
@@ -167,7 +167,7 @@ impl PartitionMiningActor {
 
                 let solution = SolutionContext {
                     partition_hash,
-                    chunk_offset: partition_chunk_offset,
+                    chunk_offset: partition_chunk_offset.value(),
                     recall_chunk_index: index as u32,
                     mining_address: self.mining_address,
                     tx_path, // capacity partitions have no tx_path nor data_path
@@ -383,7 +383,7 @@ mod tests {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ie(0, chunk_count), "hdd0".into()), // 0 to 3 inclusive, 4 chunks
+                (ie(PartitionChunkOffset::from(0), PartitionChunkOffset::from(chunk_count)), "hdd0".into()), // 0 to 3 inclusive, 4 chunks
             ],
         }];
 

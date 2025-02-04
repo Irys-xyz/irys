@@ -4,6 +4,7 @@ use base58::ToBase58;
 use eyre::{Error, Result};
 use irys_database::{block_header_by_hash, data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
+use irys_types::PartitionChunkOffset;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     DatabaseProvider, IrysBlockHeader, SimpleRNG, StorageConfig, CONFIG, H256,
@@ -654,7 +655,7 @@ impl EpochServiceActor {
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
-                submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx).into())],
+                submodules: vec![(ie(PartitionChunkOffset::from(0), PartitionChunkOffset::from(num_part_chunks)), format!("submodule_{}", idx).into())],
             })
             .collect::<Vec<_>>();
 
@@ -670,7 +671,7 @@ impl EpochServiceActor {
                 id: idx_start + idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
                 submodules: vec![(
-                    ie(0, num_part_chunks),
+                    ie(PartitionChunkOffset::from(0), PartitionChunkOffset::from(num_part_chunks)),
                     format!("submodule_{}", idx_start + idx).into(),
                 )],
             })
@@ -688,7 +689,7 @@ impl EpochServiceActor {
         let cap_info = StorageModuleInfo {
             id: idx,
             partition_assignment: Some(*pa.capacity_partitions.get(cap_part).unwrap()),
-            submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx).into())],
+            submodules: vec![(ie(PartitionChunkOffset::from(0), PartitionChunkOffset::from(num_part_chunks)), format!("submodule_{}", idx).into())],
         };
 
         module_infos.push(cap_info);

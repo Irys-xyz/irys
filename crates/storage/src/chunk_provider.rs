@@ -148,8 +148,7 @@ mod tests {
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, Base64, LedgerChunkRange,
-        TransactionLedger, UnpackedChunk,
+        irys::IrysSigner, partition::PartitionAssignment, Base64, LedgerChunkRange, PartitionChunkOffset, TransactionLedger, UnpackedChunk
     };
     use nodit::interval::{ie, ii};
     use rand::Rng as _;
@@ -159,7 +158,7 @@ mod tests {
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
-            submodules: vec![(ie(0, 50), "hdd0".into()), (ie(50, 100), "hdd1".into())],
+            submodules: vec![(ie(PartitionChunkOffset::from(0), PartitionChunkOffset::from(50)), "hdd0".into()), (ie(PartitionChunkOffset::from(50), PartitionChunkOffset::from(100)), "hdd1".into())],
         }];
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
