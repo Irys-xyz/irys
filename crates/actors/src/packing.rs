@@ -137,12 +137,12 @@ impl PackingActor {
             let storage_module_id = storage_module.id;
             let semaphore = self.semaphore.get(&storage_module_id).unwrap();
 
-            let start_value=chunk_range.0.start().value();
-            let end_value=chunk_range.0.end().value();
+            let start_value = chunk_range.0.start().value();
+            let end_value = chunk_range.0.end().value();
 
             match PACKING_TYPE {
                 PackingType::CPU => {
-                    for i in start_value..=end_value{
+                    for i in start_value..=end_value {
                         // each semaphore permit corresponds to a single chunk to be packed, as we assume it'll use an entire CPU thread's worth of compute.
                         // when we implement GPU packing, this is where we need to fork the logic between the two methods - GPU can take larger contiguous segments
                         // whereas CPU will do this permit system
@@ -352,7 +352,8 @@ mod tests {
     use irys_storage::{ii, initialize_storage_files, ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        partition::{PartitionAssignment, PartitionHash}, Address, PartitionChunkOffset, StorageConfig
+        partition::{PartitionAssignment, PartitionHash},
+        Address, PartitionChunkOffset, StorageConfig,
     };
     use reth::tasks::TaskManager;
     use tokio::runtime::Handle;
@@ -374,7 +375,10 @@ mod tests {
                 slot_index: None,
             }),
             submodules: vec![
-                (ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4)), "hdd0-4TB".into()), // 0 to 4 inclusive
+                (
+                    ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4)),
+                    "hdd0-4TB".into(),
+                ), // 0 to 4 inclusive
             ],
         }];
 
@@ -418,8 +422,17 @@ mod tests {
         storage_module.sync_pending_chunks()?;
         // check that the chunks are marked as packed
         let intervals = storage_module.get_intervals(ChunkType::Entropy);
-        assert_eq!(intervals, vec![ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(3))]);
-        let stored_entropy = storage_module.read_chunks(ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(3)))?;
+        assert_eq!(
+            intervals,
+            vec![ii(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(3)
+            )]
+        );
+        let stored_entropy = storage_module.read_chunks(ii(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(3),
+        ))?;
         // verify the packing
         for i in 0..=3 {
             let chunk = stored_entropy.get(&PartitionChunkOffset::from(i)).unwrap();

@@ -655,7 +655,13 @@ impl EpochServiceActor {
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
-                submodules: vec![(ie(PartitionChunkOffset::from(0), PartitionChunkOffset::from(num_part_chunks)), format!("submodule_{}", idx).into())],
+                submodules: vec![(
+                    ie(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(num_part_chunks),
+                    ),
+                    format!("submodule_{}", idx).into(),
+                )],
             })
             .collect::<Vec<_>>();
 
@@ -671,7 +677,10 @@ impl EpochServiceActor {
                 id: idx_start + idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
                 submodules: vec![(
-                    ie(PartitionChunkOffset::from(0), PartitionChunkOffset::from(num_part_chunks)),
+                    ie(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(num_part_chunks),
+                    ),
                     format!("submodule_{}", idx_start + idx).into(),
                 )],
             })
@@ -689,7 +698,13 @@ impl EpochServiceActor {
         let cap_info = StorageModuleInfo {
             id: idx,
             partition_assignment: Some(*pa.capacity_partitions.get(cap_part).unwrap()),
-            submodules: vec![(ie(PartitionChunkOffset::from(0), PartitionChunkOffset::from(num_part_chunks)), format!("submodule_{}", idx).into())],
+            submodules: vec![(
+                ie(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(num_part_chunks),
+                ),
+                format!("submodule_{}", idx).into(),
+            )],
         };
 
         module_infos.push(cap_info);

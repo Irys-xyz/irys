@@ -170,7 +170,7 @@ pub fn read_bytes_range(
     for i in translated_chunks_start_offset..translated_chunks_end_offset {
         let chunk = state_provider
             .chunk_provider
-            .get_chunk_by_ledger_offset(irys_database::Ledger::Publish, i)
+            .get_chunk_by_ledger_offset(irys_database::Ledger::Publish, i.into())
             .map_err(|e| {
                 PrecompileErrors::Error(PrecompileError::Other(format!(
                     "Error reading chunk with part offset {} - {}",

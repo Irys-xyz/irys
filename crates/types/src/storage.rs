@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    ops::{Add, Deref, DerefMut, Div, Rem, Sub},
+    ops::{Add, AddAssign, Deref, DerefMut, Div, Mul, Rem, Sub},
     path::PathBuf,
 };
 
@@ -179,18 +179,129 @@ impl InclusiveInterval<u32> for PartitionChunkRange {
 }
 impl From<Interval<u32>> for PartitionChunkRange {
     fn from(interval: Interval<u32>) -> Self {
-        PartitionChunkRange(
-            ii(
-                PartitionChunkOffset::from(interval.start()),
-                PartitionChunkOffset::from(interval.end()),
-            ),
-        )
+        PartitionChunkRange(ii(
+            PartitionChunkOffset::from(interval.start()),
+            PartitionChunkOffset::from(interval.end()),
+        ))
     }
 }
 
-
 /// Ledger Relative chunk offsets
-pub type LedgerChunkOffset = u64;
+// pub type LedgerChunkOffset = u64;
+
+#[derive(
+    Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Compact,
+)]
+pub struct LedgerChunkOffset(u64);
+
+impl DiscreteFinite for LedgerChunkOffset {
+    const MIN: Self = LedgerChunkOffset(0);
+    const MAX: Self = LedgerChunkOffset(u64::MAX);
+    fn up(self) -> Option<Self> {
+        self.0.checked_add(1).map(LedgerChunkOffset)
+    }
+    fn down(self) -> Option<Self> {
+        self.0.checked_sub(1).map(LedgerChunkOffset)
+    }
+}
+impl LedgerChunkOffset {
+    pub fn value(&self) -> u64 {
+        self.0
+    }
+    pub fn from_be_bytes(bytes: [u8; 8]) -> Self {
+        LedgerChunkOffset(u64::from_be_bytes(bytes))
+    }
+}
+
+impl From<LedgerChunkOffset> for u64 {
+    fn from(value: LedgerChunkOffset) -> Self {
+        value.0 as u64
+    }
+}
+impl From<LedgerChunkOffset> for u8 {
+    fn from(value: LedgerChunkOffset) -> Self {
+        value.0 as u8
+    }
+}
+impl Add<u64> for LedgerChunkOffset {
+    type Output = Self;
+    fn add(self, rhs: u64) -> Self::Output {
+        LedgerChunkOffset(self.0 + rhs)
+    }
+}
+impl Sub<LedgerChunkOffset> for LedgerChunkOffset {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self::Output {
+        LedgerChunkOffset(self.0 - rhs.0)
+    }
+}
+impl Sub<u64> for LedgerChunkOffset {
+    type Output = Self;
+    fn sub(self, rhs: u64) -> Self::Output {
+        LedgerChunkOffset(self.0 - rhs)
+    }
+}
+impl Mul<u64> for LedgerChunkOffset {
+    type Output = Self;
+    fn mul(self, rhs: u64) -> Self::Output {
+        LedgerChunkOffset(self.0 * rhs)
+    }
+}
+impl Div<LedgerChunkOffset> for LedgerChunkOffset {
+    type Output = Self;
+    fn div(self, rhs: Self) -> Self::Output {
+        LedgerChunkOffset(self.0 / rhs.0)
+    }
+}
+impl Div<u64> for LedgerChunkOffset {
+    type Output = Self;
+    fn div(self, rhs: u64) -> Self::Output {
+        LedgerChunkOffset(self.0 / rhs)
+    }
+}
+impl Rem<u64> for LedgerChunkOffset {
+    type Output = Self;
+    fn rem(self, rhs: u64) -> Self::Output {
+        LedgerChunkOffset(self.0 % rhs)
+    }
+}
+
+impl AddAssign<u64> for LedgerChunkOffset {
+    fn add_assign(&mut self, rhs: u64) {
+        self.0 = self.value() + rhs;
+    }
+}
+
+impl From<u64> for LedgerChunkOffset {
+    fn from(value: u64) -> Self {
+        LedgerChunkOffset(value.into())
+    }
+}
+impl From<u8> for LedgerChunkOffset {
+    fn from(value: u8) -> Self {
+        LedgerChunkOffset(value.into())
+    }
+}
+impl From<i32> for LedgerChunkOffset {
+    fn from(value: i32) -> Self {
+        LedgerChunkOffset(value.try_into().expect("Value must be non-negative"))
+    }
+}
+
+impl fmt::Display for LedgerChunkOffset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl TryFrom<LedgerChunkOffset> for usize {
+    type Error = &'static str;
+    fn try_from(value: LedgerChunkOffset) -> Result<Self, Self::Error> {
+        let value_u32 = value.0;
+        value_u32
+            .try_into()
+            .map_err(|_| "Conversion to usize failed")
+    }
+}
 
 /// Ledger Relative chunk interval/ranges
 #[derive(Debug, Copy, Clone)]
@@ -204,32 +315,32 @@ impl Deref for LedgerChunkRange {
     }
 }
 
-impl From<Interval<u64>> for LedgerChunkRange {
+impl From<Interval<LedgerChunkOffset>> for LedgerChunkRange {
     fn from(interval: Interval<LedgerChunkOffset>) -> Self {
         Self(interval)
     }
 }
 
 /// Add impl Into<Interval<u64>> for owned conversion
-impl From<LedgerChunkRange> for Interval<u64> {
+impl From<LedgerChunkRange> for Interval<LedgerChunkOffset> {
     fn from(range: LedgerChunkRange) -> Self {
         range.0
     }
 }
 
 // Add Deref implementation to convert to Interval<u64>
-impl AsRef<Interval<u64>> for LedgerChunkRange {
-    fn as_ref(&self) -> &Interval<u64> {
+impl AsRef<Interval<LedgerChunkOffset>> for LedgerChunkRange {
+    fn as_ref(&self) -> &Interval<LedgerChunkOffset> {
         &self.0
     }
 }
 
-impl InclusiveInterval<u64> for LedgerChunkRange {
-    fn start(&self) -> u64 {
+impl InclusiveInterval<LedgerChunkOffset> for LedgerChunkRange {
+    fn start(&self) -> LedgerChunkOffset {
         self.0.start()
     }
 
-    fn end(&self) -> u64 {
+    fn end(&self) -> LedgerChunkOffset {
         self.0.end()
     }
 }
@@ -387,68 +498,215 @@ mod tests {
     #[test]
     fn test_split_interval() {
         // interval with just one element
-        let interval = PartitionChunkRange(ii(3, 3));
+        let interval = PartitionChunkRange(ii(
+            PartitionChunkOffset::from(3),
+            PartitionChunkOffset::from(3),
+        ));
         let splits = split_interval(&interval, 3).unwrap();
         assert_eq!(splits.len(), 1);
-        assert_eq!(splits[0], PartitionChunkRange(ii(3, 3)));
+        assert_eq!(
+            splits[0],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(3),
+                PartitionChunkOffset::from(3)
+            ))
+        );
 
         // even interval
-        let interval = PartitionChunkRange(ii(0, 3));
+        let interval = PartitionChunkRange(ii(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(3),
+        ));
         let splits = split_interval(&interval, 3).unwrap();
         assert_eq!(splits.len(), 2);
-        assert_eq!(splits[0], PartitionChunkRange(ii(0, 2)));
-        assert_eq!(splits[1], PartitionChunkRange(ii(3, 3)));
+        assert_eq!(
+            splits[0],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(2)
+            ))
+        );
+        assert_eq!(
+            splits[1],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(3),
+                PartitionChunkOffset::from(3)
+            ))
+        );
 
         // odd interval
-        let interval = PartitionChunkRange(ii(0, 4));
+        let interval = PartitionChunkRange(ii(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(4),
+        ));
         let splits = split_interval(&interval, 1).unwrap();
         assert_eq!(splits.len(), 5);
-        assert_eq!(splits[0], PartitionChunkRange(ii(0, 0)));
-        assert_eq!(splits[1], PartitionChunkRange(ii(1, 1)));
-        assert_eq!(splits[2], PartitionChunkRange(ii(2, 2)));
-        assert_eq!(splits[3], PartitionChunkRange(ii(3, 3)));
-        assert_eq!(splits[4], PartitionChunkRange(ii(4, 4)));
+        assert_eq!(
+            splits[0],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(0)
+            ))
+        );
+        assert_eq!(
+            splits[1],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(1),
+                PartitionChunkOffset::from(1)
+            ))
+        );
+        assert_eq!(
+            splits[2],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(2),
+                PartitionChunkOffset::from(2)
+            ))
+        );
+        assert_eq!(
+            splits[3],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(3),
+                PartitionChunkOffset::from(3)
+            ))
+        );
+        assert_eq!(
+            splits[4],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(4),
+                PartitionChunkOffset::from(4)
+            ))
+        );
 
         // odd interval, with step size bigger than it
-        let interval = PartitionChunkRange(ie(0, 4));
+        let interval = PartitionChunkRange(ie(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(4),
+        ));
         let splits = split_interval(&interval, 8).unwrap();
         assert_eq!(splits.len(), 1);
-        assert_eq!(splits[0], PartitionChunkRange(ie(0, 4)));
+        assert_eq!(
+            splits[0],
+            PartitionChunkRange(ie(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(4)
+            ))
+        );
 
         // zero step error
-        let interval = PartitionChunkRange(ie(0, 4));
+        let interval = PartitionChunkRange(ie(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(4),
+        ));
         let splits = split_interval(&interval, 0);
         assert!(splits.is_err());
 
         // even interval not starting in zero, all complete splits
-        let interval = PartitionChunkRange(ii(2, 7));
+        let interval = PartitionChunkRange(ii(
+            PartitionChunkOffset::from(2),
+            PartitionChunkOffset::from(7),
+        ));
         let splits = split_interval(&interval, 3).unwrap();
         assert_eq!(splits.len(), 2);
-        assert_eq!(splits[0], PartitionChunkRange(ii(2, 4)));
-        assert_eq!(splits[1], PartitionChunkRange(ii(5, 7)));
+        assert_eq!(
+            splits[0],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(2),
+                PartitionChunkOffset::from(4)
+            ))
+        );
+        assert_eq!(
+            splits[1],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(5),
+                PartitionChunkOffset::from(7)
+            ))
+        );
 
         // odd interval not starting in zero, not all complete splits
-        let interval = PartitionChunkRange(ii(3, 6));
+        let interval = PartitionChunkRange(ii(
+            PartitionChunkOffset::from(3),
+            PartitionChunkOffset::from(6),
+        ));
         let splits = split_interval(&interval, 1).unwrap();
         assert_eq!(splits.len(), 4);
-        assert_eq!(splits[0], PartitionChunkRange(ii(3, 3)));
-        assert_eq!(splits[1], PartitionChunkRange(ii(4, 4)));
-        assert_eq!(splits[2], PartitionChunkRange(ii(5, 5)));
-        assert_eq!(splits[3], PartitionChunkRange(ii(6, 6)));
+        assert_eq!(
+            splits[0],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(3),
+                PartitionChunkOffset::from(3)
+            ))
+        );
+        assert_eq!(
+            splits[1],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(4),
+                PartitionChunkOffset::from(4)
+            ))
+        );
+        assert_eq!(
+            splits[2],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(5),
+                PartitionChunkOffset::from(5)
+            ))
+        );
+        assert_eq!(
+            splits[3],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(6),
+                PartitionChunkOffset::from(6)
+            ))
+        );
 
         // odd interval not starting in zero not all complete
-        let interval = PartitionChunkRange(ii(5, 8));
+        let interval = PartitionChunkRange(ii(
+            PartitionChunkOffset::from(5),
+            PartitionChunkOffset::from(8),
+        ));
         let splits = split_interval(&interval, 3).unwrap();
         assert_eq!(splits.len(), 2);
-        assert_eq!(splits[0], PartitionChunkRange(ii(5, 7)));
-        assert_eq!(splits[1], PartitionChunkRange(ii(8, 8)));
+        assert_eq!(
+            splits[0],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(5),
+                PartitionChunkOffset::from(7)
+            ))
+        );
+        assert_eq!(
+            splits[1],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(8),
+                PartitionChunkOffset::from(8)
+            ))
+        );
 
         // even interval not starting in zero, odd intervals, not all complete splits
-        let interval = PartitionChunkRange(ii(3, 7));
+        let interval = PartitionChunkRange(ii(
+            PartitionChunkOffset::from(3),
+            PartitionChunkOffset::from(7),
+        ));
         let splits = split_interval(&interval, 2).unwrap();
         assert_eq!(splits.len(), 3);
-        assert_eq!(splits[0], PartitionChunkRange(ii(3, 4)));
-        assert_eq!(splits[1], PartitionChunkRange(ii(5, 6)));
-        assert_eq!(splits[2], PartitionChunkRange(ii(7, 7)));
+        assert_eq!(
+            splits[0],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(3),
+                PartitionChunkOffset::from(4)
+            ))
+        );
+        assert_eq!(
+            splits[1],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(5),
+                PartitionChunkOffset::from(6)
+            ))
+        );
+        assert_eq!(
+            splits[2],
+            PartitionChunkRange(ii(
+                PartitionChunkOffset::from(7),
+                PartitionChunkOffset::from(7)
+            ))
+        );
     }
 }

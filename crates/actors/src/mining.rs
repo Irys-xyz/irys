@@ -109,7 +109,9 @@ impl PartitionMiningActor {
 
         let read_range = ie(
             PartitionChunkOffset::from(start_chunk_offset),
-            PartitionChunkOffset::from(start_chunk_offset + config.num_chunks_in_recall_range as u32),
+            PartitionChunkOffset::from(
+                start_chunk_offset + config.num_chunks_in_recall_range as u32,
+            ),
         );
 
         // haven't tested this, but it looks correct
@@ -137,7 +139,7 @@ impl PartitionMiningActor {
                 irys_storage::ChunkType::Entropy => (None, None),
                 irys_storage::ChunkType::Data => self
                     .storage_module
-                    .read_tx_data_path(u64::from(partition_chunk_offset))?,
+                    .read_tx_data_path(u64::from(partition_chunk_offset).into())?,
                 irys_storage::ChunkType::Uninitialized => {
                     return Err(eyre::eyre!("Cannot mine uninitialized chunks"))
                 }
@@ -322,7 +324,7 @@ mod tests {
         app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
-    use irys_types::{H256List, IrysBlockHeader};
+    use irys_types::{H256List, IrysBlockHeader, LedgerChunkOffset};
     use std::any::Any;
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
@@ -383,7 +385,13 @@ mod tests {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ie(PartitionChunkOffset::from(0), PartitionChunkOffset::from(chunk_count)), "hdd0".into()), // 0 to 3 inclusive, 4 chunks
+                (
+                    ie(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(chunk_count),
+                    ),
+                    "hdd0".into(),
+                ), // 0 to 3 inclusive, 4 chunks
             ],
         }];
 
@@ -413,7 +421,10 @@ mod tests {
         let _ = storage_module.index_transaction_data(
             tx_path.to_vec(),
             data_root,
-            LedgerChunkRange(ie(0, chunk_count as u64)),
+            LedgerChunkRange(ie(
+                LedgerChunkOffset::from(0),
+                LedgerChunkOffset::from(chunk_count as u64),
+            )),
         );
 
         for tx_chunk_offset in 0..chunk_count {

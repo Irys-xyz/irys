@@ -7,9 +7,7 @@ use irys_database::{
 };
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    app_state::DatabaseProvider, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxChunkOffset,
-    UnpackedChunk, H256,
+    app_state::DatabaseProvider, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxChunkOffset, UnpackedChunk, H256
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
@@ -185,12 +183,18 @@ fn process_transaction_chunks(
         };
 
         // Find which storage module intersects this chunk
-        let ledger_offset = tx_chunk_offset as u64 + tx_chunk_range.start();
-        let storage_module = find_storage_module(storage_modules, ledger, ledger_offset);
+        let ledger_offset = tx_chunk_range.start() + tx_chunk_offset as u64;
+        let storage_module = find_storage_module(storage_modules, ledger, ledger_offset.into());
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
-            write_chunk_to_module(module, chunk_info, data_root, data_size, tx_chunk_offset.into())?;
+            write_chunk_to_module(
+                module,
+                chunk_info,
+                data_root,
+                data_size,
+                tx_chunk_offset.into(),
+            )?;
         }
     }
     Ok(())
@@ -227,8 +231,8 @@ fn get_block_range(
     };
 
     LedgerChunkRange(ii(
-        start_chunk_offset,
-        block.ledgers[ledger].max_chunk_offset,
+        LedgerChunkOffset::from(start_chunk_offset),
+        LedgerChunkOffset::from(block.ledgers[ledger].max_chunk_offset),
     ))
 }
 fn get_tx_path_pairs(
@@ -293,7 +297,7 @@ fn find_storage_module(
             .filter(|&id| id == ledger as u32)
             // Then check offset range
             .and_then(|_| module.get_storage_module_range().ok())
-            .filter(|range| range.contains_point(ledger_offset))
+            .filter(|range| range.contains_point(ledger_offset.into()))
             .map(|_| module)
     })
 }

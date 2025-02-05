@@ -587,7 +587,7 @@ mod tests {
     use irys_storage::{ii, initialize_storage_files, ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        irys::IrysSigner, partition::{PartitionAssignment, PartitionHash}, Address, Base64, PartitionChunkOffset, MAX_CHUNK_SIZE
+        irys::IrysSigner, partition::{PartitionAssignment, PartitionHash}, Address, Base64, LedgerChunkOffset, PartitionChunkOffset, MAX_CHUNK_SIZE
     };
     use rand::Rng;
     use reth::tasks::TaskManager;
@@ -702,7 +702,7 @@ mod tests {
             });
 
             let is_last_chunk = tx_chunk_offset == last_index;
-            let interval = ii(0, last_index as u64);
+            let interval: nodit::Interval<LedgerChunkOffset> = ii(LedgerChunkOffset::from(0), LedgerChunkOffset::from(last_index as u64));
             if is_last_chunk {
                 // artificially index the chunk with the submodule
                 // this will cause the last chunk to show up in cache & on disk

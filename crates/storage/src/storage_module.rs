@@ -286,7 +286,7 @@ impl StorageModule {
             .map(|slot_index| {
                 let start_offset = slot_index as u64 * self.storage_config.num_chunks_in_partition;
                 let end_offset = start_offset + self.storage_config.num_chunks_in_partition;
-                (start_offset..end_offset).contains(&chunk_offset)
+                (start_offset..end_offset).contains(&chunk_offset.value())
             })
             .unwrap_or(false)
     }
@@ -641,7 +641,7 @@ impl StorageModule {
 
         // Get chunk info and calculate index
         let range = self.get_storage_module_range()?;
-        let partition_offset = (ledger_offset - range.start()) as u32;
+        let partition_offset = (ledger_offset - range.start()).value() as u32;
         let closest_offsets = self.collect_start_offsets(data_root)?;
 
         let nearest_start_offset = closest_offsets
@@ -664,7 +664,7 @@ impl StorageModule {
         // overlap partition boundaries) we do our calculations with i64s to
         // account for negative nearest_start_offset
         let data_root_start_offset: LedgerChunkOffset =
-            (range.start() as i64 + nearest_start_offset.value() as i64) as u64;
+            ((range.start().value() as i64 + nearest_start_offset.value() as i64) as u64).into();
 
         // Finally the index of the chunk in the transaction can be calculated
         // using the ledger relative start_offset of the data_root and the
@@ -690,13 +690,13 @@ impl StorageModule {
     ) -> eyre::Result<(Option<TxPath>, Option<ChunkDataPath>)> {
         let (_interval, submodule) = self
             .submodules
-            .get_key_value_at_point((chunk_offset as u32).into())
+            .get_key_value_at_point((chunk_offset.value() as u32).into())
             .unwrap();
 
         submodule.db.view(|tx| {
             Ok((
-                get_tx_path_by_offset(tx, (chunk_offset as u32).into())?,
-                get_data_path_by_offset(tx, (chunk_offset as u32).into())?,
+                get_tx_path_by_offset(tx, (chunk_offset.value() as u32).into())?,
+                get_data_path_by_offset(tx, (chunk_offset.value() as u32).into())?,
             ))
         })?
     }
@@ -758,7 +758,10 @@ impl StorageModule {
             if let Some(slot_index) = part_assign.slot_index {
                 let start = slot_index as u64 * self.storage_config.num_chunks_in_partition;
                 let end = start + self.storage_config.num_chunks_in_partition;
-                return Ok(LedgerChunkRange(ie(start, end)));
+                return Ok(LedgerChunkRange(ie(
+                    LedgerChunkOffset::from(start),
+                    LedgerChunkOffset::from(end),
+                )));
             } else {
                 return Err(eyre::eyre!("Ledger slot not assigned!"));
             }
@@ -778,8 +781,8 @@ impl StorageModule {
         let start = chunk_range.start() - storage_module_range.start();
         let end = chunk_range.end() - storage_module_range.start();
         Ok(PartitionChunkRange(ii(
-            (start as u32).into(),
-            (end as u32).into(),
+            (start.value() as u32).into(),
+            (end.value() as u32).into(),
         )))
     }
 
@@ -791,7 +794,7 @@ impl StorageModule {
         start_offset: LedgerChunkOffset,
     ) -> eyre::Result<i32> {
         let storage_module_range = self.get_storage_module_range()?;
-        let start = start_offset as i64 - storage_module_range.start() as i64;
+        let start = start_offset.value() as i64 - storage_module_range.start().value() as i64;
         Ok(start.try_into()?)
     }
 
@@ -1342,8 +1345,11 @@ mod tests {
         // Pack the storage module
         storage_module.pack_with_zeros();
 
-        let _ =
-            storage_module.index_transaction_data(tx_path, data_root, LedgerChunkRange(ii(0, 0)));
+        let _ = storage_module.index_transaction_data(
+            tx_path,
+            data_root,
+            LedgerChunkRange(ii(LedgerChunkOffset::from(0), LedgerChunkOffset::from(0))),
+        );
 
         let chunk = UnpackedChunk {
             data_root: H256::zero(),
@@ -1355,7 +1361,7 @@ mod tests {
 
         storage_module.write_data_chunk(&chunk)?;
 
-        let (_, ret_path) = storage_module.read_tx_data_path(0)?;
+        let (_, ret_path) = storage_module.read_tx_data_path(LedgerChunkOffset::from(0))?;
 
         assert_eq!(ret_path, Some(data_path));
 

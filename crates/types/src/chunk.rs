@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{fmt::Display, ops::Add};
 
-use crate::string_u64;
+use crate::{string_u64, LedgerChunkOffset};
 use alloy_primitives::Address;
 use arbitrary::Arbitrary;
 use eyre::eyre;
@@ -220,15 +220,23 @@ pub type ChunkPathHash = H256;
 pub type DataRoot = H256;
 
 /// The offset of the chunk relative to the first (0th) chunk of the data tree
-#[derive(Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+#[derive(
+    Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary,
+)]
 pub struct TxChunkOffset(u32);
 
-impl TxChunkOffset{
-    pub fn value(&self)->u32{
+impl TxChunkOffset {
+    pub fn value(&self) -> u32 {
         self.0
     }
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
         TxChunkOffset(u32::from_be_bytes(bytes))
+    }
+}
+
+impl From<LedgerChunkOffset> for TxChunkOffset {
+    fn from(ledger: LedgerChunkOffset) -> Self {
+        TxChunkOffset::from(ledger.value())
     }
 }
 
@@ -256,18 +264,18 @@ impl fmt::Display for TxChunkOffset {
     }
 }
 
-
-
 /// the Block relative chunk offset
 #[derive(Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BlockChunkOffset(u64);
 
 /// Used to track chunk offset ranges that span storage modules
 ///  a negative offset means the range began in a prior partition/storage module
-#[derive(Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,Compact)]
+#[derive(
+    Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Compact,
+)]
 pub struct RelativeChunkOffset(i32);
-impl RelativeChunkOffset{
-    pub fn value(&self)->i32{
+impl RelativeChunkOffset {
+    pub fn value(&self) -> i32 {
         self.0
     }
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {

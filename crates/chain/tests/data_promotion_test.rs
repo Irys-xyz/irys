@@ -258,7 +258,9 @@ async fn data_promotion_test() {
 
     // wait for the first set of chunks chunk to appear in the publish ledger
     for _attempts in 1..20 {
-        if let Some(_packed_chunk) = get_chunk(&app, Ledger::Publish, 0).await {
+        if let Some(_packed_chunk) =
+            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(0)).await
+        {
             println!("First set of chunks found!");
             break;
         }
@@ -267,7 +269,9 @@ async fn data_promotion_test() {
 
     // wait for the second set of chunks to appear in the publish ledger
     for _attempts in 1..20 {
-        if let Some(_packed_chunk) = get_chunk(&app, Ledger::Publish, 3).await {
+        if let Some(_packed_chunk) =
+            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(3)).await
+        {
             println!("Second set of chunks found!");
             break;
         }
@@ -312,30 +316,66 @@ async fn data_promotion_test() {
 
     let chunk_offset = 0;
     let expected_bytes = &data_chunks[tx_index][0];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     let chunk_offset = 1;
     let expected_bytes = &data_chunks[tx_index][1];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     let chunk_offset = 2;
     let expected_bytes = &data_chunks[tx_index][2];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     // Verify the chunks of the second promoted transaction
     let tx_index = next_tx_index;
 
     let chunk_offset = 3;
     let expected_bytes = &data_chunks[tx_index][0];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     let chunk_offset = 4;
     let expected_bytes = &data_chunks[tx_index][1];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     let chunk_offset = 5;
     let expected_bytes = &data_chunks[tx_index][2];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     // println!("\n{:?}", unpacked_chunk);
 }

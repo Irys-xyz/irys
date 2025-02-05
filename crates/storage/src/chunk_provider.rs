@@ -81,7 +81,7 @@ impl ChunkProvider {
                 .0
                 .iter()
                 .filter_map(|so| {
-                    checked_add_i32_u64(so.value(), sm_range_start) // translate into ledger-relative space
+                    checked_add_i32_u64(so.value(), sm_range_start.value()) // translate into ledger-relative space
                     .map(|mapped_start| mapped_start + (data_tx_offset.value() as u64))
                 })
                 .collect::<Vec<_>>();
@@ -89,7 +89,7 @@ impl ChunkProvider {
             for ledger_relative_offset in offsets {
                 // try other offsets and sm's if we get an Error or a None
                 // TODO: if we keep this resolver, make generate_full_chunk more modular so we can pass in work we've already done (getting the ledger relative offset, etc)
-                if let Ok(Some(r)) = sm.generate_full_chunk(ledger_relative_offset) {
+                if let Ok(Some(r)) = sm.generate_full_chunk(LedgerChunkOffset::from(ledger_relative_offset)) {
                     return Ok(Some(ChunkFormat::Packed(r)));
                 }
             }
@@ -128,7 +128,7 @@ impl ChunkProvider {
                 .0
                 .iter()
                 .filter_map(|so| {
-                    checked_add_i32_u64(so.value(), sm_range_start) // translate into ledger-relative space
+                    checked_add_i32_u64(so.value(), sm_range_start.into()) // translate into ledger-relative space
                 })
                 .collect::<Vec<_>>();
 
@@ -199,7 +199,7 @@ mod tests {
 
         storage_module.pack_with_zeros();
 
-        let chunk_range = ii(49, 51);
+        let chunk_range = ii(LedgerChunkOffset::from(49), LedgerChunkOffset::from(51));
         let _ = storage_module.index_transaction_data(
             tx_path,
             data_root,
