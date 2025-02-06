@@ -1,6 +1,6 @@
 use crate::{
     block_index_service::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
-    mining::hash_to_number, vdf_service::VdfStepsReadGuard,
+    mining::hash_to_number,
 };
 use base58::ToBase58;
 use irys_database::Ledger;
@@ -11,6 +11,7 @@ use irys_types::{
     Address, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, VDFStepsConfig, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
+use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
 use tracing::{debug, info};
 

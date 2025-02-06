@@ -22,3 +22,7 @@ pub mod tables;
 pub use block_index_data::*;
 pub use data_ledger::*;
 pub use database::*;
+
+pub mod reth_db {
+    pub use reth_db::*;
+}

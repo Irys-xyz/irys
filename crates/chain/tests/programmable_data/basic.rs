@@ -1,4 +1,3 @@
-use crate::block_production::basic_contract::future_or_mine_on_timeout;
 use actix_http::StatusCode;
 use alloy_core::primitives::aliases::U200;
 use alloy_core::primitives::U256;
@@ -27,6 +26,8 @@ use reth_primitives::{irys_primitives::range_specifier::ChunkRangeSpecifier, Gen
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
+
+use crate::utils::future_or_mine_on_timeout;
 
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs

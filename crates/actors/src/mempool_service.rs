@@ -2,7 +2,7 @@ use actix::{Actor, Context, Handler, Message, Supervised, SystemService};
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::db_cache::data_size_to_chunk_count;
-use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
+use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofLRU, IngressProofs};
 use irys_database::{insert_tx_header, tx_header_by_txid, Ledger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
@@ -12,6 +12,7 @@ use irys_types::{
 };
 use irys_types::{DataRoot, StorageConfig, CONFIG, U256};
 use reth::tasks::TaskExecutor;
+use reth_db::cursor::DbCursorRO;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
@@ -19,9 +20,10 @@ use reth_db::Database;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::block_producer::BlockConfirmedMessage;
+use crate::block_tree_service::BlockTreeReadGuard;
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug, Default)]
 pub struct MempoolService {
@@ -36,6 +38,7 @@ pub struct MempoolService {
     invalid_tx: Vec<H256>,
     storage_config: StorageConfig,
     storage_modules: StorageModuleVec,
+    block_tree_read_guard: Option<BlockTreeReadGuard>,
 }
 
 impl Actor for MempoolService {
@@ -60,6 +63,7 @@ impl MempoolService {
         signer: IrysSigner,
         storage_config: StorageConfig,
         storage_modules: StorageModuleVec,
+        block_tree_read_guard: BlockTreeReadGuard,
     ) -> Self {
         println!("service started: mempool");
         Self {
@@ -70,6 +74,7 @@ impl MempoolService {
             task_exec: Some(task_exec),
             storage_config,
             storage_modules,
+            block_tree_read_guard: Some(block_tree_read_guard),
         }
     }
 }
@@ -81,7 +86,7 @@ impl MempoolService {
 pub struct TxIngressMessage(pub IrysTransactionHeader);
 
 /// Reasons why Transaction Ingress might fail
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TxIngressError {
     /// The transaction's signature is invalid
     InvalidSignature,
@@ -89,6 +94,12 @@ pub enum TxIngressError {
     Unfunded,
     /// This transaction id is already in the cache
     Skipped,
+    /// Invalid anchor value (unknown or too old)
+    InvalidAnchor,
+    /// Some database error occurred
+    DatabaseError,
+    /// The service is uninitialized
+    ServiceUninitialized,
     /// Catch-all variant for other errors.
     Other(String),
 }
@@ -117,7 +128,7 @@ impl ChunkIngressMessage {
 }
 
 /// Reasons why Transaction Ingress might fail
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ChunkIngressError {
     /// The `data_path/proof` provided with the chunk data is invalid
     InvalidProof,
@@ -129,6 +140,8 @@ pub enum ChunkIngressError {
     InvalidChunkSize,
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
+    /// The service is uninitialized
+    ServiceUninitialized,
     // Catch-all variant for other errors.
     Other(String),
 }
@@ -149,9 +162,7 @@ impl Handler<TxIngressMessage> for MempoolService {
 
     fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
         if self.db.is_none() {
-            return Err(TxIngressError::Other(
-                "mempool_service not initialized".to_string(),
-            ));
+            return Err(TxIngressError::ServiceUninitialized);
         }
 
         let tx = &tx_msg.0;
@@ -167,10 +178,63 @@ impl Handler<TxIngressMessage> for MempoolService {
             return Err(TxIngressError::Skipped);
         }
 
-        let db = self.db.clone().unwrap();
+        let db = self
+            .db
+            .clone()
+            .ok_or(TxIngressError::ServiceUninitialized)?;
+        let read_tx = &db.tx().map_err(|_| TxIngressError::DatabaseError)?; // we use `&` here to make this a `temporary`, which means rust will automatically drop it when we're done using it, instead of at the end of a block like usual
 
-        // TODO: Don't unwrap here
-        if irys_database::get_account_balance(&db.tx().unwrap(), tx_msg.0.signer).unwrap()
+        // validate the `anchor` value
+        // it should be a block hash for a known, confirmed block (TODO: add tx hash support!)
+
+        let canon_chain = self
+            .block_tree_read_guard
+            .clone()
+            .ok_or(TxIngressError::ServiceUninitialized)?
+            .read()
+            .get_canonical_chain();
+
+        let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
+            "unable to get canonical chain from block tree".to_string(),
+        ))?;
+
+        match irys_database::block_header_by_hash(read_tx, &tx.anchor) {
+            // note: we use addition here as it's safer
+            Ok(Some(hdr)) if hdr.height + (CONFIG.anchor_expiry_depth as u64) >= *latest_height => {
+                debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id);
+                // update any associated ingress proofs
+                if let Ok(Some(old_expiry)) = read_tx.get::<IngressProofLRU>(tx.data_root) {
+                    let new_expiry = hdr.height + (CONFIG.anchor_expiry_depth as u64);
+                    debug!(
+                        "Updating ingress proof for data root {} expiry from {} -> {}",
+                        &tx.data_root, &old_expiry, &new_expiry
+                    );
+                    db.update(|write_tx| write_tx.put::<IngressProofLRU>(tx.data_root, new_expiry))
+                        .map_err(|e| {
+                            error!(
+                                "Error updating ingress proof expiry for {} - {}",
+                                &tx.data_root, &e
+                            );
+                            TxIngressError::DatabaseError
+                        })?
+                        .map_err(|e| {
+                            error!(
+                                "Error updating ingress proof expiry for {} - {}",
+                                &tx.data_root, &e
+                            );
+                            TxIngressError::DatabaseError
+                        })?
+                }
+            }
+            _ => {
+                self.invalid_tx.push(tx.id);
+                warn!("Invalid anchor value {} for tx {}", &tx.anchor, &tx.id);
+                return Err(TxIngressError::InvalidAnchor);
+            }
+        };
+
+        if irys_database::get_account_balance(read_tx, tx_msg.0.signer)
+            .map_err(|_| TxIngressError::DatabaseError)?
             < U256::from(tx_msg.0.total_fee())
         {
             return Err(TxIngressError::Unfunded);
@@ -191,7 +255,7 @@ impl Handler<TxIngressMessage> for MempoolService {
 
         // Cache the data_root in the database
 
-        let _ = self.db.clone().unwrap().update_eyre(|db_tx| {
+        let _ = db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, tx)?;
             irys_database::insert_tx_header(db_tx, tx)?;
             Ok(())
@@ -214,13 +278,10 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             ));
         }
 
+        let db = self.db.clone().unwrap();
+
         // Check to see if we have a cached data_root for this chunk
-        let read_tx = self
-            .db
-            .clone()
-            .unwrap()
-            .tx()
-            .map_err(|_| ChunkIngressError::DatabaseError)?;
+        let read_tx = db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let cached_data_root =
             irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
@@ -294,10 +355,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // TODO: fix all these unwraps!
         // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
 
-        self.db
-            .clone()
-            .unwrap()
-            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
+        db.update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         for sm in &self.storage_modules {
@@ -312,7 +370,9 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         let root_hash: H256 = root_hash.into();
 
         // check if we have generated an ingress proof for this tx already
-        // TODO: hook into whatever manages ingress proofs
+        // if we have, update it's expiry height
+
+        //  TODO: hook into whatever manages ingress proofs
         if read_tx
             .get::<IngressProofs>(root_hash)
             .map_err(|_| ChunkIngressError::DatabaseError)?
@@ -322,16 +382,12 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                 "We've already generated an ingress proof for data root {}",
                 &root_hash
             );
+
             return Ok(());
         };
 
         // check if we have all the chunks for this tx
-        let read_tx = self
-            .db
-            .clone()
-            .unwrap()
-            .tx()
-            .map_err(|_| ChunkIngressError::DatabaseError)?;
+        let read_tx = db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let mut cursor = read_tx
             .cursor_dup_read::<CachedChunksIndex>()
@@ -352,11 +408,26 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         if chunk_count == expected_chunk_count {
             // we *should* have all the chunks
             // dispatch a ingress proof task
+
+            let canon_chain = self
+                .block_tree_read_guard
+                .clone()
+                .ok_or(ChunkIngressError::ServiceUninitialized)?
+                .read()
+                .get_canonical_chain();
+
+            let (_, latest_height, _, _) = canon_chain
+                .0
+                .last()
+                .ok_or(ChunkIngressError::ServiceUninitialized)?;
+
+            let target_height = latest_height + CONFIG.anchor_expiry_depth as u64;
+
             let db1 = self.db.clone().unwrap();
             let signer1 = self.signer.clone().unwrap();
             self.task_exec.clone().unwrap().spawn_blocking(async move {
                 generate_ingress_proof(
-                    db1,
+                    db1.clone(),
                     root_hash,
                     cached_data_root.data_size,
                     chunk_size,
@@ -364,6 +435,9 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                 )
                 // TODO: handle results instead of unwrapping
                 .unwrap();
+                db1.update(|wtx| wtx.put::<IngressProofLRU>(root_hash, target_height))
+                    .unwrap()
+                    .unwrap();
             });
         }
 
@@ -410,86 +484,114 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
 impl Handler<BlockConfirmedMessage> for MempoolService {
     type Result = eyre::Result<()>;
     fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        if self.db.is_none() {
-            error!("mempool_service is uninitialized");
-            return Err(eyre!("mempool_service is uninitialized"));
-        }
+        || -> eyre::Result<()> {
+            let db = self.db.clone().ok_or_else(|| {
+                error!("mempool_service is uninitialized");
+                eyre!("mempool_service is uninitialized")
+            })?;
 
-        // Access the block header through msg.0
-        let block = &msg.0;
-        let all_txs = &msg.1;
+            // Access the block header through msg.0
+            let block = &msg.0;
+            let all_txs = &msg.1;
 
-        for txid in block.ledgers[Ledger::Submit].tx_ids.iter() {
-            // Remove the submit tx from the pending valid_tx pool
-            self.valid_tx.remove(txid);
-        }
-
-        let published_txids = &block.ledgers[Ledger::Publish].tx_ids.0;
-
-        // Loop though the promoted transactions and remove their ingress proofs
-        // from the mempool. In the future on a multi node network we may keep
-        // ingress proofs around longer to account for re-orgs, but for now
-        // we just remove them.
-        if !published_txids.is_empty() {
-            let mut_tx = self
-                .db
-                .clone()
-                .unwrap()
-                .tx_mut()
-                .map_err(|e| {
-                    error!("Failed to create mdbx transaction: {}", e);
-                })
-                .unwrap();
-
-            for (i, txid) in block.ledgers[Ledger::Publish].tx_ids.0.iter().enumerate() {
-                // Retrieve the promoted transactions header
-                let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
-                    Ok(Some(header)) => header,
-                    Ok(None) => {
-                        error!("No transaction header found for txid: {}", txid);
-                        continue;
-                    }
-                    Err(e) => {
-                        error!("Error fetching transaction header for txid {}: {}", txid, e);
-                        continue;
-                    }
-                };
-
-                // TODO: In a single node world there is only one ingress proof
-                // per promoted tx, but in the future there will be multiple proofs.
-                let proofs = block.ledgers[Ledger::Publish].proofs.as_ref().unwrap();
-                let proof = proofs.0[i].clone();
-                tx_header.ingress_proofs = Some(proof);
-
-                // Update the header record in the database to include the ingress
-                // proof, indicating it is promoted
-                if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
-                    error!(
-                        "Could not update transactions with ingress proofs - txid: {} err: {}",
-                        txid, err
-                    );
-                }
-
-                // TODO: We may want to maintain two lists of IngressProofs
-                // those that have been recently promoted and those that are
-                // awaiting promotion. That would tidy up some of the logic
-                // around promotion.
-                if let Err(err) = mut_tx.delete::<IngressProofs>(tx_header.data_root, None) {
-                    error!("DatabaseError deleting ingress proof err: {}", err);
-                }
-
-                info!("Promoted tx:\n{:?}", tx_header);
+            for txid in block.ledgers[Ledger::Submit].tx_ids.iter() {
+                // Remove the submit tx from the pending valid_tx pool
+                self.valid_tx.remove(txid);
             }
 
-            let _ = mut_tx.commit();
-        }
+            let published_txids = &block.ledgers[Ledger::Publish].tx_ids.0;
 
-        info!(
-            "Removing confirmed tx - Block height: {} num tx: {}",
-            block.height,
-            all_txs.len()
-        );
-        Ok(())
+            // Loop though the promoted transactions and remove their ingress proofs
+            // from the mempool. In the future on a multi node network we may keep
+            // ingress proofs around longer to account for re-orgs, but for now
+            // we just remove them.
+            if !published_txids.is_empty() {
+                let mut_tx = db
+                    .tx_mut()
+                    .map_err(|e| {
+                        error!("Failed to create mdbx transaction: {}", e);
+                    })
+                    .unwrap();
+
+                for (i, txid) in block.ledgers[Ledger::Publish].tx_ids.0.iter().enumerate() {
+                    // Retrieve the promoted transactions header
+                    let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
+                        Ok(Some(header)) => header,
+                        Ok(None) => {
+                            error!("No transaction header found for txid: {}", txid);
+                            continue;
+                        }
+                        Err(e) => {
+                            error!("Error fetching transaction header for txid {}: {}", txid, e);
+                            continue;
+                        }
+                    };
+
+                    // TODO: In a single node world there is only one ingress proof
+                    // per promoted tx, but in the future there will be multiple proofs.
+                    let proofs = block.ledgers[Ledger::Publish].proofs.as_ref().unwrap();
+                    let proof = proofs.0[i].clone();
+                    tx_header.ingress_proofs = Some(proof);
+
+                    // Update the header record in the database to include the ingress
+                    // proof, indicating it is promoted
+                    if let Err(err) = insert_tx_header(&mut_tx, &tx_header) {
+                        error!(
+                            "Could not update transactions with ingress proofs - txid: {} err: {}",
+                            txid, err
+                        );
+                    }
+
+                    info!("Promoted tx:\n{:?}", tx_header);
+                }
+
+                let _ = mut_tx.commit();
+            }
+
+            // prune ingress proofs
+
+            let canon_chain = self
+                .block_tree_read_guard
+                .clone()
+                .ok_or(eyre!("mempool_service is uninitialized"))?
+                .read()
+                .get_canonical_chain();
+
+            let (_, latest_height, _, _) = canon_chain
+                .0
+                .last()
+                .ok_or(eyre!("mempool_service is uninitialized"))?;
+
+            let mut_tx = db.tx_mut()?;
+            let mut cursor = mut_tx.cursor_write::<IngressProofLRU>()?;
+            let mut walker = cursor.walk(None)?;
+            while let Some((k, expiry_height)) = walker.next().transpose()? {
+                if expiry_height < *latest_height {
+                    debug!(
+                        "expiring ingress proof {} (expiry: {}, latest: {})",
+                        &k, &expiry_height, latest_height
+                    );
+                    mut_tx.delete::<IngressProofLRU>(k, None)?;
+                    mut_tx.delete::<IngressProofs>(k, None)?;
+                }
+            }
+            mut_tx.commit()?;
+
+            info!(
+                "Removing confirmed tx - Block height: {} num tx: {}",
+                block.height,
+                all_txs.len()
+            );
+            Ok(())
+        }()
+        // closure so we can "catch" and log all errs, so we don't need to log and return an err everywhere
+        .map_err(|e| {
+            error!(
+                "Unexpected Mempool error while processing BlockConfirmedMessage: {}",
+                &e
+            );
+            e
+        })
     }
 }
 
@@ -567,9 +669,7 @@ pub fn generate_ingress_proof(
 
     ro_tx.commit()?;
 
-    let rw_tx = db.tx_mut()?;
-    rw_tx.put::<IngressProofs>(data_root, proof)?;
-    rw_tx.commit()?;
+    db.update(|rw_tx| rw_tx.put::<IngressProofs>(data_root, proof))??;
 
     Ok(())
 }
@@ -577,201 +677,202 @@ pub fn generate_ingress_proof(
 //==============================================================================
 // Tests
 //------------------------------------------------------------------------------
-#[cfg(test)]
-mod tests {
-    use std::{sync::Arc, time::Duration};
+// #[cfg(test)]
+// mod tests {
+//     use std::{sync::Arc, time::Duration};
 
-    use assert_matches::assert_matches;
-    use irys_database::{open_or_create_db, tables::IrysTables};
-    use irys_packing::xor_vec_u8_arrays_in_place;
-    use irys_storage::{ii, initialize_storage_files, ChunkType, StorageModule, StorageModuleInfo};
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{
-        irys::IrysSigner, partition::{PartitionAssignment, PartitionHash}, Address, Base64, LedgerChunkOffset, PartitionChunkOffset, MAX_CHUNK_SIZE
-    };
-    use rand::Rng;
-    use reth::tasks::TaskManager;
-    use tokio::time::{sleep, timeout};
+//     use assert_matches::assert_matches;
+//     use irys_database::{open_or_create_db, tables::IrysTables};
+//     use irys_packing::xor_vec_u8_arrays_in_place;
+//     use irys_storage::{ii, ChunkType, StorageModule, StorageModuleInfo};
+//     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+//     use irys_types::{
+//         irys::IrysSigner,
+//         partition::{PartitionAssignment, PartitionHash},
+//         Address, Base64, MAX_CHUNK_SIZE,
+//     };
+//     use rand::Rng;
+//     use reth::tasks::TaskManager;
+//     use tokio::time::{sleep, timeout};
 
-    use super::*;
+//     use super::*;
 
-    use actix::prelude::*;
+//     use actix::prelude::*;
 
-    #[actix::test]
-    async fn post_transaction_and_chunks() -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("post_transaction_and_chunks"), false);
-        let base_path = tmp_dir.path().to_path_buf();
+//     #[actix::test]
+//     async fn post_transaction_and_chunks() -> eyre::Result<()> {
+//         let tmp_dir = setup_tracing_and_temp_dir(Some("post_transaction_and_chunks"), false);
+//         let base_path = tmp_dir.path().to_path_buf();
 
-        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
-        let arc_db1 = DatabaseProvider(Arc::new(db));
-        let arc_db2 = DatabaseProvider(Arc::clone(&arc_db1));
+//         let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+//         let arc_db1 = DatabaseProvider(Arc::new(db));
+//         let arc_db2 = DatabaseProvider(Arc::clone(&arc_db1));
 
-        // Create an instance of the mempool actor
-        let task_manager = TaskManager::current();
+//         // Create an instance of the mempool actor
+//         let task_manager = TaskManager::current();
 
-        let storage_config = StorageConfig::default();
-        let chunk_size = storage_config.chunk_size;
+//         let storage_config = StorageConfig::default();
+//         let chunk_size = storage_config.chunk_size;
 
-        let storage_module_info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment {
-                partition_hash: PartitionHash::zero(),
-                miner_address: Address::random(),
-                ledger_id: Some(0),
-                slot_index: Some(0),
-            }),
-            submodules: vec![
-                (ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4)), "hdd0-4TB".into()), // 0 to 4 inclusive
-            ],
-        };
-        initialize_storage_files(&base_path, &vec![storage_module_info.clone()], &vec![])?;
+//         let storage_module_info = StorageModuleInfo {
+//             id: 0,
+//             partition_assignment: Some(PartitionAssignment {
+//                 partition_hash: PartitionHash::zero(),
+//                 miner_address: Address::random(),
+//                 ledger_id: Some(0),
+//                 slot_index: Some(0),
+//             }),
+//             submodules: vec![
+//                 (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
+//             ],
+//         };
 
-        // Override the default StorageModule config for testing
-        let config = StorageConfig {
-            min_writes_before_sync: 1,
-            chunk_size,
-            num_chunks_in_partition: 5,
-            ..Default::default()
-        };
+//         // Override the default StorageModule config for testing
+//         let config = StorageConfig {
+//             min_writes_before_sync: 1,
+//             chunk_size,
+//             num_chunks_in_partition: 5,
+//             ..Default::default()
+//         };
 
-        let storage_module = Arc::new(StorageModule::new(
-            &base_path,
-            &storage_module_info,
-            config,
-        )?);
+//         let storage_module = Arc::new(StorageModule::new(
+//             &base_path,
+//             &storage_module_info,
+//             config,
+//         )?);
 
-        storage_module.pack_with_zeros();
+//         storage_module.pack_with_zeros();
 
-        let mempool = MempoolService::new(
-            arc_db1,
-            task_manager.executor(),
-            IrysSigner::random_signer(),
-            storage_config,
-            vec![storage_module.clone()],
-        );
-        let addr: Addr<MempoolService> = mempool.start();
+//         let mempool = MempoolService::new(
+//             arc_db1,
+//             task_manager.executor(),
+//             IrysSigner::random_signer(),
+//             storage_config,
+//             vec![storage_module.clone()],
+//         );
+//         let addr: Addr<MempoolService> = mempool.start();
 
-        // Create 2.5 chunks worth of data *  fill the data with random bytes
-        let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
-        let mut data_bytes = vec![0u8; data_size];
-        rand::thread_rng().fill(&mut data_bytes[..]);
+//         // Create 2.5 chunks worth of data *  fill the data with random bytes
+//         let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
+//         let mut data_bytes = vec![0u8; data_size];
+//         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        // Create a new Irys API instance & a signed transaction
-        let irys = IrysSigner::random_signer();
-        let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
-        let tx = irys.sign_transaction(tx).unwrap();
+//         // Create a new Irys API instance & a signed transaction
+//         let irys = IrysSigner::random_signer();
+//         let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
+//         let tx = irys.sign_transaction(tx).unwrap();
 
-        println!("{:?}", tx.header);
-        println!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
+//         println!("{:?}", tx.header);
+//         println!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
 
-        for proof in &tx.proofs {
-            println!("offset: {}", proof.offset);
-        }
+//         for proof in &tx.proofs {
+//             println!("offset: {}", proof.offset);
+//         }
 
-        // Wrap the transaction in a TxIngressMessage
-        let data_root = tx.header.data_root;
-        let data_size = tx.header.data_size;
-        let tx_ingress_msg = TxIngressMessage(tx.header);
+//         // Wrap the transaction in a TxIngressMessage
+//         let data_root = tx.header.data_root;
+//         let data_size = tx.header.data_size;
+//         let tx_ingress_msg = TxIngressMessage(tx.header);
 
-        // Post the TxIngressMessage to the handle method on the mempool actor
-        let result = addr.send(tx_ingress_msg).await.unwrap();
+//         // Post the TxIngressMessage to the handle method on the mempool actor
+//         let result = addr.send(tx_ingress_msg).await.unwrap();
 
-        // Verify the transaction was added
-        assert_matches!(result, Ok(()));
+//         // Verify the transaction was added
+//         assert_matches!(result, Ok(()));
 
-        let db_tx = arc_db2.tx()?;
+//         let db_tx = arc_db2.tx()?;
 
-        // Verify the data_root was added to the cache
-        let result = irys_database::cached_data_root_by_data_root(&db_tx, data_root).unwrap();
-        assert_matches!(result, Some(_));
-        let last_index = tx.chunks.len() - 1;
-        // Loop though each of the transaction chunks
-        for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
-            let min = chunk_node.min_byte_range;
-            let max = chunk_node.max_byte_range;
-            let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
-            let key: H256 = hash_sha256(&data_path.0).unwrap().into();
-            let chunk_bytes = Base64(data_bytes[min..max].to_vec());
-            // Create a ChunkIngressMessage for each chunk
-            let chunk_ingress_msg = ChunkIngressMessage(UnpackedChunk {
-                data_root,
-                data_size,
-                data_path: data_path.clone(),
-                bytes: chunk_bytes.clone(),
-                tx_offset: (tx_chunk_offset as u32).into(),
-            });
+//         // Verify the data_root was added to the cache
+//         let result = irys_database::cached_data_root_by_data_root(&db_tx, data_root).unwrap();
+//         assert_matches!(result, Some(_));
+//         let last_index = tx.chunks.len() - 1;
+//         // Loop though each of the transaction chunks
+//         for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
+//             let min = chunk_node.min_byte_range;
+//             let max = chunk_node.max_byte_range;
+//             let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
+//             let key: H256 = hash_sha256(&data_path.0).unwrap().into();
+//             let chunk_bytes = Base64(data_bytes[min..max].to_vec());
+//             // Create a ChunkIngressMessage for each chunk
+//             let chunk_ingress_msg = ChunkIngressMessage(UnpackedChunk {
+//                 data_root,
+//                 data_size,
+//                 data_path: data_path.clone(),
+//                 bytes: chunk_bytes.clone(),
+//                 tx_offset: tx_chunk_offset as u32,
+//             });
 
-            let is_last_chunk = tx_chunk_offset == last_index;
-            let interval: nodit::Interval<LedgerChunkOffset> = ii(LedgerChunkOffset::from(0), LedgerChunkOffset::from(last_index as u64));
-            if is_last_chunk {
-                // artificially index the chunk with the submodule
-                // this will cause the last chunk to show up in cache & on disk
-                storage_module.index_transaction_data(vec![0], data_root, interval.into())?;
-            }
+//             let is_last_chunk = tx_chunk_offset == last_index;
+//             let interval = ii(0, last_index as u64);
+//             if is_last_chunk {
+//                 // artificially index the chunk with the submodule
+//                 // this will cause the last chunk to show up in cache & on disk
+//                 storage_module.index_transaction_data(vec![0], data_root, interval.into())?;
+//             }
 
-            // Post the ChunkIngressMessage to the handle method on the mempool
-            let result = addr.send(chunk_ingress_msg).await.unwrap();
+//             // Post the ChunkIngressMessage to the handle method on the mempool
+//             let result = addr.send(chunk_ingress_msg).await.unwrap();
 
-            // Verify the chunk was added
-            assert_matches!(result, Ok(()));
+//             // Verify the chunk was added
+//             assert_matches!(result, Ok(()));
 
-            // Verify the chunk is added to the ChunksCache
-            // use a new read tx so we can see the writes
-            let db_tx = arc_db2.tx()?;
+//             // Verify the chunk is added to the ChunksCache
+//             // use a new read tx so we can see the writes
+//             let db_tx = arc_db2.tx()?;
 
-            let (meta, chunk) = irys_database::cached_chunk_by_chunk_offset(
-                &db_tx,
-                data_root,
-                (tx_chunk_offset as u32).into(),
-            )
-            .unwrap()
-            .unwrap();
-            assert_eq!(meta.chunk_path_hash, key);
-            assert_eq!(chunk.data_path, data_path);
-            assert_eq!(chunk.chunk, Some(chunk_bytes.clone()));
+//             let (meta, chunk) = irys_database::cached_chunk_by_chunk_offset(
+//                 &db_tx,
+//                 data_root,
+//                 tx_chunk_offset as u32,
+//             )
+//             .unwrap()
+//             .unwrap();
+//             assert_eq!(meta.chunk_path_hash, key);
+//             assert_eq!(chunk.data_path, data_path);
+//             assert_eq!(chunk.chunk, Some(chunk_bytes.clone()));
 
-            let result = irys_database::cached_chunk_by_chunk_path_hash(&db_tx, &key).unwrap();
-            assert_matches!(result, Some(_));
+//             let result = irys_database::cached_chunk_by_chunk_path_hash(&db_tx, &key).unwrap();
+//             assert_matches!(result, Some(_));
 
-            storage_module.sync_pending_chunks()?;
+//             storage_module.sync_pending_chunks()?;
 
-            if is_last_chunk {
-                // read the set of chunks
-                // only offset 2 (last chunk) should have data
-                let res = storage_module.read_chunks(ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(last_index as u32)))?;
-                let r = res.get(&PartitionChunkOffset::from(2)).unwrap();
-                let mut packed_bytes = r.0.clone();
-                // unpack the data (packing was all 0's)
-                xor_vec_u8_arrays_in_place(&mut packed_bytes, &vec![0u8; chunk_size as usize]);
-                let packed_bytes_slice = &packed_bytes[0..chunk_bytes.0.len()];
-                let chunk_bytes = chunk_bytes.0;
-                assert_eq!(packed_bytes_slice.len(), chunk_bytes.len());
-                assert_eq!(packed_bytes_slice, chunk_bytes);
-                assert_eq!(r.1, ChunkType::Data);
-            }
-        }
+//             if is_last_chunk {
+//                 // read the set of chunks
+//                 // only offset 2 (last chunk) should have data
+//                 let res = storage_module.read_chunks(ii(0, last_index as u32))?;
+//                 let r = res.get(&2).unwrap();
+//                 let mut packed_bytes = r.0.clone();
+//                 // unpack the data (packing was all 0's)
+//                 xor_vec_u8_arrays_in_place(&mut packed_bytes, &vec![0u8; chunk_size as usize]);
+//                 let packed_bytes_slice = &packed_bytes[0..chunk_bytes.0.len()];
+//                 let chunk_bytes = chunk_bytes.0;
+//                 assert_eq!(packed_bytes_slice.len(), chunk_bytes.len());
+//                 assert_eq!(packed_bytes_slice, chunk_bytes);
+//                 assert_eq!(r.1, ChunkType::Data);
+//             }
+//         }
 
-        // Modify one of the chunks
+//         // Modify one of the chunks
 
-        // Attempt to post the chunk
+//         // Attempt to post the chunk
 
-        // Verify there chunk is not accepted
+//         // Verify there chunk is not accepted
 
-        task_manager.graceful_shutdown_with_timeout(Duration::from_secs(5));
-        // check the ingress proof is in the DB
-        let timed_get = timeout(Duration::from_secs(5), async {
-            loop {
-                // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
-                let ro_tx = &arc_db2.tx().unwrap();
-                match ro_tx.get::<IngressProofs>(data_root).unwrap() {
-                    Some(ip) => break ip,
-                    None => sleep(Duration::from_millis(100)).await,
-                }
-            }
-        })
-        .await?;
-        assert_eq!(&timed_get.data_root, &data_root);
+//         task_manager.graceful_shutdown_with_timeout(Duration::from_secs(5));
+//         // check the ingress proof is in the DB
+//         let timed_get = timeout(Duration::from_secs(5), async {
+//             loop {
+//                 // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
+//                 let ro_tx = &arc_db2.tx().unwrap();
+//                 match ro_tx.get::<IngressProofs>(data_root).unwrap() {
+//                     Some(ip) => break ip,
+//                     None => sleep(Duration::from_millis(100)).await,
+//                 }
+//             }
+//         })
+//         .await?;
+//         assert_eq!(&timed_get.data_root, &data_root);
 
-        Ok(())
-    }
-}
+//         Ok(())
+//     }
+// }

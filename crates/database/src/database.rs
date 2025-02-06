@@ -5,7 +5,7 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders,
-    PartitionHashes, PartitionHashesByDataRoot,
+    PartitionHashes,
 };
 
 use irys_types::partition::PartitionHash;
@@ -14,10 +14,14 @@ use irys_types::{
     IrysTransactionId, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
 };
 use reth_db::cursor::DbDupCursorRO;
+use reth_db::mdbx::tx::Tx;
+use reth_db::mdbx::RO;
+use reth_db::table::Table;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
 use reth_db::{
     create_db as reth_create_db,
+    cursor::*,
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     ClientVersion, DatabaseEnv, DatabaseError,
 };
@@ -194,50 +198,20 @@ pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
     tx.get::<CachedChunks>(*key)
 }
 
-/// Associates a partition hash with a data root, appending to existing
-/// partition hashes if present or creating a new list if not. Indicates
-/// that chunks of this data overlap with the partition.
-pub fn assign_data_root<T: DbTxMut + DbTx>(
-    tx: &T,
-    data_root: DataRoot,
-    partition_hash: PartitionHash,
-) -> eyre::Result<()> {
-    let partition_hashes = if let Some(mut phs) = get_partition_hashes_by_data_root(tx, data_root)?
-    {
-        if !phs.0.contains(&partition_hash) {
-            phs.0.push(partition_hash)
-        };
-        phs
-    } else {
-        PartitionHashes(vec![partition_hash])
-    };
-    set_partition_hashes_by_data_root(tx, data_root, partition_hashes)?;
-    Ok(())
-}
-
-/// Stores list of partition hashes for a data root in the database
-pub fn set_partition_hashes_by_data_root<T: DbTxMut>(
-    tx: &T,
-    data_root: DataRoot,
-    partition_hashes: PartitionHashes,
-) -> eyre::Result<()> {
-    Ok(tx.put::<PartitionHashesByDataRoot>(data_root, partition_hashes)?)
-}
-
-/// Retrieves list of partition hashes for a data root from the database
-pub fn get_partition_hashes_by_data_root<T: DbTx>(
-    tx: &T,
-    data_root: DataRoot,
-) -> eyre::Result<Option<PartitionHashes>> {
-    Ok(tx.get::<PartitionHashesByDataRoot>(data_root)?)
-}
-
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
 pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U256> {
     Ok(tx
         .get::<PlainAccountState>(address)?
         .map(|a| U256::from_little_endian(a.balance.as_le_slice()))
         .unwrap_or(U256::from(0)))
+}
+
+pub fn walk_all<T: Table>(
+    read_tx: &Tx<RO>,
+) -> eyre::Result<Vec<(<T as Table>::Key, <T as Table>::Value)>> {
+    let mut read_cursor = read_tx.cursor_read::<T>()?;
+    let walker = read_cursor.walk(None)?;
+    Ok(walker.collect::<Result<Vec<_>, _>>()?)
 }
 
 #[cfg(test)]

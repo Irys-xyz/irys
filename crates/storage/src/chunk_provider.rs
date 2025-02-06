@@ -142,8 +142,9 @@ impl ChunkProvider {
 
 #[cfg(test)]
 mod tests {
+    use crate::StorageModuleInfo;
+
     use super::*;
-    use crate::{initialize_storage_files, StorageModuleInfo};
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -165,7 +166,6 @@ mod tests {
         let base_path = tmp_dir.path().to_path_buf();
         let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
         let arc_db = DatabaseProvider(Arc::new(db));
-        initialize_storage_files(&base_path, &infos, &vec![])?;
 
         // Override the default StorageModule config for testing
         let config = StorageConfig {
