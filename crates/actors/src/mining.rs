@@ -70,7 +70,10 @@ impl PartitionMiningActor {
             debug!("Step {} already processed or next consecutive one", step);
             Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         } else {
-            debug!("Non consecutive step {} may need to reconstruct ranges", step);
+            debug!(
+                "Non consecutive step {} may need to reconstruct ranges",
+                step
+            );
             // calculate the nearest step lower or equal to step where recall ranges are reinitialized, as this is the step from where ranges will be recalculated
             let reset_step = self.ranges.reset_step(step);
             debug!(
@@ -89,9 +92,9 @@ impl PartitionMiningActor {
                 next_ranges_step
             };
             // check if we need to reconstruct steps, that is inverval start..=step-1 is not empty
-            if start <= step - 1 {  
+            if start <= step - 1 {
                 debug!("Getting stored steps from ({}..={})", start, step - 1);
-                let vdf_steps = self.steps_guard.read();                
+                let vdf_steps = self.steps_guard.read();
                 let steps = vdf_steps.get_steps(ii(start, step - 1))?; // -1 because last step is calculated in next get_recall_range call, with its corresponding argument seed
                 self.ranges.reconstruct(&steps, partition_hash);
             };
