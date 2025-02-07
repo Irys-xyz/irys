@@ -28,7 +28,6 @@ use tracing::{debug, warn};
 pub struct PackingRequest {
     pub storage_module: Arc<StorageModule>,
     pub chunk_range: PartitionChunkRange,
-    pub packing_ready: Option<Recipient<MiningControl>>,
 }
 
 pub type PackingJobs = Arc<RwLock<VecDeque<PackingRequest>>>;
@@ -106,7 +105,6 @@ impl PackingActor {
             let PackingRequest {
                 storage_module,
                 chunk_range,
-                packing_ready,
             } = next_range;
 
             let assignment = match storage_module.partition_assignment {
@@ -220,10 +218,6 @@ impl PackingActor {
                 _ => unimplemented!(),
             }
 
-            packing_ready.map(|r| { 
-                debug!(target: "irys::packing", "Notifying mining control for SM {} --------------------------------------------------------------------------------------------- ", &storage_module_id);
-                r.do_send(MiningControl(true)) 
-            });
             // Remove from queue once complete
             let _ = self.pending_jobs.write().unwrap().pop_front();
         }
@@ -373,7 +367,6 @@ mod tests {
         let request = PackingRequest {
             storage_module: storage_module.clone(),
             chunk_range: ii(0, 3).into(),
-            packing_ready: None,
         };
         // Create an instance of the mempool actor
         let task_manager = TaskManager::current();

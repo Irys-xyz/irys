@@ -1,6 +1,6 @@
 use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
-    BroadcastDifficultyUpdate, BroadcastExpiration, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe
+    BroadcastDifficultyUpdate, BroadcastPartitionsExpiration, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe
 };
 use crate::packing::{self, PackingRequest};
 use crate::vdf_service::VdfStepsReadGuard;
@@ -253,22 +253,20 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
     }
 }
 
-impl Handler<BroadcastExpiration> for PartitionMiningActor {
+impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
     type Result = ();
 
-    fn handle(&mut self, msg: BroadcastExpiration, ctx: &mut Context<Self>) {
+    fn handle(&mut self, msg: BroadcastPartitionsExpiration, ctx: &mut Context<Self>) {
         self.storage_module.partition_hash().map(|partition_hash| {
             if msg.0.0.contains(&partition_hash) {
-                self.should_mine = false;
                 self.storage_module.get_all_intervals().iter().for_each(|interval| {
+                    debug!("Partition hash {}, packing interval {:?}", partition_hash, *interval);
                     self.packing_actor.do_send(
                             PackingRequest{
                                 storage_module: self.storage_module.clone(),
                                 chunk_range: PartitionChunkRange(*interval), 
-                                packing_ready: Some(ctx.address().recipient())
                             });
                 });
-                debug!("expired partition hash {} -----------------------------------------------------------------------------------------------------------------------", partition_hash);
             }    
         });
     }
@@ -291,7 +289,7 @@ impl Handler<MiningControl> for PartitionMiningActor {
     fn handle(&mut self, control: MiningControl, _ctx: &mut Context<Self>) -> Self::Result {
         let should_mine = control.into_inner();
         debug!(
-            "Setting should_mine to {} from {} -------------------------------------------------------------------------------------------------------------------------------------",
+            "Setting should_mine to {} from {}",
             &self.should_mine, &should_mine
         );
         self.should_mine = should_mine

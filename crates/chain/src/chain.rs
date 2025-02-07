@@ -440,7 +440,6 @@ pub async fn start_irys_node(
                             packing_actor_addr.do_send(PackingRequest {
                                 storage_module: sm.clone(),
                                 chunk_range: (*interval).into(),
-                                packing_ready: None,
                             })
                         })
                         .collect::<Vec<()>>();
