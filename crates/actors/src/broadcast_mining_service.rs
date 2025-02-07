@@ -115,7 +115,10 @@ impl Handler<BroadcastPartitionsExpiration> for BroadcastMiningService {
 
     fn handle(&mut self, msg: BroadcastPartitionsExpiration, _: &mut Context<Self>) {
         self.subscribers.retain(|addr| addr.connected());
-        debug!("Broadcasting expiration, expired partition hashes: {:?}", msg.0);
+        debug!(
+            "Broadcasting expiration, expired partition hashes: {:?}",
+            msg.0
+        );
         for subscriber in &self.subscribers {
             subscriber.do_send(msg.clone());
         }

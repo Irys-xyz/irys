@@ -21,7 +21,7 @@ use tracing::{debug, error, trace, warn};
 use crate::block_index_service::{
     BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage,
 };
-use crate::broadcast_mining_service::{BroadcastPartitionsExpiration, BroadcastMiningService};
+use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
 
 /// Allows for overriding of the consensus parameters for ledgers and partitions
 #[derive(Debug, Clone)]
@@ -391,7 +391,9 @@ impl EpochServiceActor {
         }
 
         let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-        mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(expired_hashes.clone())));
+        mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
+            expired_hashes.clone(),
+        )));
 
         // Update expired data partitions assignments marking them as capacity partitions
         for partition_hash in expired_hashes {
@@ -724,11 +726,16 @@ mod tests {
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::{initialize_storage_files, StorageModule, StorageModuleVec};
-    use irys_testing_utils::utils::{setup_tracing_and_temp_dir};
+    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{Address, PartitionChunkRange, CONFIG};
     use tokio::time::sleep;
 
-    use crate::{mining::PartitionMiningActor, packing::{PackingActor, PackingRequest}, vdf_service::{VdfState, VdfStepsReadGuard}, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage};
+    use crate::{
+        mining::PartitionMiningActor,
+        packing::{PackingActor, PackingRequest},
+        vdf_service::{VdfState, VdfStepsReadGuard},
+        BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
+    };
 
     use super::*;
 
@@ -979,7 +986,7 @@ mod tests {
             num_blocks_in_epoch: 100, // this is harcoded in CONFIG, now way to move it in tests ?
             storage_config: storage_config.clone(),
         };
-        
+
         let mut epoch_service = EpochServiceActor::new(Some(config));
 
         // Process genesis message directly instead of through actor system
@@ -995,24 +1002,20 @@ mod tests {
         // Get the genesis storage modules and their assigned partitions
         let storage_module_infos = epoch_service.handle(GetGenesisStorageModulesMessage, &mut ctx);
 
-        let _ = initialize_storage_files(&base_path, &storage_module_infos, &vec![]);        
+        let _ = initialize_storage_files(&base_path, &storage_module_infos, &vec![]);
 
         let mut storage_modules: StorageModuleVec = Vec::new();
         // Create a list of storage modules wrapping the storage files
         for info in storage_module_infos {
             let arc_module = Arc::new(
-                StorageModule::new(
-                    &base_path,
-                    &info,
-                    storage_config.clone(),
-                )
-                // TODO: remove this unwrap
-                .unwrap(),
+                StorageModule::new(&base_path, &info, storage_config.clone())
+                    // TODO: remove this unwrap
+                    .unwrap(),
             );
             storage_modules.push(arc_module.clone());
             // arc_module.pack_with_zeros();
         }
-        
+
         let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
         let database_provider = DatabaseProvider(Arc::new(db));
 
@@ -1021,7 +1024,9 @@ mod tests {
         let closure_arc = arc_rwlock.clone();
 
         let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
-            let inner_result: eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> = Ok(None);
+            let inner_result: eyre::Result<
+                Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>,
+            > = Ok(None);
             Box::new(Some(inner_result)) as Box<dyn Any>
         }));
 
@@ -1050,7 +1055,7 @@ mod tests {
 
         let packing_addr = packing.start();
         let mut part_actors = Vec::new();
-        
+
         for sm in &storage_modules {
             let partition_mining_actor = PartitionMiningActor::new(
                 mining_address,
@@ -1063,29 +1068,27 @@ mod tests {
             );
 
             let part_arbiter = Arbiter::new();
-            let partition_address = PartitionMiningActor::start_in_arbiter(
-                &part_arbiter.handle(),
-                |_| partition_mining_actor,
-            );
+            let partition_address =
+                PartitionMiningActor::start_in_arbiter(&part_arbiter.handle(), |_| {
+                    partition_mining_actor
+                });
             debug!("starting miner partition hash {:?}", sm.partition_hash());
             part_actors.push(partition_address);
         }
 
-        let submit_partition_hash =
-            {
-                let partition_assignments_read = epoch_service.partition_assignments.read().unwrap();
-                let mut maybe_partition_hash = None;
-                for (partition_hash, assignment) in partition_assignments_read.data_partitions.iter() {
-                    if assignment.ledger_id == Some(Ledger::Submit.get_id()) {
-                        maybe_partition_hash = Some(partition_hash.clone());
-                        break;
-                    }
+        let submit_partition_hash = {
+            let partition_assignments_read = epoch_service.partition_assignments.read().unwrap();
+            let mut maybe_partition_hash = None;
+            for (partition_hash, assignment) in partition_assignments_read.data_partitions.iter() {
+                if assignment.ledger_id == Some(Ledger::Submit.get_id()) {
+                    maybe_partition_hash = Some(partition_hash.clone());
+                    break;
                 }
-                maybe_partition_hash.expect("There should be a partition assigned to submit ledger")
-            };        
+            }
+            maybe_partition_hash.expect("There should be a partition assigned to submit ledger")
+        };
 
-
-        let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.into()), &mut ctx);            
+        let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.into()), &mut ctx);
         // give computation time for broadcaster to receive and broadcast expiration
         sleep(Duration::from_secs(1)).await;
 
@@ -1105,8 +1108,15 @@ mod tests {
             }
         };
 
-        assert_eq!(pack_req.storage_module.partition_hash(), Some(submit_partition_hash) ,"Partition hashes should be equal");
-        assert_eq!(pack_req.chunk_range, PartitionChunkRange(ie(0, chunk_count as u32)) ,"The hole partition should be repacked");
+        assert_eq!(
+            pack_req.storage_module.partition_hash(),
+            Some(submit_partition_hash),
+            "Partition hashes should be equal"
+        );
+        assert_eq!(
+            pack_req.chunk_range,
+            PartitionChunkRange(ie(0, chunk_count as u32)),
+            "The hole partition should be repacked"
+        );
     }
-
 }

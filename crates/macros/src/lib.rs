@@ -35,7 +35,7 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
         Ok(path) => {
             println!("USING CONFIG FILE: {}", path);
             path
-        },
+        }
         Err(_) => {
             println!("USING DEFAULT CONFIG");
             // Use the provided default if the environment variable is not set

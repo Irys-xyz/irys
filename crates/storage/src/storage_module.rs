@@ -450,7 +450,6 @@ impl StorageModule {
         set.into_iter().collect::<Vec<_>>()
     }
 
-
     /// Queues chunk data for later disk write. Chunks are batched for efficiency
     /// and written during periodic sync operations.
     pub fn write_chunk(

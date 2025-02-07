@@ -1,6 +1,7 @@
 use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
-    BroadcastDifficultyUpdate, BroadcastPartitionsExpiration, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe
+    BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService,
+    BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
 };
 use crate::packing::{self, PackingRequest};
 use crate::vdf_service::VdfStepsReadGuard;
@@ -258,16 +259,21 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
 
     fn handle(&mut self, msg: BroadcastPartitionsExpiration, ctx: &mut Context<Self>) {
         self.storage_module.partition_hash().map(|partition_hash| {
-            if msg.0.0.contains(&partition_hash) {
-                self.storage_module.get_all_intervals().iter().for_each(|interval| {
-                    debug!("Partition hash {}, packing interval {:?}", partition_hash, *interval);
-                    self.packing_actor.do_send(
-                            PackingRequest{
-                                storage_module: self.storage_module.clone(),
-                                chunk_range: PartitionChunkRange(*interval), 
-                            });
-                });
-            }    
+            if msg.0 .0.contains(&partition_hash) {
+                self.storage_module
+                    .get_all_intervals()
+                    .iter()
+                    .for_each(|interval| {
+                        debug!(
+                            "Partition hash {}, packing interval {:?}",
+                            partition_hash, *interval
+                        );
+                        self.packing_actor.do_send(PackingRequest {
+                            storage_module: self.storage_module.clone(),
+                            chunk_range: PartitionChunkRange(*interval),
+                        });
+                    });
+            }
         });
     }
 }
@@ -351,7 +357,9 @@ mod tests {
                 lck.replace(solution);
             }
 
-            let inner_result: eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> = Ok(None);
+            let inner_result: eyre::Result<
+                Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>,
+            > = Ok(None);
             Box::new(Some(inner_result)) as Box<dyn Any>
         }));
 
