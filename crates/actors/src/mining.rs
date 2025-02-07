@@ -4,7 +4,6 @@ use crate::broadcast_mining_service::{
     BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
 };
 use crate::packing::{PackingRequest};
-use crate::vdf_service::VdfStepsReadGuard;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use irys_efficient_sampling::Ranges;
@@ -12,7 +11,8 @@ use irys_storage::{ie, ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
-use irys_types::{Address, H256List, PartitionChunkOffset, PartitionChunkRange};
+use irys_types::{Address, AtomicVdfStepNumber, H256List, PartitionChunkOffset, PartitionChunkRange};
+use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -28,6 +28,7 @@ pub struct PartitionMiningActor {
     difficulty: U256,
     ranges: Ranges,
     steps_guard: VdfStepsReadGuard,
+    atomic_global_step_number: AtomicVdfStepNumber,
 }
 
 /// Allows this actor to live in the the local service registry
@@ -42,6 +43,7 @@ impl PartitionMiningActor {
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStepsReadGuard,
+        atomic_global_step_number: AtomicVdfStepNumber,
     ) -> Self {
         Self {
             mining_address,
@@ -58,6 +60,7 @@ impl PartitionMiningActor {
             should_mine: start_mining,
             difficulty: U256::zero(),
             steps_guard,
+            atomic_global_step_number,
         }
     }
 
@@ -67,16 +70,40 @@ impl PartitionMiningActor {
         seed: &H256,
         partition_hash: &H256,
     ) -> eyre::Result<u64> {
-        let vdf_steps = self.steps_guard.read();
-        if self.ranges.last_step_num + 1 >= step {
+        let next_ranges_step = self.ranges.last_step_num + 1; // next consecutive step expected to be calculated by ranges
+        if next_ranges_step >= step {
             debug!("Step {} already processed or next consecutive one", step);
             Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         } else {
-            // This code is not needed for just one node, but will be needed for multiple nodes
-            warn!("Non consecutive Step {} need to reconstruct ranges", step);
-            let steps = vdf_steps.get_steps(ii(self.ranges.last_step_num + 1, step - 1))?;
-            self.ranges.reconstruct(&steps, partition_hash);
-            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
+            debug!(
+                "Non consecutive step {} may need to reconstruct ranges",
+                step
+            );
+            // calculate the nearest step lower or equal to step where recall ranges are reinitialized, as this is the step from where ranges will be recalculated
+            let reset_step = self.ranges.reset_step(step);
+            debug!(
+                "Near reset step is {} num recall ranges in partition {}",
+                reset_step, self.ranges.num_recall_ranges_in_partition
+            );
+            let start = if reset_step > next_ranges_step {
+                debug!(
+                    "Step {} is too far ahead of last processed step {}, reinitializing ranges ...",
+                    step, self.ranges.last_step_num
+                );
+                self.ranges.reinitialize();
+                self.ranges.last_step_num = reset_step - 1; // advance last step number calculated by ranges to (reset_step - 1), so ranges next step will be reset_step line
+                reset_step
+            } else {
+                next_ranges_step
+            };
+            // check if we need to reconstruct steps, that is inverval start..=step-1 is not empty
+            if start <= step - 1 {
+                debug!("Getting stored steps from ({}..={})", start, step - 1);
+                let vdf_steps = self.steps_guard.read();
+                let steps = vdf_steps.get_steps(ii(start, step - 1))?; // -1 because last step is calculated in next get_recall_range call, with its corresponding argument seed
+                self.ranges.reconstruct(&steps, partition_hash);
+            };
+            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64) // calculates step range
         }
     }
 
@@ -217,6 +244,28 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
             return;
         }
 
+        let current_step = self
+            .atomic_global_step_number
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        debug!(
+            "Mining partition {} with seed {:?} step number {} current step {}",
+            self.storage_module.partition_hash().unwrap(),
+            seed,
+            msg.global_step,
+            current_step
+        );
+
+        let lag = current_step - msg.global_step;
+
+        if lag >= 3 {
+            warn!(
+                "Storage module {} is {} steps behind in mining. Skipping.",
+                self.storage_module.id, lag
+            );
+            return;
+        }
+
         debug!(
             "Partition {} -- looking for solution with difficulty >= {}",
             self.storage_module.partition_hash().unwrap(),
@@ -315,24 +364,44 @@ mod tests {
     use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
     use crate::mining::{PartitionMiningActor, Seed};
     use crate::packing::PackingActor;
-    use crate::vdf_service::{GetVdfStateMessage, VdfService, VdfStepsReadGuard};
+    use crate::vdf_service::{GetVdfStateMessage, VdfSeed, VdfService};
     use actix::actors::mocker::Mocker;
-    use actix::{Actor, Addr, ArbiterService, Recipient};
+    use actix::{Actor, Addr, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
-    use irys_storage::{
-        ie, initialize_storage_files, read_info_file, StorageModule, StorageModuleInfo,
-    };
+    use irys_storage::{ie, PackingParams, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::{
         app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
-    use irys_types::{H256List, IrysBlockHeader};
+    use irys_types::{partition, H256List, IrysBlockHeader};
+    use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
     use std::any::Any;
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
     use tokio::time::sleep;
+
+    fn get_mocked_block_producer(
+        closure_arc: Arc<RwLock<Option<SolutionContext>>>,
+    ) -> BlockProducerMockActor {
+        let closure_arc = closure_arc.clone();
+        BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
+            let solution_message: SolutionFoundMessage =
+                *msg.downcast::<SolutionFoundMessage>().unwrap();
+            let solution = solution_message.0;
+
+            {
+                let mut lck = closure_arc.write().unwrap();
+                lck.replace(solution);
+            }
+
+            let inner_result = None::<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>;
+            Box::new(Some(inner_result)) as Box<dyn Any>
+        }))
+    }
 
     #[actix_rt::test]
     async fn test_solution() {
@@ -347,21 +416,7 @@ mod tests {
         let arc_rwlock = Arc::new(rwlock);
         let closure_arc = arc_rwlock.clone();
 
-        let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
-            let solution_message: SolutionFoundMessage =
-                *msg.downcast::<SolutionFoundMessage>().unwrap();
-            let solution = solution_message.0;
-
-            {
-                let mut lck = closure_arc.write().unwrap();
-                lck.replace(solution);
-            }
-
-            let inner_result: eyre::Result<
-                Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>,
-            > = Ok(None);
-            Box::new(Some(inner_result)) as Box<dyn Any>
-        }));
+        let mocked_block_producer = get_mocked_block_producer(closure_arc);
 
         let packing = Mocker::<PackingActor>::mock(Box::new(move |msg, _ctx| {
             Box::new(Some(())) as Box<dyn Any>
@@ -400,16 +455,16 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        let _ = initialize_storage_files(&base_path, &infos, &vec![]);
-
-        // Verify the StorageModuleInfo file was crated in the base path
-        let file_infos = read_info_file(&base_path.join("StorageModule_0.json")).unwrap();
-        assert_eq!(file_infos, infos[0]);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
         let storage_module =
             Arc::new(StorageModule::new(&base_path, storage_module_info, storage_config).unwrap());
+
+        // Verify the packing params file was crated in the submodule
+        let params_path = base_path.join("hdd0").join("packing_params.toml");
+        let params = PackingParams::from_toml(params_path).expect("packing params to load");
+        assert_eq!(params.partition_hash, Some(partition_hash));
 
         // Pack the storage module
         storage_module.pack_with_zeros();
@@ -447,6 +502,8 @@ mod tests {
         let vdf_steps_guard: VdfStepsReadGuard =
             vdf_service.send(GetVdfStateMessage).await.unwrap();
 
+        let atomic_global_step_number = Arc::new(AtomicU64::new(1));
+
         let partition_mining_actor = PartitionMiningActor::new(
             mining_address,
             database_provider.clone(),
@@ -455,6 +512,7 @@ mod tests {
             storage_module,
             true,
             vdf_steps_guard.clone(),
+            atomic_global_step_number,
         );
 
         let seed: Seed = Seed(H256::random());
@@ -511,5 +569,108 @@ mod tests {
             solution.data_path,
             "Not expected partition"
         );
+    }
+
+    #[actix_rt::test]
+    async fn test_recall_range_reinit() {
+        let mining_address = Address::random();
+
+        let partition_hash = H256::random();
+
+        let infos = vec![StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: partition_hash.clone(),
+                miner_address: mining_address,
+                ledger_id: Some(0),
+                slot_index: Some(0), // Submit Ledger Slot 0
+            }),
+            submodules: vec![
+                (ie(0, 10), "hdd0".into()), // 10 chunks
+            ],
+        }];
+
+        let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+        let database_provider = DatabaseProvider(Arc::new(db));
+
+        // Override the default StorageModule config for testing
+        let config = StorageConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: 10,
+            num_chunks_in_recall_range: 2, // Recall range size is 5 chunks
+            miner_address: mining_address.clone(),
+            ..Default::default()
+        };
+
+        // Create a StorageModule with the specified submodules and config
+        let storage_module_info = &infos[0];
+        let storage_module =
+            Arc::new(StorageModule::new(&base_path, storage_module_info, config.clone()).unwrap());
+
+        let rwlock: RwLock<Option<SolutionContext>> = RwLock::new(None);
+        let arc_rwlock = Arc::new(rwlock);
+        let closure_arc = arc_rwlock.clone();
+        let mocked_block_producer = get_mocked_block_producer(closure_arc);
+        let block_producer_actor_addr: Addr<BlockProducerMockActor> = mocked_block_producer.start();
+        let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
+        let mocked_addr = MockedBlockProducerAddr(recipient);
+
+        let vdf_state = VdfState {
+            global_step: 0,
+            max_seeds_num: 5,
+            seeds: VecDeque::new(),
+        };
+
+        let vdf_service = VdfService::from_atomic_state(Arc::new(RwLock::new(vdf_state))).start();
+        let vdf_steps_guard: VdfStepsReadGuard =
+            vdf_service.send(GetVdfStateMessage).await.unwrap();
+
+        let hash: H256 = H256::random();
+        vdf_service.do_send(VdfSeed(Seed(hash)));
+        vdf_service.do_send(VdfSeed(Seed(hash)));
+        vdf_service.do_send(VdfSeed(Seed(hash)));
+        vdf_service.do_send(VdfSeed(Seed(hash)));
+        vdf_service.do_send(VdfSeed(Seed(hash))); //5
+                                                  // reset
+        vdf_service.do_send(VdfSeed(Seed(hash))); //6
+        vdf_service.do_send(VdfSeed(Seed(hash))); //7
+
+        sleep(Duration::from_secs(1)).await;
+
+        let atomic_global_step_number = Arc::new(AtomicU64::new(1));
+
+        let packing = Mocker::<PackingActor>::mock(Box::new(move |msg, _ctx| {
+            Box::new(Some(())) as Box<dyn Any>
+        }));
+
+
+        let mut partition_mining_actor = PartitionMiningActor::new(
+            mining_address,
+            database_provider.clone(),
+            mocked_addr.0,
+            packing.start().recipient(),            
+            storage_module,
+            false,
+            vdf_steps_guard.clone(),
+            atomic_global_step_number,
+        );
+
+        let range = partition_mining_actor
+            .get_recall_range(7, &hash, &partition_hash)
+            .unwrap();
+
+        let mut ranges = Ranges::new(5);
+        ranges.get_recall_range(1, &hash, &partition_hash);
+        ranges.get_recall_range(2, &hash, &partition_hash);
+        ranges.get_recall_range(3, &hash, &partition_hash);
+        ranges.get_recall_range(4, &hash, &partition_hash);
+        ranges.get_recall_range(5, &hash, &partition_hash);
+        // reset
+        ranges.get_recall_range(6, &hash, &partition_hash);
+        let range2 = ranges.get_recall_range(7, &hash, &partition_hash) as u64;
+
+        assert_eq!(range, range2, "Ranges should be equal");
     }
 }

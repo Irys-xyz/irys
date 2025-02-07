@@ -10,6 +10,7 @@ pub mod epoch_service;
 pub mod mempool_service;
 pub mod mining;
 pub mod packing;
+pub mod reth_service;
 pub mod validation_service;
 pub mod vdf_service;
 

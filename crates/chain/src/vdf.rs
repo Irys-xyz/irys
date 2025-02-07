@@ -3,7 +3,11 @@ use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     vdf_service::{VdfSeed, VdfService},
 };
-use irys_types::{block_production::Seed, vdf_config::VDFStepsConfig, H256List, H256, U256};
+use irys_types::{
+    block_production::Seed,
+    vdf_config::{AtomicVdfStepNumber, VDFStepsConfig},
+    H256List, H256, U256,
+};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::Receiver;
@@ -19,6 +23,7 @@ pub fn run_vdf(
     shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
     vdf_service: Addr<VdfService>,
+    atomic_vdf_global_step: AtomicVdfStepNumber,
 ) {
     let mut hasher = Sha256::new();
     let mut hash: H256 = seed;
@@ -46,6 +51,7 @@ pub fn run_vdf(
         );
 
         global_step_number += 1;
+        atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
 
         let elapsed = now.elapsed();
         debug!("Vdf step duration: {:.2?}", elapsed);
@@ -86,11 +92,14 @@ pub fn run_vdf(
 mod tests {
     use super::*;
     use actix::*;
-    use irys_actors::vdf_service::{GetVdfStateMessage, VdfStepsReadGuard};
+    use irys_actors::vdf_service::GetVdfStateMessage;
     use irys_types::*;
-    use irys_vdf::{vdf_sha_verification, vdf_steps_are_valid};
+    use irys_vdf::{vdf_sha_verification, vdf_state::VdfStepsReadGuard, vdf_steps_are_valid};
     use nodit::interval::ii;
-    use std::{sync::mpsc, time::Duration};
+    use std::{
+        sync::{atomic::AtomicU64, mpsc, Arc},
+        time::Duration,
+    };
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
 
@@ -160,6 +169,8 @@ mod tests {
         let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
+        let atomic_global_step_number = Arc::new(AtomicU64::new(0));
+
         let vdf_thread_handler = std::thread::spawn(move || {
             run_vdf(
                 vdf_config2,
@@ -170,6 +181,7 @@ mod tests {
                 shutdown_rx,
                 broadcast_mining_service,
                 vdf_service,
+                atomic_global_step_number,
             )
         });
 
@@ -216,7 +228,7 @@ mod tests {
         };
 
         assert!(
-            vdf_steps_are_valid(&vdf_info, &vdf_config).is_ok(),
+            vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_steps).is_ok(),
             "Invalid VDF"
         );
 

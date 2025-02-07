@@ -234,13 +234,13 @@ impl PdAccessListArgSerde for ByteRangeSpecifier {
     where
         Self: Sized,
     {
-        let len_buf = bytes[6..=10].try_into()?;
         Ok(ByteRangeSpecifier {
             index: bytes[0],
             chunk_offset: u16::from_le_bytes(bytes[1..=2].try_into()?),
             byte_offset: U18::try_from_le_slice(bytes[3..=5].try_into()?)
                 .ok_or_eyre("U18 out of bounds")?,
-            length: U34::try_from_le_slice(len_buf).ok_or_eyre("U34 out of bounds")?,
+            length: U34::try_from_le_slice(bytes[6..=10].try_into()?)
+                .ok_or_eyre("U34 out of bounds")?,
         })
     }
 }

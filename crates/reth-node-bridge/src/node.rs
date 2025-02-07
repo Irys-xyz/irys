@@ -135,6 +135,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     irys_config: Arc<IrysNodeConfig>,
     tables: &[T],
     provider: IrysRethProvider,
+    latest_block: u64,
 ) -> eyre::Result<RethNodeExitHandle> {
     let mut os_args: Vec<String> = std::env::args().collect();
     let bp = os_args.remove(0);
@@ -266,8 +267,8 @@ pub async fn run_node<T: HasName + HasTableType>(
     // from ext/reth/bin/reth/src/main.rs
 
     let engine_tree_config = TreeConfig::default()
-        .with_persistence_threshold(engine_args.persistence_threshold)
-        .with_memory_block_buffer_target(engine_args.memory_block_buffer_target);
+        .with_persistence_threshold(0 /* engine_args.persistence_threshold */) // always persist to disk
+        .with_memory_block_buffer_target(0 /* engine_args.memory_block_buffer_target */);
 
     let handle =
         builder
@@ -295,7 +296,8 @@ pub async fn run_node<T: HasName + HasTableType>(
                     builder.task_executor().clone(),
                     builder.config().datadir(),
                     engine_tree_config,
-                    irys_provider
+                    irys_provider,
+                    latest_block
                 );
                 builder.launch_with(launcher)
             })

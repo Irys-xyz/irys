@@ -226,8 +226,11 @@ impl Ledger {
         *self as u32
     }
 
-    // Takes "perm" or some term e.g. "1year"
+    // Takes "perm" or some term e.g. "1year", or an integer ID
     pub fn from_url(s: &str) -> eyre::Result<Self> {
+        if let Ok(ledger_id) = s.parse::<u32>() {
+            return Ledger::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
+        }
         match s {
             "perm" => eyre::Result::Ok(Self::Publish),
             "5days" => eyre::Result::Ok(Self::Submit),
@@ -254,7 +257,18 @@ impl TryFrom<u32> for Ledger {
     }
 }
 
-/// Provides a way to enforce accessing ledgers by their [Ledger] enum.
+/// A container for managing permanent and term ledgers with type-safe access
+/// through the [Ledger] enum.
+///
+/// The permanent and term ledgers are intentionally given different types to
+/// prevent runtime errors:
+/// - The permanent ledger (`perm`) holds critical data that must never
+///   be expired or lost
+/// - Term ledgers (`term`) hold temporary data and support expiration
+///
+/// This type separation ensures operations like partition expiration can only
+/// be performed on term ledgers, making any attempt to expire a permanent
+/// ledger partition fail at compile time.
 #[derive(Debug, Clone)]
 pub struct Ledgers {
     perm: PermanentLedger,
@@ -299,28 +313,35 @@ impl Ledgers {
         expired_hashes
     }
 
+    // Private helper methods for term ledger lookups
+    fn get_term_ledger(&self, ledger: Ledger) -> &TermLedger {
+        self.term
+            .iter()
+            .find(|l| l.ledger_id == ledger as u32)
+            .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
+    }
+
+    fn get_term_ledger_mut(&mut self, ledger: Ledger) -> &mut TermLedger {
+        self.term
+            .iter_mut()
+            .find(|l| l.ledger_id == ledger as u32)
+            .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
+    }
+
     pub fn get_slots(&self, ledger: Ledger) -> &Vec<LedgerSlot> {
         match ledger {
             Ledger::Publish => self.perm.get_slots(),
-            Ledger::Submit => self.term[0].get_slots(),
+            ledger => self.get_term_ledger(ledger).get_slots(),
         }
     }
 
-    /// Get the slot needs for a given ledger.
     pub fn get_slot_needs(&self, ledger: Ledger) -> Vec<(usize, usize)> {
         match ledger {
-            Ledger::Submit => {
-                // Call `get_slot_needs` on the corresponding `term` ledger
-                self.term[0].get_slot_needs()
-            }
-            Ledger::Publish => {
-                // Call `get_slot_needs` on `perm` ledger directly
-                self.perm.get_slot_needs()
-            }
+            Ledger::Publish => self.perm.get_slot_needs(),
+            ledger => self.get_term_ledger(ledger).get_slot_needs(),
         }
     }
 
-    /// Pushes a partition hash to the appropriate slot based on the ledger type.
     pub fn push_partition_to_slot(
         &mut self,
         ledger: Ledger,
@@ -328,13 +349,33 @@ impl Ledgers {
         partition_hash: H256,
     ) {
         match ledger {
-            Ledger::Submit => {
-                self.term[0].slots[slot_index]
+            Ledger::Publish => {
+                self.perm.slots[slot_index].partitions.push(partition_hash);
+            }
+            ledger => {
+                self.get_term_ledger_mut(ledger).slots[slot_index]
                     .partitions
                     .push(partition_hash);
             }
+        }
+    }
+
+    pub fn remove_partition_from_slot(
+        &mut self,
+        ledger: Ledger,
+        slot_index: usize,
+        partition_hash: &H256,
+    ) {
+        match ledger {
             Ledger::Publish => {
-                self.perm.slots[slot_index].partitions.push(partition_hash);
+                self.perm.slots[slot_index]
+                    .partitions
+                    .retain(|p| p != partition_hash);
+            }
+            ledger => {
+                self.get_term_ledger_mut(ledger).slots[slot_index]
+                    .partitions
+                    .retain(|p| p != partition_hash);
             }
         }
     }
@@ -347,7 +388,11 @@ impl Index<Ledger> for Ledgers {
     fn index(&self, ledger: Ledger) -> &Self::Output {
         match ledger {
             Ledger::Publish => &self.perm,
-            Ledger::Submit => &self.term[0],
+            ledger => self
+                .term
+                .iter()
+                .find(|l| l.ledger_id == ledger as u32)
+                .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger)),
         }
     }
 }

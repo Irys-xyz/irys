@@ -2805,6 +2805,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f578e8e2c440e7297e008bb5486a3a8a194775224bbc23729b0dbdfaeebf162e"
 
 [[package]]
+name = "debug-utils"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "irys-database",
+]
+
+[[package]]
 name = "delay_map"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5191,6 +5199,7 @@ dependencies = [
  "base64-url",
  "env_logger",
  "eyre",
+ "futures",
  "irys-config",
  "irys-database",
  "irys-efficient-sampling",
@@ -5477,15 +5486,18 @@ dependencies = [
  "reth-cli-commands",
  "reth-cli-runner",
  "reth-cli-util",
+ "reth-config",
  "reth-consensus",
  "reth-consensus-debug-client",
  "reth-db",
+ "reth-downloaders",
  "reth-e2e-test-utils",
  "reth-engine-service",
  "reth-engine-tree",
  "reth-engine-util",
  "reth-ethereum-cli",
  "reth-ethereum-engine-primitives",
+ "reth-evm",
  "reth-exex",
  "reth-network",
  "reth-network-api",
@@ -5500,11 +5512,14 @@ dependencies = [
  "reth-payload-primitives",
  "reth-primitives",
  "reth-provider",
+ "reth-prune",
  "reth-rpc-engine-api",
  "reth-rpc-eth-types",
  "reth-rpc-layer",
  "reth-rpc-types-compat",
+ "reth-stages",
  "reth-stages-types",
+ "reth-static-file",
  "reth-tasks",
  "reth-tokio-util",
  "reth-tracing",
@@ -5533,6 +5548,7 @@ dependencies = [
  "derive_more 1.0.0",
  "eyre",
  "futures",
+ "irys-config",
  "irys-database",
  "irys-packing",
  "irys-testing-utils",
@@ -5544,6 +5560,7 @@ dependencies = [
  "reth-db",
  "serde",
  "serde_json",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -5614,11 +5631,14 @@ dependencies = [
  "actix",
  "actix-rt",
  "assert_matches",
+ "base58",
  "env_logger",
  "eyre",
+ "hex",
  "irys-config",
  "irys-testing-utils",
  "irys-types",
+ "nodit",
  "openssl",
  "rand",
  "rand_chacha",

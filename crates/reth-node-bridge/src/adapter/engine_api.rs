@@ -99,6 +99,30 @@ impl<E: EngineTypes> EngineApiContext<E> {
         .await?;
         Ok(())
     }
+
+    /// Sends forkchoice update to the engine api
+    // we can set safe or finalized to ZERO to skip updating them, but head is mandatory.
+    // safe (confirmed) we update in the block confirmed handler
+    // finalized we update in the block finalized handler
+    pub async fn update_forkchoice_full(
+        &self,
+        head_block_hash: B256,
+        confirmed_block_hash: Option<B256>,
+        finalized_block_hash: Option<B256>,
+    ) -> eyre::Result<()> {
+        EngineApiClient::<E>::fork_choice_updated_v1_irys(
+            &self.engine_api_client,
+            ForkchoiceState {
+                head_block_hash: head_block_hash,
+                safe_block_hash: confirmed_block_hash.unwrap_or(B256::ZERO),
+                finalized_block_hash: finalized_block_hash.unwrap_or(B256::ZERO),
+            },
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn update_forkchoice_payload_attr(
         &self,
         current_head: B256,

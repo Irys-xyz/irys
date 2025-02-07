@@ -1,7 +1,8 @@
 use actix::SystemService;
-use actix::{Actor, ArbiterService, Context, Handler, Message, MessageResponse};
+use actix::{Actor, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
+use irys_config::STORAGE_SUBMODULES_CONFIG;
 use irys_database::{block_header_by_hash, data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::H256List;
@@ -12,7 +13,7 @@ use irys_types::{
 use openssl::sha;
 use reth_db::Database;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 
@@ -397,7 +398,7 @@ impl EpochServiceActor {
 
         // Update expired data partitions assignments marking them as capacity partitions
         for partition_hash in expired_hashes {
-            self.mark_partition_as_expired(partition_hash);
+            self.return_expired_partition_to_capacity(partition_hash);
         }
     }
 
@@ -569,15 +570,24 @@ impl EpochServiceActor {
 
     // Updates PartitionAssignment information about a partition hash, marking
     // it as expired (or unassigned to a slot in a data ledger)
-    fn mark_partition_as_expired(&mut self, partition_hash: H256) {
+    fn return_expired_partition_to_capacity(&mut self, partition_hash: H256) {
         let mut pa = self.partition_assignments.write().unwrap();
         // Convert data partition to capacity partition if it exists
         if let Some(mut assignment) = pa.data_partitions.remove(&partition_hash) {
+            {
+                // Remove the partition hash from the slots state
+                let ledger: Ledger = Ledger::try_from(assignment.ledger_id.unwrap()).unwrap();
+                let partition_hash = assignment.partition_hash;
+                let slot_index = assignment.slot_index.unwrap();
+                let mut write = self.ledgers.write().unwrap();
+                write.remove_partition_from_slot(ledger, slot_index, &partition_hash);
+            }
+
             // Clear ledger assignment
             assignment.ledger_id = None;
             assignment.slot_index = None;
 
-            // Add to capacity pool
+            // Return the partition hash to the capacity pool
             pa.capacity_partitions.insert(partition_hash, assignment);
         }
     }
@@ -651,6 +661,7 @@ impl EpochServiceActor {
         let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
 
         let pa = self.partition_assignments.read().unwrap();
+        let sm_paths = &STORAGE_SUBMODULES_CONFIG.submodule_paths;
 
         // Configure publish ledger storage
         let mut module_infos = ledgers
@@ -661,7 +672,7 @@ impl EpochServiceActor {
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
-                submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx).into())],
+                submodules: vec![(ie(0, num_part_chunks), sm_paths[idx].clone())],
             })
             .collect::<Vec<_>>();
 
@@ -676,10 +687,7 @@ impl EpochServiceActor {
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx_start + idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
-                submodules: vec![(
-                    ie(0, num_part_chunks),
-                    format!("submodule_{}", idx_start + idx).into(),
-                )],
+                submodules: vec![(ie(0, num_part_chunks), sm_paths[idx_start + idx].clone())],
             })
             .collect::<Vec<_>>();
 
@@ -688,17 +696,21 @@ impl EpochServiceActor {
         // Sort the active capacity partitions by hash
         let mut capacity_partitions: Vec<H256> = pa.capacity_partitions.keys().copied().collect();
         capacity_partitions.sort_unstable();
+        let mut cap_parts: VecDeque<H256> = capacity_partitions.into();
 
         // Add initial capacity partition config
-        let cap_part = capacity_partitions.first().unwrap();
-        let idx = module_infos.len();
-        let cap_info = StorageModuleInfo {
-            id: idx,
-            partition_assignment: Some(*pa.capacity_partitions.get(cap_part).unwrap()),
-            submodules: vec![(ie(0, num_part_chunks), format!("submodule_{}", idx).into())],
-        };
+        let start_idx = module_infos.len();
 
-        module_infos.push(cap_info);
+        for i in start_idx..sm_paths.len() {
+            let cap_part = cap_parts.pop_front().unwrap();
+            let sm_info = StorageModuleInfo {
+                id: i,
+                partition_assignment: Some(*pa.capacity_partitions.get(&cap_part).unwrap()),
+                submodules: vec![(ie(0, num_part_chunks), sm_paths[i].clone())],
+            };
+            module_infos.push(sm_info);
+        }
+
         module_infos
     }
 }
@@ -720,12 +732,12 @@ fn truncate_to_3_decimals(value: f64) -> f64 {
 //------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use std::{any::Any, collections::VecDeque, time::Duration};
+    use std::{any::Any, collections::VecDeque, sync::atomic::AtomicU64, time::Duration};
 
     use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
-    use irys_storage::{initialize_storage_files, StorageModule, StorageModuleVec};
+    use irys_storage::{StorageModule, StorageModuleVec};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{Address, PartitionChunkRange, CONFIG};
     use tokio::time::sleep;
@@ -733,9 +745,9 @@ mod tests {
     use crate::{
         mining::PartitionMiningActor,
         packing::{PackingActor, PackingRequest},
-        vdf_service::{VdfState, VdfStepsReadGuard},
         BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
     };
+    use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
 
     use super::*;
 
@@ -814,7 +826,7 @@ mod tests {
                         assignment,
                         &PartitionAssignment {
                             partition_hash,
-                            ledger_id: Some(Ledger::Publish.into()),
+                            ledger_id: Some(Ledger::Submit.into()),
                             slot_index: Some(slot_idx),
                             miner_address,
                         }
@@ -1002,7 +1014,7 @@ mod tests {
         // Get the genesis storage modules and their assigned partitions
         let storage_module_infos = epoch_service.handle(GetGenesisStorageModulesMessage, &mut ctx);
 
-        let _ = initialize_storage_files(&base_path, &storage_module_infos, &vec![]);
+        //let _ = initialize_storage_files(&base_path, &storage_module_infos, &vec![]);
 
         let mut storage_modules: StorageModuleVec = Vec::new();
         // Create a list of storage modules wrapping the storage files
@@ -1056,6 +1068,8 @@ mod tests {
         let packing_addr = packing.start();
         let mut part_actors = Vec::new();
 
+        let atomic_global_step_number = Arc::new(AtomicU64::new(0));
+
         for sm in &storage_modules {
             let partition_mining_actor = PartitionMiningActor::new(
                 mining_address,
@@ -1065,6 +1079,7 @@ mod tests {
                 sm.clone(),
                 true, // do not start mining automatically
                 vdf_steps_guard.clone(),
+                atomic_global_step_number.clone(),
             );
 
             let part_arbiter = Arbiter::new();

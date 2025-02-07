@@ -1,6 +1,7 @@
 use irys_primitives::GenesisAccount;
 use irys_types::{Address, IrysBlockHeader};
-use reth_chainspec::ChainSpecBuilder;
+use reth_chainspec::{ChainSpec, ChainSpecBuilder};
+use tracing::debug;
 
 use super::chain::IRYS_MAINNET;
 
@@ -26,8 +27,13 @@ impl IrysChainSpecBuilder {
         }
     }
 
-    pub fn genesis(&self) -> IrysBlockHeader {
-        self.genesis.clone()
+    // build the chainspec and the Irys genesis block
+    pub fn build(&self) -> (ChainSpec, IrysBlockHeader) {
+        let cs = self.reth_builder.clone().build();
+        let mut genesis = self.genesis.clone();
+        genesis.evm_block_hash = cs.genesis_hash();
+        debug!("EVM genesis block hash: {}", &genesis.evm_block_hash);
+        (cs, genesis)
     }
 
     pub fn new() -> Self {

@@ -29,7 +29,7 @@ pub struct Config {
     pub num_writes_before_sync: u64,
     /// If `true`, the ledger will be persisted on disk when the node restarts. Otherwise the
     /// entire state of the node will reset to genesis upon restart.
-    pub persist_data_on_restart: bool,
+    pub reset_state_on_restart: bool,
     // Longest chain consensus
     /// Number of block confirmations required before considering data final.
     ///
@@ -42,6 +42,9 @@ pub struct Config {
     // TODO: enable this after fixing option in toml
     pub num_capacity_partitions: Option<u64>,
     pub port: u16,
+    /// the number of block a given anchor (tx or block hash) is valid for.
+    /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
+    pub anchor_expiry_depth: u8,
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 5;
@@ -60,7 +63,7 @@ pub const CONFIG: Config = load_toml!(
         vdf_reset_frequency: 10 * 120, // Reset the nonce limiter (vdf) once every 1200 steps/seconds or every ~20 min
         vdf_parallel_verification_thread_limit: 4,
         num_checkpoints_in_vdf_step: 25, // 25 checkpoints 40 ms each = 1000 ms
-        vdf_sha_1s: 530_000,
+        vdf_sha_1s: 7_000,
         entropy_packing_iterations: 22_500_000,
         irys_chain_id: 1275, // mainnet chainID (testnet is 1270)
         capacity_scalar: 100,
@@ -68,11 +71,12 @@ pub const CONFIG: Config = load_toml!(
         submit_ledger_epoch_length: 5,
         num_partitions_per_slot: 1,
         num_writes_before_sync: 5,
-        persist_data_on_restart: true,
+        reset_state_on_restart: false,
         chunk_migration_depth: 1, // Number of confirmations before moving chunks to storage modules
         mining_key: "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0", // Burner PrivateKey (PK)
         num_capacity_partitions: None,
-        port: 80
+        port: 8080,
+        anchor_expiry_depth: 10 // lower for tests
     }
 );
 

@@ -48,7 +48,12 @@ reth-primitives.workspace = true
 reth-provider.workspace = true
 reth-rpc-engine-api.workspace = true
 reth-tracing.workspace = true
-
+reth-downloaders.workspace = true
+reth-config.workspace = true
+reth-static-file.workspace = true
+reth-prune.workspace = true
+reth-stages.workspace = true
+reth-evm.workspace = true
 foldhash.workspace = true
 irys-types.workspace = true
 reth-tokio-util.workspace = true
