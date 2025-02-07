@@ -13,7 +13,7 @@ use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
     Ledger,
 };
-use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
+use irys_primitives::{BlockRewardShadow, DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
@@ -25,7 +25,10 @@ use irys_types::{
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
 use openssl::sha;
-use reth::{revm::primitives::B256, rpc::eth::EthApiServer as _};
+use reth::{
+    revm::primitives::{hex, B256},
+    rpc::eth::EthApiServer as _,
+};
 use reth_db::cursor::*;
 use reth_db::Database;
 use tracing::{debug, error, info, warn};
@@ -374,23 +377,40 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
             let context =  RethNodeContext::new(reth.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
+            let mut shadows_vec: Vec<ShadowTx> =                 submit_txs
+            .iter()
+            .map(|header| ShadowTx {
+                tx_id: IrysTxId::from_slice(header.id.as_bytes()),
+                fee: irys_primitives::U256::from(
+                    header.total_fee(),
+                ),
+                address: header.signer,
+                tx: ShadowTxType::Data(DataShadow {
+                    fee: irys_primitives::U256::from(
+                        header.total_fee(),
+                    ),
+                }),
+            })
+            .collect();
+        
+            warn!("\x1b[1;31m FAUCET RESUPPLY ACTIVE \x1b[0m");
+            
+            shadows_vec.push(ShadowTx {
+                tx_id: IrysTxId::ZERO,
+                fee: irys_primitives::U256::ZERO,
+                address: Address::from_slice(
+                    hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
+                        .unwrap()
+                        .as_slice(),
+                ),
+                tx: ShadowTxType::BlockReward(BlockRewardShadow {
+                    reward: irys_primitives::U256::from(1_000_000_000_000_000_000_000_000_u128)
+                })
+            });
+
 
             let shadows = Shadows::new(
-                submit_txs
-                    .iter()
-                    .map(|header| ShadowTx {
-                        tx_id: IrysTxId::from_slice(header.id.as_bytes()),
-                        fee: irys_primitives::U256::from(
-                            header.total_fee(),
-                        ),
-                        address: header.signer,
-                        tx: ShadowTxType::Data(DataShadow {
-                            fee: irys_primitives::U256::from(
-                                header.total_fee(),
-                            ),
-                        }),
-                    })
-                    .collect(),
+                shadows_vec
             );
 
             // create a new reth payload
