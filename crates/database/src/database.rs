@@ -5,7 +5,7 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders,
-    PartitionHashes, PartitionHashesByDataRoot,
+    PartitionHashes,
 };
 
 use irys_types::partition::PartitionHash;
@@ -196,44 +196,6 @@ pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
     key: &ChunkPathHash,
 ) -> Result<Option<CachedChunk>, DatabaseError> {
     tx.get::<CachedChunks>(*key)
-}
-
-/// Associates a partition hash with a data root, appending to existing
-/// partition hashes if present or creating a new list if not. Indicates
-/// that chunks of this data overlap with the partition.
-pub fn assign_data_root<T: DbTxMut + DbTx>(
-    tx: &T,
-    data_root: DataRoot,
-    partition_hash: PartitionHash,
-) -> eyre::Result<()> {
-    let partition_hashes = if let Some(mut phs) = get_partition_hashes_by_data_root(tx, data_root)?
-    {
-        if !phs.0.contains(&partition_hash) {
-            phs.0.push(partition_hash)
-        };
-        phs
-    } else {
-        PartitionHashes(vec![partition_hash])
-    };
-    set_partition_hashes_by_data_root(tx, data_root, partition_hashes)?;
-    Ok(())
-}
-
-/// Stores list of partition hashes for a data root in the database
-pub fn set_partition_hashes_by_data_root<T: DbTxMut>(
-    tx: &T,
-    data_root: DataRoot,
-    partition_hashes: PartitionHashes,
-) -> eyre::Result<()> {
-    Ok(tx.put::<PartitionHashesByDataRoot>(data_root, partition_hashes)?)
-}
-
-/// Retrieves list of partition hashes for a data root from the database
-pub fn get_partition_hashes_by_data_root<T: DbTx>(
-    tx: &T,
-    data_root: DataRoot,
-) -> eyre::Result<Option<PartitionHashes>> {
-    Ok(tx.get::<PartitionHashesByDataRoot>(data_root)?)
 }
 
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]

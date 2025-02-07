@@ -159,7 +159,7 @@ pub fn reset_step_number(step_num: u64, config: &StorageConfig) -> u64 {
 }
 
 pub fn reset_step(step_num: u64, num_recall_ranges_in_partition: u64) -> u64 {
-((step_num - 1) / num_recall_ranges_in_partition) * num_recall_ranges_in_partition + 1
+    ((step_num - 1) / num_recall_ranges_in_partition) * num_recall_ranges_in_partition + 1
 }
 
 pub fn num_recall_ranges_in_partition(config: &StorageConfig) -> u64 {

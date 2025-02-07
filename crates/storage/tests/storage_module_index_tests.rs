@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use irys_database::{
-    assign_data_root, cache_chunk, cached_chunk_by_chunk_offset, get_partition_hashes_by_data_root,
-    open_or_create_db,
+    cache_chunk, cached_chunk_by_chunk_offset, open_or_create_db,
     submodule::{get_full_tx_path, get_path_hashes_by_offset, get_start_offsets_by_data_root},
     tables::IrysTables,
 };
@@ -307,19 +306,6 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
     let part_hash_0 = storage_modules[0].partition_hash().unwrap();
     let part_hash_1 = storage_modules[1].partition_hash().unwrap();
-    let _ = db.update(|tx| -> eyre::Result<()> {
-        // Partition 0
-        assign_data_root(tx, tx_headers[0].data_root, part_hash_0)?;
-        assign_data_root(tx, tx_headers[1].data_root, part_hash_0)?;
-        assign_data_root(tx, tx_headers[2].data_root, part_hash_0)?;
-        assign_data_root(tx, tx_headers[3].data_root, part_hash_0)?;
-
-        // Partition 1
-        assign_data_root(tx, tx_headers[3].data_root, part_hash_1)?;
-        assign_data_root(tx, tx_headers[4].data_root, part_hash_1)?;
-
-        Ok(())
-    });
 
     // Loop though all the transactions and add their chunks to the cache
     for tx in &txs {
@@ -355,59 +341,46 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         let data_root = tx.header.data_root;
         let num_chunks = (tx.header.data_size / chunk_size) as u32;
 
-        // Retrieve the partition assignments from the data root
-        let hashes = db
-            .view(|tx| get_partition_hashes_by_data_root(tx, data_root))
-            .unwrap()
-            .unwrap();
-        if let Some(partition_hashes) = hashes {
-            let mut chunks_added = 0;
-            // loop though the assigned partitions
-            for part_hash in partition_hashes.0 {
-                // Get the storage module
-                let storage_module = storage_modules
-                    .iter()
-                    .find(|&sm| sm.partition_hash() == Some(part_hash))
-                    .unwrap();
-
-                let _ = db.view(|tx| {
-                    for i in chunks_added..num_chunks {
-                        // first make sure the ledger_offset falls within the bounds
-                        // of the storage_module. Sometime txs contain ledger relative
-                        // chunk_offsets that span multiple storage modules.
-                        if !storage_module.contains_offset(ledger_offset) {
-                            continue;
-                        }
-
-                        // Request the chunk from the global db index by  data root & tx relative offset
-                        let res = cached_chunk_by_chunk_offset(tx, data_root, i).unwrap();
-
-                        // Build a Chunk struct to store in the submodule
-                        if let Some((_metadata, chunk)) = res {
-                            let chunk_bytes = chunk.chunk.unwrap();
-                            let chunk_byte_value = chunk_bytes.0[0];
-                            info!("chunk_bytes: {:?}", chunk_byte_value);
-                            let chunk = UnpackedChunk {
-                                data_root,
-                                data_size: chunk_bytes.len() as u64,
-                                data_path: chunk.data_path,
-                                bytes: chunk_bytes,
-                                tx_offset: i,
-                            };
-
-                            let res = storage_module.write_data_chunk(&chunk);
-                            if let Err(err) = res {
-                                panic!("{}", err);
-                            }
-                        }
-
-                        ledger_offset += 1;
-                        chunks_added += 1;
+        let mut chunks_added = 0;
+        // loop though the assigned partitions
+        for storage_module in &storage_modules {
+            let _ = db.view(|tx| {
+                for i in chunks_added..num_chunks {
+                    // first make sure the ledger_offset falls within the bounds
+                    // of the storage_module. Sometime txs contain ledger relative
+                    // chunk_offsets that span multiple storage modules.
+                    if !storage_module.contains_offset(ledger_offset) {
+                        continue;
                     }
-                });
 
-                //storage_module.print_pending_writes();
-            }
+                    // Request the chunk from the global db index by  data root & tx relative offset
+                    let res = cached_chunk_by_chunk_offset(tx, data_root, i).unwrap();
+
+                    // Build a Chunk struct to store in the submodule
+                    if let Some((_metadata, chunk)) = res {
+                        let chunk_bytes = chunk.chunk.unwrap();
+                        let chunk_byte_value = chunk_bytes.0[0];
+                        info!("chunk_bytes: {:?}", chunk_byte_value);
+                        let chunk = UnpackedChunk {
+                            data_root,
+                            data_size: chunk_bytes.len() as u64,
+                            data_path: chunk.data_path,
+                            bytes: chunk_bytes,
+                            tx_offset: i,
+                        };
+
+                        let res = storage_module.write_data_chunk(&chunk);
+                        if let Err(err) = res {
+                            panic!("{}", err);
+                        }
+                    }
+
+                    ledger_offset += 1;
+                    chunks_added += 1;
+                }
+            });
+
+            //storage_module.print_pending_writes();
         }
     }
 
