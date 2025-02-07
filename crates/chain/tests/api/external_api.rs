@@ -26,7 +26,9 @@ use irys_database::{
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    app_state::DatabaseProvider, partition::*, Address, Base64, H256List, IrysBlockHeader, PartitionChunkOffset, PoaData, Signature, StorageConfig, TransactionLedger, VDFLimiterInfo, H256, U256
+    app_state::DatabaseProvider, partition::*, Address, Base64, H256List, IrysBlockHeader,
+    PartitionChunkOffset, PoaData, Signature, StorageConfig, TransactionLedger, VDFLimiterInfo,
+    H256, U256,
 };
 use reth::{revm::primitives::B256, tasks::TaskManager};
 use reth_db::transaction::DbTx;
@@ -92,7 +94,7 @@ async fn external_api() -> eyre::Result<()> {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(5)), "sm1".into()), // 0 to 5 inclusive
+                (partition_chunk_offset_ii!(0, 5), "sm1".into()), // 0 to 5 inclusive
             ],
         },
         StorageModuleInfo {
@@ -104,7 +106,7 @@ async fn external_api() -> eyre::Result<()> {
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
             submodules: vec![
-                (ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(5)), "sm2".into()), // 0 to 5 inclusive
+                (partition_chunk_offset_ii!(0, 5), "sm2".into()), // 0 to 5 inclusive
             ],
         },
     ];

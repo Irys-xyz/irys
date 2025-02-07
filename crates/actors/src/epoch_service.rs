@@ -5,11 +5,11 @@ use eyre::{Error, Result};
 use irys_config::STORAGE_SUBMODULES_CONFIG;
 use irys_database::{block_header_by_hash, data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
-use irys_types::PartitionChunkOffset;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     DatabaseProvider, IrysBlockHeader, SimpleRNG, StorageConfig, CONFIG, H256,
 };
+use irys_types::{partition_chunk_offset_ie, PartitionChunkOffset};
 use openssl::sha;
 use reth_db::Database;
 use std::{
@@ -667,10 +667,7 @@ impl EpochServiceActor {
                 id: idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
                 submodules: vec![(
-                    ie(
-                        PartitionChunkOffset::from(0),
-                        PartitionChunkOffset::from(num_part_chunks),
-                    ),
+                    partition_chunk_offset_ie!(0, num_part_chunks),
                     sm_paths[idx].clone(),
                 )],
             })
@@ -688,10 +685,7 @@ impl EpochServiceActor {
                 id: idx_start + idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
                 submodules: vec![(
-                    ie(
-                        PartitionChunkOffset::from(0),
-                        PartitionChunkOffset::from(num_part_chunks),
-                    ),
+                    partition_chunk_offset_ie!(0, num_part_chunks),
                     sm_paths[idx_start + idx].clone(),
                 )],
             })
@@ -713,12 +707,9 @@ impl EpochServiceActor {
                 id: i,
                 partition_assignment: Some(*pa.capacity_partitions.get(&cap_part).unwrap()),
                 submodules: vec![(
-                ie(
-                    PartitionChunkOffset::from(0),
-                    PartitionChunkOffset::from(num_part_chunks),
-                ),
-                sm_paths[i].clone(),
-            )],
+                    partition_chunk_offset_ie!(0, num_part_chunks),
+                    sm_paths[i].clone(),
+                )],
             };
             module_infos.push(sm_info);
         }

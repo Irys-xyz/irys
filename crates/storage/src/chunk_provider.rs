@@ -81,15 +81,17 @@ impl ChunkProvider {
                 .0
                 .iter()
                 .filter_map(|so| {
-                    checked_add_i32_u64(so.value(), sm_range_start.value()) // translate into ledger-relative space
-                    .map(|mapped_start| mapped_start + (data_tx_offset.value() as u64))
+                    checked_add_i32_u64(**so, *sm_range_start) // translate into ledger-relative space
+                    .map(|mapped_start| mapped_start + (*data_tx_offset as u64))
                 })
                 .collect::<Vec<_>>();
 
             for ledger_relative_offset in offsets {
                 // try other offsets and sm's if we get an Error or a None
                 // TODO: if we keep this resolver, make generate_full_chunk more modular so we can pass in work we've already done (getting the ledger relative offset, etc)
-                if let Ok(Some(r)) = sm.generate_full_chunk(LedgerChunkOffset::from(ledger_relative_offset)) {
+                if let Ok(Some(r)) =
+                    sm.generate_full_chunk(LedgerChunkOffset::from(ledger_relative_offset))
+                {
                     return Ok(Some(ChunkFormat::Packed(r)));
                 }
             }
@@ -128,7 +130,7 @@ impl ChunkProvider {
                 .0
                 .iter()
                 .filter_map(|so| {
-                    checked_add_i32_u64(so.value(), sm_range_start.into()) // translate into ledger-relative space
+                    checked_add_i32_u64(**so, sm_range_start.into()) // translate into ledger-relative space
                 })
                 .collect::<Vec<_>>();
 
@@ -149,7 +151,9 @@ mod tests {
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, Base64, LedgerChunkRange, PartitionChunkOffset, TransactionLedger, UnpackedChunk
+        irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
+        partition_chunk_offset_ie, Base64, LedgerChunkRange, PartitionChunkOffset,
+        TransactionLedger, UnpackedChunk,
     };
     use nodit::interval::{ie, ii};
     use rand::Rng as _;
@@ -159,7 +163,10 @@ mod tests {
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
-            submodules: vec![(ie(PartitionChunkOffset::from(0), PartitionChunkOffset::from(50)), "hdd0".into()), (ie(PartitionChunkOffset::from(50), PartitionChunkOffset::from(100)), "hdd1".into())],
+            submodules: vec![
+                (partition_chunk_offset_ie!(0, 50), "hdd0".into()),
+                (partition_chunk_offset_ie!(50, 100), "hdd1".into()),
+            ],
         }];
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
@@ -199,7 +206,7 @@ mod tests {
 
         storage_module.pack_with_zeros();
 
-        let chunk_range = ii(LedgerChunkOffset::from(49), LedgerChunkOffset::from(51));
+        let chunk_range = ledger_chunk_offset_ii!(49, 51);
         let _ = storage_module.index_transaction_data(
             tx_path,
             data_root,

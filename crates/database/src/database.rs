@@ -161,7 +161,7 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
 ) -> eyre::Result<Option<CachedChunkIndexMetadata>> {
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
     Ok(cursor
-        .seek_by_key_subkey(data_root, chunk_offset.value())?
+        .seek_by_key_subkey(data_root, *chunk_offset)?
         // make sure we find the exact subkey - dupsort seek can seek to the value, or a value greater than if it doesn't exist.
         .filter(|result| result.index == chunk_offset)
         .map(|index_entry| index_entry.meta))
@@ -175,7 +175,7 @@ pub fn cached_chunk_by_chunk_offset<T: DbTx>(
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
 
     if let Some(index_entry) = cursor
-        .seek_by_key_subkey(data_root, chunk_offset.value())?
+        .seek_by_key_subkey(data_root, *chunk_offset)?
         .filter(|e| e.index == chunk_offset)
     {
         let meta: CachedChunkIndexMetadata = index_entry.into();

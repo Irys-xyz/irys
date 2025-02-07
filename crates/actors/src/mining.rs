@@ -9,7 +9,9 @@ use irys_storage::{ie, ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
-use irys_types::{Address, AtomicVdfStepNumber, H256List, PartitionChunkOffset};
+use irys_types::{
+    partition_chunk_offset_ie, Address, AtomicVdfStepNumber, H256List, PartitionChunkOffset,
+};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
 use std::sync::Arc;
@@ -131,11 +133,9 @@ impl PartitionMiningActor {
         //     recall_range_index, start_chunk_offset
         // );
 
-        let read_range = ie(
-            PartitionChunkOffset::from(start_chunk_offset),
-            PartitionChunkOffset::from(
-                start_chunk_offset + config.num_chunks_in_recall_range as u32,
-            ),
+        let read_range = partition_chunk_offset_ie!(
+            start_chunk_offset,
+            start_chunk_offset + config.num_chunks_in_recall_range as u32
         );
 
         // haven't tested this, but it looks correct
@@ -176,7 +176,7 @@ impl PartitionMiningActor {
 
             let mut hasher = sha::Sha256::new();
             hasher.update(chunk_bytes);
-            hasher.update(&partition_chunk_offset.value().to_le_bytes());
+            hasher.update(&partition_chunk_offset.to_le_bytes());
             hasher.update(mining_seed.as_bytes());
             let solution_hash = hasher.finish();
             let test_solution = hash_to_number(&solution_hash);
@@ -193,7 +193,7 @@ impl PartitionMiningActor {
 
                 let solution = SolutionContext {
                     partition_hash,
-                    chunk_offset: partition_chunk_offset.value(),
+                    chunk_offset: *partition_chunk_offset,
                     recall_chunk_index: index as u32,
                     mining_address: self.mining_address,
                     tx_path, // capacity partitions have no tx_path nor data_path
@@ -416,13 +416,7 @@ mod tests {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (
-                    ie(
-                        PartitionChunkOffset::from(0),
-                        PartitionChunkOffset::from(chunk_count),
-                    ),
-                    "hdd0".into(),
-                ), // 0 to 3 inclusive, 4 chunks
+                (partition_chunk_offset_ie!(0, chunk_count), "hdd0".into()), // 0 to 3 inclusive, 4 chunks
             ],
         }];
 
@@ -561,7 +555,7 @@ mod tests {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ie(PartitionChunkOffset::from(0), PartitionChunkOffset::from(10)), "hdd0".into()), // 10 chunks
+                (partition_chunk_offset_ie!(0, 10), "hdd0".into()), // 10 chunks
             ],
         }];
 

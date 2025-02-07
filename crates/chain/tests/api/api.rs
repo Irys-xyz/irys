@@ -179,7 +179,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         if resp.status() == StatusCode::OK {
             let packed_chunk: PackedChunk = test::read_body_json(resp).await;
             assert_eq!(
-                chunk, packed_chunk.tx_offset.value() as usize,
+                chunk, *packed_chunk.tx_offset as usize,
                 "Got different chunk index"
             );
 

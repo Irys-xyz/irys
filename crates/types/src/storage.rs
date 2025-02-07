@@ -1,13 +1,14 @@
 use std::{
     fmt,
-    ops::{Add, AddAssign, Deref, DerefMut, Div, Mul, Rem, Sub},
+    ops::{Add, AddAssign, Deref, DerefMut, Rem},
     path::PathBuf,
 };
 
-use crate::CONFIG;
+use crate::{RelativeChunkOffset, CONFIG};
+use derive_more::{Add, Div, From, Into, Mul, Sub};
 use nodit::{
     interval::{ie, ii},
-    DiscreteFinite, InclusiveInterval, Interval, IntervalType,
+    DiscreteFinite, InclusiveInterval, Interval,
 };
 use reth_codecs::Compact;
 use reth_db::table::{Decode, Encode};
@@ -19,9 +20,44 @@ pub const TERABYTE: usize = GIGABYTE * 1024;
 
 /// Partition relative chunk offsets
 #[derive(
-    Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Compact,
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Compact,
+    Add,
+    Sub,
+    Div,
+    From,
+    Into,
 )]
 pub struct PartitionChunkOffset(u32);
+
+#[macro_export]
+macro_rules! partition_chunk_offset_ii {
+    ($start:expr, $end:expr) => {
+        ii(
+            PartitionChunkOffset::from($start),
+            PartitionChunkOffset::from($end),
+        )
+    };
+}
+
+#[macro_export]
+macro_rules! partition_chunk_offset_ie {
+    ($start:expr, $end:expr) => {
+        ie(
+            PartitionChunkOffset::from($start),
+            PartitionChunkOffset::from($end),
+        )
+    };
+}
 
 impl Decode for PartitionChunkOffset {
     fn decode(value: &[u8]) -> Result<Self, reth_db::DatabaseError> {
@@ -57,53 +93,41 @@ impl DiscreteFinite for PartitionChunkOffset {
     }
 }
 impl PartitionChunkOffset {
-    pub fn value(&self) -> u32 {
-        self.0
-    }
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
         PartitionChunkOffset(u32::from_be_bytes(bytes))
     }
 }
+impl Deref for PartitionChunkOffset {
+    type Target = u32;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for PartitionChunkOffset {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<RelativeChunkOffset> for PartitionChunkOffset {
+    fn from(value: RelativeChunkOffset) -> PartitionChunkOffset {
+        PartitionChunkOffset::from(*value)
+    }
+}
+
 impl From<PartitionChunkOffset> for u64 {
     fn from(value: PartitionChunkOffset) -> Self {
         value.0 as u64
     }
 }
-impl From<PartitionChunkOffset> for u8 {
-    fn from(value: PartitionChunkOffset) -> Self {
-        value.0 as u8
-    }
-}
+
 impl Add<u32> for PartitionChunkOffset {
     type Output = Self;
     fn add(self, rhs: u32) -> Self::Output {
         PartitionChunkOffset(self.0 + rhs)
     }
 }
-impl Sub<PartitionChunkOffset> for PartitionChunkOffset {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self::Output {
-        PartitionChunkOffset(self.0 - rhs.0)
-    }
-}
-impl Sub<u32> for PartitionChunkOffset {
-    type Output = Self;
-    fn sub(self, rhs: u32) -> Self::Output {
-        PartitionChunkOffset(self.0 - rhs)
-    }
-}
-impl Div<PartitionChunkOffset> for PartitionChunkOffset {
-    type Output = Self;
-    fn div(self, rhs: Self) -> Self::Output {
-        PartitionChunkOffset(self.0 / rhs.0)
-    }
-}
-impl Div<u32> for PartitionChunkOffset {
-    type Output = Self;
-    fn div(self, rhs: u32) -> Self::Output {
-        PartitionChunkOffset(self.0 / rhs)
-    }
-}
+
 impl Rem<u32> for PartitionChunkOffset {
     type Output = Self;
     fn rem(self, rhs: u32) -> Self::Output {
@@ -114,11 +138,6 @@ impl Rem<u32> for PartitionChunkOffset {
 impl From<u8> for PartitionChunkOffset {
     fn from(value: u8) -> Self {
         PartitionChunkOffset(value.into())
-    }
-}
-impl From<u32> for PartitionChunkOffset {
-    fn from(value: u32) -> Self {
-        PartitionChunkOffset(value)
     }
 }
 impl From<u64> for PartitionChunkOffset {
@@ -179,18 +198,30 @@ impl InclusiveInterval<u32> for PartitionChunkRange {
 }
 impl From<Interval<u32>> for PartitionChunkRange {
     fn from(interval: Interval<u32>) -> Self {
-        PartitionChunkRange(ii(
-            PartitionChunkOffset::from(interval.start()),
-            PartitionChunkOffset::from(interval.end()),
-        ))
+        PartitionChunkRange(partition_chunk_offset_ii!(interval.start(), interval.end()))
     }
 }
 
 /// Ledger Relative chunk offsets
-// pub type LedgerChunkOffset = u64;
 
 #[derive(
-    Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Compact,
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Compact,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    From,
+    Into,
 )]
 pub struct LedgerChunkOffset(u64);
 
@@ -204,61 +235,27 @@ impl DiscreteFinite for LedgerChunkOffset {
         self.0.checked_sub(1).map(LedgerChunkOffset)
     }
 }
-impl LedgerChunkOffset {
-    pub fn value(&self) -> u64 {
-        self.0
+impl Deref for LedgerChunkOffset {
+    type Target = u64;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
+}
+impl LedgerChunkOffset {
     pub fn from_be_bytes(bytes: [u8; 8]) -> Self {
         LedgerChunkOffset(u64::from_be_bytes(bytes))
     }
 }
 
-impl From<LedgerChunkOffset> for u64 {
-    fn from(value: LedgerChunkOffset) -> Self {
-        value.0 as u64
-    }
-}
-impl From<LedgerChunkOffset> for u8 {
-    fn from(value: LedgerChunkOffset) -> Self {
-        value.0 as u8
-    }
-}
 impl Add<u64> for LedgerChunkOffset {
     type Output = Self;
+
     fn add(self, rhs: u64) -> Self::Output {
-        LedgerChunkOffset(self.0 + rhs)
+        LedgerChunkOffset::from(*self + rhs)
     }
 }
-impl Sub<LedgerChunkOffset> for LedgerChunkOffset {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self::Output {
-        LedgerChunkOffset(self.0 - rhs.0)
-    }
-}
-impl Sub<u64> for LedgerChunkOffset {
-    type Output = Self;
-    fn sub(self, rhs: u64) -> Self::Output {
-        LedgerChunkOffset(self.0 - rhs)
-    }
-}
-impl Mul<u64> for LedgerChunkOffset {
-    type Output = Self;
-    fn mul(self, rhs: u64) -> Self::Output {
-        LedgerChunkOffset(self.0 * rhs)
-    }
-}
-impl Div<LedgerChunkOffset> for LedgerChunkOffset {
-    type Output = Self;
-    fn div(self, rhs: Self) -> Self::Output {
-        LedgerChunkOffset(self.0 / rhs.0)
-    }
-}
-impl Div<u64> for LedgerChunkOffset {
-    type Output = Self;
-    fn div(self, rhs: u64) -> Self::Output {
-        LedgerChunkOffset(self.0 / rhs)
-    }
-}
+
 impl Rem<u64> for LedgerChunkOffset {
     type Output = Self;
     fn rem(self, rhs: u64) -> Self::Output {
@@ -268,15 +265,10 @@ impl Rem<u64> for LedgerChunkOffset {
 
 impl AddAssign<u64> for LedgerChunkOffset {
     fn add_assign(&mut self, rhs: u64) {
-        self.0 = self.value() + rhs;
+        self.0 = *(*self + rhs);
     }
 }
 
-impl From<u64> for LedgerChunkOffset {
-    fn from(value: u64) -> Self {
-        LedgerChunkOffset(value.into())
-    }
-}
 impl From<u8> for LedgerChunkOffset {
     fn from(value: u8) -> Self {
         LedgerChunkOffset(value.into())
@@ -301,6 +293,16 @@ impl TryFrom<LedgerChunkOffset> for usize {
             .try_into()
             .map_err(|_| "Conversion to usize failed")
     }
+}
+
+#[macro_export]
+macro_rules! ledger_chunk_offset_ii {
+    ($start:expr, $end:expr) => {
+        ii(
+            LedgerChunkOffset::from($start),
+            LedgerChunkOffset::from($end),
+        )
+    };
 }
 
 /// Ledger Relative chunk interval/ranges
@@ -498,215 +500,128 @@ mod tests {
     #[test]
     fn test_split_interval() {
         // interval with just one element
-        let interval = PartitionChunkRange(ii(
-            PartitionChunkOffset::from(3),
-            PartitionChunkOffset::from(3),
-        ));
+        let interval = PartitionChunkRange(partition_chunk_offset_ii!(3, 3));
         let splits = split_interval(&interval, 3).unwrap();
         assert_eq!(splits.len(), 1);
         assert_eq!(
             splits[0],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(3),
-                PartitionChunkOffset::from(3)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(3, 3))
         );
 
         // even interval
-        let interval = PartitionChunkRange(ii(
-            PartitionChunkOffset::from(0),
-            PartitionChunkOffset::from(3),
-        ));
+        let interval = PartitionChunkRange(partition_chunk_offset_ii!(0, 3));
         let splits = split_interval(&interval, 3).unwrap();
         assert_eq!(splits.len(), 2);
         assert_eq!(
             splits[0],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(0),
-                PartitionChunkOffset::from(2)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(0, 2))
         );
         assert_eq!(
             splits[1],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(3),
-                PartitionChunkOffset::from(3)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(3, 3))
         );
 
         // odd interval
-        let interval = PartitionChunkRange(ii(
-            PartitionChunkOffset::from(0),
-            PartitionChunkOffset::from(4),
-        ));
+        let interval = PartitionChunkRange(partition_chunk_offset_ii!(0, 4));
         let splits = split_interval(&interval, 1).unwrap();
         assert_eq!(splits.len(), 5);
         assert_eq!(
             splits[0],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(0),
-                PartitionChunkOffset::from(0)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(0, 0))
         );
         assert_eq!(
             splits[1],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(1),
-                PartitionChunkOffset::from(1)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(1, 1))
         );
         assert_eq!(
             splits[2],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(2),
-                PartitionChunkOffset::from(2)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(2, 2))
         );
         assert_eq!(
             splits[3],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(3),
-                PartitionChunkOffset::from(3)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(3, 3))
         );
         assert_eq!(
             splits[4],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(4),
-                PartitionChunkOffset::from(4)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(4, 4))
         );
 
         // odd interval, with step size bigger than it
-        let interval = PartitionChunkRange(ie(
-            PartitionChunkOffset::from(0),
-            PartitionChunkOffset::from(4),
-        ));
+        let interval = PartitionChunkRange(partition_chunk_offset_ie!(0, 4));
         let splits = split_interval(&interval, 8).unwrap();
         assert_eq!(splits.len(), 1);
         assert_eq!(
             splits[0],
-            PartitionChunkRange(ie(
-                PartitionChunkOffset::from(0),
-                PartitionChunkOffset::from(4)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ie!(0, 4))
         );
 
         // zero step error
-        let interval = PartitionChunkRange(ie(
-            PartitionChunkOffset::from(0),
-            PartitionChunkOffset::from(4),
-        ));
+        let interval = PartitionChunkRange(partition_chunk_offset_ie!(0, 4));
         let splits = split_interval(&interval, 0);
         assert!(splits.is_err());
 
         // even interval not starting in zero, all complete splits
-        let interval = PartitionChunkRange(ii(
-            PartitionChunkOffset::from(2),
-            PartitionChunkOffset::from(7),
-        ));
+        let interval = PartitionChunkRange(partition_chunk_offset_ii!(2, 7));
         let splits = split_interval(&interval, 3).unwrap();
         assert_eq!(splits.len(), 2);
         assert_eq!(
             splits[0],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(2),
-                PartitionChunkOffset::from(4)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(2, 4))
         );
         assert_eq!(
             splits[1],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(5),
-                PartitionChunkOffset::from(7)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(5, 7))
         );
 
         // odd interval not starting in zero, not all complete splits
-        let interval = PartitionChunkRange(ii(
-            PartitionChunkOffset::from(3),
-            PartitionChunkOffset::from(6),
-        ));
+        let interval = PartitionChunkRange(partition_chunk_offset_ii!(3, 6));
         let splits = split_interval(&interval, 1).unwrap();
         assert_eq!(splits.len(), 4);
         assert_eq!(
             splits[0],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(3),
-                PartitionChunkOffset::from(3)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(3, 3))
         );
         assert_eq!(
             splits[1],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(4),
-                PartitionChunkOffset::from(4)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(4, 4))
         );
         assert_eq!(
             splits[2],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(5),
-                PartitionChunkOffset::from(5)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(5, 5))
         );
         assert_eq!(
             splits[3],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(6),
-                PartitionChunkOffset::from(6)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(6, 6))
         );
 
         // odd interval not starting in zero not all complete
-        let interval = PartitionChunkRange(ii(
-            PartitionChunkOffset::from(5),
-            PartitionChunkOffset::from(8),
-        ));
+        let interval = PartitionChunkRange(partition_chunk_offset_ii!(5, 8));
         let splits = split_interval(&interval, 3).unwrap();
         assert_eq!(splits.len(), 2);
         assert_eq!(
             splits[0],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(5),
-                PartitionChunkOffset::from(7)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(5, 7))
         );
         assert_eq!(
             splits[1],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(8),
-                PartitionChunkOffset::from(8)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(8, 8))
         );
 
         // even interval not starting in zero, odd intervals, not all complete splits
-        let interval = PartitionChunkRange(ii(
-            PartitionChunkOffset::from(3),
-            PartitionChunkOffset::from(7),
-        ));
+        let interval = PartitionChunkRange(partition_chunk_offset_ii!(3, 7));
         let splits = split_interval(&interval, 2).unwrap();
         assert_eq!(splits.len(), 3);
         assert_eq!(
             splits[0],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(3),
-                PartitionChunkOffset::from(4)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(3, 4))
         );
         assert_eq!(
             splits[1],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(5),
-                PartitionChunkOffset::from(6)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(5, 6))
         );
         assert_eq!(
             splits[2],
-            PartitionChunkRange(ii(
-                PartitionChunkOffset::from(7),
-                PartitionChunkOffset::from(7)
-            ))
+            PartitionChunkRange(partition_chunk_offset_ii!(7, 7))
         );
     }
 }

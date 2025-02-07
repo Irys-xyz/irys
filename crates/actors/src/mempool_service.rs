@@ -325,7 +325,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
 
         // Is this chunk index any of the chunks before the last in the tx?
         let num_chunks_in_tx = cached_data_root.data_size.div_ceil(chunk_size);
-        if (chunk.tx_offset.value() as u64) < num_chunks_in_tx - 1 {
+        if (*chunk.tx_offset as u64) < num_chunks_in_tx - 1 {
             // Ensure prefix chunks are all exactly chunk_size
             if chunk_len != chunk_size {
                 error!(

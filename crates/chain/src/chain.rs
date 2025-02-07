@@ -293,7 +293,6 @@ pub async fn start_irys_node(
                     if latest.unwrap().unwrap().header.number != latest_block.height {
                         error!("Reth is out of sync with Irys block index! recovery will be attempted.")
                     };
-                    
                 }
 
                 RethServiceActor::from_registry()
@@ -532,7 +531,6 @@ pub async fn start_irys_node(
                         })
                         .collect::<Vec<()>>();
                 }
-                
                 // let _ = wait_for_packing(packing_actor_addr.clone(), None).await;
                 // debug!("Packing complete");
 

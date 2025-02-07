@@ -137,8 +137,8 @@ impl PackingActor {
             let storage_module_id = storage_module.id;
             let semaphore = self.semaphore.get(&storage_module_id).unwrap();
 
-            let start_value = chunk_range.0.start().value();
-            let end_value = chunk_range.0.end().value();
+            let start_value = *chunk_range.0.start();
+            let end_value = *chunk_range.0.end();
 
             match PACKING_TYPE {
                 PackingType::CPU => {
@@ -353,7 +353,7 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
-        Address, PartitionChunkOffset, StorageConfig,
+        partition_chunk_offset_ii, Address, PartitionChunkOffset, StorageConfig,
     };
     use reth::tasks::TaskManager;
     use tokio::runtime::Handle;
@@ -375,10 +375,7 @@ mod tests {
                 slot_index: None,
             }),
             submodules: vec![
-                (
-                    ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4)),
-                    "hdd0-4TB".into(),
-                ), // 0 to 4 inclusive
+                (partition_chunk_offset_ii!(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         }];
 

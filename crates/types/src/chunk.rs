@@ -1,12 +1,15 @@
 use core::fmt;
-use std::{fmt::Display, ops::Add};
+use std::{
+    convert::Infallible,
+    ops::{Deref, DerefMut},
+};
 
 use crate::{string_u64, LedgerChunkOffset};
 use alloy_primitives::Address;
 use arbitrary::Arbitrary;
+use derive_more::{Add, From, Into};
 use eyre::eyre;
 use reth_codecs::Compact;
-use reth_db::mdbx::tx::Tx;
 use serde::{Deserialize, Serialize};
 
 use crate::{hash_sha256, partition::PartitionHash, Base64, PartitionChunkOffset, H256};
@@ -75,7 +78,7 @@ impl UnpackedChunk {
         if self.tx_offset.0 as u64 == last_index {
             self.data_size
         } else {
-            (self.tx_offset + 1).0 as u64 * chunk_size - 1
+            (*self.tx_offset + 1) as u64 * chunk_size - 1
         }
     }
 }
@@ -221,43 +224,62 @@ pub type DataRoot = H256;
 
 /// The offset of the chunk relative to the first (0th) chunk of the data tree
 #[derive(
-    Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary,
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Arbitrary,
+    Add,
+    From,
+    Into,
 )]
 pub struct TxChunkOffset(u32);
-
 impl TxChunkOffset {
-    pub fn value(&self) -> u32 {
-        self.0
-    }
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
         TxChunkOffset(u32::from_be_bytes(bytes))
     }
 }
 
+impl Deref for TxChunkOffset {
+    type Target = u32;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for TxChunkOffset {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl From<LedgerChunkOffset> for TxChunkOffset {
     fn from(ledger: LedgerChunkOffset) -> Self {
-        TxChunkOffset::from(ledger.value())
+        TxChunkOffset::from(*ledger)
     }
 }
 
-impl Add<u32> for TxChunkOffset {
-    type Output = Self;
-
-    fn add(self, rhs: u32) -> Self::Output {
-        TxChunkOffset(self.0 + rhs)
-    }
-}
-
-impl From<u32> for TxChunkOffset {
-    fn from(value: u32) -> Self {
-        TxChunkOffset(value)
-    }
-}
 impl From<u64> for TxChunkOffset {
     fn from(value: u64) -> Self {
         TxChunkOffset(value as u32)
     }
 }
+impl From<i32> for TxChunkOffset {
+    fn from(value: i32) -> Self {
+        TxChunkOffset(value.try_into().unwrap())
+    }
+}
+impl From<RelativeChunkOffset> for TxChunkOffset {
+    fn from(value: RelativeChunkOffset) -> TxChunkOffset {
+        TxChunkOffset::from(*value)
+    }
+}
+
 impl fmt::Display for TxChunkOffset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -265,37 +287,49 @@ impl fmt::Display for TxChunkOffset {
 }
 
 /// the Block relative chunk offset
-#[derive(Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, From, Into,
+)]
 pub struct BlockChunkOffset(u64);
 
 /// Used to track chunk offset ranges that span storage modules
 ///  a negative offset means the range began in a prior partition/storage module
 #[derive(
-    Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Compact,
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Compact,
+    Add,
+    From,
+    Into,
 )]
 pub struct RelativeChunkOffset(i32);
-impl RelativeChunkOffset {
-    pub fn value(&self) -> i32 {
-        self.0
+
+impl Deref for RelativeChunkOffset {
+    type Target = i32;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
+}
+impl DerefMut for RelativeChunkOffset {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl RelativeChunkOffset {
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
         RelativeChunkOffset(i32::from_be_bytes(bytes))
     }
 }
 
-impl Add<i32> for RelativeChunkOffset {
-    type Output = Self;
-
-    fn add(self, rhs: i32) -> Self::Output {
-        RelativeChunkOffset(self.0 + rhs)
-    }
-}
-
-impl From<i32> for RelativeChunkOffset {
-    fn from(value: i32) -> Self {
-        RelativeChunkOffset(value)
-    }
-}
 impl fmt::Display for RelativeChunkOffset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

@@ -8,7 +8,10 @@ use irys_database::{
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    irys::IrysSigner, partition::PartitionAssignment, Address, Base64, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset, PartitionChunkRange, StorageConfig, TransactionLedger, UnpackedChunk, H256
+    irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
+    partition_chunk_offset_ie, partition_chunk_offset_ii, Address, Base64, IrysTransaction,
+    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset,
+    PartitionChunkRange, StorageConfig, TransactionLedger, UnpackedChunk, H256,
 };
 use openssl::sha;
 use reth_db::Database;
@@ -41,9 +44,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4)), "hdd0".into()),   // 0 to 4 inclusive
-                (ii(PartitionChunkOffset::from(5), PartitionChunkOffset::from(9)), "hdd1".into()),   // 5 to 9 inclusive
-                (ii(PartitionChunkOffset::from(10), PartitionChunkOffset::from(19)), "hdd2".into()), // 10 to 19 inclusive
+                (partition_chunk_offset_ii!(0, 4), "hdd0".into()), // 0 to 4 inclusive
+                (partition_chunk_offset_ii!(5, 9), "hdd1".into()), // 5 to 9 inclusive
+                (partition_chunk_offset_ii!(10, 19), "hdd2".into()), // 10 to 19 inclusive
             ],
         },
         StorageModuleInfo {
@@ -55,8 +58,14 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
             submodules: vec![
-                (ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(9)), "hdd3".into()),   // 0 to 9 inclusive
-                (ii(PartitionChunkOffset::from(10), PartitionChunkOffset::from(19)), "hdd4".into()), // 10 to 19 inclusive
+                (partition_chunk_offset_ii!(0, 9), "hdd3".into()), // 0 to 9 inclusive
+                (
+                    ii(
+                        PartitionChunkOffset::from(10),
+                        PartitionChunkOffset::from(19),
+                    ),
+                    "hdd4".into(),
+                ), // 10 to 19 inclusive
             ],
         },
         StorageModuleInfo {
@@ -68,7 +77,13 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 slot_index: Some(2), // Submit Ledger Slot 2
             }),
             submodules: vec![
-                (ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(19)), "hdd5".into()), // 0 to 19 inclusive
+                (
+                    ii(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(19),
+                    ),
+                    "hdd5".into(),
+                ), // 0 to 19 inclusive
             ],
         },
     ];
@@ -90,8 +105,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         arc_module.pack_with_zeros();
     }
 
-    let partition_0_range = LedgerChunkRange(ii(LedgerChunkOffset::from(0), LedgerChunkOffset::from(19)));
-    let partition_1_range = LedgerChunkRange(ii(LedgerChunkOffset::from(20), LedgerChunkOffset::from(39)));
+    let partition_0_range = ledger_chunk_offset_ii!(0, 19).into();
+    let partition_1_range = ledger_chunk_offset_ii!(20, 39).into();
 
     // Create a list of BLOBs that represent transaction data
     let data_chunks = vec![
@@ -139,8 +154,12 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Tx:1 - Base case, write tx index data without any overlaps
     let num_chunks_in_tx = (proof.offset + 1) as u64 / storage_config.chunk_size;
-    let (tx_ledger_range, tx_partition_range) =
-        calculate_tx_ranges(LedgerChunkOffset::from(0), &partition_0_range, proof.offset as u64, chunk_size);
+    let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
+        LedgerChunkOffset::from(0),
+        &partition_0_range,
+        proof.offset as u64,
+        chunk_size,
+    );
 
     let data_root = tx_headers[0].data_root;
     let _ = storage_modules[0].index_transaction_data(tx_path.clone(), data_root, tx_ledger_range);
@@ -198,7 +217,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // Tx:3 - Fill up the StorageModule leaving one empty chunk
     let tx_path = &proofs[2].proof;
     let data_root = tx_headers[2].data_root;
-    let bytes_in_tx = proofs[2].offset as u64 - (tx_ledger_range.end() * storage_config.chunk_size).value();
+    let bytes_in_tx =
+        proofs[2].offset as u64 - (*tx_ledger_range.end() * storage_config.chunk_size);
     let start_chunk_offset = tx_ledger_range.end() + 1;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
@@ -238,7 +258,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tx_path = &proofs[3].proof;
     let data_root = tx_headers[3].data_root;
     let offset = proofs[3].offset as u64;
-    let bytes_in_tx = (offset + 1) - ((tx_ledger_range.end() + 1).value() * storage_config.chunk_size);
+    let bytes_in_tx = (offset + 1) - (*(tx_ledger_range.end() + 1) * storage_config.chunk_size);
     let start_chunk_offset = tx_ledger_range.end() + 1;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
@@ -280,8 +300,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tx_path = &proofs[4].proof;
     let data_root = tx_headers[4].data_root;
     let offset = proofs[4].offset as u64;
-    let bytes_in_tx = (offset + 1) - ((tx_ledger_range.end() + 1) * storage_config.chunk_size).value();
-    let start_chunk_offset = tx_ledger_range.end() + 1;
+    let bytes_in_tx = (offset + 1) - ((*tx_ledger_range.end() + 1) * storage_config.chunk_size);
+    let start_chunk_offset = tx_ledger_range.end() + 1u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_1_range,
@@ -387,8 +407,12 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let _ = storage_modules[1].sync_pending_chunks();
 
     // For each of the storage modules, makes sure they sync to disk
-    let chunks1 = storage_modules[0].read_chunks(ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(19))).unwrap();
-    let chunks2 = storage_modules[1].read_chunks(ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(19))).unwrap();
+    let chunks1 = storage_modules[0]
+        .read_chunks(partition_chunk_offset_ii!(0, 19))
+        .unwrap();
+    let chunks2 = storage_modules[1]
+        .read_chunks(partition_chunk_offset_ii!(0, 19))
+        .unwrap();
 
     // This is just helpful logging, could be commented out
     for i in 0..=19 {
@@ -467,7 +491,7 @@ fn verify_tx_path_offsets(
     submodule
         .db
         .view(|tx| {
-            for offset in chunk_range.0.start().value()..=chunk_range.0.end().value() {
+            for offset in *chunk_range.0.start()..=*chunk_range.0.end() {
                 match get_path_hashes_by_offset(tx, offset.into()).unwrap() {
                     Some(paths) => {
                         let tx_ph = paths
@@ -503,16 +527,16 @@ fn calculate_tx_ranges(
         start_chunk_offset + num_chunks_in_tx,
     ));
 
-    let partition_start = start_chunk_offset.value() as i64 - partition_range.start().value() as i64;
+    let partition_start = *start_chunk_offset as i64 - *partition_range.start() as i64;
     if partition_start < 0 {
         num_chunks_in_tx = (num_chunks_in_tx as i64 + partition_start) as u64;
     }
 
     let partition_start = partition_start.max(0) as u32;
 
-    let partition_range = PartitionChunkRange(ie(
-        PartitionChunkOffset::from(partition_start),
-        PartitionChunkOffset::from(partition_start + num_chunks_in_tx as u32),
+    let partition_range = PartitionChunkRange(partition_chunk_offset_ie!(
+        partition_start,
+        partition_start + num_chunks_in_tx as u32
     ));
 
     (ledger_range, partition_range)

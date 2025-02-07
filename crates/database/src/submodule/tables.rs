@@ -75,9 +75,12 @@ mod tests {
             tx_path_hash: Some(tx_path_hash),
         };
 
-        write_tx.put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(1), path_hashes.clone())?;
-        write_tx.put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(100), path_hashes.clone())?;
-        write_tx.put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(0), path_hashes.clone())?;
+        write_tx
+            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(1), path_hashes.clone())?;
+        write_tx
+            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(100), path_hashes.clone())?;
+        write_tx
+            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(0), path_hashes.clone())?;
 
         write_tx.commit()?;
 

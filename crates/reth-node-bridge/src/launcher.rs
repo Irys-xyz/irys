@@ -181,7 +181,7 @@ where
             .with_metrics_task()
             // passing FullNodeTypes as type parameter here so that we can build
             // later the components.
-            .with_blockchain_db::<T, _>(move |provider_factory| {            
+            .with_blockchain_db::<T, _>(move |provider_factory| {
                 Ok(BlockchainProvider2::new(provider_factory)?)
             }, tree_config, canon_state_notification_sender)?
             // "inspect" fn to unwind blocks that are out of sync with Irys
@@ -195,7 +195,7 @@ where
                 let last = provider.last_block_number()?;
 
                 let target = latest_irys_block_height;
-                
+
                 if target >= last {
                     warn!("requesting to prune reth block ({}) ahead (or equal to) of current state ({})", &target, &last);
                     return Ok(false)
@@ -217,7 +217,7 @@ where
                    /*  if self.offline {
                         info!(target: "reth::cli", "Performing an unwind for offline-only data!");
                     } */
-        
+
                     if let Some(highest_static_file_block) = highest_static_file_block {
                         info!(target: "reth::cli", ?range, ?highest_static_file_block, "Executing a pipeline unwind.");
                     } else {
@@ -226,19 +226,19 @@ where
 
                     let mut pipeline = crate::prune_pipeline::build_pipeline(false, config.stages.clone(), config.prune.clone(), provider_factory.clone())?;
 
-        
+
                     // Move all applicable data from database to static files.
                     pipeline.move_to_static_files()?;
-        
+
                     pipeline.unwind((*range.start()).saturating_sub(1), None)?;
                 } else {
                     info!(target: "reth::cli", ?range, "Executing a database unwind.");
                     let provider = provider_factory.provider_rw()?;
-        
+
                     let _ = provider
                         .take_block_and_execution_range(range.clone())
                         .map_err(|err| eyre::eyre!("Transaction error on unwind: {err}"))?;
-        
+
                     // update finalized block if needed
                     let last_saved_finalized_block_number = provider.last_finalized_block_number()?;
                     let range_min =
@@ -248,13 +248,13 @@ where
                     {
                         provider.save_finalized_block_number(BlockNumber::from(range_min))?;
                     }
-        
+
                     provider.commit()?;
                 }
                 Ok(true)
             }();
-            
-        match result 
+
+        match result
             {
                 Err(e) => {
                     error!("Error pruning: {}", &e);
@@ -268,7 +268,7 @@ where
                   ()
                 }
             };
-            })          
+            })
             .with_components(components_builder, on_component_initialized, Some(irys_ext.clone())).await?;
 
         // spawn exexs
