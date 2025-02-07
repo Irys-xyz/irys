@@ -4,12 +4,11 @@ use std::{
     time::Duration,
 };
 
-use actix::{Actor, Addr, Context, Handler, Message, MessageResponse, Recipient};
+use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
 
 use eyre::eyre;
 use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
 
-use crate::mining::MiningControl;
 
 #[cfg(feature = "nvidia")]
 use {

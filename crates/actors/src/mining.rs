@@ -3,12 +3,12 @@ use crate::broadcast_mining_service::{
     BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService,
     BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
 };
-use crate::packing::{self, PackingRequest};
+use crate::packing::{PackingRequest};
 use crate::vdf_service::VdfStepsReadGuard;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use irys_efficient_sampling::Ranges;
-use irys_storage::{ie, ii, storage_module, StorageModule};
+use irys_storage::{ie, ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
