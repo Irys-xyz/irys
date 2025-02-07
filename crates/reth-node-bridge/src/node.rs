@@ -144,7 +144,7 @@ pub async fn run_node<T: HasName + HasTableType>(
         "node",
         "-vvvvv",
         "--instance",
-        format!("{}", irys_config.instance_number),
+        format!("{}", irys_config.instance_number.unwrap_or(1)),
         "--disable-discovery",
         "--http",
         "--http.api",

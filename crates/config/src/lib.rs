@@ -21,9 +21,8 @@ pub mod chain;
 pub struct IrysNodeConfig {
     /// Signer instance used for mining
     pub mining_signer: IrysSigner,
-    /// Node ID/instance number: used for testing
-    pub instance_number: u32,
-
+    /// Node ID/instance number: used for testing. if omitted, an instance subfolder is not created. reth will still be set as instance `1`.
+    pub instance_number: Option<u32>,
     /// base data directory, i.e `./.tmp`
     /// should not be used directly, instead use the appropriate methods, i.e `instance_directory`
     pub base_directory: PathBuf,
@@ -41,7 +40,7 @@ impl Default for IrysNodeConfig {
         Self {
             chainspec_builder: IrysChainSpecBuilder::mainnet(),
             mining_signer: IrysSigner::random_signer(),
-            instance_number: 1,
+            instance_number: Some(1),
             base_directory: base_dir,
         }
     }
@@ -58,7 +57,7 @@ impl IrysNodeConfig {
     pub fn mainnet() -> Self {
         Self {
             mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(CONFIG.mining_key).unwrap()),
-            instance_number: 1,
+            instance_number: None,
             base_directory: env::current_dir()
                 .expect("Unable to determine working dir, aborting")
                 .join(".irys"),
@@ -67,8 +66,12 @@ impl IrysNodeConfig {
     }
 
     /// get the instance-specific directory path
+    /// this will return the base directory if instance_number is not `Some`
     pub fn instance_directory(&self) -> PathBuf {
-        self.base_directory.join(self.instance_number.to_string())
+        self.instance_number
+            .map_or(self.base_directory.clone(), |i| {
+                self.base_directory.join(i.to_string())
+            })
     }
     /// get the instance-specific storage module directory path
     pub fn storage_module_dir(&self) -> PathBuf {
