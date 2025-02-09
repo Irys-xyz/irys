@@ -1,12 +1,6 @@
 use irys_database::{
     open_or_create_db,
-    reth_db::{
-        cursor::*,
-        mdbx::{tx::Tx, RO},
-        table::Table,
-        transaction::DbTx,
-        Database as _, DatabaseEnv, HasName, HasTableType,
-    },
+    reth_db::{Database as _, DatabaseEnv},
     tables::{IngressProofs, IrysTables, IrysTxHeaders},
     walk_all,
 };
@@ -16,7 +10,6 @@ pub fn load_db() -> DatabaseEnv {
     open_or_create_db(path, IrysTables::ALL, None).unwrap()
 }
 
-#[test]
 fn promotion_debug() -> eyre::Result<()> {
     let db = load_db();
     let read_tx = db.tx()?;

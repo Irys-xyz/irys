@@ -2,7 +2,7 @@ use actix::SystemService;
 use actix::{Actor, ArbiterService, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
-use irys_config::STORAGE_SUBMODULES_CONFIG;
+use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
@@ -205,17 +205,17 @@ impl Handler<GetPartitionAssignmentsGuardMessage> for EpochServiceActor {
 /// Retrieve a read only reference to the ledger partition assignments
 #[derive(Message, Debug)]
 #[rtype(result = "Vec<StorageModuleInfo>")]
-pub struct GetGenesisStorageModulesMessage;
+pub struct GetGenesisStorageModulesMessage(pub StorageSubmodulesConfig);
 
 impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
     type Result = Vec<StorageModuleInfo>;
 
     fn handle(
         &mut self,
-        _msg: GetGenesisStorageModulesMessage,
+        msg: GetGenesisStorageModulesMessage,
         _ctx: &mut Self::Context,
     ) -> Self::Result {
-        self.get_genesis_storage_module_infos()
+        self.get_genesis_storage_module_infos(msg.0)
     }
 }
 
@@ -649,13 +649,16 @@ impl EpochServiceActor {
     }
 
     /// Configure storage modules for genesis partition assignments
-    pub fn get_genesis_storage_module_infos(&self) -> Vec<StorageModuleInfo> {
+    pub fn get_genesis_storage_module_infos(
+        &self,
+        storage_module_config: StorageSubmodulesConfig,
+    ) -> Vec<StorageModuleInfo> {
         let ledgers = self.ledgers.read().unwrap();
         let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
 
         let pa = self.partition_assignments.read().unwrap();
-        let sm_paths = &STORAGE_SUBMODULES_CONFIG.submodule_paths;
 
+        let sm_paths = storage_module_config.submodule_paths;
         // Configure publish ledger storage
         let mut module_infos = ledgers
             .get_slots(Ledger::Publish)
@@ -853,8 +856,8 @@ mod tests {
 
         println!("{:?}", ledgers.read());
 
-        let infos = epoch_service.get_genesis_storage_module_infos();
-        println!("{:#?}", infos);
+        // let infos = epoch_service.get_genesis_storage_module_infos();
+        // println!("{:#?}", infos);
     }
 
     #[actix::test]
