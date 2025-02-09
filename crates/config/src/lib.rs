@@ -39,7 +39,7 @@ impl Default for IrysNodeConfig {
         Self {
             chainspec_builder: IrysChainSpecBuilder::mainnet(),
             mining_signer: IrysSigner::random_signer(),
-            instance_number: Some(1),
+            instance_number: None, // no instance dir
             base_directory: base_dir,
         }
     }

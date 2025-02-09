@@ -107,7 +107,7 @@ pub async fn start_for_testing_default(
     let config = IrysNodeConfig {
         base_directory: setup_tracing_and_temp_dir(name, keep).into_path(),
         mining_signer: miner_signer.clone(),
-        ..Default::default()
+        ..IrysNodeConfig::default()
     };
 
     let storage_config = StorageConfig {
