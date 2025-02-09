@@ -147,7 +147,7 @@ pub async fn start_irys_node(
     }
 
     // Autogenerates the ".irys_submodules.toml" in dev mode
-    StorageSubmodulesConfig::load();
+    let storage_module_config = StorageSubmodulesConfig::load(base_dir.clone()).unwrap();
 
     if PACKING_TYPE != PackingType::CPU && storage_config.chunk_size != CHUNK_SIZE {
         error!("GPU packing only supports chunk size {}!", CHUNK_SIZE)
@@ -354,7 +354,7 @@ pub async fn start_irys_node(
 
                 // Get the genesis storage modules and their assigned partitions
                 let storage_module_infos = epoch_service_actor_addr
-                    .send(GetGenesisStorageModulesMessage)
+                    .send(GetGenesisStorageModulesMessage(storage_module_config))
                     .await
                     .unwrap();
 
