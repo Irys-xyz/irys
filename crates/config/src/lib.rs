@@ -4,7 +4,6 @@ use std::{
     fs,
     num::ParseIntError,
     path::{Path, PathBuf},
-    str::FromStr as _,
 };
 
 use chain::chainspec::IrysChainSpecBuilder;

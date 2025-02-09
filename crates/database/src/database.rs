@@ -5,10 +5,8 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders,
-    PartitionHashes,
 };
 
-use irys_types::partition::PartitionHash;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
     IrysTransactionId, TxRelativeChunkOffset, UnpackedChunk, MEGABYTE, U256,
