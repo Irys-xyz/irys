@@ -6,7 +6,7 @@ use tracing::debug;
 
 #[cfg(test)]
 #[actix_web::test]
-async fn double_root_data_promotion_test() {
+async fn serial_double_root_data_promotion_test() {
     use std::time::Duration;
 
     use actix_web::{

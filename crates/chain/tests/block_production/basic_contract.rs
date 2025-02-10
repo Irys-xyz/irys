@@ -21,9 +21,9 @@ sol!(
     IrysERC20,
     "../../fixtures/contracts/out/IrysERC20.sol/IrysERC20.json"
 );
-
+#[cfg(test)]
 #[tokio::test]
-async fn test_erc20() -> eyre::Result<()> {
+async fn serial_test_erc20() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_erc20"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();
@@ -56,7 +56,7 @@ async fn test_erc20() -> eyre::Result<()> {
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
-        .on_http("http://localhost:8080".parse()?);
+        .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
 
     let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.address()));
 
