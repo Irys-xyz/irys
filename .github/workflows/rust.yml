@@ -15,6 +15,7 @@ env:
   CACHE_VERSION: v1
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  RUST_LOG: debug
 
 jobs:
   gate:
