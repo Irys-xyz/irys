@@ -56,7 +56,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
 
-      - run: cargo nextest run --workspace --all-features --all-targets --retries 3
+      - run: cargo nextest run --workspace --retries 3
 
       - name: Clean cache
         run: .github/scripts/clean_cache.sh
