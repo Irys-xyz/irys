@@ -263,7 +263,8 @@ impl EpochServiceActor {
 
         let mut block_index = 0_u64;
 
-        loop {
+        // commented out epoch block loops as now we are not triggering NewEpochMessage
+        // loop {
             let block = rg.get_item(block_index.try_into().unwrap());
 
             match block {
@@ -282,9 +283,10 @@ impl EpochServiceActor {
                     block_index += self.config.num_blocks_in_epoch;
                 }
                 None => {
-                    break;
+                    panic!("Could not recover block at index during epoch service initialization {}", block_index);                    
+                    // break;
                 }
-            }
+        // }
 
             // print out the block_list at startup (debugging)
             // self.print_items(read_guard.clone(), db.clone());
