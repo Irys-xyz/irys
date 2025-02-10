@@ -1,8 +1,5 @@
 use core::fmt;
-use std::{
-    convert::Infallible,
-    ops::{Deref, DerefMut},
-};
+use std::ops::{Add, Deref, DerefMut};
 
 use crate::{string_u64, LedgerChunkOffset};
 use alloy_primitives::Address;
@@ -327,6 +324,14 @@ impl DerefMut for RelativeChunkOffset {
 impl RelativeChunkOffset {
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
         RelativeChunkOffset(i32::from_be_bytes(bytes))
+    }
+}
+
+impl Add<i32> for RelativeChunkOffset {
+    type Output = Self;
+
+    fn add(self, rhs: i32) -> Self::Output {
+        RelativeChunkOffset(self.0 + rhs)
     }
 }
 

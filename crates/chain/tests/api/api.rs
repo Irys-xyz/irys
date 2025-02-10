@@ -10,6 +10,7 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use base58::ToBase58;
+use irys_types::TxChunkOffset;
 use tracing::info;
 
 #[cfg(test)]
@@ -115,7 +116,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: (index as u32).into(),
+            tx_offset: TxChunkOffset::from(index as u32),
         };
 
         // Make a POST request with JSON payload

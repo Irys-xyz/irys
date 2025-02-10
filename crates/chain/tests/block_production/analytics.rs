@@ -9,6 +9,7 @@ use alloy_provider::Provider;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::LocalSigner;
 use alloy_signer_local::PrivateKeySigner;
+use irys_types::TxChunkOffset;
 use irys_types::UnpackedChunk;
 use rand::Rng;
 
@@ -195,7 +196,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     data_size,
                     data_path,
                     bytes: Base64(data_bytes[min..max].to_vec()),
-                    tx_offset: (tx_chunk_offset as u32).into(),
+                    tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
                 };
 
                 // Make a POST request with JSON payload

@@ -16,7 +16,7 @@ use {
 };
 
 use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
-use irys_types::{PartitionChunkRange, StorageConfig};
+use irys_types::{PartitionChunkOffset, PartitionChunkRange, StorageConfig};
 use reth::tasks::TaskExecutor;
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
@@ -155,20 +155,20 @@ impl PackingActor {
                         let permit = semaphore.acquire_owned().await.unwrap();
                         //debug!(target: "irys::packing", "Packing chunk {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
                         self.task_executor.spawn_blocking(async move {
-                            let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
+                            let mut out = Vec::with_capacity(chunk_size as usize);
                             compute_entropy_chunk(
                                 mining_address,
-                                u64::from(i),
+                                i as u64,
                                 partition_hash.0,
                                 entropy_packing_iterations,
-                                chunk_size.try_into().unwrap(),
+                                chunk_size as usize,
                                 &mut out,
                             );
 
                             debug!(target: "irys::packing::progress", "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                             // write the chunk
                             //debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.id);
-                            storage_module.write_chunk(i.into(), out, ChunkType::Entropy);
+                            storage_module.write_chunk(PartitionChunkOffset::from(i), out, ChunkType::Entropy);
                             let _ = storage_module.sync_pending_chunks();
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                         });
@@ -353,7 +353,8 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
-        partition_chunk_offset_ii, Address, PartitionChunkOffset, StorageConfig,
+        partition_chunk_offset_ii, Address, PartitionChunkOffset, PartitionChunkRange,
+        StorageConfig,
     };
     use reth::tasks::TaskManager;
     use tokio::runtime::Handle;
@@ -400,7 +401,7 @@ mod tests {
 
         let request = PackingRequest {
             storage_module: storage_module.clone(),
-            chunk_range: ii(0, 3).into(),
+            chunk_range: PartitionChunkRange(partition_chunk_offset_ii!(0, 3)),
         };
         // Create an instance of the mempool actor
         let task_manager = TaskManager::current();
@@ -433,7 +434,7 @@ mod tests {
         for i in 0..=3 {
             let chunk = stored_entropy.get(&PartitionChunkOffset::from(i)).unwrap();
 
-            let mut out = Vec::with_capacity(storage_config.chunk_size.try_into().unwrap());
+            let mut out = Vec::with_capacity(storage_config.chunk_size as usize);
             compute_entropy_chunk(
                 mining_address,
                 i as u64,

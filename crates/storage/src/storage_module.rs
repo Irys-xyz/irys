@@ -13,11 +13,12 @@ use irys_database::{
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_types::{
     app_state::DatabaseProvider,
-    get_leaf_proof,
+    get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot,
     LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange,
-    ProofDeserialize, StorageConfig, TxChunkOffset, TxPath, UnpackedChunk, H256,
+    ProofDeserialize, RelativeChunkOffset, StorageConfig, TxChunkOffset, TxPath, UnpackedChunk,
+    H256,
 };
 use nodit::{
     interval::{ie, ii},
@@ -500,8 +501,10 @@ impl StorageModule {
 
             // Read chunks in clipped range
             for chunk_offset in start..=end {
-                let bytes = self.read_chunk_internal(chunk_offset.into())?;
-                chunk_map.insert(chunk_offset.into(), (bytes, chunk_type.clone()));
+                let partition_chunk_offset = PartitionChunkOffset::from(chunk_offset);
+
+                let bytes = self.read_chunk_internal(partition_chunk_offset)?;
+                chunk_map.insert(partition_chunk_offset, (bytes, chunk_type.clone()));
             }
         }
         Ok(chunk_map)
@@ -524,12 +527,12 @@ impl StorageModule {
 
         // Calculate file offset and prepare buffer
         let chunk_size = self.storage_config.chunk_size;
-        let file_offset = (u64::from(chunk_offset) - u64::from(interval.start())) * chunk_size;
+        let file_offset = *(chunk_offset - interval.start()) as u64 * chunk_size;
         let mut buf = vec![0u8; chunk_size as usize];
 
         // Read chunk from file
         let mut file = submodule.file.lock().unwrap();
-        file.seek(SeekFrom::Start(file_offset.into()))?;
+        file.seek(SeekFrom::Start(file_offset))?;
         file.read_exact(&mut buf)?;
 
         Ok(buf)
@@ -596,7 +599,8 @@ impl StorageModule {
         // Compute the partition relative overlapping chunk range
         let partition_overlap = self.make_range_partition_relative(overlap)?;
         // Compute the Partition relative offset
-        let relative_offset = self.make_offset_partition_relative(chunk_range.start())?;
+        let relative_offset =
+            RelativeChunkOffset::from(self.make_offset_partition_relative(chunk_range.start())?);
 
         for (interval, submodule) in self.submodules.overlapping(partition_overlap) {
             let _ = submodule.db.update(|tx| -> eyre::Result<()> {
@@ -606,14 +610,15 @@ impl StorageModule {
                 if let Some(range) = interval.intersection(&partition_overlap) {
                     // Add the tx_path_hash to every offset in the intersecting range
                     for offset in *range.start()..=*range.end() {
+                        let part_offset = PartitionChunkOffset::from(offset);
                         add_tx_path_hash_to_offset_index(
                             tx,
-                            offset.into(),
+                            part_offset,
                             Some(tx_path_hash.clone()),
                         )?;
                     }
                     // Also update the start offset by data_root index
-                    add_start_offset_to_data_root_index(tx, data_root, relative_offset.into())?;
+                    add_start_offset_to_data_root_index(tx, data_root, relative_offset)?;
                 }
                 Ok(())
             })?;
@@ -659,13 +664,13 @@ impl StorageModule {
         let mut write_offsets = vec![];
         for start_offset in start_offsets.0 {
             let partition_offset =
-                PartitionChunkOffset::from(start_offset + (*chunk.tx_offset as i32).into());
+                PartitionChunkOffset::from(start_offset + (*chunk.tx_offset as i32));
             {
                 // read the metadata in a block so the read guard expires quickly
                 let intervals = self.intervals.read().unwrap();
                 let chunk_state = intervals.get_at_point(partition_offset);
                 if chunk_state.is_some_and(|s| *s == ChunkType::Entropy) {
-                    write_offsets.push(PartitionChunkOffset::from(partition_offset))
+                    write_offsets.push(partition_offset)
                 }
             };
         }
@@ -750,13 +755,13 @@ impl StorageModule {
 
         // Get chunk info and calculate index
         let range = self.get_storage_module_range()?;
-        let partition_offset = *(ledger_offset - range.start()) as u32;
+        let partition_offset = PartitionChunkOffset::from(*(ledger_offset - range.start()));
         let closest_offsets = self.collect_start_offsets(data_root)?;
 
         let nearest_start_offset = closest_offsets
             .0
             .iter()
-            .filter(|&&offset| *offset <= partition_offset as i32)
+            .filter(|&&offset| *offset <= *partition_offset as i32)
             .max()
             .copied()
             .ok_or_eyre("Could not find nearest_start_offset")?;
@@ -766,14 +771,14 @@ impl StorageModule {
             partition_offset
         ))?;
         let chunk_info = chunks
-            .get(&PartitionChunkOffset::from(partition_offset))
+            .get(&partition_offset)
             .ok_or_eyre("Could not find chunk bytes on disk")?;
 
         // Because nearest_start_offset can be negative (for data_roots that
         // overlap partition boundaries) we do our calculations with i64s to
         // account for negative nearest_start_offset
         let data_root_start_offset: LedgerChunkOffset =
-            ((*range.start() as i64 + *nearest_start_offset as i64) as u64).into();
+            LedgerChunkOffset::from(*range.start() as i64 + *nearest_start_offset as i64);
 
         // Finally the index of the chunk in the transaction can be calculated
         // using the ledger relative start_offset of the data_root and the
@@ -785,7 +790,7 @@ impl StorageModule {
             data_size,
             data_path,
             bytes: Base64::from(chunk_info.0.clone()),
-            partition_offset: partition_offset.into(),
+            partition_offset,
             tx_offset: chunk_offset,
             packing_address: self.storage_config.miner_address,
             partition_hash: self.partition_hash().unwrap(),
@@ -799,13 +804,13 @@ impl StorageModule {
     ) -> eyre::Result<(Option<TxPath>, Option<ChunkDataPath>)> {
         let (_interval, submodule) = self
             .submodules
-            .get_key_value_at_point((*chunk_offset as u32).into())
+            .get_key_value_at_point(PartitionChunkOffset::from(chunk_offset))
             .unwrap();
 
         submodule.db.view(|tx| {
             Ok((
-                get_tx_path_by_offset(tx, (*chunk_offset as u32).into())?,
-                get_data_path_by_offset(tx, (*chunk_offset as u32).into())?,
+                get_tx_path_by_offset(tx, PartitionChunkOffset::from(chunk_offset))?,
+                get_data_path_by_offset(tx, PartitionChunkOffset::from(chunk_offset))?,
             ))
         })?
     }
@@ -863,10 +868,7 @@ impl StorageModule {
             if let Some(slot_index) = part_assign.slot_index {
                 let start = slot_index as u64 * self.storage_config.num_chunks_in_partition;
                 let end = start + self.storage_config.num_chunks_in_partition;
-                return Ok(LedgerChunkRange(ie(
-                    LedgerChunkOffset::from(start),
-                    LedgerChunkOffset::from(end),
-                )));
+                return Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)));
             } else {
                 return Err(eyre::eyre!("Ledger slot not assigned!"));
             }
@@ -886,8 +888,8 @@ impl StorageModule {
         let start = chunk_range.start() - storage_module_range.start();
         let end = chunk_range.end() - storage_module_range.start();
         Ok(PartitionChunkRange(ii(
-            (*start as u32).into(),
-            (*end as u32).into(),
+            PartitionChunkOffset::from(start),
+            PartitionChunkOffset::from(end),
         )))
     }
 
@@ -915,7 +917,8 @@ impl StorageModule {
         if local_offset < 0 {
             return Err(eyre::eyre!("chunk offset not in storage module"));
         }
-        Ok(local_offset.try_into()?)
+        // no need to worry about this conversion failing since we are already handling the negative case
+        Ok(local_offset as u32)
     }
 
     /// Test utility function to mark a StorageModule as packed
@@ -923,7 +926,7 @@ impl StorageModule {
         let entropy_bytes = vec![0u8; self.storage_config.chunk_size as usize];
         for chunk_offset in 0..self.storage_config.num_chunks_in_partition as u32 {
             self.write_chunk(
-                chunk_offset.into(),
+                PartitionChunkOffset::from(chunk_offset),
                 entropy_bytes.clone(),
                 ChunkType::Entropy,
             );
@@ -1072,14 +1075,14 @@ pub fn find_invalid_packing_starts(sm: Arc<StorageModule>) -> Vec<PartitionChunk
             }
         }
         if left != range.end() {
-            invalid_starts.push(left - 1u64.into())
+            invalid_starts.push(left - PartitionChunkOffset::from(1u64))
         }
     }
     invalid_starts
 }
 
 pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::Result<bool> {
-    let chunk = sm.read_chunk_internal(point.into())?;
+    let chunk = sm.read_chunk_internal(PartitionChunkOffset::from(point))?;
     let chunk_size = sm.storage_config.chunk_size;
     let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
 
@@ -1324,7 +1327,7 @@ mod tests {
         let _ = storage_module.index_transaction_data(
             tx_path,
             data_root,
-            ledger_chunk_offset_ii!(0, 0).into(),
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
         );
 
         let chunk = UnpackedChunk {

@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    ops::{Add, AddAssign, Deref, DerefMut, Rem},
+    ops::{Add, AddAssign, Deref, DerefMut, Rem, Sub},
     path::PathBuf,
 };
 
@@ -111,6 +111,11 @@ impl DerefMut for PartitionChunkOffset {
 
 impl From<RelativeChunkOffset> for PartitionChunkOffset {
     fn from(value: RelativeChunkOffset) -> PartitionChunkOffset {
+        PartitionChunkOffset::from(*value)
+    }
+}
+impl From<LedgerChunkOffset> for PartitionChunkOffset {
+    fn from(value: LedgerChunkOffset) -> PartitionChunkOffset {
         PartitionChunkOffset::from(*value)
     }
 }
@@ -248,6 +253,13 @@ impl LedgerChunkOffset {
     }
 }
 
+impl Add<u32> for LedgerChunkOffset {
+    type Output = Self;
+
+    fn add(self, rhs: u32) -> Self::Output {
+        LedgerChunkOffset::from(*self + rhs as u64)
+    }
+}
 impl Add<u64> for LedgerChunkOffset {
     type Output = Self;
 
@@ -274,8 +286,18 @@ impl From<u8> for LedgerChunkOffset {
         LedgerChunkOffset(value.into())
     }
 }
+impl From<u32> for LedgerChunkOffset {
+    fn from(value: u32) -> Self {
+        LedgerChunkOffset(value.try_into().expect("Value must be non-negative"))
+    }
+}
 impl From<i32> for LedgerChunkOffset {
     fn from(value: i32) -> Self {
+        LedgerChunkOffset(value.try_into().expect("Value must be non-negative"))
+    }
+}
+impl From<i64> for LedgerChunkOffset {
+    fn from(value: i64) -> Self {
         LedgerChunkOffset(value.try_into().expect("Value must be non-negative"))
     }
 }
@@ -297,6 +319,15 @@ impl TryFrom<LedgerChunkOffset> for usize {
 
 #[macro_export]
 macro_rules! ledger_chunk_offset_ii {
+    ($start:expr, $end:expr) => {
+        ii(
+            LedgerChunkOffset::from($start),
+            LedgerChunkOffset::from($end),
+        )
+    };
+}
+#[macro_export]
+macro_rules! ledger_chunk_offset_ie {
     ($start:expr, $end:expr) => {
         ii(
             LedgerChunkOffset::from($start),

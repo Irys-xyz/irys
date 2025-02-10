@@ -21,7 +21,7 @@ pub fn unpack(
     let mut entropy: Vec<u8> = Vec::with_capacity(chunk_size);
     capacity_single::compute_entropy_chunk(
         packed_chunk.packing_address,
-        u64::from(packed_chunk.partition_offset),
+        *packed_chunk.partition_offset as u64,
         packed_chunk.partition_hash.0,
         entropy_packing_iterations,
         chunk_size,
@@ -249,7 +249,7 @@ pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
 mod tests {
     use crate::capacity_single::SHA_HASH_SIZE;
     use crate::*;
-    use irys_types::{TxChunkOffset, H256};
+    use irys_types::{PartitionChunkOffset, TxChunkOffset, H256};
     use rand::{Rng, RngCore};
     use std::time::*;
 
@@ -516,7 +516,7 @@ mod tests {
             bytes: Base64(packed_data.clone()),
             tx_offset: TxChunkOffset::from(0),
             packing_address: mining_address,
-            partition_offset: (chunk_offset as u32).into(),
+            partition_offset: PartitionChunkOffset::from(chunk_offset as u32),
             partition_hash: H256::from(partition_hash),
         };
 

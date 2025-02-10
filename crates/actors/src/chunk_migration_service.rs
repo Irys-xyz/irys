@@ -178,25 +178,20 @@ fn process_transaction_chunks(
     db: &DatabaseProvider,
 ) -> Result<(), ()> {
     for tx_chunk_offset in 0..num_chunks_in_tx {
+        let tx_chunk_offset = TxChunkOffset::from(tx_chunk_offset);
         // Attempt to retrieve the cached chunk from the mempool
-        let chunk_info = match get_cached_chunk(db, data_root, tx_chunk_offset.into()) {
+        let chunk_info = match get_cached_chunk(db, data_root, tx_chunk_offset) {
             Ok(Some(info)) => info,
             _ => continue,
         };
 
         // Find which storage module intersects this chunk
-        let ledger_offset = tx_chunk_range.start() + tx_chunk_offset as u64;
+        let ledger_offset = tx_chunk_range.start() + *tx_chunk_offset;
         let storage_module = find_storage_module(storage_modules, ledger, ledger_offset.into());
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
-            write_chunk_to_module(
-                module,
-                chunk_info,
-                data_root,
-                data_size,
-                tx_chunk_offset.into(),
-            )?;
+            write_chunk_to_module(module, chunk_info, data_root, data_size, tx_chunk_offset)?;
         }
     }
     Ok(())
