@@ -24,9 +24,9 @@ use tracing::info;
 
 use crate::utils::capacity_chunk_solution;
 /// Create a valid capacity PoA solution
-
+#[cfg(test)]
 #[tokio::test]
-async fn test_blockprod() -> eyre::Result<()> {
+async fn serial_test_blockprod() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
@@ -129,7 +129,7 @@ async fn test_blockprod() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn mine_ten_blocks() -> eyre::Result<()> {
+async fn serial_mine_ten_blocks() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();
@@ -172,7 +172,7 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
+async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();
@@ -219,7 +219,7 @@ async fn mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn test_basic_blockprod() -> eyre::Result<()> {
+async fn serial_test_basic_blockprod() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();
@@ -264,7 +264,7 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
+async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();

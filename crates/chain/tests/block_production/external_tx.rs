@@ -22,7 +22,8 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 const DEV2_PRIVATE_KEY: &str = "9687cbc3f9f3a0b6dffbf01ec30143e33b7c49f789257d7836eb54b9ae5d27e2";
 const DEV2_ADDRESS: &str = "Bea4f456A5801cf9Af196a582D6Ec425c970c2C6";
 
-// #[tokio::test]
+#[ignore]
+#[tokio::test]
 /// WARNING DO NOT RUN AUTOMATICALLY
 /// THIS TEST BLOCKS EXPECTING AN EXTERNAL TX TO BE SUBMITTED, THROUGH A TOOL LIKE METAMASK
 async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {

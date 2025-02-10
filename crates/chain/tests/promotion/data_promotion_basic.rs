@@ -1,6 +1,6 @@
 #[cfg(test)]
 #[actix_web::test]
-async fn data_promotion_test() {
+async fn serial_data_promotion_test() {
     use actix_web::{
         middleware::Logger,
         test::{self, call_service, TestRequest},

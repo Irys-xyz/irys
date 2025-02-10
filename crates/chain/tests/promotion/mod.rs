@@ -1,2 +1,2 @@
-mod data_promotion_basic;
-mod data_promotion_double;
+pub mod data_promotion_basic;
+pub mod data_promotion_double;

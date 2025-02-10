@@ -21,6 +21,7 @@ pub struct IrysNodeConfig {
     /// Signer instance used for mining
     pub mining_signer: IrysSigner,
     /// Node ID/instance number: used for testing. if omitted, an instance subfolder is not created. reth will still be set as instance `1`.
+    /// if `0` is provided as the instance number, random ports are used
     pub instance_number: Option<u32>,
     /// base data directory, i.e `./.tmp`
     /// should not be used directly, instead use the appropriate methods, i.e `instance_directory`
