@@ -1,5 +1,5 @@
 use actix::SystemService;
-use actix::{Actor, ArbiterService, Context, Handler, Message, MessageResponse};
+use actix::{Actor, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
 use irys_config::StorageSubmodulesConfig;
@@ -261,29 +261,24 @@ impl EpochServiceActor {
 
         let rg = read_guard.read();
 
-        let mut block_index = 0_u64;
-
+        let block_index = 0;
         // TODO: restore epoch block loops as now we are not triggering NewEpochMessage
-        let block = rg.get_item(block_index.try_into().unwrap());
-
-        match block {
+        match rg.get_item(block_index) {
             Some(b) => {
                 let block_header = database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
                     .unwrap()
                     .unwrap();
                 match self.perform_epoch_tasks(Arc::new(block_header)) {
-                    Ok(_) => debug!("Processed epoch block {}", &block_index),
+                    Ok(_) => debug!(?block_index, "Processed epoch block"),
                     Err(e) => {
                         self.print_items(read_guard.clone(), db.clone());
                         panic!("{:?}", e);
                     }
                 }
-                block_index += self.config.num_blocks_in_epoch;
             }
             None => {
                 panic!(
-                    "Could not recover block at index during epoch service initialization {}",
-                    block_index
+                    "Could not recover block at index during epoch service initialization {block_index:?}"
                 );
             }
         }
@@ -379,7 +374,7 @@ impl EpochServiceActor {
 
     /// Loops though all of the term ledgers and looks for slots that are older
     /// than the `epoch_length` (term length) of the ledger.
-    fn expire_term_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
+    fn expire_term_ledger_slots(&self, new_epoch_block: &IrysBlockHeader) {
         let epoch_height = new_epoch_block.height;
         let expired_hashes: Vec<H256>;
         {
@@ -395,7 +390,7 @@ impl EpochServiceActor {
 
     /// Loops though all the ledgers both perm and term, checking to see if any
     /// require additional ledger slots added to accommodate data ingress.
-    fn allocate_additional_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
+    fn allocate_additional_ledger_slots(&self, new_epoch_block: &IrysBlockHeader) {
         for ledger in Ledger::iter() {
             let part_slots = self.calculate_additional_slots(new_epoch_block, ledger);
             {
@@ -561,7 +556,7 @@ impl EpochServiceActor {
 
     // Updates PartitionAssignment information about a partition hash, marking
     // it as expired (or unassigned to a slot in a data ledger)
-    fn return_expired_partition_to_capacity(&mut self, partition_hash: H256) {
+    fn return_expired_partition_to_capacity(&self, partition_hash: H256) {
         let mut pa = self.partition_assignments.write().unwrap();
         // Convert data partition to capacity partition if it exists
         if let Some(mut assignment) = pa.data_partitions.remove(&partition_hash) {
@@ -585,12 +580,7 @@ impl EpochServiceActor {
 
     /// Takes a capacity partition hash and updates its `PartitionAssignment`
     /// state to indicate it is part of a data ledger
-    fn assign_partition_to_slot(
-        &mut self,
-        partition_hash: H256,
-        ledger: Ledger,
-        slot_index: usize,
-    ) {
+    fn assign_partition_to_slot(&self, partition_hash: H256, ledger: Ledger, slot_index: usize) {
         debug!(
             "Assigning partition {} to slot {} of ledger {:?}",
             &partition_hash.0.to_base58(),

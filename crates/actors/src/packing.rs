@@ -95,7 +95,7 @@ impl PackingActor {
         }
     }
 
-    async fn process_jobs(self, storage_module_id: usize, pending_jobs: AtomicPackingJobQueue) {
+    async fn process_jobs(self, _storage_module_id: usize, pending_jobs: AtomicPackingJobQueue) {
         loop {
             // block as the compiler can't reason about explicit read guard drops with Send bounds apparently
             let front = {

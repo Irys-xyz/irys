@@ -254,10 +254,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // Publish Ledger Transactions
             let publish_chunks_added = calculate_chunks_added(&publish_txs, chunk_size);
             let publish_max_chunk_offset =  prev_block_header.ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
-            let opt_proofs = if !proofs.is_empty() {
-                 Some(IngressProofsList::from(proofs))
+            let opt_proofs = if proofs.is_empty() {
+                 None
             } else {
-                None
+                Some(IngressProofsList::from(proofs))
             };
 
             // Submit Ledger Transactions    
