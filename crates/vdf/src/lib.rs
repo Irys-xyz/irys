@@ -7,7 +7,7 @@ use nodit::interval::ii;
 use openssl::sha;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 use vdf_state::VdfStepsReadGuard;
 
 pub mod vdf_state;
