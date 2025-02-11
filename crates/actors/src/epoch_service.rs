@@ -285,8 +285,7 @@ impl EpochServiceActor {
                     "Could not recover block at index during epoch service initialization {}",
                     block_index
                 );
-                // break;
-            } // }
+            }
 
               // print out the block_list at startup (debugging)
               // self.print_items(read_guard.clone(), db.clone());
