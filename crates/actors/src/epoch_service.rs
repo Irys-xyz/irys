@@ -264,7 +264,6 @@ impl EpochServiceActor {
         let mut block_index = 0_u64;
 
         // commented out epoch block loops as now we are not triggering NewEpochMessage
-        // loop {
         let block = rg.get_item(block_index.try_into().unwrap());
 
         match block {
