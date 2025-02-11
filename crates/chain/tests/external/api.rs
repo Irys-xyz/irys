@@ -37,6 +37,12 @@ use tracing::info;
 
 #[ignore]
 #[actix::test]
+/// This test is designed to test the external storage Tx API
+/// Instructions:
+/// Run the test, wait until it logs `waiting for tx header`
+/// Send it a valid Irys perm (ledger 0) storage tx header, you should see a log `got tx <tx_id>- waiting for chunks & ingress proof generation...`
+/// Send it all the chunks for the storage transaction so it can generate an ingress proof. you should see a log for `got ingress proof for data root <data_root>`
+/// The test will then mine a block, and confirm the tx has been mined and the chunks have been migrated to the storage modules.
 async fn external_api() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("external_api"), false);
 

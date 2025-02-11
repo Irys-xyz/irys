@@ -1,4 +1,5 @@
 #[cfg(test)]
+// re-exports for all tests we want CI to discover/run
 pub mod tests {
     pub use crate::block_production;
     pub use crate::programmable_data;

@@ -24,12 +24,12 @@ const DEV2_ADDRESS: &str = "Bea4f456A5801cf9Af196a582D6Ec425c970c2C6";
 
 #[ignore]
 #[tokio::test]
-/// WARNING DO NOT RUN AUTOMATICALLY
-/// THIS TEST BLOCKS EXPECTING AN EXTERNAL TX TO BE SUBMITTED, THROUGH A TOOL LIKE METAMASK
-async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
+/// This test is designed as a utility for external tooling integrations (Js Client, metamask, etc) - it will wait to be sent an EVM transaction,
+/// After which it will mine blocks continuously until stopped.
+async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
     let expected_addr = hex::decode(DEV_ADDRESS)?;
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
+    let temp_dir = setup_tracing_and_temp_dir(Some("continuous_blockprod_evm_tx"), false);
     let mut config = IrysNodeConfig {
         mining_signer: IrysSigner {
             signer: SigningKey::from_slice(dev_wallet.as_slice())?,
