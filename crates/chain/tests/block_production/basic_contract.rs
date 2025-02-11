@@ -21,7 +21,6 @@ sol!(
     IrysERC20,
     "../../fixtures/contracts/out/IrysERC20.sol/IrysERC20.json"
 );
-#[cfg(test)]
 #[tokio::test]
 async fn serial_test_erc20() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_erc20"), false);

@@ -12,7 +12,6 @@ use awc::http::StatusCode;
 use base58::ToBase58;
 use tracing::info;
 
-#[cfg(test)]
 #[ignore]
 #[actix_web::test]
 async fn serial_api_end_to_end_test_32b() {
@@ -23,7 +22,6 @@ async fn serial_api_end_to_end_test_32b() {
     }
 }
 
-#[cfg(test)]
 #[ignore]
 #[actix_web::test]
 async fn serial_api_end_to_end_test_256kb() {

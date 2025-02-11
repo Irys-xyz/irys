@@ -1,4 +1,3 @@
-#[cfg(test)]
 #[actix_web::test]
 async fn serial_data_promotion_test() {
     use actix_web::{
