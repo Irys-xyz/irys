@@ -395,10 +395,10 @@ mod tests {
 
         let reset_seed = H256([0; 32]);
         print!("seed: {:?}\n", seed);
-        
+
         // seed = apply_reset_seed(seed, reset_seed);
         // println!("seed after reset {:?}", seed);
-        
+
         let start_step_number = 0;
         let mut hasher = Sha256::new();
         let mut salt = U256::from(step_number_to_salt_number(
@@ -1136,7 +1136,7 @@ mod tests {
                         .unwrap()
                         .try_into()
                         .unwrap(),
-                ),                
+                ),
             ]),
             steps: H256List(vec![H256(
                 hex::decode("68230a9b96fbd924982a3d29485ad2c67285d76f2c8fc0a4770d50ed5fd41efd")
@@ -1176,6 +1176,4 @@ mod tests {
         );
         println!("x: {:?}", x);
     }
-
-    
 }
