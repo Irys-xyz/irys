@@ -113,7 +113,7 @@ impl<E: EngineTypes> EngineApiContext<E> {
         EngineApiClient::<E>::fork_choice_updated_v1_irys(
             &self.engine_api_client,
             ForkchoiceState {
-                head_block_hash: head_block_hash,
+                head_block_hash,
                 safe_block_hash: confirmed_block_hash.unwrap_or(B256::ZERO),
                 finalized_block_hash: finalized_block_hash.unwrap_or(B256::ZERO),
             },
