@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
     BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService,
