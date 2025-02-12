@@ -342,9 +342,8 @@ impl StorageModule {
         }
     }
 
-    /// Reinitialize intervals, merging and setting them as Uninitialized, and erase db
+    /// Reinit intervals setting them as Uninitialized, and erase db
     pub fn reinitialize_intervals(&self) -> eyre::Result<Interval<u32>> {
-        println!("here 1 ...");
         let storage_interval = { 
             let mut intervals = self.intervals.write().unwrap();
             let start = intervals.first_key_value().unwrap().0.start();
@@ -354,7 +353,6 @@ impl StorageModule {
             intervals.insert_strict(storage_interval, ChunkType::Uninitialized).unwrap_or_else(|_| panic!("Failed to create new interval, should never happen as interval is empty!"));
             storage_interval
         };
-        println!("here 2 ...");
         if Self::write_intervals_to_submodules(&self.intervals, &self.submodules).is_err() {
             error!("Could not update submodule interval files")
         };
@@ -365,8 +363,6 @@ impl StorageModule {
                 Ok(())
             });
         };
-        println!("here 4 ...");
-
         Ok(storage_interval)
     }
 
@@ -1234,18 +1230,18 @@ mod tests {
         // Load up the intervals from file
         let intervals = StorageModule::load_intervals_from_submodules(&storage_module.submodules);
 
-        let file_intervals = intervals.into_iter().collect::<Vec<_>>();
-        let ints = storage_module.intervals.read().unwrap();
-        let module_intervals = ints.clone().into_iter().collect::<Vec<_>>();
-        assert_eq!(file_intervals, module_intervals);
-
+        {
+            let file_intervals = intervals.into_iter().collect::<Vec<_>>();
+            let ints = storage_module.intervals.read().unwrap();
+            let module_intervals = ints.clone().into_iter().collect::<Vec<_>>();
+            assert_eq!(file_intervals, module_intervals);
+        }
         // Test intervals reset
-        println!("Here ... ");
         let intervals = storage_module.reinitialize_intervals().unwrap();
         
-        // // Verify the entire storage module range is uninitialized again
+        // Verify the entire storage module range is uninitialized again
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
-        // assert_eq!(unpacked, [ii(0, 19)]);
+        assert_eq!(unpacked, [ii(0, 19)]);
 
         Ok(())
     }

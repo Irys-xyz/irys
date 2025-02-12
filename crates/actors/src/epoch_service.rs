@@ -1012,8 +1012,9 @@ mod tests {
         new_epoch_block.height = 600; // grater than epoch_length (5) * num_blocks_in_epoch (100)
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
 
+        let storage_module_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
         // Get the genesis storage modules and their assigned partitions
-        let storage_module_infos = epoch_service_actor.send(GetGenesisStorageModulesMessage).await.unwrap();
+        let storage_module_infos = epoch_service_actor.send(GetGenesisStorageModulesMessage(storage_module_config)).await.unwrap();
 
         //let _ = initialize_storage_files(&base_path, &storage_module_infos, &vec![]);
 
