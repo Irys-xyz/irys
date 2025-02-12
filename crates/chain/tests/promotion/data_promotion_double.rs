@@ -4,7 +4,6 @@ use irys_database::Ledger;
 
 use tracing::debug;
 
-#[cfg(test)]
 #[actix_web::test]
 async fn serial_double_root_data_promotion_test() {
     use std::time::Duration;

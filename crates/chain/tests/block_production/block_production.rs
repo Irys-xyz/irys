@@ -24,7 +24,7 @@ use tracing::info;
 
 use crate::utils::capacity_chunk_solution;
 /// Create a valid capacity PoA solution
-#[cfg(test)]
+
 #[tokio::test]
 async fn serial_test_blockprod() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
