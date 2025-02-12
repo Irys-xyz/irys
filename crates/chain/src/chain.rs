@@ -107,7 +107,7 @@ pub async fn start_for_testing_default(
     let config = IrysNodeConfig {
         base_directory: setup_tracing_and_temp_dir(name, keep).into_path(),
         mining_signer: miner_signer.clone(),
-        ..Default::default()
+        ..IrysNodeConfig::default()
     };
 
     let storage_config = StorageConfig {
@@ -147,7 +147,7 @@ pub async fn start_irys_node(
     }
 
     // Autogenerates the ".irys_submodules.toml" in dev mode
-    StorageSubmodulesConfig::load();
+    let storage_module_config = StorageSubmodulesConfig::load(base_dir.clone()).unwrap();
 
     if PACKING_TYPE != PackingType::CPU && storage_config.chunk_size != CHUNK_SIZE {
         error!("GPU packing only supports chunk size {}!", CHUNK_SIZE)
@@ -293,7 +293,7 @@ pub async fn start_irys_node(
                     if latest.unwrap().unwrap().header.number != latest_block.height {
                         error!("Reth is out of sync with Irys block index! recovery will be attempted.")
                     };
-                    
+
                 }
 
                 RethServiceActor::from_registry()
@@ -362,7 +362,7 @@ pub async fn start_irys_node(
 
                 // Get the genesis storage modules and their assigned partitions
                 let storage_module_infos = epoch_service_actor_addr
-                    .send(GetGenesisStorageModulesMessage)
+                    .send(GetGenesisStorageModulesMessage(storage_module_config))
                     .await
                     .unwrap();
 
@@ -535,7 +535,7 @@ pub async fn start_irys_node(
                         })
                         .collect::<Vec<()>>();
                 }
-                
+
                 // let _ = wait_for_packing(packing_actor_addr.clone(), None).await;
                 // debug!("Packing complete");
 

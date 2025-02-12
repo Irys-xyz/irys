@@ -370,7 +370,7 @@ mod tests {
         app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
-    use irys_types::{partition, H256List, IrysBlockHeader};
+    use irys_types::{H256List, IrysBlockHeader};
     use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
     use std::any::Any;
     use std::collections::VecDeque;

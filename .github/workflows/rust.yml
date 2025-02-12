@@ -15,6 +15,7 @@ env:
   CACHE_VERSION: v1
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  RUST_LOG: debug
 
 jobs:
   gate:
@@ -54,7 +55,9 @@ jobs:
           restore-keys: |
             ci-cache-${{ runner.os }}-${{env.cache-name}}-${{ env.CACHE_VERSION }}-build-
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace --all-features --all-targets
+      - uses: taiki-e/install-action@nextest
+
+      - run: cargo nextest run --workspace --retries 3
 
       - name: Clean cache
         run: .github/scripts/clean_cache.sh

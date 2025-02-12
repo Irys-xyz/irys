@@ -74,7 +74,11 @@ pub struct IrysTransactionHeader {
     #[serde(default, with = "optional_string_u64")]
     pub perm_fee: Option<u64>,
 
-    /// Signed ingress proofs used to promote this transaction to the Publish ledger
+    /// INTERNAL: Signed ingress proofs used to promote this transaction to the Publish ledger
+    /// TODO: put these somewhere else?
+    #[rlp(skip)]
+    #[rlp(default)]
+    #[serde(skip)]
     pub ingress_proofs: Option<TxIngressProof>,
 }
 

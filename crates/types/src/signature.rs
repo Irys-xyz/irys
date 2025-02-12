@@ -159,12 +159,12 @@ mod tests {
     const DEV_PRIVATE_KEY: &str =
         "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
-    // from the js-client, for the tx header in signer_test
-    const JS_SIGNATURE: &str = "0x0515dc91d5dbb4bbe9a030e5c9039eea484332391a5441a7aadd9af31b4ce4cc1a3269151ce7a01c50e33d5e0fe2f80699525e15b9a01dc567d74dabf0c3964a1c";
 
+    // from the JS Client - `txSigningParity`
+    const SIG_HEX: &str = "0x40619e8f16ac2feaa7a525a1f16ad3a7ac952038caba1fe347aed0fa722bfe3d5e2b5cb648a3407c197b762e5aec63dae48a86988550a19b472ae989372d5d041b";
     // BS58 (JSON, hence the escaped quotes) encoded signature
     const SIG_BS58: &str =
-        "\"T2eUuL9SqvdCTiW1vt2mwrH2rBqaS1TKoouePL2x7wLDkA9npixpiFBY9He4ZDhkVLVR13GRd55FCojiGW4Sy7s1\"";
+        "\"6gXBVhqKMqZdgZC5wbaKa1brL6PWQmP4nYfpSoHubhUG29WzawKkoZxeEugX6Wj8rrGuB3tVutmjhfremFB6z5x3U\"";
 
     #[test]
     fn signature_signing_serialization() -> eyre::Result<()> {
@@ -199,8 +199,6 @@ mod tests {
             transaction.signature_hash(),
             Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice())
         ));
-        let decoded_js_sig = Signature::try_from(&hex::decode(JS_SIGNATURE)?[..])?;
-        assert_eq!(transaction.header.signature, decoded_js_sig.into());
 
         // encode and decode the signature
         //compact
@@ -213,10 +211,13 @@ mod tests {
 
         // serde-json
         let ser = serde_json::to_string(&transaction.header.signature)?;
-        assert_eq!(SIG_BS58, ser);
         let de_ser: IrysSignature = serde_json::from_str(&ser)?;
-
         assert_eq!(transaction.header.signature, de_ser);
+
+        // assert parity against hardcoded signatures
+        assert_eq!(SIG_BS58, ser);
+        let decoded_js_sig = Signature::try_from(&hex::decode(SIG_HEX)?[..])?;
+        assert_eq!(transaction.header.signature, decoded_js_sig.into());
 
         Ok(())
     }

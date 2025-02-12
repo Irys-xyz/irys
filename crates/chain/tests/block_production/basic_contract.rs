@@ -1,19 +1,15 @@
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 
 use alloy_core::primitives::U256;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use futures::future::select;
-use irys_actors::block_producer::SolutionFoundMessage;
-use irys_chain::{chain::start_for_testing, IrysNodeCtx};
+use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, StorageConfig, VDFStepsConfig};
-use irys_vdf::vdf_state::VdfStepsReadGuard;
+use irys_types::irys::IrysSigner;
 use reth_primitives::GenesisAccount;
-use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::future_or_mine_on_timeout;
@@ -25,9 +21,8 @@ sol!(
     IrysERC20,
     "../../fixtures/contracts/out/IrysERC20.sol/IrysERC20.json"
 );
-
 #[tokio::test]
-async fn test_erc20() -> eyre::Result<()> {
+async fn serial_test_erc20() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_erc20"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();
@@ -60,7 +55,7 @@ async fn test_erc20() -> eyre::Result<()> {
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
-        .on_http("http://localhost:8080".parse()?);
+        .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
 
     let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.address()));
 

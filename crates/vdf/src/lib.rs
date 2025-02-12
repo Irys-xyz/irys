@@ -382,7 +382,6 @@ fn warn_mismatches(a: &H256List, b: &H256List) {
 #[cfg(test)]
 mod tests {
     use base58::{FromBase58, ToBase58};
-    use irys_types::CONFIG;
 
     use super::*;
     #[test]
@@ -394,7 +393,7 @@ mod tests {
                 .unwrap(),
         );
 
-        let mut reset_seed = H256([0; 32]);
+        let reset_seed = H256([0; 32]);
         print!("seed: {:?}\n", seed);
 
         let start_step_number = 44399;

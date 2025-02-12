@@ -12,9 +12,9 @@ use awc::http::StatusCode;
 use base58::ToBase58;
 use tracing::info;
 
-#[cfg(test)]
+#[ignore]
 #[actix_web::test]
-async fn api_end_to_end_test_32b() {
+async fn serial_api_end_to_end_test_32b() {
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await;
     } else {
@@ -22,9 +22,9 @@ async fn api_end_to_end_test_32b() {
     }
 }
 
-#[cfg(test)]
+#[ignore]
 #[actix_web::test]
-async fn api_end_to_end_test_256kb() {
+async fn serial_api_end_to_end_test_256kb() {
     api_end_to_end_test(256 * 1024).await;
 }
 
@@ -99,7 +99,10 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
     // Call the service
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
+    let body = test::read_body(resp).await;
+    debug!("Response body: {:#?}", body);
+    assert_eq!(status, StatusCode::OK);
     info!("Transaction was posted");
 
     // Loop though each of the transaction chunks

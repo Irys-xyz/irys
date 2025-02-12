@@ -144,6 +144,8 @@ impl PackingParams {
 pub struct StorageSubmodule {
     /// Persistent database env
     pub db: DatabaseProvider,
+    /// path to this Submodule
+    pub path: PathBuf,
     /// Persistent storage handle
     file: Arc<Mutex<File>>,
     /// Intervals file handle
@@ -196,7 +198,7 @@ impl StorageModule {
 
         // Initialize the submodules from the StorageModuleInfo
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
-            let sub_base_path = base_path.join(dir);
+            let sub_base_path = base_path.join(dir.clone());
 
             println!("{:?}", sub_base_path);
             fs::create_dir_all(&sub_base_path)?; // Ensure the directory exists (for component tests)
@@ -283,6 +285,7 @@ impl StorageModule {
                 .insert_strict(
                     submodule_interval.clone(),
                     StorageSubmodule {
+                        path: dir,
                         file: chunks_file,
                         db: DatabaseProvider(Arc::new(submodule_db)),
                         intervals_file: Arc::new(Mutex::new(submodules_intervals_file)),

@@ -37,6 +37,12 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
 #[ignore]
 #[actix_web::test]
+/// This test is the counterpart test to the programmable data basic test in the JS Client https://github.com/Irys-xyz/irys-js
+/// It waits for a valid storage tx header & chunks, mines and confirms it, then mines a couple more blocks, which will include the programmable data EVM tx.
+/// we then halt so the client has time to make the getStorage call and read the contract state.
+/// Instructions:
+/// Run this test, until you see `waiting for tx header...`, then start the JS client test
+/// that's it!, just kill this test once the JS client test finishes.
 async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "info");
 

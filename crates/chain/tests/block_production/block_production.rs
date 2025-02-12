@@ -5,20 +5,12 @@ use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
-use irys_actors::{
-    block_producer::SolutionFoundMessage, block_validation, mempool_service::TxIngressMessage,
-};
+use irys_actors::{block_producer::SolutionFoundMessage, mempool_service::TxIngressMessage};
 use irys_chain::chain::start_for_testing;
 use irys_config::IrysNodeConfig;
-use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
-use irys_storage::ii;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{
-    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    vdf_config::VDFStepsConfig, Address, H256List, IrysTransaction, StorageConfig, CONFIG, H256,
-};
-use irys_vdf::{step_number_to_salt_number, vdf_sha, vdf_state::VdfStepsReadGuard};
+use irys_types::{irys::IrysSigner, IrysTransaction, CONFIG};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use reth_db::Database;
@@ -26,15 +18,15 @@ use reth_primitives::{
     irys_primitives::{IrysTxId, ShadowResult},
     GenesisAccount,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::utils::capacity_chunk_solution;
 /// Create a valid capacity PoA solution
 
 #[tokio::test]
-async fn test_blockprod() -> eyre::Result<()> {
+async fn serial_test_blockprod() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
@@ -137,7 +129,7 @@ async fn test_blockprod() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn mine_ten_blocks() -> eyre::Result<()> {
+async fn serial_mine_ten_blocks() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();
@@ -180,7 +172,7 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
+async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();
@@ -227,7 +219,7 @@ async fn mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn test_basic_blockprod() -> eyre::Result<()> {
+async fn serial_test_basic_blockprod() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();
@@ -272,7 +264,7 @@ async fn test_basic_blockprod() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
+async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
     config.base_directory = temp_dir.path().to_path_buf();
