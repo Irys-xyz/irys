@@ -265,31 +265,32 @@ impl EpochServiceActor {
 
         // commented out epoch block loops as now we are not triggering NewEpochMessage
         // loop {
-            let block = rg.get_item(block_index.try_into().unwrap());
+        let block = rg.get_item(block_index.try_into().unwrap());
 
-            match block {
-                Some(b) => {
-                    let block_header =
-                        database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
-                            .unwrap()
-                            .unwrap();
-                    match self.perform_epoch_tasks(Arc::new(block_header)) {
-                        Ok(_) => debug!("Processed epoch block {}", &block_index),
-                        Err(e) => {
-                            self.print_items(read_guard.clone(), db.clone());
-                            panic!("{:?}", e);
-                        }
+        match block {
+            Some(b) => {
+                let block_header = database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
+                    .unwrap()
+                    .unwrap();
+                match self.perform_epoch_tasks(Arc::new(block_header)) {
+                    Ok(_) => debug!("Processed epoch block {}", &block_index),
+                    Err(e) => {
+                        self.print_items(read_guard.clone(), db.clone());
+                        panic!("{:?}", e);
                     }
-                    block_index += self.config.num_blocks_in_epoch;
                 }
-                None => {
-                    panic!("Could not recover block at index during epoch service initialization {}", block_index);                    
-                    // break;
-                }
-        // }
+                block_index += self.config.num_blocks_in_epoch;
+            }
+            None => {
+                panic!(
+                    "Could not recover block at index during epoch service initialization {}",
+                    block_index
+                );
+                // break;
+            } // }
 
-            // print out the block_list at startup (debugging)
-            // self.print_items(read_guard.clone(), db.clone());
+              // print out the block_list at startup (debugging)
+              // self.print_items(read_guard.clone(), db.clone());
         }
     }
 
