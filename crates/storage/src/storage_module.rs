@@ -366,7 +366,6 @@ impl StorageModule {
         if Self::write_intervals_to_submodules(&self.intervals, &self.submodules).is_err() {
             error!("Could not update submodule interval files")
         };
-        println!("here 3 ...");
         for (_interval, submodule) in self.submodules.iter() {
             let _ = submodule.db.update(|tx| -> eyre::Result<()> {
                 clear(tx)?;
@@ -1249,9 +1248,22 @@ mod tests {
         // Test intervals reset
         let intervals = storage_module.reinitialize_intervals().unwrap();
 
+        // The hole storage interval is returned
+        assert_eq!(intervals, ii(0, 19));
+
         // Verify the entire storage module range is uninitialized again
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
         assert_eq!(unpacked, [ii(0, 19)]);
+
+        // Check intervals file is also reinitialized
+        let intervals = StorageModule::load_intervals_from_submodules(&storage_module.submodules);
+
+        {
+            let file_intervals = intervals.into_iter().collect::<Vec<_>>();
+            let ints = storage_module.intervals.read().unwrap();
+            let module_intervals = ints.clone().into_iter().collect::<Vec<_>>();
+            assert_eq!(file_intervals, module_intervals);
+        }
 
         Ok(())
     }
@@ -1306,6 +1318,14 @@ mod tests {
         let (_, ret_path) = storage_module.read_tx_data_path(0)?;
 
         assert_eq!(ret_path, Some(data_path));
+
+        // check db is cleared
+        let intervals = storage_module.reinitialize_intervals().unwrap();
+
+        let (tx_path, ret_path) = storage_module.read_tx_data_path(0)?;        
+        
+        assert!(tx_path.is_none());
+        assert!(ret_path.is_none());
 
         Ok(())
     }
