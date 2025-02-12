@@ -7,7 +7,7 @@ use nodit::interval::ii;
 use openssl::sha;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use vdf_state::VdfStepsReadGuard;
 
 pub mod vdf_state;
@@ -372,7 +372,7 @@ fn warn_mismatches(a: &H256List, b: &H256List) {
             .collect();
 
     for (index, (a, b)) in mismatches {
-        println!(
+        error!(
             "Mismatched hashes at index {}: expected {:?} got {:?}",
             index, a, b
         );
@@ -394,8 +394,6 @@ mod tests {
         );
 
         let reset_seed = H256([0; 32]);
-        print!("seed: {:?}\n", seed);
-
         // seed = apply_reset_seed(seed, reset_seed);
         // println!("seed after reset {:?}", seed);
 
@@ -403,7 +401,7 @@ mod tests {
         let mut hasher = Sha256::new();
         let mut salt = U256::from(step_number_to_salt_number(
             &VDFStepsConfig::default(),
-            start_step_number as u64,
+            start_step_number,
         ));
 
         let mut checkpoints: Vec<H256> = vec![H256::default(); 25];
