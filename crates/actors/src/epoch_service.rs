@@ -1005,7 +1005,10 @@ mod tests {
 
         // Process genesis message directly instead of through actor system
         // This allows us to inspect the actor's state after processing
-        let _ = epoch_service_actor.send(NewEpochMessage(genesis_block.into())).await.unwrap();
+        let _ = epoch_service_actor
+            .send(NewEpochMessage(genesis_block.into()))
+            .await
+            .unwrap();
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new();
@@ -1014,7 +1017,10 @@ mod tests {
 
         let storage_module_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
         // Get the genesis storage modules and their assigned partitions
-        let storage_module_infos = epoch_service_actor.send(GetGenesisStorageModulesMessage(storage_module_config)).await.unwrap();
+        let storage_module_infos = epoch_service_actor
+            .send(GetGenesisStorageModulesMessage(storage_module_config))
+            .await
+            .unwrap();
 
         //let _ = initialize_storage_files(&base_path, &storage_module_infos, &vec![]);
 
@@ -1094,9 +1100,14 @@ mod tests {
         }
 
         let submit_partition_hash = {
-            let partition_assignments_read = epoch_service_actor.send(GetPartitionAssignmentsGuardMessage).await.unwrap();
+            let partition_assignments_read = epoch_service_actor
+                .send(GetPartitionAssignmentsGuardMessage)
+                .await
+                .unwrap();
             let mut maybe_partition_hash = None;
-            for (partition_hash, assignment) in partition_assignments_read.read().data_partitions.iter() {
+            for (partition_hash, assignment) in
+                partition_assignments_read.read().data_partitions.iter()
+            {
                 if assignment.ledger_id == Some(Ledger::Submit.get_id()) {
                     maybe_partition_hash = Some(partition_hash.clone());
                     break;
@@ -1105,7 +1116,10 @@ mod tests {
             maybe_partition_hash.expect("There should be a partition assigned to submit ledger")
         };
 
-        let _ = epoch_service_actor.send(NewEpochMessage(new_epoch_block.into())).await.unwrap();
+        let _ = epoch_service_actor
+            .send(NewEpochMessage(new_epoch_block.into()))
+            .await
+            .unwrap();
         // give computation time for broadcaster to receive and broadcast expiration
         sleep(Duration::from_secs(1)).await;
 

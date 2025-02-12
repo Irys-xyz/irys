@@ -9,7 +9,6 @@ use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
 use eyre::eyre;
 use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
 
-
 #[cfg(feature = "nvidia")]
 use {
     irys_packing::capacity_pack_range_cuda_c,

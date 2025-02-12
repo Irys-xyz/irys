@@ -3,7 +3,14 @@ use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, Context, OptionExt, Result};
 use irys_database::{
     submodule::{
-        add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path, add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index, clear, create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root, get_tx_path_by_offset, tables::{ChunkDataPathByPathHash, ChunkOffsetsByPathHash, ChunkPathHashByOffset, RelativeStartOffsets, StartOffsetsByDataRoot, TxPathByTxPathHash}
+        add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
+        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index, clear,
+        create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
+        get_tx_path_by_offset,
+        tables::{
+            ChunkDataPathByPathHash, ChunkOffsetsByPathHash, ChunkPathHashByOffset,
+            RelativeStartOffsets, StartOffsetsByDataRoot, TxPathByTxPathHash,
+        },
     },
     Ledger,
 };
@@ -344,13 +351,19 @@ impl StorageModule {
 
     /// Reinit intervals setting them as Uninitialized, and erase db
     pub fn reinitialize_intervals(&self) -> eyre::Result<Interval<u32>> {
-        let storage_interval = { 
+        let storage_interval = {
             let mut intervals = self.intervals.write().unwrap();
             let start = intervals.first_key_value().unwrap().0.start();
             let end = intervals.last_key_value().unwrap().0.end();
             let storage_interval = ii(start, end);
             *intervals = StorageIntervals::new();
-            intervals.insert_strict(storage_interval, ChunkType::Uninitialized).unwrap_or_else(|_| panic!("Failed to create new interval, should never happen as interval is empty!"));
+            intervals
+                .insert_strict(storage_interval, ChunkType::Uninitialized)
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "Failed to create new interval, should never happen as interval is empty!"
+                    )
+                });
             storage_interval
         };
         if Self::write_intervals_to_submodules(&self.intervals, &self.submodules).is_err() {
@@ -362,7 +375,7 @@ impl StorageModule {
                 clear(tx)?;
                 Ok(())
             });
-        };
+        }
         Ok(storage_interval)
     }
 
@@ -1238,7 +1251,7 @@ mod tests {
         }
         // Test intervals reset
         let intervals = storage_module.reinitialize_intervals().unwrap();
-        
+
         // Verify the entire storage module range is uninitialized again
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
         assert_eq!(unpacked, [ii(0, 19)]);

@@ -5,7 +5,7 @@ use crate::broadcast_mining_service::{
     BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService,
     BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
 };
-use crate::packing::{PackingRequest};
+use crate::packing::PackingRequest;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use irys_efficient_sampling::Ranges;
@@ -13,7 +13,9 @@ use irys_storage::{ie, ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
-use irys_types::{Address, AtomicVdfStepNumber, H256List, PartitionChunkOffset, PartitionChunkRange};
+use irys_types::{
+    Address, AtomicVdfStepNumber, H256List, PartitionChunkOffset, PartitionChunkRange,
+};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
 use tracing::{debug, error, info, warn};
@@ -309,7 +311,7 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
 
     fn handle(&mut self, msg: BroadcastPartitionsExpiration, _ctx: &mut Context<Self>) {
         self.storage_module.partition_hash().map(|partition_hash| {
-            if msg.0.0.contains(&partition_hash) {
+            if msg.0 .0.contains(&partition_hash) {
                 let interval = self.storage_module.reinitialize_intervals().unwrap();
                 debug!(
                     "Partition hash {}, packing interval {:?}",
@@ -642,12 +644,11 @@ mod tests {
             Box::new(Some(())) as Box<dyn Any>
         }));
 
-
         let mut partition_mining_actor = PartitionMiningActor::new(
             mining_address,
             database_provider.clone(),
             mocked_addr.0,
-            packing.start().recipient(),            
+            packing.start().recipient(),
             storage_module,
             false,
             vdf_steps_guard.clone(),
