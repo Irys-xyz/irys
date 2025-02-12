@@ -1000,7 +1000,7 @@ mod tests {
             storage_config: storage_config.clone(),
         };
 
-        let mut epoch_service = EpochServiceActor::new(Some(config));
+        let epoch_service = EpochServiceActor::new(Some(config));
         let epoch_service_actor = epoch_service.start();
 
         // Process genesis message directly instead of through actor system

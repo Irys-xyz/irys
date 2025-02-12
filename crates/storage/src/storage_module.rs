@@ -7,10 +7,7 @@ use irys_database::{
         add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index, clear,
         create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
         get_tx_path_by_offset,
-        tables::{
-            ChunkDataPathByPathHash, ChunkOffsetsByPathHash, ChunkPathHashByOffset,
-            RelativeStartOffsets, StartOffsetsByDataRoot, TxPathByTxPathHash,
-        },
+        tables::RelativeStartOffsets,
     },
     Ledger,
 };
