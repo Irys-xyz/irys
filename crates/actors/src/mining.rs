@@ -14,7 +14,6 @@ use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{Address, AtomicVdfStepNumber, H256List, PartitionChunkOffset, PartitionChunkRange};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
-use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
@@ -306,22 +305,18 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
 impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
     type Result = ();
 
-    fn handle(&mut self, msg: BroadcastPartitionsExpiration, ctx: &mut Context<Self>) {
+    fn handle(&mut self, msg: BroadcastPartitionsExpiration, _ctx: &mut Context<Self>) {
         self.storage_module.partition_hash().map(|partition_hash| {
-            if msg.0 .0.contains(&partition_hash) {
-                self.storage_module
-                    .get_all_intervals()
-                    .iter()
-                    .for_each(|interval| {
-                        debug!(
-                            "Partition hash {}, packing interval {:?}",
-                            partition_hash, *interval
-                        );
-                        self.packing_actor.do_send(PackingRequest {
-                            storage_module: self.storage_module.clone(),
-                            chunk_range: PartitionChunkRange(*interval),
-                        });
-                    });
+            if msg.0.0.contains(&partition_hash) {
+                let interval = self.storage_module.reinitialize_intervals().unwrap();
+                debug!(
+                    "Partition hash {}, packing interval {:?}",
+                    partition_hash, interval
+                );
+                self.packing_actor.do_send(PackingRequest {
+                    storage_module: self.storage_module.clone(),
+                    chunk_range: PartitionChunkRange(interval),
+                });
             }
         });
     }

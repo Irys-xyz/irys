@@ -490,6 +490,16 @@ pub async fn start_irys_node(
 
                 let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
 
+                let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
+
+                let packing_actor_addr = PackingActor::new(
+                    Handle::current(),
+                    reth_node.task_executor.clone(),
+                    sm_ids,
+                    None,
+                )
+                .start();
+
                 for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
@@ -511,15 +521,6 @@ pub async fn start_irys_node(
                 // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
                 tokio::task::yield_now().await;
 
-                let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
-
-                let packing_actor_addr = PackingActor::new(
-                    Handle::current(),
-                    reth_node.task_executor.clone(),
-                    sm_ids,
-                    None,
-                )
-                .start();
                 // request packing for uninitialized ranges
                 for sm in &storage_modules {
                     let uninitialized = sm.get_intervals(ChunkType::Uninitialized);

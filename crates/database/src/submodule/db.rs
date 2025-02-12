@@ -176,3 +176,16 @@ pub fn add_start_offset_to_data_root_index<T: DbTxMut + DbTx>(
     set_start_offsets_by_data_root(tx, data_root, offsets)?;
     Ok(())
 }
+
+/// clear db
+pub fn clear<T: DbTxMut>(
+    tx: &T,
+) -> eyre::Result<()> {
+    tx.clear::<ChunkPathHashByOffset>()?;
+    tx.clear::<ChunkDataPathByPathHash>()?;
+    tx.clear::<TxPathByTxPathHash>()?;
+    tx.clear::<ChunkOffsetsByPathHash>()?;
+    tx.clear::<StartOffsetsByDataRoot>()?;
+    Ok(())
+}
+

@@ -3,10 +3,7 @@ use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, Context, OptionExt, Result};
 use irys_database::{
     submodule::{
-        add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
-        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
-        create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
-        get_tx_path_by_offset, tables::RelativeStartOffsets,
+        add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path, add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index, clear, create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root, get_tx_path_by_offset, tables::{ChunkDataPathByPathHash, ChunkOffsetsByPathHash, ChunkPathHashByOffset, RelativeStartOffsets, StartOffsetsByDataRoot, TxPathByTxPathHash}
     },
     Ledger,
 };
@@ -342,6 +339,34 @@ impl StorageModule {
         }
     }
 
+    /// Reinitialize intervals, merging and setting them as Uninitialized, and erase db
+    pub fn reinitialize_intervals(&self) -> eyre::Result<Interval<u32>> {
+        println!("here 1 ...");
+        let storage_interval = { 
+            let mut intervals = self.intervals.write().unwrap();
+            let start = intervals.first_key_value().unwrap().0.start();
+            let end = intervals.last_key_value().unwrap().0.end();
+            let storage_interval = ii(start, end);
+            *intervals = StorageIntervals::new();
+            intervals.insert_strict(storage_interval, ChunkType::Uninitialized).unwrap_or_else(|_| panic!("Failed to create new interval, should never happen as interval is empty!"));
+            storage_interval
+        };
+        println!("here 2 ...");
+        if Self::write_intervals_to_submodules(&self.intervals, &self.submodules).is_err() {
+            error!("Could not update submodule interval files")
+        };
+        println!("here 3 ...");
+        for (_interval, submodule) in self.submodules.iter() {
+            let _ = submodule.db.update(|tx| -> eyre::Result<()> {
+                clear(tx)?;
+                Ok(())
+            });
+        };
+        println!("here 4 ...");
+
+        Ok(storage_interval)
+    }
+
     /// Returns whether the given chunk offset falls within this StorageModules assigned range
     pub fn contains_offset(&self, chunk_offset: LedgerChunkOffset) -> bool {
         self.partition_assignment
@@ -543,20 +568,6 @@ impl StorageModule {
             if *ct == chunk_type {
                 let _ = set.insert_merge_touching_or_overlapping(interval.clone());
             }
-        }
-        // NoditSet is a BTreeMap underneath, meaning collecting them into a vec
-        // is done in ascending key order.
-        set.into_iter().collect::<Vec<_>>()
-    }
-
-    /// Gets all chunk intervals in a given storage state, merging adjacent ranges
-    ///
-    /// Returns a NoditSet containing the merged intervals for efficient range operations
-    pub fn get_all_intervals(&self) -> Vec<Interval<u32>> {
-        let intervals = self.intervals.read().unwrap();
-        let mut set = NoditSet::new();
-        for (interval, ct) in intervals.iter() {
-            let _ = set.insert_merge_touching_or_overlapping(interval.clone());
         }
         // NoditSet is a BTreeMap underneath, meaning collecting them into a vec
         // is done in ascending key order.
@@ -1100,6 +1111,7 @@ mod tests {
 
     #[test]
     fn storage_module_test() -> eyre::Result<()> {
+        println!("Empezo ... ");
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: None,
@@ -1223,6 +1235,14 @@ mod tests {
         let ints = storage_module.intervals.read().unwrap();
         let module_intervals = ints.clone().into_iter().collect::<Vec<_>>();
         assert_eq!(file_intervals, module_intervals);
+
+        // Test intervals reset
+        println!("Here ... ");
+        let intervals = storage_module.reinitialize_intervals().unwrap();
+        
+        // // Verify the entire storage module range is uninitialized again
+        let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
+        // assert_eq!(unpacked, [ii(0, 19)]);
 
         Ok(())
     }
