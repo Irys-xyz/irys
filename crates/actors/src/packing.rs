@@ -195,7 +195,7 @@ impl PackingActor {
                             chunk_range_split.end()
                         );
                         let num_chunks =
-                            (chunk_range_split.end() - chunk_range_split.start() + 1) as u32;
+                            (chunk_range_split.end().0 - chunk_range_split.start().0 + 1);
                         let storage_module = storage_module.clone();
                         let chunk_range_split = chunk_range_split.clone();
 
