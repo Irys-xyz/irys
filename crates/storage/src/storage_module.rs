@@ -4,9 +4,9 @@ use eyre::{eyre, Context, OptionExt, Result};
 use irys_database::{
     submodule::{
         add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
-        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index, clear_submodule_database,
-        create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
-        get_tx_path_by_offset, tables::RelativeStartOffsets,
+        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
+        clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
+        get_start_offsets_by_data_root, get_tx_path_by_offset, tables::RelativeStartOffsets,
     },
     Ledger,
 };
@@ -362,12 +362,15 @@ impl StorageModule {
                 });
             storage_interval
         };
-        Self::write_intervals_to_submodules(&self.intervals, &self.submodules).wrap_err("Could not update submodule interval files")?;
+        Self::write_intervals_to_submodules(&self.intervals, &self.submodules)
+            .wrap_err("Could not update submodule interval files")?;
 
         for (_interval, submodule) in self.submodules.iter() {
-            submodule.db.update_eyre(|tx| clear_submodule_database(tx))?;  
-        };
-        
+            submodule
+                .db
+                .update_eyre(|tx| clear_submodule_database(tx))?;
+        }
+
         Ok(storage_interval)
     }
 
