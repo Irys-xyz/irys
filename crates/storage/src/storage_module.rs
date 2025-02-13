@@ -20,10 +20,7 @@ use irys_types::{
     ProofDeserialize, RelativeChunkOffset, StorageConfig, TxChunkOffset, TxPath, UnpackedChunk,
     H256,
 };
-use nodit::{
-    interval::ii,
-    InclusiveInterval, Interval, NoditMap, NoditSet,
-};
+use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use openssl::sha;
 use reth_db::Database;
 use serde::{Deserialize, Serialize};

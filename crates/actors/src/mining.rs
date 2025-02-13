@@ -349,9 +349,7 @@ mod tests {
         app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
-    use irys_types::{
-        ledger_chunk_offset_ie, H256List, IrysBlockHeader, LedgerChunkOffset,
-    };
+    use irys_types::{ledger_chunk_offset_ie, H256List, IrysBlockHeader, LedgerChunkOffset};
     use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
     use std::any::Any;
     use std::collections::VecDeque;
