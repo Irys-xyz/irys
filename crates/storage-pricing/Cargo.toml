@@ -9,7 +9,6 @@ homepage.workspace = true
 license.workspace = true
 
 [dependencies]
-irys-types.workspace = true
 eyre.workspace = true
 rust_decimal = { workspace = true, features = ["maths"] }
 rust_decimal_macros.workspace = true

@@ -5,11 +5,11 @@
 //! - `Amount<(IrysPrice, Usd)>` - Cost in $USD of a single $IRYS token, the data retrieved form oracles
 //! - `Amount<(Ema, Usd)>` - Exponential Moving Average for a single $IRYS token, the data to be stored in blocks
 //! - `Amount<(NetworkFee, Irys)>` - The cost in $IRYS that the user will have to pay to store his data on Irys
-use std::{fmt::Debug, marker::PhantomData, ops::Deref};
+use core::{fmt::Debug, marker::PhantomData, ops::Deref};
 
-use eyre::{ensure, OptionExt};
+use eyre::{ensure, OptionExt as _};
 pub use phantoms::*;
-use rust_decimal::{Decimal, MathematicalOps};
+use rust_decimal::{Decimal, MathematicalOps as _};
 use rust_decimal_macros::dec;
 
 /// A wrapper around [`rust_decimal::Decimal`] that also denominates the value in currency using [`PhantomData`]
@@ -20,8 +20,9 @@ pub struct Amount<T> {
 }
 
 impl<T> Amount<T> {
-    /// Initialize a new Amount; PhantomData to be inferred from usage
-    pub fn new(amount: Decimal) -> Self {
+    /// Initialize a new Amount; `PhantomData` to be inferred from usage
+    #[must_use]
+    pub const fn new(amount: Decimal) -> Self {
         Self {
             amount,
             _t: PhantomData,
@@ -78,7 +79,11 @@ impl Amount<(CostPerGb, Usd)> {
     /// n = years to pay for storage
     /// r = decay rate
     ///
-    /// total cost = annual_cost * ((1 - (1-r)^n) / r)
+    /// total cost = `annual_cost` * ((1 - (1-r)^n) / r)
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
     pub fn cost_per_replica(
         self,
         years_to_pay_for_storage: u64,
@@ -110,6 +115,10 @@ impl Amount<(CostPerGb, Usd)> {
 
 impl Amount<(CostPerGbYearAdjusted, Usd)> {
     /// Apply a multiplier of how much would storing the data cost fro `n` replicas.
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
     pub fn replica_count(self, replicas: u64) -> eyre::Result<Self> {
         let amount = self
             .amount
@@ -119,6 +128,10 @@ impl Amount<(CostPerGbYearAdjusted, Usd)> {
     }
 
     /// calculate the network fee, denominated in $IRYS tokens
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
     pub fn base_network_fee(
         self,
         bytes_to_store: Decimal,
@@ -126,13 +139,20 @@ impl Amount<(CostPerGbYearAdjusted, Usd)> {
     ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
         // divide by the ratio
         let bytes_in_gb = dec!(1_073_741_824); // 1024 * 1024 * 1024
-        let price_ratio = bytes_to_store.checked_div(bytes_in_gb).unwrap();
+        let price_ratio = bytes_to_store
+            .checked_div(bytes_in_gb)
+            .ok_or_eyre("invalid byte amount to store")?;
 
         // annual cost per byte in usd
-        let usd_fee = self.amount.checked_mul(price_ratio.into()).unwrap();
+        let usd_fee = self
+            .amount
+            .checked_mul(price_ratio)
+            .ok_or_eyre("invalid price ratio")?;
 
         // converted to $IRYS
-        let network_fee = usd_fee.checked_div(*irys_token_price).unwrap();
+        let network_fee = usd_fee
+            .checked_div(*irys_token_price)
+            .ok_or_eyre("invalid irys token price")?;
 
         Ok(Amount {
             amount: network_fee,
@@ -147,14 +167,18 @@ impl Amount<(NetworkFee, Irys)> {
     /// 0.05 => 5%
     /// 1.00 => 100%
     /// 0.50 => 50%
-    pub fn add_multiplier(self, percentage: Decimal) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    pub fn add_multiplier(self, percentage: Decimal) -> eyre::Result<Self> {
         // amount * (100% + x%)
         let amount = self
             .amount
             .checked_mul(
                 percentage
                     .checked_add(dec!(1))
-                    .expect("rewarad percentage too large"),
+                    .ok_or_eyre("rewarad percentage too large")?,
             )
             .ok_or_eyre("reward percentage too large")?;
         Ok(Self {
@@ -176,6 +200,10 @@ impl Amount<(IrysPrice, Usd)> {
     /// - `α` is the smoothing factor, calculated as `α = 2 / (n+1)`, where n is the number of block prices.
     /// - `Pb` is the price at block b.
     /// - `EMAb-1` is the EMA at the previous block.
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
     pub fn calculate_ema(
         self,
         total_past_blocks: u64,
@@ -220,6 +248,8 @@ impl Amount<(IrysPrice, Usd)> {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "used in tests")]
+#[expect(clippy::panic_in_result_fn, reason = "used in tests")]
 mod tests {
     use super::*;
     use eyre::Result;
@@ -281,7 +311,7 @@ mod tests {
                 .replica_count(1)?;
 
             // assert
-            assert_eq!(total.amount, Decimal::from(500));
+            assert_eq!(total.amount, Decimal::from(500_u64));
             Ok(())
         }
 
@@ -348,7 +378,7 @@ mod tests {
             // Setup
             let cost_per_gb_10_replicas_200_years = dec!(8.65);
             let price_irys = Amount::new(dec!(1.09));
-            let bytes_to_store = 1024 * 1024 * 200; // 200mb
+            let bytes_to_store = 1024 * 1024 * 200_u64; // 200mb
             let fee_percentage = dec!(0.05);
 
             // Action
@@ -357,7 +387,7 @@ mod tests {
                 _t: PhantomData,
             }
             .base_network_fee(bytes_to_store.into(), price_irys)?;
-            let price_with_network_reward = network_fee.clone().add_multiplier(fee_percentage)?;
+            let price_with_network_reward = network_fee.add_multiplier(fee_percentage)?;
 
             // Assert
             let expected = Decimal::from_str_exact("1.55")?;
@@ -397,7 +427,7 @@ mod tests {
             Ok(())
         }
 
-        /// Test extremely large inputs (u64::MAX)
+        /// Test extremely large inputs (`u64::MAX`)
         #[test]
         fn test_calculate_ema_huge_epoch() {
             // setup
@@ -409,7 +439,7 @@ mod tests {
             let result = current_irys_price.calculate_ema(total_past_blocks, last_block_ema);
 
             // assert
-            assert!(result.is_ok());
+            result.unwrap();
         }
     }
 }

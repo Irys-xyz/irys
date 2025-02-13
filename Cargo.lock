@@ -11258,7 +11258,6 @@ name = "storage-pricing"
 version = "0.1.0"
 dependencies = [
  "eyre",
- "irys-types",
  "rust_decimal",
  "rust_decimal_macros",
 ]
