@@ -7,10 +7,8 @@ version = "0.1.0"
 name = "irys"
 path = "src/main.rs"
 
-
 [features]
 nvidia = ["irys-actors/nvidia"]
-
 
 [dependencies]
 # Irys
@@ -58,7 +56,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-alloy-network = { path = "../../ext/alloy/crates/network" }
+alloy-network.workspace = true
 alloy-signer-local.workspace = true
 alloy-core.workspace = true
 actix.workspace = true
@@ -66,9 +64,7 @@ alloy-rlp.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-serde.workspace = true
-arbitrary = { workspace = true, features = [
-	"derive",
-] } # arbitrary.workspace = truebytes.workspace = true
+arbitrary = { workspace = true, features = ["derive"] } # arbitrary.workspace = truebytes.workspace = true
 bytes.workspace = true
 
 derive_more.workspace = true
@@ -79,10 +75,7 @@ futures-util.workspace = true
 futures.workspace = true
 reth-tracing.workspace = true
 hex.workspace = true
-k256 = { version = "0.13", default-features = false, features = [
-	"ecdsa",
-	"serde",
-] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "serde"] }
 alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true

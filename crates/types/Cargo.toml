@@ -11,8 +11,8 @@ base64-url.workspace = true
 eyre = "0.6.8"
 fixed-hash = "0.8.0"
 rand = "0.8.5"
-reth-codecs = { path = "../../ext/reth/crates/storage/codecs" }
-reth-db-api = { path = "../../ext/reth/crates/storage/db-api" }
+reth-codecs.workspace = true
+reth-db-api.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.107"
 serde_derive = "1.0.107"
