@@ -50,7 +50,7 @@ jobs:
       - name: Setup repo
         uses: ./.github/actions/setup-repo
 
-      - name: cargo coverage
+      - name: cargo test
         run: cargo xtask test
 
   cargo-check:
@@ -67,7 +67,7 @@ jobs:
       - name: Setup repo
         uses: ./.github/actions/setup-repo
 
-      - name: cargo coverage
+      - name: cargo check
         run: cargo xtask check
 
   cargo-doc:
@@ -84,7 +84,7 @@ jobs:
       - name: Setup repo
         uses: ./.github/actions/setup-repo
 
-      - name: cargo coverage
+      - name: cargo doc
         run: cargo xtask doc
 
   cargo-unused-deps:
@@ -101,7 +101,7 @@ jobs:
       - name: Setup repo
         uses: ./.github/actions/setup-repo
 
-      - name: cargo coverage
+      - name: cargo unused deps
         run: cargo xtask unused-deps
 
   typos:

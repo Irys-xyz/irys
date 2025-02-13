@@ -9,7 +9,7 @@ runs:
   using: "composite"
   steps:
     - name: Install rust
-      uses: dtolnay/rust-toolchain@master
+      uses: dtolnay/rust-toolchain@stable
       with:
         components: "rustfmt,clippy,cargo,llvm-tools-preview"
     - uses: Swatinem/rust-cache@v2
@@ -17,9 +17,3 @@ runs:
         cache-on-failure: true
         cache-all-crates: true
         rust-cache: "buildjet" # allows for fast cache compresson & restoration on self-hosted runners
-
-    - name: Install needed tooling (needed for solana deps)
-      shell: bash
-      run: |
-        sudo apt-get install -y protobuf-compiler bzip2 clang
-
