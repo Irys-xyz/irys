@@ -39,8 +39,7 @@ use reth_provider::ChainStateBlockReader;
 use reth_provider::ChainStateBlockWriter;
 use reth_provider::{
     providers::{BlockchainProvider2, ProviderNodeTypes},
-    writer::UnifiedStorageWriter,
-    BlockHashReader as _, DatabaseProviderFactory as _, StaticFileProviderFactory as _,
+    StaticFileProviderFactory as _,
 };
 use reth_rpc_engine_api::{capabilities::EngineCapabilities, EngineApi};
 use reth_tasks::TaskExecutor;

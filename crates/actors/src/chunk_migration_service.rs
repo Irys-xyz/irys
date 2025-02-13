@@ -211,7 +211,6 @@ fn process_transaction_chunks(
 /// # Returns
 /// A `LedgerChunkRange` representing the [start, end] chunk offsets of the chunks
 /// added to the ledger by the specified block.
-
 fn get_block_range(
     block: &IrysBlockHeader,
     ledger: Ledger,

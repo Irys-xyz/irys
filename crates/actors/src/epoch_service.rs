@@ -1,8 +1,8 @@
 use actix::SystemService;
-use actix::{Actor, ArbiterService, Context, Handler, Message, MessageResponse};
+use actix::{Actor, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
-use irys_config::STORAGE_SUBMODULES_CONFIG;
+use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
@@ -206,17 +206,17 @@ impl Handler<GetPartitionAssignmentsGuardMessage> for EpochServiceActor {
 /// Retrieve a read only reference to the ledger partition assignments
 #[derive(Message, Debug)]
 #[rtype(result = "Vec<StorageModuleInfo>")]
-pub struct GetGenesisStorageModulesMessage;
+pub struct GetGenesisStorageModulesMessage(pub StorageSubmodulesConfig);
 
 impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
     type Result = Vec<StorageModuleInfo>;
 
     fn handle(
         &mut self,
-        _msg: GetGenesisStorageModulesMessage,
+        msg: GetGenesisStorageModulesMessage,
         _ctx: &mut Self::Context,
     ) -> Self::Result {
-        self.get_genesis_storage_module_infos()
+        self.get_genesis_storage_module_infos(msg.0)
     }
 }
 
@@ -262,33 +262,26 @@ impl EpochServiceActor {
 
         let rg = read_guard.read();
 
-        let mut block_index = 0_u64;
-
-        loop {
-            let block = rg.get_item(block_index.try_into().unwrap());
-
-            match block {
-                Some(b) => {
-                    let block_header =
-                        database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
-                            .unwrap()
-                            .unwrap();
-                    match self.perform_epoch_tasks(Arc::new(block_header)) {
-                        Ok(_) => debug!("Processed epoch block {}", &block_index),
-                        Err(e) => {
-                            self.print_items(read_guard.clone(), db.clone());
-                            panic!("{:?}", e);
-                        }
+        let block_index = 0;
+        // TODO: restore epoch block loops as now we are not triggering NewEpochMessage
+        match rg.get_item(block_index) {
+            Some(b) => {
+                let block_header = database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
+                    .unwrap()
+                    .unwrap();
+                match self.perform_epoch_tasks(Arc::new(block_header)) {
+                    Ok(_) => debug!(?block_index, "Processed epoch block"),
+                    Err(e) => {
+                        self.print_items(read_guard.clone(), db.clone());
+                        panic!("{:?}", e);
                     }
-                    block_index += self.config.num_blocks_in_epoch;
-                }
-                None => {
-                    break;
                 }
             }
-
-            // print out the block_list at startup (debugging)
-            // self.print_items(read_guard.clone(), db.clone());
+            None => {
+                panic!(
+                    "Could not recover block at index during epoch service initialization {block_index:?}"
+                );
+            }
         }
     }
 
@@ -382,7 +375,7 @@ impl EpochServiceActor {
 
     /// Loops though all of the term ledgers and looks for slots that are older
     /// than the `epoch_length` (term length) of the ledger.
-    fn expire_term_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
+    fn expire_term_ledger_slots(&self, new_epoch_block: &IrysBlockHeader) {
         let epoch_height = new_epoch_block.height;
         let expired_hashes: Vec<H256>;
         {
@@ -398,7 +391,7 @@ impl EpochServiceActor {
 
     /// Loops though all the ledgers both perm and term, checking to see if any
     /// require additional ledger slots added to accommodate data ingress.
-    fn allocate_additional_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
+    fn allocate_additional_ledger_slots(&self, new_epoch_block: &IrysBlockHeader) {
         for ledger in Ledger::iter() {
             let part_slots = self.calculate_additional_slots(new_epoch_block, ledger);
             {
@@ -564,7 +557,7 @@ impl EpochServiceActor {
 
     // Updates PartitionAssignment information about a partition hash, marking
     // it as expired (or unassigned to a slot in a data ledger)
-    fn return_expired_partition_to_capacity(&mut self, partition_hash: H256) {
+    fn return_expired_partition_to_capacity(&self, partition_hash: H256) {
         let mut pa = self.partition_assignments.write().unwrap();
         // Convert data partition to capacity partition if it exists
         if let Some(mut assignment) = pa.data_partitions.remove(&partition_hash) {
@@ -588,12 +581,7 @@ impl EpochServiceActor {
 
     /// Takes a capacity partition hash and updates its `PartitionAssignment`
     /// state to indicate it is part of a data ledger
-    fn assign_partition_to_slot(
-        &mut self,
-        partition_hash: H256,
-        ledger: Ledger,
-        slot_index: usize,
-    ) {
+    fn assign_partition_to_slot(&self, partition_hash: H256, ledger: Ledger, slot_index: usize) {
         debug!(
             "Assigning partition {} to slot {} of ledger {:?}",
             &partition_hash.0.to_base58(),
@@ -650,13 +638,16 @@ impl EpochServiceActor {
     }
 
     /// Configure storage modules for genesis partition assignments
-    pub fn get_genesis_storage_module_infos(&self) -> Vec<StorageModuleInfo> {
+    pub fn get_genesis_storage_module_infos(
+        &self,
+        storage_module_config: StorageSubmodulesConfig,
+    ) -> Vec<StorageModuleInfo> {
         let ledgers = self.ledgers.read().unwrap();
         let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
 
         let pa = self.partition_assignments.read().unwrap();
-        let sm_paths = &STORAGE_SUBMODULES_CONFIG.submodule_paths;
 
+        let sm_paths = storage_module_config.submodule_paths;
         // Configure publish ledger storage
         let mut module_infos = ledgers
             .get_slots(Ledger::Publish)
@@ -863,8 +854,8 @@ mod tests {
 
         println!("{:?}", ledgers.read());
 
-        let infos = epoch_service.get_genesis_storage_module_infos();
-        println!("{:#?}", infos);
+        // let infos = epoch_service.get_genesis_storage_module_infos();
+        // println!("{:#?}", infos);
     }
 
     #[actix::test]

@@ -130,7 +130,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             ProviderBuilder::new()
                 .with_recommended_fillers()
                 .wallet(EthereumWallet::from(signer))
-                .on_http("http://localhost:8080".parse().unwrap())
+                .on_http("http://localhost:8080/v1/execution-rpc".parse().unwrap())
         })
         .collect::<Vec<_>>();
 

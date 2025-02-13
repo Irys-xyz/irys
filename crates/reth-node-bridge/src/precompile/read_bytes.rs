@@ -117,8 +117,8 @@ pub fn read_partial_byte_range(
 
 pub fn read_bytes_range(
     bytes_range: ByteRangeSpecifier,
-    gas_limit: u64,
-    env: &Env,
+    _gas_limit: u64,
+    _env: &Env,
     state_provider: &IrysRethProviderInner,
     access_lists: ParsedAccessLists,
 ) -> PrecompileResult {

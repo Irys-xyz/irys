@@ -177,9 +177,9 @@ fn test_load_toml_valid() {
 
     let expected_output: ExprStruct = parse_quote! {
         FooBar {
-            foo: 7i64,
+            foo: 7/* i64 */,
             bar: true,
-            fizz: "hey".to_string(),
+            fizz: "hey"/* .to_string() */,
             buzz: rust_decimal_macros::dec![3.14],
         }
     };

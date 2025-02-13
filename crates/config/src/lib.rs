@@ -4,7 +4,6 @@ use std::{
     fs,
     num::ParseIntError,
     path::{Path, PathBuf},
-    str::FromStr as _,
 };
 
 use chain::chainspec::IrysChainSpecBuilder;
@@ -21,9 +20,8 @@ pub mod chain;
 pub struct IrysNodeConfig {
     /// Signer instance used for mining
     pub mining_signer: IrysSigner,
-    /// Node ID/instance number: used for testing
-    pub instance_number: u32,
-
+    /// Node ID/instance number: used for testing. if omitted, an instance subfolder is not created. reth will still be set as instance `1`.
+    pub instance_number: Option<u32>,
     /// base data directory, i.e `./.tmp`
     /// should not be used directly, instead use the appropriate methods, i.e `instance_directory`
     pub base_directory: PathBuf,
@@ -41,7 +39,7 @@ impl Default for IrysNodeConfig {
         Self {
             chainspec_builder: IrysChainSpecBuilder::mainnet(),
             mining_signer: IrysSigner::random_signer(),
-            instance_number: 1,
+            instance_number: None, // no instance dir
             base_directory: base_dir,
         }
     }
@@ -58,7 +56,7 @@ impl IrysNodeConfig {
     pub fn mainnet() -> Self {
         Self {
             mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(CONFIG.mining_key).unwrap()),
-            instance_number: 1,
+            instance_number: None,
             base_directory: env::current_dir()
                 .expect("Unable to determine working dir, aborting")
                 .join(".irys"),
@@ -67,8 +65,12 @@ impl IrysNodeConfig {
     }
 
     /// get the instance-specific directory path
+    /// this will return the base directory if instance_number is not `Some`
     pub fn instance_directory(&self) -> PathBuf {
-        self.base_directory.join(self.instance_number.to_string())
+        self.instance_number
+            .map_or(self.base_directory.clone(), |i| {
+                self.base_directory.join(i.to_string())
+            })
     }
     /// get the instance-specific storage module directory path
     pub fn storage_module_dir(&self) -> PathBuf {
@@ -182,6 +184,8 @@ pub struct StorageSubmodulesConfig {
     pub submodule_paths: Vec<PathBuf>,
 }
 
+const FILENAME: &str = ".irys_submodules.toml";
+
 impl StorageSubmodulesConfig {
     /// Loads the [`StorageSubmodulesConfig`] from a TOML file at the given path
     pub fn from_toml(path: impl AsRef<Path>) -> eyre::Result<Self> {
@@ -201,29 +205,7 @@ impl StorageSubmodulesConfig {
         Ok(config)
     }
 
-    /// Forces the lazy loading of the [`STORAGE_SUBMODULES_CONFIG`]
-    pub fn load() {
-        let _ = STORAGE_SUBMODULES_CONFIG.submodule_paths.len();
-    }
-}
-
-/// Constant used to make sure .irys shows up in the right place all the time
-pub const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
-
-/// Configure storage submodule paths:
-/// - In deployed envs (IRYS_ENV set): Try HOME/.irys_submodules.toml first
-/// - Otherwise: Use/create .irys/<instance id>/.irys_submodules.toml
-/// - Default: Create config with hardcoded submodule paths in .irys
-pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesConfig> =
-    once_cell::sync::Lazy::new(|| {
-        const FILENAME: &str = ".irys_submodules.toml";
-        // let node_config = IrysNodeConfig::default();
-        // let instance_dir = node_config.instance_directory();
-
-        // hack for now until I can rework this entire thing
-        let instance_dir = PathBuf::from_str(CARGO_MANIFEST_DIR)
-            .unwrap()
-            .join("../../.irys/1");
+    pub fn load(instance_dir: PathBuf) -> eyre::Result<Self> {
         let home_dir = env::var("HOME").expect("Failed to get home directory");
 
         let is_deployed = env::var("IRYS_ENV").is_ok();
@@ -277,13 +259,13 @@ pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesCon
                     }
                 }
 
-                return config;
+                return Ok(config);
             }
         }
 
         // Try .irys directory config in dev/local environment
         if config_path_local.exists() {
-            return StorageSubmodulesConfig::from_toml(config_path_local).unwrap();
+            return StorageSubmodulesConfig::from_toml(config_path_local);
         } else {
             // Create default config with hardcoded paths in dev if none exists
             tracing::info!("Creating default config at {:?}", config_path_local);
@@ -309,6 +291,8 @@ pub static STORAGE_SUBMODULES_CONFIG: once_cell::sync::Lazy<StorageSubmodulesCon
             }
 
             // Load the config to verify it parses
-            StorageSubmodulesConfig::from_toml(config_path_local).unwrap()
+            StorageSubmodulesConfig::from_toml(config_path_local)
         }
-    });
+        // let _ = STORAGE_SUBMODULES_CONFIG.submodule_paths.len();
+    }
+}
