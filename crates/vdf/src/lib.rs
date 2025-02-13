@@ -1,6 +1,7 @@
 //! This crate provides functions and utilities for VDF (Verifiable Delay Function) operations,
 //! including checkpoint validation and seed application.
 
+use eyre::Context;
 use irys_types::{H256List, VDFLimiterInfo, VDFStepsConfig, H256, U256};
 
 use nodit::interval::ii;
@@ -161,7 +162,7 @@ pub async fn last_step_checkpoints_is_valid(
     //     Base64::from(vdf_info.last_step_checkpoints[24].to_vec())
     // );
 
-    let global_step_number: usize = vdf_info.global_step_number as usize;
+    let global_step_number: usize = vdf_info.global_step_number.try_into().wrap_err("Should run in a 64 bits architecture!")?;
 
     // If the vdf reset happened on this step, apply the entropy to the seed (special case is step 0 that no reset is applied, then the > 1)
     if (global_step_number > 1) && ((global_step_number - 1) % config.vdf_reset_frequency == 0) {
