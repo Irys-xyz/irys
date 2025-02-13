@@ -4,6 +4,7 @@ use crate::broadcast_mining_service::{
 };
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
+use eyre::WrapErr;
 use irys_efficient_sampling::Ranges;
 use irys_storage::{ie, ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
@@ -68,7 +69,6 @@ impl PartitionMiningActor {
         let next_ranges_step = self.ranges.last_step_num + 1; // next consecutive step expected to be calculated by ranges
         if next_ranges_step >= step {
             debug!("Step {} already processed or next consecutive one", step);
-            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         } else {
             debug!(
                 "Non consecutive step {} may need to reconstruct ranges",
@@ -91,15 +91,17 @@ impl PartitionMiningActor {
             } else {
                 next_ranges_step
             };
-            // check if we need to reconstruct steps, that is inverval start..=step-1 is not empty
-            if start <= step - 1 {
+            // check if we need to reconstruct steps, that is interval start..=step-1 is not empty
+            if start < step {
                 debug!("Getting stored steps from ({}..={})", start, step - 1);
                 let vdf_steps = self.steps_guard.read();
                 let steps = vdf_steps.get_steps(ii(start, step - 1))?; // -1 because last step is calculated in next get_recall_range call, with its corresponding argument seed
                 self.ranges.reconstruct(&steps, partition_hash);
             };
-            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64) // calculates step range
         }
+
+        u64::try_from(self.ranges.get_recall_range(step, seed, partition_hash)?)
+            .wrap_err("recall range larger than u64")
     }
 
     fn mine_partition_with_seed(
@@ -620,14 +622,14 @@ mod tests {
             .unwrap();
 
         let mut ranges = Ranges::new(5);
-        ranges.get_recall_range(1, &hash, &partition_hash);
-        ranges.get_recall_range(2, &hash, &partition_hash);
-        ranges.get_recall_range(3, &hash, &partition_hash);
-        ranges.get_recall_range(4, &hash, &partition_hash);
-        ranges.get_recall_range(5, &hash, &partition_hash);
+        ranges.get_recall_range(1, &hash, &partition_hash).unwrap();
+        ranges.get_recall_range(2, &hash, &partition_hash).unwrap();
+        ranges.get_recall_range(3, &hash, &partition_hash).unwrap();
+        ranges.get_recall_range(4, &hash, &partition_hash).unwrap();
+        ranges.get_recall_range(5, &hash, &partition_hash).unwrap();
         // reset
-        ranges.get_recall_range(6, &hash, &partition_hash);
-        let range2 = ranges.get_recall_range(7, &hash, &partition_hash) as u64;
+        ranges.get_recall_range(6, &hash, &partition_hash).unwrap();
+        let range2 = ranges.get_recall_range(7, &hash, &partition_hash).unwrap() as u64;
 
         assert_eq!(range, range2, "Ranges should be equal");
     }

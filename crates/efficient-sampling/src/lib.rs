@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-
+use eyre::Result;
 use irys_types::{H256List, SimpleRNG, StorageConfig, H256};
 use openssl::sha;
+use std::collections::HashMap;
 use tracing::{debug, info};
 
 /// number of vdf steps cached for efficient sampling after ranges reinitialization
@@ -24,19 +24,23 @@ pub struct Ranges {
 impl Ranges {
     /// Returns recall range index for a given step number, seed and partition hash.
     /// if the range is already cached, it returns the cached range, otherwise it picks a new random range.
-    pub fn get_recall_range(&mut self, step: u64, seed: &H256, partition_hash: &H256) -> usize {
-        if self.last_recall_ranges.contains_key(&step) {
-            let range = *self.last_recall_ranges.get(&step).unwrap();
+    pub fn get_recall_range(
+        &mut self,
+        step: u64,
+        seed: &H256,
+        partition_hash: &H256,
+    ) -> Result<usize> {
+        if let Some(&range) = self.last_recall_ranges.get(&step) {
             debug!(
                 "Partition hash {}, Recall range for step {} is cached, range {}/{}",
                 partition_hash, step, range, self.num_recall_ranges_in_partition
             );
-            range
-        } else {
-            let range = self.next_recall_range(step, seed, partition_hash);
-            debug!("Partition hash {}, Recall range for step {} is not cached, calling next range, range {}/{}", partition_hash, step, range, self.num_recall_ranges_in_partition);
-            range
-        }
+            return Ok(range);
+        };
+
+        let range = self.next_recall_range(step, seed, partition_hash);
+        debug!("Partition hash {}, Recall range for step {} is not cached, calling next range, range {}/{}", partition_hash, step, range, self.num_recall_ranges_in_partition);
+        Ok(range)
     }
 
     pub fn get_last_recall_range(self) -> Option<usize> {
@@ -185,7 +189,7 @@ mod tests {
 
         // check for no repeated range index
         for i in 1..=num_recall_ranges {
-            let range = ranges.get_recall_range(i, &seed, &partition_hash);
+            let range = ranges.get_recall_range(i, &seed, &partition_hash).unwrap();
             assert!(
                 (range as u64) < num_recall_ranges,
                 "Invalid range idx {range}"
@@ -194,7 +198,7 @@ mod tests {
             got_ranges.insert(range);
 
             // get the same cached range
-            let range2 = ranges.get_recall_range(i, &seed, &partition_hash);
+            let range2 = ranges.get_recall_range(i, &seed, &partition_hash).unwrap();
             assert_eq!(range, range2, "Cached range should be equal");
         }
 
@@ -215,7 +219,9 @@ mod tests {
         let mut ranges = Ranges::new(num_recall_ranges);
 
         for step in 1..=num_recall_ranges {
-            let range = ranges.get_recall_range(step as u64, &seeds[step - 1], &partition_hash);
+            let range = ranges
+                .get_recall_range(step as u64, &seeds[step - 1], &partition_hash)
+                .unwrap();
             let res = recall_range_is_valid(
                 range,
                 num_recall_ranges,

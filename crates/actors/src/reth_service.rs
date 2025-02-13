@@ -141,14 +141,13 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
     fn handle(&mut self, msg: ForkChoiceUpdateMessage, _ctx: &mut Self::Context) -> Self::Result {
         let handle = self.handle.clone();
         let db = self.db.clone();
-        let prev_fcu = self.latest_fcu.clone();
+        let prev_fcu = self.latest_fcu;
         AtomicResponse::new(Box::pin(
             async move {
                 let handle = handle.ok_or_eyre("Reth service is uninitialized!")?;
                 let db = db.ok_or_eyre("Reth service is uninitialized!")?;
-                let fcu = RethServiceActor::resolve_new_fcu(db, msg, prev_fcu).map_err(|e| {
-                    error!("Error updating reth with forkchoice {:?} - {}", &msg, &e);
-                    e
+                let fcu = Self::resolve_new_fcu(db, msg, prev_fcu).inspect_err(|e| {
+                    error!(error = ?e, ?msg, "Error updating reth with forkchoice");
                 })?;
 
                 let ForkChoiceUpdate {
