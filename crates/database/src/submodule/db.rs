@@ -178,7 +178,7 @@ pub fn add_start_offset_to_data_root_index<T: DbTxMut + DbTx>(
 }
 
 /// clear db
-pub fn clear<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
+pub fn clear_submodule_database<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
     tx.clear::<ChunkPathHashByOffset>()?;
     tx.clear::<ChunkDataPathByPathHash>()?;
     tx.clear::<TxPathByTxPathHash>()?;

@@ -312,9 +312,9 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
     fn handle(&mut self, msg: BroadcastPartitionsExpiration, _ctx: &mut Context<Self>) {
         self.storage_module.partition_hash().map(|partition_hash| {
             if msg.0 .0.contains(&partition_hash) {
-                let interval = self.storage_module.reinitialize_intervals().unwrap();
+                let interval = self.storage_module.reset().unwrap();
                 debug!(
-                    "Partition hash {}, packing interval {:?}",
+                    "Expiring partition hash {}, packing interval {:?}",
                     partition_hash, interval
                 );
                 self.packing_actor.do_send(PackingRequest {

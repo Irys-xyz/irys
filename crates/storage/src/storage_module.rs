@@ -4,7 +4,7 @@ use eyre::{eyre, Context, OptionExt, Result};
 use irys_database::{
     submodule::{
         add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
-        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index, clear,
+        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index, clear_submodule_database,
         create_or_open_submodule_db, get_data_path_by_offset, get_start_offsets_by_data_root,
         get_tx_path_by_offset, tables::RelativeStartOffsets,
     },
@@ -346,7 +346,7 @@ impl StorageModule {
     }
 
     /// Reinit intervals setting them as Uninitialized, and erase db
-    pub fn reinitialize_intervals(&self) -> eyre::Result<Interval<u32>> {
+    pub fn reset(&self) -> eyre::Result<Interval<u32>> {
         let storage_interval = {
             let mut intervals = self.intervals.write().unwrap();
             let start = intervals.first_key_value().unwrap().0.start();
@@ -362,15 +362,12 @@ impl StorageModule {
                 });
             storage_interval
         };
-        if Self::write_intervals_to_submodules(&self.intervals, &self.submodules).is_err() {
-            error!("Could not update submodule interval files")
-        };
+        if Self::write_intervals_to_submodules(&self.intervals, &self.submodules).wrap_err("Could not update submodule interval files")?;
+
         for (_interval, submodule) in self.submodules.iter() {
-            let _ = submodule.db.update(|tx| -> eyre::Result<()> {
-                clear(tx)?;
-                Ok(())
-            });
-        }
+            submodule.db.update_eyre(|tx| clear_submodule_database(tx))?;  
+        };
+        
         Ok(storage_interval)
     }
 
@@ -1118,7 +1115,6 @@ mod tests {
 
     #[test]
     fn storage_module_test() -> eyre::Result<()> {
-        println!("Empezo ... ");
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: None,
@@ -1245,7 +1241,7 @@ mod tests {
             assert_eq!(file_intervals, module_intervals);
         }
         // Test intervals reset
-        let intervals = storage_module.reinitialize_intervals().unwrap();
+        let intervals = storage_module.reset().unwrap();
 
         // The hole storage interval is returned
         assert_eq!(intervals, ii(0, 19));
@@ -1319,7 +1315,7 @@ mod tests {
         assert_eq!(ret_path, Some(data_path));
 
         // check db is cleared
-        let intervals = storage_module.reinitialize_intervals().unwrap();
+        let intervals = storage_module.reset().unwrap();
 
         let (tx_path, ret_path) = storage_module.read_tx_data_path(0)?;
 

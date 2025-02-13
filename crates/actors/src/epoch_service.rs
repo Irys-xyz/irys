@@ -1022,8 +1022,6 @@ mod tests {
             .await
             .unwrap();
 
-        //let _ = initialize_storage_files(&base_path, &storage_module_infos, &vec![]);
-
         let mut storage_modules: StorageModuleVec = Vec::new();
         // Create a list of storage modules wrapping the storage files
         for info in storage_module_infos {
@@ -1033,7 +1031,6 @@ mod tests {
                     .unwrap(),
             );
             storage_modules.push(arc_module.clone());
-            // arc_module.pack_with_zeros();
         }
 
         let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
@@ -1147,7 +1144,7 @@ mod tests {
         assert_eq!(
             pack_req.chunk_range,
             PartitionChunkRange(ie(0, chunk_count as u32)),
-            "The hole partition should be repacked"
+            "The whole partition should be repacked"
         );
     }
 }
