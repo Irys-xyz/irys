@@ -362,7 +362,7 @@ impl StorageModule {
                 });
             storage_interval
         };
-        if Self::write_intervals_to_submodules(&self.intervals, &self.submodules).wrap_err("Could not update submodule interval files")?;
+        Self::write_intervals_to_submodules(&self.intervals, &self.submodules).wrap_err("Could not update submodule interval files")?;
 
         for (_interval, submodule) in self.submodules.iter() {
             submodule.db.update_eyre(|tx| clear_submodule_database(tx))?;  
