@@ -94,17 +94,17 @@ impl Amount<(CostPerGb, Usd)> {
         // (1 - r)^n
         let one_minus_r_pow = (Decimal::ONE.saturating_sub(*decay_rate))
             .checked_powu(years_to_pay_for_storage)
-            .ok_or_eyre("too many years to pay for")?;
+            .ok_or_else(|| eyre::eyre!("too many years to pay for: {years_to_pay_for_storage}"))?;
 
         // fraction = [ 1 - (1-r)^n ] / r
         let fraction = (Decimal::ONE.saturating_sub(one_minus_r_pow))
             .checked_div(decay_rate.amount)
-            .ok_or_eyre("decay rate invalid")?;
+            .ok_or_else(|| eyre::eyre!("decay rate invalid {decay_rate}"))?;
 
         // total = annual_cost * fraction
         let total = annual_cost_per_byte
             .checked_mul(fraction)
-            .ok_or_eyre("fraction too large")?;
+            .ok_or_else(|| eyre::eyre!("fraction too large: fraction={fraction} annual_cost_per_byte={annual_cost_per_byte}"))?;
 
         Ok(Amount {
             amount: total,
@@ -114,16 +114,15 @@ impl Amount<(CostPerGb, Usd)> {
 }
 
 impl Amount<(CostPerGbYearAdjusted, Usd)> {
-    /// Apply a multiplier of how much would storing the data cost fro `n` replicas.
+    /// Apply a multiplier of how much would storing the data cost for `n` replicas.
     ///
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
     pub fn replica_count(self, replicas: u64) -> eyre::Result<Self> {
-        let amount = self
-            .amount
-            .checked_mul(replicas.into())
-            .ok_or_eyre("overflow during replica multiplication")?;
+        let amount = self.amount.checked_mul(replicas.into()).ok_or_else(|| {
+            eyre::eyre!("overflow during replica multiplication {replicas}, cost={self}")
+        })?;
         Ok(Self { amount, ..self })
     }
 
@@ -141,13 +140,13 @@ impl Amount<(CostPerGbYearAdjusted, Usd)> {
         let bytes_in_gb = dec!(1_073_741_824); // 1024 * 1024 * 1024
         let price_ratio = bytes_to_store
             .checked_div(bytes_in_gb)
-            .ok_or_eyre("invalid byte amount to store")?;
+            .ok_or_else(|| eyre::eyre!("invalid byte amount to store {bytes_to_store}"))?;
 
         // annual cost per byte in usd
         let usd_fee = self
             .amount
             .checked_mul(price_ratio)
-            .ok_or_eyre("invalid price ratio")?;
+            .ok_or_else(|| eyre::eyre!("price ratio causes overflow {price_ratio}, cost={self}"))?;
 
         // converted to $IRYS
         let network_fee = usd_fee
@@ -162,7 +161,7 @@ impl Amount<(CostPerGbYearAdjusted, Usd)> {
 }
 
 impl Amount<(NetworkFee, Irys)> {
-    /// Add additional network fee for storing data to incerace incentivisation.
+    /// Add additional network fee for storing data to increase incentivisation.
     ///
     /// 0.05 => 5%
     /// 1.00 => 100%
@@ -178,9 +177,9 @@ impl Amount<(NetworkFee, Irys)> {
             .checked_mul(
                 percentage
                     .checked_add(dec!(1))
-                    .ok_or_eyre("rewarad percentage too large")?,
+                    .ok_or_else(|| eyre::eyre!("rewarad percentage too large {percentage}"))?,
             )
-            .ok_or_eyre("reward percentage too large")?;
+            .ok_or_else(|| eyre::eyre!("reward percentage too large {percentage}, fee={self}"))?;
         Ok(Self {
             amount,
             _t: PhantomData,
@@ -212,12 +211,14 @@ impl Amount<(IrysPrice, Usd)> {
         // Safely convert `total_blocks_in_epoch + 1` to Decimal
         let denominator = Decimal::from(total_past_blocks)
             .checked_add(dec!(1))
-            .ok_or_eyre("failed to compute total_past_blocks + 1")?;
+            .ok_or_else(|| {
+                eyre::eyre!("failed to compute total_past_blocks + 1 {total_past_blocks}")
+            })?;
 
         // Calculate alpha = 2 / (n+1)
-        let alpha = dec!(2)
-            .checked_div(denominator)
-            .ok_or_eyre("failed to compute smoothing factor alpha")?;
+        let alpha = dec!(2).checked_div(denominator).ok_or_else(|| {
+            eyre::eyre!("failed to compute smoothing factor alpha with denominator {denominator}")
+        })?;
         ensure!(
             alpha > dec!(0) || alpha <= dec!(1),
             "computed alpha={alpha} is out of the valid range (0,1]"
@@ -226,24 +227,39 @@ impl Amount<(IrysPrice, Usd)> {
         // Calculate (1 - alpha)
         let one_minus_alpha = dec!(1)
             .checked_sub(alpha)
-            .ok_or_eyre("failed to compute (1 - alpha)")?;
+            .ok_or_else(|| eyre::eyre!("failed to compute (1 - {alpha}) "))?;
 
         // alpha * current_irys_price
         let scaled_current_price = alpha
             .checked_mul(self.amount)
-            .ok_or_eyre("failed to multiply alpha by current_irys_price")?;
+            .ok_or_else(|| eyre::eyre!("failed to multiply {alpha} by {self}"))?;
 
         // (1 - alpha) * last_block_ema
         let scaled_last_ema = one_minus_alpha
             .checked_mul(*previous_block_ema)
-            .ok_or_eyre("failed to multiply (1 - alpha) by last_block_ema")?;
+            .ok_or_else(|| {
+                eyre::eyre!("failed to multiply (1 - {alpha}) by {previous_block_ema}")
+            })?;
 
         // alpha * price + (1 - alpha) * previous_ema
         let current_block_ema = scaled_current_price
             .checked_add(scaled_last_ema)
-            .ok_or_eyre("failed to add scaled current block price to scaled last block EMA")?;
+            .ok_or_else(|| {
+                eyre::eyre!("failed to add {scaled_current_price} price to {scaled_last_ema} EMA")
+            })?;
 
         Ok(Amount::new(current_block_ema))
+    }
+}
+
+#[expect(clippy::min_ident_chars, reason = "part of the Display interface")]
+#[expect(
+    clippy::use_debug,
+    reason = "Our phantom types don't need display impl"
+)]
+impl<T> core::fmt::Display for Amount<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "<{:?}>: {}", self._t, self.amount)
     }
 }
 
@@ -439,7 +455,7 @@ mod tests {
             let result = current_irys_price.calculate_ema(total_past_blocks, last_block_ema);
 
             // assert
-            assert!(result.is_ok());
+            result.unwrap();
         }
     }
 }
