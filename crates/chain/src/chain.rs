@@ -33,6 +33,7 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
+use irys_types::PartitionChunkRange;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
     vdf_config::VDFStepsConfig, StorageConfig, CHUNK_SIZE, CONFIG, H256,
@@ -527,7 +528,7 @@ pub async fn start_irys_node(
                         .map(|interval| {
                             packing_actor_addr.do_send(PackingRequest {
                                 storage_module: sm.clone(),
-                                chunk_range: (*interval).into(),
+                                chunk_range: PartitionChunkRange(*interval),
                             })
                         })
                         .collect::<Vec<()>>();

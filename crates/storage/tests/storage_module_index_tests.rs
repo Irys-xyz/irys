@@ -8,9 +8,10 @@ use irys_database::{
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    irys::IrysSigner, partition::PartitionAssignment, Address, Base64, IrysTransaction,
-    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PartitionChunkRange, StorageConfig,
-    TransactionLedger, UnpackedChunk, H256,
+    irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
+    partition_chunk_offset_ie, partition_chunk_offset_ii, Address, Base64, IrysTransaction,
+    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset,
+    PartitionChunkRange, StorageConfig, TransactionLedger, TxChunkOffset, UnpackedChunk, H256,
 };
 use openssl::sha;
 use reth_db::Database;
@@ -43,9 +44,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ii(0, 4), "hdd0".into()),   // 0 to 4 inclusive
-                (ii(5, 9), "hdd1".into()),   // 5 to 9 inclusive
-                (ii(10, 19), "hdd2".into()), // 10 to 19 inclusive
+                (partition_chunk_offset_ii!(0, 4), "hdd0".into()), // 0 to 4 inclusive
+                (partition_chunk_offset_ii!(5, 9), "hdd1".into()), // 5 to 9 inclusive
+                (partition_chunk_offset_ii!(10, 19), "hdd2".into()), // 10 to 19 inclusive
             ],
         },
         StorageModuleInfo {
@@ -57,8 +58,14 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
             submodules: vec![
-                (ii(0, 9), "hdd3".into()),   // 0 to 9 inclusive
-                (ii(10, 19), "hdd4".into()), // 10 to 19 inclusive
+                (partition_chunk_offset_ii!(0, 9), "hdd3".into()), // 0 to 9 inclusive
+                (
+                    ii(
+                        PartitionChunkOffset::from(10),
+                        PartitionChunkOffset::from(19),
+                    ),
+                    "hdd4".into(),
+                ), // 10 to 19 inclusive
             ],
         },
         StorageModuleInfo {
@@ -70,7 +77,13 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 slot_index: Some(2), // Submit Ledger Slot 2
             }),
             submodules: vec![
-                (ii(0, 19), "hdd5".into()), // 0 to 19 inclusive
+                (
+                    ii(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(19),
+                    ),
+                    "hdd5".into(),
+                ), // 0 to 19 inclusive
             ],
         },
     ];
@@ -92,8 +105,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         arc_module.pack_with_zeros();
     }
 
-    let partition_0_range = LedgerChunkRange(ii(0, 19));
-    let partition_1_range = LedgerChunkRange(ii(20, 39));
+    let partition_0_range = LedgerChunkRange(ledger_chunk_offset_ii!(0, 19));
+    let partition_1_range = LedgerChunkRange(ledger_chunk_offset_ii!(20, 39));
 
     // Create a list of BLOBs that represent transaction data
     let data_chunks = vec![
@@ -141,15 +154,19 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Tx:1 - Base case, write tx index data without any overlaps
     let num_chunks_in_tx = (proof.offset + 1) as u64 / storage_config.chunk_size;
-    let (tx_ledger_range, tx_partition_range) =
-        calculate_tx_ranges(0, &partition_0_range, proof.offset as u64, chunk_size);
+    let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
+        LedgerChunkOffset::from(0),
+        &partition_0_range,
+        proof.offset as u64,
+        chunk_size,
+    );
 
     let data_root = tx_headers[0].data_root;
     let _ = storage_modules[0].index_transaction_data(tx_path.clone(), data_root, tx_ledger_range);
 
     // Get the submodule reference
     let submodule = storage_modules[0]
-        .get_submodule(0)
+        .get_submodule(PartitionChunkOffset::from(0))
         .ok_or(eyre::eyre!("Storage module not found"))
         .unwrap();
 
@@ -162,7 +179,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     verify_data_root_start_offset(submodule, data_root, 0);
 
     // Tx:2 - Overlapping case, tx chunks start in one submodule and go to another
-    let start_chunk_offset = num_chunks_in_tx;
+    let start_chunk_offset = LedgerChunkOffset::from(num_chunks_in_tx);
     let bytes_in_tx = proofs[1].offset as u64 - proof.offset as u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
@@ -176,7 +193,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Get the both submodule references
     let submodule = storage_modules[0]
-        .get_submodule(0)
+        .get_submodule(PartitionChunkOffset::from(0))
         .ok_or(eyre::eyre!("Storage module not found"))
         .unwrap();
 
@@ -200,8 +217,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // Tx:3 - Fill up the StorageModule leaving one empty chunk
     let tx_path = &proofs[2].proof;
     let data_root = tx_headers[2].data_root;
-    let bytes_in_tx = proofs[2].offset as u64 - (tx_ledger_range.end() * storage_config.chunk_size);
-    let start_chunk_offset = tx_ledger_range.end() + 1;
+    let bytes_in_tx =
+        proofs[2].offset as u64 - (*tx_ledger_range.end() * storage_config.chunk_size);
+    let start_chunk_offset = tx_ledger_range.end() + 1u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_0_range,
@@ -240,8 +258,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tx_path = &proofs[3].proof;
     let data_root = tx_headers[3].data_root;
     let offset = proofs[3].offset as u64;
-    let bytes_in_tx = (offset + 1) - ((tx_ledger_range.end() + 1) * storage_config.chunk_size);
-    let start_chunk_offset = tx_ledger_range.end() + 1;
+    let bytes_in_tx = (offset + 1) - (*(tx_ledger_range.end() + 1u64) * storage_config.chunk_size);
+    let start_chunk_offset = tx_ledger_range.end() + 1u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_0_range,
@@ -254,7 +272,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // The first submodule of the second StorageModule/Partition
     let submodule4 = storage_modules[1]
-        .get_submodule(0)
+        .get_submodule(PartitionChunkOffset::from(0))
         .ok_or(eyre::eyre!("Storage module not found"))
         .unwrap();
 
@@ -282,8 +300,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tx_path = &proofs[4].proof;
     let data_root = tx_headers[4].data_root;
     let offset = proofs[4].offset as u64;
-    let bytes_in_tx = (offset + 1) - ((tx_ledger_range.end() + 1) * storage_config.chunk_size);
-    let start_chunk_offset = tx_ledger_range.end() + 1;
+    let bytes_in_tx = (offset + 1) - ((*tx_ledger_range.end() + 1) * storage_config.chunk_size);
+    let start_chunk_offset = tx_ledger_range.end() + 1u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_1_range,
@@ -326,7 +344,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 data_size: chunk_bytes.len() as u64,
                 data_path: Base64(proof.proof.clone()),
                 bytes: chunk_bytes,
-                tx_offset: i as u32,
+                tx_offset: TxChunkOffset::from(i as u32),
             };
 
             let _ = db.update_eyre(|tx| cache_chunk(tx, &chunk));
@@ -336,7 +354,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Now loop through all the transactions using their data_roots and data_sizes
     // to write data chunks to the storage modules
-    let mut ledger_offset: LedgerChunkOffset = 0;
+    let mut ledger_offset: LedgerChunkOffset = LedgerChunkOffset::from(0);
     for tx in &txs {
         let data_root = tx.header.data_root;
         let num_chunks = (tx.header.data_size / chunk_size) as u32;
@@ -346,6 +364,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         for storage_module in &storage_modules {
             let _ = db.view(|tx| {
                 for i in chunks_added..num_chunks {
+                    let tx_chunk_offset = TxChunkOffset::from(i);
                     // first make sure the ledger_offset falls within the bounds
                     // of the storage_module. Sometime txs contain ledger relative
                     // chunk_offsets that span multiple storage modules.
@@ -354,7 +373,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                     }
 
                     // Request the chunk from the global db index by  data root & tx relative offset
-                    let res = cached_chunk_by_chunk_offset(tx, data_root, i).unwrap();
+                    let res = cached_chunk_by_chunk_offset(tx, data_root, tx_chunk_offset).unwrap();
 
                     // Build a Chunk struct to store in the submodule
                     if let Some((_metadata, chunk)) = res {
@@ -366,7 +385,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                             data_size: chunk_bytes.len() as u64,
                             data_path: chunk.data_path,
                             bytes: chunk_bytes,
-                            tx_offset: i,
+                            tx_offset: tx_chunk_offset,
                         };
 
                         let res = storage_module.write_data_chunk(&chunk);
@@ -389,12 +408,16 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let _ = storage_modules[1].sync_pending_chunks();
 
     // For each of the storage modules, makes sure they sync to disk
-    let chunks1 = storage_modules[0].read_chunks(ii(0, 19)).unwrap();
-    let chunks2 = storage_modules[1].read_chunks(ii(0, 19)).unwrap();
+    let chunks1 = storage_modules[0]
+        .read_chunks(partition_chunk_offset_ii!(0, 19))
+        .unwrap();
+    let chunks2 = storage_modules[1]
+        .read_chunks(partition_chunk_offset_ii!(0, 19))
+        .unwrap();
 
     // This is just helpful logging, could be commented out
     for i in 0..=19 {
-        if let Some((chunk, chunk_type)) = chunks1.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks1.get(&PartitionChunkOffset::from(i)) {
             let preview = &chunk[..chunk.len().min(5)];
             info!(
                 "storage_module[0][{:?}]: {:?}... - {:?}",
@@ -405,7 +428,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         }
     }
     for i in 0..=19 {
-        if let Some((chunk, chunk_type)) = chunks2.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks2.get(&PartitionChunkOffset::from(i)) {
             let preview = &chunk[..chunk.len().min(5)];
             info!(
                 "storage_module[1][{:?}]: {:?}... - {:?}",
@@ -418,7 +441,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Test the chunks read back from the storage modules
     for i in 0..=19 {
-        if let Some((chunk, chunk_type)) = chunks1.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks1.get(&PartitionChunkOffset::from(i)) {
             let bytes = [i as u8; 32];
             assert_eq!(*chunk, bytes);
             assert_eq!(*chunk_type, ChunkType::Data);
@@ -427,7 +450,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     }
 
     for i in 0..=19 {
-        if let Some((chunk, chunk_type)) = chunks2.get(&i) {
+        if let Some((chunk, chunk_type)) = chunks2.get(&PartitionChunkOffset::from(i)) {
             let bytes = [20 + i as u8; 32];
             if i <= 7 {
                 assert_eq!(*chunk, bytes);
@@ -469,8 +492,8 @@ fn verify_tx_path_offsets(
     submodule
         .db
         .view(|tx| {
-            for offset in chunk_range.start()..=chunk_range.end() {
-                match get_path_hashes_by_offset(tx, offset).unwrap() {
+            for offset in *chunk_range.0.start()..=*chunk_range.0.end() {
+                match get_path_hashes_by_offset(tx, PartitionChunkOffset::from(offset)).unwrap() {
                     Some(paths) => {
                         let tx_ph = paths
                             .tx_path_hash
@@ -505,16 +528,16 @@ fn calculate_tx_ranges(
         start_chunk_offset + num_chunks_in_tx,
     ));
 
-    let partition_start = start_chunk_offset as i64 - partition_range.start() as i64;
+    let partition_start = *start_chunk_offset as i64 - *partition_range.start() as i64;
     if partition_start < 0 {
         num_chunks_in_tx = (num_chunks_in_tx as i64 + partition_start) as u64;
     }
 
     let partition_start = partition_start.max(0) as u32;
 
-    let partition_range = PartitionChunkRange(ie(
+    let partition_range = PartitionChunkRange(partition_chunk_offset_ie!(
         partition_start,
-        partition_start + num_chunks_in_tx as u32,
+        partition_start + num_chunks_in_tx as u32
     ));
 
     (ledger_range, partition_range)
@@ -531,7 +554,7 @@ fn verify_data_root_start_offset(
                 .unwrap()
                 .expect("start offsets not found");
             assert_eq!(relative_start_offsets.0.len(), 1);
-            assert_eq!(relative_start_offsets.0[0], expected_offset);
+            assert_eq!(relative_start_offsets.0[0], expected_offset.into());
         })
         .unwrap();
 }

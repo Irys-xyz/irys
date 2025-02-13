@@ -9,6 +9,7 @@ use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     DatabaseProvider, IrysBlockHeader, SimpleRNG, StorageConfig, CONFIG, H256,
 };
+use irys_types::{partition_chunk_offset_ie, PartitionChunkOffset};
 use openssl::sha;
 use reth_db::Database;
 use std::{
@@ -656,7 +657,10 @@ impl EpochServiceActor {
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
-                submodules: vec![(ie(0, num_part_chunks), sm_paths[idx].clone())],
+                submodules: vec![(
+                    partition_chunk_offset_ie!(0, num_part_chunks),
+                    sm_paths[idx].clone(),
+                )],
             })
             .collect::<Vec<_>>();
 
@@ -671,7 +675,10 @@ impl EpochServiceActor {
             .map(|(idx, partition)| StorageModuleInfo {
                 id: idx_start + idx,
                 partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
-                submodules: vec![(ie(0, num_part_chunks), sm_paths[idx_start + idx].clone())],
+                submodules: vec![(
+                    partition_chunk_offset_ie!(0, num_part_chunks),
+                    sm_paths[idx_start + idx].clone(),
+                )],
             })
             .collect::<Vec<_>>();
 
@@ -690,7 +697,10 @@ impl EpochServiceActor {
             let sm_info = StorageModuleInfo {
                 id: i,
                 partition_assignment: Some(*pa.capacity_partitions.get(&cap_part).unwrap()),
-                submodules: vec![(ie(0, num_part_chunks), sm_paths[i].clone())],
+                submodules: vec![(
+                    partition_chunk_offset_ie!(0, num_part_chunks),
+                    sm_paths[i].clone(),
+                )],
             };
             module_infos.push(sm_info);
         }

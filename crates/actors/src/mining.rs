@@ -10,7 +10,10 @@ use irys_storage::{ie, ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
-use irys_types::{Address, AtomicVdfStepNumber, H256List, PartitionChunkOffset};
+use irys_types::{
+    partition_chunk_offset_ie, Address, AtomicVdfStepNumber, H256List, LedgerChunkOffset,
+    PartitionChunkOffset,
+};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
 use std::sync::Arc;
@@ -133,9 +136,9 @@ impl PartitionMiningActor {
         //     recall_range_index, start_chunk_offset
         // );
 
-        let read_range = ie(
-            start_chunk_offset as u32,
-            start_chunk_offset + config.num_chunks_in_recall_range as u32,
+        let read_range = partition_chunk_offset_ie!(
+            start_chunk_offset,
+            start_chunk_offset + config.num_chunks_in_recall_range as u32
         );
 
         // haven't tested this, but it looks correct
@@ -156,14 +159,14 @@ impl PartitionMiningActor {
         for (index, (_chunk_offset, (chunk_bytes, chunk_type))) in chunks.iter().enumerate() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
             let partition_chunk_offset =
-                (start_chunk_offset + index as u32) as PartitionChunkOffset;
+                PartitionChunkOffset::from(start_chunk_offset + index as u32);
 
             // Only include the tx_path and data_path for chunks that contain data
             let (tx_path, data_path) = match chunk_type {
                 irys_storage::ChunkType::Entropy => (None, None),
                 irys_storage::ChunkType::Data => self
                     .storage_module
-                    .read_tx_data_path(partition_chunk_offset as u64)?,
+                    .read_tx_data_path(LedgerChunkOffset::from(*partition_chunk_offset))?,
                 irys_storage::ChunkType::Uninitialized => {
                     return Err(eyre::eyre!("Cannot mine uninitialized chunks"))
                 }
@@ -193,7 +196,7 @@ impl PartitionMiningActor {
 
                 let solution = SolutionContext {
                     partition_hash,
-                    chunk_offset: partition_chunk_offset,
+                    chunk_offset: *partition_chunk_offset,
                     recall_chunk_index: index as u32,
                     mining_address: self.mining_address,
                     tx_path, // capacity partitions have no tx_path nor data_path
@@ -346,7 +349,9 @@ mod tests {
         app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
-    use irys_types::{H256List, IrysBlockHeader};
+    use irys_types::{
+        ledger_chunk_offset_ie, partition, H256List, IrysBlockHeader, LedgerChunkOffset,
+    };
     use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
     use std::any::Any;
     use std::collections::VecDeque;
@@ -416,7 +421,7 @@ mod tests {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ie(0, chunk_count), "hdd0".into()), // 0 to 3 inclusive, 4 chunks
+                (partition_chunk_offset_ie!(0, chunk_count), "hdd0".into()), // 0 to 3 inclusive, 4 chunks
             ],
         }];
 
@@ -446,7 +451,7 @@ mod tests {
         let _ = storage_module.index_transaction_data(
             tx_path.to_vec(),
             data_root,
-            LedgerChunkRange(ie(0, chunk_count as u64)),
+            LedgerChunkRange(ledger_chunk_offset_ie!(0, chunk_count)),
         );
 
         for tx_chunk_offset in 0..chunk_count {
@@ -455,7 +460,7 @@ mod tests {
                 data_size: chunk_size,
                 data_path: data_path.to_vec().into(),
                 bytes: chunk_data.to_vec().into(),
-                tx_offset: tx_chunk_offset,
+                tx_offset: tx_chunk_offset.into(),
             };
             storage_module.write_data_chunk(&chunk).unwrap();
         }
@@ -552,7 +557,7 @@ mod tests {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ie(0, 10), "hdd0".into()), // 10 chunks
+                (partition_chunk_offset_ie!(0, 10), "hdd0".into()), // 10 chunks
             ],
         }];
 
