@@ -1,17 +1,20 @@
 use std::{fmt::Debug, marker::PhantomData};
 
-use eyre::ContextCompat;
+use eyre::{ensure, ContextCompat, OptionExt};
+pub use phantoms::*;
 use rust_decimal::{Decimal, MathematicalOps};
 use rust_decimal_macros::dec;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CostUsdPerGb;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DecayRate;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct NetworkFee;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct UsdCostPerGbYearAccounted;
+mod phantoms {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct CostUsdPerGb;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct DecayRate;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct NetworkFee;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct UsdCostPerGbYearAccounted;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Amount<T> {
@@ -93,6 +96,7 @@ impl Amount<NetworkFee> {
     /// 1.00 => 100%
     /// 0.50 => 50%
     pub fn add_multiplier(self, percentage: Decimal) -> eyre::Result<Amount<NetworkFee>> {
+        // amount * (100% + x%)
         let amount = self
             .amount
             .checked_mul(
@@ -106,6 +110,57 @@ impl Amount<NetworkFee> {
             _t: PhantomData,
         })
     }
+}
+
+/// The EMA can be calculated using the following formula:
+///
+/// `EMA b = α ⋅ Pb + (1 - α) ⋅ EMAb-1`
+///
+/// Where:
+/// - `EMAb` is the Exponential Moving Average at block b.
+/// - `α` is the smoothing factor, calculated as `α = 2 / (n+1)`, where n is the number of block prices.
+/// - `Pb` is the price at block b.
+/// - `EMAb-1` is the EMA at the previous block.
+pub fn calculate_ema(
+    total_past_blocks: u64,
+    current_block_price: Amount<NetworkFee>,
+    previous_block_ema: Amount<NetworkFee>,
+) -> eyre::Result<Decimal> {
+    // Safely convert `total_blocks_in_epoch + 1` to Decimal
+    let denominator = Decimal::from(total_past_blocks)
+        .checked_add(dec!(1))
+        .ok_or_eyre("failed to compute total_past_blocks + 1")?;
+
+    // Calculate alpha = 2 / (n+1)
+    let alpha = dec!(2)
+        .checked_div(denominator)
+        .ok_or_eyre("failed to compute smoothing factor alpha")?;
+    ensure!(
+        alpha > dec!(0) || alpha <= dec!(1),
+        "computed alpha={alpha} is out of the valid range (0,1]"
+    );
+
+    // Calculate (1 - alpha)
+    let one_minus_alpha = dec!(1)
+        .checked_sub(alpha)
+        .ok_or_eyre("failed to compute (1 - alpha)")?;
+
+    // alpha * current_block_price
+    let scaled_current_price = alpha
+        .checked_mul(current_block_price.amount)
+        .ok_or_eyre("failed to multiply alpha by current_block_price")?;
+
+    // (1 - alpha) * last_block_ema
+    let scaled_last_ema = one_minus_alpha
+        .checked_mul(previous_block_ema.amount)
+        .ok_or_eyre("failed to multiply (1 - alpha) by last_block_ema")?;
+
+    // alpha * price + (1 - alpha) * previous_ema
+    let current_block_ema = scaled_current_price
+        .checked_add(scaled_last_ema)
+        .ok_or_eyre("failed to add scaled current block price to scaled last block EMA")?;
+
+    Ok(current_block_ema)
 }
 
 #[cfg(test)]
@@ -272,6 +327,63 @@ mod tests {
             let diff = (price_with_network_reward.amount - expected).abs();
             assert!(diff < Decimal::from_str_exact("0.01")?);
             Ok(())
+        }
+    }
+
+    mod ema_calculations {
+        use super::*;
+
+        /// Test a normal scenario where all parameters lead to a valid EMA.
+        #[test]
+        fn test_calculate_ema_valid() -> Result<()> {
+            // setup
+            let total_past_blocks = 10;
+            let ema_0 = Amount {
+                amount: dec!(1.00),
+                _t: std::marker::PhantomData,
+            };
+            let current_price = dec!(1.01);
+
+            // action
+            let ema_1 = calculate_ema(
+                total_past_blocks,
+                Amount {
+                    amount: current_price,
+                    _t: PhantomData,
+                },
+                ema_0,
+            )?;
+
+            // assert
+            let expected = dec!(1.00181818181818);
+            assert!(
+                (ema_1 - expected).abs() < dec!(0.00000001),
+                "EMA is {}, expected around {}",
+                ema_1,
+                expected
+            );
+            Ok(())
+        }
+
+        /// Test extremely large inputs (u64::MAX)
+        #[test]
+        fn test_calculate_ema_huge_epoch() {
+            // setup
+            let total_past_blocks = u64::MAX;
+            let current_block_price = Amount {
+                amount: dec!(123.456),
+                _t: std::marker::PhantomData,
+            };
+            let last_block_ema = Amount {
+                amount: dec!(1000.0),
+                _t: std::marker::PhantomData,
+            };
+
+            // action
+            let result = calculate_ema(total_past_blocks, current_block_price, last_block_ema);
+
+            // assert
+            assert!(result.is_ok());
         }
     }
 }
