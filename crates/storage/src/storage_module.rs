@@ -21,7 +21,7 @@ use irys_types::{
     H256,
 };
 use nodit::{
-    interval::{ie, ii},
+    interval::ii,
     InclusiveInterval, Interval, NoditMap, NoditSet,
 };
 use openssl::sha;
@@ -31,7 +31,6 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    ops::Deref,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };

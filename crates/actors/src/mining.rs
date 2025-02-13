@@ -350,7 +350,7 @@ mod tests {
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
     use irys_types::{
-        ledger_chunk_offset_ie, partition, H256List, IrysBlockHeader, LedgerChunkOffset,
+        ledger_chunk_offset_ie, H256List, IrysBlockHeader, LedgerChunkOffset,
     };
     use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
     use std::any::Any;
