@@ -439,7 +439,7 @@ mod tests {
             let result = current_irys_price.calculate_ema(total_past_blocks, last_block_ema);
 
             // assert
-            result.unwrap();
+            assert!(result.is_ok());
         }
     }
 }
