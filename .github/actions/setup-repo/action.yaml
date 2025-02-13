@@ -1,0 +1,25 @@
+name: "Setup Repo Action"
+description: "A reusable composite action that setups rust and other common tasks"
+inputs:
+  toolchain:
+    description: "An example input parameter"
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        components: "rustfmt,clippy,cargo,llvm-tools-preview"
+    - uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        cache-all-crates: true
+        rust-cache: "buildjet" # allows for fast cache compresson & restoration on self-hosted runners
+
+    - name: Install needed tooling (needed for solana deps)
+      shell: bash
+      run: |
+        sudo apt-get install -y protobuf-compiler bzip2 clang
+
