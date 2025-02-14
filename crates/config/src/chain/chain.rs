@@ -96,7 +96,7 @@ pub struct IrysChainSpec {
 impl IrysChainSpec {
     fn new() -> Self {
         Self {
-            irys_genesis: IrysBlockHeader::new_mock_header(),
+            irys_genesis: IrysBlockHeader::default(),
         }
     }
 }

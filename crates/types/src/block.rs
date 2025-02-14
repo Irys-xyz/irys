@@ -260,7 +260,6 @@ impl fmt::Display for IrysBlockHeader {
     }
 }
 
-#[cfg(test)]
 impl IrysBlockHeader {
     pub fn new_mock_header() -> Self {
         use std::str::FromStr;

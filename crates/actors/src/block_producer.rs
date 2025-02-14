@@ -18,7 +18,7 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
-    Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
+    Base64, BlockMeta, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
     IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
     H256, U256,
 };
@@ -125,16 +125,16 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>>,
     >;
 
+    #[tracing::instrument(skip_all, fields(
+            minting_address = ?msg.0.mining_address,
+            partition_hash = ?msg.0.partition_hash,
+            chunk_offset = ?msg.0.chunk_offset,
+            tx_path = ?msg.0.tx_path.is_none(),
+            chunk = ?msg.0.chunk.len(),
+    ))]
     fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
         let solution = msg.0;
-        info!(
-            "BlockProducerActor solution received miner:{:?} partition_hash:{:?} offset:{} capacity:{} chunk_length:{}",
-            solution.mining_address,
-            solution.partition_hash,
-            solution.chunk_offset,
-            solution.tx_path.is_none(),
-            solution.chunk.len(),
-        );
+        info!("BlockProducerActor solution received");
 
         let mempool_addr = self.mempool_addr.clone();
         let block_discovery_addr = self.block_discovery_addr.clone();
@@ -147,16 +147,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let chunk_size = self.storage_config.chunk_size;
         let block_tree_guard = self.block_tree_guard.clone();
 
-        // let self_addr = ctx.address();
-        // let storage_config = self.storage_config.clone();
-        // let vdf_config = self.vdf_config.clone();
         let vdf_steps = self.vdf_steps_guard.clone();
 
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
             let (canonical_blocks, _not_onchain_count) = block_tree_guard.read().get_canonical_chain();
             let (latest_block_hash, prev_block_height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
-            info!("Starting block production, previous block: {} ({})", &latest_block_hash, &prev_block_height);
+            info!(?latest_block_hash, ?prev_block_height, "Starting block production, previous block");
 
             let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash)) {
                 Ok(Some(header)) => Ok(header),
@@ -176,8 +173,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     Err(eyre!("Failed to get previous block {} ({}) header: {}", prev_block_hash.0.to_base58(), prev_block_height,  e)) 
             }?;
 
-            if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-                warn!("Skipping solution for old step number {}, previous block step number {} for block {} ({}) ", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58(),  prev_block_height);
+            if solution.vdf_step <= prev_block_header.meta.vdf_limiter_info.global_step_number {
+                warn!("Skipping solution for old step number {}, previous block step number {} for block {} ({}) ", solution.vdf_step, prev_block_header.meta.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58(),  prev_block_height);
                 return Ok(None)
             }
 
@@ -207,7 +204,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 for data_root in ingress_proofs.keys() {
                     let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
                     if let Some(cached_data_root) = cached_data_root {
-                        debug!("publishing {:?}", &cached_data_root.txid_set);
+                        debug!(tx_ids = ?cached_data_root.txid_set, "publishing");
                         publish_txids.extend(cached_data_root.txid_set);
                     }
                 }
@@ -313,10 +310,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 partition_hash: solution.partition_hash,
             };
 
-            let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
+            let mut steps = if prev_block_header.meta.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
                 H256List::new()
             } else {
-                vdf_steps.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await
+                vdf_steps.get_steps(ii(prev_block_header.meta.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await
                 .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))?
             };
             steps.push(solution.seed.0);
@@ -359,15 +356,19 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     },
                 ],
                 evm_block_hash: B256::ZERO,
-                vdf_limiter_info: VDFLimiterInfo {
-                    global_step_number: solution.vdf_step,
-                    output: solution.seed.into_inner(),
-                    last_step_checkpoints: solution.checkpoints,
-                    prev_output: prev_block_header.vdf_limiter_info.output,
-                    seed: prev_block_header.vdf_limiter_info.seed,
-                    steps,
-                    ..Default::default()
-                },
+                meta: BlockMeta {
+                    vdf_limiter_info: VDFLimiterInfo {
+                        global_step_number: solution.vdf_step,
+                        output: solution.seed.into_inner(),
+                        last_step_checkpoints: solution.checkpoints,
+                        prev_output: prev_block_header.meta.vdf_limiter_info.output,
+                        seed: prev_block_header.meta.vdf_limiter_info.seed,
+                        steps,
+                        ..Default::default()
+                    },
+                    // todo: update this in the future to get the data from an oracle / use EMA
+                    irys_price: prev_block_header.meta.irys_price
+                }
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node

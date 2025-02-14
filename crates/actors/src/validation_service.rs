@@ -81,7 +81,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
         let miner_address = block.miner_address;
         let vdf_config = self.vdf_config.clone();
         let block_hash = block.block_hash;
-        let vdf_info = block.vdf_limiter_info.clone();
+        let vdf_info = block.meta.vdf_limiter_info.clone();
         let poa = block.poa.clone();
         let vdf_steps_guard = self.vdf_steps_guard.clone().unwrap();
 

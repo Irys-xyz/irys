@@ -62,12 +62,12 @@ impl VdfService {
                 let tx = db.tx().unwrap();
 
                 let mut block = block_header_by_hash(&tx, &block_hash).unwrap().unwrap();
-                let global_step_number = block.vdf_limiter_info.global_step_number;
+                let global_step_number = block.meta.vdf_limiter_info.global_step_number;
                 let mut steps_remaining = capacity;
 
                 while steps_remaining > 0 && block.height > 0 {
                     // get all the steps out of the block
-                    for step in block.vdf_limiter_info.steps.0.iter().rev() {
+                    for step in block.meta.vdf_limiter_info.steps.0.iter().rev() {
                         seeds.push_front(Seed(*step));
                         steps_remaining -= 1;
                         if steps_remaining == 0 {
