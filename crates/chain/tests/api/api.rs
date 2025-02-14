@@ -10,6 +10,7 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use base58::ToBase58;
+use irys_types::TxChunkOffset;
 use tracing::info;
 
 #[ignore]
@@ -118,7 +119,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: index as u32,
+            tx_offset: TxChunkOffset::from(index as u32),
         };
 
         // Make a POST request with JSON payload
@@ -182,7 +183,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         if resp.status() == StatusCode::OK {
             let packed_chunk: PackedChunk = test::read_body_json(resp).await;
             assert_eq!(
-                chunk, packed_chunk.tx_offset as usize,
+                chunk, *packed_chunk.tx_offset as usize,
                 "Got different chunk index"
             );
 

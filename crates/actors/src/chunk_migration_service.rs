@@ -8,7 +8,7 @@ use irys_database::{
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
     app_state::DatabaseProvider, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxRelativeChunkOffset,
+    LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxChunkOffset,
     UnpackedChunk, H256,
 };
 use reth_db::Database;
@@ -178,6 +178,7 @@ fn process_transaction_chunks(
     db: &DatabaseProvider,
 ) -> Result<(), ()> {
     for tx_chunk_offset in 0..num_chunks_in_tx {
+        let tx_chunk_offset = TxChunkOffset::from(tx_chunk_offset);
         // Attempt to retrieve the cached chunk from the mempool
         let chunk_info = match get_cached_chunk(db, data_root, tx_chunk_offset) {
             Ok(Some(info)) => info,
@@ -185,8 +186,8 @@ fn process_transaction_chunks(
         };
 
         // Find which storage module intersects this chunk
-        let ledger_offset = tx_chunk_offset as u64 + tx_chunk_range.start();
-        let storage_module = find_storage_module(storage_modules, ledger, ledger_offset);
+        let ledger_offset = tx_chunk_range.start() + *tx_chunk_offset;
+        let storage_module = find_storage_module(storage_modules, ledger, ledger_offset.into());
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
@@ -210,7 +211,6 @@ fn process_transaction_chunks(
 /// # Returns
 /// A `LedgerChunkRange` representing the [start, end] chunk offsets of the chunks
 /// added to the ledger by the specified block.
-
 fn get_block_range(
     block: &IrysBlockHeader,
     ledger: Ledger,
@@ -227,8 +227,8 @@ fn get_block_range(
     };
 
     LedgerChunkRange(ii(
-        start_chunk_offset,
-        block.ledgers[ledger].max_chunk_offset,
+        LedgerChunkOffset::from(start_chunk_offset),
+        LedgerChunkOffset::from(block.ledgers[ledger].max_chunk_offset),
     ))
 }
 fn get_tx_path_pairs(
@@ -274,7 +274,7 @@ fn update_storage_module_indexes(
 fn get_cached_chunk(
     db: &DatabaseProvider,
     data_root: DataRoot,
-    chunk_offset: TxRelativeChunkOffset,
+    chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
     db.view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
 }
@@ -293,7 +293,7 @@ fn find_storage_module(
             .filter(|&id| id == ledger as u32)
             // Then check offset range
             .and_then(|_| module.get_storage_module_range().ok())
-            .filter(|range| range.contains_point(ledger_offset))
+            .filter(|range| range.contains_point(ledger_offset.into()))
             .map(|_| module)
     })
 }
@@ -303,7 +303,7 @@ fn write_chunk_to_module(
     chunk_info: (CachedChunkIndexMetadata, CachedChunk),
     data_root: DataRoot,
     data_size: u64,
-    chunk_offset: TxRelativeChunkOffset,
+    chunk_offset: TxChunkOffset,
 ) -> Result<(), ()> {
     let data_path = Base64::from(chunk_info.1.data_path.0.clone());
 
