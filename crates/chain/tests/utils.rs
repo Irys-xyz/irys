@@ -8,7 +8,7 @@ use irys_storage::ii;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, H256List, H256,
 };
-use irys_types::{StorageConfig, VDFStepsConfig};
+use irys_types::{StorageConfig, TxChunkOffset, VDFStepsConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
@@ -210,7 +210,7 @@ pub async fn post_chunk<T, B>(
         data_size: tx.header.data_size,
         data_path: Base64(tx.proofs[chunk_index].proof.to_vec()),
         bytes: Base64(chunks[chunk_index].to_vec()),
-        tx_offset: chunk_index as u32,
+        tx_offset: TxChunkOffset::from(chunk_index as u32),
     };
 
     let resp = test::call_service(

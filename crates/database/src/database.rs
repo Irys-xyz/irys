@@ -9,7 +9,7 @@ use crate::tables::{
 
 use irys_types::{
     Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionId, TxRelativeChunkOffset, UnpackedChunk, MEGABYTE, U256,
+    IrysTransactionId, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
 };
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::mdbx::tx::Tx;
@@ -155,11 +155,11 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
 pub fn cached_chunk_meta_by_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
-    chunk_offset: TxRelativeChunkOffset,
+    chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<CachedChunkIndexMetadata>> {
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
     Ok(cursor
-        .seek_by_key_subkey(data_root, chunk_offset)?
+        .seek_by_key_subkey(data_root, *chunk_offset)?
         // make sure we find the exact subkey - dupsort seek can seek to the value, or a value greater than if it doesn't exist.
         .filter(|result| result.index == chunk_offset)
         .map(|index_entry| index_entry.meta))
@@ -168,12 +168,12 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
 pub fn cached_chunk_by_chunk_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
-    chunk_offset: TxRelativeChunkOffset,
+    chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
 
     if let Some(index_entry) = cursor
-        .seek_by_key_subkey(data_root, chunk_offset)?
+        .seek_by_key_subkey(data_root, *chunk_offset)?
         .filter(|e| e.index == chunk_offset)
     {
         let meta: CachedChunkIndexMetadata = index_entry.into();

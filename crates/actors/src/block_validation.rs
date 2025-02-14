@@ -63,6 +63,9 @@ pub async fn prevalidate_block(
         &block.height
     );
 
+    check_poa_data_expiration(&block.poa, &_partitions_guard)?;
+    debug!("poa data not expired");
+
     // Check the solution_hash
     solution_hash_is_valid(&block)?;
     debug!(
@@ -135,6 +138,27 @@ pub fn difficulty_is_valid(
             &block.diff
         ))
     }
+}
+
+/// Checks PoA data chunk data solution partitions has not expired
+pub fn check_poa_data_expiration(
+    poa: &PoaData,
+    partitions_guard: &PartitionAssignmentsReadGuard,
+) -> eyre::Result<()> {
+    // if is a data chunk
+    if poa.data_path.is_some() && poa.tx_path.is_some() && poa.ledger_id.is_some() {
+        if partitions_guard
+            .read()
+            .data_partitions
+            .get(&poa.partition_hash)
+            .is_none()
+        {
+            return Err(eyre::eyre!(
+                "Invalid data PoA, partition hash is not a data partition, it may have expired"
+            ));
+        }
+    };
+    Ok(())
 }
 
 /// Validates if a block's cumulative difficulty equals the previous cumulative difficulty

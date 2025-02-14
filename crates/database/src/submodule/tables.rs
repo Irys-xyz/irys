@@ -75,9 +75,12 @@ mod tests {
             tx_path_hash: Some(tx_path_hash),
         };
 
-        write_tx.put::<ChunkPathHashByOffset>(1, path_hashes.clone())?;
-        write_tx.put::<ChunkPathHashByOffset>(100, path_hashes.clone())?;
-        write_tx.put::<ChunkPathHashByOffset>(0, path_hashes.clone())?;
+        write_tx
+            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(1), path_hashes.clone())?;
+        write_tx
+            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(100), path_hashes.clone())?;
+        write_tx
+            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(0), path_hashes.clone())?;
 
         write_tx.commit()?;
 
@@ -92,9 +95,9 @@ mod tests {
         assert_eq!(
             res,
             vec![
-                (0, path_hashes.clone()),
-                (1, path_hashes.clone()),
-                (100, path_hashes)
+                (PartitionChunkOffset::from(0), path_hashes.clone()),
+                (PartitionChunkOffset::from(1), path_hashes.clone()),
+                (PartitionChunkOffset::from(100), path_hashes)
             ]
         );
 
