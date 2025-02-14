@@ -1901,7 +1901,7 @@ mod tests {
     }
 
     fn random_block(cumulative_diff: U256) -> IrysBlockHeader {
-        let mut block = IrysBlockHeader::new();
+        let mut block = IrysBlockHeader::new_mock_header();
         block.block_hash = BlockHash::random();
         block.solution_hash = H256::random(); // Ensure unique solution hash
         block.height = 0; // Default to genesis

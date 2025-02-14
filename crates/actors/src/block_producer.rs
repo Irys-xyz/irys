@@ -249,16 +249,15 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 }
             }
 
-            debug!("Publish transactions: {:?}", &publish_txs.iter().map(|h| h.id.0.to_base58()).collect::<Vec<_>>());
+            {
+                let txs = &publish_txs.iter().map(|h| h.id.0.to_base58()).collect::<Vec<_>>();
+                debug!(?txs, "Publish transactions");
+            }
 
             // Publish Ledger Transactions
             let publish_chunks_added = calculate_chunks_added(&publish_txs, chunk_size);
             let publish_max_chunk_offset =  prev_block_header.ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
-            let opt_proofs = if proofs.is_empty() {
-                 None
-            } else {
-                Some(IngressProofsList::from(proofs))
-            };
+            let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
             // Submit Ledger Transactions    
             let submit_txs: Vec<IrysTransactionHeader> =
@@ -300,8 +299,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // Use the partition hash to figure out what ledger it belongs to
             let ledger_id = epoch_service_addr
                 .send(GetPartitionAssignmentMessage(solution.partition_hash))
-                .await
-                .unwrap()
+                .await?
                 .and_then(|pa| pa.ledger_id);
 
 
@@ -427,8 +425,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let exec_payload = context
                 .engine_api
                 .build_payload_v1_irys(prev_block_header.evm_block_hash, payload_attrs)
-                .await
-                .unwrap();
+                .await?;
 
             // we can examine the execution status of generated shadow txs
             // let shadow_receipts = exec_payload.shadow_receipts;
