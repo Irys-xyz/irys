@@ -1101,16 +1101,14 @@ mod tests {
                 .send(GetPartitionAssignmentsGuardMessage)
                 .await
                 .unwrap();
-            let mut maybe_partition_hash = None;
-            for (partition_hash, assignment) in
-                partition_assignments_read.read().data_partitions.iter()
-            {
-                if assignment.ledger_id == Some(Ledger::Submit.get_id()) {
-                    maybe_partition_hash = Some(partition_hash.clone());
-                    break;
-                }
-            }
-            maybe_partition_hash.expect("There should be a partition assigned to submit ledger")
+
+            let partition_hash = partition_assignments_read.read().data_partitions
+                .iter()
+                .find(|(_hash, assignment)| assignment.ledger_id == Some(Ledger::Submit.get_id()))
+                .map(|(hash, _)| hash.clone())
+                .expect("There should be a partition assigned to submit ledger");
+
+            partition_hash
         };
 
         let _ = epoch_service_actor

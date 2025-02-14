@@ -355,11 +355,7 @@ impl StorageModule {
             *intervals = StorageIntervals::new();
             intervals
                 .insert_strict(storage_interval, ChunkType::Uninitialized)
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "Failed to create new interval, should never happen as interval is empty!"
-                    )
-                });
+                .expect("Failed to create new interval, should never happen as interval is empty!");
             storage_interval
         };
         Self::write_intervals_to_submodules(&self.intervals, &self.submodules)
