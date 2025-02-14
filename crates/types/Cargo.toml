@@ -45,6 +45,7 @@ zerocopy = "0.8.9"
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 irys-macros.workspace = true
+irys-storage-pricing.workspace = true
 
 [build-dependencies]
 build-print = "0"

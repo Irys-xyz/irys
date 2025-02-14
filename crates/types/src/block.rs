@@ -2,22 +2,17 @@
 //!
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
-use std::{
-    fmt,
-    str::FromStr,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::fmt;
 
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash, resolve_proofs, string_u128, u64_stringify, Arbitrary, Base64,
     Compact, DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader,
-    Proof, Signature, H256, U256,
+    Proof, H256, U256,
 };
 use alloy_primitives::{keccak256, Address, B256};
+use irys_storage_pricing::{Amount, IrysPrice, Usd};
 use serde::{Deserialize, Serialize};
-
-use crate::hash_sha256;
 
 pub type BlockHash = H256;
 
@@ -55,9 +50,13 @@ pub struct VDFLimiterInfo {
 #[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
 /// Stores deserialized fields from a JSON formatted Irys block header.
 #[serde(rename_all = "camelCase")]
+#[repr(C)]
 pub struct IrysBlockHeader {
     /// The block identifier.
     pub block_hash: BlockHash,
+
+    /// The block signature
+    pub signature: IrysSignature,
 
     /// The block height.
     pub height: u64,
@@ -71,7 +70,6 @@ pub struct IrysBlockHeader {
 
     /// timestamp (in milliseconds) since UNIX_EPOCH of the last difficulty adjustment
     #[serde(with = "string_u128")]
-    ///
     pub last_diff_timestamp: u128,
 
     /// The solution hash for the block hash(chunk_bytes + partition_chunk_offset + mining_seed)
@@ -88,6 +86,8 @@ pub struct IrysBlockHeader {
 
     // Previous block identifier.
     pub previous_block_hash: H256,
+
+    /// The cumulative difficulty of the previous block
     pub previous_cumulative_diff: U256,
 
     /// The recall chunk proof
@@ -100,9 +100,6 @@ pub struct IrysBlockHeader {
     /// We allow for miners to send rewards to a separate address
     pub miner_address: Address,
 
-    /// The block signature
-    pub signature: IrysSignature,
-
     /// timestamp (in milliseconds) since UNIX_EPOCH of when the block was discovered/produced
     #[serde(with = "string_u128")]
     pub timestamp: u128,
@@ -112,197 +109,87 @@ pub struct IrysBlockHeader {
     /// and ledger.
     pub ledgers: Vec<TransactionLedger>,
 
+    /// Evm block hash (32 bytes)
     pub evm_block_hash: B256,
 
+    /// Extra block data that cannot be inlined here because of `Compact` derive macro
+    pub meta: BlockMeta,
+}
+
+/// Uitlity struct that manually derives the `Compact` trait.
+/// Compact trait only allows a single foreign type to be present
+/// in the struct it derives, and it must be moved at the very bottom of the struct definition.
+///
+/// If a struct has 2 foreign types that are no regisetred in the macros source code, the `Compact`
+/// trait **cannot** be automatically derived.
+///
+/// Once we improve the communication with reth (which is the reason we need `Arbitrary` and `Compact`),
+/// We can also get rid of this util struct.
+#[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary)]
+pub struct BlockMeta {
+    /// $IRYS token price expressed in $USD
+    pub irys_price: Amount<(IrysPrice, Usd)>,
+
+    /// Metadata about the verifiable delay function, used for block verification purposes
     pub vdf_limiter_info: VDFLimiterInfo,
 }
 
-impl IrysBlockHeader {
-    pub fn new() -> Self {
-        let tx_ids = H256List::new();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+impl Compact for BlockMeta {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let w1 = self.irys_price.to_compact(buf);
+        let w2 = self.vdf_limiter_info.to_compact(buf);
+        w1.saturating_add(w2)
+    }
 
-        // Create a sample IrysBlockHeader object with mock data
-        IrysBlockHeader {
-            diff: U256::from(1000),
-            cumulative_diff: U256::from(5000),
-            last_diff_timestamp: 1622543200,
-            solution_hash: H256::zero(),
-            previous_solution_hash: H256::zero(),
-            last_epoch_hash: H256::random(),
-            chunk_hash: H256::zero(),
-            height: 42,
-            block_hash: H256::zero(),
-            previous_block_hash: H256::zero(),
-            previous_cumulative_diff: U256::from(4000),
-            poa: PoaData {
-                tx_path: None,
-                data_path: None,
-                chunk: Base64::from_str("").unwrap(),
-                partition_hash: PartitionHash::zero(),
-                partition_chunk_offset: 0,
-                recall_chunk_index: 0,
-                ledger_id: None,
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let (irys_price, buf) = Amount::from_compact(buf, 16);
+        let (vdf_limiter_info, buf) = VDFLimiterInfo::from_compact(buf, len.saturating_sub(16));
+        (
+            Self {
+                irys_price,
+                vdf_limiter_info,
             },
-            reward_address: Address::ZERO,
-            signature: Signature::test_signature().into(),
-            timestamp: now.as_millis(),
-            ledgers: vec![
-                // Permanent Publish Ledger
-                TransactionLedger {
-                    ledger_id: 0, // Publish ledger_id
-                    tx_root: H256::zero(),
-                    tx_ids,
-                    max_chunk_offset: 0,
-                    expires: None,
-                    proofs: None,
-                },
-                // Term Submit Ledger
-                TransactionLedger {
-                    ledger_id: 1, // Submit ledger_id
-                    tx_root: H256::zero(),
-                    tx_ids: H256List::new(),
-                    max_chunk_offset: 0,
-                    expires: Some(1622543200),
-                    proofs: None,
-                },
-            ],
-            evm_block_hash: B256::ZERO,
-            vdf_limiter_info: VDFLimiterInfo::default(),
-            miner_address: Address::ZERO,
-        }
+            buf,
+        )
+    }
+}
+
+impl IrysBlockHeader {
+    /// Proxy method for `Compact::to_compact`
+    ///
+    /// packs all the header data into a byte buffer.
+    ///
+    /// ## Warning
+    ///
+    /// This approach is unsafe and prone to attacks.
+    /// ideally we should use udigest crate - https://docs.rs/udigest/latest/udigest/
+    /// for reference on why https://www.dfns.co/article/unambiguous-hashing
+    pub fn digest_for_signing<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        self.to_compact(buf);
     }
 
-    pub fn encode_for_signing(&self, buf: &mut Vec<u8>) -> eyre::Result<()> {
-        buf.extend_from_slice(&self.height.to_le_bytes());
-        let _ = &self.diff.write_bytes(buf);
-        let _ = &self.cumulative_diff.write_bytes(buf);
-        buf.extend_from_slice(&self.last_diff_timestamp.to_le_bytes());
-        buf.extend_from_slice(self.solution_hash.as_bytes());
-        buf.extend_from_slice(self.previous_solution_hash.as_bytes());
-        buf.extend_from_slice(self.last_epoch_hash.as_bytes());
-        buf.extend_from_slice(self.chunk_hash.as_bytes());
-        buf.extend_from_slice(self.previous_block_hash.as_bytes());
-        let _ = &self.previous_cumulative_diff.write_bytes(buf);
-
-        // poa data
-        write_optional_ref(buf, &self.poa.tx_path);
-        write_optional_ref(buf, &self.poa.data_path);
-        // we use the chunk hash instead of the data
-        buf.extend_from_slice(&hash_sha256(&self.poa.chunk.0)?);
-        write_optional(buf, &self.poa.ledger_id);
-        buf.extend_from_slice(&self.poa.partition_chunk_offset.to_le_bytes());
-        buf.extend_from_slice(self.poa.partition_hash.as_bytes());
-        //
-
-        buf.extend_from_slice(&self.reward_address.0 .0);
-        buf.extend_from_slice(&self.miner_address.0 .0);
-
-        buf.extend_from_slice(&self.timestamp.to_le_bytes());
-        buf.extend_from_slice(&self.evm_block_hash.0);
-        buf.extend_from_slice(&self.evm_block_hash.0);
-
-        // VDFLimiterInfo
-        buf.extend_from_slice(&self.vdf_limiter_info.output.0);
-        buf.extend_from_slice(&self.vdf_limiter_info.global_step_number.to_le_bytes());
-        buf.extend_from_slice(&self.vdf_limiter_info.seed.0);
-        buf.extend_from_slice(&self.vdf_limiter_info.next_seed.0);
-        buf.extend_from_slice(&self.vdf_limiter_info.prev_output.0);
-        buf.extend_from_slice(&self.vdf_limiter_info.prev_output.0);
-
-        let _ = &self
-            .vdf_limiter_info
-            .last_step_checkpoints
-            .iter()
-            .for_each(|c| buf.extend_from_slice(&c.0));
-
-        let _ = &self
-            .vdf_limiter_info
-            .steps
-            .iter()
-            .for_each(|c| buf.extend_from_slice(&c.0));
-
-        write_optional(buf, &self.vdf_limiter_info.vdf_difficulty);
-        write_optional(buf, &self.vdf_limiter_info.next_vdf_difficulty);
-        //
-        Ok(())
-    }
-
-    pub fn signature_hash(&self) -> eyre::Result<[u8; 32]> {
-        let mut bytes = Vec::new();
-        self.encode_for_signing(&mut bytes)?;
-        let prehash = keccak256(&bytes).0;
-        Ok(prehash)
+    /// Create a `keccak256` hash of the [`IrysBlockHeader`]
+    pub fn signature_hash(&self) -> [u8; 32] {
+        // allocate the buffer, guesstimate the required capacity
+        let mut bytes = Vec::with_capacity(size_of::<Self>() * 3);
+        self.digest_for_signing(&mut bytes);
+        // we trim the `BlockHash` and `Signature` from the signing scheme
+        let bytes = &bytes[size_of::<BlockHash>() + size_of::<IrysSignature>()..];
+        keccak256(&bytes).0
     }
 
     /// Validates the block hash signature by:
     /// 1.) generating the prehash
     /// 2.) recovering the sender address, and comparing it to the block header's miner_address (miner_address MUST be part of the prehash)
-    pub fn is_signature_valid(&self) -> eyre::Result<bool> {
-        Ok(self
-            .signature
-            .validate_signature(self.signature_hash()?, self.miner_address))
-    }
-}
-
-fn write_optional<'a, T>(buf: &mut Vec<u8>, value: &'a Option<T>)
-where
-    &'a T: WriteBytes,
-{
-    if let Some(v) = value {
-        v.write_bytes(buf)
-    }
-}
-
-fn write_optional_ref<T>(buf: &mut Vec<u8>, value: &Option<T>)
-where
-    T: AsRef<[u8]>,
-{
-    if let Some(v) = value {
-        buf.extend_from_slice(v.as_ref())
-    }
-}
-
-trait WriteBytes {
-    fn write_bytes(&self, buf: &mut Vec<u8>);
-}
-
-// Implementation for integer types
-impl WriteBytes for u32 {
-    fn write_bytes(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&self.to_le_bytes());
-    }
-}
-
-impl WriteBytes for &u32 {
-    fn write_bytes(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&(**self).to_le_bytes());
-    }
-}
-
-impl WriteBytes for u64 {
-    fn write_bytes(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&self.to_le_bytes());
-    }
-}
-
-impl WriteBytes for &u64 {
-    fn write_bytes(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&(**self).to_le_bytes());
-    }
-}
-
-impl WriteBytes for Base64 {
-    fn write_bytes(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&self.0);
-    }
-}
-
-impl WriteBytes for U256 {
-    fn write_bytes(&self, buf: &mut Vec<u8>) {
-        let mut le_bytes = [0u8; 32];
-        self.to_little_endian(&mut le_bytes);
-        buf.extend_from_slice(&le_bytes);
+    pub fn is_signature_valid(&self) -> bool {
+        self.signature
+            .validate_signature(self.signature_hash(), self.miner_address)
     }
 }
 
@@ -342,7 +229,8 @@ pub struct TransactionLedger {
 }
 
 impl TransactionLedger {
-    /// Computes the tx_root and tx_paths. The TX Root is composed of taking the data_roots of each of the storage transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
+    /// Computes the tx_root and tx_paths. The TX Root is composed of taking the data_roots of each of the storage
+    /// transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
     pub fn merklize_tx_root(data_txs: &[IrysTransactionHeader]) -> (H256, Vec<Proof>) {
         if data_txs.is_empty() {
             return (H256::zero(), vec![]);
@@ -360,12 +248,8 @@ impl TransactionLedger {
         let proofs = resolve_proofs(root, None).unwrap();
         (H256(root_id), proofs)
     }
-
-    // tx_path = proof ?
-    // tx_path/proof verification
 }
 
-// Implement the Display trait
 impl fmt::Display for IrysBlockHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Convert the struct to a JSON string using serde_json
@@ -377,24 +261,16 @@ impl fmt::Display for IrysBlockHeader {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::{irys::IrysSigner, validate_path, CONFIG, MAX_CHUNK_SIZE};
+impl IrysBlockHeader {
+    pub fn new_mock_header() -> Self {
+        use std::str::FromStr;
+        use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::*;
-    use alloy_core::hex;
-    use alloy_primitives::Signature;
-    use k256::ecdsa::SigningKey;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
-    use serde_json;
-    use std::str::FromStr;
-    use zerocopy::IntoBytes;
-
-    #[test]
-    fn test_irys_block_header_serialization() {
         let tx_ids = H256List::new();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
         // Create a sample IrysBlockHeader object with mock data
-        let mut header = IrysBlockHeader {
+        IrysBlockHeader {
             diff: U256::from(1000),
             cumulative_diff: U256::from(5000),
             last_diff_timestamp: 1622543200,
@@ -410,50 +286,83 @@ mod tests {
                 tx_path: None,
                 data_path: None,
                 chunk: Base64::from_str("").unwrap(),
-                partition_hash: H256::zero(),
+                partition_hash: PartitionHash::zero(),
                 partition_chunk_offset: 0,
                 recall_chunk_index: 0,
                 ledger_id: None,
             },
             reward_address: Address::ZERO,
-            signature: Signature::test_signature().into(),
-            timestamp: 1622543200,
-            ledgers: vec![TransactionLedger {
-                ledger_id: 0, // Publish ledger_id
-                tx_root: H256::zero(),
-                tx_ids,
-                proofs: None,
-                max_chunk_offset: 100,
-                expires: Some(1622543200),
-            }],
+            signature: IrysSignature::new(alloy_signer::Signature::test_signature()),
+            timestamp: now.as_millis(),
+            ledgers: vec![
+                // Permanent Publish Ledger
+                TransactionLedger {
+                    ledger_id: 0, // Publish ledger_id
+                    tx_root: H256::zero(),
+                    tx_ids,
+                    max_chunk_offset: 0,
+                    expires: None,
+                    proofs: None,
+                },
+                // Term Submit Ledger
+                TransactionLedger {
+                    ledger_id: 1, // Submit ledger_id
+                    tx_root: H256::zero(),
+                    tx_ids: H256List::new(),
+                    max_chunk_offset: 0,
+                    expires: Some(1622543200),
+                    proofs: None,
+                },
+            ],
             evm_block_hash: B256::ZERO,
-            vdf_limiter_info: VDFLimiterInfo::default(),
             miner_address: Address::ZERO,
-        };
+            ..Default::default()
+        }
+    }
+}
 
-        // Use a specific seed
-        let seed: [u8; 32] = [0; 32]; // Example: use an array of zeros as the seed
+#[cfg(test)]
+mod tests {
+    use crate::{irys::IrysSigner, validate_path, CONFIG, MAX_CHUNK_SIZE};
 
-        // Create a seeded RNG
-        let mut rng = StdRng::from_seed(seed);
+    use super::*;
+    use alloy_primitives::Signature;
+    use k256::ecdsa::SigningKey;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use serde_json;
+    use std::str::FromStr;
+    use zerocopy::IntoBytes;
 
-        // Populate some deterministic random hash data (will not pass consensus checks)
-        rng.fill(&mut header.chunk_hash.as_bytes_mut()[..]);
-        rng.fill(&mut header.solution_hash.as_bytes_mut()[..]);
-        rng.fill(&mut header.previous_solution_hash.as_bytes_mut()[..]);
-        rng.fill(&mut header.previous_block_hash.as_bytes_mut()[..]);
-        rng.fill(&mut header.block_hash.as_bytes_mut()[..]);
-        rng.fill(&mut header.reward_address.as_mut_bytes()[..]);
+    #[test]
+    fn test_irys_block_header_serde_round_trip() {
+        // setup
+        let header = mock_header();
 
-        // Serialize the header to a JSON string
+        // action
         let serialized = serde_json::to_string_pretty(&header).unwrap();
-        println!("\n{}", serialized);
-
-        // Deserialize back to IrysBlockHeader struct
         let deserialized: IrysBlockHeader = serde_json::from_str(&serialized).unwrap();
 
-        // Assert that the deserialized object is equal to the original
+        // Assert
         assert_eq!(header, deserialized);
+    }
+
+    #[test]
+    fn test_irys_header_compacat_round_trip() {
+        // setup
+        let header = mock_header();
+        let mut buf = vec![];
+
+        // actoin
+        header.to_compact(&mut buf);
+        assert!(!buf.is_empty(), "expect data to be written into the buffer");
+        let (derived_header, rest_of_the_buffer) = IrysBlockHeader::from_compact(&buf, buf.len());
+        assert!(
+            rest_of_the_buffer.is_empty(),
+            "the whole buffer should be read"
+        );
+
+        // assert
+        assert_eq!(derived_header, header);
     }
 
     #[test]
@@ -472,16 +381,61 @@ mod tests {
         }
     }
 
-    const DEV_PRIVATE_KEY: &str =
-        "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
-    const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
-
     #[test]
     fn test_irys_block_header_signing() {
-        let tx_ids = H256List::new();
+        // setup
+        let mut header = mock_header();
+        let mut rng = rand::thread_rng();
+        let signer = SigningKey::random(&mut rng);
+        let signer = IrysSigner {
+            signer,
+            chain_id: CONFIG.irys_chain_id,
+            chunk_size: MAX_CHUNK_SIZE,
+        };
 
-        // Create a sample IrysBlockHeader object with mock data
-        let mut header = IrysBlockHeader {
+        // action
+        // sign the block header
+        signer.sign_block_header(&mut header).unwrap();
+        let block_hash = keccak256(header.signature.as_bytes()).0;
+
+        // assert signature
+        assert_eq!(H256::from(block_hash), header.block_hash);
+        assert!(header.is_signature_valid());
+        let mut rng = StdRng::from_seed([42_u8; 32]);
+
+        // assert that updating values changes the hash
+        let fields: &[fn(&mut IrysBlockHeader) -> &mut [u8]] = &[
+            |h: &mut IrysBlockHeader| h.height.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.last_diff_timestamp.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.solution_hash.as_bytes_mut(),
+            |h: &mut IrysBlockHeader| h.previous_solution_hash.as_bytes_mut(),
+            |h: &mut IrysBlockHeader| h.last_epoch_hash.as_bytes_mut(),
+            |h: &mut IrysBlockHeader| h.chunk_hash.as_bytes_mut(),
+            |h: &mut IrysBlockHeader| h.previous_block_hash.as_bytes_mut(),
+            |h: &mut IrysBlockHeader| h.reward_address.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.miner_address.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.timestamp.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.ledgers[0].ledger_id.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.ledgers[0].max_chunk_offset.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.ledgers[0].expires.as_mut().unwrap().as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.evm_block_hash.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.meta.vdf_limiter_info.global_step_number.as_mut_bytes(),
+        ];
+        for get_field in fields {
+            let mut header_clone = header.clone();
+            let get_field = get_field(&mut header_clone);
+            rng.fill(get_field);
+            assert!(!header_clone.is_signature_valid());
+        }
+
+        // assert that changing the block hash, the signature is still valid (because the validatoin does not validate )
+        header.block_hash = H256::random();
+        assert!(header.is_signature_valid());
+    }
+
+    fn mock_header() -> IrysBlockHeader {
+        let tx_ids = H256List::new();
+        IrysBlockHeader {
             diff: U256::from(1000),
             cumulative_diff: U256::from(5000),
             last_diff_timestamp: 1622543200,
@@ -509,44 +463,13 @@ mod tests {
                 ledger_id: 0, // Publish ledger_id
                 tx_root: H256::zero(),
                 tx_ids,
+                proofs: None,
                 max_chunk_offset: 100,
                 expires: Some(1622543200),
-                proofs: None,
             }],
             evm_block_hash: B256::ZERO,
-            vdf_limiter_info: VDFLimiterInfo::default(),
             miner_address: Address::ZERO,
-        };
-
-        let signer = IrysSigner {
-            signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
-                .unwrap(),
-            chain_id: CONFIG.irys_chain_id,
-            chunk_size: MAX_CHUNK_SIZE,
-        };
-
-        // sign the block header
-        header = signer.sign_block_header(header).unwrap();
-
-        assert!(header.is_signature_valid().unwrap());
-
-        // validate block hash
-        let id: [u8; 32] = keccak256(header.signature.as_bytes()).into();
-
-        assert_eq!(H256::from(id), header.block_hash);
-
-        // fuzz some fields, make sure the signature fails
-
-        // Use a specific seed
-        let seed: [u8; 32] = [0; 32];
-        let mut rng = StdRng::from_seed(seed);
-
-        rng.fill(&mut header.chunk_hash.as_bytes_mut()[..]);
-        rng.fill(&mut header.solution_hash.as_bytes_mut()[..]);
-        rng.fill(&mut header.previous_solution_hash.as_bytes_mut()[..]);
-        rng.fill(&mut header.previous_block_hash.as_bytes_mut()[..]);
-        rng.fill(&mut header.block_hash.as_bytes_mut()[..]);
-
-        assert!(!header.is_signature_valid().unwrap());
+            ..Default::default()
+        }
     }
 }
