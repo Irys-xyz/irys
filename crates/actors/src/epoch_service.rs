@@ -738,7 +738,7 @@ mod tests {
     use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
-    use irys_storage::{StorageModule, StorageModuleVec, ie};
+    use irys_storage::{ie, StorageModule, StorageModuleVec};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{partition_chunk_offset_ie, Address, PartitionChunkRange, CONFIG};
     use tokio::time::sleep;
