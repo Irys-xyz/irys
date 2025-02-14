@@ -388,7 +388,6 @@ mod tests {
     use base58::{FromBase58, ToBase58};
 
     use super::*;
-    #[test]
     fn generate_next_vdf_step() {
         let mut seed = H256(
             hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41")
@@ -937,26 +936,6 @@ mod tests {
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
-
-        if x.is_ok() {
-            println!("Checkpoints are valid!");
-        } else {
-            println!("Checkpoints are invalid!");
-        }
-
-        println!(
-            "---\nsteps: {} last_checkpoint: {}\n seed: {}",
-            vdf_info.steps[0].0.to_base58(),
-            vdf_info
-                .last_step_checkpoints
-                .0
-                .last()
-                .unwrap()
-                .0
-                .to_base58(),
-            vdf_info.prev_output.0.to_base58()
-        );
-        println!("x: {:?}", x);
     }
 
     // one special case that do not apply reset seed
