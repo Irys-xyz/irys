@@ -49,6 +49,7 @@ jobs:
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
+      - uses: taiki-e/install-action@nextest
 
       - name: cargo test
         run: cargo xtask test

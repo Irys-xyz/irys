@@ -31,7 +31,7 @@ fn main() -> eyre::Result<()> {
     match args.command {
         Commands::Test { args, coverage } => {
             println!("cargo test");
-            cmd!(sh, "cargo install cargo-nextest").run()?;
+            let _ = cmd!(sh, "cargo install cargo-nextest").run();
 
             if coverage {
                 cmd!(sh, "cargo install grcov").run()?;
