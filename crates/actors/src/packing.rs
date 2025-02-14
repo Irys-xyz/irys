@@ -185,19 +185,22 @@ impl PackingActor {
                         chunk_size, CHUNK_SIZE,
                         "Chunk size is not aligned with C code"
                     );
+
                     for chunk_range_split in split_interval(&chunk_range, self.config.max_chunks)
                         .unwrap()
                         .iter()
                     {
+                        let start: u32 = (*chunk_range_split).start();
+                        let end: u32 = (*chunk_range_split).end();
+
+                        let num_chunks = end - start + 1;
+
                         debug!(
-                            "Packing using CUDA C implementation, start:{} end:{}!",
-                            chunk_range_split.start(),
-                            chunk_range_split.end()
+                            "Packing using CUDA C implementation, start:{} end:{} (len: {})",
+                            &start, &end, &num_chunks
                         );
-                        let num_chunks: u32 =
-                            (chunk_range_split.end() as u32 - chunk_range_split.start() as u32 + 1);
+
                         let storage_module = storage_module.clone();
-                        let chunk_range_split = chunk_range_split.clone();
 
                         let semaphore = self.semaphore.get(&storage_module_id).unwrap().clone();
                         // wait for the permit before spawning the thread
@@ -211,14 +214,14 @@ impl PackingActor {
                             capacity_pack_range_cuda_c(
                                 num_chunks,
                                 mining_address,
-                                chunk_range_split.start() as u64,
+                                start as u64,
                                 partition_hash,
                                 Some(entropy_packing_iterations),
                                 &mut out,
                             );
                             for i in 0..num_chunks {
                                 storage_module.write_chunk(
-                                    chunk_range_split.start() + i,
+                                    (start + i).into(),
                                     out[(i * chunk_size as u32) as usize
                                         ..((i + 1) * chunk_size as u32) as usize]
                                         .to_vec(),
@@ -228,7 +231,7 @@ impl PackingActor {
                             }
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                         });
-                        debug!(target: "irys::packing::update", "CUDA Packed chunks {} - {} for SM {} partition_hash {} mining_address {} iterations {}", chunk_range_split.start(), chunk_range_split.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                        debug!(target: "irys::packing::update", "CUDA Packed chunks {} - {} for SM {} partition_hash {} mining_address {} iterations {}", start, end, &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                     }
                 }
                 _ => unimplemented!(),
