@@ -182,7 +182,6 @@ mod tests {
     use super::*;
     use crate::{irys::IrysSigner, MAX_CHUNK_SIZE};
 
-    use alloy_core::hex::{self};
     use alloy_rlp::Decodable;
 
     use k256::ecdsa::SigningKey;
@@ -219,10 +218,6 @@ mod tests {
         assert_eq!(original_header, deserialized);
     }
 
-    const DEV_PRIVATE_KEY: &str =
-        "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
-    const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
-
     #[test]
     fn test_tx_encode_and_signing() {
         // Create a sample IrysTransactionHeader
@@ -254,8 +249,7 @@ mod tests {
         assert_eq!(&dec, &original_header);
 
         let signer = IrysSigner {
-            signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
-                .unwrap(),
+            signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: CONFIG.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };

@@ -27,7 +27,7 @@ impl IrysSignature {
         self
     }
 
-    /// Passthough to the inner signature.as_bytes()
+    /// Passthrough to the inner signature.as_bytes()
     pub fn as_bytes(&self) -> [u8; 65] {
         self.0.as_bytes()
     }

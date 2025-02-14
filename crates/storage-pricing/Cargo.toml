@@ -1,5 +1,5 @@
 [package]
-name = "storage-pricing"
+name = "irys-storage-pricing"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,10 @@ license.workspace = true
 eyre.workspace = true
 rust_decimal = { workspace = true, features = ["maths"] }
 rust_decimal_macros.workspace = true
+serde.workspace = true
+arbitrary.workspace = true
+reth-codecs.workspace = true
+bytes.workspace = true
 
 [lints]
 workspace = true

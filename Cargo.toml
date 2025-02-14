@@ -44,6 +44,7 @@ irys-packing = { path = "./crates/packing" }
 irys-chain = { path = "./crates/chain" }
 irys-vdf = { path = "./crates/vdf" }
 irys-efficient-sampling = { path = "./crates/efficient-sampling" }
+irys-storage-pricing = { path = "./crates/storage-pricing" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"

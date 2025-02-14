@@ -237,7 +237,7 @@ mod tests {
         let result = db.view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?;
         assert_eq!(result, Some(tx_header));
 
-        let mut block_header = IrysBlockHeader::new();
+        let mut block_header = IrysBlockHeader::new_mock_header();
         block_header.block_hash.0[0] = 1;
 
         // Write a Block
