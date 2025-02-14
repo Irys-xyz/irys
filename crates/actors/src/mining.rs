@@ -314,14 +314,20 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
             let msg = msg.0;
             if msg.0.contains(&partition_hash) {
                 if let Ok(interval) = self.storage_module.reset() {
-                    debug!(?partition_hash, ?interval, "Expiring partition hash");  
+                    debug!(?partition_hash, ?interval, "Expiring partition hash");
                     self.packing_actor.do_send(PackingRequest {
                         storage_module: self.storage_module.clone(),
                         chunk_range: PartitionChunkRange(interval),
                     });
                 } else {
-                    error!(?partition_hash, "Expiring partition hash, could not reset its storage module!");  
-                    return Err(eyre::eyre!("Could not reset storage module with partition hash {}", partition_hash));
+                    error!(
+                        ?partition_hash,
+                        "Expiring partition hash, could not reset its storage module!"
+                    );
+                    return Err(eyre::eyre!(
+                        "Could not reset storage module with partition hash {}",
+                        partition_hash
+                    ));
                 }
             }
             Ok(())

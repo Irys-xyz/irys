@@ -1102,7 +1102,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            let partition_hash = partition_assignments_read.read().data_partitions
+            let partition_hash = partition_assignments_read
+                .read()
+                .data_partitions
                 .iter()
                 .find(|(_hash, assignment)| assignment.ledger_id == Some(Ledger::Submit.get_id()))
                 .map(|(hash, _)| hash.clone())
