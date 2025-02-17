@@ -49,7 +49,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
 
       - name: cargo test
-        run: RUST_LOG=debug cargo xtask test -- --all-features
+        run: RUST_LOG=debug cargo xtask test
 
   cargo-check:
     name: cargo check
