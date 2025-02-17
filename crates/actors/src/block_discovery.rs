@@ -186,9 +186,9 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let block_header: IrysBlockHeader = (*new_block_header).clone();
 
         info!(height = ?new_block_header.height,
-            global_step_counter = ?new_block_header.meta.vdf_limiter_info.global_step_number,
-            output = ?new_block_header.meta.vdf_limiter_info.output,
-            prev_output = ?new_block_header.meta.vdf_limiter_info.prev_output,
+            global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
+            output = ?new_block_header.vdf_limiter_info.output,
+            prev_output = ?new_block_header.vdf_limiter_info.prev_output,
             "Validating block"
         );
         Box::pin(async move {

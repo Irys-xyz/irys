@@ -18,7 +18,7 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
-    Base64, BlockMeta, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
+    Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
     IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
     H256, U256,
 };
@@ -173,8 +173,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     Err(eyre!("Failed to get previous block {} ({}) header: {}", prev_block_hash.0.to_base58(), prev_block_height,  e)) 
             }?;
 
-            if solution.vdf_step <= prev_block_header.meta.vdf_limiter_info.global_step_number {
-                warn!("Skipping solution for old step number {}, previous block step number {} for block {} ({}) ", solution.vdf_step, prev_block_header.meta.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58(),  prev_block_height);
+            if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
+                warn!("Skipping solution for old step number {}, previous block step number {} for block {} ({}) ", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58(),  prev_block_height);
                 return Ok(None)
             }
 
@@ -310,10 +310,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 partition_hash: solution.partition_hash,
             };
 
-            let mut steps = if prev_block_header.meta.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
+            let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
                 H256List::new()
             } else {
-                vdf_steps.get_steps(ii(prev_block_header.meta.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await
+                vdf_steps.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await
                 .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))?
             };
             steps.push(solution.seed.0);
@@ -356,19 +356,17 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     },
                 ],
                 evm_block_hash: B256::ZERO,
-                meta: BlockMeta {
-                    vdf_limiter_info: VDFLimiterInfo {
-                        global_step_number: solution.vdf_step,
-                        output: solution.seed.into_inner(),
-                        last_step_checkpoints: solution.checkpoints,
-                        prev_output: prev_block_header.meta.vdf_limiter_info.output,
-                        seed: prev_block_header.meta.vdf_limiter_info.seed,
-                        steps,
-                        ..Default::default()
-                    },
-                    // todo: update this in the future to get the data from an oracle / use EMA
-                    irys_price: prev_block_header.meta.irys_price
-                }
+                vdf_limiter_info: VDFLimiterInfo {
+                    global_step_number: solution.vdf_step,
+                    output: solution.seed.into_inner(),
+                    last_step_checkpoints: solution.checkpoints,
+                    prev_output: prev_block_header.vdf_limiter_info.output,
+                    seed: prev_block_header.vdf_limiter_info.seed,
+                    steps,
+                    ..Default::default()
+                },
+                // todo: update this in the future to get the data from an oracle / use EMA
+                irys_price: prev_block_header.irys_price
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node

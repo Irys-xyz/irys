@@ -47,8 +47,8 @@ pub struct VDFLimiterInfo {
     pub next_vdf_difficulty: Option<u64>,
 }
 
-#[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
 /// Stores deserialized fields from a JSON formatted Irys block header.
+#[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
 #[serde(rename_all = "camelCase")]
 #[repr(C)]
 pub struct IrysBlockHeader {
@@ -112,50 +112,14 @@ pub struct IrysBlockHeader {
     /// Evm block hash (32 bytes)
     pub evm_block_hash: B256,
 
-    /// Extra block data that cannot be inlined here because of `Compact` derive macro
-    pub meta: BlockMeta,
-}
-
-/// Uitlity struct that manually derives the `Compact` trait.
-/// Compact trait only allows a single foreign type to be present
-/// in the struct it derives, and it must be moved at the very bottom of the struct definition.
-///
-/// If a struct has 2 foreign types that are no regisetred in the macros source code, the `Compact`
-/// trait **cannot** be automatically derived.
-///
-/// Once we improve the communication with reth (which is the reason we need `Arbitrary` and `Compact`),
-/// We can also get rid of this util struct.
-#[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary)]
-pub struct BlockMeta {
     /// $IRYS token price expressed in $USD
-    pub irys_price: Amount<(IrysPrice, Usd)>,
+    pub irys_price: IrysTokenPrice,
 
     /// Metadata about the verifiable delay function, used for block verification purposes
     pub vdf_limiter_info: VDFLimiterInfo,
 }
 
-impl Compact for BlockMeta {
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        let w1 = self.irys_price.to_compact(buf);
-        let w2 = self.vdf_limiter_info.to_compact(buf);
-        w1.saturating_add(w2)
-    }
-
-    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let (irys_price, buf) = Amount::from_compact(buf, 16);
-        let (vdf_limiter_info, buf) = VDFLimiterInfo::from_compact(buf, len.saturating_sub(16));
-        (
-            Self {
-                irys_price,
-                vdf_limiter_info,
-            },
-            buf,
-        )
-    }
-}
+pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
 
 impl IrysBlockHeader {
     /// Proxy method for `Compact::to_compact`
@@ -171,6 +135,7 @@ impl IrysBlockHeader {
     where
         B: bytes::BufMut + AsMut<[u8]>,
     {
+        // todo use rlp encoding, same like in IrysTransactionHeader
         self.to_compact(buf);
     }
 
@@ -418,7 +383,7 @@ mod tests {
             |h: &mut IrysBlockHeader| h.ledgers[0].max_chunk_offset.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.ledgers[0].expires.as_mut().unwrap().as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.evm_block_hash.as_mut_bytes(),
-            |h: &mut IrysBlockHeader| h.meta.vdf_limiter_info.global_step_number.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.vdf_limiter_info.global_step_number.as_mut_bytes(),
         ];
         for get_field in fields {
             let mut header_clone = header.clone();

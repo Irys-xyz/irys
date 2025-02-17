@@ -83,7 +83,7 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.meta.vdf_limiter_info, &vdf_config).await?;
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config).await?;
     debug!(
         "last_step_checkpoints_is_valid for block {} ({})",
         &block.block_hash.0.to_base58(),
@@ -97,13 +97,13 @@ pub fn prev_output_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
 ) -> eyre::Result<()> {
-    if block.meta.vdf_limiter_info.prev_output == previous_block.meta.vdf_limiter_info.output {
+    if block.vdf_limiter_info.prev_output == previous_block.vdf_limiter_info.output {
         Ok(())
     } else {
         Err(eyre::eyre!(
             "vdf_limiter.prev_output ({}) does not match previous blocks vdf_limiter.output ({})",
-            &block.meta.vdf_limiter_info.prev_output,
-            &previous_block.meta.vdf_limiter_info.output
+            &block.vdf_limiter_info.prev_output,
+            &previous_block.vdf_limiter_info.output
         ))
     }
 }
@@ -213,16 +213,16 @@ pub fn recall_recall_range_is_valid(
     let num_recall_ranges_in_partition =
         irys_efficient_sampling::num_recall_ranges_in_partition(config);
     let reset_step_number = irys_efficient_sampling::reset_step_number(
-        block.meta.vdf_limiter_info.global_step_number,
+        block.vdf_limiter_info.global_step_number,
         config,
     );
     info!(
         "Validating recall ranges steps from: {} to: {}",
-        reset_step_number, block.meta.vdf_limiter_info.global_step_number
+        reset_step_number, block.vdf_limiter_info.global_step_number
     );
     let steps = steps_guard.read().get_steps(ii(
         reset_step_number,
-        block.meta.vdf_limiter_info.global_step_number,
+        block.vdf_limiter_info.global_step_number,
     ))?;
     irys_efficient_sampling::recall_range_is_valid(
         (block.poa.partition_chunk_offset as u64 / config.num_chunks_in_recall_range) as usize,

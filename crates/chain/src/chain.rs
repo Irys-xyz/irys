@@ -553,13 +553,13 @@ pub async fn start_irys_node(
                 let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
                 let vdf_config2 = vdf_config.clone();
-                let seed = seed.map_or(arc_genesis.meta.vdf_limiter_info.output, |seed| seed.0);
-                let vdf_reset_seed = latest_block.meta.vdf_limiter_info.seed;
+                let seed = seed.map_or(arc_genesis.vdf_limiter_info.output, |seed| seed.0);
+                let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
 
                 info!(
                     ?seed,
                     ?global_step_number,
-                    reset_seed = ?arc_genesis.meta.vdf_limiter_info.seed,
+                    reset_seed = ?arc_genesis.vdf_limiter_info.seed,
                     "Starting",
                 );
 
