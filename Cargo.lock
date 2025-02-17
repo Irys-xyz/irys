@@ -5249,7 +5249,6 @@ dependencies = [
  "irys-primitives",
  "irys-reth-node-bridge",
  "irys-storage",
- "irys-storage-pricing",
  "irys-testing-utils",
  "irys-types",
  "irys-vdf",
@@ -5608,19 +5607,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "irys-storage-pricing"
-version = "0.1.0"
-dependencies = [
- "arbitrary",
- "bytes",
- "eyre",
- "reth-codecs",
- "rust_decimal",
- "rust_decimal_macros",
- "serde",
-]
-
-[[package]]
 name = "irys-testing-utils"
 version = "0.1.0"
 dependencies = [
@@ -5652,6 +5638,7 @@ dependencies = [
  "borsh",
  "borsh-derive",
  "build-print",
+ "bytemuck",
  "bytes",
  "chrono",
  "derive_more 2.0.1",
@@ -5659,7 +5646,6 @@ dependencies = [
  "fixed-hash",
  "futures",
  "irys-macros",
- "irys-storage-pricing",
  "k256",
  "modular-bitfield",
  "nodit",
