@@ -129,7 +129,7 @@ pub fn difficulty_is_valid(
         difficulty_config,
     );
 
-    if diff == block.diff {
+    if diff == block.diff && block.diff > previous_block.diff {
         Ok(())
     } else {
         Err(eyre::eyre!(
