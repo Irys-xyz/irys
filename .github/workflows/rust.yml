@@ -142,6 +142,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: crate-ci/typos@v1.26.1
+      - uses: crate-ci/typos@v1.29.7
         with:
           files: .
