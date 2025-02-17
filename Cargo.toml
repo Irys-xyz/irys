@@ -342,3 +342,10 @@ redundant_pub_crate = "allow"
 significant_drop_in_scrutinee = "allow"
 significant_drop_tightening = "allow"
 too_long_first_doc_paragraph = "allow"
+
+# https://github.com/crate-ci/typos/blob/master/docs/reference.md
+[workspace.metadata.typos.files]
+extend-exclude = [
+  "ext/*",
+  "fixtures/*",
+]
