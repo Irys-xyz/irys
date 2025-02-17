@@ -17,7 +17,11 @@ enum Commands {
         args: Vec<String>,
     },
     Check,
-    Fmt,
+    Fmt {
+        #[clap(short, long, default_value_t = false)]
+        check_only: bool,
+    },
+    Clippy,
     Doc,
     Typos,
     UnusedDeps,
@@ -45,7 +49,7 @@ fn main() -> eyre::Result<()> {
             }
             cmd!(
                 sh,
-                "cargo nextest run --workspace --tests --all-targets --no-fail-fast {args...}"
+                "cargo nextest run --workspace --tests --all-targets {args...}"
             )
             .run()?;
 
@@ -66,22 +70,31 @@ fn main() -> eyre::Result<()> {
 
         Commands::Check => {
             println!("cargo check");
-            cmd!(sh, "cargo clippy --workspace --locked").run()?;
-            cmd!(sh, "cargo fmt --all --check").run()?;
+            cmd!(sh, "cargo check").run()?;
         }
-        Commands::Fmt => {
-            println!("cargo fix");
-            cmd!(sh, "cargo fmt --all").run()?;
-            cmd!(
-                sh,
-                "cargo fix --allow-dirty --allow-staged --workspace --all-features --tests"
-            )
-            .run()?;
-            cmd!(
-                sh,
-                "cargo clippy --fix --allow-dirty --allow-staged --workspace --all-features --tests"
-            )
-            .run()?;
+        Commands::Clippy => {
+            println!("cargo clippy");
+            cmd!(sh, "cargo clippy --workspace --locked").run()?;
+        }
+        Commands::Fmt {
+            check_only: only_check,
+        } => {
+            if only_check {
+                cmd!(sh, "cargo fmt --check").run()?;
+            } else {
+                println!("cargo fmt & fix & clippy fix");
+                cmd!(sh, "cargo fmt --all").run()?;
+                cmd!(
+                    sh,
+                    "cargo fix --allow-dirty --allow-staged --workspace --all-features --tests"
+                )
+                .run()?;
+                cmd!(
+                    sh,
+                    "cargo clippy --fix --allow-dirty --allow-staged --workspace --all-features --tests"
+                )
+                .run()?;
+            }
         }
         Commands::Doc => {
             println!("cargo doc");

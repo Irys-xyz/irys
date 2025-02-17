@@ -16,10 +16,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CACHE_VERSION: v1
-  CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
-  RUST_LOG: debug
 
 jobs:
   gate:
@@ -52,7 +49,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
 
       - name: cargo test
-        run: cargo xtask test
+        run: RUST_LOG=debug cargo xtask test -- --fail-fast
 
   cargo-check:
     name: cargo check
@@ -70,6 +67,40 @@ jobs:
 
       - name: cargo check
         run: cargo xtask check
+
+  cargo-fmt:
+    name: cargo fmt
+    runs-on: self-hosted
+    needs: gate
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
+      - name: cargo fmt
+        run: cargo xtask fmt --check-only
+
+  cargo-clippy:
+    name: cargo clippy
+    runs-on: self-hosted
+    needs: gate
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
+      - name: cargo clippy
+        run: cargo xtask clippy
 
   cargo-doc:
     name: cargo doc
@@ -106,7 +137,7 @@ jobs:
         run: cargo xtask unused-deps
 
   typos:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: gate
     timeout-minutes: 30
     steps:

@@ -1,9 +1,5 @@
 name: "Setup Repo Action"
 description: "A reusable composite action that setups rust and other common tasks"
-inputs:
-  toolchain:
-    description: "An example input parameter"
-    required: false
 
 runs:
   using: "composite"
