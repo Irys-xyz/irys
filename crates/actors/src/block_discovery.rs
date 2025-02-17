@@ -194,7 +194,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         Box::pin(async move {
             let block_header_clone = new_block_header.clone(); // Clone before moving
 
-            tracing::info!("Pre-validating block");
+            info!("Pre-validating block");
             let validation_future = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
                     block_header,
