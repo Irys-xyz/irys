@@ -5481,7 +5481,6 @@ dependencies = [
  "bs58",
  "clap",
  "eyre",
- "foldhash",
  "futures",
  "futures-util",
  "irys-config",
