@@ -16,13 +16,24 @@ enum Commands {
         #[clap(last = true)]
         args: Vec<String>,
     },
-    Check,
+    Check {
+        #[clap(last = true)]
+        args: Vec<String>,
+    },
     Fmt {
         #[clap(short, long, default_value_t = false)]
         check_only: bool,
+        #[clap(last = true)]
+        args: Vec<String>,
     },
-    Clippy,
-    Doc,
+    Clippy {
+        #[clap(last = true)]
+        args: Vec<String>,
+    },
+    Doc {
+        #[clap(last = true)]
+        args: Vec<String>,
+    },
     Typos,
     UnusedDeps,
 }
@@ -68,37 +79,39 @@ fn main() -> eyre::Result<()> {
             }
         }
 
-        Commands::Check => {
+        Commands::Check { args } => {
             println!("cargo check");
-            cmd!(sh, "cargo check").run()?;
+            cmd!(sh, "cargo check {args...}").run()?;
         }
-        Commands::Clippy => {
+        Commands::Clippy { args } => {
             println!("cargo clippy");
-            cmd!(sh, "cargo clippy --workspace --locked").run()?;
+            cmd!(sh, "cargo clippy --workspace --locked {args...}").run()?;
         }
         Commands::Fmt {
             check_only: only_check,
+            args,
         } => {
             if only_check {
-                cmd!(sh, "cargo fmt --check").run()?;
+                cmd!(sh, "cargo fmt --check {args...}").run()?;
             } else {
                 println!("cargo fmt & fix & clippy fix");
                 cmd!(sh, "cargo fmt --all").run()?;
+                let args_clone = args.clone();
                 cmd!(
                     sh,
-                    "cargo fix --allow-dirty --allow-staged --workspace --all-features --tests"
+                    "cargo fix --allow-dirty --allow-staged --workspace --tests {args_clone...}"
                 )
                 .run()?;
                 cmd!(
                     sh,
-                    "cargo clippy --fix --allow-dirty --allow-staged --workspace --all-features --tests"
+                    "cargo clippy --fix --allow-dirty --allow-staged --workspace --tests {args...}"
                 )
                 .run()?;
             }
         }
-        Commands::Doc => {
+        Commands::Doc { args } => {
             println!("cargo doc");
-            cmd!(sh, "cargo doc --workspace --no-deps --all-features").run()?;
+            cmd!(sh, "cargo doc --workspace --no-deps {args...}").run()?;
 
             if std::option_env!("CI").is_none() {
                 #[cfg(target_os = "macos")]

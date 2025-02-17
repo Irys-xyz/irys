@@ -49,7 +49,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
 
       - name: cargo test
-        run: RUST_LOG=debug cargo xtask test -- --fail-fast
+        run: RUST_LOG=debug cargo xtask test -- --all-features
 
   cargo-check:
     name: cargo check
@@ -66,7 +66,7 @@ jobs:
         uses: ./.github/actions/setup-repo
 
       - name: cargo check
-        run: cargo xtask check
+        run: cargo xtask check -- --all-features
 
   cargo-fmt:
     name: cargo fmt
@@ -100,7 +100,7 @@ jobs:
         uses: ./.github/actions/setup-repo
 
       - name: cargo clippy
-        run: cargo xtask clippy
+        run: cargo xtask clippy -- --all-features
 
   cargo-doc:
     name: cargo doc
@@ -117,7 +117,7 @@ jobs:
         uses: ./.github/actions/setup-repo
 
       - name: cargo doc
-        run: cargo xtask doc
+        run: cargo xtask doc -- --all-features
 
   cargo-unused-deps:
     name: cargo unused-deps
