@@ -755,7 +755,7 @@ mod tests {
     #[actix::test]
     async fn genesis_test() {
         // Initialize genesis block at height 0
-        let mut genesis_block = IrysBlockHeader::new();
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
 
         // Create epoch service with random miner address
@@ -883,7 +883,7 @@ mod tests {
     #[actix::test]
     async fn add_slots_test() {
         // Initialize genesis block at height 0
-        let mut genesis_block = IrysBlockHeader::new();
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
 
         // Create a storage config for testing
@@ -915,7 +915,7 @@ mod tests {
         let _ = epoch_service.handle(NewEpochMessage(genesis_block.into()), &mut ctx);
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
-        let mut new_epoch_block = IrysBlockHeader::new();
+        let mut new_epoch_block = IrysBlockHeader::new_mock_header();
         new_epoch_block.height = num_blocks_in_epoch;
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
 
@@ -931,7 +931,7 @@ mod tests {
         }
 
         // Simulate a subsequent epoch block that adds multiple ledger slots
-        let mut new_epoch_block = IrysBlockHeader::new();
+        let mut new_epoch_block = IrysBlockHeader::new_mock_header();
         new_epoch_block.height = num_blocks_in_epoch * 2;
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset =
             (num_chunks_in_partition as f64 * 2.5) as u64;
@@ -974,7 +974,7 @@ mod tests {
     async fn partition_expiration_test() {
         // Initialize genesis block at height 0
         let mining_address = Address::random();
-        let mut genesis_block = IrysBlockHeader::new();
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
         let chunk_count = 10;
         genesis_block.height = 0;
 
@@ -1011,7 +1011,7 @@ mod tests {
             .unwrap();
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
-        let mut new_epoch_block = IrysBlockHeader::new();
+        let mut new_epoch_block = IrysBlockHeader::new_mock_header();
         new_epoch_block.height = 600; // grater than epoch_length (5) * num_blocks_in_epoch (100)
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
 

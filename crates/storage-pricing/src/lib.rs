@@ -7,19 +7,28 @@
 //! - `Amount<(NetworkFee, Irys)>` - The cost in $IRYS that the user will have to pay to store his data on Irys
 use core::{fmt::Debug, marker::PhantomData, ops::Deref};
 
+pub use arbitrary::{Arbitrary, Unstructured};
 use eyre::{ensure, OptionExt as _};
 pub use phantoms::*;
-use rust_decimal::{Decimal, MathematicalOps as _};
-use rust_decimal_macros::dec;
+pub use reth_codecs::Compact;
+pub use rust_decimal;
+use rust_decimal::{prelude::FromPrimitive, Decimal, MathematicalOps as _};
+pub use rust_decimal_macros::dec;
+use serde::{Deserialize, Serialize};
 
 /// A wrapper around [`rust_decimal::Decimal`] that also denominates the value in currency using [`PhantomData`]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Arbitrary, Default,
+)]
 pub struct Amount<T> {
+    #[arbitrary(with = arbitrary_rust_decimal)]
     amount: Decimal,
     _t: PhantomData<T>,
 }
 
 impl<T> Amount<T> {
+    pub const SERIALIZED_SIZE: usize = 16;
+
     /// Initialize a new Amount; `PhantomData` to be inferred from usage
     #[must_use]
     pub const fn new(amount: Decimal) -> Self {
@@ -39,36 +48,38 @@ impl<T> Deref for Amount<T> {
 }
 
 mod phantoms {
+    use arbitrary::Arbitrary;
+
     /// The cost of storing a single GB of data.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Default)]
     pub struct CostPerGb;
 
     /// Currency denomintator util type.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Default)]
     pub struct Usd;
 
     /// Currency denominator util type.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Default)]
     pub struct Irys;
 
     /// Exponential Moving Average.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Default)]
     pub struct Ema;
 
     /// Decay rate to account for storage hardware getting cheaper.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Default)]
     pub struct DecayRate;
 
     /// The network fee, that the user would have to pay for storing his data on Irys.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Default)]
     pub struct NetworkFee;
 
     /// Price of the $IRYS token.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Default)]
     pub struct IrysPrice;
 
     /// Cost per storing 1GB, of data. Includes adjustment for storage duration.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Default)]
     pub struct CostPerGbYearAdjusted;
 }
 
@@ -260,6 +271,56 @@ impl Amount<(IrysPrice, Usd)> {
 impl<T> core::fmt::Display for Amount<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "<{:?}>: {}", self._t, self.amount)
+    }
+}
+
+fn arbitrary_rust_decimal(u: &mut Unstructured<'_>) -> arbitrary::Result<Decimal> {
+    let lo = u.int_in_range(0..=u32::MAX)?;
+    let mid = u.int_in_range(0..=u32::MAX)?;
+    let hi = u.int_in_range(0..=u32::MAX)?;
+    let scale = u.int_in_range(0..=28)?;
+    let negative = u.arbitrary()?;
+    let decimal = Decimal::from_parts(lo, mid, hi, negative, scale);
+    Ok(decimal)
+}
+
+// compile time assertions
+const _: () = {
+    // `rust_decimal::Decimal` serializes to 16 byte array
+    let decimal_bytes = Decimal::from_parts(1, 1, 1, false, 1).serialize();
+    assert!(decimal_bytes.len() == 16);
+};
+
+impl<T> Compact for Amount<T> {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        // Extract the 128-bit raw parts of the Decimal
+        let packed_data = self.amount.serialize();
+
+        // Put them in little-endian form into `buf`
+        buf.put(&packed_data[..]);
+
+        // We used 16 bytes total (4 parts * 4 bytes each)
+        packed_data.len()
+    }
+
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        assert!(
+            len >= Self::SERIALIZED_SIZE,
+            "Compact encoding for Decimal requires 16 bytes but received {}",
+            len
+        );
+        let buf_exact = buf[0..Self::SERIALIZED_SIZE]
+            .try_into()
+            .expect("we validated that we have at least 16 bytes");
+
+        let res = Self {
+            amount: Decimal::deserialize(buf_exact),
+            _t: PhantomData,
+        };
+        (res, &buf[Self::SERIALIZED_SIZE..])
     }
 }
 

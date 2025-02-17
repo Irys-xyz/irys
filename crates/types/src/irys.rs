@@ -99,20 +99,19 @@ impl IrysSigner {
         Ok(transaction)
     }
 
-    pub fn sign_block_header(&self, mut block_header: IrysBlockHeader) -> Result<IrysBlockHeader> {
+    pub fn sign_block_header(&self, block_header: &mut IrysBlockHeader) -> Result<()> {
         // Store the signer address
         block_header.miner_address = Address::from_public_key(self.signer.verifying_key());
 
         // Create the signature hash and sign it
-        let prehash = block_header.signature_hash()?;
-
+        let prehash = block_header.signature_hash();
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
-
         block_header.signature = IrysSignature::new(signature);
+
         // Derive the block hash by hashing the signature
         let id: [u8; 32] = keccak256(signature.as_bytes()).into();
         block_header.block_hash = H256::from(id);
-        Ok(block_header)
+        Ok(())
     }
 
     /// Builds a merkle tree, with a root, including all the proofs for each
