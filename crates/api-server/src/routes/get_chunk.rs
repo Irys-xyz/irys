@@ -25,7 +25,7 @@ pub async fn get_chunk_by_ledger_offset(
 
     match state
         .chunk_provider
-        .get_chunk_by_ledger_offset(ledger, path.ledger_offset)
+        .get_chunk_by_ledger_offset(ledger, path.ledger_offset.into())
     {
         Ok(Some(chunk)) => Ok(HttpResponse::Ok().json(ChunkFormat::Packed(chunk))),
         Ok(None) => Ok(HttpResponse::NotFound().body("Chunk not found")),
@@ -53,7 +53,7 @@ pub async fn get_chunk_by_data_root_offset(
 
     match state
         .chunk_provider
-        .get_chunk_by_data_root(ledger, path.data_root, path.offset)
+        .get_chunk_by_data_root(ledger, path.data_root, path.offset.into())
     {
         Ok(Some(chunk)) => Ok(HttpResponse::Ok().json(chunk)),
         Ok(None) => Ok(HttpResponse::NotFound().body("Chunk not found")),

@@ -78,7 +78,6 @@ pub struct IrysTransactionHeader {
     /// TODO: put these somewhere else?
     #[rlp(skip)]
     #[rlp(default)]
-    #[serde(skip)]
     pub ingress_proofs: Option<TxIngressProof>,
 }
 

@@ -33,6 +33,7 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
+use irys_types::PartitionChunkRange;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
     vdf_config::VDFStepsConfig, StorageConfig, CHUNK_SIZE, CONFIG, H256,
@@ -196,8 +197,6 @@ pub async fn start_irys_node(
             &latest_block_height
         );
 
-        dbg!("BI len: {}", &i.items.len());
-
         // // trim the last block off the block index
         // let trimmed_items = &i.items[0..i.items.len() - 1];
         // irys_database::save_block_index(trimmed_items, &arc_config.clone())?;
@@ -326,6 +325,14 @@ pub async fn start_irys_node(
                 }
 
                 debug!("AT GENESIS {}", at_genesis);
+
+                // need to start before the epoch service, as epoch service calls from_registry that triggers broadcast mining service initialization
+                let broadcast_arbiter = Arbiter::new();
+                let broadcast_mining_service =
+                    BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
+                        BroadcastMiningService::default()
+                    });
+                SystemRegistry::set(broadcast_mining_service.clone());
 
                 let mut epoch_service = EpochServiceActor::new(Some(config));
                 epoch_service.initialize(&db).await;
@@ -478,22 +485,26 @@ pub async fn start_irys_node(
                         block_producer_actor
                     });
 
-                let broadcast_arbiter = Arbiter::new();
-                let broadcast_mining_service =
-                    BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
-                        BroadcastMiningService::default()
-                    });
-                SystemRegistry::set(broadcast_mining_service.clone());
-
                 let mut part_actors = Vec::new();
 
                 let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
+
+                let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
+
+                let packing_actor_addr = PackingActor::new(
+                    Handle::current(),
+                    reth_node.task_executor.clone(),
+                    sm_ids,
+                    None,
+                )
+                .start();
 
                 for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
                         db.clone(),
                         block_producer_addr.clone().recipient(),
+                        packing_actor_addr.clone().recipient(),
                         sm.clone(),
                         false, // do not start mining automatically
                         vdf_steps_guard.clone(),
@@ -509,15 +520,6 @@ pub async fn start_irys_node(
                 // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
                 tokio::task::yield_now().await;
 
-                let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
-
-                let packing_actor_addr = PackingActor::new(
-                    Handle::current(),
-                    reth_node.task_executor.clone(),
-                    sm_ids,
-                    None,
-                )
-                .start();
                 // request packing for uninitialized ranges
                 for sm in &storage_modules {
                     let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
@@ -527,7 +529,7 @@ pub async fn start_irys_node(
                         .map(|interval| {
                             packing_actor_addr.do_send(PackingRequest {
                                 storage_module: sm.clone(),
-                                chunk_range: (*interval).into(),
+                                chunk_range: PartitionChunkRange(*interval),
                             })
                         })
                         .collect::<Vec<()>>();

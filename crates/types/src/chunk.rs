@@ -1,6 +1,12 @@
-use crate::string_u64;
+use core::fmt;
+use std::ops::{Add, Deref, DerefMut};
+
+use crate::{string_u64, LedgerChunkOffset};
 use alloy_primitives::Address;
+use arbitrary::Arbitrary;
+use derive_more::{Add, From, Into};
 use eyre::eyre;
+use reth_codecs::Compact;
 use serde::{Deserialize, Serialize};
 
 use crate::{hash_sha256, partition::PartitionHash, Base64, PartitionChunkOffset, H256};
@@ -49,7 +55,7 @@ pub struct UnpackedChunk {
     /// last chunk in the transaction
     pub bytes: Base64,
     // Index of the chunk in the transaction starting with 0
-    pub tx_offset: TxRelativeChunkOffset,
+    pub tx_offset: TxChunkOffset,
 }
 
 impl UnpackedChunk {
@@ -66,10 +72,10 @@ impl UnpackedChunk {
     /// i.e for the first chunk, the offset is chunk_size instead of 0
     pub fn byte_offset(&self, chunk_size: u64) -> u64 {
         let last_index = self.data_size.div_ceil(chunk_size);
-        if self.tx_offset as u64 == last_index {
+        if self.tx_offset.0 as u64 == last_index {
             self.data_size
         } else {
-            (self.tx_offset + 1) as u64 * chunk_size - 1
+            (*self.tx_offset + 1) as u64 * chunk_size - 1
         }
     }
 }
@@ -96,7 +102,7 @@ pub struct PackedChunk {
     /// the partiton relative chunk offset
     pub partition_offset: PartitionChunkOffset,
     /// Index of the chunk in the transaction starting with 0
-    pub tx_offset: TxRelativeChunkOffset,
+    pub tx_offset: TxChunkOffset,
     /// The hash of the partition containing this chunk
     pub partition_hash: PartitionHash,
 }
@@ -124,7 +130,7 @@ pub struct PartialChunk {
     /// the Address used to pack this chunk
     pub packing_address: Option<Address>,
     // Index of the chunk in the transaction starting with 0
-    pub tx_offset: Option<TxRelativeChunkOffset>,
+    pub tx_offset: Option<TxChunkOffset>,
     /// The hash of the partition containing this chunk
     pub partition_hash: Option<PartitionHash>,
 }
@@ -214,14 +220,137 @@ pub type ChunkPathHash = H256;
 pub type DataRoot = H256;
 
 /// The offset of the chunk relative to the first (0th) chunk of the data tree
-pub type TxRelativeChunkOffset = u32;
+#[derive(
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Arbitrary,
+    Add,
+    From,
+    Into,
+)]
+pub struct TxChunkOffset(u32);
+impl TxChunkOffset {
+    pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
+        TxChunkOffset(u32::from_be_bytes(bytes))
+    }
+}
+
+impl Deref for TxChunkOffset {
+    type Target = u32;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for TxChunkOffset {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<LedgerChunkOffset> for TxChunkOffset {
+    fn from(ledger: LedgerChunkOffset) -> Self {
+        TxChunkOffset::from(*ledger)
+    }
+}
+
+impl From<u64> for TxChunkOffset {
+    fn from(value: u64) -> Self {
+        TxChunkOffset(value as u32)
+    }
+}
+impl From<i32> for TxChunkOffset {
+    fn from(value: i32) -> Self {
+        TxChunkOffset(value.try_into().unwrap())
+    }
+}
+impl From<RelativeChunkOffset> for TxChunkOffset {
+    fn from(value: RelativeChunkOffset) -> TxChunkOffset {
+        TxChunkOffset::from(*value)
+    }
+}
+
+impl fmt::Display for TxChunkOffset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// the Block relative chunk offset
-pub type BlockRelativeChunkOffset = u64;
+#[derive(
+    Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, From, Into,
+)]
+pub struct BlockChunkOffset(u64);
 
 /// Used to track chunk offset ranges that span storage modules
 ///  a negative offset means the range began in a prior partition/storage module
-pub type RelativeChunkOffset = i32;
+#[derive(
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Compact,
+    Add,
+    From,
+    Into,
+)]
+pub struct RelativeChunkOffset(i32);
+
+impl Deref for RelativeChunkOffset {
+    type Target = i32;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for RelativeChunkOffset {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl RelativeChunkOffset {
+    pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
+        RelativeChunkOffset(i32::from_be_bytes(bytes))
+    }
+}
+
+impl Add<i32> for RelativeChunkOffset {
+    type Output = Self;
+
+    fn add(self, rhs: i32) -> Self::Output {
+        RelativeChunkOffset(self.0 + rhs)
+    }
+}
+
+impl fmt::Display for RelativeChunkOffset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl TryFrom<RelativeChunkOffset> for u32 {
+    type Error = &'static str;
+
+    fn try_from(offset: RelativeChunkOffset) -> Result<Self, Self::Error> {
+        if offset.0 >= 0 {
+            Ok(offset.0 as u32)
+        } else {
+            Err("Cannot convert negative RelativeChunkOffset to u32")
+        }
+    }
+}
 
 /// A chunks's data path
 pub type ChunkDataPath = Vec<u8>;

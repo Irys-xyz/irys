@@ -14,7 +14,7 @@ use irys_chain::chain::start_for_testing;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{irys::IrysSigner, Address};
-use irys_types::{Base64, IrysTransactionHeader, UnpackedChunk};
+use irys_types::{Base64, IrysTransactionHeader, TxChunkOffset, UnpackedChunk};
 
 use k256::ecdsa::SigningKey;
 use reth::rpc::eth::EthApiServer;
@@ -199,7 +199,7 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: tx_chunk_offset as u32,
+            tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
         };
 
         // Make a POST request with JSON payload
