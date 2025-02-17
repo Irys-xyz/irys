@@ -316,7 +316,7 @@ mod tests {
         let header = mock_header();
         let mut buf = vec![];
 
-        // actoin
+        // action
         header.to_compact(&mut buf);
         assert!(!buf.is_empty(), "expect data to be written into the buffer");
         let (derived_header, rest_of_the_buffer) = IrysBlockHeader::from_compact(&buf, buf.len());
