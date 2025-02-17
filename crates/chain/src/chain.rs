@@ -197,8 +197,6 @@ pub async fn start_irys_node(
             &latest_block_height
         );
 
-        dbg!("BI len: {}", &i.items.len());
-
         // // trim the last block off the block index
         // let trimmed_items = &i.items[0..i.items.len() - 1];
         // irys_database::save_block_index(trimmed_items, &arc_config.clone())?;
