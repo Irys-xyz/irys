@@ -189,11 +189,13 @@ async fn serial_mine_ten_blocks() -> eyre::Result<()> {
         info!("waiting block {}", i);
 
         let mut retries = 0;
-        while node.block_index_guard.read().num_blocks() < i + 1 {
+        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 60_u64 {
             sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
-        info!("got block after {} retries", &retries);
+
+        info!("got block after {} seconds/retries", &retries);
+
         let block = node
             .block_index_guard
             .read()
