@@ -18,7 +18,6 @@ use reth_primitives::{
     irys_primitives::{IrysTxId, ShadowResult},
     GenesisAccount,
 };
-use sha2::Digest;
 use tokio::time::sleep;
 use tracing::info;
 
@@ -190,11 +189,11 @@ async fn serial_mine_ten_blocks() -> eyre::Result<()> {
         info!("waiting block {}", i);
 
         let mut retries = 0;
-        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 20_u64 {
+        while node.block_index_guard.read().num_blocks() < i + 1 {
             sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
-
+        info!("got block after {} retries", &retries);
         let block = node
             .block_index_guard
             .read()
