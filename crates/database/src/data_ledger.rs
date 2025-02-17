@@ -181,7 +181,7 @@ impl LedgerCore for TermLedger {
             .enumerate()
             .filter_map(|(idx, slot)| {
                 let needed = CONFIG.num_partitions_per_slot as usize - slot.partitions.len();
-                if needed > 0 {
+                if needed > 0 && !slot.is_expired {
                     Some((idx, needed))
                 } else {
                     None
