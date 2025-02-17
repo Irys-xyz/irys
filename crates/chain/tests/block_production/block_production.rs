@@ -129,49 +129,6 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn serial_mine_ten_blocks() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let mut config = IrysNodeConfig::default();
-    config.base_directory = temp_dir.path().to_path_buf();
-
-    let node = start_for_testing(config).await?;
-    node.actor_addresses.start_mining()?;
-
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
-
-    for i in 1..10 {
-        info!("waiting block {}", i);
-
-        let mut retries = 0;
-        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 20_u64 {
-            sleep(Duration::from_secs(1)).await;
-            retries += 1;
-        }
-
-        let block = node
-            .block_index_guard
-            .read()
-            .get_item(i as usize)
-            .unwrap()
-            .clone();
-
-        //check reth for built block
-        let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
-        assert_eq!(i, reth_block.header.number);
-        assert_eq!(i, reth_block.number);
-
-        // check irys DB for built block
-        let db_irys_block = &node
-            .db
-            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
-            .unwrap();
-
-        assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-    }
-    Ok(())
-}
-
-#[tokio::test]
 async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let mut config = IrysNodeConfig::default();
@@ -214,6 +171,49 @@ async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()>
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
         // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
         sleep(Duration::from_millis(1500)).await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn serial_mine_ten_blocks() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
+    let mut config = IrysNodeConfig::default();
+    config.base_directory = temp_dir.path().to_path_buf();
+
+    let node = start_for_testing(config).await?;
+    node.actor_addresses.start_mining()?;
+
+    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+
+    for i in 1..10 {
+        info!("waiting block {}", i);
+
+        let mut retries = 0;
+        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 20_u64 {
+            sleep(Duration::from_secs(1)).await;
+            retries += 1;
+        }
+
+        let block = node
+            .block_index_guard
+            .read()
+            .get_item(i as usize)
+            .unwrap()
+            .clone();
+
+        //check reth for built block
+        let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
+        assert_eq!(i, reth_block.header.number);
+        assert_eq!(i, reth_block.number);
+
+        // check irys DB for built block
+        let db_irys_block = &node
+            .db
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+            .unwrap();
+
+        assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     }
     Ok(())
 }
