@@ -92,11 +92,3 @@ use serde::{Deserialize, Serialize};
 pub struct IrysChainSpec {
     irys_genesis: IrysBlockHeader,
 }
-
-impl IrysChainSpec {
-    fn new() -> Self {
-        Self {
-            irys_genesis: IrysBlockHeader::default(),
-        }
-    }
-}
