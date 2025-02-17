@@ -1,6 +1,5 @@
 use alloy_rpc_types::BlockId;
 use alloy_signer_local::PrivateKeySigner;
-use foldhash::fast::RandomState;
 use irys_primitives::{Address, Genesis, ShadowReceipt};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use jsonrpsee_core::async_trait;
@@ -368,10 +367,7 @@ impl AccountStateExtApiServer for AccountStateExt {
             .with_bundle_update()
             .build();
         // TODO @JesseTheRobot - fix this (it seems like it's a dep & feature re-export issue)
-        let mut journaled_state = JournaledState::new(
-            SpecId::LATEST,
-            HashSet::<Address, RandomState>::with_hasher(RandomState::default()),
-        );
+        let mut journaled_state = JournaledState::new(SpecId::LATEST, HashSet::<Address>::new());
         // let res = apply_shadow(shadow, &mut journaled_state, &mut db);
         let res = simulate_apply_shadow_thin(shadow, &mut journaled_state, &mut db);
         res.map_err(|e| {

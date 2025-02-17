@@ -54,7 +54,6 @@ reth-static-file.workspace = true
 reth-prune.workspace = true
 reth-stages.workspace = true
 reth-evm.workspace = true
-foldhash.workspace = true
 irys-types.workspace = true
 reth-tokio-util.workspace = true
 tracing.workspace = true
