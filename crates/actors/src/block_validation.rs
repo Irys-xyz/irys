@@ -129,18 +129,8 @@ pub fn difficulty_is_valid(
         difficulty_config,
     );
 
-    if diff == block.diff {
-        if let Some(stats) = _stats {
-            if stats.is_adjusted && block.diff > previous_block.diff {
-                Ok(())
-            } else {
-                Err(eyre::eyre!(
-                    "Difficulty shoud be greater than previous difficulty."
-                ))
-            }
-        } else {
-            Ok(())
-        }
+    if diff == block.diff && block.diff > previous_block.diff {
+        Ok(())
     } else {
         Err(eyre::eyre!(
             "Invalid difficulty (expected {} got {})",
