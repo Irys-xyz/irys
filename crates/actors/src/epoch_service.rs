@@ -983,7 +983,7 @@ mod tests {
             chunk_size: 32,
             num_chunks_in_partition: chunk_count,
             num_chunks_in_recall_range: 2,
-            num_partitions_in_slot: 1,
+            num_partitions_in_slot: 1, // 1 replica per slot
             miner_address: mining_address.clone(),
             min_writes_before_sync: 1,
             entropy_packing_iterations: CONFIG.entropy_packing_iterations,
@@ -993,10 +993,12 @@ mod tests {
         let tmp_dir = setup_tracing_and_temp_dir(Some("partition_expiration_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
 
+        let num_blocks_in_epoch = CONFIG.num_blocks_in_epoch;
+
         // Create epoch service
         let config = EpochServiceConfig {
             capacity_scalar: 100,
-            num_blocks_in_epoch: 100, // this is harcoded in CONFIG, now way to move it in tests ?
+            num_blocks_in_epoch: CONFIG.num_blocks_in_epoch, // this is harcoded in CONFIG, now way to move it in tests ?
             storage_config: storage_config.clone(),
         };
 
@@ -1012,7 +1014,7 @@ mod tests {
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new();
-        new_epoch_block.height = 600; // grater than epoch_length (5) * num_blocks_in_epoch (100)
+        new_epoch_block.height = (CONFIG.submit_ledger_epoch_length + 1) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch, 
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
 
         let storage_module_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
@@ -1113,6 +1115,35 @@ mod tests {
             partition_hash
         };
 
+        {
+            let ledgers= epoch_service_actor
+            .send(GetLedgersGuardMessage)
+            .await
+            .unwrap();
+
+            let pub_slots = ledgers.read().get_slots(Ledger::Publish).clone();
+            let sub_slots = ledgers.read().get_slots(Ledger::Submit).clone();
+            assert_eq!(pub_slots.len(), 1);
+            assert_eq!(sub_slots.len(), 1);
+        }        
+
+        let capacity_partitions = {
+            let partition_assignments_read = epoch_service_actor
+                .send(GetPartitionAssignmentsGuardMessage)
+                .await
+                .unwrap();
+            
+            let capacity_partitions: Vec<H256> = 
+                partition_assignments_read
+                    .read()
+                    .capacity_partitions
+                    .keys()
+                    .map(|partition| partition.clone())
+                    .collect();
+
+            capacity_partitions
+        };
+
         let _ = epoch_service_actor
             .send(NewEpochMessage(new_epoch_block.into()))
             .await
@@ -1135,6 +1166,67 @@ mod tests {
                 Err(_) => sleep(Duration::from_millis(50)).await,
             }
         };
+
+        // check a new slots is inserted with a partition assigned to it, and slot 0 expires and partition is removed
+        let (publish_partition, submit_partition) = {
+            let ledgers= epoch_service_actor
+            .send(GetLedgersGuardMessage)
+            .await
+            .unwrap();
+
+            let pub_slots = ledgers.read().get_slots(Ledger::Publish).clone();
+            let sub_slots = ledgers.read().get_slots(Ledger::Submit).clone();
+            assert_eq!(pub_slots.len(), 1, "Publish should still have only one slot");
+            assert_eq!(sub_slots.len(), 2, "Submit slots should have one new not expired slot with a new fresh partition from available previous capacity ones!");
+            assert!(sub_slots[0].is_expired && sub_slots[0].partitions.len() == 0, "Slot 0 should have expired and have no assigned partition!");
+            assert!(!sub_slots[1].is_expired && sub_slots[1].partitions.len() == 1 && capacity_partitions.contains(&sub_slots[1].partitions[0]),"Slot 1 should not be expired and have a new fresh partition from previous capacity ones!");
+            //println!("Ledger State: {:#?}", ledgers);
+
+            let publish_partition = pub_slots[0].partitions.get(0).expect("publish ledger slot 0 should have a partition assigned").clone();
+            let submit_partition = sub_slots[1].partitions.get(0).expect("submit ledger slot 1 should have a partition assinged").clone();
+            (publish_partition, submit_partition)
+        };
+
+        // check expired partition is in capacity and repacking request is for it and its whole interval range, and partitions assignments are consistent
+        {
+            let partition_assignments_read = epoch_service_actor
+                .send(GetPartitionAssignmentsGuardMessage)
+                .await
+                .unwrap();
+
+            assert!(partition_assignments_read
+                    .read()
+                    .capacity_partitions
+                    .contains_key(&submit_partition_hash),
+                    "Expired partition should be in capacity partitions");
+
+            assert_eq!(partition_assignments_read
+                    .read()
+                    .data_partitions
+                    .len(), 
+                    2,
+                    "Should have two partitions assignments");
+    
+            if let Some(publish_assignment) = partition_assignments_read
+                .read()
+                .data_partitions
+                .get(&publish_partition) {
+                assert_eq!(publish_assignment.ledger_id, Some(Ledger::Publish.get_id()),"Should be assigned to publish ledger");
+                assert_eq!(publish_assignment.slot_index, Some(0),"Should be assigned to slot 0");
+            } else {
+                panic!("Should have an assignment");
+            };
+
+            if let Some(submit_assignment) = partition_assignments_read
+                .read()
+                .data_partitions
+                .get(&submit_partition) {
+                assert_eq!(submit_assignment.ledger_id, Some(Ledger::Submit.get_id()),"Should be assigned to submit ledger");
+                assert_eq!(submit_assignment.slot_index, Some(1),"Should be assigned to slot 1");
+            } else {
+                panic!("Should have an assignment");
+            };
+        }
 
         assert_eq!(
             pack_req.storage_module.partition_hash(),
