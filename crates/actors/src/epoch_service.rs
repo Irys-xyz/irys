@@ -998,7 +998,7 @@ mod tests {
         // Create epoch service
         let config = EpochServiceConfig {
             capacity_scalar: 100,
-            num_blocks_in_epoch: CONFIG.num_blocks_in_epoch, // this is harcoded in CONFIG, now way to move it in tests ?
+            num_blocks_in_epoch: CONFIG.num_blocks_in_epoch,
             storage_config: storage_config.clone(),
         };
 
