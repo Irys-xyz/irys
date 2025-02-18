@@ -8,7 +8,7 @@ chrono = "0.4"
 uint = "0.9.5"
 base58 = "0.2.0"
 base64-url.workspace = true
-derive_more = {version = "2.0.1" ,features = ["add","mul","from","into"],default-features = true}
+derive_more = { version = "2.0.1", features = ["add", "mul", "from", "into"], default-features = true }
 eyre = "0.6.8"
 fixed-hash = "0.8.0"
 rand = "0.8.5"
@@ -46,7 +46,7 @@ zerocopy = "0.8.9"
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 irys-macros.workspace = true
-irys-storage-pricing.workspace = true
+bytemuck.workspace = true
 
 [build-dependencies]
 build-print = "0"

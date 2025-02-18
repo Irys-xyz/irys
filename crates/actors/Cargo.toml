@@ -12,7 +12,6 @@ irys-packing.workspace = true
 irys-storage.workspace = true
 irys-config.workspace = true
 irys-vdf.workspace = true
-irys-storage-pricing.workspace = true
 irys-efficient-sampling.workspace = true
 
 actix.workspace = true
@@ -42,6 +41,7 @@ tempfile.workspace = true
 irys-testing-utils.workspace = true
 base58.workspace = true
 futures.workspace = true
+
 [lints]
 workspace = true
 

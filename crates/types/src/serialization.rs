@@ -17,6 +17,7 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
 };
 use std::{ops::Index, slice::SliceIndex, str::FromStr};
+use zerocopy::IntoBytes;
 
 use fixed_hash::construct_fixed_hash;
 use uint::construct_uint;
@@ -63,6 +64,43 @@ impl<'a> Arbitrary<'a> for U256 {
         rng.fill_bytes(&mut bytes);
 
         Ok(U256::from_big_endian(&bytes))
+    }
+}
+
+impl Encode for U256 {
+    type Encoded = [u8; 32];
+
+    fn encode(self) -> Self::Encoded {
+        bytemuck::cast(self.0)
+    }
+}
+
+impl Decode for U256 {
+    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
+        let res = bytemuck::try_from_bytes::<[u64; 4]>(value).map_err(|_| DatabaseError::Decode)?;
+        let res = U256(*res);
+        Ok(res)
+    }
+}
+
+impl Encodable for U256 {
+    #[inline]
+    fn length(&self) -> usize {
+        self.0.as_bytes().len()
+    }
+
+    #[inline]
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        let bytes = bytemuck::bytes_of(&self.0);
+        bytes.encode(out);
+    }
+}
+
+impl Decodable for U256 {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let res = <[u8; 32]>::decode(buf)?;
+        let res = bytemuck::cast::<_, [u64; 4]>(res);
+        Ok(Self(res))
     }
 }
 
@@ -181,7 +219,19 @@ impl TxIngressProof {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Compact, Serialize, Deserialize, Arbitrary)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Default,
+    Compact,
+    Serialize,
+    Deserialize,
+    Arbitrary,
+    RlpDecodable,
+    RlpEncodable,
+)]
 pub struct IngressProofsList(pub Vec<TxIngressProof>);
 
 impl From<Vec<TxIngressProof>> for IngressProofsList {
@@ -380,7 +430,7 @@ impl Decompress for H256 {
 /// A struct of [`Vec<u8>`] used for all `base64_url` encoded fields. This is
 /// used for large fields like proof chunk data.
 
-#[derive(Default, Debug, Clone, Eq, PartialEq, Compact, Arbitrary)]
+#[derive(Default, Debug, Clone, Eq, PartialEq, Compact, Arbitrary, RlpDecodable, RlpEncodable)]
 pub struct Base64(pub Vec<u8>);
 
 impl std::fmt::Display for Base64 {
@@ -486,7 +536,7 @@ impl<'de> Deserialize<'de> for Base64 {
 // H256List Type
 //------------------------------------------------------------------------------
 /// A struct of [`Vec<H256>`] used for lists of [`Base64`] encoded hashes
-#[derive(Debug, Default, Clone, Eq, PartialEq, Compact, Arbitrary)]
+#[derive(Debug, Default, Clone, Eq, PartialEq, Compact, Arbitrary, RlpEncodable, RlpDecodable)]
 pub struct H256List(pub Vec<H256>);
 
 impl H256List {

@@ -7,10 +7,11 @@
 //! - `Amount<(NetworkFee, Irys)>` - The cost in $IRYS that the user will have to pay to store his data on Irys
 
 use crate::U256;
-use alloy_rlp::{RlpDecodable, RlpEncodable};
+use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Arbitrary;
 use core::{fmt::Debug, marker::PhantomData, ops::Deref};
 use eyre::{ensure, eyre, Result};
+use reth_codecs::Compact;
 use serde::{Deserialize, Serialize};
 
 /// 1.0 in 18-decimal fixed point. little endian encoded.
@@ -26,24 +27,50 @@ pub const BPS_SCALE: U256 = U256([1_000_000, 0, 0, 0]);
 ///
 /// The actual scale is defined by the usage: pr
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    Arbitrary,
-    Default,
-    RlpEncodable,
-    RlpDecodable,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Arbitrary, Default,
 )]
-#[rlp(trailing)]
 pub struct Amount<T> {
     amount: U256,
     _t: PhantomData<T>,
+}
+
+impl<T> Encodable for Amount<T> {
+    #[inline]
+    fn length(&self) -> usize {
+        self.amount.length()
+    }
+
+    #[inline]
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        self.amount.encode(out);
+    }
+}
+
+impl<T> Decodable for Amount<T> {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let res = U256::decode(buf)?;
+        Ok(Amount::new(res))
+    }
+}
+
+impl<T> Compact for Amount<T> {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        self.amount.to_compact(buf)
+    }
+
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let (instance, buf) = U256::from_compact(buf, len);
+        (
+            Amount {
+                amount: instance,
+                _t: PhantomData,
+            },
+            buf,
+        )
+    }
 }
 
 impl<T> Amount<T> {
@@ -68,35 +95,35 @@ pub mod phantoms {
     use arbitrary::Arbitrary;
 
     /// The cost of storing a single GB of data.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct CostPerGb;
 
     /// Currency denomintator util type.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct Usd;
 
     /// Currency denominator util type.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct Irys;
 
     /// Exponential Moving Average.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct Ema;
 
     /// Decay rate to account for storage hardware getting cheaper.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct DecayRate;
 
     /// The network fee, that the user would have to pay for storing his data on Irys.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct NetworkFee;
 
     /// Price of the $IRYS token.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct IrysPrice;
 
     /// Cost per storing 1GB, of data. Includes adjustment for storage duration.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct CostPerGbYearAdjusted;
 }
 
@@ -496,7 +523,6 @@ mod tests {
 
     mod user_fee {
         use super::*;
-        use rust_decimal::Decimal;
         use rust_decimal_macros::dec;
 
         #[test]

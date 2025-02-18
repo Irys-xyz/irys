@@ -4,6 +4,7 @@
 //! making them easy to reference and maintain.
 use std::fmt;
 
+use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash, resolve_proofs, string_u128, u64_stringify, Arbitrary, Base64,
@@ -11,13 +12,26 @@ use crate::{
     Proof, H256, U256,
 };
 use alloy_primitives::{keccak256, Address, B256};
-use irys_storage_pricing::{Amount, IrysPrice, Usd};
+use alloy_rlp::{RlpDecodable, RlpEncodable};
 use serde::{Deserialize, Serialize};
 
 pub type BlockHash = H256;
 
 /// Stores the `vdf_limiter_info` in the [`IrysBlockHeader`]
-#[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Arbitrary,
+    Compact,
+    RlpEncodable,
+    RlpDecodable,
+)]
+#[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
 pub struct VDFLimiterInfo {
     /// The output of the latest step - the source of the entropy for the mining nonces.
@@ -48,13 +62,30 @@ pub struct VDFLimiterInfo {
 }
 
 /// Stores deserialized fields from a JSON formatted Irys block header.
-#[derive(Clone, Debug, Eq, Default, Serialize, Deserialize, PartialEq, Arbitrary, Compact)]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Arbitrary,
+    Compact,
+    RlpEncodable,
+    RlpDecodable,
+)]
+#[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
 #[repr(C)]
 pub struct IrysBlockHeader {
+    #[rlp(skip)]
+    #[rlp(default)]
     /// The block identifier.
     pub block_hash: BlockHash,
 
+    #[rlp(skip)]
+    #[rlp(default)]
     /// The block signature
     pub signature: IrysSignature,
 
@@ -158,22 +189,48 @@ impl IrysBlockHeader {
     }
 }
 
-#[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Compact, Arbitrary)]
+#[derive(
+    Default,
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    Compact,
+    Arbitrary,
+    RlpDecodable,
+    RlpEncodable,
+)]
+#[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
 /// Stores deserialized fields from a `poa` (Proof of Access) JSON
 pub struct PoaData {
-    pub tx_path: Option<Base64>,
-    pub data_path: Option<Base64>,
-    pub chunk: Base64,
     pub recall_chunk_index: u32,
-    pub ledger_id: Option<u32>,
     pub partition_chunk_offset: u32,
     pub partition_hash: PartitionHash,
+    pub chunk: Base64,
+    pub ledger_id: Option<u32>,
+    pub tx_path: Option<Base64>,
+    pub data_path: Option<Base64>,
 }
 
 pub type TxRoot = H256;
 
-#[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Compact, Arbitrary)]
+#[derive(
+    Default,
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    Compact,
+    Arbitrary,
+    RlpDecodable,
+    RlpEncodable,
+)]
+#[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionLedger {
     /// Unique identifier for this ledger, maps to discriminant in `Ledger` enum
