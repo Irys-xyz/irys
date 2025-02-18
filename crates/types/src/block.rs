@@ -272,40 +272,6 @@ pub struct TransactionLedger {
     pub proofs: Option<IngressProofsList>,
 }
 
-#[cfg(test)]
-mod transaction_ledger_tests {
-    use alloy_rlp::Decodable;
-    use alloy_signer::Signature;
-
-    use crate::TxIngressProof;
-
-    use super::*;
-
-    #[test]
-    fn test_irys_block_header_rlp_round_trip() {
-        // setup
-        let data = TransactionLedger {
-            ledger_id: 1,
-            tx_root: H256::random(),
-            tx_ids: H256List(vec![]),
-            max_chunk_offset: 55,
-            expires: None,
-            proofs: Some(IngressProofsList(vec![TxIngressProof {
-                proof: H256::random(),
-                signature: IrysSignature::new(Signature::test_signature()),
-            }])),
-        };
-
-        // action
-        let mut buffer = vec![];
-        data.encode(&mut buffer);
-        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
-
-        // Assert
-        assert_eq!(data, decoded);
-    }
-}
-
 impl TransactionLedger {
     /// Computes the tx_root and tx_paths. The TX Root is composed of taking the data_roots of each of the storage
     /// transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
@@ -401,7 +367,7 @@ impl IrysBlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::{irys::IrysSigner, validate_path, CONFIG, MAX_CHUNK_SIZE};
+    use crate::{irys::IrysSigner, validate_path, TxIngressProof, CONFIG, MAX_CHUNK_SIZE};
 
     use super::*;
     use alloy_primitives::Signature;
@@ -411,6 +377,30 @@ mod tests {
     use serde_json;
     use std::str::FromStr;
     use zerocopy::IntoBytes;
+
+    #[test]
+    fn test_transaction_ledger_rlp_round_trip() {
+        // setup
+        let data = TransactionLedger {
+            ledger_id: 1,
+            tx_root: H256::random(),
+            tx_ids: H256List(vec![]),
+            max_chunk_offset: 55,
+            expires: None,
+            proofs: Some(IngressProofsList(vec![TxIngressProof {
+                proof: H256::random(),
+                signature: IrysSignature::new(Signature::test_signature()),
+            }])),
+        };
+
+        // action
+        let mut buffer = vec![];
+        data.encode(&mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
 
     #[test]
     fn test_irys_block_header_serde_round_trip() {
@@ -428,7 +418,7 @@ mod tests {
     #[test]
     fn test_irys_block_header_rlp_round_trip() {
         // setup
-        let data = mock_header();
+        let mut data = mock_header();
 
         // action
         let mut buffer = vec![];
@@ -436,6 +426,9 @@ mod tests {
         let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
 
         // Assert
+        // (the following fields just get zeroed out once encoded)
+        data.block_hash = H256::zero();
+        data.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
         assert_eq!(data, decoded);
     }
 
