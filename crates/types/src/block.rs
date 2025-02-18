@@ -168,8 +168,6 @@ impl IrysBlockHeader {
         // allocate the buffer, guesstimate the required capacity
         let mut bytes = Vec::with_capacity(size_of::<Self>() * 3);
         self.digest_for_signing(&mut bytes);
-        // we trim the `BlockHash` and `Signature` from the signing scheme
-        let bytes = &bytes[size_of::<BlockHash>() + size_of::<IrysSignature>()..];
         keccak256(bytes).0
     }
 
@@ -375,7 +373,7 @@ mod tests {
     use k256::ecdsa::SigningKey;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use serde_json;
-    use std::str::FromStr;
+    use std::{borrow::BorrowMut, str::FromStr};
     use zerocopy::IntoBytes;
 
     #[test]
