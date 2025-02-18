@@ -41,7 +41,7 @@ pub(crate) fn bind_capacity(c_src: &PathBuf) {
         .expect("Couldn't write bindings!");
 }
 
-pub(crate) fn build_capacity_cuda(c_src: &PathBuf, ssl_inc_dir: &PathBuf) {
+pub(crate) fn build_capacity_cuda(c_src: &PathBuf, _ssl_inc_dir: &PathBuf) {
     let mut cc = cc::Build::new();
 
     cc.cuda(true);

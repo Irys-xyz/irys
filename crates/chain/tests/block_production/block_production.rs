@@ -69,7 +69,7 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
         let tx = a.create_transaction(data_bytes, None).unwrap();
         let tx = a.sign_transaction(tx).unwrap();
         // submit to mempool
-        let tx_res = node
+        let _tx_res = node
             .actor_addresses
             .mempool
             .send(TxIngressMessage(tx.header.clone()))
@@ -150,7 +150,7 @@ async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()>
             .actor_addresses
             .block_producer
             .send(SolutionFoundMessage(poa_solution.clone()));
-        let (block, reth_exec_env) = fut.await??.unwrap();
+        let (block, _reth_exec_env) = fut.await??.unwrap();
 
         //check reth for built block
         let reth_block = reth_context
@@ -351,7 +351,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         let tx = a.create_transaction(data_bytes, None).unwrap();
         let tx = a.sign_transaction(tx).unwrap();
         // submit to mempool
-        let tx_res = node
+        let _tx_res = node
             .actor_addresses
             .mempool
             .send(TxIngressMessage(tx.header.clone()))

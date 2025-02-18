@@ -8,7 +8,7 @@ use reth_db::{HasName, HasTableType, TableType, TableViewer};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Per-submodule database tables
+// Per-submodule database tables
 tables! {
     SubmoduleTables;
 

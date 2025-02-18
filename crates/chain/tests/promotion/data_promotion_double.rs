@@ -184,7 +184,7 @@ async fn serial_double_root_data_promotion_test() {
     // ==============================
     // Post Tx chunks out of order
     // ------------------------------
-    let tx_index = 2;
+    let _tx_index = 2;
 
     // // Last Tx, last chunk
     // let chunk_index = 2;
@@ -294,7 +294,7 @@ async fn serial_double_root_data_promotion_test() {
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
     let first_tx_index: usize;
-    let next_tx_index: usize;
+    let _next_tx_index: usize;
 
     // if block_tx1.block_hash == block_tx2.block_hash {
     //     // Extract the transaction order
@@ -384,7 +384,7 @@ async fn serial_double_root_data_promotion_test() {
 
     let mut txs: Vec<IrysTransaction> = Vec::new();
 
-    for (i, chunks) in data_chunks.iter().enumerate() {
+    for (_i, chunks) in data_chunks.iter().enumerate() {
         let mut data: Vec<u8> = Vec::new();
         for chunk in chunks {
             data.extend_from_slice(chunk);

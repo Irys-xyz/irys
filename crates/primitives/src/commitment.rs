@@ -3,7 +3,6 @@ use alloy_rlp::{
     Decodable, Encodable, Error as RlpError, RlpDecodable, RlpDecodableWrapper, RlpEncodable,
     RlpEncodableWrapper,
 };
-use arbitrary::Arbitrary as PledgeArbitrary;
 use bytes::Buf;
 use reth_codecs::Compact;
 

@@ -388,7 +388,7 @@ mod tests {
     use base58::{FromBase58, ToBase58};
 
     use super::*;
-    fn generate_next_vdf_step() {
+    fn _generate_next_vdf_step() {
         let mut seed = H256(
             hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41")
                 .unwrap()

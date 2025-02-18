@@ -10,7 +10,7 @@ pub fn load_db() -> DatabaseEnv {
     open_or_create_db(path, IrysTables::ALL, None).unwrap()
 }
 
-fn promotion_debug() -> eyre::Result<()> {
+fn _promotion_debug() -> eyre::Result<()> {
     let db = load_db();
     let read_tx = db.tx()?;
     let ingress_proofs = walk_all::<IngressProofs>(&read_tx)?;

@@ -3,6 +3,9 @@ edition = "2021"
 name = "irys-types"
 version = "0.1.0"
 
+[features]
+dev = []
+
 [dependencies]
 chrono = "0.4"
 uint = "0.9.5"

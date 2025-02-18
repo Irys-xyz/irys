@@ -149,7 +149,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         let resp = test::call_service(&app, req).await;
 
         if resp.status() == StatusCode::OK {
-            let result: IrysTransactionHeader = test::read_body_json(resp).await;
+            let _result: IrysTransactionHeader = test::read_body_json(resp).await;
             //assert_eq!(tx.header, result); TODO: uncomment this after fixing IrysSignature serialization issue with chain id Dan described
             info!("Transaction was retrieved ok after {} attempts", attempts);
             break;

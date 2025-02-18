@@ -429,7 +429,7 @@ mod tests {
 
         let mocked_block_producer = get_mocked_block_producer(closure_arc);
 
-        let packing = Mocker::<PackingActor>::mock(Box::new(move |msg, _ctx| {
+        let packing = Mocker::<PackingActor>::mock(Box::new(move |_msg, _ctx| {
             Box::new(Some(())) as Box<dyn Any>
         }));
 
@@ -652,7 +652,7 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
-        let packing = Mocker::<PackingActor>::mock(Box::new(move |msg, _ctx| {
+        let packing = Mocker::<PackingActor>::mock(Box::new(move |_msg, _ctx| {
             Box::new(Some(())) as Box<dyn Any>
         }));
 

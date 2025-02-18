@@ -592,7 +592,7 @@ dependencies = [
  "keccak-asm",
  "paste",
  "proptest",
- "proptest-derive 0.5.1",
+ "proptest-derive",
  "rand",
  "ruint",
  "rustc-hash 2.1.0",
@@ -5490,7 +5490,7 @@ dependencies = [
  "derive_more 1.0.0",
  "eyre",
  "modular-bitfield",
- "proptest-derive 0.5.1",
+ "proptest-derive",
  "reth-codecs",
  "ruint",
  "serde",
@@ -6119,7 +6119,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -7591,17 +7591,6 @@ dependencies = [
 
 [[package]]
 name = "proptest-derive"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cf16337405ca084e9c78985114633b6827711d22b9e6ef6c6c0d665eb3f0b6e"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "proptest-derive"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ee1c9ac207483d5e7db4940700de86a9aae46ef90c48b57f99fe7edb8345e49"
@@ -8225,7 +8214,6 @@ dependencies = [
  "reth-primitives",
  "reth-primitives-traits",
  "reth-trie-common",
- "revm-primitives",
  "serde",
  "serde_json",
 ]
@@ -8234,7 +8222,6 @@ dependencies = [
 name = "reth-cli"
 version = "1.1.0"
 dependencies = [
- "alloy-genesis",
  "clap",
  "eyre",
  "irys-primitives",
@@ -8399,7 +8386,6 @@ dependencies = [
  "futures",
  "reqwest",
  "reth-node-api",
- "reth-rpc-api",
  "reth-rpc-builder",
  "reth-tracing",
  "ringbuffer",
@@ -8443,7 +8429,6 @@ dependencies = [
 name = "reth-db-api"
 version = "1.1.0"
 dependencies = [
- "alloy-genesis",
  "alloy-primitives",
  "arbitrary",
  "bytes",
@@ -8468,7 +8453,6 @@ dependencies = [
 name = "reth-db-common"
 version = "1.1.0"
 dependencies = [
- "alloy-genesis",
  "alloy-primitives",
  "boyer-moore-magiclen",
  "eyre",
@@ -8873,7 +8857,7 @@ dependencies = [
  "dyn-clone",
  "once_cell",
  "proptest",
- "proptest-derive 0.5.1",
+ "proptest-derive",
  "rustc-hash 2.1.0",
  "serde",
  "thiserror-no-std",
@@ -9363,7 +9347,6 @@ dependencies = [
  "futures",
  "humantime",
  "irys-storage",
- "irys-types",
  "rand",
  "reth-chainspec",
  "reth-cli-util",
@@ -9569,7 +9552,6 @@ version = "1.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-genesis",
  "alloy-primitives",
  "alloy-rlp",
  "arbitrary",
@@ -9815,7 +9797,6 @@ dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-engine",
  "async-trait",
- "eyre",
  "jsonrpsee-core",
  "jsonrpsee-types",
  "metrics 0.23.0",
@@ -9833,7 +9814,6 @@ dependencies = [
  "reth-tasks",
  "reth-transaction-pool",
  "serde",
- "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -9959,7 +9939,6 @@ dependencies = [
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "alloy-serde",
- "irys-primitives",
  "reth-primitives",
  "reth-trie-common",
 ]
@@ -10199,7 +10178,6 @@ name = "reth-trie-common"
 version = "1.1.0"
 dependencies = [
  "alloy-consensus",
- "alloy-genesis",
  "alloy-primitives",
  "alloy-rlp",
  "alloy-trie",
@@ -10325,25 +10303,16 @@ dependencies = [
  "alloy-eip2930",
  "alloy-eip7702",
  "alloy-primitives",
- "arbitrary",
  "auto_impl",
  "bitflags 2.6.0",
  "bitvec",
- "bytes",
  "c-kzg",
  "cfg-if",
- "derive_more 1.0.0",
  "dyn-clone",
  "enumn",
  "hex",
  "irys-primitives",
- "modular-bitfield",
- "proptest",
- "proptest-derive 0.4.0",
- "reth-codecs",
  "serde",
- "test-fuzz",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -12517,7 +12486,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

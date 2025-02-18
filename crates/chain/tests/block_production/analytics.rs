@@ -80,7 +80,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         },
     )
     .await?;
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let _reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
 
     let http_url = "http://127.0.0.1:8080";
 
@@ -90,7 +90,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .timeout(Duration::from_secs(10_000))
         .finish();
 
-    let response = client
+    let _response = client
         .get(format!("{}/v1/info", http_url))
         .send()
         .await
@@ -257,7 +257,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         )
         .await;
 
-        let (block, reth_exec_env) = node
+        let (_block, _reth_exec_env) = node
             .actor_addresses
             .block_producer
             .send(SolutionFoundMessage(poa_solution))

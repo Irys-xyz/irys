@@ -94,7 +94,7 @@ pub struct IrysChainSpec {
 }
 
 impl IrysChainSpec {
-    fn new() -> Self {
+    fn _new() -> Self {
         Self {
             irys_genesis: IrysBlockHeader::new(),
         }

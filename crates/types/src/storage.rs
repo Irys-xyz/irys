@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    ops::{Add, AddAssign, Deref, DerefMut, Rem, Sub},
+    ops::{Add, AddAssign, Deref, DerefMut, Rem},
     path::PathBuf,
 };
 
