@@ -127,9 +127,11 @@ pub struct IrysBlockHeader {
 
     /// The address that the block reward should be sent to
     pub reward_address: Address,
+
     /// The address of the block producer - used to validate the block hash/signature & the PoA chunk (as the packing key)
     /// We allow for miners to send rewards to a separate address
     pub miner_address: Address,
+
     /// timestamp (in milliseconds) since UNIX_EPOCH of when the block was discovered/produced
     #[serde(with = "string_u128")]
     pub timestamp: u128,
@@ -142,11 +144,11 @@ pub struct IrysBlockHeader {
     /// Evm block hash (32 bytes)
     pub evm_block_hash: B256,
 
-    /// $IRYS token price expressed in $USD
-    pub irys_price: IrysTokenPrice,
-
     /// Metadata about the verifiable delay function, used for block verification purposes
     pub vdf_limiter_info: VDFLimiterInfo,
+
+    /// $IRYS token price expressed in $USD
+    pub irys_price: IrysTokenPrice,
 }
 
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
@@ -373,8 +375,30 @@ mod tests {
     use k256::ecdsa::SigningKey;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use serde_json;
-    use std::{borrow::BorrowMut, str::FromStr};
     use zerocopy::IntoBytes;
+
+    #[test]
+    fn test_vdf_limiter_info_compact_round_trip() {
+        let data = VDFLimiterInfo {
+            output: H256::random(),
+            global_step_number: 42,
+            seed: H256::random(),
+            next_seed: H256::random(),
+            prev_output: H256::random(),
+            last_step_checkpoints: H256List(vec![H256::random(), H256::random()]),
+            steps: H256List(vec![H256::random(), H256::random()]),
+            vdf_difficulty: Some(123),
+            next_vdf_difficulty: Some(321),
+        };
+
+        // action
+        let mut buffer = vec![];
+        data.encode(&mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
 
     #[test]
     fn test_transaction_ledger_rlp_round_trip() {
@@ -501,7 +525,6 @@ mod tests {
             |h: &mut IrysBlockHeader| h.timestamp.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.ledgers[0].ledger_id.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.ledgers[0].max_chunk_offset.as_mut_bytes(),
-            |h: &mut IrysBlockHeader| h.ledgers[0].expires.as_mut().unwrap().as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.evm_block_hash.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.vdf_limiter_info.global_step_number.as_mut_bytes(),
         ];
@@ -518,42 +541,6 @@ mod tests {
     }
 
     fn mock_header() -> IrysBlockHeader {
-        let tx_ids = H256List::new();
-        IrysBlockHeader {
-            diff: U256::from(1000),
-            cumulative_diff: U256::from(5000),
-            last_diff_timestamp: 1622543200,
-            solution_hash: H256::zero(),
-            previous_solution_hash: H256::zero(),
-            last_epoch_hash: H256::random(),
-            chunk_hash: H256::zero(),
-            height: 42,
-            block_hash: H256::zero(),
-            previous_block_hash: H256::zero(),
-            previous_cumulative_diff: U256::from(4000),
-            poa: PoaData {
-                tx_path: None,
-                data_path: None,
-                chunk: Base64::from_str("").unwrap(),
-                partition_hash: H256::zero(),
-                partition_chunk_offset: 0,
-                recall_chunk_index: 0,
-                ledger_id: None,
-            },
-            reward_address: Address::ZERO,
-            signature: Signature::test_signature().into(),
-            timestamp: 1622543200,
-            ledgers: vec![TransactionLedger {
-                ledger_id: 0, // Publish ledger_id
-                tx_root: H256::zero(),
-                tx_ids,
-                proofs: None,
-                max_chunk_offset: 100,
-                expires: Some(1622543200),
-            }],
-            evm_block_hash: B256::ZERO,
-            miner_address: Address::ZERO,
-            ..Default::default()
-        }
+        IrysBlockHeader::new_mock_header()
     }
 }
