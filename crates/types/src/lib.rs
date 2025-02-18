@@ -10,7 +10,6 @@ pub mod config;
 pub mod difficulty_adjustment_config;
 pub mod ingress;
 pub mod irys;
-pub mod storage_pricing;
 mod merkle;
 pub mod partition;
 pub mod serialization;
@@ -18,6 +17,7 @@ pub mod signature;
 pub mod simple_rng;
 pub mod storage;
 pub mod storage_config;
+pub mod storage_pricing;
 pub mod transaction;
 pub mod vdf_config;
 

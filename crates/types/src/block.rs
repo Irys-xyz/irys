@@ -177,7 +177,7 @@ impl IrysBlockHeader {
         self.digest_for_signing(&mut bytes);
         // we trim the `BlockHash` and `Signature` from the signing scheme
         let bytes = &bytes[size_of::<BlockHash>() + size_of::<IrysSignature>()..];
-        keccak256(&bytes).0
+        keccak256(bytes).0
     }
 
     /// Validates the block hash signature by:

@@ -103,11 +103,11 @@ impl<T> Amount<T> {
 
         // Get the underlying integer representation and the scale.
         // A Decimal represents: value = mantissa / 10^(dec.scale())
-        let unscaled = dec.mantissa().abs() as u128;
+        let unscaled = dec.mantissa().unsigned_abs();
         let dec_scale = dec.scale();
 
         // divisor = 10^(dec.scale())
-        let divisor = U256::from(10u128.pow(dec_scale as u32));
+        let divisor = U256::from(10u128.pow(dec_scale));
 
         // For rounding, add half the divisor.
         let half_divisor = divisor / U256::from(2u8);
@@ -359,8 +359,7 @@ impl Amount<(IrysPrice, Usd)> {
 /// Basic Display impl
 impl<T> core::fmt::Display for Amount<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Convert to string as integer. For printing real "decimal", you'd do
-        // dividing by 1e18 yourself.
+        // Convert to string as integer.
         write!(f, "<{:?}>: {}", self._t, self.amount)
     }
 }
@@ -417,11 +416,11 @@ fn mul_div(a: U256, b: U256, c: U256) -> Result<U256> {
 mod tests {
     use super::*;
     use eyre::Result;
-    use rust_decimal::Decimal;
+    
     use rust_decimal_macros::dec;
 
     mod token_conversoins {
-        use crate::IrysTokenPrice;
+        
 
         use super::*;
 
@@ -454,12 +453,12 @@ mod tests {
         #[test]
         fn test_u256_to_decimal_known_values() {
             // 1e18 as U256 should become exactly 1 token.
-            let one_token_u256 = U256::from(TOKEN_SCALE);
+            let one_token_u256 = TOKEN_SCALE;
             let one_token_dec = Amount::<()>::new(one_token_u256).token_to_decimal();
             assert_eq!(one_token_dec, dec!(1));
 
             // 5e17 as U256 should convert to 0.5.
-            let half_token_u256 = U256::from(TOKEN_SCALE / 2);
+            let half_token_u256 = (TOKEN_SCALE / 2);
             let half_token_dec = Amount::<()>::new(half_token_u256).token_to_decimal();
             assert_eq!(half_token_dec, dec!(0.5));
 

@@ -288,7 +288,7 @@ impl From<u8> for LedgerChunkOffset {
 }
 impl From<u32> for LedgerChunkOffset {
     fn from(value: u32) -> Self {
-        LedgerChunkOffset(value.try_into().expect("Value must be non-negative"))
+        LedgerChunkOffset(value.into())
     }
 }
 impl From<i32> for LedgerChunkOffset {
