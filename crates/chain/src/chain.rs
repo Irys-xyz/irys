@@ -61,7 +61,7 @@ use tokio::{
     sync::oneshot::{self},
 };
 
-use irys_storage::irys_consensus_data_db::{open_or_create_irys_consensus_data_db};
+use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 
 use crate::vdf::run_vdf;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -216,7 +216,9 @@ pub async fn start_irys_node(
 
     // clone as this gets `move`d into the thread
     let irys_provider_1 = irys_provider.clone();
-    let irys_db_env = Arc::new(open_or_create_irys_consensus_data_db(&arc_config.irys_consensus_data_dir())?);
+    let irys_db_env = Arc::new(open_or_create_irys_consensus_data_db(
+        &arc_config.irys_consensus_data_dir(),
+    )?);
 
     std::thread::Builder::new()
         .name("actor-main-thread".to_string())
