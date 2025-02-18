@@ -127,7 +127,7 @@ impl Compact for U256 {
 // H256 Type
 //------------------------------------------------------------------------------
 construct_fixed_hash! {
-    /// A 256-bit hash type (32 bytes)
+    /// A 256-bit hash type (32 bytes).
     pub struct H256(32);
 }
 

@@ -1042,7 +1042,7 @@ mod tests {
         let arc_rwlock = Arc::new(rwlock);
         let closure_arc = arc_rwlock.clone();
 
-        let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |msg, _ctx| {
+        let mocked_block_producer = BlockProducerMockActor::mock(Box::new(move |_msg, _ctx| {
             let inner_result: eyre::Result<
                 Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>,
             > = Ok(None);

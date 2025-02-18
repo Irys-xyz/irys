@@ -2,6 +2,7 @@
 #include <cstring>
 #include <vector>
 #include <mutex>
+#include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <gmp.h>
 #include <cstdlib>
@@ -58,6 +59,24 @@ void long_add(unsigned char* saltBuffer, int checkpointIdx) {
 	}
 }
 
+// todo: Currently the two size args (count1: SALT_SIZE, count2: VDF_SHA_HASH_SIZE) are the same. Can they be merged down to one and eliminated as arguments?
+inline void calculate(const unsigned char* saltBuffer, const unsigned char* locIn, unsigned char* tempOut, size_t count1, size_t count2) {
+	#if OPENSSL_VERSION_NUMBER < 0x30000000L
+		SHA256_CTX sha256;
+		SHA256_Init(&sha256);
+		SHA256_Update(&sha256, saltBuffer, SALT_SIZE);
+		SHA256_Update(&sha256, locIn, VDF_SHA_HASH_SIZE); // -1 memcpy
+		SHA256_Final(tempOut, &sha256);
+	#else
+		EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+		EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
+		EVP_DigestUpdate(ctx, saltBuffer, count1);
+		EVP_DigestUpdate(ctx, locIn, count2);
+		EVP_DigestFinal_ex(ctx, tempOut, NULL);
+		EVP_MD_CTX_free(ctx);
+	#endif
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 //    SHA
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -71,25 +90,13 @@ void _vdf_sha2(unsigned char* saltBuffer, unsigned char* seed, unsigned char* ou
 			unsigned char* locOut = checkpointIdx == checkpointCount ? out  : (outCheckpoint + VDF_SHA_HASH_SIZE*checkpointIdx);
 			
 			{
-				SHA256_CTX sha256;
-				SHA256_Init(&sha256);
-				SHA256_Update(&sha256, saltBuffer, SALT_SIZE);
-				SHA256_Update(&sha256, locIn, VDF_SHA_HASH_SIZE); // -1 memcpy
-				SHA256_Final(tempOut, &sha256);
+				calculate(saltBuffer, locIn, tempOut, SALT_SIZE, VDF_SHA_HASH_SIZE);
 			}
 			for(int i = 2; i < hashingIterations; i++) {
-				SHA256_CTX sha256;
-				SHA256_Init(&sha256);
-				SHA256_Update(&sha256, saltBuffer, SALT_SIZE);
-				SHA256_Update(&sha256, tempOut, VDF_SHA_HASH_SIZE);
-				SHA256_Final(tempOut, &sha256);
+				calculate(saltBuffer, tempOut, tempOut, SALT_SIZE, VDF_SHA_HASH_SIZE);
 			}
 			{
-				SHA256_CTX sha256;
-				SHA256_Init(&sha256);
-				SHA256_Update(&sha256, saltBuffer, SALT_SIZE);
-				SHA256_Update(&sha256, tempOut, VDF_SHA_HASH_SIZE);
-				SHA256_Final(locOut, &sha256);
+				calculate(saltBuffer, tempOut, locOut, SALT_SIZE, VDF_SHA_HASH_SIZE);
 			}
 			long_add(saltBuffer, 1);
 		}
@@ -99,46 +106,26 @@ void _vdf_sha2(unsigned char* saltBuffer, unsigned char* seed, unsigned char* ou
 			unsigned char* locOut = checkpointIdx == checkpointCount ? out  : (outCheckpoint + VDF_SHA_HASH_SIZE*checkpointIdx);
 			
 			{
-				SHA256_CTX sha256;
-				SHA256_Init(&sha256);
-				SHA256_Update(&sha256, saltBuffer, SALT_SIZE);
-				SHA256_Update(&sha256, locIn, VDF_SHA_HASH_SIZE); // -1 memcpy
-				SHA256_Final(tempOut, &sha256);
+				calculate(saltBuffer, locIn, tempOut, SALT_SIZE, VDF_SHA_HASH_SIZE);
 			}
 			// 1 skip on start
 			for(int i = 1; i < hashingIterations; i++) {
-				SHA256_CTX sha256;
-				SHA256_Init(&sha256);
-				SHA256_Update(&sha256, saltBuffer, SALT_SIZE);
-				SHA256_Update(&sha256, tempOut, VDF_SHA_HASH_SIZE);
-				SHA256_Final(tempOut, &sha256);
+				calculate(saltBuffer, tempOut, tempOut, SALT_SIZE, VDF_SHA_HASH_SIZE);
 			}
 			long_add(saltBuffer, 1);
 			for(int j = 1; j < skipCheckpointCount; j++) {
 				// no skips
 				for(int i = 0; i < hashingIterations; i++) {
-					SHA256_CTX sha256;
-					SHA256_Init(&sha256);
-					SHA256_Update(&sha256, saltBuffer, SALT_SIZE);
-					SHA256_Update(&sha256, tempOut, VDF_SHA_HASH_SIZE);
-					SHA256_Final(tempOut, &sha256);
+					calculate(saltBuffer, tempOut, tempOut, SALT_SIZE, VDF_SHA_HASH_SIZE);
 				}
 				long_add(saltBuffer, 1);
 			}
 			// 1 skip on end
 			for(int i = 1; i < hashingIterations; i++) {
-				SHA256_CTX sha256;
-				SHA256_Init(&sha256);
-				SHA256_Update(&sha256, saltBuffer, SALT_SIZE);
-				SHA256_Update(&sha256, tempOut, VDF_SHA_HASH_SIZE);
-				SHA256_Final(tempOut, &sha256);
+				calculate(saltBuffer, tempOut, tempOut, SALT_SIZE, VDF_SHA_HASH_SIZE);
 			}
 			{
-				SHA256_CTX sha256;
-				SHA256_Init(&sha256);
-				SHA256_Update(&sha256, saltBuffer, SALT_SIZE);
-				SHA256_Update(&sha256, tempOut, VDF_SHA_HASH_SIZE);
-				SHA256_Final(locOut, &sha256);
+				calculate(saltBuffer, tempOut, locOut, SALT_SIZE, VDF_SHA_HASH_SIZE);
 			}
 			long_add(saltBuffer, 1);
 		}
@@ -296,11 +283,7 @@ bool vdf_parallel_sha_verify(unsigned char* startSaltBuffer, unsigned char* seed
 }
 
 void reset_mix(unsigned char* res, unsigned char* prevOutput, unsigned char* resetSeed) {
-	SHA256_CTX sha256;
-	SHA256_Init(&sha256);
-	SHA256_Update(&sha256, prevOutput, VDF_SHA_HASH_SIZE);
-	SHA256_Update(&sha256, resetSeed, VDF_SHA_HASH_SIZE);
-	SHA256_Final(res, &sha256);
+	calculate(prevOutput, resetSeed, res, VDF_SHA_HASH_SIZE, VDF_SHA_HASH_SIZE);
 }
 
 bool fast_rev_cmp256(unsigned char* a, unsigned char* b) {
