@@ -5,6 +5,7 @@ use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
 use bytes::Buf;
 use eyre::{Error, OptionExt};
+use futures::AsyncReadExt;
 use openssl::sha;
 use rand::RngCore;
 use reth_codecs::Compact;
@@ -86,16 +87,16 @@ impl Decode for U256 {
 impl Encodable for U256 {
     #[inline]
     fn encode(&self, out: &mut dyn bytes::BufMut) {
-        let data: [u8; 32] = bytemuck::cast(self.0);
-        data.encode(out);
+        let mut buffer = [0_u8; 32];
+        self.to_big_endian(&mut buffer);
+        buffer.encode(out);
     }
 }
 
 impl Decodable for U256 {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let data: [u8; 32] = <[u8; 32]>::decode(buf)?;
-        let data = bytemuck::cast(data);
-        Ok(Self(data))
+        let res = <[u8; 32]>::decode(buf)?;
+        Ok(Self::from_big_endian(&res))
     }
 }
 
@@ -118,14 +119,9 @@ impl Compact for U256 {
 
     #[inline]
     fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
-        if len == 0 {
-            return (U256::zero(), buf);
-        }
-
-        let mut slice = [0; 32];
-        slice[(32 - len)..].copy_from_slice(&buf[..len]);
+        let res = Self::from_big_endian(&buf[..len]);
         buf.advance(len);
-        (Self::from_big_endian(&slice), buf)
+        (res, buf)
     }
 }
 
@@ -773,6 +769,34 @@ mod tests {
 
         // Call from_compact to convert the bytes back to U256
         let (decoded_value, _) = U256::from_compact(&buf[..], buf.len());
+
+        // Check that the decoded value matches the original value
+        assert_eq!(decoded_value, original_value);
+    }
+
+    #[test]
+    fn test_h256_rlp_round_trip() {
+        // setup
+        let data = H256::random();
+
+        // action
+        let mut buffer = vec![];
+        Encodable::encode(&data, &mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn test_h256_compact_round_trip() {
+        // Create a H256 value and convert it to compact bytes
+        let original_value = H256::random();
+        let mut buf = BytesMut::with_capacity(32);
+        original_value.to_compact(&mut buf);
+
+        // Call from_compact to convert the bytes back to H256
+        let (decoded_value, _) = H256::from_compact(&buf[..], buf.len());
 
         // Check that the decoded value matches the original value
         assert_eq!(decoded_value, original_value);
