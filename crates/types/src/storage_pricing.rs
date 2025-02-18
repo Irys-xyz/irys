@@ -416,12 +416,23 @@ fn mul_div(a: U256, b: U256, c: U256) -> Result<U256> {
 mod tests {
     use super::*;
     use eyre::Result;
-    
     use rust_decimal_macros::dec;
 
-    mod token_conversoins {
-        
+    #[test]
+    fn test_amount_rlp_round_trip() {
+        // setup
+        let data = Amount::<IrysPrice>::token(dec!(1.11));
 
+        // action
+        let mut buffer = vec![];
+        data.encode(&mut buffer);
+        let decoded = Amount::<IrysPrice>::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
+
+    mod token_conversoins {
         use super::*;
 
         #[test]

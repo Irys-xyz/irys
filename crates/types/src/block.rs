@@ -12,7 +12,8 @@ use crate::{
     Proof, H256, U256,
 };
 use alloy_primitives::{keccak256, Address, B256};
-use alloy_rlp::{RlpDecodable, RlpEncodable};
+use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
+use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 pub type BlockHash = H256;
@@ -99,12 +100,12 @@ pub struct IrysBlockHeader {
     /// produce the past blocks including this one.
     pub cumulative_diff: U256,
 
+    /// The solution hash for the block hash(chunk_bytes + partition_chunk_offset + mining_seed)
+    pub solution_hash: H256,
+
     /// timestamp (in milliseconds) since UNIX_EPOCH of the last difficulty adjustment
     #[serde(with = "string_u128")]
     pub last_diff_timestamp: u128,
-
-    /// The solution hash for the block hash(chunk_bytes + partition_chunk_offset + mining_seed)
-    pub solution_hash: H256,
 
     /// The solution hash of the previous block in the chain.
     pub previous_solution_hash: H256,
@@ -126,11 +127,9 @@ pub struct IrysBlockHeader {
 
     /// The address that the block reward should be sent to
     pub reward_address: Address,
-
     /// The address of the block producer - used to validate the block hash/signature & the PoA chunk (as the packing key)
     /// We allow for miners to send rewards to a separate address
     pub miner_address: Address,
-
     /// timestamp (in milliseconds) since UNIX_EPOCH of when the block was discovered/produced
     #[serde(with = "string_u128")]
     pub timestamp: u128,
@@ -153,21 +152,15 @@ pub struct IrysBlockHeader {
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
 
 impl IrysBlockHeader {
-    /// Proxy method for `Compact::to_compact`
+    /// Proxy method for `Encodable::encode`
     ///
-    /// packs all the header data into a byte buffer.
-    ///
-    /// ## Warning
-    ///
-    /// This approach is unsafe and prone to attacks.
-    /// ideally we should use udigest crate - https://docs.rs/udigest/latest/udigest/
-    /// for reference on why https://www.dfns.co/article/unambiguous-hashing
+    /// Packs all the header data into a byte buffer, using RLP encoding.
     pub fn digest_for_signing<B>(&self, buf: &mut B)
     where
         B: bytes::BufMut + AsMut<[u8]>,
     {
-        // todo use rlp encoding, same like in IrysTransactionHeader
-        self.to_compact(buf);
+        // Using trait directly because `reth_db_api` also has an `encode` method.
+        Encodable::encode(&self, buf);
     }
 
     /// Create a `keccak256` hash of the [`IrysBlockHeader`]
@@ -215,6 +208,35 @@ pub struct PoaData {
     pub data_path: Option<Base64>,
 }
 
+#[cfg(test)]
+mod pool_data_tests {
+    use alloy_rlp::Decodable;
+
+    use super::*;
+
+    #[test]
+    fn test_irys_block_header_rlp_round_trip() {
+        // setup
+        let data = PoaData {
+            recall_chunk_index: 123,
+            partition_chunk_offset: 321,
+            partition_hash: H256::random(),
+            chunk: Base64(vec![42; 16]),
+            ledger_id: Some(44),
+            tx_path: None,
+            data_path: Some(Base64(vec![13; 16])),
+        };
+
+        // action
+        let mut buffer = vec![];
+        data.encode(&mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
+}
+
 pub type TxRoot = H256;
 
 #[derive(
@@ -248,6 +270,40 @@ pub struct TransactionLedger {
     /// When transactions are promoted they must include their ingress proofs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proofs: Option<IngressProofsList>,
+}
+
+#[cfg(test)]
+mod transaction_ledger_tests {
+    use alloy_rlp::Decodable;
+    use alloy_signer::Signature;
+
+    use crate::TxIngressProof;
+
+    use super::*;
+
+    #[test]
+    fn test_irys_block_header_rlp_round_trip() {
+        // setup
+        let data = TransactionLedger {
+            ledger_id: 1,
+            tx_root: H256::random(),
+            tx_ids: H256List(vec![]),
+            max_chunk_offset: 55,
+            expires: None,
+            proofs: Some(IngressProofsList(vec![TxIngressProof {
+                proof: H256::random(),
+                signature: IrysSignature::new(Signature::test_signature()),
+            }])),
+        };
+
+        // action
+        let mut buffer = vec![];
+        data.encode(&mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
 }
 
 impl TransactionLedger {
@@ -337,6 +393,7 @@ impl IrysBlockHeader {
             ],
             evm_block_hash: B256::ZERO,
             miner_address: Address::ZERO,
+            irys_price: Amount::token(dec!(1.0)),
             ..Default::default()
         }
     }
@@ -348,6 +405,7 @@ mod tests {
 
     use super::*;
     use alloy_primitives::Signature;
+    use alloy_rlp::Decodable;
     use k256::ecdsa::SigningKey;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use serde_json;
@@ -365,6 +423,20 @@ mod tests {
 
         // Assert
         assert_eq!(header, deserialized);
+    }
+
+    #[test]
+    fn test_irys_block_header_rlp_round_trip() {
+        // setup
+        let data = mock_header();
+
+        // action
+        let mut buffer = vec![];
+        Encodable::encode(&data, &mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
     }
 
     #[test]

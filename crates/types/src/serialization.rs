@@ -17,7 +17,7 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
 };
 use std::{ops::Index, slice::SliceIndex, str::FromStr};
-use zerocopy::IntoBytes;
+use zerocopy::{FromBytes, IntoBytes};
 
 use fixed_hash::construct_fixed_hash;
 use uint::construct_uint;
@@ -85,22 +85,17 @@ impl Decode for U256 {
 
 impl Encodable for U256 {
     #[inline]
-    fn length(&self) -> usize {
-        self.0.as_bytes().len()
-    }
-
-    #[inline]
     fn encode(&self, out: &mut dyn bytes::BufMut) {
-        let bytes = bytemuck::bytes_of(&self.0);
-        bytes.encode(out);
+        let data: [u8; 32] = bytemuck::cast(self.0);
+        data.encode(out);
     }
 }
 
 impl Decodable for U256 {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let res = <[u8; 32]>::decode(buf)?;
-        let res = bytemuck::cast::<_, [u64; 4]>(res);
-        Ok(Self(res))
+        let data: [u8; 32] = <[u8; 32]>::decode(buf)?;
+        let data = bytemuck::cast(data);
+        Ok(Self(data))
     }
 }
 
@@ -731,6 +726,20 @@ mod tests {
     use super::*;
     use bytes::BytesMut;
     use serde_json::json;
+
+    #[test]
+    fn test_u256_rlp_round_trip() {
+        // setup
+        let data = U256::one();
+
+        // action
+        let mut buffer = vec![];
+        Encodable::encode(&data, &mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
 
     #[test]
     fn test_u256_to_compact() {
