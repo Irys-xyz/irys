@@ -2,7 +2,13 @@ use irys_macros::load_toml;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{DifficultyAdjustmentConfig, U256};
+use crate::{
+    storage_pricing::{
+        phantoms::{Percentage, Usd},
+        Amount,
+    },
+    DifficultyAdjustmentConfig, IrysTokenPrice, U256,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
@@ -45,44 +51,49 @@ pub struct Config {
     /// the number of block a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
     pub anchor_expiry_depth: u8,
+    /// defines for how long the protocol should use the geneses token price for (expressed in epoch count)
+    pub genesis_price_valid_for_n_epochs: u8,
+    /// defines the genesis price of the $IRYS, expressed in $USD
+    #[serde(deserialize_with = "serde_utils::token_amount")]
+    pub genesis_token_price: Amount<(IrysTokenPrice, Usd)>,
+    /// defines the range of how much can the token fluctuate since the last EMA price for it to be accepted
+    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    pub token_price_safe_range: Amount<Percentage>,
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 5;
 
-pub const CONFIG: Config = load_toml!(
-    "CONFIG_TOML_PATH",
-    Config {
-        block_time: DEFAULT_BLOCK_TIME,
-        max_data_txs_per_block: 100,
-        difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME) * 14, // 2 weeks worth of blocks
-        max_difficulty_adjustment_factor: rust_decimal_macros::dec!(4), // A difficulty adjustment can be 4x larger or 1/4th the current difficulty
-        min_difficulty_adjustment_factor: rust_decimal_macros::dec!(0.25), // A 10% change must be required before a difficulty adjustment will occur
-        chunk_size: 256 * 1024,
-        num_chunks_in_partition: 10,
-        num_chunks_in_recall_range: 2,
-        vdf_reset_frequency: 10 * 120, // Reset the nonce limiter (vdf) once every 1200 steps/seconds or every ~20 min
-        vdf_parallel_verification_thread_limit: 4,
-        num_checkpoints_in_vdf_step: 25, // 25 checkpoints 40 ms each = 1000 ms
-        vdf_sha_1s: 7_000,
-        entropy_packing_iterations: 22_500_000,
-        irys_chain_id: 1275, // mainnet chainID (testnet is 1270)
-        capacity_scalar: 100,
-        num_blocks_in_epoch: 100,
-        submit_ledger_epoch_length: 5,
-        num_partitions_per_slot: 1,
-        num_writes_before_sync: 5,
-        reset_state_on_restart: false,
-        chunk_migration_depth: 1, // Number of confirmations before moving chunks to storage modules
-        mining_key: "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0", // Burner PrivateKey (PK)
-        num_capacity_partitions: None,
-        port: 8080,
-        anchor_expiry_depth: 10 // lower for tests
-    }
-);
-
-pub const PARTITION_SIZE: u64 = CONFIG.chunk_size * CONFIG.num_chunks_in_partition;
-pub const NUM_RECALL_RANGES_IN_PARTITION: u64 =
-    CONFIG.num_chunks_in_partition / CONFIG.num_chunks_in_recall_range;
+pub const CONFIG: Config = Config {
+    block_time: DEFAULT_BLOCK_TIME,
+    max_data_txs_per_block: 100,
+    difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME) * 14,
+    max_difficulty_adjustment_factor: rust_decimal_macros::dec!(4),
+    min_difficulty_adjustment_factor: rust_decimal_macros::dec!(0.25),
+    chunk_size: 256 * 1024,
+    num_chunks_in_partition: 10,
+    num_chunks_in_recall_range: 2,
+    vdf_reset_frequency: 10 * 120,
+    vdf_parallel_verification_thread_limit: 4,
+    num_checkpoints_in_vdf_step: 25,
+    vdf_sha_1s: 7_000,
+    entropy_packing_iterations: 22_500_000,
+    irys_chain_id: 1275,
+    capacity_scalar: 100,
+    num_blocks_in_epoch: 100,
+    submit_ledger_epoch_length: 5,
+    num_partitions_per_slot: 1,
+    num_writes_before_sync: 5,
+    reset_state_on_restart: false,
+    chunk_migration_depth: 1,
+    mining_key: "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0",
+    num_capacity_partitions: None,
+    port: 8080,
+    anchor_expiry_depth: 10,
+    genesis_price_valid_for_n_epochs: 2,
+    genesis_token_price: Amount::token(rust_decimal_macros::dec!(1)).expect("valid token amount"),
+    token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
+        .expect("valid percentage"),
+};
 
 impl From<Config> for DifficultyAdjustmentConfig {
     fn from(config: Config) -> Self {
@@ -94,5 +105,51 @@ impl From<Config> for DifficultyAdjustmentConfig {
             min_difficulty: U256::one(), // TODO: make this customizable if desirable
             max_difficulty: U256::MAX,
         }
+    }
+}
+
+pub mod serde_utils {
+
+    use rust_decimal::Decimal;
+    use serde::{Deserialize as _, Deserializer};
+
+    use crate::storage_pricing::Amount;
+
+    /// deserialize the token amount from a string.
+    /// The string is expected to be in a format of "1.42".
+    pub fn token_amount<'de, T: std::fmt::Debug, D>(deserializer: D) -> Result<Amount<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        amount_from_string(deserializer, |dec| Amount::<T>::token(dec))
+    }
+
+    /// deserialize the percentage amount from a string.
+    ///
+    /// The string is expected to be:
+    /// - "0.1" (10%)
+    /// - "1.0" (100%)
+    pub fn percentage_amount<'de, T: std::fmt::Debug, D>(
+        deserializer: D,
+    ) -> Result<Amount<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        amount_from_string(deserializer, |dec| Amount::<T>::percentage(dec))
+    }
+
+    fn amount_from_string<'de, T: std::fmt::Debug, D>(
+        deserializer: D,
+        dec_to_amount: impl Fn(Decimal) -> eyre::Result<Amount<T>>,
+    ) -> Result<Amount<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use core::str::FromStr as _;
+
+        let raw_string = String::deserialize(deserializer)?;
+        let decimal = Decimal::from_str(&raw_string).map_err(serde::de::Error::custom)?;
+        let amount = dec_to_amount(decimal).map_err(serde::de::Error::custom)?;
+        Ok(amount)
     }
 }
