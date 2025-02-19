@@ -1,9 +1,8 @@
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, Address, Base64, Config, IrysBlockHeader,
-    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, H256,
+    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, H256, perm_storage_price::PriceCalc
 };
 use alloy_core::primitives::keccak256;
-
 use alloy_signer::utils::secret_key_to_address;
 use alloy_signer_local::LocalSigner;
 use eyre::Result;
@@ -55,15 +54,15 @@ impl IrysSigner {
     /// is signed with [sign_transaction]
     pub fn create_transaction(
         &self,
+        config: &Config,
         data: Vec<u8>,
-        anchor: Option<H256>, //TODO!: more parameters as they are implemented
+        anchor: Option<H256>,
     ) -> Result<IrysTransaction> {
+        let bytes = data.len() as u64;
         let mut transaction = self.merklize(data, self.chunk_size)?;
 
-        // TODO: These should be calculated from some pricing params passed in
-        // as a parameter
-        transaction.header.perm_fee = Some(1);
-        transaction.header.term_fee = 1;
+        transaction.header.perm_fee = Some(PriceCalc::calc_perm_storage_price(bytes, config).unwrap() as u64);
+        transaction.header.term_fee = PriceCalc::calc_term_storage_price(bytes, config).unwrap() as u64;
 
         // Fetch and set last_tx if not provided (primarily for testing).
         let anchor = anchor.unwrap_or_default();
@@ -157,7 +156,7 @@ mod tests {
         let irys = IrysSigner::random_signer(&config);
 
         // Create a transaction from the random bytes
-        let mut tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
+        let mut tx = irys.create_transaction(&config, data_bytes.clone(), None).unwrap();
 
         // Sign the transaction
         tx = irys.sign_transaction(tx).unwrap();

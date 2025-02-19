@@ -139,7 +139,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         for chunk in chunks {
             data.extend_from_slice(&chunk);
         }
-        let tx = signer.create_transaction(data, None).unwrap();
+        let tx = signer.create_transaction(&testnet_config,data, None).unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
         txs.push(tx);
     }

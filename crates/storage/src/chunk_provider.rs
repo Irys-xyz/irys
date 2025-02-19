@@ -192,7 +192,7 @@ mod tests {
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         let irys = IrysSigner::random_signer(&testnet_config);
-        let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
+        let tx = irys.create_transaction(&testnet_config, data_bytes.clone(), None).unwrap();
         let tx = irys.sign_transaction(tx).unwrap();
 
         // fake the tx_path

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 // https://docs.google.com/spreadsheets/d/1VMcMgguVRBcUUXIRwlUY7FgSTicasvzg_OWJZqk8rrs/edit?gid=0#gid=0
 pub(crate) const ANNUALIZED_COST_OF_OPERATING_16TB: Decimal = dec!(44.0);
 pub(crate) const MINER_PERCENTAGE_FEE: Decimal = dec!(0.05);
+// pub(crate) const _MINIMUM_USD_FEE: f64 = 0.01;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {

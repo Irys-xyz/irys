@@ -66,7 +66,7 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
     let mut txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
     for a in [&account1, &account2, &account3] {
         let data_bytes = "Hello, world!".as_bytes().to_vec();
-        let tx = a.create_transaction(data_bytes, None).unwrap();
+        let tx = a.create_transaction(&testnet_config, data_bytes, None).unwrap();
         let tx = a.sign_transaction(tx).unwrap();
         // submit to mempool
         let _tx_res = node
@@ -369,7 +369,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         evm_txs.insert(*tx_env.tx_hash(), tx_env.clone());
 
         let data_bytes = "Hello, world!".as_bytes().to_vec();
-        let tx = a.create_transaction(data_bytes, None).unwrap();
+        let tx = a.create_transaction(&testnet_config, data_bytes, None).unwrap();
         let tx = a.sign_transaction(tx).unwrap();
         // submit to mempool
         let _tx_res = node

@@ -17,6 +17,14 @@ impl PriceCalc {
     }
 
     /// Quote an IRYS price to store a number of bytes in perm storage
+    pub fn calc_term_storage_price(
+        _number_of_bytes_to_store: u64,
+        _config: &Config,
+    ) -> eyre::Result<u64> {
+        todo!()
+    }
+
+    /// Quote an IRYS price to store a number of bytes in perm storage
     pub fn calc_perm_storage_price(
         number_of_bytes_to_store: u64,
         config: &Config,

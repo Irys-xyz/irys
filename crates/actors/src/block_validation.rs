@@ -540,7 +540,7 @@ mod tests {
             for chunk in chunks {
                 data.extend_from_slice(chunk);
             }
-            let tx = signer.create_transaction(data, None).unwrap();
+            let tx = signer.create_transaction(&context.testnet_config, data, None).unwrap();
             let tx = signer.sign_transaction(tx).unwrap();
             txs.push(tx);
         }
@@ -571,7 +571,7 @@ mod tests {
         let mut txs: Vec<IrysTransaction> = Vec::new();
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
-        let tx = signer.create_transaction(data.clone(), None).unwrap();
+        let tx = signer.create_transaction(&context.testnet_config, data.clone(), None).unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
         txs.push(tx);
 

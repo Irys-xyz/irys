@@ -98,7 +98,7 @@ async fn serial_double_root_data_promotion_test() {
         db: node_context.db.clone(),
         mempool: node_context.actor_addresses.mempool.clone(),
         chunk_provider: node_context.chunk_provider.clone(),
-        config: testnet_config,
+        config: testnet_config.clone(),
     };
 
     // Initialize the app
@@ -129,7 +129,7 @@ async fn serial_double_root_data_promotion_test() {
         }
         // we have to use a different signer so we get a unique txid for each transaction, despite the identical data_root
         let s = if i == 2 { &signer2 } else { &signer };
-        let tx = s.create_transaction(data, None).unwrap();
+        let tx = s.create_transaction(&testnet_config, data, None).unwrap();
         let tx = s.sign_transaction(tx).unwrap();
         println!("tx[{}] {}", i, tx.header.id.as_bytes().to_base58());
         txs.push(tx);
@@ -397,7 +397,7 @@ async fn serial_double_root_data_promotion_test() {
         // we have to use a different signer so we get a unique txid for each transaction, despite the identical data_root
         let s = &signer2;
         let tx = s
-            .create_transaction(data, Some(block1.0.block_hash))
+            .create_transaction(&testnet_config, data, Some(block1.0.block_hash))
             .unwrap();
         let tx = s.sign_transaction(tx).unwrap();
         println!("tx[2] {}", tx.header.id.as_bytes().to_base58());
