@@ -58,6 +58,10 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/tx", web::post().to(tx::post_tx))
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
+        .route(
+            "/perm_storage_price/{bytes}",
+            web::get().to(price::get_perm_storage_pricing),
+        )
 }
 
 pub async fn run_server(app_state: ApiState) {
