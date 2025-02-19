@@ -208,35 +208,6 @@ pub struct PoaData {
     pub data_path: Option<Base64>,
 }
 
-#[cfg(test)]
-mod pool_data_tests {
-    use alloy_rlp::Decodable;
-
-    use super::*;
-
-    #[test]
-    fn test_irys_block_header_rlp_round_trip() {
-        // setup
-        let data = PoaData {
-            recall_chunk_index: 123,
-            partition_chunk_offset: 321,
-            partition_hash: H256::random(),
-            chunk: Base64(vec![42; 16]),
-            ledger_id: Some(44),
-            tx_path: None,
-            data_path: Some(Base64(vec![13; 16])),
-        };
-
-        // action
-        let mut buffer = vec![];
-        data.encode(&mut buffer);
-        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
-
-        // Assert
-        assert_eq!(data, decoded);
-    }
-}
-
 pub type TxRoot = H256;
 
 #[derive(
@@ -377,6 +348,28 @@ mod tests {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use serde_json;
     use zerocopy::IntoBytes;
+
+    #[test]
+    fn test_poa_data_rlp_round_trip() {
+        // setup
+        let data = PoaData {
+            recall_chunk_index: 123,
+            partition_chunk_offset: 321,
+            partition_hash: H256::random(),
+            chunk: Base64(vec![42; 16]),
+            ledger_id: Some(44),
+            tx_path: None,
+            data_path: Some(Base64(vec![13; 16])),
+        };
+
+        // action
+        let mut buffer = vec![];
+        data.encode(&mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
 
     #[test]
     fn test_vdf_limiter_info_compact_round_trip() {
