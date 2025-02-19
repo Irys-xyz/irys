@@ -76,6 +76,10 @@ impl IrysNodeConfig {
     pub fn storage_module_dir(&self) -> PathBuf {
         self.instance_directory().join("storage_modules")
     }
+    /// get the instance-specific irys consensus data directory path
+    pub fn irys_consensus_data_dir(&self) -> PathBuf {
+        self.instance_directory().join("irys_consensus_data")
+    }
     /// get the instance-specific reth data directory path
     pub fn reth_data_dir(&self) -> PathBuf {
         self.instance_directory().join("reth")

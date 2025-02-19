@@ -9,6 +9,7 @@ use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::metadata::MetadataKey;
 use crate::submodule::tables::RelativeStartOffsets;
 use crate::{
     db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
@@ -111,6 +112,9 @@ tables! {
     /// this value is updated every time we receive a valid to-be-promoted transaction to (<height of anchor block> + ANCHOR_EXPIRY_DEPTH)
     /// and is pruned if value > <current_height>
     table IngressProofLRU<Key = DataRoot, Value = u64>;
+
+    /// Table to store various metadata, such as the current db schema version
+    table Metadata<Key = MetadataKey, Value = Vec<u8>>;
 
 }
 
