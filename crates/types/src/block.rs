@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn test_irys_header_compacat_round_trip() {
+    fn test_irys_header_compact_round_trip() {
         // setup
         let header = mock_header();
         let mut buf = vec![];
