@@ -6,7 +6,7 @@
 #include "capacity.h"
 
 entropy_chunk_errors compute_seed_hash(const unsigned char *mining_addr, size_t mining_addr_size, unsigned long int chunk_offset,  unsigned long int chain_id, const unsigned char *partition_hash, size_t partition_hash_size, unsigned char *seed_hash) {
-    int input_len = mining_addr_size + partition_hash_size + sizeof(uint64_t) + sizeof(uint64_t);
+    // int input_len = mining_addr_size + partition_hash_size + sizeof(uint64_t) + sizeof(uint64_t);
     uint64_t chunk_offset_u64 = (uint64_t) chunk_offset;
     uint64_t chain_id_u64 = (uint64_t) chain_id;
 
@@ -95,7 +95,7 @@ entropy_chunk_errors compute_entropy_chunk2(const unsigned char *segment, const 
         return HASH_COMPUTATION_ERROR;
     }
 
-    for (int hash_count = HASH_ITERATIONS_PER_BLOCK; hash_count < packing_sha_1_5_s; ++hash_count) {
+    for (unsigned int hash_count = HASH_ITERATIONS_PER_BLOCK; hash_count < packing_sha_1_5_s; ++hash_count) {
         //printf("compute_entropy_chunk2 hash count %d iterations %d\n", hash_count, packing_sha_1_5_s);
         size_t start_offset = (hash_count % HASH_ITERATIONS_PER_BLOCK) * PACKING_HASH_SIZE;
 

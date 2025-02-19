@@ -421,9 +421,8 @@ mod tests {
             // Ignore errors initializing the logger if tests race to configure it
             .try_init();
 
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
         let data_dir = temporary_directory(Some("block_validation_tests"), false);
-
-        let mut genesis_block = IrysBlockHeader::new();
         genesis_block.height = 0;
         let arc_genesis = Arc::new(genesis_block);
 

@@ -322,8 +322,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Manually update the data_root -> partition_hash index
     let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
-    let part_hash_0 = storage_modules[0].partition_hash().unwrap();
-    let part_hash_1 = storage_modules[1].partition_hash().unwrap();
+    let _part_hash_0 = storage_modules[0].partition_hash().unwrap();
+    let _part_hash_1 = storage_modules[1].partition_hash().unwrap();
 
     // Loop though all the transactions and add their chunks to the cache
     for tx in &txs {

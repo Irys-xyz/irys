@@ -592,7 +592,7 @@ dependencies = [
  "keccak-asm",
  "paste",
  "proptest",
- "proptest-derive 0.5.1",
+ "proptest-derive",
  "rand",
  "ruint",
  "rustc-hash 2.1.0",
@@ -1482,18 +1482,18 @@ dependencies = [
 
 [[package]]
 name = "bit-set"
-version = "0.5.3"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0700ddab506f33b20a03b13996eccd309a48e5ff77d0d95926aa0210fb4e95f1"
+checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
 dependencies = [
  "bit-vec",
 ]
 
 [[package]]
 name = "bit-vec"
-version = "0.6.3"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
+checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
 [[package]]
 name = "bitflags"
@@ -3324,17 +3324,6 @@ name = "fastrlp"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "139834ddba373bbdd213dffe02c8d110508dcf1726c2be27e8d1f7d7e1856418"
-dependencies = [
- "arrayvec",
- "auto_impl",
- "bytes",
-]
-
-[[package]]
-name = "fastrlp"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce8dba4714ef14b8274c371879b175aa55b16b30f269663f19d576f380018dc4"
 dependencies = [
  "arrayvec",
  "auto_impl",
@@ -5490,7 +5479,7 @@ dependencies = [
  "derive_more 1.0.0",
  "eyre",
  "modular-bitfield",
- "proptest-derive 0.5.1",
+ "proptest-derive",
  "reth-codecs",
  "ruint",
  "serde",
@@ -5649,6 +5638,7 @@ dependencies = [
  "borsh",
  "borsh-derive",
  "build-print",
+ "bytemuck",
  "bytes",
  "chrono",
  "derive_more 2.0.1",
@@ -6119,14 +6109,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
-
-[[package]]
-name = "libm"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8355be11b20d696c8f18f6cc018c4e372165b1fa8126cef092399c9951984ffa"
 
 [[package]]
 name = "libnghttp2-sys"
@@ -6793,7 +6777,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
- "libm",
 ]
 
 [[package]]
@@ -7561,9 +7544,9 @@ dependencies = [
 
 [[package]]
 name = "proptest"
-version = "1.5.0"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4c2511913b88df1637da85cc8d96ec8e43a3f8bb8ccb71ee1ac240d6f3df58d"
+checksum = "14cae93065090804185d3b75f0bf93b8eeda30c7a9b4a33d3bdb3988d6229e50"
 dependencies = [
  "bit-set",
  "bit-vec",
@@ -7587,17 +7570,6 @@ checksum = "a1981e49bd2432249da8b0e11e5557099a8e74690d6b94e721f7dc0bb7f3555f"
 dependencies = [
  "arbitrary",
  "proptest",
-]
-
-[[package]]
-name = "proptest-derive"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cf16337405ca084e9c78985114633b6827711d22b9e6ef6c6c0d665eb3f0b6e"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -8225,7 +8197,6 @@ dependencies = [
  "reth-primitives",
  "reth-primitives-traits",
  "reth-trie-common",
- "revm-primitives",
  "serde",
  "serde_json",
 ]
@@ -8234,7 +8205,6 @@ dependencies = [
 name = "reth-cli"
 version = "1.1.0"
 dependencies = [
- "alloy-genesis",
  "clap",
  "eyre",
  "irys-primitives",
@@ -8399,7 +8369,6 @@ dependencies = [
  "futures",
  "reqwest",
  "reth-node-api",
- "reth-rpc-api",
  "reth-rpc-builder",
  "reth-tracing",
  "ringbuffer",
@@ -8443,7 +8412,6 @@ dependencies = [
 name = "reth-db-api"
 version = "1.1.0"
 dependencies = [
- "alloy-genesis",
  "alloy-primitives",
  "arbitrary",
  "bytes",
@@ -8468,7 +8436,6 @@ dependencies = [
 name = "reth-db-common"
 version = "1.1.0"
 dependencies = [
- "alloy-genesis",
  "alloy-primitives",
  "boyer-moore-magiclen",
  "eyre",
@@ -8873,7 +8840,7 @@ dependencies = [
  "dyn-clone",
  "once_cell",
  "proptest",
- "proptest-derive 0.5.1",
+ "proptest-derive",
  "rustc-hash 2.1.0",
  "serde",
  "thiserror-no-std",
@@ -9363,7 +9330,6 @@ dependencies = [
  "futures",
  "humantime",
  "irys-storage",
- "irys-types",
  "rand",
  "reth-chainspec",
  "reth-cli-util",
@@ -9569,7 +9535,6 @@ version = "1.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-genesis",
  "alloy-primitives",
  "alloy-rlp",
  "arbitrary",
@@ -9815,7 +9780,6 @@ dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-engine",
  "async-trait",
- "eyre",
  "jsonrpsee-core",
  "jsonrpsee-types",
  "metrics 0.23.0",
@@ -9833,7 +9797,6 @@ dependencies = [
  "reth-tasks",
  "reth-transaction-pool",
  "serde",
- "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -9959,7 +9922,6 @@ dependencies = [
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "alloy-serde",
- "irys-primitives",
  "reth-primitives",
  "reth-trie-common",
 ]
@@ -10199,7 +10161,6 @@ name = "reth-trie-common"
 version = "1.1.0"
 dependencies = [
  "alloy-consensus",
- "alloy-genesis",
  "alloy-primitives",
  "alloy-rlp",
  "alloy-trie",
@@ -10325,25 +10286,16 @@ dependencies = [
  "alloy-eip2930",
  "alloy-eip7702",
  "alloy-primitives",
- "arbitrary",
  "auto_impl",
  "bitflags 2.6.0",
  "bitvec",
- "bytes",
  "c-kzg",
  "cfg-if",
- "derive_more 1.0.0",
  "dyn-clone",
  "enumn",
  "hex",
  "irys-primitives",
- "modular-bitfield",
- "proptest",
- "proptest-derive 0.4.0",
- "reth-codecs",
  "serde",
- "test-fuzz",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -10483,19 +10435,17 @@ checksum = "afab94fb28594581f62d981211a9a4d53cc8130bbcbbb89a0440d9b8e81a7746"
 
 [[package]]
 name = "ruint"
-version = "1.12.4"
+version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5ef8fb1dd8de3870cb8400d51b4c2023854bbafd5431a3ac7e7317243e22d2f"
+checksum = "2c3cc4c2511671f327125da14133d0c5c5d137f006a1017a16f557bc85b16286"
 dependencies = [
  "alloy-rlp",
  "arbitrary",
  "ark-ff 0.3.0",
  "ark-ff 0.4.2",
  "bytes",
- "fastrlp 0.3.1",
- "fastrlp 0.4.0",
+ "fastrlp",
  "num-bigint",
- "num-integer",
  "num-traits",
  "parity-scale-codec",
  "primitive-types",
@@ -11320,15 +11270,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "storage-pricing"
-version = "0.1.0"
-dependencies = [
- "eyre",
- "rust_decimal",
- "rust_decimal_macros",
-]
 
 [[package]]
 name = "strsim"
@@ -12517,7 +12458,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

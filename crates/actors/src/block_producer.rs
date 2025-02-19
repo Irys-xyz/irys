@@ -125,16 +125,16 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         eyre::Result<Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>>,
     >;
 
+    #[tracing::instrument(skip_all, fields(
+            minting_address = ?msg.0.mining_address,
+            partition_hash = ?msg.0.partition_hash,
+            chunk_offset = ?msg.0.chunk_offset,
+            tx_path = ?msg.0.tx_path.is_none(),
+            chunk = ?msg.0.chunk.len(),
+    ))]
     fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
         let solution = msg.0;
-        info!(
-            "BlockProducerActor solution received miner:{:?} partition_hash:{:?} offset:{} capacity:{} chunk_length:{}",
-            solution.mining_address,
-            solution.partition_hash,
-            solution.chunk_offset,
-            solution.tx_path.is_none(),
-            solution.chunk.len(),
-        );
+        info!("BlockProducerActor solution received");
 
         let mempool_addr = self.mempool_addr.clone();
         let block_discovery_addr = self.block_discovery_addr.clone();
@@ -147,16 +147,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let chunk_size = self.storage_config.chunk_size;
         let block_tree_guard = self.block_tree_guard.clone();
 
-        // let self_addr = ctx.address();
-        // let storage_config = self.storage_config.clone();
-        // let vdf_config = self.vdf_config.clone();
         let vdf_steps = self.vdf_steps_guard.clone();
 
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
             let (canonical_blocks, _not_onchain_count) = block_tree_guard.read().get_canonical_chain();
             let (latest_block_hash, prev_block_height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
-            info!("Starting block production, previous block: {} ({})", &latest_block_hash, &prev_block_height);
+            info!(?latest_block_hash, ?prev_block_height, "Starting block production, previous block");
 
             let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash)) {
                 Ok(Some(header)) => Ok(header),
@@ -207,7 +204,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 for data_root in ingress_proofs.keys() {
                     let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
                     if let Some(cached_data_root) = cached_data_root {
-                        debug!("publishing {:?}", &cached_data_root.txid_set);
+                        debug!(tx_ids = ?cached_data_root.txid_set, "publishing");
                         publish_txids.extend(cached_data_root.txid_set);
                     }
                 }
@@ -249,16 +246,15 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 }
             }
 
-            debug!("Publish transactions: {:?}", &publish_txs.iter().map(|h| h.id.0.to_base58()).collect::<Vec<_>>());
+            {
+                let txs = &publish_txs.iter().map(|h| h.id.0.to_base58()).collect::<Vec<_>>();
+                debug!(?txs, "Publish transactions");
+            }
 
             // Publish Ledger Transactions
             let publish_chunks_added = calculate_chunks_added(&publish_txs, chunk_size);
             let publish_max_chunk_offset =  prev_block_header.ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
-            let opt_proofs = if proofs.is_empty() {
-                 None
-            } else {
-                Some(IngressProofsList::from(proofs))
-            };
+            let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
             // Submit Ledger Transactions    
             let submit_txs: Vec<IrysTransactionHeader> =
@@ -300,8 +296,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // Use the partition hash to figure out what ledger it belongs to
             let ledger_id = epoch_service_addr
                 .send(GetPartitionAssignmentMessage(solution.partition_hash))
-                .await
-                .unwrap()
+                .await?
                 .and_then(|pa| pa.ledger_id);
 
 
@@ -370,6 +365,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     steps,
                     ..Default::default()
                 },
+                // todo: update this in the future to get the data from an oracle / use EMA
+                irys_price: prev_block_header.irys_price
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
@@ -427,8 +424,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let exec_payload = context
                 .engine_api
                 .build_payload_v1_irys(prev_block_header.evm_block_hash, payload_attrs)
-                .await
-                .unwrap();
+                .await?;
 
             // we can examine the execution status of generated shadow txs
             // let shadow_receipts = exec_payload.shadow_receipts;

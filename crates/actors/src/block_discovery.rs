@@ -75,6 +75,7 @@ impl BlockDiscoveryActor {
 
 impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
     type Result = ResponseFuture<eyre::Result<()>>;
+
     fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Context<Self>) -> Self::Result {
         // Validate discovered block
         let new_block_header = msg.0;
@@ -184,16 +185,16 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let db = self.db.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
 
-        info!(
-            "Validating block height: {} step: {} output: {} prev output: {}",
-            new_block_header.height,
-            new_block_header.vdf_limiter_info.global_step_number,
-            new_block_header.vdf_limiter_info.output,
-            new_block_header.vdf_limiter_info.prev_output
+        info!(height = ?new_block_header.height,
+            global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
+            output = ?new_block_header.vdf_limiter_info.output,
+            prev_output = ?new_block_header.vdf_limiter_info.prev_output,
+            "Validating block"
         );
         Box::pin(async move {
             let block_header_clone = new_block_header.clone(); // Clone before moving
 
+            info!("Pre-validating block");
             let validation_future = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
                     block_header,
