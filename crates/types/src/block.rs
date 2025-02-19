@@ -359,7 +359,8 @@ impl IrysBlockHeader {
             ],
             evm_block_hash: B256::ZERO,
             miner_address: Address::ZERO,
-            irys_price: Amount::token(dec!(1.0)),
+            irys_price: Amount::token(dec!(1.0))
+                .expect("dec!(1.0) must evaluate to a valid token amount"),
             ..Default::default()
         }
     }

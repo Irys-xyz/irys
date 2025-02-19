@@ -86,20 +86,20 @@ impl<T> Amount<T> {
         }
     }
 
-    pub fn token(amount: Decimal) -> Self {
-        let amount = Self::decimal_to_u256(amount, TOKEN_SCALE_NATIVE);
-        Self::new(amount)
+    pub fn token(amount: Decimal) -> Result<Self> {
+        let amount = Self::decimal_to_u256(amount, TOKEN_SCALE_NATIVE)?;
+        Ok(Self::new(amount))
     }
 
-    pub fn percentage(amount: Decimal) -> Self {
-        let amount = Self::decimal_to_u256(amount, BPS_SCALE_NATIVE);
-        Self::new(amount)
+    pub fn percentage(amount: Decimal) -> Result<Self> {
+        let amount = Self::decimal_to_u256(amount, BPS_SCALE_NATIVE)?;
+        Ok(Self::new(amount))
     }
 
     /// Helper to convert a Decimal into a scaled U256.
-    pub fn decimal_to_u256(dec: Decimal, scale: u64) -> U256 {
+    pub fn decimal_to_u256(dec: Decimal, scale: u64) -> Result<U256> {
         // Only handle non-negative decimals.
-        assert!(dec >= Decimal::ZERO, "decimal must be non-negative");
+        ensure!(dec >= Decimal::ZERO, "decimal must be non-negative");
 
         // Get the underlying integer representation and the scale.
         // A Decimal represents: value = mantissa / 10^(dec.scale())
@@ -107,35 +107,50 @@ impl<T> Amount<T> {
         let dec_scale = dec.scale();
 
         // divisor = 10^(dec.scale())
-        let divisor = U256::from(10u128.pow(dec_scale));
+        let divisor = U256::from(
+            10u128
+                .checked_pow(dec_scale)
+                .ok_or_else(|| eyre::eyre!("decimal scale too large 10^{dec_scale}"))?,
+        );
 
         // For rounding, add half the divisor.
-        let half_divisor = divisor / U256::from(2u8);
+        let half_divisor = safe_div(divisor, U256::from(2u8))?;
 
         // Multiply the unscaled value by the target scale in U256 arithmetic.
-        let numerator = U256::from(unscaled)
-            .checked_mul(U256::from(scale))
-            .expect("multiplication overflow in U256");
+        let numerator = safe_mul(U256::from(unscaled), U256::from(scale))?;
 
         // Perform the division with rounding.
-        (numerator + half_divisor) / divisor
+        let res = safe_div(safe_add(numerator, half_divisor)?, divisor)?;
+        Ok(res)
     }
 
     /// Helper to convert a U256 (with 18 decimals) into a `Decimal` for assertions.
     /// Assumes that the U256 value is small enough to fit into a u128.
-    pub fn token_to_decimal(&self) -> Decimal {
+    pub fn token_to_decimal(&self) -> Result<Decimal> {
         // Compute the integer and fractional parts.
-        let quotient = self.amount / TOKEN_SCALE;
-        let remainder = self.amount % TOKEN_SCALE;
+        let quotient = safe_div(self.amount, TOKEN_SCALE)?;
+        let remainder = safe_mod(self.amount, TOKEN_SCALE)?;
 
         // Convert quotient and remainder to u128.
-        let q: u128 = u128::try_from(quotient).expect("quotient fits in u128");
-        let r: u128 = u128::try_from(remainder).expect("remainder fits in u128");
+        let quotient: u128 = u128::try_from(quotient).expect("quotient fits in u128");
+        let remainder: u128 = u128::try_from(remainder).expect("remainder fits in u128");
 
         // Build the Decimal value:
         // The quotient represents the integer part,
         // while the remainder scaled by 1e-18 is the fractional part.
-        Decimal::from(q) + (Decimal::from(r) / dec!(1000000000000000000))
+        let remainder = Decimal::from(remainder)
+            .checked_div(dec!(1000000000000000000))
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "scaling back remainder {remainder} decimal from 1e-18 cannot be computed"
+                )
+            })?;
+        let res = Decimal::from(quotient)
+            .checked_add(remainder)
+            .ok_or_else(|| {
+                eyre::eyre!("decimal overflow: quotient={quotient} remainder={remainder}")
+            })?;
+        Ok(res)
     }
 }
 
@@ -219,7 +234,6 @@ impl Amount<(CostPerGb, Usd)> {
         let fraction_bps = mul_div(numerator, BPS_SCALE, decay_rate.amount)?;
 
         // Convert fraction from basis points to 1e18 fixed point:
-        // fraction_1e18 = fraction_bps * 1e18 / 10000
         let fraction_1e18 = mul_div(fraction_bps, TOKEN_SCALE, BPS_SCALE)?;
 
         // Multiply the annual cost by the fraction.
@@ -381,33 +395,42 @@ fn basis_pow(mut base_bps: U256, mut exp: u64) -> Result<U256> {
 }
 
 /// safe addition that errors on overflow.
-fn safe_add(a: U256, b: U256) -> Result<U256> {
-    a.checked_add(b).ok_or_else(|| eyre!("overflow in add"))
+fn safe_add(lhs: U256, rhs: U256) -> Result<U256> {
+    lhs.checked_add(rhs).ok_or_else(|| eyre!("overflow in add"))
 }
 
 /// safe subtraction that errors on underflow.
-fn safe_sub(a: U256, b: U256) -> Result<U256> {
-    a.checked_sub(b).ok_or_else(|| eyre!("underflow in sub"))
+fn safe_sub(lhs: U256, rhs: U256) -> Result<U256> {
+    lhs.checked_sub(rhs)
+        .ok_or_else(|| eyre!("underflow in sub"))
 }
 
 /// safe multiplication that errors on overflow.
-fn safe_mul(a: U256, b: U256) -> Result<U256> {
-    a.checked_mul(b).ok_or_else(|| eyre!("overflow in mul"))
+fn safe_mul(lhs: U256, rhs: U256) -> Result<U256> {
+    lhs.checked_mul(rhs).ok_or_else(|| eyre!("overflow in mul"))
 }
 
 /// safe division that errors on division-by-zero.
-fn safe_div(a: U256, b: U256) -> Result<U256> {
-    if b.is_zero() {
+fn safe_div(lhs: U256, rhs: U256) -> Result<U256> {
+    if rhs.is_zero() {
         Err(eyre!("division by zero"))
     } else {
-        Ok(a.checked_div(b).unwrap())
+        Ok(lhs.checked_div(rhs).unwrap())
+    }
+}
+
+fn safe_mod(lhs: U256, rhs: U256) -> Result<U256> {
+    if rhs.is_zero() {
+        Err(eyre!("module by zero"))
+    } else {
+        Ok(lhs % rhs)
     }
 }
 
 /// computes (a * b) / c in 256-bit arithmetic with checks.
-fn mul_div(a: U256, b: U256, c: U256) -> Result<U256> {
-    let prod = safe_mul(a, b)?;
-    safe_div(prod, c)
+fn mul_div(mul_lhs: U256, mul_rhs: U256, div: U256) -> Result<U256> {
+    let prod = safe_mul(mul_lhs, mul_rhs)?;
+    safe_div(prod, div)
 }
 
 #[cfg(test)]
@@ -421,7 +444,7 @@ mod tests {
     #[test]
     fn test_amount_rlp_round_trip() {
         // setup
-        let data = Amount::<IrysPrice>::token(dec!(1.11));
+        let data = Amount::<IrysPrice>::token(dec!(1.11)).unwrap();
 
         // action
         let mut buffer = vec![];
@@ -439,22 +462,26 @@ mod tests {
         fn test_decimal_to_u256_known_values() {
             // 1 token should convert to exactly 1e18.
             let one_token = dec!(1);
-            let one_token_u256 = Amount::<()>::decimal_to_u256(one_token, TOKEN_SCALE_NATIVE);
+            let one_token_u256 =
+                Amount::<()>::decimal_to_u256(one_token, TOKEN_SCALE_NATIVE).unwrap();
             assert_eq!(one_token_u256, U256::from(TOKEN_SCALE_NATIVE));
 
             // 0.5 token => 0.5 * 1e18 = 5e17.
             let half_token = dec!(0.5);
-            let half_token_u256 = Amount::<()>::decimal_to_u256(half_token, TOKEN_SCALE_NATIVE);
+            let half_token_u256 =
+                Amount::<()>::decimal_to_u256(half_token, TOKEN_SCALE_NATIVE).unwrap();
             assert_eq!(half_token_u256, U256::from(TOKEN_SCALE_NATIVE / 2));
 
             // The minimum token unit, 0.000000000000000001, should become 1.
             let min_token = dec!(0.000000000000000001);
-            let min_token_u256 = Amount::<()>::decimal_to_u256(min_token, TOKEN_SCALE_NATIVE);
+            let min_token_u256 =
+                Amount::<()>::decimal_to_u256(min_token, TOKEN_SCALE_NATIVE).unwrap();
             assert_eq!(min_token_u256, U256::from(1));
 
             // 1_000_000_000 token should convert to exactly 1e27.
             let large_tokens = dec!(1_000_000_000);
-            let one_token_u256 = Amount::<()>::decimal_to_u256(large_tokens, TOKEN_SCALE_NATIVE);
+            let one_token_u256 =
+                Amount::<()>::decimal_to_u256(large_tokens, TOKEN_SCALE_NATIVE).unwrap();
             assert_eq!(
                 one_token_u256,
                 U256::from((TOKEN_SCALE_NATIVE as u128) * 1_000_000_000)
@@ -465,17 +492,23 @@ mod tests {
         fn test_u256_to_decimal_known_values() {
             // 1e18 as U256 should become exactly 1 token.
             let one_token_u256 = TOKEN_SCALE;
-            let one_token_dec = Amount::<()>::new(one_token_u256).token_to_decimal();
+            let one_token_dec = Amount::<()>::new(one_token_u256)
+                .token_to_decimal()
+                .unwrap();
             assert_eq!(one_token_dec, dec!(1));
 
             // 5e17 as U256 should convert to 0.5.
-            let half_token_u256 = (TOKEN_SCALE / 2);
-            let half_token_dec = Amount::<()>::new(half_token_u256).token_to_decimal();
+            let half_token_u256 = TOKEN_SCALE / 2;
+            let half_token_dec = Amount::<()>::new(half_token_u256)
+                .token_to_decimal()
+                .unwrap();
             assert_eq!(half_token_dec, dec!(0.5));
 
             // A U256 value of 1 should be 0.000000000000000001.
             let min_token_u256 = U256::from(1);
-            let min_token_dec = Amount::<()>::new(min_token_u256).token_to_decimal();
+            let min_token_dec = Amount::<()>::new(min_token_u256)
+                .token_to_decimal()
+                .unwrap();
             assert_eq!(min_token_dec, dec!(0.000000000000000001));
         }
     }
@@ -491,15 +524,15 @@ mod tests {
             // Setup:
             // annual = 0.01
             // decay = 1%
-            let annual = Amount::token(dec!(0.01));
-            let decay = Amount::percentage(dec!(0.01)); // 1%
+            let annual = Amount::token(dec!(0.01)).unwrap();
+            let decay = Amount::percentage(dec!(0.01)).unwrap(); // 1%
             let years = 200;
 
             // Action
             let cost_per_gb = annual.cost_per_replica(years, decay)?.replica_count(1)?;
 
             // Convert the result to Decimal for comparison
-            let actual = cost_per_gb.token_to_decimal();
+            let actual = cost_per_gb.token_to_decimal().unwrap();
 
             // Assert - cost per GB (single replica) should be ~0.8661
             let expected = dec!(0.8661);
@@ -513,7 +546,7 @@ mod tests {
 
             // Check cost for 10 replicas => multiply by 10
             let cost_10 = cost_per_gb.replica_count(10)?;
-            let actual_10 = cost_10.token_to_decimal();
+            let actual_10 = cost_10.token_to_decimal().unwrap();
             let expected_10 = dec!(8.66);
             let diff_10 = (actual_10 - expected_10).abs();
             assert!(
@@ -531,8 +564,8 @@ mod tests {
         fn test_zero_decay_rate() {
             // annual = 1000 (scaled 1e18)
             // decay = 0 BPS => division by zero.
-            let annual = Amount::token(dec!(1000));
-            let decay = Amount::percentage(dec!(0));
+            let annual = Amount::token(dec!(1000)).unwrap();
+            let decay = Amount::percentage(dec!(0)).unwrap();
             let years = 10;
 
             let result = annual.cost_per_replica(years, decay);
@@ -546,15 +579,15 @@ mod tests {
         fn test_full_decay_rate() -> Result<()> {
             // annual = 500 (scaled 1e18)
             // decay = 100% (BPS_SCALE)
-            let annual = Amount::token(dec!(500));
-            let decay = Amount::percentage(dec!(1.0)); // 100%
+            let annual = Amount::token(dec!(500)).unwrap();
+            let decay = Amount::percentage(dec!(1.0)).unwrap(); // 100%
             let years_to_pay_for_storage = 5;
 
             let total = annual
                 .cost_per_replica(years_to_pay_for_storage, decay)?
                 .replica_count(1)?;
 
-            let actual_dec = total.token_to_decimal();
+            let actual_dec = total.token_to_decimal().unwrap();
             let expected_dec = dec!(500);
             assert_eq!(
                 actual_dec, expected_dec,
@@ -566,8 +599,8 @@ mod tests {
 
         #[test]
         fn test_decay_rate_above_one() {
-            let annual = Amount::token(dec!(0.01));
-            let decay = Amount::percentage(dec!(1.5)); // Above 100%
+            let annual = Amount::token(dec!(0.01)).unwrap();
+            let decay = Amount::percentage(dec!(1.5)).unwrap(); // Above 100%
             let years = 200;
 
             let result = annual.cost_per_replica(years, decay);
@@ -582,13 +615,13 @@ mod tests {
             // If years = 0 => total cost = 0.
             // annual = 1234.56 (scaled 1e18)
             // decay = 5%
-            let annual = Amount::token(dec!(1234.56));
-            let decay = Amount::percentage(dec!(0.05)); // 5%
+            let annual = Amount::token(dec!(1234.56)).unwrap();
+            let decay = Amount::percentage(dec!(0.05)).unwrap(); // 5%
             let years = 0;
 
             let total = annual.cost_per_replica(years, decay)?.replica_count(1)?;
 
-            let actual_dec = total.token_to_decimal();
+            let actual_dec = total.token_to_decimal().unwrap();
             let expected_dec = Decimal::ZERO;
             assert_eq!(actual_dec, expected_dec, "expected 0.0, got {}", actual_dec);
             Ok(())
@@ -599,13 +632,13 @@ mod tests {
         fn test_annual_cost_zero() -> Result<()> {
             // annual = 0
             // decay = 5%
-            let annual = Amount::token(dec!(0));
-            let decay = Amount::percentage(dec!(0.05)); // 5%
+            let annual = Amount::token(dec!(0)).unwrap();
+            let decay = Amount::percentage(dec!(0.05)).unwrap(); // 5%
             let years = 10;
 
             let total = annual.cost_per_replica(years, decay)?.replica_count(1)?;
 
-            let actual_dec = total.token_to_decimal();
+            let actual_dec = total.token_to_decimal().unwrap();
             assert_eq!(
                 actual_dec,
                 Decimal::ZERO,
@@ -623,10 +656,10 @@ mod tests {
         #[test]
         fn test_normal_case() -> Result<()> {
             // Setup:
-            let cost_per_gb_10_replicas_200_years = Amount::token(dec!(8.65));
-            let price_irys = Amount::token(dec!(1.09));
+            let cost_per_gb_10_replicas_200_years = Amount::token(dec!(8.65)).unwrap();
+            let price_irys = Amount::token(dec!(1.09)).unwrap();
             let bytes_to_store = 1024u64 * 1024u64 * 200u64; // 200 MB
-            let fee_percentage = Amount::percentage(dec!(0.05)); // 5%
+            let fee_percentage = Amount::percentage(dec!(0.05)).unwrap(); // 5%
 
             // Action
             let network_fee = cost_per_gb_10_replicas_200_years
@@ -634,8 +667,8 @@ mod tests {
             let price_with_network_reward = network_fee.add_multiplier(fee_percentage)?;
 
             // Convert results for checking
-            let network_fee_dec = network_fee.token_to_decimal();
-            let reward_dec = price_with_network_reward.token_to_decimal();
+            let network_fee_dec = network_fee.token_to_decimal().unwrap();
+            let reward_dec = price_with_network_reward.token_to_decimal().unwrap();
 
             // Assert ~1.55
             let expected = dec!(1.55);
@@ -658,14 +691,14 @@ mod tests {
         fn test_calculate_ema_valid() -> Result<()> {
             // Setup
             let total_past_blocks = 10;
-            let ema_0 = Amount::token(dec!(1.00));
-            let current_price = Amount::token(dec!(1.01));
+            let ema_0 = Amount::token(dec!(1.00)).unwrap();
+            let current_price = Amount::token(dec!(1.01)).unwrap();
 
             // Action
             let ema_1 = current_price.calculate_ema(total_past_blocks, ema_0)?;
 
             // Compare
-            let actual = ema_1.token_to_decimal();
+            let actual = ema_1.token_to_decimal().unwrap();
             let expected = dec!(1.00181818181818);
             let diff = (actual - expected).abs();
             assert!(
@@ -680,8 +713,8 @@ mod tests {
         #[test]
         fn test_calculate_ema_huge_epoch() {
             let total_past_blocks = u64::MAX;
-            let current_irys_price = Amount::token(dec!(123.456));
-            let last_block_ema = Amount::token(dec!(1000.0));
+            let current_irys_price = Amount::token(dec!(123.456)).unwrap();
+            let last_block_ema = Amount::token(dec!(1000.0)).unwrap();
 
             let result = current_irys_price.calculate_ema(total_past_blocks, last_block_ema);
             assert!(result.is_err());
