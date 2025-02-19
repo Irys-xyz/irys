@@ -226,15 +226,11 @@ impl Ledger {
         *self as u32
     }
 
-    // Takes "perm" or some term e.g. "1year", or an integer ID
-    pub fn from_url(s: &str) -> eyre::Result<Self> {
-        if let Ok(ledger_id) = s.parse::<u32>() {
-            return Ledger::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
-        }
-        match s {
-            "perm" => eyre::Result::Ok(Self::Publish),
-            "5days" => eyre::Result::Ok(Self::Submit),
-            _ => Err(eyre::eyre!("Ledger {} not supported", s)),
+    fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Publish),
+            1 => Some(Self::Submit),
+            _ => None,
         }
     }
 }
@@ -249,11 +245,16 @@ impl TryFrom<u32> for Ledger {
     type Error = &'static str;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Publish),
-            1 => Ok(Self::Submit),
-            _ => Err("Invalid ledger number"),
-        }
+        Self::from_u32(value).ok_or("Invalid ledger number")
+    }
+}
+
+impl TryFrom<&str> for Ledger {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let x = value.parse().map_err(|_| "Failed to parse")?;
+        Self::from_u32(x).ok_or("Invalid ledger number")
     }
 }
 
@@ -413,5 +414,52 @@ impl IndexMut<Ledger> for Vec<TransactionLedger> {
         self.iter_mut()
             .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
             .expect("No transaction ledger found for given ledger type")
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_try_from_str_publish_ledger() {
+        let res = Ledger::try_from("0").unwrap();
+        assert_eq!(Ledger::Publish, res)
+    }
+
+    #[test]
+    fn test_try_from_str_submit_ledger() {
+        let res = Ledger::try_from("1").unwrap();
+        assert_eq!(Ledger::Submit, res)
+    }
+
+    #[test]
+    fn test_try_from_str_invalid_ledger() {
+        let res = Ledger::try_from("42");
+        assert_eq!(true, res.is_err())
+    }
+
+    #[test]
+    fn test_try_from_str_invalid_ledger_number() {
+        let res = Ledger::try_from("not a valid ledger");
+        assert_eq!(true, res.is_err())
+    }
+
+    #[test]
+    fn test_try_from_u32_publish_ledger() {
+        let res = Ledger::try_from(0).unwrap();
+        assert_eq!(Ledger::Publish, res)
+    }
+
+    #[test]
+    fn test_try_from_u32_submit_ledger() {
+        let res = Ledger::try_from(1).unwrap();
+        assert_eq!(Ledger::Submit, res)
+    }
+
+    #[test]
+    fn test_try_from_u32_invalid_ledger() {
+        let res = Ledger::try_from(42);
+        assert_eq!(true, res.is_err())
     }
 }
