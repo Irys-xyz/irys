@@ -61,9 +61,9 @@ use tokio::{
     sync::oneshot::{self},
 };
 
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-
 use crate::vdf::run_vdf;
+use irys_database::migration::check_db_version_and_run_migrations_if_needed;
+use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 
 pub async fn start() -> eyre::Result<IrysNodeCtx> {
@@ -228,7 +228,11 @@ pub async fn start_irys_node(
             System::new().block_on(async move {
                 // the RethNodeHandle doesn't *need* to be Arc, but it will reduce the copy cost
                 let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
+                let reth_db = DatabaseProvider(reth_node.provider.database.db.clone());
                 let irys_db = DatabaseProvider(irys_db_env.clone());
+
+                check_db_version_and_run_migrations_if_needed(&reth_db, &irys_db).unwrap();
+
                 let vdf_config = VDFStepsConfig::default();
 
                 let latest_block = latest_block_index
