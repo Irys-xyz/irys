@@ -47,6 +47,7 @@ hex.workspace = true
 [dev-dependencies]
 toml.workspace = true
 test-fuzz.workspace = true
+approx = "0.5.1"
 
 [build-dependencies]
 build-print = "0"

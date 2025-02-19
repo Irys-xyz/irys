@@ -10,7 +10,7 @@ use crate::tables::{
 use crate::metadata::MetadataKey;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionId, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
+    IrysTransactionId, TxChunkOffset, UnpackedChunk, MEBIBYTE, U256,
 };
 use reth_db::cursor::DbDupCursorRO;
 
@@ -39,7 +39,7 @@ pub fn open_or_create_db<P: AsRef<Path>, T: HasName + HasTableType>(
         DatabaseArguments::new(ClientVersion::default())
             .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
             // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
-            .with_growth_step((10 * MEGABYTE).try_into()?),
+            .with_growth_step((10 * MEBIBYTE).try_into()?),
     );
 
     // Register the prometheus recorder before creating the database,
