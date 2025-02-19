@@ -78,7 +78,6 @@ pub struct VDFLimiterInfo {
 )]
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
-#[repr(C)]
 pub struct IrysBlockHeader {
     #[rlp(skip)]
     #[rlp(default)]

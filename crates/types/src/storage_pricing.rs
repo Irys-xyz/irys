@@ -50,7 +50,8 @@ impl<T> Encodable for Amount<T> {
     }
 }
 
-impl<T> Decodable for Amount<T> {
+impl<T: std::fmt::Debug> Decodable for Amount<T> {
+    #[tracing::instrument(err)]
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let res = U256::decode(buf)?;
         Ok(Amount::new(res))
@@ -77,7 +78,7 @@ impl<T> Compact for Amount<T> {
     }
 }
 
-impl<T> Amount<T> {
+impl<T: std::fmt::Debug> Amount<T> {
     #[must_use]
     pub const fn new(amount: U256) -> Self {
         Self {
@@ -86,17 +87,20 @@ impl<T> Amount<T> {
         }
     }
 
+    #[tracing::instrument(err)]
     pub fn token(amount: Decimal) -> Result<Self> {
         let amount = Self::decimal_to_u256(amount, TOKEN_SCALE_NATIVE)?;
         Ok(Self::new(amount))
     }
 
+    #[tracing::instrument(err)]
     pub fn percentage(amount: Decimal) -> Result<Self> {
         let amount = Self::decimal_to_u256(amount, BPS_SCALE_NATIVE)?;
         Ok(Self::new(amount))
     }
 
     /// Helper to convert a Decimal into a scaled U256.
+    #[tracing::instrument(err)]
     pub fn decimal_to_u256(dec: Decimal, scale: u64) -> Result<U256> {
         // Only handle non-negative decimals.
         ensure!(dec >= Decimal::ZERO, "decimal must be non-negative");
@@ -126,6 +130,7 @@ impl<T> Amount<T> {
 
     /// Helper to convert a U256 (with 18 decimals) into a `Decimal` for assertions.
     /// Assumes that the U256 value is small enough to fit into a u128.
+    #[tracing::instrument(err)]
     pub fn token_to_decimal(&self) -> Result<Decimal> {
         // Compute the integer and fractional parts.
         let quotient = safe_div(self.amount, TOKEN_SCALE)?;
@@ -216,6 +221,7 @@ impl Amount<(CostPerGb, Usd)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
     pub fn cost_per_replica(
         self,
         years: u64,
@@ -263,6 +269,7 @@ impl Amount<(CostPerGbYearAdjusted, Usd)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
     pub fn replica_count(self, replicas: u64) -> Result<Self> {
         // safe_mul for scale * integer is okay (the result is still scaled)
         let total = safe_mul(self.amount, U256::from(replicas))?;
@@ -277,6 +284,7 @@ impl Amount<(CostPerGbYearAdjusted, Usd)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
     pub fn base_network_fee(
         self,
         bytes_to_store: U256,
@@ -306,6 +314,7 @@ impl Amount<(NetworkFee, Irys)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
     pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
         // total = amount * (1 + percentage) / SCALE
         let one_plus = safe_add(BPS_SCALE, percentage.amount)?;
@@ -333,6 +342,7 @@ impl Amount<(IrysPrice, Usd)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
     pub fn calculate_ema(
         self,
         total_past_blocks: u64,
@@ -395,22 +405,26 @@ fn basis_pow(mut base_bps: U256, mut exp: u64) -> Result<U256> {
 }
 
 /// safe addition that errors on overflow.
+#[tracing::instrument(err)]
 fn safe_add(lhs: U256, rhs: U256) -> Result<U256> {
     lhs.checked_add(rhs).ok_or_else(|| eyre!("overflow in add"))
 }
 
 /// safe subtraction that errors on underflow.
+#[tracing::instrument(err)]
 fn safe_sub(lhs: U256, rhs: U256) -> Result<U256> {
     lhs.checked_sub(rhs)
         .ok_or_else(|| eyre!("underflow in sub"))
 }
 
 /// safe multiplication that errors on overflow.
+#[tracing::instrument(err)]
 fn safe_mul(lhs: U256, rhs: U256) -> Result<U256> {
     lhs.checked_mul(rhs).ok_or_else(|| eyre!("overflow in mul"))
 }
 
 /// safe division that errors on division-by-zero.
+#[tracing::instrument(err)]
 fn safe_div(lhs: U256, rhs: U256) -> Result<U256> {
     if rhs.is_zero() {
         Err(eyre!("division by zero"))
@@ -419,6 +433,7 @@ fn safe_div(lhs: U256, rhs: U256) -> Result<U256> {
     }
 }
 
+#[tracing::instrument(err)]
 fn safe_mod(lhs: U256, rhs: U256) -> Result<U256> {
     if rhs.is_zero() {
         Err(eyre!("module by zero"))
@@ -428,6 +443,7 @@ fn safe_mod(lhs: U256, rhs: U256) -> Result<U256> {
 }
 
 /// computes (a * b) / c in 256-bit arithmetic with checks.
+#[tracing::instrument]
 fn mul_div(mul_lhs: U256, mul_rhs: U256, div: U256) -> Result<U256> {
     let prod = safe_mul(mul_lhs, mul_rhs)?;
     safe_div(prod, div)

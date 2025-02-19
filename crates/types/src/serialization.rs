@@ -5,7 +5,6 @@ use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
 use bytes::Buf;
 use eyre::{Error, OptionExt};
-use futures::AsyncReadExt;
 use openssl::sha;
 use rand::RngCore;
 use reth_codecs::Compact;
@@ -18,7 +17,6 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
 };
 use std::{ops::Index, slice::SliceIndex, str::FromStr};
-use zerocopy::{FromBytes, IntoBytes};
 
 use fixed_hash::construct_fixed_hash;
 use uint::construct_uint;
