@@ -18,7 +18,9 @@ use irys_actors::{
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, CONFIG};
-use routes::{block, get_chunk, index, network_config, post_chunk, price, proxy::proxy, tx};
+use routes::{
+    block, get_chunk, index, network_config, peer_list, post_chunk, price, proxy::proxy, tx,
+};
 use tracing::{debug, info};
 
 #[derive(Clone)]
@@ -51,6 +53,7 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(get_chunk::get_chunk_by_ledger_offset),
         )
         .route("/chunk", web::post().to(post_chunk::post_chunk))
+        .route("/peer_list", web::get().to(peer_list::peer_list_route))
         .route("/tx/{tx_id}", web::get().to(tx::get_tx_header_api))
         .route(
             "/tx/{tx_id}/local/data_start_offset",

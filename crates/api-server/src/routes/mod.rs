@@ -2,6 +2,7 @@ pub mod block;
 pub mod get_chunk;
 pub mod index;
 pub mod network_config;
+pub mod peer_list;
 pub mod post_chunk;
 pub mod price;
 pub mod proxy;
