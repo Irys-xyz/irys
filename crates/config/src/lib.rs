@@ -1,4 +1,4 @@
-//! Crate dedicated to the `IrysNodeConfig` to avoid depdendency cycles
+//! Crate dedicated to the `IrysNodeConfig` to avoid dependency cycles
 use std::{
     env::{self},
     fs,
@@ -160,6 +160,7 @@ impl IrysNodeConfig {
 
 pub const PRICE_PER_CHUNK_PERM: u128 = 10000;
 pub const PRICE_PER_CHUNK_5_EPOCH: u128 = 10;
+pub const ANNUALIZED_COST_OF_STORING_1GB: f64 = 0.01110839844;
 
 /// Subsystem allowing for the configuration of storage submodules via a handy TOML file
 ///
