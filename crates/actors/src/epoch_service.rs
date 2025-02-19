@@ -1286,7 +1286,6 @@ mod tests {
             } else {
                 panic!("Should have an assignment");
             };
-
         }
 
         assert_eq!(
@@ -1304,7 +1303,7 @@ mod tests {
     #[actix::test]
     async fn partitions_assignment_determinism_test() {
         // Initialize genesis block at height 0
-        let mut genesis_block = IrysBlockHeader::new();
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.last_epoch_hash = H256::zero(); // for partitions hash determinism
         genesis_block.height = 0;
 
@@ -1339,16 +1338,16 @@ mod tests {
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let total_epoch_messages = 6;
         let mut epoch_num = 1;
-        let mut new_epoch_block = IrysBlockHeader::new();
+        let mut new_epoch_block = IrysBlockHeader::new_mock_header();
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition;
         new_epoch_block.ledgers[Ledger::Publish].max_chunk_offset = num_chunks_in_partition;
 
         while epoch_num <= total_epoch_messages {
-            new_epoch_block.height = (CONFIG.submit_ledger_epoch_length * epoch_num) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
+            new_epoch_block.height =
+                (CONFIG.submit_ledger_epoch_length * epoch_num) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
             let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
             epoch_num += 1;
         }
-
 
         // Check determinism in assigned partitions
         let publish_slot_0 = H256(
@@ -1358,7 +1357,8 @@ mod tests {
                 .unwrap(),
         );
 
-        if let Some(publish_assignment) = epoch_service.partition_assignments
+        if let Some(publish_assignment) = epoch_service
+            .partition_assignments
             .read()
             .unwrap()
             .data_partitions
@@ -1385,7 +1385,8 @@ mod tests {
                 .unwrap(),
         );
 
-        if let Some(publish_assignment) = epoch_service.partition_assignments
+        if let Some(publish_assignment) = epoch_service
+            .partition_assignments
             .read()
             .unwrap()
             .data_partitions
@@ -1412,7 +1413,8 @@ mod tests {
                 .unwrap(),
         );
 
-        if let Some(submit_assignment) = epoch_service.partition_assignments
+        if let Some(submit_assignment) = epoch_service
+            .partition_assignments
             .read()
             .unwrap()
             .data_partitions
@@ -1432,7 +1434,6 @@ mod tests {
             panic!("Should have an assignment");
         };
 
-
         let submit_slot_12 = H256(
             hex::decode("fe4af4eb44d9b92afdc3113bc3fba48531502d6367ad42de3a7f1d1ea4065ba4")
                 .unwrap()
@@ -1440,7 +1441,8 @@ mod tests {
                 .unwrap(),
         );
 
-        if let Some(submit_assignment) = epoch_service.partition_assignments
+        if let Some(submit_assignment) = epoch_service
+            .partition_assignments
             .read()
             .unwrap()
             .data_partitions
@@ -1460,5 +1462,4 @@ mod tests {
             panic!("Should have an assignment");
         };
     }
-
 }
