@@ -1,4 +1,4 @@
-//! Range offsets are used by PD to figure out what chunks/bytes are required to fufill a precompile call.
+//! Range offsets are used by PD to figure out what chunks/bytes are required to fulfill a precompile call.
 
 use std::ops::Div;
 
