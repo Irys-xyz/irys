@@ -338,7 +338,7 @@ impl IrysBlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::{irys::IrysSigner, validate_path, TxIngressProof, CONFIG, MAX_CHUNK_SIZE};
+    use crate::{irys::IrysSigner, validate_path, TxIngressProof, MAX_CHUNK_SIZE};
 
     use super::*;
     use alloy_primitives::Signature;
@@ -490,7 +490,7 @@ mod tests {
         let signer = SigningKey::random(&mut rng);
         let signer = IrysSigner {
             signer,
-            chain_id: CONFIG.irys_chain_id,
+            chain_id: 42,
             chunk_size: MAX_CHUNK_SIZE,
         };
 

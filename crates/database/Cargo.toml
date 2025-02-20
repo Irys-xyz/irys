@@ -27,5 +27,9 @@ tempfile.workspace = true
 tracing.workspace = true
 irys-testing-utils.workspace = true
 rand.workspace = true
+
+[dev-dependencies]
+irys-config = { workspace = true, features = ["test-utils"] }
+
 [lints]
 workspace = true

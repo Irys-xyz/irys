@@ -5,12 +5,12 @@ use eyre::{Error, Result};
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, data_ledger::*, database};
 use irys_storage::{ie, StorageModuleInfo};
-use irys_types::H256List;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    DatabaseProvider, IrysBlockHeader, SimpleRNG, StorageConfig, CONFIG, H256,
+    DatabaseProvider, IrysBlockHeader, SimpleRNG, StorageConfig, H256,
 };
 use irys_types::{partition_chunk_offset_ie, PartitionChunkOffset};
+use irys_types::{Config, H256List};
 use openssl::sha;
 use reth_db::Database;
 use std::{
@@ -34,15 +34,18 @@ pub struct EpochServiceConfig {
     pub capacity_scalar: u64,
     /// The length of an epoch denominated in block heights
     pub num_blocks_in_epoch: u64,
+    pub num_capacity_partitions: Option<u64>,
     /// Reference to global storage config for node
     pub storage_config: StorageConfig,
 }
 
 impl Default for EpochServiceConfig {
     fn default() -> Self {
+        let config = Config::default();
         Self {
-            capacity_scalar: CONFIG.capacity_scalar,
-            num_blocks_in_epoch: CONFIG.num_blocks_in_epoch,
+            capacity_scalar: config.capacity_scalar,
+            num_blocks_in_epoch: config.num_blocks_in_epoch,
+            num_capacity_partitions: config.num_capacity_partitions,
             storage_config: StorageConfig::default(),
         }
     }
@@ -309,10 +312,10 @@ impl EpochServiceActor {
         new_epoch_block: Arc<IrysBlockHeader>,
     ) -> Result<(), EpochServiceError> {
         // Validate this is an epoch block height
-        if new_epoch_block.height % CONFIG.num_blocks_in_epoch != 0 {
+        if new_epoch_block.height % self.config.num_blocks_in_epoch != 0 {
             error!(
                 "Not an epoch block height: {} num_blocks_in_epoch: {}",
-                new_epoch_block.height, CONFIG.num_blocks_in_epoch
+                new_epoch_block.height, self.config.num_blocks_in_epoch
             );
             return Err(EpochServiceError::NotAnEpochBlock);
         }
@@ -363,7 +366,9 @@ impl EpochServiceActor {
                 + Self::get_num_capacity_partitions(num_data_partitions, &self.config);
 
             self.add_capacity_partitions(std::cmp::max(
-                CONFIG.num_capacity_partitions.unwrap_or(num_partitions),
+                self.config
+                    .num_capacity_partitions
+                    .unwrap_or(num_partitions),
                 num_partitions,
             ));
         } else {
@@ -740,7 +745,7 @@ mod tests {
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_storage::{ie, StorageModule, StorageModuleVec};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{partition_chunk_offset_ie, Address, PartitionChunkRange, CONFIG};
+    use irys_types::{partition_chunk_offset_ie, Address, PartitionChunkRange};
     use tokio::time::sleep;
 
     use crate::{
@@ -894,8 +899,9 @@ mod tests {
             num_partitions_in_slot: 1,
             miner_address: Address::random(),
             min_writes_before_sync: 1,
-            entropy_packing_iterations: CONFIG.entropy_packing_iterations,
+            entropy_packing_iterations: Config::default().entropy_packing_iterations,
             chunk_migration_depth: 1, // Testnet / single node config
+            irys_chain_id: 333,
         };
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;
 
@@ -904,6 +910,7 @@ mod tests {
             capacity_scalar: 100,
             num_blocks_in_epoch: 100,
             storage_config,
+            num_capacity_partitions: Some(123),
         };
         let num_blocks_in_epoch = config.num_blocks_in_epoch;
 
@@ -986,19 +993,21 @@ mod tests {
             num_partitions_in_slot: 1, // 1 replica per slot
             miner_address: mining_address.clone(),
             min_writes_before_sync: 1,
-            entropy_packing_iterations: CONFIG.entropy_packing_iterations,
+            entropy_packing_iterations: Config::default().entropy_packing_iterations,
             chunk_migration_depth: 1, // Testnet / single node config
+            irys_chain_id: Config::default().irys_chain_id,
         };
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;
         let tmp_dir = setup_tracing_and_temp_dir(Some("partition_expiration_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
 
-        let num_blocks_in_epoch = CONFIG.num_blocks_in_epoch;
+        let num_blocks_in_epoch = Config::default().num_blocks_in_epoch;
 
         // Create epoch service
         let config = EpochServiceConfig {
             capacity_scalar: 100,
-            num_blocks_in_epoch: CONFIG.num_blocks_in_epoch,
+            num_blocks_in_epoch: Config::default().num_blocks_in_epoch,
+            num_capacity_partitions: Config::default().num_capacity_partitions,
             storage_config: storage_config.clone(),
         };
 
@@ -1014,7 +1023,8 @@ mod tests {
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.height = (CONFIG.submit_ledger_epoch_length + 1) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
+        new_epoch_block.height =
+            (Config::default().submit_ledger_epoch_length + 1) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
 
         let storage_module_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();

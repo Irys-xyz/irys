@@ -45,7 +45,7 @@ pub fn read_bytes_range_by_index(
             .ok_or(PrecompileErrors::Error(PrecompileError::Other(
                 "Internal error - unable to parse access list".to_owned(),
             )))?;
-    read_bytes_range(bytes_range, gas_limit, env, state_provider, access_lists)
+    read_bytes_range(bytes_range, state_provider, access_lists)
 }
 
 struct ReadPartialByteRangeArgs {
@@ -112,13 +112,11 @@ pub fn read_partial_byte_range(
         ))
     })?;
 
-    read_bytes_range(bytes_range, gas_limit, env, state_provider, access_lists)
+    read_bytes_range(bytes_range, state_provider, access_lists)
 }
 
 pub fn read_bytes_range(
     bytes_range: ByteRangeSpecifier,
-    _gas_limit: u64,
-    _env: &Env,
     state_provider: &IrysRethProviderInner,
     access_lists: ParsedAccessLists,
 ) -> PrecompileResult {
@@ -187,6 +185,7 @@ pub fn read_bytes_range(
             &chunk,
             storage_config.entropy_packing_iterations,
             storage_config.chunk_size as usize,
+            storage_config.irys_chain_id,
         );
         bytes.extend(unpacked_chunk.bytes.0)
     }
