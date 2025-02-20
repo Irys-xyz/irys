@@ -5242,6 +5242,7 @@ dependencies = [
  "env_logger",
  "eyre",
  "futures",
+ "futures-util",
  "irys-config",
  "irys-database",
  "irys-efficient-sampling",
@@ -5263,6 +5264,7 @@ dependencies = [
  "sha2 0.10.8",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber",
 ]
