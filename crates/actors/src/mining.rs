@@ -68,13 +68,21 @@ impl PartitionMiningActor {
         let vdf_steps = self.steps_guard.read();
         if self.ranges.last_step_num + 1 >= step {
             debug!("Step {} already processed or next consecutive one", step);
-            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
+            Ok(self
+                .ranges
+                .get_recall_range(step, seed, partition_hash)
+                .try_into()
+                .expect("Value exceeds u64::Max"))
         } else {
             // This code is not needed for just one node, but will be needed for multiple nodes
             warn!("Non consecutive Step {} need to reconstruct ranges", step);
             let steps = vdf_steps.get_steps(ii(self.ranges.last_step_num + 1, step - 1))?;
             self.ranges.reconstruct(&steps, partition_hash);
-            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
+            Ok(self
+                .ranges
+                .get_recall_range(step, seed, partition_hash)
+                .try_into()
+                .expect("Value exceeds u64::Max"))
         }
     }
 

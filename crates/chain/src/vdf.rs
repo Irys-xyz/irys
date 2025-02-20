@@ -34,7 +34,10 @@ pub fn run_vdf(
         "VDF thread started at global_step_number: {}",
         global_step_number
     );
-    let nonce_limiter_reset_frequency = config.vdf_reset_frequency as u64;
+    let nonce_limiter_reset_frequency: u64 = config
+        .vdf_reset_frequency
+        .try_into()
+        .expect("Value exceeds u64::Max");
 
     loop {
         let now = Instant::now();
@@ -205,7 +208,11 @@ mod tests {
 
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
-        if step_num > 0 && (step_num - 1) % vdf_config.vdf_reset_frequency as u64 == 0 {
+        if step_num > 0
+            && (step_num - 1)
+                % u64::try_from(vdf_config.vdf_reset_frequency).expect("Value exceeds u64::Max")
+                == 0
+        {
             seed = apply_reset_seed(seed, reset_seed);
         }
         vdf_sha(

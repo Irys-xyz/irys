@@ -106,10 +106,12 @@ pub fn calculate_difficulty(
     let target_time_ms = target_block_time_ms * blocks_between_adjustments;
     let actual_time_ms = current_timestamp - last_diff_timestamp;
 
-    let actual_block_time =
-        Duration::from_millis((actual_time_ms / blocks_between_adjustments) as u64);
-    let target_block_time =
-        Duration::from_millis((target_time_ms / blocks_between_adjustments) as u64);
+    let actual_block_time = Duration::from_millis(
+        u64::try_from(actual_time_ms / blocks_between_adjustments).expect("Value exceeds u64::Max"),
+    );
+    let target_block_time = Duration::from_millis(
+        u64::try_from(target_time_ms / blocks_between_adjustments).expect("Value exceeds u64::Max"),
+    );
 
     // Calculate difference
     let percent_diff = actual_block_time.abs_diff(target_block_time).as_millis() * 100

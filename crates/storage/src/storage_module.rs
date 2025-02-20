@@ -353,7 +353,9 @@ impl StorageModule {
         self.partition_assignment
             .and_then(|part| part.slot_index)
             .map(|slot_index| {
-                let start_offset = slot_index as u64 * self.storage_config.num_chunks_in_partition;
+                let start_offset = TryInto::<u64>::try_into(slot_index)
+                    .expect("Value exceeds u64::Max")
+                    .saturating_mul(self.storage_config.num_chunks_in_partition);
                 let end_offset = start_offset + self.storage_config.num_chunks_in_partition;
                 (start_offset..end_offset).contains(&chunk_offset)
             })
@@ -731,7 +733,7 @@ impl StorageModule {
                     .hash()
                     .map(H256::from)
                     .ok_or_eyre("Unable to parse data_root from tx_path ")?;
-                let data_size = proof.offset() as u64;
+                let data_size = proof.offset().try_into().expect("Value exceeds u64::Max");
                 (data_root, data_size)
             }
             None => return Err(eyre::eyre!("Unable to find a chunk with that tx_path")),
@@ -741,14 +743,17 @@ impl StorageModule {
             Some(dp) => {
                 let path_buff = Base64::from(dp);
                 let proof = get_leaf_proof(&path_buff)?;
-                (path_buff, proof.offset() as u64)
+                let offset: u64 = proof.offset().try_into().expect("Value exceeds u64::Max");
+                (path_buff, offset)
             }
             None => return Err(eyre::eyre!("Unable to find a chunk for that data_path")),
         };
 
         // Get chunk info and calculate index
         let range = self.get_storage_module_range()?;
-        let partition_offset = (ledger_offset - range.start()).try_into().expect("Value exceeds u32::MAX");
+        let partition_offset = (ledger_offset - range.start())
+            .try_into()
+            .expect("Value exceeds u32::MAX");
         let closest_offsets = self.collect_start_offsets(data_root)?;
 
         let nearest_start_offset = closest_offsets
@@ -832,7 +837,9 @@ impl StorageModule {
         {
             // Lock to the submodules internal file handle & write the chunk
             let mut file = submodule.file.lock().unwrap();
-            file.seek(SeekFrom::Start(submodule_offset as u64 * chunk_size))?;
+            file.seek(SeekFrom::Start(
+                (submodule_offset as u64).saturating_mul(chunk_size),
+            ))?;
             let result = file.write(bytes.as_slice());
             match result {
                 // TODO: better logging
@@ -856,7 +863,9 @@ impl StorageModule {
     pub fn get_storage_module_range(&self) -> eyre::Result<LedgerChunkRange> {
         if let Some(part_assign) = self.partition_assignment {
             if let Some(slot_index) = part_assign.slot_index {
-                let start = slot_index as u64 * self.storage_config.num_chunks_in_partition;
+                let start: u64 = u64::try_from(slot_index)
+                    .expect("Value exceeds u64::Max")
+                    .saturating_mul(self.storage_config.num_chunks_in_partition);
                 let end = start + self.storage_config.num_chunks_in_partition;
                 return Ok(LedgerChunkRange(ie(start, end)));
             } else {

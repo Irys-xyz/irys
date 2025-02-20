@@ -3,6 +3,7 @@ use crate::{
     mining::hash_to_number,
 };
 use base58::ToBase58;
+use env_logger::try_init;
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
@@ -246,10 +247,16 @@ pub fn poa_is_valid(
             .get_assignment(poa.partition_hash)
             .unwrap();
 
-        let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
-            * config.num_partitions_in_slot
-            * config.num_chunks_in_partition
-            + poa.partition_chunk_offset as u64;
+        let ledger_chunk_offset: u64 =
+            TryInto::<u64>::try_into(partition_assignment.slot_index.unwrap())
+                .expect("Value exceeds u64::Max")
+                .saturating_mul(config.num_partitions_in_slot)
+                .saturating_mul(config.num_chunks_in_partition)
+                .saturating_add(
+                    poa.partition_chunk_offset
+                        .try_into()
+                        .expect("Value exceeds u64::Max"),
+                );
 
         // ledger data -> block
         let ledger = Ledger::try_from(ledger_id).unwrap();
@@ -306,10 +313,11 @@ pub fn poa_is_valid(
         // Because all chunks are packed as config.chunk_size, if the proof chunk is
         // smaller we need to trim off the excess padding introduced by packing ?
         let (poa_chunk_pad_trimmed, _) = poa_chunk.split_at(
-            (config
-                .chunk_size
-                .min((data_path_result.right_bound - data_path_result.left_bound) as u64))
-                as usize,
+            (config.chunk_size.min(
+                (data_path_result.right_bound - data_path_result.left_bound)
+                    .try_into()
+                    .expect("Value exceeds u64::Max"),
+            )) as usize,
         );
 
         let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
@@ -581,7 +589,9 @@ mod tests {
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(
             context.miner_address,
-            (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64,
+            (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num)
+                .try_into()
+                .expect("Value exceeds u64::Max"),
             context.partition_hash.into(),
             context.storage_config.entropy_packing_iterations,
             chunk_size,
@@ -603,8 +613,9 @@ mod tests {
             data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
             chunk: Base64(poa_chunk.clone()),
             ledger_id: Some(1),
-            partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num).try_into()
-            .expect("Value exceeds u32::MAX"),
+            partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
+                .try_into()
+                .expect("Value exceeds u32::MAX"),
             recall_chunk_index: 0,
             partition_hash: context.partition_hash,
         };

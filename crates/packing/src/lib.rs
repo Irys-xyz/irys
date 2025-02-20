@@ -195,7 +195,7 @@ pub fn capacity_pack_range_with_data(
     data.iter_mut().enumerate().for_each(|(pos, chunk)| {
         capacity_single::compute_entropy_chunk(
             mining_address,
-            chunk_offset + pos as u64,
+            chunk_offset.saturating_add(pos.try_into().expect("Value exceeds u64::Max")),
             partition_hash.0,
             iterations,
             chunk_size,
@@ -217,7 +217,7 @@ pub fn capacity_pack_range_with_data_c(
     data.iter_mut().enumerate().for_each(|(pos, chunk)| {
         capacity_pack_range_c(
             mining_address,
-            chunk_offset + pos as u64,
+            chunk_offset.saturating_add(pos.try_into().expect("Value exceeds u64::Max")),
             partition_hash,
             iterations,
             &mut entropy_chunk,
@@ -409,7 +409,7 @@ mod tests {
         let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
         capacity_pack_range_c(
             mining_address,
-            chunk_offset + rnd_chunk_pos as u64,
+            chunk_offset.saturating_add(rnd_chunk_pos.try_into().expect("Value exceeds u64::Max")),
             partition_hash.into(),
             iterations,
             &mut entropy_chunk,
@@ -511,7 +511,7 @@ mod tests {
 
         let packed_chunk = PackedChunk {
             data_root: H256::zero(),
-            data_size: data_size as u64,
+            data_size: u64::try_from(data_size).expect("Value exceeds u64::Max"),
             data_path: Base64(vec![]),
             bytes: Base64(packed_data.clone()),
             tx_offset: 0,

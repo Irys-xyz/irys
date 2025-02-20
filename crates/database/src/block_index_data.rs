@@ -105,12 +105,14 @@ impl BlockIndex<Uninitialized> {
 impl BlockIndex<Initialized> {
     /// Retrieves the number of blocks in the index
     pub fn num_blocks(&self) -> u64 {
-        self.items.len() as u64
+        self.items.len().try_into().expect("Value exceeds u64::Max")
     }
 
     /// Returns the latest block height stored by the block index
     pub fn latest_height(&self) -> u64 {
-        (self.items.len().saturating_sub(1)) as u64
+        (self.items.len().saturating_sub(1))
+            .try_into()
+            .expect("Value exceeds u64::Max")
     }
 
     /// Retrieves a [`BlockIndexItem`] from the block index by block height

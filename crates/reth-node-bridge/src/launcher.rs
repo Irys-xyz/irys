@@ -254,7 +254,7 @@ where
                 Ok(true)
             }();
             
-        match result 
+        match result
             {
                 Err(e) => {
                     error!("Error pruning: {}", &e);
@@ -268,7 +268,7 @@ where
                   ()
                 }
             };
-            })          
+            })
             .with_components(components_builder, on_component_initialized, Some(irys_ext.clone())).await?;
 
         // spawn exexs

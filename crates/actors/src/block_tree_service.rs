@@ -194,7 +194,7 @@ impl BlockTreeService {
         let migration_depth = self.storage_config.chunk_migration_depth as usize;
 
         // Skip if block isn't deep enough for finalization
-        if arc_block.height <= migration_depth as u64 {
+        if arc_block.height <= migration_depth.try_into().expect("Value exceeds u64::Max") {
             return;
         }
 

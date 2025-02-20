@@ -417,15 +417,27 @@ impl EpochServiceActor {
         let total_parts: u64;
         {
             let pa = self.partition_assignments.read().unwrap();
-            let num_data_partitions = pa.data_partitions.len() as u64;
+            let num_data_partitions = pa
+                .data_partitions
+                .len()
+                .try_into()
+                .expect("Value exceeds u64::Max");
             let num_capacity_partitions =
                 Self::get_num_capacity_partitions(num_data_partitions, &self.config);
             total_parts = num_capacity_partitions + num_data_partitions;
         }
 
         // Add additional capacity partitions as needed
-        if total_parts > self.all_active_partitions.len() as u64 {
-            let parts_to_add = total_parts - self.all_active_partitions.len() as u64;
+        if total_parts
+            > self
+                .all_active_partitions
+                .len()
+                .try_into()
+                .expect("Value exceeds u64::Max")
+        {
+            let parts_to_add = total_parts
+                - TryInto::<u64>::try_into(self.all_active_partitions.len())
+                    .expect("Value exceeds u64::Max");
             self.add_capacity_partitions(parts_to_add);
         }
     }
@@ -470,8 +482,10 @@ impl EpochServiceActor {
             let ledgers = self.ledgers.read().unwrap();
             slot_needs = ledgers.get_slot_needs(ledger);
         }
-        let mut capacity_count = capacity_partitions.len().try_into()
-        .expect("Value exceeds u32::MAX");
+        let mut capacity_count = capacity_partitions
+            .len()
+            .try_into()
+            .expect("Value exceeds u32::MAX");
 
         // Iterate over slots that need partitions and assign them
         for (slot_index, num_needed) in slot_needs {
@@ -616,7 +630,10 @@ impl EpochServiceActor {
         {
             let ledgers = self.ledgers.read().unwrap();
             let ledger = &ledgers[ledger];
-            num_slots = ledger.slot_count() as u64;
+            num_slots = ledger
+                .slot_count()
+                .try_into()
+                .expect("Value exceeds u64::Max");
         }
         let partition_chunk_count = self.config.storage_config.num_chunks_in_partition;
         let max_chunk_capacity = num_slots * partition_chunk_count;
@@ -652,8 +669,12 @@ impl EpochServiceActor {
     /// Configure storage modules for genesis partition assignments
     pub fn get_genesis_storage_module_infos(&self) -> Vec<StorageModuleInfo> {
         let ledgers = self.ledgers.read().unwrap();
-        let num_part_chunks = self.config.storage_config.num_chunks_in_partition.try_into()
-        .expect("Value exceeds u32::MAX");
+        let num_part_chunks = self
+            .config
+            .storage_config
+            .num_chunks_in_partition
+            .try_into()
+            .expect("Value exceeds u32::MAX");
 
         let pa = self.partition_assignments.read().unwrap();
         let sm_paths = &STORAGE_SUBMODULES_CONFIG.submodule_paths;
@@ -822,7 +843,11 @@ mod tests {
         // Verify the correct number of genesis partitions have been activated
         {
             let pa = epoch_service.partition_assignments.read().unwrap();
-            let data_partition_count = pa.data_partitions.len() as u64;
+            let data_partition_count = pa
+                .data_partitions
+                .len()
+                .try_into()
+                .expect("Value exceeds u64::Max");
             let expected_partitions = data_partition_count
                 + EpochServiceActor::get_num_capacity_partitions(data_partition_count, &config);
             assert_eq!(

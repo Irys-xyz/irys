@@ -185,7 +185,7 @@ pub async fn last_step_checkpoints_is_valid(
     // Calculate the starting salt value for checkpoint validation
     let start_salt = U256::from(step_number_to_salt_number(
         config,
-        (global_step_number - 1) as u64,
+        u64::try_from(global_step_number - 1).expect("Value exceeds u64::Max"),
     ));
     let config = config.clone();
 
@@ -253,7 +253,8 @@ pub fn vdf_steps_are_valid(
         vdf_info.prev_output, vdf_info.seed
     );
 
-    let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1 as u64;
+    let start = vdf_info.global_step_number
+        - u64::try_from(vdf_info.steps.len() + 1).expect("Value exceeds u64::Max");
     let end: u64 = vdf_info.global_step_number;
 
     match vdf_steps_guard.read().get_steps(ii(start, end)) {

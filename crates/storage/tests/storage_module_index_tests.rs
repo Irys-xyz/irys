@@ -141,9 +141,14 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tx_path = &proof.proof;
 
     // Tx:1 - Base case, write tx index data without any overlaps
-    let num_chunks_in_tx = (proof.offset + 1) as u64 / storage_config.chunk_size;
-    let (tx_ledger_range, tx_partition_range) =
-        calculate_tx_ranges(0, &partition_0_range, proof.offset as u64, chunk_size);
+    let num_chunks_in_tx = u64::try_from(proof.offset + 1).expect("Value exceeds u64::Max")
+        / storage_config.chunk_size;
+    let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
+        0,
+        &partition_0_range,
+        proof.offset.try_into().expect("Value exceeds u64::Max"),
+        chunk_size,
+    );
 
     let data_root = tx_headers[0].data_root;
     let _ = storage_modules[0].index_transaction_data(tx_path.clone(), data_root, tx_ledger_range);
@@ -164,7 +169,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Tx:2 - Overlapping case, tx chunks start in one submodule and go to another
     let start_chunk_offset = num_chunks_in_tx;
-    let bytes_in_tx = proofs[1].offset as u64 - proof.offset as u64;
+    let bytes_in_tx = (proofs[1].offset - proof.offset)
+        .try_into()
+        .expect("Value exceeds u64::Max");
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_0_range,
@@ -201,7 +208,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // Tx:3 - Fill up the StorageModule leaving one empty chunk
     let tx_path = &proofs[2].proof;
     let data_root = tx_headers[2].data_root;
-    let bytes_in_tx = proofs[2].offset as u64 - (tx_ledger_range.end() * storage_config.chunk_size);
+    let bytes_in_tx = u64::try_from(proofs[2].offset).expect("Value exceeds u64::Max")
+        - (tx_ledger_range.end() * storage_config.chunk_size);
     let start_chunk_offset = tx_ledger_range.end() + 1;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
@@ -240,7 +248,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // Tx:4 - Overlap between StorageModules
     let tx_path = &proofs[3].proof;
     let data_root = tx_headers[3].data_root;
-    let offset = proofs[3].offset as u64;
+    let offset = u64::try_from(proofs[3].offset).expect("Value exceeds u64::Max");
     let bytes_in_tx = (offset + 1) - ((tx_ledger_range.end() + 1) * storage_config.chunk_size);
     let start_chunk_offset = tx_ledger_range.end() + 1;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
@@ -282,7 +290,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // Tx:5 - Perfectly fills the submodule without overlapping
     let tx_path = &proofs[4].proof;
     let data_root = tx_headers[4].data_root;
-    let offset = proofs[4].offset as u64;
+    let offset = u64::try_from(proofs[4].offset).expect("Value exceeds u64::Max");
     let bytes_in_tx = (offset + 1) - ((tx_ledger_range.end() + 1) * storage_config.chunk_size);
     let start_chunk_offset = tx_ledger_range.end() + 1;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
@@ -344,7 +352,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             };
 
             let _ = db.update_eyre(|tx| cache_chunk(tx, &chunk));
-            prev_byte_offset = proof.offset as u64 + 1; // Update for next iteration
+            prev_byte_offset = u64::try_from(proof.offset).expect("Value exceeds u64::Max") + 1;
+            // Update for next iteration
         }
     }
 
@@ -353,7 +362,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let mut ledger_offset: LedgerChunkOffset = 0;
     for tx in &txs {
         let data_root = tx.header.data_root;
-        let num_chunks = (tx.header.data_size / chunk_size).try_into().expect("Value exceeds u32::MAX");
+        let num_chunks = (tx.header.data_size / chunk_size)
+            .try_into()
+            .expect("Value exceeds u32::MAX");
 
         // Retrieve the partition assignments from the data root
         let hashes = db
@@ -534,10 +545,14 @@ fn calculate_tx_ranges(
 
     let partition_start = start_chunk_offset as i64 - partition_range.start() as i64;
     if partition_start < 0 {
-        num_chunks_in_tx = (num_chunks_in_tx as i64 + partition_start) as u64;
+        num_chunks_in_tx = u64::try_from(num_chunks_in_tx as i64 + partition_start)
+            .expect("Value exceeds u64::Max");
     }
 
-    let partition_start = partition_start.max(0).try_into().expect("Value exceeds u32::MAX");
+    let partition_start = partition_start
+        .max(0)
+        .try_into()
+        .expect("Value exceeds u32::MAX");
 
     let partition_range = PartitionChunkRange(ie(
         partition_start,

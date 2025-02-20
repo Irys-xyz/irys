@@ -699,8 +699,7 @@ mod tests {
                 data_size,
                 data_path: data_path.clone(),
                 bytes: chunk_bytes.clone(),
-                tx_offset: tx_chunk_offset.try_into()
-                .expect("Value exceeds u32::MAX"),
+                tx_offset: tx_chunk_offset.try_into().expect("Value exceeds u32::MAX"),
             });
 
             let is_last_chunk = tx_chunk_offset == last_index;
@@ -724,8 +723,7 @@ mod tests {
             let (meta, chunk) = irys_database::cached_chunk_by_chunk_offset(
                 &db_tx,
                 data_root,
-                tx_chunk_offset.try_into()
-                .expect("Value exceeds u32::MAX"),
+                tx_chunk_offset.try_into().expect("Value exceeds u32::MAX"),
             )
             .unwrap()
             .unwrap();
@@ -741,8 +739,10 @@ mod tests {
             if is_last_chunk {
                 // read the set of chunks
                 // only offset 2 (last chunk) should have data
-                let res = storage_module.read_chunks(ii(0, last_index.try_into()
-                .expect("Value exceeds u32::MAX")))?;
+                let res = storage_module.read_chunks(ii(
+                    0,
+                    last_index.try_into().expect("Value exceeds u32::MAX"),
+                ))?;
                 let r = res.get(&2).unwrap();
                 let mut packed_bytes = r.0.clone();
                 // unpack the data (packing was all 0's)
