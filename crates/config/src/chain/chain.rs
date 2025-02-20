@@ -1,5 +1,5 @@
 use irys_primitives::{Genesis, GenesisAccount, U256};
-use irys_types::{Address, IrysBlockHeader, CONFIG};
+use irys_types::{Address, Config, IrysBlockHeader};
 use once_cell::sync::{Lazy, OnceCell};
 use reth_chainspec::EthereumHardfork::{
     ArrowGlacier, Berlin, Byzantium, Cancun, Constantinople, Dao, Frontier, GrayGlacier, Homestead,
@@ -13,10 +13,10 @@ use std::sync::Arc;
 
 pub const SUPPORTED_CHAINS: &[&str] = &["mainnet" /* , "devnet", "testnet" */];
 
-/// note: for testing this is overriden
+/// note: for testing this is overridden
 pub static IRYS_MAINNET: Lazy<Arc<ChainSpec>> = Lazy::new(|| {
     let mut spec = ChainSpec {
-        chain: Chain::from_id(CONFIG.irys_chain_id),
+        chain: Chain::from_id(Config::default().irys_chain_id),
         // TODO: A proper genesis block
         genesis: Genesis {
             gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,

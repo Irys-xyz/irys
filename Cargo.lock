@@ -5645,6 +5645,7 @@ dependencies = [
  "eyre",
  "fixed-hash",
  "futures",
+ "hex",
  "irys-macros",
  "k256",
  "modular-bitfield",

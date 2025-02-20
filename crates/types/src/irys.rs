@@ -1,6 +1,6 @@
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysBlockHeader,
-    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, CONFIG, H256, MAX_CHUNK_SIZE,
+    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, Config, IrysBlockHeader,
+    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, H256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -8,7 +8,6 @@ use alloy_signer::utils::secret_key_to_address;
 use alloy_signer_local::LocalSigner;
 use eyre::Result;
 use k256::ecdsa::SigningKey;
-use rand::rngs::OsRng;
 
 #[derive(Debug, Clone)]
 
@@ -21,31 +20,37 @@ pub struct IrysSigner {
 /// Encapsulates an Irys API for doing client type things, making transactions,
 /// signing them, posting them etc.
 impl IrysSigner {
-    pub fn mainnet_from_slice(key_slice: &[u8]) -> Self {
+    // todo : remove the `mainnet` prefix
+    pub fn mainnet_from_slice(config: &Config) -> Self {
         IrysSigner {
-            signer: k256::ecdsa::SigningKey::from_slice(key_slice).unwrap(),
-            chain_id: CONFIG.irys_chain_id,
-            chunk_size: CONFIG.chunk_size.try_into().unwrap(),
+            signer: k256::ecdsa::SigningKey::from_slice(config.mining_key).unwrap(),
+            chain_id: config.irys_chain_id,
+            chunk_size: config.chunk_size.try_into().unwrap(),
         }
     }
 
-    // DO NOT USE IN PROD
+    #[cfg(any(feature = "test-utils", test))]
     pub fn random_signer() -> Self {
+        use rand::rngs::OsRng;
+
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: CONFIG.irys_chain_id,
-            chunk_size: MAX_CHUNK_SIZE,
+            chain_id: Config::default().irys_chain_id,
+            chunk_size: crate::MAX_CHUNK_SIZE,
         }
     }
 
+    #[cfg(any(feature = "test-utils", test))]
     pub fn random_signer_with_chunk_size<T>(chunk_size: T) -> Self
     where
         T: TryInto<usize>,
         <T as TryInto<usize>>::Error: std::fmt::Debug,
     {
+        use rand::rngs::OsRng;
+
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: CONFIG.irys_chain_id,
+            chain_id: Config::default().irys_chain_id,
             chunk_size: chunk_size.try_into().unwrap(),
         }
     }

@@ -1,4 +1,3 @@
-use irys_macros::load_toml;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +43,11 @@ pub struct Config {
     /// - 20 confirmations protects against attackers with <40% hashpower
     /// - No number of confirmations is secure against attackers with >50% hashpower
     pub chunk_migration_depth: u32,
-    pub mining_key: &'static str,
+    #[serde(
+        deserialize_with = "serde_utils::signing_key_from_hex",
+        serialize_with = "serde_utils::serializes_signing_key"
+    )]
+    pub mining_key: k256::ecdsa::SigningKey,
     // TODO: enable this after fixing option in toml
     pub num_capacity_partitions: Option<u64>,
     pub port: u16,
@@ -61,39 +64,51 @@ pub struct Config {
     pub token_price_safe_range: Amount<Percentage>,
 }
 
-pub const DEFAULT_BLOCK_TIME: u64 = 5;
+impl Config {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testnet() -> Self {
+        use k256::ecdsa::SigningKey;
 
-pub const CONFIG: Config = Config {
-    block_time: DEFAULT_BLOCK_TIME,
-    max_data_txs_per_block: 100,
-    difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME) * 14,
-    max_difficulty_adjustment_factor: rust_decimal_macros::dec!(4),
-    min_difficulty_adjustment_factor: rust_decimal_macros::dec!(0.25),
-    chunk_size: 256 * 1024,
-    num_chunks_in_partition: 10,
-    num_chunks_in_recall_range: 2,
-    vdf_reset_frequency: 10 * 120,
-    vdf_parallel_verification_thread_limit: 4,
-    num_checkpoints_in_vdf_step: 25,
-    vdf_sha_1s: 7_000,
-    entropy_packing_iterations: 22_500_000,
-    irys_chain_id: 1275,
-    capacity_scalar: 100,
-    num_blocks_in_epoch: 100,
-    submit_ledger_epoch_length: 5,
-    num_partitions_per_slot: 1,
-    num_writes_before_sync: 5,
-    reset_state_on_restart: false,
-    chunk_migration_depth: 1,
-    mining_key: "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0",
-    num_capacity_partitions: None,
-    port: 8080,
-    anchor_expiry_depth: 10,
-    genesis_price_valid_for_n_epochs: 2,
-    genesis_token_price: Amount::token(rust_decimal_macros::dec!(1)).expect("valid token amount"),
-    token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
-        .expect("valid percentage"),
-};
+        const DEFAULT_BLOCK_TIME: u64 = 5;
+
+        Config {
+            block_time: DEFAULT_BLOCK_TIME,
+            max_data_txs_per_block: 100,
+            difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME)
+                * 14,
+            max_difficulty_adjustment_factor: rust_decimal_macros::dec!(4),
+            min_difficulty_adjustment_factor: rust_decimal_macros::dec!(0.25),
+            chunk_size: 256 * 1024,
+            num_chunks_in_partition: 10,
+            num_chunks_in_recall_range: 2,
+            vdf_reset_frequency: 10 * 120,
+            vdf_parallel_verification_thread_limit: 4,
+            num_checkpoints_in_vdf_step: 25,
+            vdf_sha_1s: 7_000,
+            entropy_packing_iterations: 22_500_000,
+            irys_chain_id: 1275,
+            capacity_scalar: 100,
+            num_blocks_in_epoch: 100,
+            submit_ledger_epoch_length: 5,
+            num_partitions_per_slot: 1,
+            num_writes_before_sync: 5,
+            reset_state_on_restart: false,
+            chunk_migration_depth: 1,
+            mining_key: SigningKey::from_slice(
+                b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0",
+            )
+            .expect("valid key"),
+            num_capacity_partitions: None,
+            port: 8080,
+            anchor_expiry_depth: 10,
+            genesis_price_valid_for_n_epochs: 2,
+            genesis_token_price: Amount::token(rust_decimal_macros::dec!(1))
+                .expect("valid token amount"),
+            token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
+                .expect("valid percentage"),
+        }
+    }
+}
 
 impl From<Config> for DifficultyAdjustmentConfig {
     fn from(config: Config) -> Self {
@@ -111,7 +126,7 @@ impl From<Config> for DifficultyAdjustmentConfig {
 pub mod serde_utils {
 
     use rust_decimal::Decimal;
-    use serde::{Deserialize as _, Deserializer};
+    use serde::{Deserialize as _, Deserializer, Serializer};
 
     use crate::storage_pricing::Amount;
 
@@ -151,5 +166,30 @@ pub mod serde_utils {
         let decimal = Decimal::from_str(&raw_string).map_err(serde::de::Error::custom)?;
         let amount = dec_to_amount(decimal).map_err(serde::de::Error::custom)?;
         Ok(amount)
+    }
+
+    /// Deserialize a secp256k1 private key from a hex encoded string slice
+    pub fn signing_key_from_hex<'de, D>(
+        deserializer: D,
+    ) -> Result<k256::ecdsa::SigningKey, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <&'de [u8]>::deserialize(deserializer)?;
+        let key = k256::ecdsa::SigningKey::from_slice(bytes).map_err(serde::de::Error::custom)?;
+        Ok(key)
+    }
+
+    pub fn serializes_signing_key<S>(
+        key: &k256::ecdsa::SigningKey,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Convert to bytes and then hex-encode
+        let key_bytes = key.to_bytes();
+        let hex_string = hex::encode(key_bytes);
+        serializer.serialize_str(&hex_string)
     }
 }

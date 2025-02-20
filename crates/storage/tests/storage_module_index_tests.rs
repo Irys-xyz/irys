@@ -29,6 +29,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1,
         chunk_migration_depth: 1, // Testnet / single node config
+        irys_chain_id: 42,
     };
     let chunk_size = storage_config.chunk_size;
 

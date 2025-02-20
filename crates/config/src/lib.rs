@@ -8,7 +8,7 @@ use std::{
 
 use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;
-use irys_types::{irys::IrysSigner, Address, CONFIG};
+use irys_types::{irys::IrysSigner, Address, Config};
 use serde::{Deserialize, Serialize};
 
 pub mod chain;
@@ -30,6 +30,7 @@ pub struct IrysNodeConfig {
 }
 
 /// "sane" default configuration
+#[cfg(any(feature = "test-utils", test))]
 impl Default for IrysNodeConfig {
     fn default() -> Self {
         let base_dir = env::current_dir()
@@ -53,9 +54,11 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
 }
 
 impl IrysNodeConfig {
-    pub fn mainnet() -> Self {
+    pub fn mainnet(config: &config::Config) -> Self {
         Self {
-            mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(CONFIG.mining_key).unwrap()),
+            mining_signer: IrysSigner::mainnet_from_slice(
+                &decode_hex(Config::default().mining_key).unwrap(),
+            ),
             instance_number: None,
             base_directory: env::current_dir()
                 .expect("Unable to determine working dir, aborting")

@@ -15,11 +15,12 @@ pub struct VDFStepsConfig {
 
 impl Default for VDFStepsConfig {
     fn default() -> Self {
+        let config = Config::default();
         VDFStepsConfig {
-            num_checkpoints_in_vdf_step: CONFIG.num_checkpoints_in_vdf_step,
-            vdf_reset_frequency: CONFIG.vdf_reset_frequency,
-            vdf_difficulty: CONFIG.vdf_sha_1s,
-            vdf_parallel_verification_thread_limit: CONFIG.vdf_parallel_verification_thread_limit,
+            num_checkpoints_in_vdf_step: config.num_checkpoints_in_vdf_step,
+            vdf_reset_frequency: config.vdf_reset_frequency,
+            vdf_difficulty: config.vdf_sha_1s,
+            vdf_parallel_verification_thread_limit: config.vdf_parallel_verification_thread_limit,
         }
     }
 }

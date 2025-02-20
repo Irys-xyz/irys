@@ -10,7 +10,7 @@ use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
     IrysTransactionHeader, H256,
 };
-use irys_types::{DataRoot, StorageConfig, CONFIG, U256};
+use irys_types::{Config, DataRoot, StorageConfig, U256};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbCursorRO;
 use reth_db::cursor::DbDupCursorRO;
@@ -37,6 +37,7 @@ pub struct MempoolService {
     signer: Option<IrysSigner>,
     invalid_tx: Vec<H256>,
     storage_config: StorageConfig,
+    config: Config,
     storage_modules: StorageModuleVec,
     block_tree_read_guard: Option<BlockTreeReadGuard>,
 }
@@ -50,7 +51,7 @@ impl Supervised for MempoolService {}
 
 impl SystemService for MempoolService {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
-        println!("mempool_service started");
+        tracing::info!("mempool_service started");
     }
 }
 
@@ -64,8 +65,9 @@ impl MempoolService {
         storage_config: StorageConfig,
         storage_modules: StorageModuleVec,
         block_tree_read_guard: BlockTreeReadGuard,
+        config: Config,
     ) -> Self {
-        println!("service started: mempool");
+        tracing::info!("service started");
         Self {
             db: Some(db),
             valid_tx: BTreeMap::new(),
@@ -74,6 +76,7 @@ impl MempoolService {
             task_exec: Some(task_exec),
             storage_config,
             storage_modules,
+            config,
             block_tree_read_guard: Some(block_tree_read_guard),
         }
     }
@@ -200,11 +203,13 @@ impl Handler<TxIngressMessage> for MempoolService {
 
         match irys_database::block_header_by_hash(read_tx, &tx.anchor) {
             // note: we use addition here as it's safer
-            Ok(Some(hdr)) if hdr.height + (CONFIG.anchor_expiry_depth as u64) >= *latest_height => {
+            Ok(Some(hdr))
+                if hdr.height + (self.config.anchor_expiry_depth as u64) >= *latest_height =>
+            {
                 debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id);
                 // update any associated ingress proofs
                 if let Ok(Some(old_expiry)) = read_tx.get::<IngressProofLRU>(tx.data_root) {
-                    let new_expiry = hdr.height + (CONFIG.anchor_expiry_depth as u64);
+                    let new_expiry = hdr.height + (self.config.anchor_expiry_depth as u64);
                     debug!(
                         "Updating ingress proof for data root {} expiry from {} -> {}",
                         &tx.data_root, &old_expiry, &new_expiry
@@ -421,7 +426,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                 .last()
                 .ok_or(ChunkIngressError::ServiceUninitialized)?;
 
-            let target_height = latest_height + CONFIG.anchor_expiry_depth as u64;
+            let target_height = latest_height + self.config.anchor_expiry_depth as u64;
 
             let db1 = self.db.clone().unwrap();
             let signer1 = self.signer.clone().unwrap();
@@ -475,7 +480,7 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
                 };
                 valid
             })
-            .take(CONFIG.max_data_txs_per_block.try_into().unwrap())
+            .take(self.config.max_data_txs_per_block.try_into().unwrap())
             .map(|(_, header)| header.clone())
             .collect()
     }

@@ -322,6 +322,7 @@ pub fn poa_is_valid(
             config.entropy_packing_iterations,
             config.chunk_size as usize,
             &mut entropy_chunk,
+            config.irys_chain_id,
         );
 
         let mut poa_chunk: Vec<u8> = poa.chunk.clone().into();
@@ -356,6 +357,7 @@ pub fn poa_is_valid(
             config.entropy_packing_iterations,
             config.chunk_size as usize,
             &mut entropy_chunk,
+            config.irys_chain_id,
         );
 
         if entropy_chunk != poa.chunk.0 {
@@ -439,6 +441,7 @@ mod tests {
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1_000,
             chunk_migration_depth: 1, // Testnet / single node config
+            irys_chain_id: 42,
         };
 
         let config = EpochServiceConfig {
@@ -620,6 +623,7 @@ mod tests {
             context.storage_config.entropy_packing_iterations,
             chunk_size,
             &mut entropy_chunk,
+            context.storage_config.irys_chain_id,
         );
 
         xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);

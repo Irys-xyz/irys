@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{StorageConfig, CONFIG, U256};
+use crate::{Config, StorageConfig, U256};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -22,7 +22,7 @@ pub struct DifficultyAdjustmentConfig {
 
 impl Default for DifficultyAdjustmentConfig {
     fn default() -> Self {
-        CONFIG.into()
+        Config::default().into()
     }
 }
 
@@ -142,9 +142,7 @@ pub fn next_cumulative_diff(previous_cumulative_diff: U256, new_diff: U256) -> U
     let network_hash_rate = max_diff / (max_diff - new_diff);
     previous_cumulative_diff + network_hash_rate
 }
-//==============================================================================
-// Tests
-//------------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -153,9 +151,7 @@ mod tests {
     use alloy_primitives::Address;
     use openssl::sha;
 
-    use crate::{
-        adjust_difficulty, calculate_initial_difficulty, StorageConfig, CONFIG, H256, U256,
-    };
+    use crate::{adjust_difficulty, calculate_initial_difficulty, StorageConfig, H256, U256};
 
     use super::DifficultyAdjustmentConfig;
 
@@ -177,8 +173,9 @@ mod tests {
             num_partitions_in_slot: 1,
             miner_address: Address::random(),
             min_writes_before_sync: 1,
-            entropy_packing_iterations: CONFIG.entropy_packing_iterations,
+            entropy_packing_iterations: Config::default().entropy_packing_iterations,
             chunk_migration_depth: 1, // Testnet / single node config
+            irys_chain_id: Config::default().irys_chain_id,
         };
 
         let mut storage_module_count = 3;

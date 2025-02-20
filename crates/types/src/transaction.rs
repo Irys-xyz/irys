@@ -1,6 +1,6 @@
 use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    IrysSignature, Node, Proof, Signature, TxIngressProof, CONFIG, H256,
+    Config, IrysSignature, Node, Proof, Signature, TxIngressProof, H256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -156,7 +156,7 @@ impl Default for IrysTransactionHeader {
             ledger_id: 0,
             bundle_format: None,
             version: 0,
-            chain_id: CONFIG.irys_chain_id,
+            chain_id: Config::default().irys_chain_id,
             signature: Signature::test_signature().into(),
             ingress_proofs: None,
         }
@@ -214,40 +214,19 @@ mod tests {
 
     #[test]
     fn test_tx_encode_and_signing() {
-        // Create a sample IrysTransactionHeader
-        // commented out fields are defaulted by the RLP decoder
-        let original_header = IrysTransactionHeader {
-            // id: H256::from([255u8; 32]),
-            id: Default::default(),
-            anchor: H256::from([1u8; 32]),
-            signer: Address::ZERO,
-            data_root: H256::from([3u8; 32]),
-            data_size: 1024,
-            term_fee: 100,
-            // perm_fee: Some(200),
-            perm_fee: None,
-            ledger_id: 0,
-            chain_id: CONFIG.irys_chain_id,
-            bundle_format: None,
-            version: 0,
-            ingress_proofs: None,
-            signature: Default::default(),
-        };
-
+        // setup
+        let original_header = mock_header();
         let mut sig_data = Vec::new();
-
         original_header.encode(&mut sig_data);
-
         let dec: IrysTransactionHeader =
             IrysTransactionHeader::decode(&mut sig_data.as_slice()).unwrap();
-        assert_eq!(&dec, &original_header);
 
+        // action
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
-            chain_id: CONFIG.irys_chain_id,
+            chain_id: Config::default().irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };
-
         let tx = IrysTransaction {
             header: dec,
             ..Default::default()
@@ -269,7 +248,7 @@ mod tests {
             perm_fee: Some(200),
             ledger_id: 1,
             bundle_format: None,
-            chain_id: CONFIG.irys_chain_id,
+            chain_id: Config::default().irys_chain_id,
             version: 0,
             ingress_proofs: None,
             signature: Signature::test_signature().into(),
