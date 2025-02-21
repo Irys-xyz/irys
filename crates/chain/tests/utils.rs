@@ -8,7 +8,7 @@ use irys_storage::ii;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, H256List, H256,
 };
-use irys_types::{StorageConfig, TxChunkOffset, VDFStepsConfig};
+use irys_types::{Config, StorageConfig, TxChunkOffset, VDFStepsConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
@@ -42,6 +42,7 @@ pub async fn capacity_chunk_solution(
     storage_config: &StorageConfig,
 ) -> SolutionContext {
     let max_retries = 20;
+    let testnet_config = Config::testnet();
     let mut i = 1;
     let initial_step_num = vdf_steps_guard.read().global_step;
     let mut step_num: u64 = 0;
@@ -90,6 +91,7 @@ pub async fn capacity_chunk_solution(
         storage_config.entropy_packing_iterations,
         storage_config.chunk_size as usize, // take it from storage config
         &mut entropy_chunk,
+        testnet_config.irys_chain_id,
     );
 
     debug!("Chunk mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_addr, 0, partition_hash, storage_config.entropy_packing_iterations, storage_config.chunk_size);
@@ -322,6 +324,7 @@ pub async fn verify_published_chunk<T, B>(
             &packed_chunk,
             storage_config.entropy_packing_iterations,
             storage_config.chunk_size as usize,
+            storage_config.irys_chain_id,
         );
         if unpacked_chunk.bytes.0 != expected_bytes {
             println!(

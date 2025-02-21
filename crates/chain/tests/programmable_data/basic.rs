@@ -10,11 +10,12 @@ use alloy_sol_macro::sol;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
-use irys_chain::chain::start_for_testing;
+use irys_chain::start_irys_node;
+use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{irys::IrysSigner, Address};
-use irys_types::{Base64, IrysTransactionHeader, TxChunkOffset, UnpackedChunk};
+use irys_types::{Base64, Config, IrysTransactionHeader, TxChunkOffset, UnpackedChunk};
 
 use k256::ecdsa::SigningKey;
 use reth::rpc::eth::EthApiServer;
@@ -46,13 +47,13 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
     let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
-    let mut config = irys_config::IrysNodeConfig {
-        base_directory: temp_dir.path().to_path_buf(),
-        ..Default::default()
-    };
-    let main_address = config.mining_signer.address();
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
+    config.base_directory = temp_dir.path().to_path_buf();
 
-    let account1 = IrysSigner::random_signer();
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let account1 = IrysSigner::random_signer(testnet_config.irys_chain_id);
+    let main_address = config.mining_signer.address();
 
     config.extend_genesis_accounts(vec![
         (
@@ -78,7 +79,7 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
         ),
     ]);
 
-    let node = start_for_testing(config.clone()).await?;
+    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     wait_for_packing(
         node.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),

@@ -182,7 +182,8 @@ mod tests {
     #[test]
     fn test_irys_transaction_header_rlp_round_trip() {
         // setup
-        let mut header = mock_header();
+        let config = Config::testnet();
+        let mut header = mock_header(&config);
 
         // action
         let mut buffer = vec![];
@@ -199,7 +200,8 @@ mod tests {
     #[test]
     fn test_irys_transaction_header_serde() {
         // Create a sample IrysTransactionHeader
-        let original_header = mock_header();
+        let config = Config::testnet();
+        let original_header = mock_header(&config);
 
         // Serialize the IrysTransactionHeader to JSON
         let serialized = serde_json::to_string(&original_header).expect("Failed to serialize");
@@ -216,7 +218,8 @@ mod tests {
     #[test]
     fn test_tx_encode_and_signing() {
         // setup
-        let original_header = mock_header();
+        let config = Config::testnet();
+        let original_header = mock_header(&config);
         let mut sig_data = Vec::new();
         original_header.encode(&mut sig_data);
         let dec: IrysTransactionHeader =
@@ -225,7 +228,7 @@ mod tests {
         // action
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
-            chain_id: Config::default().irys_chain_id,
+            chain_id: config.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };
         let tx = IrysTransaction {
@@ -238,7 +241,7 @@ mod tests {
         assert!(signed_tx.header.is_signature_valid());
     }
 
-    fn mock_header() -> IrysTransactionHeader {
+    fn mock_header(config: &Config) -> IrysTransactionHeader {
         let original_header = IrysTransactionHeader {
             id: H256::from([255u8; 32]),
             anchor: H256::from([1u8; 32]),
@@ -249,7 +252,7 @@ mod tests {
             perm_fee: Some(200),
             ledger_id: 1,
             bundle_format: None,
-            chain_id: Config::default().irys_chain_id,
+            chain_id: config.irys_chain_id,
             version: 0,
             ingress_proofs: None,
             signature: Signature::test_signature().into(),

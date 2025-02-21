@@ -1,5 +1,9 @@
+// todo delete the whole module. the tests are ignored anyway. They can be restored in the future
+
+use actix_http::StatusCode;
 use irys_api_server::{routes, ApiState};
-use irys_chain::chain::start_for_testing_default;
+use irys_chain::{start, start_irys_node};
+use irys_config::IrysNodeConfig;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 
 use actix_web::{
@@ -8,9 +12,8 @@ use actix_web::{
     web::{self, JsonConfig},
     App,
 };
-use awc::http::StatusCode;
 use base58::ToBase58;
-use irys_types::TxChunkOffset;
+use irys_types::{Config, TxChunkOffset};
 use tracing::info;
 
 #[ignore]
@@ -37,8 +40,9 @@ async fn api_end_to_end_test(chunk_size: usize) {
     use std::time::Duration;
     use tokio::time::sleep;
     use tracing::{debug, info};
-
-    let miner_signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
+    let mut testnet_config = Config::testnet();
+    testnet_config.chunk_size = chunk_size.try_into().unwrap();
+    let miner_signer = IrysSigner::from_config(&testnet_config);
 
     let storage_config = StorageConfig {
         chunk_size: chunk_size as u64,
@@ -49,13 +53,14 @@ async fn api_end_to_end_test(chunk_size: usize) {
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
         chunk_migration_depth: 1, // Testnet / single node config
+        irys_chain_id: testnet_config.irys_chain_id,
     };
+    let entropy_packing_iterations = storage_config.entropy_packing_iterations;
 
-    let handle = start_for_testing_default(
-        Some("api_end_to_end_test"),
-        false,
-        miner_signer,
-        storage_config.clone(),
+    let handle = start_irys_node(
+        IrysNodeConfig::new(&testnet_config),
+        storage_config,
+        testnet_config.clone(),
     )
     .await
     .unwrap();
@@ -68,6 +73,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         db: handle.db,
         mempool: handle.actor_addresses.mempool,
         chunk_provider: handle.chunk_provider.clone(),
+        config: testnet_config.clone(),
     };
 
     // Initialize the app
@@ -86,7 +92,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     rand::thread_rng().fill(&mut data_bytes[..]);
 
     // Create a new Irys API instance & a signed transaction
-    let irys = IrysSigner::random_signer_with_chunk_size(chunk_size);
+    let irys = IrysSigner::random_signer_with_chunk_size(chunk_size, testnet_config.irys_chain_id);
     let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
     let tx = irys.sign_transaction(tx).unwrap();
 
@@ -189,8 +195,9 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
             let unpacked_chunk = unpack(
                 &packed_chunk,
-                storage_config.entropy_packing_iterations,
+                entropy_packing_iterations,
                 chunk_size,
+                testnet_config.irys_chain_id,
             );
             assert_eq!(
                 unpacked_chunk.bytes.0,

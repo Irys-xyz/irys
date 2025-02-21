@@ -504,6 +504,7 @@ mod tests {
     fn test_chunk_packing_unpacking() {
         let mut rng = rand::thread_rng();
 
+        let testnet_config = Config::testnet();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];

@@ -65,7 +65,7 @@ use tokio::{
 use crate::vdf::run_vdf;
 
 pub async fn start(config: Config) -> eyre::Result<IrysNodeCtx> {
-    let irys_node_config = IrysNodeConfig::mainnet(&config);
+    let irys_node_config = IrysNodeConfig::new(&config);
     let storage_config = StorageConfig::new(&config);
 
     start_irys_node(irys_node_config, storage_config, config).await

@@ -152,7 +152,7 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-        partition_chunk_offset_ie, Base64, LedgerChunkRange, PartitionChunkOffset,
+        partition_chunk_offset_ie, Base64, Config, LedgerChunkRange, PartitionChunkOffset,
         TransactionLedger, UnpackedChunk,
     };
     use nodit::interval::{ie, ii};
@@ -160,6 +160,7 @@ mod tests {
 
     #[test]
     fn get_by_data_tx_offset_test() -> eyre::Result<()> {
+        let testnet_config = Config::testnet();
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
@@ -190,7 +191,10 @@ mod tests {
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        let irys = IrysSigner::random_signer_with_chunk_size(config.chunk_size);
+        let irys = IrysSigner::random_signer_with_chunk_size(
+            config.chunk_size,
+            testnet_config.irys_chain_id,
+        );
         let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
         let tx = irys.sign_transaction(tx).unwrap();
 

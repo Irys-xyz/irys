@@ -5,10 +5,10 @@ use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use irys_chain::chain::start_for_testing;
+use irys_chain::{start, start_irys_node};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::irys::IrysSigner;
+use irys_types::{irys::IrysSigner, storage_config, Config};
 use reth_primitives::GenesisAccount;
 use tracing::info;
 
@@ -24,11 +24,12 @@ sol!(
 #[tokio::test]
 async fn serial_test_erc20() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_erc20"), false);
-    let mut config = IrysNodeConfig::default();
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
     let main_address = config.mining_signer.address();
 
-    let account1 = IrysSigner::random_signer();
+    let account1 = IrysSigner::random_signer(testnet_config.irys_chain_id);
 
     config.extend_genesis_accounts(vec![
         (
@@ -47,14 +48,14 @@ async fn serial_test_erc20() -> eyre::Result<()> {
         ),
     ]);
 
-    let node = start_for_testing(config.clone()).await?;
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let signer: PrivateKeySigner = config.mining_signer.clone().into();
 
-    let signer: PrivateKeySigner = config.mining_signer.signer.into();
-    let wallet: EthereumWallet = EthereumWallet::from(signer);
+    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
 
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
-        .wallet(wallet)
+        .wallet(EthereumWallet::from(signer))
         .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
 
     let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.address()));

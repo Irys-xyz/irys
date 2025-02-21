@@ -6,11 +6,11 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
 use irys_actors::{block_producer::SolutionFoundMessage, mempool_service::TxIngressMessage};
-use irys_chain::chain::start_for_testing;
+use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, IrysTransaction, CONFIG};
+use irys_types::{irys::IrysSigner, Config, IrysTransaction};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use reth_db::Database;
@@ -28,12 +28,13 @@ use crate::utils::capacity_chunk_solution;
 async fn serial_test_blockprod() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let mut config = IrysNodeConfig::default();
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
 
-    let account1 = IrysSigner::random_signer();
-    let account2 = IrysSigner::random_signer();
-    let account3 = IrysSigner::random_signer();
+    let account1 = IrysSigner::random_signer(testnet_config.irys_chain_id);
+    let account2 = IrysSigner::random_signer(testnet_config.irys_chain_id);
+    let account3 = IrysSigner::random_signer(testnet_config.irys_chain_id);
 
     config.extend_genesis_accounts(vec![
         (
@@ -59,9 +60,8 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
         ),
     ]);
 
-    let node = start_for_testing(config).await?;
-
-    // let node_signer = PrivateKeySigner::from_signing_key(node.config.mining_signer.signer);
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
 
     let mut txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
     for a in [&account1, &account2, &account3] {
@@ -130,10 +130,11 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
 #[tokio::test]
 async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let mut config = IrysNodeConfig::default();
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
-
-    let node = start_for_testing(config).await?;
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
 
@@ -177,10 +178,11 @@ async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()>
 #[tokio::test]
 async fn serial_mine_ten_blocks() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let mut config = IrysNodeConfig::default();
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
-
-    let node = start_for_testing(config).await?;
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     node.actor_addresses.start_mining()?;
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
@@ -222,10 +224,13 @@ async fn serial_mine_ten_blocks() -> eyre::Result<()> {
 #[tokio::test]
 async fn serial_test_basic_blockprod() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let mut config = IrysNodeConfig::default();
+
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
 
-    let node = start_for_testing(config).await?;
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
 
     let poa_solution = capacity_chunk_solution(
         node.config.mining_signer.address(),
@@ -267,12 +272,15 @@ async fn serial_test_basic_blockprod() -> eyre::Result<()> {
 #[tokio::test]
 async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let mut config = IrysNodeConfig::default();
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
 
-    let account1 = IrysSigner::random_signer();
-    let account2 = IrysSigner::random_signer();
-    let account3 = IrysSigner::random_signer();
+    let mining_signer_addr = config.mining_signer.address();
+    let account1 = IrysSigner::random_signer(testnet_config.irys_chain_id);
+    let account2 = IrysSigner::random_signer(testnet_config.irys_chain_id);
+    let account3 = IrysSigner::random_signer(testnet_config.irys_chain_id);
 
     config.extend_genesis_accounts(vec![
         (
@@ -298,7 +306,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         ),
     ]);
 
-    let node = start_for_testing(config.clone()).await?;
+    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
 
     let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
@@ -306,13 +314,13 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     for (i, a) in [(1, &account1), (2, &account2), (3, &account3)] {
         let es: LocalSigner<SigningKey> = a.clone().into();
         let evm_tx_req = TransactionRequest {
-            to: Some(TxKind::Call(config.mining_signer.address())),
+            to: Some(TxKind::Call(mining_signer_addr)),
             max_fee_per_gas: Some(20e9 as u128),
             max_priority_fee_per_gas: Some(20e9 as u128),
             gas: Some(21000),
             value: Some(U256::from(1)),
             nonce: Some(0),
-            chain_id: Some(CONFIG.irys_chain_id),
+            chain_id: Some(testnet_config.irys_chain_id),
             ..Default::default()
         };
         let tx_env = TransactionTestContext::sign_tx(es, evm_tx_req).await;
@@ -399,7 +407,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     assert_eq!(
         reth_context
             .rpc
-            .get_balance(config.mining_signer.address(), None)
+            .get_balance(mining_signer_addr, None)
             .await?,
         U256::from(1)
     );

@@ -1,13 +1,15 @@
+// todo delete the test file
+
 use std::time::Duration;
 
 use alloy_core::primitives::{TxHash, U256};
 use irys_actors::block_producer::SolutionFoundMessage;
-use irys_chain::chain::start_for_testing;
+use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, Address, CONFIG, MAX_CHUNK_SIZE,
+    block_production::SolutionContext, irys::IrysSigner, Address, Config, MAX_CHUNK_SIZE,
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
@@ -29,16 +31,16 @@ const DEV2_ADDRESS: &str = "Bea4f456A5801cf9Af196a582D6Ec425c970c2C6";
 async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
     let expected_addr = hex::decode(DEV_ADDRESS)?;
+    let testnet_config = Config::testnet();
     let temp_dir = setup_tracing_and_temp_dir(Some("continuous_blockprod_evm_tx"), false);
-    let mut config = IrysNodeConfig {
-        mining_signer: IrysSigner {
-            signer: SigningKey::from_slice(dev_wallet.as_slice())?,
-            chain_id: CONFIG.irys_chain_id,
-            chunk_size: MAX_CHUNK_SIZE,
-        },
-        base_directory: temp_dir.path().to_path_buf(),
-        ..Default::default()
+    let mut config = IrysNodeConfig::new(&testnet_config);
+    config.mining_signer = IrysSigner {
+        signer: SigningKey::from_slice(dev_wallet.as_slice())?,
+        chain_id: testnet_config.irys_chain_id,
+        chunk_size: MAX_CHUNK_SIZE,
     };
+    config.base_directory = temp_dir.path().to_path_buf();
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
 
     assert_eq!(
         config.mining_signer.address(),
@@ -48,7 +50,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let account1_address = hex::decode(DEV2_ADDRESS)?;
     let account1 = IrysSigner {
         signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
-        chain_id: CONFIG.irys_chain_id,
+        chain_id: testnet_config.irys_chain_id,
         chunk_size: MAX_CHUNK_SIZE,
     };
     assert_eq!(
@@ -80,7 +82,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
         ),
     ]);
 
-    let node = start_for_testing(config).await?;
+    let node = start_irys_node(config, storage_config, testnet_config).await?;
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
 

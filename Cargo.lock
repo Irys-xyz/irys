@@ -5336,6 +5336,7 @@ dependencies = [
  "alloy-sol-types",
  "arbitrary",
  "assert_matches",
+ "awc",
  "base58",
  "base64-url",
  "bytes",

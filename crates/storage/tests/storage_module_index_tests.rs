@@ -9,7 +9,7 @@ use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-    partition_chunk_offset_ie, partition_chunk_offset_ii, Address, Base64, IrysTransaction,
+    partition_chunk_offset_ie, partition_chunk_offset_ii, Address, Base64, Config, IrysTransaction,
     IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset,
     PartitionChunkRange, StorageConfig, TransactionLedger, TxChunkOffset, UnpackedChunk, H256,
 };
@@ -19,6 +19,7 @@ use tracing::info;
 
 #[test]
 fn tx_path_overlap_tests() -> eyre::Result<()> {
+    let testnet_config = Config::testnet();
     // Set up the storage geometry for this test
     let storage_config = StorageConfig {
         chunk_size: 32,
@@ -29,7 +30,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1,
         chunk_migration_depth: 1, // Testnet / single node config
-        irys_chain_id: 42,
+        irys_chain_id: testnet_config.irys_chain_id,
     };
     let chunk_size = storage_config.chunk_size;
 
@@ -131,7 +132,10 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // }
 
     // Loop though all the data_chunks and create wrapper tx for them
-    let signer = IrysSigner::random_signer_with_chunk_size(chunk_size as usize);
+    let signer = IrysSigner::random_signer_with_chunk_size(
+        chunk_size as usize,
+        testnet_config.irys_chain_id,
+    );
     let mut txs: Vec<IrysTransaction> = Vec::new();
 
     for chunks in data_chunks {

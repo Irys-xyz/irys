@@ -60,7 +60,7 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
 }
 
 impl IrysNodeConfig {
-    pub fn mainnet(config: &config::Config) -> Self {
+    pub fn new(config: &config::Config) -> Self {
         Self {
             mining_signer: IrysSigner::from_config(&config),
             instance_number: None,
