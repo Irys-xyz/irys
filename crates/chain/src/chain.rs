@@ -1,3 +1,4 @@
+use irys_actors::packing::PackingConfig;
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
@@ -33,11 +34,11 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
-use irys_types::PartitionChunkRange;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
-    vdf_config::VDFStepsConfig, StorageConfig, CHUNK_SIZE, CONFIG, H256,
+    vdf_config::VDFStepsConfig, StorageConfig, CHUNK_SIZE, H256,
 };
+use irys_types::{Config, DifficultyAdjustmentConfig, PartitionChunkRange};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::rpc::eth::EthApiServer as _;
 use reth::{
@@ -62,62 +63,12 @@ use tokio::{
 };
 
 use crate::vdf::run_vdf;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 
-pub async fn start() -> eyre::Result<IrysNodeCtx> {
-    let config: IrysNodeConfig = IrysNodeConfig {
-        mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(CONFIG.mining_key).unwrap()),
-        ..IrysNodeConfig::default()
-    };
+pub async fn start(config: Config) -> eyre::Result<IrysNodeCtx> {
+    let irys_node_config = IrysNodeConfig::mainnet(&config);
+    let storage_config = StorageConfig::new(&config);
 
-    let storage_config = StorageConfig {
-        chunk_size: CONFIG.chunk_size,
-        num_chunks_in_partition: CONFIG.num_chunks_in_partition,
-        num_chunks_in_recall_range: CONFIG.num_chunks_in_recall_range,
-        num_partitions_in_slot: CONFIG.num_partitions_per_slot,
-        miner_address: config.mining_signer.address(),
-        min_writes_before_sync: 1,
-        entropy_packing_iterations: CONFIG.entropy_packing_iterations,
-        chunk_migration_depth: CONFIG.chunk_migration_depth, // Testnet / single node config
-    };
-
-    start_irys_node(config, storage_config).await
-}
-
-pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
-    let storage_config = StorageConfig {
-        chunk_size: 32,
-        num_chunks_in_partition: 10,
-        num_chunks_in_recall_range: 2,
-        num_partitions_in_slot: 1,
-        miner_address: config.mining_signer.address(),
-        min_writes_before_sync: 1,
-        entropy_packing_iterations: 1_000,
-        chunk_migration_depth: 1, // Testnet / single node config
-    };
-
-    start_irys_node(config, storage_config).await
-}
-
-pub async fn start_for_testing_default(
-    name: Option<&str>,
-    keep: bool,
-    miner_signer: IrysSigner,
-    storage_config: StorageConfig,
-) -> eyre::Result<IrysNodeCtx> {
-    let config = IrysNodeConfig {
-        base_directory: setup_tracing_and_temp_dir(name, keep).into_path(),
-        mining_signer: miner_signer.clone(),
-        ..IrysNodeConfig::default()
-    };
-
-    let storage_config = StorageConfig {
-        miner_address: miner_signer.address(), // just in case to keep the same miner address
-        chunk_migration_depth: 1,              // Testnet / single node config
-        ..storage_config
-    };
-
-    start_irys_node(config, storage_config).await
+    start_irys_node(irys_node_config, storage_config, config).await
 }
 
 #[derive(Debug, Clone)]
@@ -136,12 +87,13 @@ pub struct IrysNodeCtx {
 pub async fn start_irys_node(
     node_config: IrysNodeConfig,
     storage_config: StorageConfig,
+    config: Config,
 ) -> eyre::Result<IrysNodeCtx> {
     info!("Using directory {:?}", &node_config.base_directory);
 
     // Delete the .irys folder if we are not persisting data on restart
     let base_dir = node_config.instance_directory();
-    if fs::exists(&base_dir).unwrap_or(false) && CONFIG.reset_state_on_restart {
+    if fs::exists(&base_dir).unwrap_or(false) && config.reset_state_on_restart {
         // remove existing data directory as storage modules are packed with a different miner_signer generated next
         info!("Removing .irys folder {:?}", &base_dir);
         fs::remove_dir_all(&base_dir).expect("Unable to remove .irys folder");
@@ -159,7 +111,7 @@ pub async fn start_irys_node(
     let (irys_node_handle_sender, irys_node_handle_receiver) = oneshot::channel::<IrysNodeCtx>();
     let (reth_chainspec, mut irys_genesis) = node_config.chainspec_builder.build();
     let arc_config = Arc::new(node_config);
-    let mut difficulty_adjustment_config = CONFIG.clone().into();
+    let mut difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
 
     // TODO: Hard coding 3 for storage module count isn't great here,
     // eventually we'll want to relate this to the genesis config
@@ -177,7 +129,6 @@ pub async fn start_irys_node(
     let at_genesis;
     let latest_block_index: Option<irys_database::BlockIndexItem>;
 
-    #[allow(unused_assignments)] // this does get read by passing it through to reth
     let mut latest_block_height: u64 = 0;
 
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
@@ -196,12 +147,6 @@ pub async fn start_irys_node(
             "Requesting prune until block height {}",
             &latest_block_height
         );
-
-        // // trim the last block off the block index
-        // let trimmed_items = &i.items[0..i.items.len() - 1];
-        // irys_database::save_block_index(trimmed_items, &arc_config.clone())?;
-        // dbg!("written block index! {}", &trimmed_items.len());
-        // std::process::exit(0);
 
         i
     }));
@@ -224,7 +169,7 @@ pub async fn start_irys_node(
                 // the RethNodeHandle doesn't *need* to be Arc, but it will reduce the copy cost
                 let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
                 let db = DatabaseProvider(reth_node.provider.database.db.clone());
-                let vdf_config = VDFStepsConfig::default();
+                let vdf_config = VDFStepsConfig::new(&config);
 
                 let latest_block = latest_block_index
                     .map(|b| {
@@ -236,10 +181,7 @@ pub async fn start_irys_node(
                     .unwrap_or(arc_genesis.clone());
 
                 // Initialize the epoch_service actor to handle partition ledger assignments
-                let config = EpochServiceConfig {
-                    storage_config: storage_config.clone(),
-                    ..EpochServiceConfig::default()
-                };
+                let epoch_config = EpochServiceConfig::new(&config);
 
                 let miner_address = node_config.mining_signer.address();
                 debug!("Miner address {:?}", miner_address);
@@ -328,13 +270,13 @@ pub async fn start_irys_node(
 
                 // need to start before the epoch service, as epoch service calls from_registry that triggers broadcast mining service initialization
                 let broadcast_arbiter = Arbiter::new();
-                let broadcast_mining_service =
+                let broadcast_mining_service = 
                     BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
                         BroadcastMiningService::default()
                     });
                 SystemRegistry::set(broadcast_mining_service.clone());
 
-                let mut epoch_service = EpochServiceActor::new(Some(config));
+                let mut epoch_service = EpochServiceActor::new(epoch_config, &config);
                 epoch_service.initialize(&db).await;
                 let epoch_service_actor_addr = epoch_service.start();
 
@@ -407,7 +349,8 @@ pub async fn start_irys_node(
                     node_config.mining_signer.clone(),
                     storage_config.clone(),
                     storage_modules.clone(),
-                    block_tree_guard.clone()
+                    block_tree_guard.clone(),
+                    &config,
                 );
                 let mempool_arbiter = Arbiter::new();
                 SystemRegistry::set(MempoolService::start_in_arbiter(
@@ -424,14 +367,9 @@ pub async fn start_irys_node(
                 );
                 SystemRegistry::set(chunk_migration_service.start());
 
-                let vdf_state = Arc::new(RwLock::new(VdfService::create_state(
-                    Some(block_index_guard.clone()),
-                    Some(db.clone()),
-                )));
-
-                let vdf_service_actor = VdfService::from_atomic_state(vdf_state);
+                let vdf_service_actor = VdfService::new(block_index_guard.clone(), db.clone(), &config);
                 let vdf_service = vdf_service_actor.start();
-                SystemRegistry::set(vdf_service.clone()); // register it as a service
+                SystemRegistry::set(vdf_service.clone());
 
                 let vdf_steps_guard: VdfStepsReadGuard =
                     vdf_service.send(GetVdfStateMessage).await.unwrap();
@@ -495,7 +433,7 @@ pub async fn start_irys_node(
                     Handle::current(),
                     reth_node.task_executor.clone(),
                     sm_ids,
-                    None,
+                    PackingConfig::new(&config),
                 )
                 .start();
 
@@ -534,11 +472,6 @@ pub async fn start_irys_node(
                         })
                         .collect::<Vec<()>>();
                 }
-
-                // let _ = wait_for_packing(packing_actor_addr.clone(), None).await;
-                // debug!("Packing complete");
-
-
                 let part_actors_clone = part_actors.clone();
 
                 // Let the partition actors know about the genesis difficulty
@@ -625,6 +558,7 @@ pub async fn start_irys_node(
                     reth_provider: Some(reth_node.clone()),
                     block_tree: Some(block_tree_guard.clone()),
                     block_index: Some(block_index_guard.clone()),
+                    config: config
                 })
                 .await;
 

@@ -26,7 +26,7 @@ use crate::block_index_service::{
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
 
 /// Allows for overriding of the consensus parameters for ledgers and partitions
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EpochServiceConfig {
     /// Capacity partitions are allocated on a logarithmic curve, this scalar
     /// shifts the curve on the Y axis. Allowing there to be more or less
@@ -39,14 +39,13 @@ pub struct EpochServiceConfig {
     pub storage_config: StorageConfig,
 }
 
-impl Default for EpochServiceConfig {
-    fn default() -> Self {
-        let config = Config::default();
+impl EpochServiceConfig {
+    pub fn new(config: &Config) -> Self {
         Self {
             capacity_scalar: config.capacity_scalar,
             num_blocks_in_epoch: config.num_blocks_in_epoch,
             num_capacity_partitions: config.num_capacity_partitions,
-            storage_config: StorageConfig::default(),
+            storage_config: StorageConfig::new(config),
         }
     }
 }
@@ -140,7 +139,7 @@ pub struct LedgersReadGuard {
 }
 
 impl LedgersReadGuard {
-    /// Creates a new `ReadGard` for Ledgers
+    /// Creates a new `ReadGuard` for Ledgers
     pub const fn new(ledgers: Arc<RwLock<Ledgers>>) -> Self {
         Self { ledgers }
     }
@@ -244,19 +243,13 @@ impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
 
 impl EpochServiceActor {
     /// Create a new instance of the epoch service actor
-    pub fn new(config: Option<EpochServiceConfig>) -> Self {
-        let config = match config {
-            Some(cfg) => cfg,
-            // If no config was provided, use the default protocol parameters
-            None => EpochServiceConfig::default(),
-        };
-
+    pub fn new(epoch_config: EpochServiceConfig, config: &Config) -> Self {
         Self {
             last_epoch_hash: H256::zero(),
-            ledgers: Arc::new(RwLock::new(Ledgers::new())),
+            ledgers: Arc::new(RwLock::new(Ledgers::new(config))),
             partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
             all_active_partitions: Vec::new(),
-            config,
+            config: epoch_config,
         }
     }
 
@@ -761,11 +754,12 @@ mod tests {
     async fn genesis_test() {
         // Initialize genesis block at height 0
         let mut genesis_block = IrysBlockHeader::new_mock_header();
+        let testnet_config = Config::testnet();
         genesis_block.height = 0;
 
         // Create epoch service with random miner address
-        let config = EpochServiceConfig::default();
-        let mut epoch_service = EpochServiceActor::new(Some(config.clone()));
+        let config = EpochServiceConfig::new(&testnet_config);
+        let mut epoch_service = EpochServiceActor::new(config.clone(), &testnet_config);
         let miner_address = config.storage_config.miner_address;
 
         // Process genesis message directly instead of through actor system
@@ -889,6 +883,7 @@ mod tests {
     async fn add_slots_test() {
         // Initialize genesis block at height 0
         let mut genesis_block = IrysBlockHeader::new_mock_header();
+        let testnet_config = Config::testnet();
         genesis_block.height = 0;
 
         // Create a storage config for testing
@@ -899,7 +894,7 @@ mod tests {
             num_partitions_in_slot: 1,
             miner_address: Address::random(),
             min_writes_before_sync: 1,
-            entropy_packing_iterations: Config::default().entropy_packing_iterations,
+            entropy_packing_iterations: testnet_config.entropy_packing_iterations,
             chunk_migration_depth: 1, // Testnet / single node config
             irys_chain_id: 333,
         };
@@ -914,7 +909,7 @@ mod tests {
         };
         let num_blocks_in_epoch = config.num_blocks_in_epoch;
 
-        let mut epoch_service = EpochServiceActor::new(Some(config));
+        let mut epoch_service = EpochServiceActor::new(config, &testnet_config);
 
         // Process genesis message directly instead of through actor system
         // This allows us to inspect the actor's state after processing
@@ -982,6 +977,7 @@ mod tests {
         // Initialize genesis block at height 0
         let mining_address = Address::random();
         let mut genesis_block = IrysBlockHeader::new_mock_header();
+        let testnet_config = Config::testnet();
         let chunk_count = 10;
         genesis_block.height = 0;
 
@@ -993,25 +989,25 @@ mod tests {
             num_partitions_in_slot: 1, // 1 replica per slot
             miner_address: mining_address.clone(),
             min_writes_before_sync: 1,
-            entropy_packing_iterations: Config::default().entropy_packing_iterations,
+            entropy_packing_iterations: testnet_config.entropy_packing_iterations,
             chunk_migration_depth: 1, // Testnet / single node config
-            irys_chain_id: Config::default().irys_chain_id,
+            irys_chain_id: testnet_config.irys_chain_id,
         };
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;
         let tmp_dir = setup_tracing_and_temp_dir(Some("partition_expiration_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
 
-        let num_blocks_in_epoch = Config::default().num_blocks_in_epoch;
+        let num_blocks_in_epoch = testnet_config.num_blocks_in_epoch;
 
         // Create epoch service
         let config = EpochServiceConfig {
             capacity_scalar: 100,
-            num_blocks_in_epoch: Config::default().num_blocks_in_epoch,
-            num_capacity_partitions: Config::default().num_capacity_partitions,
+            num_blocks_in_epoch: testnet_config.num_blocks_in_epoch,
+            num_capacity_partitions: testnet_config.num_capacity_partitions,
             storage_config: storage_config.clone(),
         };
 
-        let epoch_service = EpochServiceActor::new(Some(config));
+        let epoch_service = EpochServiceActor::new(config, &testnet_config);
         let epoch_service_actor = epoch_service.start();
 
         // Process genesis message directly instead of through actor system
@@ -1024,7 +1020,7 @@ mod tests {
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
         new_epoch_block.height =
-            (Config::default().submit_ledger_epoch_length + 1) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
+            (testnet_config.submit_ledger_epoch_length + 1) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
 
         let storage_module_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();

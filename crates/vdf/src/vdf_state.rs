@@ -14,7 +14,7 @@ pub type AtomicVdfState = Arc<RwLock<VdfState>>;
 
 use tokio::time::sleep;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VdfState {
     /// last global step stored
     pub global_step: u64,
@@ -80,7 +80,7 @@ impl VdfState {
 pub struct VdfStepsReadGuard(AtomicVdfState);
 
 impl VdfStepsReadGuard {
-    /// Creates a new `ReadGard` for Ledgers
+    /// Creates a new `ReadGuard` for Ledgers
     pub const fn new(state: Arc<RwLock<VdfState>>) -> Self {
         Self(state)
     }

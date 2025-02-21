@@ -392,11 +392,11 @@ pub struct StorageModuleConfig {
     pub size_bytes: u64,
 }
 
-impl Default for StorageModuleConfig {
-    fn default() -> Self {
+impl StorageModuleConfig {
+    pub fn new(config: &Config) -> Self {
         Self {
             directory_path: "/tmp".into(),
-            size_bytes: 100 * Config::default().chunk_size,
+            size_bytes: 100 * config.chunk_size,
         }
     }
 }

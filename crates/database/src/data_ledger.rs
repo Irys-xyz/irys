@@ -43,16 +43,9 @@ pub struct TermLedger {
     pub num_partitions_per_slot: u64,
 }
 
-impl Default for PermanentLedger {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl PermanentLedger {
     /// Constructs a permanent ledger, always with `Ledger::Publish` as the id
-    pub fn new() -> Self {
-        let config = Config::default();
+    pub fn new(config: &Config) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: Ledger::Publish as u32,
@@ -63,12 +56,11 @@ impl PermanentLedger {
 
 impl TermLedger {
     /// Creates a term ledger with specified index and duration
-    pub fn new(ledger: Ledger, epoch_length: u64) -> Self {
-        let config = Config::default();
+    pub fn new(ledger: Ledger, config: &Config) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: ledger as u32,
-            epoch_length,
+            epoch_length: config.num_blocks_in_epoch,
             num_blocks_in_epoch: config.num_blocks_in_epoch,
             num_partitions_per_slot: config.num_partitions_per_slot,
         }
@@ -283,21 +275,12 @@ pub struct Ledgers {
     term: Vec<TermLedger>,
 }
 
-impl Default for Ledgers {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Ledgers {
     /// Instantiate a Ledgers struct with the correct Ledgers
-    pub fn new() -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
-            perm: PermanentLedger::new(),
-            term: vec![TermLedger::new(
-                Ledger::Submit,
-                Config::default().submit_ledger_epoch_length,
-            )],
+            perm: PermanentLedger::new(config),
+            term: vec![TermLedger::new(Ledger::Submit, config)],
         }
     }
 

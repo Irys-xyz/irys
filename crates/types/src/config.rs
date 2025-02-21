@@ -110,19 +110,6 @@ impl Config {
     }
 }
 
-impl From<Config> for DifficultyAdjustmentConfig {
-    fn from(config: Config) -> Self {
-        DifficultyAdjustmentConfig {
-            target_block_time: config.block_time,
-            adjustment_interval: config.difficulty_adjustment_interval,
-            max_adjustment_factor: config.max_difficulty_adjustment_factor,
-            min_adjustment_factor: config.min_difficulty_adjustment_factor,
-            min_difficulty: U256::one(), // TODO: make this customizable if desirable
-            max_difficulty: U256::MAX,
-        }
-    }
-}
-
 pub mod serde_utils {
 
     use rust_decimal::Decimal;
@@ -176,7 +163,9 @@ pub mod serde_utils {
         D: Deserializer<'de>,
     {
         let bytes = <&'de [u8]>::deserialize(deserializer)?;
-        let key = k256::ecdsa::SigningKey::from_slice(bytes).map_err(serde::de::Error::custom)?;
+        let decoded = hex::decode(bytes).map_err(serde::de::Error::custom)?;
+        let key =
+            k256::ecdsa::SigningKey::from_slice(&decoded).map_err(serde::de::Error::custom)?;
         Ok(key)
     }
 

@@ -367,6 +367,7 @@ mod tests {
 
     #[test]
     fn test_bench_chunks_packing() {
+        let testnet_config = Config::testnet();
         let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
@@ -399,8 +400,8 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
-            Config::default().entropy_packing_iterations,
-            Config::default().irys_chain_id,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.irys_chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -415,8 +416,8 @@ mod tests {
             partition_hash.into(),
             iterations,
             CHUNK_SIZE as usize,
-            Config::default().entropy_packing_iterations,
-            Config::default().irys_chain_id,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.irys_chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -432,8 +433,8 @@ mod tests {
             partition_hash.into(),
             iterations,
             &mut entropy_chunk,
-            Config::default().entropy_packing_iterations,
-            Config::default().irys_chain_id,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.irys_chain_id,
         );
 
         // sign picked random chunk with entropy
@@ -520,7 +521,7 @@ mod tests {
             iterations,
             chunk_size,
             &mut entropy_chunk,
-            Config::default().irys_chain_id,
+            testnet_config.irys_chain_id,
         );
 
         // simulate a smaller end chunk
@@ -546,7 +547,7 @@ mod tests {
             &packed_chunk,
             iterations,
             chunk_size,
-            Config::default().irys_chain_id,
+            testnet_config.irys_chain_id,
         );
 
         assert_eq!(unpacked_chunk.bytes.0, data_bytes);

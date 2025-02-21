@@ -394,7 +394,7 @@ mod tests {
     use irys_database::{BlockIndex, Initialized};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, H256List,
+        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, Config, H256List,
         IrysTransaction, IrysTransactionHeader, Signature, TransactionLedger, H256, U256,
     };
     use std::sync::{Arc, RwLock};
@@ -424,6 +424,7 @@ mod tests {
             .try_init();
 
         let mut genesis_block = IrysBlockHeader::new_mock_header();
+        let testnet_config = Config::testnet();
         let data_dir = temporary_directory(Some("block_validation_tests"), false);
         genesis_block.height = 0;
         let arc_genesis = Arc::new(genesis_block);
@@ -449,7 +450,7 @@ mod tests {
             ..Default::default()
         };
 
-        let epoch_service = EpochServiceActor::new(Some(config.clone()));
+        let epoch_service = EpochServiceActor::new(config.clone(), &testnet_config);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers
@@ -527,6 +528,7 @@ mod tests {
     #[actix::test]
     async fn poa_test_3_complete_txs() {
         let chunk_size: usize = 32;
+        let testnet_config = Config::testnet();
         let (_tmp, context) = init().await;
         // Create a bunch of TX chunks
         let data_chunks = vec![
@@ -537,7 +539,8 @@ mod tests {
 
         // Create a bunch of signed TX from the chunks
         // Loop though all the data_chunks and create wrapper tx for them
-        let signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
+        let signer =
+            IrysSigner::random_signer_with_chunk_size(chunk_size, testnet_config.irys_chain_id);
         let mut txs: Vec<IrysTransaction> = Vec::new();
 
         for chunks in &data_chunks {
@@ -569,11 +572,13 @@ mod tests {
 
     #[actix::test]
     async fn poa_not_complete_last_chunk_test() {
+        let testnet_config = Config::testnet();
         let (_tmp, context) = init().await;
         let chunk_size: usize = 32;
 
         // Create a signed TX from the chunks
-        let signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
+        let signer =
+            IrysSigner::random_signer_with_chunk_size(chunk_size, testnet_config.irys_chain_id);
         let mut txs: Vec<IrysTransaction> = Vec::new();
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk

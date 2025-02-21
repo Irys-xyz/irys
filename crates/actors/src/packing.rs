@@ -372,13 +372,13 @@ mod tests {
         cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingConfig, PackingRequest,
     };
 
-    // #[actix::test]
+    #[actix::test]
     async fn test_packing_actor() -> eyre::Result<()> {
         // setup
         let mining_address = Address::random();
         let partition_hash = PartitionHash::zero();
-        let config = Config::default();
-        let config = PackingConfig::new(&config);
+        let testnet_config = Config::testnet();
+        let config = PackingConfig::new(&testnet_config);
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {

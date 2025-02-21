@@ -168,10 +168,11 @@ mod tests {
 
     #[test]
     fn signature_signing_serialization() -> eyre::Result<()> {
+        let testnet_config = Config::testnet();
         let irys_signer = IrysSigner {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
-            chain_id: Config::default().irys_chain_id,
+            chain_id: testnet_config.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };
 
@@ -185,7 +186,7 @@ mod tests {
             perm_fee: Some(1),
             ledger_id: 0,
             bundle_format: Some(0),
-            chain_id: Config::default().irys_chain_id,
+            chain_id: testnet_config.irys_chain_id,
             version: 0,
             ingress_proofs: None,
             signature: Default::default(),

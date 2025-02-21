@@ -1,5 +1,4 @@
 use irys_primitives::Address;
-use irys_types::Config;
 use openssl::sha;
 
 pub const SHA_HASH_SIZE: usize = 32;
@@ -80,19 +79,18 @@ mod tests {
 
     #[test]
     fn test_seed_hash() {
+        let testnet_config = Config::testnet();
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-
         let now = Instant::now();
-
         let rust_hash = capacity_single::compute_seed_hash(
             mining_address,
             chunk_offset,
             partition_hash,
-            Config::default().irys_chain_id,
+            testnet_config.irys_chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -107,7 +105,7 @@ mod tests {
         let c_hash_ptr = c_hash.as_ptr() as *mut u8;
 
         let now = Instant::now();
-        let chain_id = Config::default().irys_chain_id;
+        let chain_id = testnet_config.irys_chain_id;
 
         unsafe {
             compute_seed_hash(
@@ -131,6 +129,7 @@ mod tests {
 
     #[test]
     fn test_compute_entropy_chunk() {
+        let testnet_config = Config::testnet();
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
@@ -147,9 +146,9 @@ mod tests {
             chunk_offset,
             partition_hash,
             iterations,
-            Config::default().chunk_size as usize,
+            testnet_config.chunk_size as usize,
             &mut chunk,
-            Config::default().irys_chain_id,
+            testnet_config.irys_chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -165,7 +164,7 @@ mod tests {
         let c_chunk_ptr = c_chunk.as_ptr() as *mut u8;
 
         let now = Instant::now();
-        let chain_id = Config::default().irys_chain_id;
+        let chain_id = testnet_config.irys_chain_id;
 
         unsafe {
             compute_entropy_chunk(

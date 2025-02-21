@@ -13,10 +13,9 @@ use std::sync::Arc;
 
 pub const SUPPORTED_CHAINS: &[&str] = &["mainnet" /* , "devnet", "testnet" */];
 
-/// note: for testing this is overridden
 pub static IRYS_MAINNET: Lazy<Arc<ChainSpec>> = Lazy::new(|| {
     let mut spec = ChainSpec {
-        chain: Chain::from_id(Config::default().irys_chain_id),
+        chain: Chain::from_id(1275),
         // TODO: A proper genesis block
         genesis: Genesis {
             gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,

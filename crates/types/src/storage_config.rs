@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::*;
 
-/// This is hardcoded here to be used just by C packing related staff as it is also harcoded right now in C sources
+/// This is hardcoded here to be used just by C packing related stuff as it is also hardcoded right now in C sources
 pub const CHUNK_SIZE: u64 = 256 * 1024;
 
 /// Protocol storage sizing configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StorageConfig {
     /// Size of each chunk in bytes
     pub chunk_size: u64,
@@ -36,7 +36,7 @@ impl StorageConfig {
             num_chunks_in_partition: config.num_chunks_in_partition,
             num_chunks_in_recall_range: config.num_chunks_in_recall_range,
             num_partitions_in_slot: config.num_partitions_per_slot,
-            miner_address: config.mining_key,
+            miner_address: Address::from_private_key(&config.mining_key),
             min_writes_before_sync: config.num_writes_before_sync,
             // TODO: revert this back
             entropy_packing_iterations: 1_000, /* PACKING_SHA_1_5_S */

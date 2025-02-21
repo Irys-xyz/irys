@@ -20,9 +20,16 @@ pub struct DifficultyAdjustmentConfig {
     pub max_difficulty: U256,
 }
 
-impl Default for DifficultyAdjustmentConfig {
-    fn default() -> Self {
-        Config::default().into()
+impl DifficultyAdjustmentConfig {
+    pub fn new(config: &Config) -> Self {
+        DifficultyAdjustmentConfig {
+            target_block_time: config.block_time,
+            adjustment_interval: config.difficulty_adjustment_interval,
+            max_adjustment_factor: config.max_difficulty_adjustment_factor,
+            min_adjustment_factor: config.min_difficulty_adjustment_factor,
+            min_difficulty: U256::one(), // TODO: make this customizable if desirable
+            max_difficulty: U256::MAX,
+        }
     }
 }
 
@@ -157,6 +164,7 @@ mod tests {
 
     #[test]
     fn test_adjustments() {
+        let config = Config::testnet();
         let difficulty_config = DifficultyAdjustmentConfig {
             target_block_time: 5,              // 5 seconds
             adjustment_interval: 10,           // every X blocks
@@ -173,9 +181,9 @@ mod tests {
             num_partitions_in_slot: 1,
             miner_address: Address::random(),
             min_writes_before_sync: 1,
-            entropy_packing_iterations: Config::default().entropy_packing_iterations,
+            entropy_packing_iterations: config.entropy_packing_iterations,
             chunk_migration_depth: 1, // Testnet / single node config
-            irys_chain_id: Config::default().irys_chain_id,
+            irys_chain_id: config.irys_chain_id,
         };
 
         let mut storage_module_count = 3;

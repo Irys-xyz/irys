@@ -13,6 +13,7 @@ pub type IrysTransactionId = H256;
     Debug,
     Eq,
     Serialize,
+    Default,
     Deserialize,
     PartialEq,
     Arbitrary,
@@ -143,8 +144,8 @@ impl IrysTransaction {
     }
 }
 
-impl Default for IrysTransactionHeader {
-    fn default() -> Self {
+impl IrysTransactionHeader {
+    pub fn new(config: &Config) -> Self {
         IrysTransactionHeader {
             id: H256::zero(),
             anchor: H256::zero(),
@@ -156,7 +157,7 @@ impl Default for IrysTransactionHeader {
             ledger_id: 0,
             bundle_format: None,
             version: 0,
-            chain_id: Config::default().irys_chain_id,
+            chain_id: config.irys_chain_id,
             signature: Signature::test_signature().into(),
             ingress_proofs: None,
         }

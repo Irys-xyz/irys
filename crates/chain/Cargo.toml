@@ -7,10 +7,8 @@ version = "0.1.0"
 name = "irys"
 path = "src/main.rs"
 
-
 [features]
 nvidia = ["irys-actors/nvidia"]
-
 
 [dependencies]
 # Irys
@@ -28,11 +26,11 @@ irys-vdf.workspace = true
 #
 
 base64-url.workspace = true
-awc = "3.5.1"
 base58 = "0.2.0"
 assert_matches = "1.5.0"
-clap = "4.5.20"
-eyre = "0.6.8"
+eyre.workspace = true
+color-eyre.workspace = true
+tracing-error.workspace = true
 openssl.workspace = true
 rand = "0.8.5"
 rand_chacha = "0.3.1"
@@ -44,11 +42,11 @@ reth-db-models.workspace = true
 reth-db.workspace = true
 reth-primitives.workspace = true
 reth.workspace = true
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.107"
-sha2 = "0.10.8"
-tempfile = "3.10"
-env_logger = "0.11.5"
+toml.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
 actix-rt.workspace = true
 actix-web.workspace = true
 actix-http.workspace = true
@@ -66,9 +64,7 @@ alloy-rlp.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-serde.workspace = true
-arbitrary = { workspace = true, features = [
-	"derive",
-] } # arbitrary.workspace = truebytes.workspace = true
+arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
 
 derive_more.workspace = true
@@ -79,10 +75,7 @@ futures-util.workspace = true
 futures.workspace = true
 reth-tracing.workspace = true
 hex.workspace = true
-k256 = { version = "0.13", default-features = false, features = [
-	"ecdsa",
-	"serde",
-] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "serde"] }
 alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true

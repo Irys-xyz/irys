@@ -21,27 +21,30 @@ pub struct IrysSigner {
 /// signing them, posting them etc.
 impl IrysSigner {
     // todo : remove the `mainnet` prefix
-    pub fn mainnet_from_slice(config: &Config) -> Self {
+    pub fn from_config(config: &Config) -> Self {
         IrysSigner {
-            signer: k256::ecdsa::SigningKey::from_slice(config.mining_key).unwrap(),
+            signer: config.mining_key.clone(),
             chain_id: config.irys_chain_id,
-            chunk_size: config.chunk_size.try_into().unwrap(),
+            chunk_size: config
+                .chunk_size
+                .try_into()
+                .expect("invalid chunk size specified in the config"),
         }
     }
 
     #[cfg(any(feature = "test-utils", test))]
-    pub fn random_signer() -> Self {
+    pub fn random_signer(irys_chain_id: u64) -> Self {
         use rand::rngs::OsRng;
 
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: Config::default().irys_chain_id,
+            chain_id: irys_chain_id,
             chunk_size: crate::MAX_CHUNK_SIZE,
         }
     }
 
     #[cfg(any(feature = "test-utils", test))]
-    pub fn random_signer_with_chunk_size<T>(chunk_size: T) -> Self
+    pub fn random_signer_with_chunk_size<T>(chunk_size: T, irys_chain_id: u64) -> Self
     where
         T: TryInto<usize>,
         <T as TryInto<usize>>::Error: std::fmt::Debug,
@@ -50,8 +53,8 @@ impl IrysSigner {
 
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: Config::default().irys_chain_id,
-            chunk_size: chunk_size.try_into().unwrap(),
+            chain_id: irys_chain_id,
+            chunk_size: chunk_size.try_into().expect("invalid chunk size specified"),
         }
     }
 
@@ -165,12 +168,13 @@ mod tests {
     #[tokio::test]
     async fn create_and_sign_transaction() {
         // Create 2.5 chunks worth of data *  fill the data with random bytes
+        let config = crate::Config::testnet();
         let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Create a new Irys API instance
-        let irys = IrysSigner::random_signer();
+        let irys = IrysSigner::random_signer(config.irys_chain_id);
 
         // Create a transaction from the random bytes
         let mut tx = irys.create_transaction(data_bytes.clone(), None).unwrap();

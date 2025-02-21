@@ -5,7 +5,7 @@ use crate::*;
 pub type AtomicVdfStepNumber = Arc<AtomicU64>;
 
 /// Allows for overriding of the vdf steps generation parameters
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VDFStepsConfig {
     pub num_checkpoints_in_vdf_step: usize,
     pub vdf_reset_frequency: usize,
@@ -13,9 +13,8 @@ pub struct VDFStepsConfig {
     pub vdf_parallel_verification_thread_limit: usize,
 }
 
-impl Default for VDFStepsConfig {
-    fn default() -> Self {
-        let config = Config::default();
+impl VDFStepsConfig {
+    pub fn new(config: &Config) -> Self {
         VDFStepsConfig {
             num_checkpoints_in_vdf_step: config.num_checkpoints_in_vdf_step,
             vdf_reset_frequency: config.vdf_reset_frequency,
