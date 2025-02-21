@@ -6,7 +6,7 @@ use crate::{
         phantoms::{Percentage, Usd},
         Amount,
     },
-    DifficultyAdjustmentConfig, IrysTokenPrice, U256,
+    IrysTokenPrice,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

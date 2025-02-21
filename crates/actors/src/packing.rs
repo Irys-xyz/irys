@@ -377,7 +377,8 @@ mod tests {
         // setup
         let mining_address = Address::random();
         let partition_hash = PartitionHash::zero();
-        let testnet_config = Config::testnet();
+        let mut testnet_config = Config::testnet();
+        testnet_config.chunk_size = 32;
         let config = PackingConfig::new(&testnet_config);
         let infos = vec![StorageModuleInfo {
             id: 0,
