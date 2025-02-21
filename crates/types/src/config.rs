@@ -95,7 +95,8 @@ impl Config {
             reset_state_on_restart: false,
             chunk_migration_depth: 1,
             mining_key: SigningKey::from_slice(
-                b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0",
+                &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                    .expect("valid hex"),
             )
             .expect("valid key"),
             num_capacity_partitions: None,
