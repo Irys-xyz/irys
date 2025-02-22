@@ -1,6 +1,6 @@
 pub mod error;
 pub mod routes;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use actix::Addr;
 use actix_cors::Cors;
@@ -15,11 +15,14 @@ use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,
 };
+use irys_database::{tables::PeerListItems, walk_all};
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, CONFIG};
+use reth_db::Database;
 use routes::{
-    block, get_chunk, index, network_config, peer_list, post_chunk, price, proxy::proxy, tx,
+    block, get_chunk, index, network_config, peer_list, post_chunk, post_version, price,
+    proxy::proxy, tx,
 };
 use tracing::{debug, info};
 
@@ -33,6 +36,28 @@ pub struct ApiState {
     pub reth_provider: Option<RethNodeProvider>,
     pub block_tree: Option<BlockTreeReadGuard>,
     pub block_index: Option<BlockIndexReadGuard>,
+}
+
+impl ApiState {
+    pub fn get_known_peers(&self) -> eyre::Result<Vec<SocketAddr>> {
+        // Attempt to create a read transaction
+        let read_tx = self
+            .db
+            .tx()
+            .map_err(|e| eyre::eyre!("Database error: {}", e))?;
+
+        // Fetch peer list items
+        let peer_list_items =
+            walk_all::<PeerListItems>(&read_tx).map_err(|e| eyre::eyre!("Read error: {}", e))?;
+
+        // Extract IP addresses and Port (SocketAddr) into a Vec<String>
+        let ips: Vec<SocketAddr> = peer_list_items
+            .iter()
+            .map(|(_miner_addr, entry)| entry.address)
+            .collect();
+
+        Ok(ips)
+    }
 }
 
 pub fn routes() -> impl HttpServiceFactory {
@@ -61,6 +86,7 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/tx", web::post().to(tx::post_tx))
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
+        .route("/version", web::post().to(post_version::post_version))
 }
 
 pub async fn run_server(app_state: ApiState) {
