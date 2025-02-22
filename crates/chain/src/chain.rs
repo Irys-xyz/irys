@@ -2,6 +2,7 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use alloy_eips::BlockNumberOrTag;
+use irys_actors::peer_list_service::PeerListService;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
@@ -400,6 +401,12 @@ pub async fn start_irys_node(
                     .await
                     .unwrap();
 
+                let peer_list_service = PeerListService::new(db.clone());
+                let peer_list_arbiter = Arbiter::new();
+                SystemRegistry::set(PeerListService::start_in_arbiter(
+                    &peer_list_arbiter.handle(),
+                    |_| peer_list_service,
+                ));
 
                 let mempool_service = MempoolService::new(
                     db.clone(),
