@@ -21,6 +21,7 @@ pub mod storage_config;
 pub mod storage_pricing;
 pub mod transaction;
 pub mod vdf_config;
+pub mod version;
 
 pub use block::*;
 pub use config::*;
@@ -41,3 +42,4 @@ pub use reth_codecs::Compact;
 pub use simple_rng::*;
 pub use storage_config::*;
 pub use vdf_config::*;
+pub use version::*;
