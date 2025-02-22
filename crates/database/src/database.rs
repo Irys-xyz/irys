@@ -5,11 +5,12 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders,
+    PeerListItems,
 };
 
 use irys_types::{
     Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionId, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
+    IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
 };
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::mdbx::tx::Tx;
@@ -202,6 +203,14 @@ pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U2
         .get::<PlainAccountState>(address)?
         .map(|a| U256::from_little_endian(a.balance.as_le_slice()))
         .unwrap_or(U256::from(0)))
+}
+
+pub fn insert_peer_list_item<T: DbTxMut>(
+    tx: &T,
+    mining_address: &Address,
+    peer_list_entry: &PeerListItem,
+) -> eyre::Result<()> {
+    Ok(tx.put::<PeerListItems>(mining_address.clone(), peer_list_entry.clone().into())?)
 }
 
 pub fn walk_all<T: Table>(
