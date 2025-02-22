@@ -28,6 +28,7 @@ rand = "0.8.5"
 tokio.workspace = true
 actix-cors = "0.7.0"
 tracing.workspace = true
+semver.workspace = true
 eyre.workspace = true
 log = "0.4.22"
 env_logger = "0.11.5"
