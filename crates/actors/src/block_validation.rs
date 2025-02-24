@@ -191,7 +191,7 @@ pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
 
-    let previous_solution_diff=hash_to_number(&block.previous_solution_hash.0);
+    let previous_solution_diff = hash_to_number(&block.previous_solution_hash.0);
 
     if solution_diff >= previous_solution_diff {
         Ok(())
