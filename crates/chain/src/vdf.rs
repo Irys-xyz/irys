@@ -92,7 +92,12 @@ pub fn run_vdf(
 mod tests {
     use super::*;
     use actix::*;
-    use irys_actors::vdf_service::GetVdfStateMessage;
+    use color_eyre::owo_colors::OwoColorize;
+    use irys_actors::{
+        block_index_service::BlockIndexService,
+        vdf_service::{calc_capacity, GetVdfStateMessage},
+    };
+    use irys_config::IrysNodeConfig;
     use irys_types::*;
     use irys_vdf::{vdf_sha_verification, vdf_state::VdfStepsReadGuard, vdf_steps_are_valid};
     use nodit::interval::ii;
@@ -109,6 +114,7 @@ mod tests {
             .finish()
             .try_init();
     }
+
     #[actix_rt::test]
     async fn test_vdf_step() {
         let config = Config::testnet();
@@ -121,7 +127,7 @@ mod tests {
 
         init_tracing();
 
-        let config = VDFStepsConfig::default();
+        let config = VDFStepsConfig::new(&config);
 
         debug!("VDF difficulty: {}", config.vdf_difficulty);
         let now = Instant::now();
@@ -151,19 +157,20 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf_service() {
+        let mut config = Config::testnet();
+        config.vdf_reset_frequency = 2;
+        config.vdf_sha_1s = 1;
         let seed = H256::random();
         let reset_seed = H256::random();
 
-        let vdf_config = VDFStepsConfig {
-            vdf_reset_frequency: 2, // so to validation get into reset point
-            vdf_difficulty: 1,      // go quicker
-            ..VDFStepsConfig::default()
-        };
+        let vdf_config = VDFStepsConfig::new(&config);
 
         init_tracing();
 
         let broadcast_mining_service = BroadcastMiningService::from_registry();
-        let vdf_service = VdfService::from_registry();
+        let capacity = calc_capacity(&config);
+        let vdf_service = VdfService::from_capacity(capacity).start();
+        SystemRegistry::set(vdf_service.clone());
         let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();
 
         let vdf_config2 = vdf_config.clone();

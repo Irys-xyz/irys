@@ -84,3 +84,4 @@ core_affinity = "0.8.1"
 
 [dev-dependencies]
 awc = "3.5"
+irys-actors = { workspace = true, features = ["test-utils"] }

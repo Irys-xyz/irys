@@ -27,8 +27,8 @@ impl VdfService {
         }
     }
 
-    #[cfg(test)]
-    fn from_capacity(capacity: usize) -> Self {
+    #[cfg(any(feature = "test-utils", test))]
+    pub fn from_capacity(capacity: usize) -> Self {
         VdfService {
             vdf_state: Arc::new(RwLock::new(VdfState {
                 global_step: 0,
@@ -91,10 +91,7 @@ fn create_state(
     }
 }
 
-/// set up a minimum cache size of 10_000 steps for testing purposes, chunks number can be
-/// very low in testing setups so may need more cached steps than strictly efficient
-/// sampling needs.
-fn calc_capacity(config: &Config) -> usize {
+pub fn calc_capacity(config: &Config) -> usize {
     let capacity = std::cmp::max(
         10_000,
         (config.num_chunks_in_partition / config.num_chunks_in_recall_range)

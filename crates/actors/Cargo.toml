@@ -47,3 +47,4 @@ workspace = true
 
 [features]
 nvidia = ["irys-packing/nvidia"]
+test-utils = []
