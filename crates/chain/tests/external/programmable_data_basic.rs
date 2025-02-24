@@ -202,7 +202,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         None
     });
 
-    let start_offset = future_or_mine_on_timeout(
+    let _start_offset = future_or_mine_on_timeout(
         node.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
@@ -213,7 +213,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     .await?
     .unwrap();
 
-    for i in 1..10 {
+    for _i in 1..10 {
         let poa_solution = capacity_chunk_solution(
             node.config.mining_signer.address(),
             node.vdf_steps_guard.clone(),

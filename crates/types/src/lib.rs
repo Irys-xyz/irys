@@ -17,6 +17,7 @@ pub mod signature;
 pub mod simple_rng;
 pub mod storage;
 pub mod storage_config;
+pub mod storage_pricing;
 pub mod transaction;
 pub mod vdf_config;
 

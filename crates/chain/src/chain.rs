@@ -564,8 +564,10 @@ pub async fn start_irys_node(
                 let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
 
                 info!(
-                    "Starting VDF thread seed {:?} reset_seed {:?} step_number: {:?}",
-                    seed, arc_genesis.vdf_limiter_info.seed, global_step_number
+                    ?seed,
+                    ?global_step_number,
+                    reset_seed = ?arc_genesis.vdf_limiter_info.seed,
+                    "Starting VDF thread",
                 );
 
                 let vdf_thread_handler = std::thread::spawn(move || {

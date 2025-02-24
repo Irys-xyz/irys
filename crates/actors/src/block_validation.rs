@@ -191,7 +191,9 @@ pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
 
-    if solution_diff >= block.diff {
+    let previous_solution_diff=hash_to_number(&block.previous_solution_hash.0);
+
+    if solution_diff >= previous_solution_diff {
         Ok(())
     } else {
         Err(eyre::eyre!(
@@ -421,9 +423,8 @@ mod tests {
             // Ignore errors initializing the logger if tests race to configure it
             .try_init();
 
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
         let data_dir = temporary_directory(Some("block_validation_tests"), false);
-
-        let mut genesis_block = IrysBlockHeader::new();
         genesis_block.height = 0;
         let arc_genesis = Arc::new(genesis_block);
 

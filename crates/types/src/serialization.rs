@@ -66,6 +66,38 @@ impl<'a> Arbitrary<'a> for U256 {
     }
 }
 
+impl Encode for U256 {
+    type Encoded = [u8; 32];
+
+    fn encode(self) -> Self::Encoded {
+        bytemuck::cast(self.0)
+    }
+}
+
+impl Decode for U256 {
+    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
+        let res = bytemuck::try_from_bytes::<[u64; 4]>(value).map_err(|_| DatabaseError::Decode)?;
+        let res = U256(*res);
+        Ok(res)
+    }
+}
+
+impl Encodable for U256 {
+    #[inline]
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        let mut buffer = [0_u8; 32];
+        self.to_big_endian(&mut buffer);
+        buffer.encode(out);
+    }
+}
+
+impl Decodable for U256 {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let res = <[u8; 32]>::decode(buf)?;
+        Ok(Self::from_big_endian(&res))
+    }
+}
+
 // Manually implement Compact for U256
 impl Compact for U256 {
     fn to_compact<B>(&self, buf: &mut B) -> usize
@@ -85,14 +117,9 @@ impl Compact for U256 {
 
     #[inline]
     fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
-        if len == 0 {
-            return (U256::zero(), buf);
-        }
-
-        let mut slice = [0; 32];
-        slice[(32 - len)..].copy_from_slice(&buf[..len]);
+        let res = Self::from_big_endian(&buf[..len]);
         buf.advance(len);
-        (Self::from_big_endian(&slice), buf)
+        (res, buf)
     }
 }
 
@@ -100,7 +127,7 @@ impl Compact for U256 {
 // H256 Type
 //------------------------------------------------------------------------------
 construct_fixed_hash! {
-    /// A 256-bit hash type (32 bytes)
+    /// A 256-bit hash type (32 bytes).
     pub struct H256(32);
 }
 
@@ -181,7 +208,19 @@ impl TxIngressProof {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Compact, Serialize, Deserialize, Arbitrary)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Default,
+    Compact,
+    Serialize,
+    Deserialize,
+    Arbitrary,
+    RlpDecodable,
+    RlpEncodable,
+)]
 pub struct IngressProofsList(pub Vec<TxIngressProof>);
 
 impl From<Vec<TxIngressProof>> for IngressProofsList {
@@ -380,7 +419,7 @@ impl Decompress for H256 {
 /// A struct of [`Vec<u8>`] used for all `base64_url` encoded fields. This is
 /// used for large fields like proof chunk data.
 
-#[derive(Default, Debug, Clone, Eq, PartialEq, Compact, Arbitrary)]
+#[derive(Default, Debug, Clone, Eq, PartialEq, Compact, Arbitrary, RlpDecodable, RlpEncodable)]
 pub struct Base64(pub Vec<u8>);
 
 impl std::fmt::Display for Base64 {
@@ -486,7 +525,7 @@ impl<'de> Deserialize<'de> for Base64 {
 // H256List Type
 //------------------------------------------------------------------------------
 /// A struct of [`Vec<H256>`] used for lists of [`Base64`] encoded hashes
-#[derive(Debug, Default, Clone, Eq, PartialEq, Compact, Arbitrary)]
+#[derive(Debug, Default, Clone, Eq, PartialEq, Compact, Arbitrary, RlpEncodable, RlpDecodable)]
 pub struct H256List(pub Vec<H256>);
 
 impl H256List {
@@ -683,6 +722,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn test_u256_rlp_round_trip() {
+        // setup
+        let data = U256::one();
+
+        // action
+        let mut buffer = vec![];
+        Encodable::encode(&data, &mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
+
+    #[test]
     fn test_u256_to_compact() {
         // Create a U256 value to test
         let original_value = U256::from(123456789u64);
@@ -714,6 +767,34 @@ mod tests {
 
         // Call from_compact to convert the bytes back to U256
         let (decoded_value, _) = U256::from_compact(&buf[..], buf.len());
+
+        // Check that the decoded value matches the original value
+        assert_eq!(decoded_value, original_value);
+    }
+
+    #[test]
+    fn test_h256_rlp_round_trip() {
+        // setup
+        let data = H256::random();
+
+        // action
+        let mut buffer = vec![];
+        Encodable::encode(&data, &mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn test_h256_compact_round_trip() {
+        // Create a H256 value and convert it to compact bytes
+        let original_value = H256::random();
+        let mut buf = BytesMut::with_capacity(32);
+        original_value.to_compact(&mut buf);
+
+        // Call from_compact to convert the bytes back to H256
+        let (decoded_value, _) = H256::from_compact(&buf[..], buf.len());
 
         // Check that the decoded value matches the original value
         assert_eq!(decoded_value, original_value);

@@ -163,48 +163,42 @@ impl Default for IrysTransactionHeader {
     }
 }
 
-#[test]
-fn t() {
-    dbg!(serde_json::to_string(&IrysTransactionHeader::default()).unwrap());
-}
-
 pub type TxPath = Vec<u8>;
 
 /// sha256(tx_path)
 pub type TxPathHash = H256;
 
-//==============================================================================
-// Tests
-//------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{irys::IrysSigner, MAX_CHUNK_SIZE};
 
-    use alloy_core::hex::{self};
     use alloy_rlp::Decodable;
 
     use k256::ecdsa::SigningKey;
     use serde_json;
 
     #[test]
+    fn test_irys_transaction_header_rlp_round_trip() {
+        // setup
+        let mut header = mock_header();
+
+        // action
+        let mut buffer = vec![];
+        header.encode(&mut buffer);
+        let decoded = IrysTransactionHeader::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        // zero out the id and signature, those do not get encoded
+        header.id = H256::zero();
+        header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        assert_eq!(header, decoded);
+    }
+
+    #[test]
     fn test_irys_transaction_header_serde() {
         // Create a sample IrysTransactionHeader
-        let original_header = IrysTransactionHeader {
-            id: H256::from([255u8; 32]),
-            anchor: H256::from([1u8; 32]),
-            signer: Address::default(),
-            data_root: H256::from([3u8; 32]),
-            data_size: 1024,
-            term_fee: 100,
-            perm_fee: Some(200),
-            ledger_id: 1,
-            bundle_format: None,
-            chain_id: CONFIG.irys_chain_id,
-            version: 0,
-            ingress_proofs: None,
-            signature: Signature::test_signature().into(),
-        };
+        let original_header = mock_header();
 
         // Serialize the IrysTransactionHeader to JSON
         let serialized = serde_json::to_string(&original_header).expect("Failed to serialize");
@@ -217,10 +211,6 @@ mod tests {
         // Ensure the deserialized struct matches the original
         assert_eq!(original_header, deserialized);
     }
-
-    const DEV_PRIVATE_KEY: &str =
-        "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
-    const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
     #[test]
     fn test_tx_encode_and_signing() {
@@ -253,8 +243,7 @@ mod tests {
         assert_eq!(&dec, &original_header);
 
         let signer = IrysSigner {
-            signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
-                .unwrap(),
+            signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: CONFIG.irys_chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };
@@ -267,5 +256,24 @@ mod tests {
         let signed_tx = signer.sign_transaction(tx.clone()).unwrap();
 
         assert!(signed_tx.header.is_signature_valid());
+    }
+
+    fn mock_header() -> IrysTransactionHeader {
+        let original_header = IrysTransactionHeader {
+            id: H256::from([255u8; 32]),
+            anchor: H256::from([1u8; 32]),
+            signer: Address::default(),
+            data_root: H256::from([3u8; 32]),
+            data_size: 1024,
+            term_fee: 100,
+            perm_fee: Some(200),
+            ledger_id: 1,
+            bundle_format: None,
+            chain_id: CONFIG.irys_chain_id,
+            version: 0,
+            ingress_proofs: None,
+            signature: Signature::test_signature().into(),
+        };
+        original_header
     }
 }
