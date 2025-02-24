@@ -65,6 +65,9 @@ pub fn calculate_initial_difficulty(
     Ok(initial_difficulty)
 }
 
+/// - if `actual_time_ms` < `target_time_ms`,the difficulty increases i.e. block.difficulty > previous_block.difficulty.
+/// -  if `actual_time_ms` > `target_time_ms`,the difficulty decreases i.e. block.difficulty < previous_block.difficulty.
+/// - if the `percent_diff` < `min_threshold`, the difficulty remains unchanged.
 pub fn adjust_difficulty(current_diff: U256, actual_time_ms: u128, target_time_ms: u128) -> U256 {
     let max_u256 = U256::MAX;
     let scale = U256::from(1000);
