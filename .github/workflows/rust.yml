@@ -69,7 +69,7 @@ jobs:
         run: git submodule update --init --recursive
 
       - name: cargo check
-        run: RUSTFLAGS="-D warnings" cargo xtask check --all-targets --workspace --all-features
+        run: RUSTFLAGS="-D warnings" cargo xtask check -- --all-targets --workspace --all-features
 
   cargo-fmt:
     name: cargo fmt
