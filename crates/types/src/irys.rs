@@ -56,7 +56,8 @@ impl IrysSigner {
     pub fn create_transaction(
         &self,
         data: Vec<u8>,
-        anchor: Option<H256>, //TODO!: more parameters as they are implemented
+        anchor: Option<H256>,
+        bytes: u64,
     ) -> Result<IrysTransaction> {
         let mut transaction = self.merklize(data, self.chunk_size)?;
 
