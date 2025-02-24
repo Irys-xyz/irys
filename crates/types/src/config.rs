@@ -94,6 +94,7 @@ impl Config {
             num_writes_before_sync: 5,
             reset_state_on_restart: false,
             chunk_migration_depth: 1,
+            // todo add mining key
             mining_key: SigningKey::from_slice(
                 &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
                     .expect("valid hex"),

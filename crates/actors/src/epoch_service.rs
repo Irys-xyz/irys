@@ -419,12 +419,14 @@ impl EpochServiceActor {
             let num_data_partitions = pa.data_partitions.len() as u64;
             let num_capacity_partitions =
                 Self::get_num_capacity_partitions(num_data_partitions, &self.config);
+            warn!(?num_capacity_partitions, ?num_data_partitions, "loggging");
             total_parts = num_capacity_partitions + num_data_partitions;
         }
 
         // Add additional capacity partitions as needed
         if total_parts > self.all_active_partitions.len() as u64 {
             let parts_to_add = total_parts - self.all_active_partitions.len() as u64;
+            warn!(?parts_to_add, ?total_parts, active_partitions =? self.all_active_partitions.len(), "aaaa");
             self.add_capacity_partitions(parts_to_add);
         }
     }
@@ -514,6 +516,7 @@ impl EpochServiceActor {
         let log_10 = (base_count as f64).log10();
         let trunc = truncate_to_3_decimals(log_10);
         let scaled = truncate_to_3_decimals(trunc * config.capacity_scalar as f64);
+        warn!(?num_data_partitions, ?min_count, ?config.capacity_scalar, ?config.storage_config.num_partitions_in_slot, "insidi get part" );
 
         // println!(
         //     "- base_count: {}, log_10: {}, trunc: {}, scaled: {}, rounded: {}",
@@ -975,24 +978,23 @@ mod tests {
     #[actix::test]
     async fn partition_expiration_test() {
         // Initialize genesis block at height 0
-        let mining_address = Address::random();
         let mut genesis_block = IrysBlockHeader::new_mock_header();
-        let testnet_config = Config::testnet();
+        let mut testnet_config = Config::testnet();
+        let chunk_size = 32;
         let chunk_count = 10;
+        testnet_config.chunk_size = chunk_size;
+        testnet_config.num_chunks_in_partition = chunk_count;
+        testnet_config.num_chunks_in_recall_range = 2;
+        testnet_config.num_partitions_per_slot = 1;
+        testnet_config.num_writes_before_sync = 1;
+        // testnet_config.entropy_packing_iterations = 1_000;
+        testnet_config.chunk_migration_depth = 1;
+        testnet_config.capacity_scalar = 100;
+        let mining_address = Address::from_private_key(&testnet_config.mining_key);
         genesis_block.height = 0;
 
         // Create a storage config for testing
-        let storage_config = StorageConfig {
-            chunk_size: 32,
-            num_chunks_in_partition: chunk_count,
-            num_chunks_in_recall_range: 2,
-            num_partitions_in_slot: 1, // 1 replica per slot
-            miner_address: mining_address.clone(),
-            min_writes_before_sync: 1,
-            entropy_packing_iterations: testnet_config.entropy_packing_iterations,
-            chunk_migration_depth: 1, // Testnet / single node config
-            irys_chain_id: testnet_config.irys_chain_id,
-        };
+        let storage_config = StorageConfig::new(&testnet_config);
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;
         let tmp_dir = setup_tracing_and_temp_dir(Some("partition_expiration_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
@@ -1000,13 +1002,8 @@ mod tests {
         let num_blocks_in_epoch = testnet_config.num_blocks_in_epoch;
 
         // Create epoch service
-        let config = EpochServiceConfig {
-            capacity_scalar: 100,
-            num_blocks_in_epoch: testnet_config.num_blocks_in_epoch,
-            num_capacity_partitions: testnet_config.num_capacity_partitions,
-            storage_config: storage_config.clone(),
-        };
-
+        let config = EpochServiceConfig::new(&testnet_config);
+        debug!(?config, ?testnet_config, "epoch params");
         let epoch_service = EpochServiceActor::new(config, &testnet_config);
         let epoch_service_actor = epoch_service.start();
 
@@ -1157,12 +1154,17 @@ mod tests {
         sleep(Duration::from_secs(1)).await;
 
         // busypoll the solution context rwlock
+        let mut counter = 0;
         let pack_req = 'outer: loop {
             match arc_rwlock.try_read() {
                 Ok(lck) => {
                     if lck.is_none() {
                         debug!("Packing request not ready waiting!");
                         sleep(Duration::from_millis(50)).await;
+                        counter += 1;
+                        if counter == 10 {
+                            panic!();
+                        }
                     } else {
                         debug!("Packing request received ready!");
                         break 'outer lck.as_ref().unwrap().clone();
