@@ -378,8 +378,12 @@ mod tests {
         let mining_address = Address::random();
         let partition_hash = PartitionHash::zero();
         let mut testnet_config = Config::testnet();
+        testnet_config.num_writes_before_sync = 1;
+        testnet_config.entropy_packing_iterations = 1000;
+        testnet_config.num_chunks_in_partition = 5;
         testnet_config.chunk_size = 32;
         let config = PackingConfig::new(&testnet_config);
+
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
@@ -392,13 +396,7 @@ mod tests {
                 (partition_chunk_offset_ii!(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         }];
-        // Override the default StorageModule config for testing
-        let storage_config = StorageConfig {
-            min_writes_before_sync: 1,
-            entropy_packing_iterations: 1_000,
-            num_chunks_in_partition: 5,
-            ..Default::default()
-        };
+        let storage_config = StorageConfig::new(&testnet_config);
         let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
         let base_path = tmp_dir.path().to_path_buf();
         // Create a StorageModule with the specified submodules and config

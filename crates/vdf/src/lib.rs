@@ -734,7 +734,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block_after_reset() {
-        let testnet_config = Config::testnet();
+        let mut testnet_config = Config::testnet();
+        testnet_config.vdf_sha_1s = 100_000;
+
         // step: 44398 output: 0x893d
         let vdf_info = VDFLimiterInfo {
             output: H256(
@@ -924,8 +926,7 @@ mod tests {
             next_vdf_difficulty: None,
         };
 
-        let mut config = VDFStepsConfig::new(&testnet_config);
-        config.vdf_difficulty = 100_000;
+        let config = VDFStepsConfig::new(&testnet_config);
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
@@ -934,7 +935,9 @@ mod tests {
     // one special case that do not apply reset seed
     #[tokio::test]
     async fn test_checkpoints_for_single_step_one() {
-        let testnet_config = Config::testnet();
+        let mut testnet_config = Config::testnet();
+        testnet_config.vdf_sha_1s = 100_000;
+
         let vdf_info = VDFLimiterInfo {
             output: H256(
                 hex::decode("68230a9b96fbd924982a3d29485ad2c67285d76f2c8fc0a4770d50ed5fd41efd")
@@ -1123,9 +1126,7 @@ mod tests {
             next_vdf_difficulty: None,
         };
 
-        let mut config = VDFStepsConfig::new(&testnet_config);
-        config.vdf_difficulty = 1000;
-
+        let config = VDFStepsConfig::new(&testnet_config);
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
 
