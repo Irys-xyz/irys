@@ -110,7 +110,8 @@ async fn serial_data_promotion_test() {
         for chunk in chunks {
             data.extend_from_slice(chunk);
         }
-        let tx = signer.create_transaction(data, None).unwrap();
+        let bytes = 1024 * 257;
+        let tx = signer.create_transaction(data, None, bytes).unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
         println!("tx[{}] {}", i, tx.header.id.as_bytes().to_base58());
         txs.push(tx);

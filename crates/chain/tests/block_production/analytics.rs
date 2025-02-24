@@ -103,7 +103,8 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        let tx = a.create_transaction(data_bytes.clone(), None).unwrap();
+        let bytes = 1024 * 257;
+        let tx = a.create_transaction(data_bytes.clone(), None, bytes).unwrap();
         let tx = a.sign_transaction(tx).unwrap();
         (tx, data_bytes)
     };
