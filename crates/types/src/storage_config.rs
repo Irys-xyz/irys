@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::*;
 
-/// This is harcoded here to be used just by C packing related staff as it is also harcoded right now in C sources
+/// This is hardcoded here to be used just by C packing related staff as it is also hardcoded right now in C sources
 pub const CHUNK_SIZE: u64 = 256 * 1024;
 
 /// Protocol storage sizing configuration

@@ -69,7 +69,7 @@ pub fn unpack_with_entropy(
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
 /// defaults to [`PACKING_SHA_1_5_S`]`, returns entropy chunk in out_entropy_chunk parameter.
-/// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (definded in capacity.h file) capacity
+/// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (defined in capacity.h file) capacity
 /// Uses C 2D Packing implementation
 pub fn capacity_pack_range_c(
     mining_address: Address,
@@ -264,7 +264,7 @@ mod tests {
         rng.fill(&mut partition_hash[..]);
         let iterations = 2 * CHUNK_SIZE as u32;
 
-        // Please do not change CHUNK_SIZE to CHUNK_SIZE as this compares with C implementation that uses harcoded 256KB
+        // Please do not change CHUNK_SIZE to CHUNK_SIZE as this compares with C implementation that uses hardcoded 256KB
         let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
         let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
 
@@ -405,7 +405,7 @@ mod tests {
 
         assert_eq!(chunks, chunks_rust, "Rust and C packing should be equal");
 
-        // calculate entropy for choosen random chunk
+        // calculate entropy for chosen random chunk
         let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
         capacity_pack_range_c(
             mining_address,

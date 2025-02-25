@@ -80,7 +80,7 @@ impl VdfState {
 pub struct VdfStepsReadGuard(AtomicVdfState);
 
 impl VdfStepsReadGuard {
-    /// Creates a new `ReadGard` for Ledgers
+    /// Creates a new `ReadGuard` for Ledgers
     pub const fn new(state: Arc<RwLock<VdfState>>) -> Self {
         Self(state)
     }

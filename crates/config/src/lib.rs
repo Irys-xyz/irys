@@ -1,4 +1,4 @@
-//! Crate dedicated to the `IrysNodeConfig` to avoid depdendency cycles
+//! Crate dedicated to the `IrysNodeConfig` to avoid dependency cycles
 use std::{
     env::{self},
     fs,
