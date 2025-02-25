@@ -44,6 +44,7 @@ rust_decimal_macros.workspace = true
 irys-macros.workspace = true
 bytemuck.workspace = true
 test-fuzz.workspace = true
+approx = "0.5.1"
 
 
 [build-dependencies]
