@@ -44,7 +44,7 @@ async fn serial_data_promotion_test() {
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
         chunk_migration_depth: 1, // Testnet / single node config
-        irys_chain_id: testnet_config.chain_id,
+        chain_id: testnet_config.chain_id,
     };
 
     let temp_dir = setup_tracing_and_temp_dir(Some("data_promotion_test"), false);

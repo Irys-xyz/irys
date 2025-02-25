@@ -191,7 +191,7 @@ pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
 
-    let previous_solution_diff=hash_to_number(&block.previous_solution_hash.0);
+    let previous_solution_diff = hash_to_number(&block.previous_solution_hash.0);
 
     if solution_diff >= previous_solution_diff {
         Ok(())
@@ -324,7 +324,7 @@ pub fn poa_is_valid(
             config.entropy_packing_iterations,
             config.chunk_size as usize,
             &mut entropy_chunk,
-            config.irys_chain_id,
+            config.chain_id,
         );
 
         let mut poa_chunk: Vec<u8> = poa.chunk.clone().into();
@@ -359,7 +359,7 @@ pub fn poa_is_valid(
             config.entropy_packing_iterations,
             config.chunk_size as usize,
             &mut entropy_chunk,
-            config.irys_chain_id,
+            config.chain_id,
         );
 
         if entropy_chunk != poa.chunk.0 {
@@ -628,7 +628,7 @@ mod tests {
             context.storage_config.entropy_packing_iterations,
             chunk_size,
             &mut entropy_chunk,
-            context.storage_config.irys_chain_id,
+            context.storage_config.chain_id,
         );
 
         xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);

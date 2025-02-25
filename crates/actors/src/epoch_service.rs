@@ -892,7 +892,7 @@ mod tests {
             min_writes_before_sync: 1,
             entropy_packing_iterations: testnet_config.entropy_packing_iterations,
             chunk_migration_depth: 1, // Testnet / single node config
-            irys_chain_id: 333,
+            chain_id: 333,
         };
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;
 
@@ -978,7 +978,6 @@ mod tests {
         testnet_config.num_chunks_in_recall_range = 2;
         testnet_config.num_partitions_per_slot = 1;
         testnet_config.num_writes_before_sync = 1;
-        // testnet_config.entropy_packing_iterations = 1_000;
         testnet_config.chunk_migration_depth = 1;
         testnet_config.capacity_scalar = 100;
         let mining_address = Address::from_private_key(&testnet_config.mining_key);
@@ -994,7 +993,6 @@ mod tests {
 
         // Create epoch service
         let config = EpochServiceConfig::new(&testnet_config);
-        debug!(?config, ?testnet_config, "epoch params");
         let epoch_service = EpochServiceActor::new(config, &testnet_config);
         let epoch_service_actor = epoch_service.start();
 

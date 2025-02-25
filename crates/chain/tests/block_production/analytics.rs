@@ -1,4 +1,3 @@
-// todo this file because the test is ignored anyway
 use std::str::from_utf8;
 use std::time::Duration;
 
@@ -78,7 +77,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1_000,
             chunk_migration_depth: 1, // Testnet / single node config
-            irys_chain_id: testnet_config.chain_id,
+            chain_id: testnet_config.chain_id,
         },
         testnet_config.clone(),
     )

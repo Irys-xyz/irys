@@ -324,7 +324,7 @@ pub async fn verify_published_chunk<T, B>(
             &packed_chunk,
             storage_config.entropy_packing_iterations,
             storage_config.chunk_size as usize,
-            storage_config.irys_chain_id,
+            storage_config.chain_id,
         );
         if unpacked_chunk.bytes.0 != expected_bytes {
             println!(

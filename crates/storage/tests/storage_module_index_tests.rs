@@ -30,7 +30,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1,
         chunk_migration_depth: 1, // Testnet / single node config
-        irys_chain_id: testnet_config.chain_id,
+        chain_id: testnet_config.chain_id,
     };
     let chunk_size = storage_config.chunk_size;
 
@@ -132,10 +132,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // }
 
     // Loop though all the data_chunks and create wrapper tx for them
-    let signer = IrysSigner::random_signer_with_chunk_size(
-        chunk_size as usize,
-        testnet_config.chain_id,
-    );
+    let signer =
+        IrysSigner::random_signer_with_chunk_size(chunk_size as usize, testnet_config.chain_id);
     let mut txs: Vec<IrysTransaction> = Vec::new();
 
     for chunks in data_chunks {

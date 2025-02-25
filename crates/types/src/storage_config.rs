@@ -25,13 +25,13 @@ pub struct StorageConfig {
     /// Number of confirmations before storing tx data in `StorageModule`s
     pub chunk_migration_depth: u32,
     /// Irys chain id
-    pub irys_chain_id: u64,
+    pub chain_id: u64,
 }
 
 impl StorageConfig {
     pub fn new(config: &Config) -> Self {
         Self {
-            irys_chain_id: config.chain_id,
+            chain_id: config.chain_id,
             chunk_size: config.chunk_size,
             num_chunks_in_partition: config.num_chunks_in_partition,
             num_chunks_in_recall_range: config.num_chunks_in_recall_range,

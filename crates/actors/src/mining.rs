@@ -449,7 +449,7 @@ mod tests {
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1,
             chunk_migration_depth: 1, // Testnet / single node config
-            irys_chain_id: 1,
+            chain_id: 1,
         };
 
         let infos = vec![StorageModuleInfo {

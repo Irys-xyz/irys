@@ -53,7 +53,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
         chunk_migration_depth: 1, // Testnet / single node config
-        irys_chain_id: testnet_config.chain_id,
+        chain_id: testnet_config.chain_id,
     };
     let entropy_packing_iterations = storage_config.entropy_packing_iterations;
 

@@ -185,7 +185,7 @@ pub fn read_bytes_range(
             &chunk,
             storage_config.entropy_packing_iterations,
             storage_config.chunk_size as usize,
-            storage_config.irys_chain_id,
+            storage_config.chain_id,
         );
         bytes.extend(unpacked_chunk.bytes.0)
     }
