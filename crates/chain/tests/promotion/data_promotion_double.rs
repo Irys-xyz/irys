@@ -36,8 +36,7 @@ async fn serial_double_root_data_promotion_test() {
     let chunk_size = 32; // 32 byte chunks
     let mut testnet_config = Config::testnet();
     testnet_config.chunk_size = chunk_size;
-    let miner_signer =
-        IrysSigner::random_signer_with_chunk_size(chunk_size, testnet_config.chain_id);
+    let miner_signer = IrysSigner::random_signer_with_chunk_size(&testnet_config);
 
     let storage_config = StorageConfig {
         chunk_size: chunk_size as u64,
