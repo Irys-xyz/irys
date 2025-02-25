@@ -38,7 +38,7 @@ fn init_tracing() -> eyre::Result<()> {
         .with_line_number(true)
         .with_ansi(true)
         .with_file(true)
-        .with_writer(std::io::stderr);
+        .with_writer(std::io::stdout);
 
     // use json logging for release builds
     let subscriber = subscriber.with(filter).with(ErrorLayer::default());
