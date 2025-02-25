@@ -94,7 +94,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     rand::thread_rng().fill(&mut data_bytes[..]);
 
     // Create a new Irys API instance & a signed transaction
-    let irys = IrysSigner::random_signer_with_chunk_size(chunk_size, testnet_config.chain_id);
+    let irys = IrysSigner::random_signer_with_chunk_size(&testnet_config);
     let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
     let tx = irys.sign_transaction(tx).unwrap();
 

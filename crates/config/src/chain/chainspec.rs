@@ -3,7 +3,7 @@ use irys_types::{Address, IrysBlockHeader};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder};
 use tracing::debug;
 
-use super::chain::IRYS_MAINNET;
+use super::chain::IRYS_TESTNET;
 
 /// A helper to build custom chain specs
 #[derive(Debug, Default, Clone)]
@@ -19,9 +19,9 @@ impl IrysChainSpecBuilder {
         genesis.height = 0;
         Self {
             reth_builder: ChainSpecBuilder {
-                chain: Some(IRYS_MAINNET.chain),
-                genesis: Some(IRYS_MAINNET.genesis.clone()),
-                hardforks: IRYS_MAINNET.hardforks.clone(),
+                chain: Some(IRYS_TESTNET.chain),
+                genesis: Some(IRYS_TESTNET.genesis.clone()),
+                hardforks: IRYS_TESTNET.hardforks.clone(),
             },
             genesis,
         }

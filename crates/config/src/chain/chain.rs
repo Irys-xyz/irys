@@ -11,11 +11,11 @@ use reth_primitives::revm_primitives::hex;
 use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
 
-pub const SUPPORTED_CHAINS: &[&str] = &["mainnet" /* , "devnet", "testnet" */];
+pub const IRYS_TESTNET_CHAIN_ID: u64 = 1275;
 
-pub static IRYS_MAINNET: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
+pub static IRYS_TESTNET: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
     let mut spec = ChainSpec {
-        chain: Chain::from_id(1275),
+        chain: Chain::from_id(IRYS_TESTNET_CHAIN_ID),
         // TODO: A proper genesis block
         genesis: Genesis {
             gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,

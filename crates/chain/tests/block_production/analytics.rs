@@ -39,9 +39,9 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
 
-    let account1 = IrysSigner::random_signer_with_chunk_size(32, testnet_config.chain_id);
-    let account2 = IrysSigner::random_signer_with_chunk_size(32, testnet_config.chain_id);
-    let account3 = IrysSigner::random_signer_with_chunk_size(32, testnet_config.chain_id);
+    let account1 = IrysSigner::random_signer_with_chunk_size(&testnet_config);
+    let account2 = IrysSigner::random_signer_with_chunk_size(&testnet_config);
+    let account3 = IrysSigner::random_signer_with_chunk_size(&testnet_config);
     config.extend_genesis_accounts(vec![
         (
             account1.address(),
