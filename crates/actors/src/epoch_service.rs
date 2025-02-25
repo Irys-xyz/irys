@@ -969,18 +969,21 @@ mod tests {
     #[ignore = "test is flaky, something doesn't work after updating the configs"]
     async fn partition_expiration_test() {
         // Initialize genesis block at height 0
-        let mut genesis_block = IrysBlockHeader::new_mock_header();
-        let mut testnet_config = Config::testnet();
         let chunk_size = 32;
         let chunk_count = 10;
-        testnet_config.chunk_size = chunk_size;
-        testnet_config.num_chunks_in_partition = chunk_count;
-        testnet_config.num_chunks_in_recall_range = 2;
-        testnet_config.num_partitions_per_slot = 1;
-        testnet_config.num_writes_before_sync = 1;
-        testnet_config.chunk_migration_depth = 1;
-        testnet_config.capacity_scalar = 100;
-        let mining_address = Address::from_private_key(&testnet_config.mining_key);
+        let testnet_config = Config {
+            chunk_size,
+            num_chunks_in_partition: chunk_count,
+            num_chunks_in_recall_range: 2,
+            num_partitions_per_slot: 1,
+            num_writes_before_sync: 1,
+            chunk_migration_depth: 1,
+            capacity_scalar: 100,
+            ..Config::testnet()
+        };
+        let mining_address = testnet_config.miner_address();
+
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
 
         // Create a storage config for testing

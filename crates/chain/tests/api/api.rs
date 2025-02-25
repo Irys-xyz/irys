@@ -40,8 +40,10 @@ async fn api_end_to_end_test(chunk_size: usize) {
     use std::time::Duration;
     use tokio::time::sleep;
     use tracing::{debug, info};
-    let mut testnet_config = Config::testnet();
-    testnet_config.chunk_size = chunk_size.try_into().unwrap();
+    let mut testnet_config = Config {
+        chunk_size: chunk_size.try_into().unwrap(),
+        ..Config::testnet()
+    };
     let miner_signer = IrysSigner::from_config(&testnet_config);
 
     let storage_config = StorageConfig {

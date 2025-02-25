@@ -272,14 +272,16 @@ async fn serial_test_basic_blockprod() -> eyre::Result<()> {
 #[tokio::test]
 async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let mut testnet_config = Config::testnet();
-    testnet_config.chunk_size = 32;
-    testnet_config.num_chunks_in_partition = 10;
-    testnet_config.num_chunks_in_recall_range = 2;
-    testnet_config.num_partitions_per_slot = 1;
-    testnet_config.num_writes_before_sync = 1;
-    testnet_config.entropy_packing_iterations = 1_000;
-    testnet_config.chunk_migration_depth = 1;
+    let testnet_config = Config {
+        chunk_size: 32,
+        num_chunks_in_partition: 10,
+        num_chunks_in_recall_range: 2,
+        num_partitions_per_slot: 1,
+        num_writes_before_sync: 1,
+        entropy_packing_iterations: 1_000,
+        chunk_migration_depth: 1,
+        ..Config::testnet()
+    };
     let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
     let storage_config = irys_types::StorageConfig::new(&testnet_config);

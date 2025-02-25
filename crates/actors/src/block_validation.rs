@@ -377,9 +377,6 @@ pub fn poa_is_valid(
     Ok(())
 }
 
-//==============================================================================
-// Tests
-//------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -427,21 +424,23 @@ mod tests {
             .try_init();
 
         let mut genesis_block = IrysBlockHeader::new_mock_header();
-
-        let mut testnet_config = Config::testnet();
-        let data_dir = temporary_directory(Some("block_validation_tests"), false);
         genesis_block.height = 0;
-        let arc_genesis = Arc::new(genesis_block);
-        let signer = IrysSigner::from_config(&testnet_config);
-        let miner_address = signer.address();
         let chunk_size = 32;
-        testnet_config.chunk_size = chunk_size;
-        testnet_config.num_chunks_in_partition = 10;
-        testnet_config.num_chunks_in_recall_range = 2;
-        testnet_config.num_partitions_per_slot = 1;
-        testnet_config.num_writes_before_sync = 1;
-        testnet_config.entropy_packing_iterations = 1_000;
-        testnet_config.chunk_migration_depth = 1;
+        let testnet_config = Config {
+            chunk_size,
+            num_chunks_in_partition: 10,
+            num_chunks_in_recall_range: 2,
+            num_partitions_per_slot: 1,
+            num_writes_before_sync: 1,
+            entropy_packing_iterations: 1_000,
+            chunk_migration_depth: 1,
+            ..Config::testnet()
+        };
+
+        let data_dir = temporary_directory(Some("block_validation_tests"), false);
+        let arc_genesis = Arc::new(genesis_block);
+        let signer = testnet_config.irys_signer();
+        let miner_address = signer.address();
 
         // Create epoch service with random miner address
         let storage_config = StorageConfig::new(&testnet_config);

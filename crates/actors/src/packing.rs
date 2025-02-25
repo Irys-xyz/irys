@@ -377,11 +377,13 @@ mod tests {
         // setup
         let mining_address = Address::random();
         let partition_hash = PartitionHash::zero();
-        let mut testnet_config = Config::testnet();
-        testnet_config.num_writes_before_sync = 1;
-        testnet_config.entropy_packing_iterations = 1000;
-        testnet_config.num_chunks_in_partition = 5;
-        testnet_config.chunk_size = 32;
+        let testnet_config = Config {
+            num_writes_before_sync: 1,
+            entropy_packing_iterations: 1000,
+            num_chunks_in_partition: 5,
+            chunk_size: 32,
+            ..Config::testnet()
+        };
         let config = PackingConfig::new(&testnet_config);
 
         let infos = vec![StorageModuleInfo {
