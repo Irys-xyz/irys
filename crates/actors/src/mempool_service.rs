@@ -201,11 +201,11 @@ impl Handler<TxIngressMessage> for MempoolService {
 
         match irys_database::block_header_by_hash(read_tx, &tx.anchor) {
             // note: we use addition here as it's safer
-            Ok(Some(hdr)) if hdr.height + (self.anchor_expiry_depth as u64) >= *latest_height => {
+            Ok(Some(hdr)) if hdr.height + self.anchor_expiry_depth >= *latest_height => {
                 debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id);
                 // update any associated ingress proofs
                 if let Ok(Some(old_expiry)) = read_tx.get::<IngressProofLRU>(tx.data_root) {
-                    let new_expiry = hdr.height + (self.anchor_expiry_depth as u64);
+                    let new_expiry = hdr.height + self.anchor_expiry_depth;
                     debug!(
                         "Updating ingress proof for data root {} expiry from {} -> {}",
                         &tx.data_root, &old_expiry, &new_expiry
@@ -422,7 +422,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                 .last()
                 .ok_or(ChunkIngressError::ServiceUninitialized)?;
 
-            let target_height = latest_height + self.anchor_expiry_depth as u64;
+            let target_height = latest_height + self.anchor_expiry_depth;
 
             let db1 = self.db.clone().unwrap();
             let signer1 = self.signer.clone().unwrap();
