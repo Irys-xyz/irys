@@ -60,7 +60,7 @@ impl TermLedger {
         Self {
             slots: Vec::new(),
             ledger_id: ledger as u32,
-            epoch_length: config.num_blocks_in_epoch,
+            epoch_length: config.submit_ledger_epoch_length,
             num_blocks_in_epoch: config.num_blocks_in_epoch,
             num_partitions_per_slot: config.num_partitions_per_slot,
         }

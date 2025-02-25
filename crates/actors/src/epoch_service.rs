@@ -966,7 +966,6 @@ mod tests {
     }
 
     #[actix::test]
-    #[ignore = "test is flaky, something doesn't work after updating the configs"]
     async fn partition_expiration_test() {
         // Initialize genesis block at height 0
         let chunk_size = 32;
