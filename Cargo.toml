@@ -166,6 +166,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "env-filter",
   "fmt",
   "json",
+  "ansi",
 ] }
 alloy-signer = { path = "./ext/alloy/crates/signer" }
 tempfile = "3.10"
