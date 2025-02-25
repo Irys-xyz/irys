@@ -472,7 +472,7 @@ pub enum ChunkState {
 /// * `step` - Number of elements in each chunk
 ///
 /// # Returns
-/// * `Result<Vec<Interval>, IntervalSplitError>` - Vector of splitted chunks
+/// * `Result<Vec<Interval>, IntervalSplitError>` - Vector of split chunks
 ///
 /// # Examples
 /// ```

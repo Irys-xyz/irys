@@ -77,7 +77,7 @@ impl Compact for CachedChunkIndexEntry {
         B: bytes::BufMut + AsMut<[u8]>,
     {
         // for now put full bytes and later compress it.
-        // make sure your byte endianess is correct! for integers, it needs to be big endian so the ordering works correctly
+        // make sure your byte endianness is correct! for integers, it needs to be big endian so the ordering works correctly
         buf.put_slice(&self.index.to_be_bytes());
         let chunk_bytes = self.meta.to_compact(buf);
         chunk_bytes + KEY_BYTES

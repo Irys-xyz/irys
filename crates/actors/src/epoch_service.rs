@@ -137,7 +137,7 @@ pub struct LedgersReadGuard {
 }
 
 impl LedgersReadGuard {
-    /// Creates a new `ReadGard` for Ledgers
+    /// Creates a new `ReadGuard` for Ledgers
     pub const fn new(ledgers: Arc<RwLock<Ledgers>>) -> Self {
         Self { ledgers }
     }
@@ -171,7 +171,7 @@ pub struct PartitionAssignmentsReadGuard {
 }
 
 impl PartitionAssignmentsReadGuard {
-    /// Creates a new `ReadGard` for Ledgers
+    /// Creates a new `ReadGuard` for Ledgers
     pub const fn new(partition_assignments: Arc<RwLock<PartitionAssignments>>) -> Self {
         Self {
             partition_assignments,
@@ -1196,7 +1196,7 @@ mod tests {
             let submit_partition = sub_slots[1]
                 .partitions
                 .get(0)
-                .expect("submit ledger slot 1 should have a partition assinged")
+                .expect("submit ledger slot 1 should have a partition assigned")
                 .clone();
             (publish_partition, submit_partition)
         };

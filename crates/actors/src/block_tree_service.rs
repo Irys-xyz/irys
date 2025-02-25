@@ -36,7 +36,7 @@ pub struct BlockTreeReadGuard {
 }
 
 impl BlockTreeReadGuard {
-    /// Creates a new `ReadGard` for the `block_tree` cache
+    /// Creates a new `ReadGuard` for the `block_tree` cache
     pub const fn new(block_tree_cache: Arc<RwLock<BlockTreeCache>>) -> Self {
         Self { block_tree_cache }
     }

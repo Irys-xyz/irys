@@ -127,7 +127,7 @@ impl AccountStateExtApiServer for AccountStateExt {
         dbg!(&addr);
         let socket_addr = SocketAddr::from_str(addr.as_str()).map_err(|e| {
             ErrorObjectOwned::owned::<String>(
-                -32073, // TOOD @JesseTheRobot add a RPC error registry so we don't overlap with error codes/numbers
+                -32073, // TODO @JesseTheRobot add a RPC error registry so we don't overlap with error codes/numbers
                 "unable to convert address into SocketAddr",
                 Some(e.to_string()),
             )

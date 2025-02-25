@@ -17,17 +17,10 @@ irys-efficient-sampling.workspace = true
 actix.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true
-base64-url.workspace = true
-
-rand = "0.8.5"
-rand_chacha = "0.3.1"
-sha2 = "0.10.8"
 env_logger = "0.11.5"
 
 tokio.workspace = true
 tokio-stream.workspace = true
-serde.workspace = true
-serde_json = { workspace = true, features = ["std", "raw_value"] }
 reth-db.workspace = true
 irys-primitives.workspace = true
 eyre.workspace = true
@@ -36,8 +29,6 @@ irys-reth-node-bridge.workspace = true
 reth.workspace = true
 alloy-rpc-types-engine.workspace = true
 tracing.workspace = true
-actix_async_handler = "0.1.0"
-tracing-subscriber.workspace = true
 tempfile.workspace = true
 irys-testing-utils.workspace = true
 base58.workspace = true
