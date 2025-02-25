@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 pub struct PriceCalc;
 
 impl PriceCalc {
-    const CHUNKS_PER_GB: u32 = 4 * 1024; // 256 KiB chunk size
+    const ONE_GB: u64 = 1024 * 1024 * 1024;
     const GB_PER_TB: u32 = 1024;
     const TB_PER_DRIVE: u32 = 16;
 
@@ -15,6 +15,7 @@ impl PriceCalc {
     }
 
     pub fn calc_perm_storage_price(number_of_bytes_to_store: u64) -> Result<f64, Error> {
+        ensure!(CONFIG.chunk_size != 0, "Chunk size should not be 0");
         let perm_cost = Self::calc_perm_cost_per_gb(
             CONFIG.decay_params.safe_minimum_number_of_years,
             CONFIG.decay_params.annualized_decay_rate.try_into()?,
@@ -27,7 +28,8 @@ impl PriceCalc {
         )?;
         let approximate_usd_irys_price = Self::get_usd_to_irys_conversion_rate();
         let chunks = Self::get_chunks_from_bytes(number_of_bytes_to_store);
-        Ok(chunks as f64 * perm_fee * approximate_usd_irys_price / Self::CHUNKS_PER_GB as f64)
+        let chunks_per_gb = Self::ONE_GB / CONFIG.chunk_size;
+        Ok(chunks as f64 * perm_fee * approximate_usd_irys_price / chunks_per_gb as f64)
     }
 
     fn get_chunks_from_bytes(number_of_bytes_to_store: u64) -> u64 {
