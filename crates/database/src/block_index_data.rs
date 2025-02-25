@@ -395,7 +395,6 @@ mod tests {
         data_ledger::Ledger,
         BlockBounds, BlockIndexItem, LedgerIndexItem,
     };
-    use assert_matches::assert_matches;
     use irys_config::IrysNodeConfig;
     use irys_types::H256;
 
@@ -453,7 +452,7 @@ mod tests {
         let _ = ensure_path_exists(&arc_config);
 
         let save_result = save_block_index(&block_items, &arc_config);
-        assert_matches!(save_result, Ok(()));
+        assert!(save_result.is_ok());
 
         // Load the items from disk
         let block_index = BlockIndex::new();

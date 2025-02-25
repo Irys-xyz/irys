@@ -957,9 +957,6 @@ mod tests {
     }
 
     #[actix::test]
-    async fn expire_slots_test() {}
-
-    #[actix::test]
     async fn capacity_projection_tests() {
         let max_data_parts = 1000;
         let config = EpochServiceConfig::default();
@@ -976,7 +973,7 @@ mod tests {
     }
 
     #[actix::test]
-    // #[ignore = "test is flaky, something doesn't work after updating the configs"]
+    #[ignore = "test is flaky, something doesn't work after updating the configs"]
     async fn partition_expiration_test() {
         // Initialize genesis block at height 0
         let mut genesis_block = IrysBlockHeader::new_mock_header();

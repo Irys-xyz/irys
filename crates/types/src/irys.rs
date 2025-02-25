@@ -20,7 +20,6 @@ pub struct IrysSigner {
 /// Encapsulates an Irys API for doing client type things, making transactions,
 /// signing them, posting them etc.
 impl IrysSigner {
-    // todo : remove the `mainnet` prefix
     pub fn from_config(config: &Config) -> Self {
         IrysSigner {
             signer: config.mining_key.clone(),
@@ -159,7 +158,6 @@ impl From<IrysSigner> for LocalSigner<SigningKey> {
 #[cfg(test)]
 mod tests {
     use crate::{hash_sha256, validate_chunk, MAX_CHUNK_SIZE};
-    use assert_matches::assert_matches;
     use rand::Rng;
     use reth_primitives::transaction::recover_signer;
 
@@ -215,7 +213,7 @@ mod tests {
             let root_id = tx.header.data_root.0;
             let proof = tx.proofs[index].clone();
             let proof_result = validate_chunk(root_id, chunk_node, &proof);
-            assert_matches!(proof_result, Ok(_));
+            assert!(proof_result.is_ok());
 
             // Ensure the data_hash is valid by hashing the chunk data
             let chunk_bytes: &[u8] = &data_bytes[min..max];

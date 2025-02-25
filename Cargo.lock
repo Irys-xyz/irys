@@ -5409,7 +5409,6 @@ dependencies = [
  "actix",
  "alloy-primitives",
  "arbitrary",
- "assert_matches",
  "base58",
  "bytes",
  "eyre",
@@ -5435,7 +5434,6 @@ name = "irys-efficient-sampling"
 version = "0.1.0"
 dependencies = [
  "arbitrary",
- "assert_matches",
  "eyre",
  "irys-types",
  "openssl",

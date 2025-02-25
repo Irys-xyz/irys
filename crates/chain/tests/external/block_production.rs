@@ -1,5 +1,3 @@
-// todo delete the test file
-
 use std::time::Duration;
 
 use alloy_core::primitives::{TxHash, U256};
@@ -9,7 +7,7 @@ use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, Address, Config, MAX_CHUNK_SIZE,
+    Address, Config, MAX_CHUNK_SIZE, block_production::SolutionContext, irys::IrysSigner,
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
@@ -59,27 +57,18 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     );
 
     config.extend_genesis_accounts(vec![
-        (
-            config.mining_signer.address(),
-            GenesisAccount {
-                balance: U256::from(690000000000000000_u128),
-                ..Default::default()
-            },
-        ),
-        (
-            config.mining_signer.address(),
-            GenesisAccount {
-                balance: U256::from(690000000000000000_u128),
-                ..Default::default()
-            },
-        ),
-        (
-            account1.address(),
-            GenesisAccount {
-                balance: U256::from(1),
-                ..Default::default()
-            },
-        ),
+        (config.mining_signer.address(), GenesisAccount {
+            balance: U256::from(690000000000000000_u128),
+            ..Default::default()
+        }),
+        (config.mining_signer.address(), GenesisAccount {
+            balance: U256::from(690000000000000000_u128),
+            ..Default::default()
+        }),
+        (account1.address(), GenesisAccount {
+            balance: U256::from(1),
+            ..Default::default()
+        }),
     ]);
 
     let node = start_irys_node(config, storage_config, testnet_config).await?;

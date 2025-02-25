@@ -7,7 +7,6 @@ rust-version.workspace = true
 [dependencies]
 alloy-primitives.workspace = true
 actix.workspace = true
-assert_matches.workspace = true
 base58.workspace = true
 tokio.workspace = true
 reth-node-metrics.workspace = true

@@ -1,5 +1,3 @@
-// todo delete the test file -- all the tests are ignored anyway
-
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_network::EthereumWallet;
