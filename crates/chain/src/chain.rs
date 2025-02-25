@@ -63,6 +63,8 @@ use tokio::{
 };
 
 use crate::vdf::run_vdf;
+use irys_database::migration::check_db_version_and_run_migrations_if_needed;
+use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 
 pub async fn start(config: Config) -> eyre::Result<IrysNodeCtx> {
     let irys_node_config = IrysNodeConfig::new(&config);
@@ -159,6 +161,9 @@ pub async fn start_irys_node(
 
     // clone as this gets `move`d into the thread
     let irys_provider_1 = irys_provider.clone();
+    let irys_db_env = Arc::new(open_or_create_irys_consensus_data_db(
+        &arc_config.irys_consensus_data_dir(),
+    )?);
 
     std::thread::Builder::new()
         .name("actor-main-thread".to_string())
@@ -168,12 +173,15 @@ pub async fn start_irys_node(
             System::new().block_on(async move {
                 // the RethNodeHandle doesn't *need* to be Arc, but it will reduce the copy cost
                 let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
-                let db = DatabaseProvider(reth_node.provider.database.db.clone());
+                let reth_db = DatabaseProvider(reth_node.provider.database.db.clone());
+                let irys_db = DatabaseProvider(irys_db_env.clone());
                 let vdf_config = VDFStepsConfig::new(&config);
+
+                check_db_version_and_run_migrations_if_needed(&reth_db, &irys_db).unwrap();
 
                 let latest_block = latest_block_index
                     .map(|b| {
-                        database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
+                        database::block_header_by_hash(&irys_db.tx().unwrap(), &b.block_hash)
                             .unwrap()
                             .unwrap()
                     })
@@ -186,7 +194,7 @@ pub async fn start_irys_node(
                 let miner_address = node_config.mining_signer.address();
                 debug!("Miner address {:?}", miner_address);
 
-                let reth_service = RethServiceActor::new(reth_node.clone(), db.clone());
+                let reth_service = RethServiceActor::new(reth_node.clone(), irys_db.clone());
                 let reth_arbiter = Arbiter::new();
                 SystemRegistry::set(RethServiceActor::start_in_arbiter(
                     &reth_arbiter.handle(),
@@ -258,7 +266,7 @@ pub async fn start_irys_node(
                         block_header: arc_genesis.clone(),
                         all_txs: Arc::new(vec![]),
                     };
-                    db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
+                    irys_db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
                         .unwrap();
                     match block_index_actor_addr.send(msg).await {
                         Ok(_) => info!("Genesis block indexed"),
@@ -277,7 +285,7 @@ pub async fn start_irys_node(
                 SystemRegistry::set(broadcast_mining_service.clone());
 
                 let mut epoch_service = EpochServiceActor::new(epoch_config, &config);
-                epoch_service.initialize(&db).await;
+                epoch_service.initialize(&irys_db).await;
                 let epoch_service_actor_addr = epoch_service.start();
 
                 // Retrieve ledger assignments
@@ -324,7 +332,7 @@ pub async fn start_irys_node(
 
 
                 let block_tree_service = BlockTreeService::new(
-                    db.clone(),
+                    irys_db.clone(),
                     block_index.clone(),
                     &miner_address,
                     block_index_guard.clone(),
@@ -344,7 +352,7 @@ pub async fn start_irys_node(
 
 
                 let mempool_service = MempoolService::new(
-                    db.clone(),
+                    irys_db.clone(),
                     reth_node.task_executor.clone(),
                     node_config.mining_signer.clone(),
                     storage_config.clone(),
@@ -363,11 +371,11 @@ pub async fn start_irys_node(
                     block_index.clone(),
                     storage_config.clone(),
                     storage_modules.clone(),
-                    db.clone(),
+                    irys_db.clone(),
                 );
                 SystemRegistry::set(chunk_migration_service.start());
 
-                let vdf_service_actor = VdfService::new(block_index_guard.clone(), db.clone(), &config);
+                let vdf_service_actor = VdfService::new(block_index_guard.clone(), irys_db.clone(), &config);
                 let vdf_service = vdf_service_actor.start();
                 SystemRegistry::set(vdf_service.clone());
 
@@ -395,7 +403,7 @@ pub async fn start_irys_node(
                     partition_assignments_guard: partition_assignments_guard.clone(),
                     storage_config: storage_config.clone(),
                     difficulty_config: difficulty_adjustment_config,
-                    db: db.clone(),
+                    db: irys_db.clone(),
                     vdf_config: vdf_config.clone(),
                     vdf_steps_guard: vdf_steps_guard.clone(),
                 };
@@ -407,7 +415,7 @@ pub async fn start_irys_node(
 
                 let block_producer_arbiter = Arbiter::new();
                 let block_producer_actor = BlockProducerActor::new(
-                    db.clone(),
+                    irys_db.clone(),
                     mempool_addr.clone(),
                     block_discovery_addr.clone(),
                     epoch_service_actor_addr.clone(),
@@ -440,7 +448,7 @@ pub async fn start_irys_node(
                 for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
-                        db.clone(),
+                        irys_db.clone(),
                         block_producer_addr.clone().recipient(),
                         packing_actor_addr.clone().recipient(),
                         sm.clone(),
@@ -528,7 +536,7 @@ pub async fn start_irys_node(
                 };
 
                 let chunk_provider =
-                    ChunkProvider::new(storage_config.clone(), storage_modules.clone(), db.clone());
+                    ChunkProvider::new(storage_config.clone(), storage_modules.clone(), irys_db.clone());
                 let arc_chunk_provider = Arc::new(chunk_provider);
                 // this OnceLock is due to the cyclic chain between Reth & the Irys node, where the IrysRethProvider requires both
                 // this is "safe", as the OnceLock is always set before this start function returns
@@ -542,7 +550,7 @@ pub async fn start_irys_node(
                 let _ = irys_node_handle_sender.send(IrysNodeCtx {
                     actor_addresses: actor_addresses.clone(),
                     reth_handle: reth_node.clone(),
-                    db: db.clone(),
+                    db: irys_db.clone(),
                     config: arc_config.clone(),
                     chunk_provider: arc_chunk_provider.clone(),
                     block_index_guard: block_index_guard.clone(),
@@ -554,11 +562,11 @@ pub async fn start_irys_node(
                 run_server(ApiState {
                     mempool: mempool_addr,
                     chunk_provider: arc_chunk_provider.clone(),
-                    db,
+                    db: irys_db,
                     reth_provider: Some(reth_node.clone()),
                     block_tree: Some(block_tree_guard.clone()),
                     block_index: Some(block_index_guard.clone()),
-                    config: config
+                    config
                 })
                 .await;
 

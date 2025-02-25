@@ -211,7 +211,7 @@ pub fn add_genesis_block(
     error!("Written genesis block (hash: {}), reloading...", &hash);
 
     // WARNING: RACE CONDITION
-    // the reload operation doesn't wait for the reponse response of this method/RPC call to finish, it *does* have a 500ms delay, but that might not be
+    // the reload operation doesn't wait for the response of this method/RPC call to finish, it *does* have a 500ms delay, but that might not be
     // sufficient in certain conditions
     let _res = sender.send(ReloadPayload::ReloadConfig(chain.clone()));
 

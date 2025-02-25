@@ -126,7 +126,7 @@ pub fn capacity_pack_range_cuda_c(
 
     let entropy_ptr = entropy.as_ptr() as *mut u8;
 
-    let mut result: u32 = 1;
+    let result;
     unsafe {
         result = capacity_cuda::compute_entropy_chunks_cuda(
             mining_addr,

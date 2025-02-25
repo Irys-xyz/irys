@@ -313,7 +313,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     //         NodeExitReason::Normal => (),
     //         NodeExitReason::Reload(payload) => match payload {
     //             ReloadPayload::ReloadConfig(chain_spec) => {
-    //                 // delay here so the genesis submission RPC reponse is able to make it back before the server dies
+    //                 // delay here so the genesis submission RPC response is able to make it back before the server dies
     //                 let ser = serde_json::to_string_pretty(&chain_spec.genesis)?;
     //                 let pb =
     //                     PathBuf::from(handle.node.data_dir.data_dir().join("dev_genesis.json"));
