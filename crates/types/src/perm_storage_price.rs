@@ -178,11 +178,8 @@ mod test {
         let safe_minimum_number_of_years = 0;
         let annualized_decay_rate = 0.01;
         let partitions = 1;
-        if PriceCalc::calc_perm_cost_per_gb(safe_minimum_number_of_years, annualized_decay_rate, partitions)
-            .is_ok()
-        {
-            assert!(true)
-        }
+        let res = PriceCalc::calc_perm_cost_per_gb(safe_minimum_number_of_years, annualized_decay_rate, partitions);
+        assert_eq!(true, res.is_err())
     }
 
     #[test]
@@ -190,11 +187,8 @@ mod test {
         let safe_minimum_number_of_years = 200;
         let annualized_decay_rate = 0.0;
         let partitions = 1;
-        if PriceCalc::calc_perm_cost_per_gb(safe_minimum_number_of_years, annualized_decay_rate, partitions)
-            .is_ok()
-        {
-            assert!(true)
-        }
+        let res = PriceCalc::calc_perm_cost_per_gb(safe_minimum_number_of_years, annualized_decay_rate, partitions);
+        assert_eq!(true, res.is_err())
     }
 
     #[test]
