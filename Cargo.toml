@@ -27,12 +27,6 @@ license = "MIT/Apache-2.0"
 repository = "https://github.com/Irys-xyz/irys"
 authors = []
 
-[workspace.metadata.typos]
-default.extend-ignore-re = [
-  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
-  "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
-]
-
 
 [workspace.dependencies]
 # Irys
@@ -362,5 +356,9 @@ significant_drop_tightening = "allow"
 too_long_first_doc_paragraph = "allow"
 
 # https://github.com/crate-ci/typos/blob/master/docs/reference.md
-[workspace.metadata.typos.files]
-extend-exclude = ["ext/*", "fixtures/*"]
+[workspace.metadata.typos]
+default.extend-ignore-re = [
+  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
+  "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
+]
+files.extend-exclude = ["ext/*", "fixtures/*"]
