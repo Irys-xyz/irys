@@ -43,9 +43,8 @@ rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 irys-macros.workspace = true
 bytemuck.workspace = true
+test-fuzz.workspace = true
+
 
 [build-dependencies]
 build-print = "0"
-
-[package.metadata.cargo-machete]
-ignored = ["modular-bitfield"]

@@ -396,6 +396,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloy-contract"
+version = "0.4.2"
+dependencies = [
+ "alloy-dyn-abi",
+ "alloy-json-abi",
+ "alloy-network",
+ "alloy-network-primitives",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types-eth",
+ "alloy-sol-types",
+ "alloy-transport",
+ "futures",
+ "futures-util",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "alloy-core"
 version = "0.8.7"
 dependencies = [
@@ -4042,12 +4060,14 @@ dependencies = [
  "actix-rt",
  "actix-web",
  "alloy-consensus",
+ "alloy-contract",
  "alloy-core",
  "alloy-eips",
  "alloy-network",
  "alloy-provider",
  "alloy-signer-local",
  "alloy-sol-macro",
+ "alloy-sol-types",
  "awc",
  "base58",
  "clap",
@@ -4075,6 +4095,7 @@ dependencies = [
  "reth-tracing",
  "serde_json",
  "sha2 0.10.8",
+ "test-fuzz",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -4116,6 +4137,7 @@ dependencies = [
  "reth-node-metrics",
  "serde",
  "tempfile",
+ "test-fuzz",
  "tokio",
  "tracing",
 ]
@@ -4167,6 +4189,7 @@ dependencies = [
  "reth-codecs",
  "ruint",
  "serde",
+ "test-fuzz",
  "thiserror 1.0.69",
 ]
 
@@ -4312,6 +4335,7 @@ dependencies = [
  "rust_decimal_macros",
  "serde",
  "serde_json",
+ "test-fuzz",
  "tokio",
  "tracing",
  "uint",
@@ -4688,7 +4712,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -9645,6 +9669,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-fuzz"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ab7a9bb33d134e863862ab9dad2ac7e022ac89707914627f498fe0f29248d9b"
+dependencies = [
+ "serde",
+ "test-fuzz-internal",
+ "test-fuzz-macro",
+ "test-fuzz-runtime",
+]
+
+[[package]]
+name = "test-fuzz-internal"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0bef5dd380747bd7b6e636a8032a24aa34fcecaf843e59fc97d299681922e86"
+dependencies = [
+ "bincode",
+ "cargo_metadata",
+ "serde",
+]
+
+[[package]]
+name = "test-fuzz-macro"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7e6b4c7391a38f0f026972ec2200bcfd1ec45533aa266fdae5858d011afc500"
+dependencies = [
+ "darling",
+ "heck",
+ "itertools 0.13.0",
+ "once_cell",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.90",
+]
+
+[[package]]
+name = "test-fuzz-runtime"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9fbe6fb7481ec6d9bf64ae2c5d49cb1b40f8da624a91031482af7b08168c679"
+dependencies = [
+ "hex",
+ "num-traits",
+ "serde",
+ "sha1",
+ "test-fuzz-internal",
+]
+
+[[package]]
 name = "thin-vec"
 version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10568,7 +10644,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11107,7 +11183,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "alloy-contract"
-version = "0.4.2"

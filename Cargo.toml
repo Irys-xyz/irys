@@ -355,6 +355,10 @@ significant_drop_in_scrutinee = "allow"
 significant_drop_tightening = "allow"
 too_long_first_doc_paragraph = "allow"
 
+[workspace.metadata.cargo-machete]
+ignored = ["modular-bitfield", "test-fuzz"]
+
+
 # https://github.com/crate-ci/typos/blob/master/docs/reference.md
 [workspace.metadata.typos]
 default.extend-ignore-re = [

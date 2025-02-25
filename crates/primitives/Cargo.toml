@@ -19,6 +19,7 @@ ruint.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 eyre.workspace = true
+test-fuzz.workspace = true
 
 [package.metadata.cargo-machete]
-ignored = ["modular-bitfield", "derive_more"]
+ignored = ["derive_more"]

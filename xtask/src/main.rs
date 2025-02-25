@@ -20,6 +20,14 @@ enum Commands {
         #[clap(last = true)]
         args: Vec<String>,
     },
+    FullCheck {
+        #[clap(last = true)]
+        args: Vec<String>,
+    },
+    FullBacon {
+        #[clap(last = true)]
+        args: Vec<String>,
+    },
     Fmt {
         #[clap(short, long, default_value_t = false)]
         check_only: bool,
@@ -82,6 +90,15 @@ fn main() -> eyre::Result<()> {
         Commands::Check { args } => {
             println!("cargo check");
             cmd!(sh, "cargo check {args...}").run()?;
+        }
+        Commands::FullCheck { args } => {
+            println!("cargo check --all-features --all-targets");
+            cmd!(sh, "cargo check --all-features --all-targets {args...}").run()?;
+        }
+        Commands::FullBacon { args } => {
+            let _ = cmd!(sh, "cargo install --locked bacon").run();
+            println!("bacon check-all ");
+            cmd!(sh, "bacon check-all {args...}").run()?;
         }
         Commands::Clippy { args } => {
             println!("cargo clippy");
