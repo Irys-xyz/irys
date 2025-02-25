@@ -410,7 +410,7 @@ pub async fn start_irys_node(
                     .await
                     .unwrap();
 
-                let peer_list_service = PeerListService::new(db.clone());
+                let peer_list_service = PeerListService::new(irys_db.clone());
                 let peer_list_arbiter = Arbiter::new();
                 SystemRegistry::set(PeerListService::start_in_arbiter(
                     &peer_list_arbiter.handle(),
