@@ -46,10 +46,10 @@ fn main() -> eyre::Result<()> {
     match args.command {
         Commands::Test { args, coverage } => {
             println!("cargo test");
-            let _ = cmd!(sh, "cargo install cargo-nextest").run();
+            let _ = cmd!(sh, "cargo install --locked cargo-nextest").run();
 
             if coverage {
-                cmd!(sh, "cargo install grcov").run()?;
+                cmd!(sh, "cargo install  --locked grcov").run()?;
                 for (key, val) in [
                     ("CARGO_INCREMENTAL", "0"),
                     ("RUSTFLAGS", "-Cinstrument-coverage"),
@@ -123,12 +123,12 @@ fn main() -> eyre::Result<()> {
         }
         Commands::Typos => {
             println!("typos check");
-            cmd!(sh, "cargo install typos-cli").run()?;
+            cmd!(sh, "cargo install --locked typos-cli").run()?;
             cmd!(sh, "typos").run()?;
         }
         Commands::UnusedDeps => {
             println!("unused deps");
-            cmd!(sh, "cargo install cargo-machete").run()?;
+            cmd!(sh, "cargo install --locked cargo-machete").run()?;
             cmd!(sh, "cargo-machete").run()?;
         }
     }

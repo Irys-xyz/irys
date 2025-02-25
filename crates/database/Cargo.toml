@@ -15,17 +15,17 @@ irys-config.workspace = true
 reth-db.workspace = true
 arbitrary = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
 reth-db-api.workspace = true
 bytes.workspace = true
 modular-bitfield.workspace = true
 reth-codecs.workspace = true
 eyre.workspace = true
 irys-types.workspace = true
-test-fuzz.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
 irys-testing-utils.workspace = true
-rand.workspace = true
 [lints]
 workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["modular-bitfield"]
