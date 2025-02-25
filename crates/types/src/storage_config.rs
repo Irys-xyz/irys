@@ -31,7 +31,7 @@ pub struct StorageConfig {
 impl StorageConfig {
     pub fn new(config: &Config) -> Self {
         Self {
-            irys_chain_id: config.irys_chain_id,
+            irys_chain_id: config.chain_id,
             chunk_size: config.chunk_size,
             num_chunks_in_partition: config.num_chunks_in_partition,
             num_chunks_in_recall_range: config.num_chunks_in_recall_range,

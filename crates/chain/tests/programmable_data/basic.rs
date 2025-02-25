@@ -52,7 +52,7 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
     config.base_directory = temp_dir.path().to_path_buf();
 
     let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let account1 = IrysSigner::random_signer(testnet_config.irys_chain_id);
+    let account1 = IrysSigner::random_signer(testnet_config.chain_id);
     let main_address = config.mining_signer.address();
 
     config.extend_genesis_accounts(vec![

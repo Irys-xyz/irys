@@ -157,7 +157,7 @@ impl IrysTransactionHeader {
             ledger_id: 0,
             bundle_format: None,
             version: 0,
-            chain_id: config.irys_chain_id,
+            chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
             ingress_proofs: None,
         }
@@ -228,7 +228,7 @@ mod tests {
         // action
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
-            chain_id: config.irys_chain_id,
+            chain_id: config.chain_id,
             chunk_size: MAX_CHUNK_SIZE,
         };
         let tx = IrysTransaction {
@@ -252,7 +252,7 @@ mod tests {
             perm_fee: Some(200),
             ledger_id: 1,
             bundle_format: None,
-            chain_id: config.irys_chain_id,
+            chain_id: config.chain_id,
             version: 0,
             ingress_proofs: None,
             signature: Signature::test_signature().into(),

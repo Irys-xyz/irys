@@ -29,7 +29,7 @@ async fn serial_test_erc20() -> eyre::Result<()> {
     config.base_directory = temp_dir.path().to_path_buf();
     let main_address = config.mining_signer.address();
 
-    let account1 = IrysSigner::random_signer(testnet_config.irys_chain_id);
+    let account1 = IrysSigner::random_signer(testnet_config.chain_id);
 
     config.extend_genesis_accounts(vec![
         (

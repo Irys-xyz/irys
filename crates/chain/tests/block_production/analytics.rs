@@ -40,9 +40,9 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
 
-    let account1 = IrysSigner::random_signer_with_chunk_size(32, testnet_config.irys_chain_id);
-    let account2 = IrysSigner::random_signer_with_chunk_size(32, testnet_config.irys_chain_id);
-    let account3 = IrysSigner::random_signer_with_chunk_size(32, testnet_config.irys_chain_id);
+    let account1 = IrysSigner::random_signer_with_chunk_size(32, testnet_config.chain_id);
+    let account2 = IrysSigner::random_signer_with_chunk_size(32, testnet_config.chain_id);
+    let account3 = IrysSigner::random_signer_with_chunk_size(32, testnet_config.chain_id);
     config.extend_genesis_accounts(vec![
         (
             account1.address(),
@@ -78,7 +78,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1_000,
             chunk_migration_depth: 1, // Testnet / single node config
-            irys_chain_id: testnet_config.irys_chain_id,
+            irys_chain_id: testnet_config.chain_id,
         },
         testnet_config.clone(),
     )
@@ -159,7 +159,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 gas: Some(21000),
                 value: Some(U256::from(simple_rng.next_range(20_000))),
                 nonce: Some(alloy_provider.get_transaction_count(a.address()).await?),
-                chain_id: Some(testnet_config.irys_chain_id),
+                chain_id: Some(testnet_config.chain_id),
                 ..Default::default()
             };
 

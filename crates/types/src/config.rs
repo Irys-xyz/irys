@@ -25,7 +25,7 @@ pub struct Config {
     pub num_checkpoints_in_vdf_step: usize,
     pub vdf_sha_1s: u64,
     pub entropy_packing_iterations: u32,
-    pub irys_chain_id: u64,
+    pub chain_id: u64,
     /// Scaling factor for the capacity projection curve
     pub capacity_scalar: u64,
     pub num_blocks_in_epoch: u64,
@@ -86,7 +86,7 @@ impl Config {
             num_checkpoints_in_vdf_step: 25,
             vdf_sha_1s: 7_000,
             entropy_packing_iterations: 22_500_000,
-            irys_chain_id: 1275,
+            chain_id: 1275,
             capacity_scalar: 100,
             num_blocks_in_epoch: 100,
             submit_ledger_epoch_length: 5,

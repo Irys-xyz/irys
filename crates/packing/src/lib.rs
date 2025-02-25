@@ -401,7 +401,7 @@ mod tests {
             partition_hash.into(),
             iterations,
             testnet_config.entropy_packing_iterations,
-            testnet_config.irys_chain_id,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -417,7 +417,7 @@ mod tests {
             iterations,
             CHUNK_SIZE as usize,
             testnet_config.entropy_packing_iterations,
-            testnet_config.irys_chain_id,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -434,7 +434,7 @@ mod tests {
             iterations,
             &mut entropy_chunk,
             testnet_config.entropy_packing_iterations,
-            testnet_config.irys_chain_id,
+            testnet_config.chain_id,
         );
 
         // sign picked random chunk with entropy
@@ -522,7 +522,7 @@ mod tests {
             iterations,
             chunk_size,
             &mut entropy_chunk,
-            testnet_config.irys_chain_id,
+            testnet_config.chain_id,
         );
 
         // simulate a smaller end chunk
@@ -548,7 +548,7 @@ mod tests {
             &packed_chunk,
             iterations,
             chunk_size,
-            testnet_config.irys_chain_id,
+            testnet_config.chain_id,
         );
 
         assert_eq!(unpacked_chunk.bytes.0, data_bytes);

@@ -32,9 +32,9 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
     let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
 
-    let account1 = IrysSigner::random_signer(testnet_config.irys_chain_id);
-    let account2 = IrysSigner::random_signer(testnet_config.irys_chain_id);
-    let account3 = IrysSigner::random_signer(testnet_config.irys_chain_id);
+    let account1 = IrysSigner::random_signer(testnet_config.chain_id);
+    let account2 = IrysSigner::random_signer(testnet_config.chain_id);
+    let account3 = IrysSigner::random_signer(testnet_config.chain_id);
 
     config.extend_genesis_accounts(vec![
         (
@@ -285,9 +285,9 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let storage_config = irys_types::StorageConfig::new(&testnet_config);
 
     let mining_signer_addr = config.mining_signer.address();
-    let account1 = IrysSigner::random_signer(testnet_config.irys_chain_id);
-    let account2 = IrysSigner::random_signer(testnet_config.irys_chain_id);
-    let account3 = IrysSigner::random_signer(testnet_config.irys_chain_id);
+    let account1 = IrysSigner::random_signer(testnet_config.chain_id);
+    let account2 = IrysSigner::random_signer(testnet_config.chain_id);
+    let account3 = IrysSigner::random_signer(testnet_config.chain_id);
 
     config.extend_genesis_accounts(vec![
         (
@@ -331,7 +331,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
             gas: Some(21000),
             value: Some(U256::from(1)),
             nonce: Some(0),
-            chain_id: Some(testnet_config.irys_chain_id),
+            chain_id: Some(testnet_config.chain_id),
             ..Default::default()
         };
         let tx_env = TransactionTestContext::sign_tx(es, evm_tx_req).await;

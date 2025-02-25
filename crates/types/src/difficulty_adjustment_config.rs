@@ -186,7 +186,7 @@ mod tests {
             min_writes_before_sync: 1,
             entropy_packing_iterations: config.entropy_packing_iterations,
             chunk_migration_depth: 1, // Testnet / single node config
-            irys_chain_id: config.irys_chain_id,
+            irys_chain_id: config.chain_id,
         };
 
         let mut storage_module_count = 3;

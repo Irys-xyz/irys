@@ -33,7 +33,7 @@ async fn serial_data_promotion_test() {
     testnet_config.chunk_size = chunk_size;
 
     let miner_signer =
-        IrysSigner::random_signer_with_chunk_size(chunk_size, testnet_config.irys_chain_id);
+        IrysSigner::random_signer_with_chunk_size(chunk_size, testnet_config.chain_id);
 
     let storage_config = StorageConfig {
         chunk_size: testnet_config.chunk_size,
@@ -44,16 +44,14 @@ async fn serial_data_promotion_test() {
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
         chunk_migration_depth: 1, // Testnet / single node config
-        irys_chain_id: testnet_config.irys_chain_id,
+        irys_chain_id: testnet_config.chain_id,
     };
 
     let temp_dir = setup_tracing_and_temp_dir(Some("data_promotion_test"), false);
     let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
-    let signer = IrysSigner::random_signer_with_chunk_size(
-        chunk_size as usize,
-        testnet_config.irys_chain_id,
-    );
+    let signer =
+        IrysSigner::random_signer_with_chunk_size(chunk_size as usize, testnet_config.chain_id);
 
     config.extend_genesis_accounts(vec![(
         signer.address(),

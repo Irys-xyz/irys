@@ -23,7 +23,7 @@ impl IrysSigner {
     pub fn from_config(config: &Config) -> Self {
         IrysSigner {
             signer: config.mining_key.clone(),
-            chain_id: config.irys_chain_id,
+            chain_id: config.chain_id,
             chunk_size: config
                 .chunk_size
                 .try_into()
@@ -172,7 +172,7 @@ mod tests {
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Create a new Irys API instance
-        let irys = IrysSigner::random_signer(config.irys_chain_id);
+        let irys = IrysSigner::random_signer(config.chain_id);
 
         // Create a transaction from the random bytes
         let mut tx = irys.create_transaction(data_bytes.clone(), None).unwrap();

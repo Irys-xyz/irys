@@ -91,7 +91,7 @@ pub async fn capacity_chunk_solution(
         storage_config.entropy_packing_iterations,
         storage_config.chunk_size as usize, // take it from storage config
         &mut entropy_chunk,
-        testnet_config.irys_chain_id,
+        testnet_config.chain_id,
     );
 
     debug!("Chunk mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_addr, 0, partition_hash, storage_config.entropy_packing_iterations, storage_config.chunk_size);

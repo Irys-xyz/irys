@@ -53,7 +53,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
         chunk_migration_depth: 1, // Testnet / single node config
-        irys_chain_id: testnet_config.irys_chain_id,
+        irys_chain_id: testnet_config.chain_id,
     };
     let entropy_packing_iterations = storage_config.entropy_packing_iterations;
 
@@ -92,7 +92,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     rand::thread_rng().fill(&mut data_bytes[..]);
 
     // Create a new Irys API instance & a signed transaction
-    let irys = IrysSigner::random_signer_with_chunk_size(chunk_size, testnet_config.irys_chain_id);
+    let irys = IrysSigner::random_signer_with_chunk_size(chunk_size, testnet_config.chain_id);
     let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
     let tx = irys.sign_transaction(tx).unwrap();
 
@@ -197,7 +197,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
                 &packed_chunk,
                 entropy_packing_iterations,
                 chunk_size,
-                testnet_config.irys_chain_id,
+                testnet_config.chain_id,
             );
             assert_eq!(
                 unpacked_chunk.bytes.0,

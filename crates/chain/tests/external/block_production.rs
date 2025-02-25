@@ -7,7 +7,7 @@ use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    Address, Config, MAX_CHUNK_SIZE, block_production::SolutionContext, irys::IrysSigner,
+    block_production::SolutionContext, irys::IrysSigner, Address, Config, MAX_CHUNK_SIZE,
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
@@ -34,7 +34,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let mut config = IrysNodeConfig::new(&testnet_config);
     config.mining_signer = IrysSigner {
         signer: SigningKey::from_slice(dev_wallet.as_slice())?,
-        chain_id: testnet_config.irys_chain_id,
+        chain_id: testnet_config.chain_id,
         chunk_size: MAX_CHUNK_SIZE,
     };
     config.base_directory = temp_dir.path().to_path_buf();
@@ -48,7 +48,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let account1_address = hex::decode(DEV2_ADDRESS)?;
     let account1 = IrysSigner {
         signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
-        chain_id: testnet_config.irys_chain_id,
+        chain_id: testnet_config.chain_id,
         chunk_size: MAX_CHUNK_SIZE,
     };
     assert_eq!(
@@ -57,18 +57,27 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     );
 
     config.extend_genesis_accounts(vec![
-        (config.mining_signer.address(), GenesisAccount {
-            balance: U256::from(690000000000000000_u128),
-            ..Default::default()
-        }),
-        (config.mining_signer.address(), GenesisAccount {
-            balance: U256::from(690000000000000000_u128),
-            ..Default::default()
-        }),
-        (account1.address(), GenesisAccount {
-            balance: U256::from(1),
-            ..Default::default()
-        }),
+        (
+            config.mining_signer.address(),
+            GenesisAccount {
+                balance: U256::from(690000000000000000_u128),
+                ..Default::default()
+            },
+        ),
+        (
+            config.mining_signer.address(),
+            GenesisAccount {
+                balance: U256::from(690000000000000000_u128),
+                ..Default::default()
+            },
+        ),
+        (
+            account1.address(),
+            GenesisAccount {
+                balance: U256::from(1),
+                ..Default::default()
+            },
+        ),
     ]);
 
     let node = start_irys_node(config, storage_config, testnet_config).await?;

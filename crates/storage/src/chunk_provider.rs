@@ -193,7 +193,7 @@ mod tests {
 
         let irys = IrysSigner::random_signer_with_chunk_size(
             config.chunk_size,
-            testnet_config.irys_chain_id,
+            testnet_config.chain_id,
         );
         let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
         let tx = irys.sign_transaction(tx).unwrap();

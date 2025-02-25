@@ -90,7 +90,7 @@ mod tests {
             mining_address,
             chunk_offset,
             partition_hash,
-            testnet_config.irys_chain_id,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -105,7 +105,7 @@ mod tests {
         let c_hash_ptr = c_hash.as_ptr() as *mut u8;
 
         let now = Instant::now();
-        let chain_id = testnet_config.irys_chain_id;
+        let chain_id = testnet_config.chain_id;
 
         unsafe {
             compute_seed_hash(
@@ -148,7 +148,7 @@ mod tests {
             iterations,
             testnet_config.chunk_size as usize,
             &mut chunk,
-            testnet_config.irys_chain_id,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -164,7 +164,7 @@ mod tests {
         let c_chunk_ptr = c_chunk.as_ptr() as *mut u8;
 
         let now = Instant::now();
-        let chain_id = testnet_config.irys_chain_id;
+        let chain_id = testnet_config.chain_id;
 
         unsafe {
             compute_entropy_chunk(

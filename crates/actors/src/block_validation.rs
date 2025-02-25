@@ -535,7 +535,7 @@ mod tests {
         // Loop though all the data_chunks and create wrapper tx for them
         let signer = IrysSigner::random_signer_with_chunk_size(
             context.testnet_config.chunk_size,
-            context.testnet_config.irys_chain_id,
+            context.testnet_config.chain_id,
         );
         let mut txs: Vec<IrysTransaction> = Vec::new();
 
@@ -573,7 +573,7 @@ mod tests {
         // Create a signed TX from the chunks
         let signer = IrysSigner::random_signer_with_chunk_size(
             context.testnet_config.chunk_size,
-            context.testnet_config.irys_chain_id,
+            context.testnet_config.chain_id,
         );
         let mut txs: Vec<IrysTransaction> = Vec::new();
 

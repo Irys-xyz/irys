@@ -67,7 +67,7 @@ impl PackingConfig {
             poll_duration: Duration::from_millis(1000),
             concurrency: 4,
             max_chunks: 1024,
-            irys_chain_id: config.irys_chain_id,
+            irys_chain_id: config.chain_id,
         }
     }
 }
