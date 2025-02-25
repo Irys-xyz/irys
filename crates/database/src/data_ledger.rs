@@ -424,3 +424,44 @@ impl IndexMut<Ledger> for Vec<TransactionLedger> {
             .expect("No transaction ledger found for given ledger type")
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_try_from_str_publish_ledger() {
+        let res = Ledger::try_from("0").unwrap();
+        assert_eq!(Ledger::Publish, res)
+    }
+
+    #[test]
+    fn test_try_from_str_submit_ledger() {
+        let res = Ledger::try_from("1").unwrap();
+        assert_eq!(Ledger::Submit, res)
+    }
+
+    #[test]
+    fn test_try_from_str_invalid_ledger() {
+        let res = Ledger::try_from("42");
+        assert_eq!(true, res.is_err())
+    }
+
+    #[test]
+    fn test_try_from_u32_publish_ledger() {
+        let res = Ledger::try_from(0).unwrap();
+        assert_eq!(Ledger::Publish, res)
+    }
+
+    #[test]
+    fn test_try_from_u32_submit_ledger() {
+        let res = Ledger::try_from(1).unwrap();
+        assert_eq!(Ledger::Submit, res)
+    }
+
+    #[test]
+    fn test_try_from_u32_invalid_ledger() {
+        let res = Ledger::try_from(42);
+        assert_eq!(true, res.is_err())
+    }
+}
