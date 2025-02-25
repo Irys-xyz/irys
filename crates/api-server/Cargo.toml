@@ -13,22 +13,15 @@ irys-types.workspace = true
 irys-config.workspace = true
 #
 
-actix-proxy = "0.2.0"
 awc = "3.5.1"
 base58.workspace = true
-base64-url.workspace = true
 reth.workspace = true
 reth-db.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 serde.workspace = true
-tempfile = "3.10"
 actix.workspace = true
 actix-web.workspace = true
-rand = "0.8.5"
-tokio.workspace = true
 actix-cors = "0.7.0"
 tracing.workspace = true
 semver.workspace = true
 eyre.workspace = true
-log = "0.4.22"
-env_logger = "0.11.5"

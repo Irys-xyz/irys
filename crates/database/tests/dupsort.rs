@@ -59,7 +59,7 @@ impl Compact for CachedChunk2 {
 /// with each duplicate value being sorted *by the encoded bytes of the value*;
 /// Under BE encoding, subkey 0 would come before subkey 255.
 /// This is why it's important the subkey is the first element that is encoded when serializing the value, as it defines the sort order for that encoded value.
-/// Completely identical values (subkey + data) **are** deduplicated, but partially indentical (same subkey + different data) are **NOT**, see chunk3.
+/// Completely identical values (subkey + data) **are** deduplicated, but partially identical (same subkey + different data) are **NOT**, see chunk3.
 #[test]
 fn db_subkey_test() -> eyre::Result<()> {
     let builder = tempfile::Builder::new()

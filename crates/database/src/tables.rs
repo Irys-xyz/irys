@@ -10,6 +10,7 @@ use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::metadata::MetadataKey;
 use crate::submodule::tables::RelativeStartOffsets;
 use crate::{
     db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
@@ -120,6 +121,9 @@ tables! {
     /// ones with high reputation - the PeerListEntries contain all the peers
     /// that the node is aware of and is periodically updated via peer discovery
     table PeerListItems<Key = Address, Value = CompactPeerListItem>;
+
+    /// Table to store various metadata, such as the current db schema version
+    table Metadata<Key = MetadataKey, Value = Vec<u8>>;
 
 }
 

@@ -1,4 +1,4 @@
-//! Crate dedicated to the `IrysNodeConfig` to avoid depdendency cycles
+//! Crate dedicated to the `IrysNodeConfig` to avoid dependency cycles
 use std::{
     env::{self},
     fs,
@@ -75,6 +75,10 @@ impl IrysNodeConfig {
     /// get the instance-specific storage module directory path
     pub fn storage_module_dir(&self) -> PathBuf {
         self.instance_directory().join("storage_modules")
+    }
+    /// get the instance-specific irys consensus data directory path
+    pub fn irys_consensus_data_dir(&self) -> PathBuf {
+        self.instance_directory().join("irys_consensus_data")
     }
     /// get the instance-specific reth data directory path
     pub fn reth_data_dir(&self) -> PathBuf {
