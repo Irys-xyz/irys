@@ -53,5 +53,8 @@ irys-macros.workspace = true
 bytemuck.workspace = true
 hex.workspace = true
 
+[dev-dependencies]
+toml.workspace = true
+
 [build-dependencies]
 build-print = "0"

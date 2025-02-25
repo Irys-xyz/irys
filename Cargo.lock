@@ -5662,6 +5662,7 @@ dependencies = [
  "serde_json",
  "test-fuzz",
  "tokio",
+ "toml",
  "tracing",
  "uint",
  "zerocopy 0.8.13",
