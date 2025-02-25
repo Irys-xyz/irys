@@ -173,7 +173,7 @@ pub struct PartitionAssignmentsReadGuard {
 }
 
 impl PartitionAssignmentsReadGuard {
-    /// Creates a new `ReadGard` for Ledgers
+    /// Creates a new `ReadGuard` for Ledgers
     pub const fn new(partition_assignments: Arc<RwLock<PartitionAssignments>>) -> Self {
         Self {
             partition_assignments,
@@ -419,14 +419,12 @@ impl EpochServiceActor {
             let num_data_partitions = pa.data_partitions.len() as u64;
             let num_capacity_partitions =
                 Self::get_num_capacity_partitions(num_data_partitions, &self.config);
-            warn!(?num_capacity_partitions, ?num_data_partitions, "loggging");
             total_parts = num_capacity_partitions + num_data_partitions;
         }
 
         // Add additional capacity partitions as needed
         if total_parts > self.all_active_partitions.len() as u64 {
             let parts_to_add = total_parts - self.all_active_partitions.len() as u64;
-            warn!(?parts_to_add, ?total_parts, active_partitions =? self.all_active_partitions.len(), "aaaa");
             self.add_capacity_partitions(parts_to_add);
         }
     }
@@ -516,12 +514,7 @@ impl EpochServiceActor {
         let log_10 = (base_count as f64).log10();
         let trunc = truncate_to_3_decimals(log_10);
         let scaled = truncate_to_3_decimals(trunc * config.capacity_scalar as f64);
-        warn!(?num_data_partitions, ?min_count, ?config.capacity_scalar, ?config.storage_config.num_partitions_in_slot, "insidi get part" );
 
-        // println!(
-        //     "- base_count: {}, log_10: {}, trunc: {}, scaled: {}, rounded: {}",
-        //     base_count, log_10, trunc, scaled, rounded
-        // );
         truncate_to_3_decimals(scaled).ceil() as u64
     }
 
@@ -1202,7 +1195,7 @@ mod tests {
             let submit_partition = sub_slots[1]
                 .partitions
                 .get(0)
-                .expect("submit ledger slot 1 should have a partition assinged")
+                .expect("submit ledger slot 1 should have a partition assigned")
                 .clone();
             (publish_partition, submit_partition)
         };
