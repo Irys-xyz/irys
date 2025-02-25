@@ -98,6 +98,7 @@ pub fn check_db_version_and_run_migrations_if_needed(
     Ok(())
 }
 
+#[cfg(test)]
 mod tests {
     use crate::migration::check_db_version_and_run_migrations_if_needed;
     use crate::open_or_create_db;
