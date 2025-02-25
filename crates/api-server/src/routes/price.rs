@@ -3,33 +3,22 @@ use irys_config::{PRICE_PER_CHUNK_5_EPOCH, PRICE_PER_CHUNK_PERM};
 use irys_database::Ledger;
 use irys_types::{perm_storage_price::PriceCalc, CONFIG};
 
-pub async fn get_perm_storage_pricing(path: Path<u64>) -> actix_web::Result<HttpResponse> {
-    match PriceCalc::calc_perm_storage_price(path.into_inner()) {
-        Ok(perm_storage_price) => Ok(HttpResponse::Ok().body(perm_storage_price.to_string())),
-        Err(e) => Ok(HttpResponse::BadRequest().body(format!("{e:?}"))),
-    }
-}
-
 pub async fn get_price(path: Path<(String, u64)>) -> actix_web::Result<HttpResponse> {
-    let size = path.1;
-    let ledger = Ledger::from_url(&path.0);
+    let (ledger, size) = path.into_inner();
 
-    let num_of_chunks = if size < CONFIG.chunk_size {
-        1u128
-    } else {
-        // Safe because u128 > u64
-        (size % CONFIG.chunk_size + 1) as u128
-    };
-
-    if let Ok(l) = ledger {
-        let final_price = match l {
-            Ledger::Publish => PRICE_PER_CHUNK_PERM,
-            Ledger::Submit => PRICE_PER_CHUNK_5_EPOCH,
-        } * num_of_chunks;
-
-        Ok(HttpResponse::Ok().body(final_price.to_string()))
-    } else {
-        Ok(HttpResponse::BadRequest().body("Ledger type not support"))
+    match Ledger::try_from(ledger.as_str()) {
+        Ok(Ledger::Publish) => {
+            match PriceCalc::calc_perm_storage_price(size) {
+                Ok(perm_storage_price) => Ok(HttpResponse::Ok().body(perm_storage_price.to_string())),
+                Err(e) => Ok(HttpResponse::BadRequest().body(format!("{e:?}"))),
+            }
+        }
+        Ok(Ledger::Submit) => {
+            Ok(HttpResponse::BadRequest().body("term not yet implemented"))
+        }
+        Err(_) => {
+            Ok(HttpResponse::BadRequest().body("Ledger type not supported"))
+        }
     }
 }
 
