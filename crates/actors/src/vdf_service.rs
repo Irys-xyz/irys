@@ -92,12 +92,18 @@ fn create_state(
 }
 
 pub fn calc_capacity(config: &Config) -> usize {
+    const DEFAULT_CAPACITY: usize = 10_000;
     let capacity = std::cmp::max(
-        10_000,
+        DEFAULT_CAPACITY,
         (config.num_chunks_in_partition / config.num_chunks_in_recall_range)
             .try_into()
             .unwrap(),
     );
+
+    if capacity <= DEFAULT_CAPACITY {
+        warn!("Capacity is clamped to 10k, which may not be sufficient for mining a partition.");
+    }
+
     capacity
 }
 

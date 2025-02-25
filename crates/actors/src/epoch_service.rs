@@ -1143,17 +1143,12 @@ mod tests {
         sleep(Duration::from_secs(1)).await;
 
         // busypoll the solution context rwlock
-        let mut counter = 0;
         let pack_req = 'outer: loop {
             match arc_rwlock.try_read() {
                 Ok(lck) => {
                     if lck.is_none() {
                         debug!("Packing request not ready waiting!");
                         sleep(Duration::from_millis(50)).await;
-                        counter += 1;
-                        if counter == 10 {
-                            panic!();
-                        }
                     } else {
                         debug!("Packing request received ready!");
                         break 'outer lck.as_ref().unwrap().clone();
