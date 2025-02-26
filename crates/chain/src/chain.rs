@@ -1,8 +1,8 @@
-use irys_actors::packing::PackingConfig;
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use alloy_eips::BlockNumberOrTag;
+use irys_actors::packing::PackingConfig;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
@@ -35,8 +35,8 @@ use irys_storage::{
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, irys::IrysSigner,
-    vdf_config::VDFStepsConfig, StorageConfig, CHUNK_SIZE, H256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
+    StorageConfig, CHUNK_SIZE, H256,
 };
 use irys_types::{Config, DifficultyAdjustmentConfig, PartitionChunkRange};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
@@ -131,7 +131,7 @@ pub async fn start_irys_node(
     let at_genesis;
     let latest_block_index: Option<irys_database::BlockIndexItem>;
 
-    let latest_block_height ;
+    let latest_block_height;
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
         let idx = BlockIndex::default();
         let i = idx.init(arc_config.clone()).await.unwrap();
@@ -277,7 +277,7 @@ pub async fn start_irys_node(
 
                 // need to start before the epoch service, as epoch service calls from_registry that triggers broadcast mining service initialization
                 let broadcast_arbiter = Arbiter::new();
-                let broadcast_mining_service = 
+                let broadcast_mining_service =
                     BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
                         BroadcastMiningService::default()
                     });
