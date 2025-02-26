@@ -338,12 +338,11 @@ impl IrysBlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::{irys::IrysSigner, validate_path, Config, TxIngressProof, MAX_CHUNK_SIZE};
+    use crate::{validate_path, Config, TxIngressProof};
 
     use super::*;
     use alloy_primitives::Signature;
     use alloy_rlp::Decodable;
-    use k256::ecdsa::SigningKey;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use serde_json;
     use zerocopy::IntoBytes;

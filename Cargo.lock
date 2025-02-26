@@ -4199,6 +4199,7 @@ dependencies = [
  "reth-node-metrics",
  "serde",
  "tempfile",
+ "test-fuzz",
  "tokio",
  "tracing",
 ]

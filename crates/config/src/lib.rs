@@ -8,7 +8,7 @@ use std::{
 
 use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;
-use irys_types::{config, irys::IrysSigner, Address, Config};
+use irys_types::{config, irys::IrysSigner, Address};
 use serde::{Deserialize, Serialize};
 
 pub mod chain;
