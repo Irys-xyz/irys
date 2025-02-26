@@ -58,7 +58,7 @@ pub struct PackingConfig {
     #[allow(unused)]
     pub max_chunks: u32,
     /// Irys chain id
-    pub irys_chain_id: u64,
+    pub chain_id: u64,
 }
 
 impl PackingConfig {
@@ -67,7 +67,7 @@ impl PackingConfig {
             poll_duration: Duration::from_millis(1000),
             concurrency: 4,
             max_chunks: 1024,
-            irys_chain_id: config.chain_id,
+            chain_id: config.chain_id,
         }
     }
 }
@@ -166,8 +166,7 @@ impl PackingActor {
                                 entropy_packing_iterations,
                                 chunk_size as usize,
                                 &mut out,
-
-                self.config.irys_chain_id
+                                self.config.chain_id
                             );
 
                             debug!(target: "irys::packing::progress", "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
@@ -223,6 +222,8 @@ impl PackingActor {
                                 partition_hash,
                                 Some(entropy_packing_iterations),
                                 &mut out,
+                                entropy_packing_iterations,
+                                self.config.chain_id,
                             );
                             for i in 0..num_chunks {
                                 storage_module.write_chunk(
@@ -455,7 +456,7 @@ mod tests {
                 storage_config.entropy_packing_iterations,
                 storage_config.chunk_size.try_into().unwrap(),
                 &mut out,
-                config.irys_chain_id,
+                config.chain_id,
             );
             assert_eq!(chunk.0.first(), out.first());
         }
