@@ -32,8 +32,8 @@ impl ReadBytesRangeByIndexArgs {
 
 pub fn read_bytes_range_by_index(
     call_data: &Bytes,
-    gas_limit: u64,
-    env: &Env,
+    _gas_limit: u64,
+    _env: &Env,
     state_provider: &IrysRethProviderInner,
     access_lists: ParsedAccessLists,
 ) -> PrecompileResult {
@@ -73,8 +73,8 @@ impl ReadPartialByteRangeArgs {
 // this method overrides the length, and augments the start
 pub fn read_partial_byte_range(
     call_data: &Bytes,
-    gas_limit: u64,
-    env: &Env,
+    _gas_limit: u64,
+    _env: &Env,
     state_provider: &IrysRethProviderInner,
     access_lists: ParsedAccessLists,
 ) -> PrecompileResult {
