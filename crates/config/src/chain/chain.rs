@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 pub const SUPPORTED_CHAINS: &[&str] = &["mainnet" /* , "devnet", "testnet" */];
 
-/// note: for testing this is overriden
+/// note: for testing this is overridden
 pub static IRYS_MAINNET: Lazy<Arc<ChainSpec>> = Lazy::new(|| {
     let mut spec = ChainSpec {
         chain: Chain::from_id(CONFIG.irys_chain_id),
@@ -91,12 +91,4 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IrysChainSpec {
     irys_genesis: IrysBlockHeader,
-}
-
-impl IrysChainSpec {
-    fn new() -> Self {
-        Self {
-            irys_genesis: IrysBlockHeader::new(),
-        }
-    }
 }

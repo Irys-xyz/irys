@@ -4,9 +4,10 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders, Metadata,
 };
 
+use crate::metadata::MetadataKey;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
     IrysTransactionId, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
@@ -212,6 +213,24 @@ pub fn walk_all<T: Table>(
     Ok(walker.collect::<Result<Vec<_>, _>>()?)
 }
 
+pub fn set_database_schema_version<T: DbTxMut>(tx: &T, version: u32) -> Result<(), DatabaseError> {
+    tx.put::<Metadata>(MetadataKey::DBSchemaVersion, version.to_le_bytes().to_vec())
+}
+
+pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseError> {
+    if let Some(bytes) = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)? {
+        let arr: [u8; 4] = bytes.as_slice().try_into().map_err(|_| {
+            DatabaseError::Other(
+                "Db schema version metadata does not have exactly 4 bytes".to_string(),
+            )
+        })?;
+
+        Ok(Some(u32::from_le_bytes(arr)))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use irys_types::{IrysBlockHeader, IrysTransactionHeader};
@@ -237,7 +256,7 @@ mod tests {
         let result = db.view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?;
         assert_eq!(result, Some(tx_header));
 
-        let mut block_header = IrysBlockHeader::new();
+        let mut block_header = IrysBlockHeader::new_mock_header();
         block_header.block_hash.0[0] = 1;
 
         // Write a Block

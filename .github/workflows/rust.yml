@@ -65,8 +65,11 @@ jobs:
       - name: Setup repo
         uses: ./.github/actions/setup-repo
 
+      - name: Update submodules
+        run: git submodule update --init --recursive
+
       - name: cargo check
-        run: cargo xtask check -- --all-features
+        run: RUSTFLAGS="-D warnings" cargo xtask full-check
 
   cargo-fmt:
     name: cargo fmt

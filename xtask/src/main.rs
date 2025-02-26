@@ -20,6 +20,14 @@ enum Commands {
         #[clap(last = true)]
         args: Vec<String>,
     },
+    FullCheck {
+        #[clap(last = true)]
+        args: Vec<String>,
+    },
+    FullBacon {
+        #[clap(last = true)]
+        args: Vec<String>,
+    },
     Fmt {
         #[clap(short, long, default_value_t = false)]
         check_only: bool,
@@ -46,10 +54,10 @@ fn main() -> eyre::Result<()> {
     match args.command {
         Commands::Test { args, coverage } => {
             println!("cargo test");
-            let _ = cmd!(sh, "cargo install cargo-nextest").run();
+            let _ = cmd!(sh, "cargo install --locked cargo-nextest").run();
 
             if coverage {
-                cmd!(sh, "cargo install grcov").run()?;
+                cmd!(sh, "cargo install  --locked grcov").run()?;
                 for (key, val) in [
                     ("CARGO_INCREMENTAL", "0"),
                     ("RUSTFLAGS", "-Cinstrument-coverage"),
@@ -82,6 +90,15 @@ fn main() -> eyre::Result<()> {
         Commands::Check { args } => {
             println!("cargo check");
             cmd!(sh, "cargo check {args...}").run()?;
+        }
+        Commands::FullCheck { args } => {
+            println!("cargo check --all-features --all-targets");
+            cmd!(sh, "cargo check --all-features --all-targets {args...}").run()?;
+        }
+        Commands::FullBacon { args } => {
+            let _ = cmd!(sh, "cargo install --locked bacon").run();
+            println!("bacon check-all ");
+            cmd!(sh, "bacon check-all {args...}").run()?;
         }
         Commands::Clippy { args } => {
             println!("cargo clippy");
@@ -123,12 +140,12 @@ fn main() -> eyre::Result<()> {
         }
         Commands::Typos => {
             println!("typos check");
-            cmd!(sh, "cargo install typos-cli").run()?;
+            cmd!(sh, "cargo install --locked typos-cli").run()?;
             cmd!(sh, "typos").run()?;
         }
         Commands::UnusedDeps => {
             println!("unused deps");
-            cmd!(sh, "cargo install cargo-machete").run()?;
+            cmd!(sh, "cargo install --locked cargo-machete").run()?;
             cmd!(sh, "cargo-machete").run()?;
         }
     }

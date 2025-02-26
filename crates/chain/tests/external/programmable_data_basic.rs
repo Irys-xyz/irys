@@ -161,7 +161,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     // now we wait for an ingress proof to be generated for this tx (automatic once all chunks have been uploaded)
     let ingress_proof = loop {
-        // don't reuse the tx! it has read isolation (won't see anything commited after it's creation)
+        // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
         let ro_tx = &node.db.0.tx().unwrap();
         match ro_tx.get::<IngressProofs>(recv_tx.data_root).unwrap() {
             Some(ip) => break ip,
@@ -202,7 +202,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         None
     });
 
-    let start_offset = future_or_mine_on_timeout(
+    let _start_offset = future_or_mine_on_timeout(
         node.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
@@ -213,7 +213,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     .await?
     .unwrap();
 
-    for i in 1..10 {
+    for _i in 1..10 {
         let poa_solution = capacity_chunk_solution(
             node.config.mining_signer.address(),
             node.vdf_steps_guard.clone(),

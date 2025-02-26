@@ -36,7 +36,7 @@ pub struct BlockTreeReadGuard {
 }
 
 impl BlockTreeReadGuard {
-    /// Creates a new `ReadGard` for the `block_tree` cache
+    /// Creates a new `ReadGuard` for the `block_tree` cache
     pub const fn new(block_tree_cache: Arc<RwLock<BlockTreeCache>>) -> Self {
         Self { block_tree_cache }
     }
@@ -1168,9 +1168,6 @@ impl BlockTreeCache {
     }
 }
 
-//==============================================================================
-// Tests
-//------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1901,7 +1898,7 @@ mod tests {
     }
 
     fn random_block(cumulative_diff: U256) -> IrysBlockHeader {
-        let mut block = IrysBlockHeader::new();
+        let mut block = IrysBlockHeader::new_mock_header();
         block.block_hash = BlockHash::random();
         block.solution_hash = H256::random(); // Ensure unique solution hash
         block.height = 0; // Default to genesis

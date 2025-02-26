@@ -15,7 +15,7 @@ use {
     irys_types::{split_interval, CHUNK_SIZE},
 };
 
-use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
+use irys_storage::{ChunkType, StorageModule};
 use irys_types::{PartitionChunkOffset, PartitionChunkRange, StorageConfig};
 use reth::tasks::TaskExecutor;
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
@@ -190,8 +190,8 @@ impl PackingActor {
                         .unwrap()
                         .iter()
                     {
-                        let start: u32 = (*chunk_range_split).start();
-                        let end: u32 = (*chunk_range_split).end();
+                        let start: u32 = *(*chunk_range_split).start();
+                        let end: u32 = *(*chunk_range_split).end();
 
                         let num_chunks = end - start + 1;
 
@@ -465,6 +465,6 @@ mod tests {
     #[should_panic(expected = "wrong input N 3")]
     fn test_casting_error() {
         let v: Vec<u8> = (1..=10).collect();
-        let c2 = cast_vec_u8_to_vec_u8_array::<3>(v);
+        let _c2 = cast_vec_u8_to_vec_u8_array::<3>(v);
     }
 }

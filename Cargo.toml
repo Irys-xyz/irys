@@ -15,7 +15,6 @@ members = [
   "crates/efficient-sampling",
   "crates/macros",
   "crates/debug-utils",
-  "crates/storage-pricing",
   "xtask",
 ]
 resolver = "2"
@@ -27,6 +26,7 @@ homepage = "http://irys.xyz/"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/Irys-xyz/irys"
 authors = []
+
 
 [workspace.dependencies]
 # Irys
@@ -90,6 +90,7 @@ eyre = "0.6"
 color-eyre = "0.6.2"
 itertools = "0.13.0"
 futures = "0.3"
+bytemuck = "1"
 
 nodit = { version = "0.9.2", features = ["serde"] }
 modular-bitfield = "0.11.2"
@@ -165,6 +166,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "env-filter",
   "fmt",
   "json",
+  "ansi",
 ] }
 alloy-signer = { path = "./ext/alloy/crates/signer" }
 tempfile = "3.10"
@@ -354,9 +356,14 @@ significant_drop_in_scrutinee = "allow"
 significant_drop_tightening = "allow"
 too_long_first_doc_paragraph = "allow"
 
+[workspace.metadata.cargo-machete]
+ignored = ["modular-bitfield", "test-fuzz"]
+
+
 # https://github.com/crate-ci/typos/blob/master/docs/reference.md
-[workspace.metadata.typos.files]
-extend-exclude = [
-  "ext/*",
-  "fixtures/*",
+[workspace.metadata.typos]
+default.extend-ignore-re = [
+  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
+  "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
 ]
+files.extend-exclude = ["ext/*", "fixtures/*"]

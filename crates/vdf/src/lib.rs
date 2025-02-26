@@ -388,7 +388,7 @@ mod tests {
     use base58::{FromBase58, ToBase58};
 
     use super::*;
-    fn generate_next_vdf_step() {
+    fn _generate_next_vdf_step() {
         let mut seed = H256(
             hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41")
                 .unwrap()
@@ -451,6 +451,7 @@ mod tests {
             seed: to_hash("11111111111111111111111111111111"),
             next_seed: to_hash("11111111111111111111111111111111"),
             prev_output: to_hash("8oYs33LUVjtsB6rz6BRXBsVS48WbZJovgbyviKziV6ar"),
+            // spellchecker:off
             last_step_checkpoints: H256List(vec![
                 to_hash("5YGk1yQMi5TwLf2iHAaLWnS8iDSdzQEhm3fambxy5Syy"),
                 to_hash("FM8XvtafL5pEsMkwJZDEZpppQpbCWQHxSSijffSjHVaX"),
@@ -481,6 +482,7 @@ mod tests {
             steps: H256List(vec![to_hash(
                 "AEj76XfsPWoB2CjcDm3RXTwaM5AKs7SbWnkHR8umvgmW",
             )]),
+            // spellchecker:on
             vdf_difficulty: None,
             next_vdf_difficulty: None,
         };
