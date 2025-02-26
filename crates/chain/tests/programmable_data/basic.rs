@@ -48,13 +48,13 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
 
     let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
     let testnet_config = Config::testnet();
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
 
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let main_address = testnet_config.miner_address();
     let account1 = IrysSigner::random_signer(testnet_config.chain_id);
-    let main_address = config.mining_signer.address();
-
+    let mut config = IrysNodeConfig {
+        base_directory: temp_dir.path().to_path_buf(),
+        ..IrysNodeConfig::new(&testnet_config)
+    };
     config.extend_genesis_accounts(vec![
         (
             main_address,
@@ -78,6 +78,7 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
             },
         ),
     ]);
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
 
     let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     wait_for_packing(

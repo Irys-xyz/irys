@@ -74,9 +74,7 @@ impl Config {
     pub fn miner_address(&self) -> Address {
         Address::from_private_key(&self.mining_key)
     }
-}
 
-impl Config {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn testnet() -> Self {
         use k256::ecdsa::SigningKey;

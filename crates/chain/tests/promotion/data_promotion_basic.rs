@@ -29,22 +29,18 @@ async fn serial_data_promotion_test() {
 
     let chunk_size = 32_u64; // 32 byte chunks
 
-    let mut testnet_config = Config::testnet();
-    testnet_config.chunk_size = chunk_size;
-
-    let miner_signer = IrysSigner::random_signer_with_chunk_size(&testnet_config);
-
-    let storage_config = StorageConfig {
-        chunk_size: testnet_config.chunk_size,
+    let mut testnet_config = Config {
+        chunk_size,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
-        num_partitions_in_slot: 1,
-        miner_address: miner_signer.address(),
-        min_writes_before_sync: 1,
+        num_partitions_per_slot: 1,
+        num_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
         chunk_migration_depth: 1, // Testnet / single node config
-        chain_id: testnet_config.chain_id,
+        ..Config::testnet()
     };
+    testnet_config.chunk_size = chunk_size;
+    let storage_config = StorageConfig::new(&testnet_config);
 
     let temp_dir = setup_tracing_and_temp_dir(Some("data_promotion_test"), false);
     let mut config = IrysNodeConfig::new(&testnet_config);
