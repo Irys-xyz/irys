@@ -273,7 +273,8 @@ mod tests {
     #[test]
     fn test_compute_entropy_chunk() {
         let mut rng = rand::thread_rng();
-        let mining_address = Address::random();
+        let testnet_config = Config::testnet();
+        let mining_address = testnet_config.miner_address();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
@@ -292,6 +293,7 @@ mod tests {
             iterations,
             CHUNK_SIZE as usize,
             &mut chunk,
+            testnet_config.chain_id,
         );
 
         capacity_single::compute_entropy_chunk(
@@ -301,6 +303,7 @@ mod tests {
             iterations,
             CHUNK_SIZE as usize,
             &mut chunk2,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -316,6 +319,8 @@ mod tests {
             partition_hash.into(),
             Some(iterations),
             &mut c_chunk,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         capacity_pack_range_c(
@@ -324,6 +329,8 @@ mod tests {
             partition_hash.into(),
             Some(iterations),
             &mut c_chunk2,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -342,6 +349,8 @@ mod tests {
             partition_hash.into(),
             Some(iterations),
             &mut c_chunk_cuda,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         println!("CUDA result: {}", result);
