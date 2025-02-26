@@ -311,7 +311,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         let target_offset = chunk.byte_offset(self.storage_config.chunk_size) as u128;
         let path_buff = &chunk.data_path;
 
-        println!(
+        info!(
             "chunk_offset:{} data_size:{} offset:{}",
             chunk.tx_offset, chunk.data_size, target_offset
         );

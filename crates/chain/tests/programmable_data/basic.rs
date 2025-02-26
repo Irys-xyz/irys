@@ -44,10 +44,11 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
 #[actix_web::test]
 async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
+    std::env::set_var("RUST_LOG", "info");
 
     let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
-    let testnet_config = Config::testnet();
+    let mut testnet_config = Config::testnet();
+    testnet_config.chunk_size = 32;
 
     let main_address = testnet_config.miner_address();
     let account1 = IrysSigner::random_signer(testnet_config.chain_id);
@@ -196,6 +197,7 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
         let max = chunk_node.max_byte_range;
         let data_path = Base64(tx.proofs[tx_chunk_offset].proof.to_vec());
 
+        tracing::warn!(?tx_chunk_offset, "offset");
         let chunk = UnpackedChunk {
             data_root,
             data_size,
@@ -203,6 +205,7 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
             bytes: Base64(data_bytes[min..max].to_vec()),
             tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
         };
+        tracing::warn!(?chunk, "chunk");
 
         // Make a POST request with JSON payload
 

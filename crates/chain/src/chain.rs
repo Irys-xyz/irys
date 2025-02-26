@@ -131,8 +131,7 @@ pub async fn start_irys_node(
     let at_genesis;
     let latest_block_index: Option<irys_database::BlockIndexItem>;
 
-    let mut latest_block_height: u64 = 0;
-
+    let latest_block_height ;
     let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
         let idx = BlockIndex::default();
         let i = idx.init(arc_config.clone()).await.unwrap();
