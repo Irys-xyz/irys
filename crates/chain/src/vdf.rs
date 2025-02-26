@@ -92,12 +92,7 @@ pub fn run_vdf(
 mod tests {
     use super::*;
     use actix::*;
-    use color_eyre::owo_colors::OwoColorize;
-    use irys_actors::{
-        block_index_service::BlockIndexService,
-        vdf_service::{calc_capacity, GetVdfStateMessage},
-    };
-    use irys_config::IrysNodeConfig;
+    use irys_actors::vdf_service::{calc_capacity, GetVdfStateMessage};
     use irys_types::*;
     use irys_vdf::{vdf_sha_verification, vdf_state::VdfStepsReadGuard, vdf_steps_are_valid};
     use nodit::interval::ii;

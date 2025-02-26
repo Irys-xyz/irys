@@ -9,7 +9,7 @@ use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-    partition_chunk_offset_ie, partition_chunk_offset_ii, Address, Base64, Config, IrysTransaction,
+    partition_chunk_offset_ie, partition_chunk_offset_ii, Base64, Config, IrysTransaction,
     IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset,
     PartitionChunkRange, StorageConfig, TransactionLedger, TxChunkOffset, UnpackedChunk, H256,
 };
