@@ -7,17 +7,11 @@ rust-version.workspace = true
 [dependencies]
 openssl.workspace = true
 nodit.workspace = true
-irys-config.workspace = true
 eyre.workspace = true
 serde.workspace = true
 irys-types.workspace = true
 rand.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
-actix-rt.workspace = true
-actix.workspace = true
-bytes.workspace = true
-futures.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 reth-db.workspace = true
@@ -25,7 +19,6 @@ irys-database.workspace = true
 irys-testing-utils.workspace = true
 irys-packing.workspace = true
 derive_more.workspace = true
-itertools.workspace = true
 base58.workspace = true
 [lints]
 workspace = true

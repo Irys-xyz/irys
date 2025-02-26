@@ -1,3 +1,4 @@
+//! Crate dedicated to the `IrysNodeConfig` to avoid dependency cycles
 use std::{
     env::{self},
     fs,
@@ -11,8 +12,6 @@ use irys_types::{config, irys::IrysSigner, Address, Config};
 use serde::{Deserialize, Serialize};
 
 pub mod chain;
-
-// TODO: convert this into a set of clap args
 
 #[derive(Debug, Clone)]
 /// Top level configuration struct for the node
@@ -251,6 +250,5 @@ impl StorageSubmodulesConfig {
             // Load the config to verify it parses
             StorageSubmodulesConfig::from_toml(config_path_local)
         }
-        // let _ = STORAGE_SUBMODULES_CONFIG.submodule_paths.len();
     }
 }

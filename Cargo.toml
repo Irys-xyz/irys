@@ -152,9 +152,9 @@ derive-syn-parse = "0"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
-tracing = "0.1"
+tracing = "0.1.0"
 tracing-error = "0.2"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi"] }
 alloy-signer = { path = "./ext/alloy/crates/signer" }
 tempfile = "3"
 jsonrpsee = "0.24"
@@ -343,9 +343,13 @@ significant_drop_in_scrutinee = "allow"
 significant_drop_tightening = "allow"
 too_long_first_doc_paragraph = "allow"
 
+[workspace.metadata.cargo-machete]
+ignored = ["modular-bitfield", "test-fuzz"]
+
 # https://github.com/crate-ci/typos/blob/master/docs/reference.md
-[workspace.metadata.typos.files]
-extend-exclude = [
-  "ext/*",
-  "fixtures/*",
+[workspace.metadata.typos]
+default.extend-ignore-re = [
+  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$", # disable a single line: spellchecker:disable-line
+  "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
 ]
+files.extend-exclude = ["ext/*", "fixtures/*"]

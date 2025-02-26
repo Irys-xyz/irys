@@ -7,7 +7,5 @@ version = "0.1.0"
 irys-types.workspace = true
 
 eyre.workspace = true
-rand.workspace = true
 openssl.workspace = true
 tracing.workspace = true
-arbitrary.workspace = true

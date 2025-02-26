@@ -279,7 +279,7 @@ mod tests {
         rng.fill(&mut partition_hash[..]);
         let iterations = 2 * CHUNK_SIZE as u32;
 
-        // Please do not change CHUNK_SIZE to CHUNK_SIZE as this compares with C implementation that uses harcoded 256KB
+        // Please do not change CHUNK_SIZE to CHUNK_SIZE as this compares with C implementation that uses hardcoded 256KB
         let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
         let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
 

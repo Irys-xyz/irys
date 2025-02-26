@@ -4,8 +4,6 @@ name = "irys-primitives"
 version = "0.1.0"
 
 [dependencies]
-
-alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-genesis.workspace = true
 alloy-primitives.workspace = true
@@ -16,11 +14,12 @@ arbitrary.workspace = true
 bytes.workspace = true
 derive_more.workspace = true
 modular-bitfield.workspace = true
-proptest-derive.workspace = true
 reth-codecs.workspace = true
 ruint.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-test-fuzz.workspace = true
 thiserror.workspace = true
 eyre.workspace = true
+test-fuzz.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["derive_more"]

@@ -19,7 +19,7 @@ pub struct BlockIndexReadGuard {
 }
 
 impl BlockIndexReadGuard {
-    /// Creates a new `ReadGard` for Ledgers
+    /// Creates a new `ReadGuard` for Ledgers
     pub const fn new(block_index_data: Arc<RwLock<BlockIndex<Initialized>>>) -> Self {
         Self { block_index_data }
     }

@@ -353,6 +353,7 @@ pub async fn start_irys_node(
 
                 let mempool_service = MempoolService::new(
                     irys_db.clone(),
+                    reth_db.clone(),
                     reth_node.task_executor.clone(),
                     node_config.mining_signer.clone(),
                     storage_config.clone(),

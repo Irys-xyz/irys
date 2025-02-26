@@ -8,9 +8,9 @@ use awc::http::StatusCode;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
 use irys_database::{database, Ledger};
 use irys_types::{u64_stringify, IrysTransactionHeader, H256};
-use log::info;
 use reth_db::Database;
 use serde::{Deserialize, Serialize};
+use tracing::info;
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `IrysTransactionHeader` type,
