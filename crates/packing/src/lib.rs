@@ -455,6 +455,7 @@ mod tests {
     #[cfg(feature = "nvidia")]
     #[test]
     fn test_bench_chunks_packing_cuda() {
+        let testnet_config = Config::testnet();
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
@@ -483,6 +484,8 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -496,6 +499,8 @@ mod tests {
             partition_hash.into(),
             iterations,
             CHUNK_SIZE as usize,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
