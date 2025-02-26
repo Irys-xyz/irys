@@ -160,7 +160,12 @@ mod tests {
 
     #[test]
     fn get_by_data_tx_offset_test() -> eyre::Result<()> {
-        let testnet_config = Config::testnet();
+        let testnet_config = Config {
+            num_writes_before_sync: 1,
+            chunk_size: 32,
+            num_chunks_in_partition: 100,
+            ..Config::testnet()
+        };
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
@@ -176,12 +181,7 @@ mod tests {
         let arc_db = DatabaseProvider(Arc::new(db));
 
         // Override the default StorageModule config for testing
-        let config = StorageConfig {
-            min_writes_before_sync: 1,
-            chunk_size: 32,
-            num_chunks_in_partition: 100,
-            ..Default::default()
-        };
+        let config = StorageConfig::new(&testnet_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];

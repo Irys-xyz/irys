@@ -2,7 +2,7 @@
 
 use actix_http::StatusCode;
 use irys_api_server::{routes, ApiState};
-use irys_chain::{start, start_irys_node};
+use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 
@@ -40,7 +40,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     use std::time::Duration;
     use tokio::time::sleep;
     use tracing::{debug, info};
-    let mut testnet_config = Config {
+    let testnet_config = Config {
         chunk_size: chunk_size.try_into().unwrap(),
         ..Config::testnet()
     };

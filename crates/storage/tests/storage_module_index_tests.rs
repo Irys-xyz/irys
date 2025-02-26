@@ -19,19 +19,18 @@ use tracing::info;
 
 #[test]
 fn tx_path_overlap_tests() -> eyre::Result<()> {
-    let testnet_config = Config::testnet();
-    // Set up the storage geometry for this test
-    let storage_config = StorageConfig {
+    let testnet_config = Config {
         chunk_size: 32,
         num_chunks_in_partition: 20,
         num_chunks_in_recall_range: 5,
-        num_partitions_in_slot: 1,
-        miner_address: Address::random(),
-        min_writes_before_sync: 1,
+        num_partitions_per_slot: 1,
+        num_writes_before_sync: 1,
         entropy_packing_iterations: 1,
-        chunk_migration_depth: 1, // Testnet / single node config
-        chain_id: testnet_config.chain_id,
+        chunk_migration_depth: 1,
+        ..Config::testnet()
     };
+    // Set up the storage geometry for this test
+    let storage_config = StorageConfig::new(&testnet_config);
     let chunk_size = storage_config.chunk_size;
 
     // Configure 3 storage modules that are assigned to the submit ledger in

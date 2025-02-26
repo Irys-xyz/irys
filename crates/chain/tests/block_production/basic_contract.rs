@@ -5,10 +5,10 @@ use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use irys_chain::{start, start_irys_node};
+use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, storage_config, Config};
+use irys_types::{irys::IrysSigner, Config};
 use reth_primitives::GenesisAccount;
 use tracing::info;
 

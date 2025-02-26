@@ -1,5 +1,5 @@
 use irys_primitives::{Genesis, GenesisAccount, U256};
-use irys_types::{Address, Config, IrysBlockHeader};
+use irys_types::{Address, IrysBlockHeader};
 use once_cell::sync::OnceCell;
 use reth_chainspec::EthereumHardfork::{
     ArrowGlacier, Berlin, Byzantium, Cancun, Constantinople, Dao, Frontier, GrayGlacier, Homestead,
