@@ -1,13 +1,15 @@
-use crate::{ANNUALIZED_COST_OF_STORING_1GB, CONFIG};
+use crate::{
+    ANNUALIZED_COST_OF_OPERATING_16TIB, ANNUALIZED_COST_OF_STORING_1GIB, CONFIG, MINER_FEE,
+};
 use eyre::{ensure, Error};
 use rust_decimal::Decimal;
 
 pub struct PriceCalc;
 
 impl PriceCalc {
-    const ONE_GB: u64 = 1024 * 1024 * 1024;
-    const GB_PER_TB: u32 = 1024;
-    const TB_PER_DRIVE: u32 = 16;
+    const ONE_GIB: u64 = 1024 * 1024 * 1024;
+    const GIB_PER_TIB: u64 = 1024;
+    const TIB_PER_PARTITION: u64 = 16;
 
     fn get_usd_to_irys_conversion_rate() -> f64 {
         // 1 USD = how many $IRYS. end result is in $IRYS
@@ -16,20 +18,22 @@ impl PriceCalc {
 
     pub fn calc_perm_storage_price(number_of_bytes_to_store: u64) -> Result<f64, Error> {
         ensure!(CONFIG.chunk_size != 0, "Chunk size should not be 0");
-        let perm_cost = Self::calc_perm_cost_per_gb(
+        let perm_cost = Self::calc_perm_cost_per_gib(
             CONFIG.decay_params.safe_minimum_number_of_years,
             CONFIG.decay_params.annualized_decay_rate.try_into()?,
             CONFIG.num_partitions_per_slot,
         )?;
-        let perm_fee = Self::calc_perm_fee_per_gb(
-            perm_cost,
+        let ingress_perm_fee = Self::calc_perm_fee_per_ingress_gib(
             CONFIG.storage_fees.number_of_ingress_proofs,
             CONFIG.storage_fees.ingress_fee,
         )?;
         let approximate_usd_irys_price = Self::get_usd_to_irys_conversion_rate();
         let chunks = Self::get_chunks_from_bytes(number_of_bytes_to_store);
-        let chunks_per_gb = Self::ONE_GB / CONFIG.chunk_size;
-        Ok(chunks as f64 * perm_fee * approximate_usd_irys_price / chunks_per_gb as f64)
+        let chunks_per_gib = Self::ONE_GIB / CONFIG.chunk_size;
+        let immediate_miner_reward = perm_cost * MINER_FEE;
+        Ok((chunks as f64 / chunks_per_gib as f64)
+            * (ingress_perm_fee + perm_cost + immediate_miner_reward)
+            * approximate_usd_irys_price)
     }
 
     fn get_chunks_from_bytes(number_of_bytes_to_store: u64) -> u64 {
@@ -49,14 +53,13 @@ impl PriceCalc {
         }
     }
 
-    fn calc_perm_cost_per_gb(
+    fn calc_perm_cost_per_gib(
         safe_minimum_number_of_years: u32,
         annualized_decay_rate: f64,
         partitions: u64,
     ) -> Result<f64, Error> {
-        const ANNUALIZED_COST_OF_STORING_16TB: f64 = 44.0;
-        let annualized_cost_of_storing_1_tb =
-            ANNUALIZED_COST_OF_STORING_16TB / Self::TB_PER_DRIVE as f64;
+        let annualized_cost_of_storing_1_tib =
+            ANNUALIZED_COST_OF_OPERATING_16TIB / Self::TIB_PER_PARTITION as f64;
 
         ensure!(
             safe_minimum_number_of_years != 0,
@@ -67,7 +70,7 @@ impl PriceCalc {
             "Decay rate must be non-zero and positive"
         );
 
-        let total_cost = (annualized_cost_of_storing_1_tb / Self::GB_PER_TB as f64)
+        let total_cost = (annualized_cost_of_storing_1_tib / Self::GIB_PER_TIB as f64)
             * (1.0
                 - f64::powi(
                     1.0 - annualized_decay_rate,
@@ -77,14 +80,13 @@ impl PriceCalc {
         Ok(total_cost * partitions as f64)
     }
 
-    fn calc_perm_fee_per_gb(
-        perm_cost: f64,
+    fn calc_perm_fee_per_ingress_gib(
         ingress_proofs: u32,
         ingress_fee: Decimal,
     ) -> Result<f64, Error> {
         ensure!(ingress_proofs != 0, "Ingress proofs must be > 0");
         let ingress_fee = f64::try_from(ingress_fee)?;
-        Ok(ANNUALIZED_COST_OF_STORING_1GB + (ingress_fee * ingress_proofs as f64) + perm_cost)
+        Ok(ANNUALIZED_COST_OF_STORING_1GIB + ingress_fee * ingress_proofs as f64)
     }
 }
 
@@ -96,9 +98,9 @@ mod test {
     const EPSILON: f64 = 1e-9;
 
     fn get_expected_chunk_price() -> Option<f64> {
-        // These values come from 200 years, 1% decay rate, n partitions
-        const PRICE_FOR_1_PARTITION: f64 = 8.390679107108607e-5;
-        const PRICE_FOR_10_PARTITIONS: f64 = 0.0005949332461698451;
+        // These values come from 200 years, 1% decay rate, n partitions, 5% miner fee
+        const PRICE_FOR_1_PARTITION: f64 = 8.674582693274584e-5;
+        const PRICE_FOR_10_PARTITIONS: f64 = 0.0006233236047864428;
 
         match CONFIG.num_partitions_per_slot {
             1 => Some(PRICE_FOR_1_PARTITION),
@@ -111,7 +113,6 @@ mod test {
     fn test_calc_perm_storage_price_0_bytes() {
         let bytes_to_store = 0;
         let res = PriceCalc::calc_perm_storage_price(bytes_to_store).unwrap();
-        print!("res: {res:?}");
         let expected = 0.0;
         assert_abs_diff_eq!(expected, res, epsilon = EPSILON)
     }
@@ -120,7 +121,6 @@ mod test {
     fn test_calc_perm_storage_price_256_bytes() {
         let bytes_to_store = 256;
         let res = PriceCalc::calc_perm_storage_price(bytes_to_store).unwrap();
-        print!("res: {res:?}");
         let expected = get_expected_chunk_price().unwrap();
         assert_abs_diff_eq!(expected, res, epsilon = EPSILON)
     }
@@ -129,7 +129,6 @@ mod test {
     fn test_calc_perm_storage_price_1_chunk() {
         let bytes_to_store = CONFIG.chunk_size;
         let res = PriceCalc::calc_perm_storage_price(bytes_to_store).unwrap();
-        print!("res: {res:?}");
         let expected = get_expected_chunk_price().unwrap();
         assert_abs_diff_eq!(expected, res, epsilon = EPSILON)
     }
@@ -138,7 +137,6 @@ mod test {
     fn test_calc_perm_storage_price_2_chunks() {
         let bytes_to_store = CONFIG.chunk_size * 2;
         let res = PriceCalc::calc_perm_storage_price(bytes_to_store).unwrap();
-        print!("res: {res:?}");
         let expected = 2.0 * get_expected_chunk_price().unwrap();
         assert_abs_diff_eq!(expected, res, epsilon = EPSILON)
     }
@@ -147,7 +145,6 @@ mod test {
     fn test_calc_perm_storage_price_1_mb() {
         let bytes_to_store = CONFIG.chunk_size * 4;
         let res = PriceCalc::calc_perm_storage_price(bytes_to_store).unwrap();
-        print!("res: {res:?}");
         let expected = 4.0 * get_expected_chunk_price().unwrap();
         assert_abs_diff_eq!(expected, res, epsilon = EPSILON)
     }
@@ -156,7 +153,6 @@ mod test {
     fn test_calc_perm_storage_price_1_gb() {
         let bytes_to_store = CONFIG.chunk_size * 4 * 1024;
         let res = PriceCalc::calc_perm_storage_price(bytes_to_store).unwrap();
-        print!("res: {res:?}");
         let expected = 4.0 * 1024.0 * get_expected_chunk_price().unwrap();
         assert_abs_diff_eq!(expected, res, epsilon = EPSILON)
     }
@@ -166,7 +162,7 @@ mod test {
         let safe_minimum_number_of_years = 10;
         let annualized_decay_rate = 0.01;
         let partitions = 1;
-        let res = PriceCalc::calc_perm_cost_per_gb(
+        let res = PriceCalc::calc_perm_cost_per_gib(
             safe_minimum_number_of_years,
             annualized_decay_rate,
             partitions,
@@ -180,7 +176,7 @@ mod test {
         let safe_minimum_number_of_years = 200;
         let annualized_decay_rate = 0.01;
         let partitions = 1;
-        let res = PriceCalc::calc_perm_cost_per_gb(
+        let res = PriceCalc::calc_perm_cost_per_gib(
             safe_minimum_number_of_years,
             annualized_decay_rate,
             partitions,
@@ -194,7 +190,7 @@ mod test {
         let safe_minimum_number_of_years = 0;
         let annualized_decay_rate = 0.01;
         let partitions = 1;
-        let res = PriceCalc::calc_perm_cost_per_gb(
+        let res = PriceCalc::calc_perm_cost_per_gib(
             safe_minimum_number_of_years,
             annualized_decay_rate,
             partitions,
@@ -207,7 +203,7 @@ mod test {
         let safe_minimum_number_of_years = 200;
         let annualized_decay_rate = 0.0;
         let partitions = 1;
-        let res = PriceCalc::calc_perm_cost_per_gb(
+        let res = PriceCalc::calc_perm_cost_per_gib(
             safe_minimum_number_of_years,
             annualized_decay_rate,
             partitions,
@@ -219,8 +215,8 @@ mod test {
     fn test_get_perm_fee() {
         let ingress_proofs = 10;
         let ingress_fee = rust_decimal_macros::dec!(0.01);
-        let res = PriceCalc::calc_perm_fee_per_gb(2.33, ingress_proofs, ingress_fee).unwrap();
-        assert_abs_diff_eq!(2.44110839844, res, epsilon = EPSILON);
+        let res = PriceCalc::calc_perm_fee_per_ingress_gib(ingress_proofs, ingress_fee).unwrap();
+        assert_abs_diff_eq!(0.11110839844, res, epsilon = EPSILON);
     }
 
     #[test]

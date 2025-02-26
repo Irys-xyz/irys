@@ -23,9 +23,9 @@ mod test {
     use irys_types::CONFIG;
 
     fn get_expected_chunk_price() -> Option<f64> {
-        // These values come from 200 years, 1% decay rate, n partitions
-        const PRICE_FOR_1_PARTITION: f64 = 8.390679107108607e-5;
-        const PRICE_FOR_10_PARTITIONS: f64 = 0.0005949332461698451;
+        // These values come from 200 years, 1% decay rate, n partitions, 5% miner fee
+        const PRICE_FOR_1_PARTITION: f64 = 8.674582693274584e-5;
+        const PRICE_FOR_10_PARTITIONS: f64 = 0.0006233236047864428;
 
         match CONFIG.num_partitions_per_slot {
             1 => Some(PRICE_FOR_1_PARTITION),
