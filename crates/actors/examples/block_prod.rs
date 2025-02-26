@@ -1,11 +1,8 @@
 use std::{future::Future, pin::Pin, task::Poll, time::Duration};
 
-use futures::{pin_mut, FutureExt, StreamExt as _};
-use irys_types::SimpleRNG;
-use reth::{
-    network::metered_poll_nested_stream_with_budget,
-    tasks::{shutdown::GracefulShutdown, TaskExecutor},
-};
+use futures::{FutureExt, StreamExt as _};
+use irys_types::{SimpleRNG, H256};
+use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use tokio::{
     sync::{
         mpsc::{self, UnboundedSender},
@@ -14,12 +11,11 @@ use tokio::{
     time::sleep,
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 #[derive(Debug)]
 pub enum BlockProducerAction {
-    OnFinalizedBlock(u64, oneshot::Sender<()>),
-    Shutdown,
+    OnSolutionFound(H256, oneshot::Sender<()>),
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +28,7 @@ impl BlockProducerHandle {
         let (tx, rx) = mpsc::unbounded_channel();
         exec.spawn_critical_with_graceful_shutdown_signal("Cache Service", |shutdown| async move {
             let cache_service = ExampleBlockProducer {
+                fut: None,
                 shutdown: shutdown,
                 msg_rx: UnboundedReceiverStream::new(rx),
             };
@@ -50,33 +47,59 @@ impl BlockProducerHandle {
     }
 }
 
-#[derive(Debug)]
+use std::fmt::Debug;
+
 pub struct ExampleBlockProducer {
     pub shutdown: GracefulShutdown,
+    pub fut: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
     pub msg_rx: UnboundedReceiverStream<BlockProducerAction>,
 }
 
-trait BlockProducer {
-    async fn on_handle_message(&mut self, msg: BlockProducerAction);
-}
-
-impl BlockProducer for ExampleBlockProducer {
-    async fn on_handle_message(&mut self, msg: BlockProducerAction) {
-        match msg {
-            BlockProducerAction::OnFinalizedBlock(finalized_height, sender) => {
-                // prune the cache below this new finalized height
-                debug!("processing OnFinalizedBlock {} message!", &finalized_height);
-                sleep(Duration::from_millis(SimpleRNG::new(1000).next().into())).await;
-                _ = sender
-                    .send(())
-                    .inspect_err(|e| warn!("RX failure for OnFinalizedBlock: {:?}", &e));
-            }
-            BlockProducerAction::Shutdown => todo!(),
-        }
+impl Debug for ExampleBlockProducer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExampleBlockProducer")
+            .field("shutdown", &self.shutdown)
+            .field(
+                "fut",
+                match self.fut {
+                    Some(_) => &"Some(future)",
+                    None => &"None",
+                },
+            )
+            .field("msg_rx", &self.msg_rx)
+            .finish()
     }
 }
 
-pub const DRAIN_BUDGET: u32 = 10;
+trait BlockProducer {
+    // returns a future that must be polled before another message is processed
+    fn on_handle_message(
+        &self,
+        msg: BlockProducerAction,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+}
+
+impl BlockProducer for ExampleBlockProducer {
+    fn on_handle_message(
+        &self,
+        msg: BlockProducerAction,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        match msg {
+            BlockProducerAction::OnSolutionFound(solution_hash, sender) => {
+                return Box::pin((async move || {
+                    debug!("processing OnSolutionFound {} message!", &solution_hash);
+                    sleep(Duration::from_millis(
+                        SimpleRNG::new(1000).next_range(1_000).into(),
+                    ))
+                    .await;
+                    _ = sender
+                        .send(())
+                        .inspect_err(|e| warn!("RX failure for OnSolutionFound: {:?}", &e));
+                })())
+            }
+        }
+    }
+}
 
 impl Future for ExampleBlockProducer {
     type Output = eyre::Result<String>;
@@ -87,73 +110,47 @@ impl Future for ExampleBlockProducer {
     ) -> std::task::Poll<Self::Output> {
         let this = self.get_mut();
 
+        // if the block production future is done, or no future is set, continue
+        match this.fut.as_mut() {
+            Some(fut) => match fut.as_mut().poll(cx) {
+                Poll::Ready(_) => {
+                    debug!("Block producer future finished");
+                    this.fut = None; // make sure we set it to `None` so we can't poll it again
+                }
+                Poll::Pending => return Poll::Pending,
+            },
+            None => {}
+        };
+
+        // shutdown
         match this.shutdown.poll_unpin(cx) {
             Poll::Ready(guard) => {
                 debug!("Shutting down!");
-                // do shutdown stuff
-                // process all remaining tasks
-                loop {
-                    match this.msg_rx.poll_next_unpin(cx) {
-                        Poll::Ready(Some(msg)) => {
-                            let fut = this.on_handle_message(msg);
-                            pin_mut!(fut);
-                            match fut.poll(cx) {
-                                Poll::Ready(_) => (),
-                                Poll::Pending => return Poll::Pending,
-                            }
-                        }
-                        Poll::Ready(None) => break,
-                        Poll::Pending => break,
-                    }
-                }
                 drop(guard);
                 return Poll::Ready(Ok("Graceful shutdown".to_owned()));
             }
             Poll::Pending => {}
-        }
+        };
 
-        let mut time_taken = Duration::ZERO;
-        // we don't budget this actor, as it's async, so it'll naturally yield.
-        loop {
-            match this.msg_rx.poll_next_unpin(cx) {
-                // poll so we only evaluate one message at a time
-                Poll::Ready(Some(msg)) => {
-                    let fut = this.on_handle_message(msg);
-                    pin_mut!(fut);
-                    match fut.poll(cx) {
-                        Poll::Ready(_) => (),
-                        Poll::Pending => return Poll::Pending,
-                    }
-                }
-                Poll::Ready(None) => break,
-                Poll::Pending => break,
+        match this.msg_rx.poll_next_unpin(cx) {
+            // we only evaluate one message at a time
+            Poll::Ready(Some(msg)) => {
+                let fut = this.on_handle_message(msg);
+                this.fut = Some(fut);
+
+                // make sure we're woken up again (so it starts polling the block prod future, and in case there are more pending messages)
+                cx.waker().wake_by_ref();
+                Poll::Pending
             }
+            Poll::Ready(None) => Poll::Pending, // no more pending values
+            Poll::Pending => Poll::Pending,
         }
-        debug!("took {:?} to process block producer messages", &time_taken);
-        // // process `DRAIN_BUDGET` messages before yielding
-        // let maybe_more_handle_messages = metered_poll_nested_stream_with_budget!(
-        //     time_taken,
-        //     "cache",
-        //     "cache service channel",
-        //     DRAIN_BUDGET,
-        //     this.msg_rx.poll_next_unpin(cx),
-        //     |msg| this.on_handle_message(msg),
-        //     error!("cache channel closed");
-        // );
-        // this.on_handle_message(msg);
-
-        // if maybe_more_handle_messages {
-        //     // make sure we're woken up again
-        //     cx.waker().wake_by_ref();
-        //     return Poll::Pending;
-        // }
-        Poll::Pending
     }
 }
 
 fn main() {}
 
-// #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use std::{
         sync::{
@@ -164,7 +161,7 @@ mod tests {
         time::Duration,
     };
 
-    use irys_types::SimpleRNG;
+    use irys_types::{SimpleRNG, H256};
     use reth::tasks::TaskManager;
     use tokio::{runtime::Handle, sync::oneshot, time::sleep};
     use tracing::level_filters::LevelFilter;
@@ -175,7 +172,7 @@ mod tests {
     use crate::{BlockProducerAction, BlockProducerHandle};
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cache_service_test() -> eyre::Result<()> {
+    async fn block_prod_actor_test() -> eyre::Result<()> {
         let _ = SubscriberBuilder::default()
             .with_max_level(LevelFilter::DEBUG)
             .finish()
@@ -188,7 +185,7 @@ mod tests {
         // task_manager.graceful_shutdown();
         handle
             .sender
-            .send(BlockProducerAction::OnFinalizedBlock(42, tx))?;
+            .send(BlockProducerAction::OnSolutionFound(H256::zero(), tx))?;
         let result = rx.into_future().await?;
         dbg!(result);
         Ok(())
@@ -213,10 +210,10 @@ mod tests {
             let mut i = 0;
             loop {
                 let (tx, _rx) = oneshot::channel();
-                match handle2
-                    .sender
-                    .send(BlockProducerAction::OnFinalizedBlock(i, tx))
-                {
+                match handle2.sender.send(BlockProducerAction::OnSolutionFound(
+                    H256::repeat_byte(i),
+                    tx,
+                )) {
                     Ok(_) => {}
                     Err(e) => {
                         if !shutting_down_2.load(Ordering::SeqCst) {
