@@ -45,9 +45,26 @@ pub struct Config {
     /// the number of block a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
     pub anchor_expiry_depth: u8,
+    pub decay_params: DecayParams,
+    pub storage_fees: StorageFees,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DecayParams {
+    pub safe_minimum_number_of_years: u32,
+    pub annualized_decay_rate: Decimal,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StorageFees {
+    pub ingress_fee: Decimal,
+    pub number_of_ingress_proofs: u32,
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 5;
+pub(crate) const ANNUALIZED_COST_OF_STORING_1GIB: f64 = 0.01110839844;
+pub(crate) const ANNUALIZED_COST_OF_OPERATING_16TIB: f64 = 44.0;
+pub(crate) const MINER_FEE: f64 = 0.05;
 
 pub const CONFIG: Config = load_toml!(
     "CONFIG_TOML_PATH",
@@ -76,7 +93,15 @@ pub const CONFIG: Config = load_toml!(
         mining_key: "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0", // Burner PrivateKey (PK)
         num_capacity_partitions: None,
         port: 8080,
-        anchor_expiry_depth: 10 // lower for tests
+        anchor_expiry_depth: 10, // lower for tests
+        decay_params: DecayParams {
+            safe_minimum_number_of_years: 200,
+            annualized_decay_rate: rust_decimal_macros::dec!(0.01),
+        },
+        storage_fees: StorageFees {
+            number_of_ingress_proofs: 10,
+            ingress_fee: rust_decimal_macros::dec!(0.01)
+        }
     }
 );
 
