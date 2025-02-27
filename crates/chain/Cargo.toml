@@ -62,7 +62,6 @@ alloy-provider.workspace = true
 core_affinity = "0.8.1"
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true
-log = "0.4.22"
 
 [package.metadata.cargo-machete]
 ignored = ["alloy-sol-types", "alloy-contract"]
