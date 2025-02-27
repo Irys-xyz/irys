@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::*;
 
-/// This is hardcoded here to be used just by C packing related staff as it is also hardcoded right now in C sources
+/// This is hardcoded here to be used just by C packing related stuff as it is also hardcoded right now in C sources
 pub const CHUNK_SIZE: u64 = 256 * 1024;
 
 /// Protocol storage sizing configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StorageConfig {
     /// Size of each chunk in bytes
     pub chunk_size: u64,
@@ -24,20 +24,23 @@ pub struct StorageConfig {
     pub entropy_packing_iterations: u32,
     /// Number of confirmations before storing tx data in `StorageModule`s
     pub chunk_migration_depth: u32,
+    /// Irys chain id
+    pub chain_id: u64,
 }
 
-impl Default for StorageConfig {
-    fn default() -> Self {
+impl StorageConfig {
+    pub fn new(config: &Config) -> Self {
         Self {
-            chunk_size: CONFIG.chunk_size,
-            num_chunks_in_partition: CONFIG.num_chunks_in_partition,
-            num_chunks_in_recall_range: CONFIG.num_chunks_in_recall_range,
-            num_partitions_in_slot: CONFIG.num_partitions_per_slot,
-            miner_address: Address::random(),
-            min_writes_before_sync: CONFIG.num_writes_before_sync,
+            chain_id: config.chain_id,
+            chunk_size: config.chunk_size,
+            num_chunks_in_partition: config.num_chunks_in_partition,
+            num_chunks_in_recall_range: config.num_chunks_in_recall_range,
+            num_partitions_in_slot: config.num_partitions_per_slot,
+            miner_address: Address::from_private_key(&config.mining_key),
+            min_writes_before_sync: config.num_writes_before_sync,
             // TODO: revert this back
             entropy_packing_iterations: 1_000, /* PACKING_SHA_1_5_S */
-            chunk_migration_depth: CONFIG.chunk_migration_depth,
+            chunk_migration_depth: config.chunk_migration_depth,
         }
     }
 }

@@ -9,10 +9,11 @@ use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
 use irys_actors::SolutionFoundMessage;
 use irys_api_server::routes::tx::TxOffset;
-use irys_chain::chain::start_for_testing;
+use irys_chain::start_irys_node;
+use irys_config::IrysNodeConfig;
 use irys_database::tables::IngressProofs;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, Address};
+use irys_types::{irys::IrysSigner, Address, Config};
 use k256::ecdsa::SigningKey;
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
@@ -47,14 +48,14 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "info");
 
     let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic_external"), false);
-    let mut config = irys_config::IrysNodeConfig {
-        base_directory: temp_dir.path().to_path_buf(),
 
-        ..Default::default()
-    };
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
+    config.base_directory = temp_dir.path().to_path_buf();
+
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
     let main_address = config.mining_signer.address();
-
-    let account1 = IrysSigner::random_signer();
+    let account1 = IrysSigner::random_signer(&testnet_config);
 
     config.extend_genesis_accounts(vec![
         (
@@ -80,7 +81,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         ),
     ]);
 
-    let node = start_for_testing(config.clone()).await?;
+    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     node.actor_addresses.stop_mining()?;
     wait_for_packing(
         node.actor_addresses.packing.clone(),

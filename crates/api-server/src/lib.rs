@@ -18,7 +18,7 @@ use irys_actors::{
 use irys_database::{tables::PeerListItems, walk_all};
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
-use irys_types::{app_state::DatabaseProvider, CONFIG};
+use irys_types::{app_state::DatabaseProvider, Config};
 use reth_db::Database;
 use routes::{
     block, get_chunk, index, network_config, peer_list, post_chunk, post_version, price,
@@ -31,6 +31,7 @@ pub struct ApiState {
     pub mempool: Addr<MempoolService>,
     pub chunk_provider: Arc<ChunkProvider>,
     pub db: DatabaseProvider,
+    pub config: Config,
     // TODO: slim this down to what we actually use - beware the types!
     // TODO: remove the Option<>
     pub reth_provider: Option<RethNodeProvider>,
@@ -90,7 +91,8 @@ pub fn routes() -> impl HttpServiceFactory {
 }
 
 pub async fn run_server(app_state: ApiState) {
-    info!("Starting API server on port {}", CONFIG.port);
+    let port = app_state.config.port;
+    info!(?port, "Starting API server");
 
     HttpServer::new(move || {
         let awc_client = awc::Client::new();
@@ -110,7 +112,7 @@ pub async fn run_server(app_state: ApiState) {
             .route("/", web::get().to(index::info_route))
             .wrap(Cors::permissive())
     })
-    .bind(("0.0.0.0", CONFIG.port))
+    .bind(("0.0.0.0", port))
     .unwrap()
     .run()
     .await
