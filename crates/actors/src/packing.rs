@@ -62,7 +62,7 @@ pub struct PackingConfig {
 }
 
 impl PackingConfig {
-    pub fn new(config: &Config) -> Self {
+    pub const fn new(config: &Config) -> Self {
         Self {
             poll_duration: Duration::from_millis(1000),
             concurrency: config.cpu_packing_concurrency,
