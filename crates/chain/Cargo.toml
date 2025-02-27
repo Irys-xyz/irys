@@ -15,7 +15,7 @@ nvidia = ["irys-actors/nvidia"]
 irys-database.workspace = true
 irys-storage.workspace = true
 irys-reth-node-bridge.workspace = true
-irys-types.workspace = true
+irys-types = { workspace = true, features = ["test-utils"] }
 irys-api-server.workspace = true
 irys-config.workspace = true
 irys-testing-utils.workspace = true

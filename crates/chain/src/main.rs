@@ -17,10 +17,16 @@ async fn main() -> eyre::Result<()> {
         .unwrap_or_else(|_| "config.toml".to_owned())
         .parse::<PathBuf>()
         .expect("invalid file path");
-    let config_file = std::fs::read_to_string(config_file).expect("cannot read config file");
-    let config = toml::from_str::<Config>(&config_file).expect("invalid config file");
+
+    let config = std::fs::read_to_string(config_file)
+        .map(|config_file| toml::from_str::<Config>(&config_file).expect("invalid config file"))
+        .unwrap_or_else(|_err| {
+            tracing::warn!("config file not provided, defaulting to testnet config");
+            Config::testnet()
+        });
 
     // start the node
+    tracing::info!("starting the node");
     let handle = start(config).await?;
     handle.actor_addresses.start_mining()?;
     std::thread::park();
@@ -30,8 +36,9 @@ async fn main() -> eyre::Result<()> {
 
 fn init_tracing() -> eyre::Result<()> {
     let subscriber = Registry::default();
-    let filter = EnvFilter::new("actix=info")
+    let filter = EnvFilter::new("info")
         .add_directive("actix_web=info".parse()?)
+        .add_directive("actix=info".parse()?)
         .add_directive(EnvFilter::from_default_env().to_string().parse()?);
 
     let output_layer = tracing_subscriber::fmt::layer()
