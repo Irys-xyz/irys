@@ -20,6 +20,7 @@ actix-rt.workspace = true
 env_logger = "0.11.5"
 
 tokio.workspace = true
+tokio-stream.workspace = true
 reth-db.workspace = true
 irys-primitives.workspace = true
 eyre.workspace = true
@@ -32,7 +33,7 @@ tempfile.workspace = true
 irys-testing-utils.workspace = true
 base58.workspace = true
 futures.workspace = true
-
+futures-util.workspace = true
 [lints]
 workspace = true
 
