@@ -11,6 +11,11 @@ use crate::{
     IrysTokenPrice,
 };
 
+pub(crate) const ANNUALIZED_COST_OF_STORING_1GB: f64 = 0.01110839844;
+pub(crate) const ANNUALIZED_COST_OF_OPERATING_16TB: f64 = 44.0;
+pub(crate) const TB_PER_PARTITION: u64 = 16;
+pub(crate) const MINER_PERCENTAGE_FEE: f64 = 0.05;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Block time in seconds
@@ -68,6 +73,20 @@ pub struct Config {
     ///packing specific config
     pub cpu_packing_concurrency: u16,
     pub gpu_packing_batch_size: u32,
+    pub decay_params: DecayParams,
+    pub storage_fees: StorageFees,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DecayParams {
+    pub safe_minimum_number_of_years: u32,
+    pub annualized_decay_rate: Decimal,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StorageFees {
+    pub ingress_fee: Decimal,
+    pub number_of_ingress_proofs: u32,
 }
 
 impl Config {
@@ -123,6 +142,14 @@ impl Config {
                 .expect("valid percentage"),
             cpu_packing_concurrency: 4,
             gpu_packing_batch_size: 1024,
+            decay_params: DecayParams {
+                safe_minimum_number_of_years: 200,
+                annualized_decay_rate: rust_decimal_macros::dec!(0.01),
+            },
+            storage_fees: StorageFees {
+                number_of_ingress_proofs: 10,
+                ingress_fee: rust_decimal_macros::dec!(0.01)
+            }
         }
     }
 }
