@@ -15,7 +15,7 @@ members = [
   "crates/efficient-sampling",
   "crates/macros",
   "crates/debug-utils",
-  "xtask",
+  "xtask", "crates/ema-service",
 ]
 resolver = "2"
 
