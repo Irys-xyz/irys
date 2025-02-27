@@ -18,12 +18,12 @@ impl PriceCalc {
         config: &Config,
     ) -> Result<f64, Error> {
         ensure!(config.chunk_size != 0, "Chunk size should not be 0");
-        let perm_cost = Self::calc_perm_cost_per_gib(
+        let perm_cost = Self::calc_perm_cost_per_gb(
             config.decay_params.safe_minimum_number_of_years,
             config.decay_params.annualized_decay_rate.try_into()?,
             config.num_partitions_per_slot,
         )?;
-        let ingress_perm_fee = Self::calc_perm_fee_per_ingress_gib(
+        let ingress_perm_fee = Self::calc_perm_fee_per_ingress_gb(
             config.storage_fees.number_of_ingress_proofs,
             config.storage_fees.ingress_fee,
         )?;
@@ -53,7 +53,7 @@ impl PriceCalc {
         }
     }
 
-    fn calc_perm_cost_per_gib(
+    fn calc_perm_cost_per_gb(
         safe_minimum_number_of_years: u32,
         annualized_decay_rate: f64,
         partitions: u64,
@@ -80,7 +80,7 @@ impl PriceCalc {
         Ok(total_cost * partitions as f64)
     }
 
-    fn calc_perm_fee_per_ingress_gib(
+    fn calc_perm_fee_per_ingress_gb(
         ingress_proofs: u32,
         ingress_fee: Decimal,
     ) -> Result<f64, Error> {
@@ -220,7 +220,7 @@ mod test {
         let safe_minimum_number_of_years = 10;
         let annualized_decay_rate = 0.01;
         let partitions = 1;
-        let res = PriceCalc::calc_perm_cost_per_gib(
+        let res = PriceCalc::calc_perm_cost_per_gb(
             safe_minimum_number_of_years,
             annualized_decay_rate,
             partitions,
@@ -234,7 +234,7 @@ mod test {
         let safe_minimum_number_of_years = 200;
         let annualized_decay_rate = 0.01;
         let partitions = 1;
-        let res = PriceCalc::calc_perm_cost_per_gib(
+        let res = PriceCalc::calc_perm_cost_per_gb(
             safe_minimum_number_of_years,
             annualized_decay_rate,
             partitions,
@@ -248,7 +248,7 @@ mod test {
         let safe_minimum_number_of_years = 0;
         let annualized_decay_rate = 0.01;
         let partitions = 1;
-        let res = PriceCalc::calc_perm_cost_per_gib(
+        let res = PriceCalc::calc_perm_cost_per_gb(
             safe_minimum_number_of_years,
             annualized_decay_rate,
             partitions,
@@ -261,7 +261,7 @@ mod test {
         let safe_minimum_number_of_years = 200;
         let annualized_decay_rate = 0.0;
         let partitions = 1;
-        let res = PriceCalc::calc_perm_cost_per_gib(
+        let res = PriceCalc::calc_perm_cost_per_gb(
             safe_minimum_number_of_years,
             annualized_decay_rate,
             partitions,
@@ -273,7 +273,7 @@ mod test {
     fn test_get_perm_fee() {
         let ingress_proofs = 10;
         let ingress_fee = rust_decimal_macros::dec!(0.01);
-        let res = PriceCalc::calc_perm_fee_per_ingress_gib(ingress_proofs, ingress_fee).unwrap();
+        let res = PriceCalc::calc_perm_fee_per_ingress_gb(ingress_proofs, ingress_fee).unwrap();
         assert_abs_diff_eq!(0.11110839844, res, epsilon = EPSILON);
     }
 
