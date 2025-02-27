@@ -760,6 +760,7 @@ mod tests {
     use irys_storage::{ie, StorageModule, StorageModuleVec};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{partition_chunk_offset_ie, Address, PartitionChunkRange, CONFIG};
+    use crate::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
     use tokio::time::sleep;
     use tracing::info;
 
