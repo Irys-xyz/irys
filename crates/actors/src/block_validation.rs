@@ -448,7 +448,30 @@ mod tests {
             ..Default::default()
         };
 
-        let epoch_service = EpochServiceActor::new(Some(config.clone()));
+        let arc_config = Arc::new(IrysNodeConfig {
+            base_directory: data_dir.path().to_path_buf(),
+            ..Default::default()
+        });
+
+        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
+            BlockIndex::default()
+                .reset(&arc_config.clone())
+                .unwrap()
+                .init(arc_config.clone())
+                .await
+                .unwrap(),
+        ));
+
+        let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        SystemRegistry::set(block_index_actor.clone());
+
+        let block_index_guard =
+            block_index_actor
+            .send(GetBlockIndexGuardMessage)
+            .await
+            .unwrap();
+
+        let epoch_service = EpochServiceActor::new(Some(config.clone()), block_index_guard);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers
@@ -474,22 +497,6 @@ mod tests {
 
         let partition_hash = sub_slots[0].partitions[0];
 
-        let arc_config = Arc::new(IrysNodeConfig {
-            base_directory: data_dir.path().to_path_buf(),
-            ..Default::default()
-        });
-
-        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
-            BlockIndex::default()
-                .reset(&arc_config.clone())
-                .unwrap()
-                .init(arc_config.clone())
-                .await
-                .unwrap(),
-        ));
-
-        let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
-        SystemRegistry::set(block_index_actor.start());
 
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),

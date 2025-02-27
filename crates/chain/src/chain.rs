@@ -311,6 +311,11 @@ pub async fn start_irys_node(
                 SystemRegistry::set(block_index_actor.start());
                 let block_index_actor_addr = BlockIndexService::from_registry();
 
+                let block_index_guard = block_index_actor_addr
+                    .send(GetBlockIndexGuardMessage)
+                    .await
+                    .unwrap();
+
                 if at_genesis {
                     let msg = BlockFinalizedMessage {
                         block_header: arc_genesis.clone(),
@@ -334,7 +339,7 @@ pub async fn start_irys_node(
                     });
                 SystemRegistry::set(broadcast_mining_service.clone());
 
-                let mut epoch_service = EpochServiceActor::new(Some(config));
+                let mut epoch_service = EpochServiceActor::new(Some(config), block_index_guard.clone());
                 epoch_service.initialize(&db).await;
                 let epoch_service_actor_addr = epoch_service.start();
 
@@ -353,12 +358,6 @@ pub async fn start_irys_node(
                     .send(GetPartitionAssignmentsGuardMessage)
                     .await
                     .unwrap();
-
-                let block_index_guard = block_index_actor_addr
-                    .send(GetBlockIndexGuardMessage)
-                    .await
-                    .unwrap();
-
                 // Get the genesis storage modules and their assigned partitions
                 let storage_module_infos = epoch_service_actor_addr
                     .send(GetGenesisStorageModulesMessage(storage_module_config))
