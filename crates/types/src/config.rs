@@ -77,13 +77,13 @@ pub struct Config {
     pub storage_fees: StorageFees,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DecayParams {
     pub safe_minimum_number_of_years: u32,
     pub annualized_decay_rate: Decimal,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StorageFees {
     pub ingress_fee: Decimal,
     pub number_of_ingress_proofs: u32,
@@ -148,8 +148,8 @@ impl Config {
             },
             storage_fees: StorageFees {
                 number_of_ingress_proofs: 10,
-                ingress_fee: rust_decimal_macros::dec!(0.01)
-            }
+                ingress_fee: rust_decimal_macros::dec!(0.01),
+            },
         }
     }
 }
