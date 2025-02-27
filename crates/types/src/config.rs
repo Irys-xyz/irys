@@ -266,6 +266,10 @@ genesis_token_price = "1.0"
 token_price_safe_range = "0.25"
 cpu_packing_concurrency = 4
 gpu_packing_batch_size = 1024
+decay_params.safe_minimum_number_of_years = 200
+decay_params.annualized_decay_rate = "0.01"
+storage_fees.number_of_ingress_proofs = 10
+storage_fees.ingress_fee = "0.01"
 "#;
 
         // Attempt to deserialize the TOML string into a Config
@@ -282,5 +286,7 @@ gpu_packing_batch_size = 1024
             Amount::token(dec!(1.0)).unwrap()
         );
         assert_eq!(config.port, 8080);
+        assert_eq!(config.decay_params.safe_minimum_number_of_years, 200);
+        assert_eq!(config.storage_fees.ingress_fee, rust_decimal_macros::dec!(0.01));
     }
 }
