@@ -1,5 +1,5 @@
 use crate::{
-    ANNUALIZED_COST_OF_OPERATING_16TIB, ANNUALIZED_COST_OF_STORING_1GIB, CONFIG, MINER_FEE,
+    ANNUALIZED_COST_OF_OPERATING_16TIB, ANNUALIZED_COST_OF_STORING_1GIB, CONFIG, GIGABYTE, MINER_FEE, TERABYTE
 };
 use eyre::{ensure, Error};
 use rust_decimal::Decimal;
@@ -7,8 +7,6 @@ use rust_decimal::Decimal;
 pub struct PriceCalc;
 
 impl PriceCalc {
-    const ONE_GIB: u64 = 1024 * 1024 * 1024;
-    const GIB_PER_TIB: u64 = 1024;
     const TIB_PER_PARTITION: u64 = 16;
 
     fn get_usd_to_irys_conversion_rate() -> f64 {
@@ -29,7 +27,7 @@ impl PriceCalc {
         )?;
         let approximate_usd_irys_price = Self::get_usd_to_irys_conversion_rate();
         let chunks = Self::get_chunks_from_bytes(number_of_bytes_to_store);
-        let chunks_per_gib = Self::ONE_GIB / CONFIG.chunk_size;
+        let chunks_per_gib = GIGABYTE as u64 / CONFIG.chunk_size;
         let immediate_miner_reward = perm_cost * MINER_FEE;
         Ok((chunks as f64 / chunks_per_gib as f64)
             * (ingress_perm_fee + perm_cost + immediate_miner_reward)
@@ -58,8 +56,8 @@ impl PriceCalc {
         annualized_decay_rate: f64,
         partitions: u64,
     ) -> Result<f64, Error> {
-        let annualized_cost_of_storing_1_tib =
-            ANNUALIZED_COST_OF_OPERATING_16TIB / Self::TIB_PER_PARTITION as f64;
+        let annualized_cost_of_storing_1_gib =
+            ANNUALIZED_COST_OF_OPERATING_16TIB / (Self::TIB_PER_PARTITION as f64 * (TERABYTE / GIGABYTE) as f64);
 
         ensure!(
             safe_minimum_number_of_years != 0,
@@ -70,7 +68,7 @@ impl PriceCalc {
             "Decay rate must be non-zero and positive"
         );
 
-        let total_cost = (annualized_cost_of_storing_1_tib / Self::GIB_PER_TIB as f64)
+        let total_cost = annualized_cost_of_storing_1_gib
             * (1.0
                 - f64::powi(
                     1.0 - annualized_decay_rate,
