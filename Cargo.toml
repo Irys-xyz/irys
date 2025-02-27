@@ -15,7 +15,8 @@ members = [
   "crates/efficient-sampling",
   "crates/macros",
   "crates/debug-utils",
-  "xtask", "crates/ema-service",
+  "xtask",
+  "crates/ema-service",
 ]
 resolver = "2"
 
@@ -82,6 +83,7 @@ color-eyre = "0.6"
 itertools = "0.13"
 futures = "0.3"
 bytemuck = "1"
+futures-concurrency = "7"
 
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.11"
