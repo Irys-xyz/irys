@@ -191,7 +191,7 @@ pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
 
-    let previous_solution_diff=hash_to_number(&block.previous_solution_hash.0);
+    let previous_solution_diff = hash_to_number(&block.previous_solution_hash.0);
 
     if solution_diff >= previous_solution_diff {
         Ok(())
@@ -462,11 +462,11 @@ mod tests {
                 .unwrap(),
         ));
 
-        let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        let block_index_actor =
+            BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
         SystemRegistry::set(block_index_actor.clone());
 
-        let block_index_guard =
-            block_index_actor
+        let block_index_guard = block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
             .unwrap();
@@ -496,7 +496,6 @@ mod tests {
         let sub_slots = ledgers.get_slots(Ledger::Submit);
 
         let partition_hash = sub_slots[0].partitions[0];
-
 
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),

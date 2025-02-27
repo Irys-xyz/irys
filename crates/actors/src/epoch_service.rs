@@ -265,14 +265,19 @@ impl EpochServiceActor {
 
         loop {
             let block_height = {
-                self.block_index_guard.read().get_item(block_index).map(|block| block.clone()).clone()
+                self.block_index_guard
+                    .read()
+                    .get_item(block_index)
+                    .map(|block| block.clone())
+                    .clone()
             };
 
             match block_height {
                 Some(b) => {
-                    let block_header = database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
-                        .unwrap()
-                        .unwrap();
+                    let block_header =
+                        database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
+                            .unwrap()
+                            .unwrap();
                     match self.perform_epoch_tasks(Arc::new(block_header)) {
                         Ok(_) => debug!(?block_index, "Processed epoch block"),
                         Err(e) => {
@@ -280,13 +285,14 @@ impl EpochServiceActor {
                             panic!("{:?}", e);
                         }
                     }
-                    block_index += TryInto::<usize>::try_into(self.config.num_blocks_in_epoch).expect("Number of blocks in epoch is too large!");
-                },
+                    block_index += TryInto::<usize>::try_into(self.config.num_blocks_in_epoch)
+                        .expect("Number of blocks in epoch is too large!");
+                }
                 None => {
                     debug!(
                         "Could not recover block at index during epoch service initialization {block_index:?}"
                     );
-                    break
+                    break;
                 }
             }
         }
@@ -640,10 +646,19 @@ impl EpochServiceActor {
         // Compute Data uploaded to the ledger last epoch
         if new_epoch_block.height >= self.config.num_blocks_in_epoch {
             let rg = self.block_index_guard.read();
-            let previous_epoch_block_height: usize = (new_epoch_block.height - self.config.num_blocks_in_epoch).try_into().expect("Height is too large!");
-            let last_epoch_block = rg.get_item(previous_epoch_block_height).expect(&format!("Needed previous epoch block with hight {} is not available in block index!", previous_epoch_block_height));
+            let previous_epoch_block_height: usize = (new_epoch_block.height
+                - self.config.num_blocks_in_epoch)
+                .try_into()
+                .expect("Height is too large!");
+            let last_epoch_block = rg.get_item(previous_epoch_block_height).expect(&format!(
+                "Needed previous epoch block with hight {} is not available in block index!",
+                previous_epoch_block_height
+            ));
             let data_added: u64 = ledger_size - last_epoch_block.ledgers[ledger].max_chunk_offset;
-            slots_to_add += u64::div_ceil(data_added, self.config.storage_config.num_chunks_in_partition);
+            slots_to_add += u64::div_ceil(
+                data_added,
+                self.config.storage_config.num_chunks_in_partition,
+            );
         }
 
         slots_to_add
@@ -751,7 +766,10 @@ mod tests {
     use tracing::info;
 
     use crate::{
-        mining::PartitionMiningActor, packing::{PackingActor, PackingRequest}, BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage
+        mining::PartitionMiningActor,
+        packing::{PackingActor, PackingRequest},
+        BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr,
+        SolutionFoundMessage,
     };
     use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
 
@@ -777,11 +795,11 @@ mod tests {
         ));
 
         let storage_config = StorageConfig::default();
-        let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        let block_index_actor =
+            BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
         SystemRegistry::set(block_index_actor.clone());
 
-        let block_index_guard =
-            block_index_actor
+        let block_index_guard = block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
             .unwrap();
@@ -946,8 +964,7 @@ mod tests {
         let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config).start();
         SystemRegistry::set(block_index_actor.clone());
 
-        let block_index_guard =
-            block_index_actor
+        let block_index_guard = block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
             .unwrap();
@@ -986,8 +1003,8 @@ mod tests {
             }
 
             height += 1;
-        };
-        
+        }
+
         new_epoch_block.height = num_blocks_in_epoch;
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
 
@@ -1015,7 +1032,7 @@ mod tests {
             }
 
             height += 1;
-        };
+        }
 
         // Simulate a subsequent epoch block that adds multiple ledger slots
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
@@ -1096,11 +1113,11 @@ mod tests {
                 .unwrap(),
         ));
 
-        let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        let block_index_actor =
+            BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
         SystemRegistry::set(block_index_actor.clone());
 
-        let block_index_guard =
-            block_index_actor
+        let block_index_guard = block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
             .unwrap();
@@ -1256,7 +1273,7 @@ mod tests {
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = 0;
-        
+
         // index epoch previous blocks
         let mut height = 1;
         while height < (CONFIG.submit_ledger_epoch_length + 1) * num_blocks_in_epoch {
@@ -1271,7 +1288,7 @@ mod tests {
             }
 
             height += 1;
-        };
+        }
 
         new_epoch_block.height = (CONFIG.submit_ledger_epoch_length + 1) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
@@ -1333,10 +1350,10 @@ mod tests {
                 .expect("submit ledger slot 1 should have a partition assigned")
                 .clone();
             let submit_partition2 = sub_slots[1]
-            .partitions
-            .get(0)
-            .expect("submit ledger slot 1 should have a partition assigned")
-            .clone();
+                .partitions
+                .get(0)
+                .expect("submit ledger slot 1 should have a partition assigned")
+                .clone();
 
             (publish_partition, submit_partition, submit_partition2)
         };

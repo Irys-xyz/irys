@@ -16,7 +16,11 @@ use irys_database::{
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address, Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo, CONFIG, H256, U256
+    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
+    next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
+    Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
+    IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
+    CONFIG, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -468,9 +472,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             }
 
             if block_height > 0 && block_height % CONFIG.num_blocks_in_epoch == 0 {
-                epoch_service_addr.do_send(NewEpochMessage(block.clone()));                
+                epoch_service_addr.do_send(NewEpochMessage(block.clone()));
             }
-            
+
             info!("Finished producing block {}, ({})", &block_hash.0.to_base58(),&block_height);
 
             Ok(Some((block.clone(), exec_payload)))
