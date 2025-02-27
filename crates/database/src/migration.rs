@@ -10,7 +10,7 @@ use tracing::debug;
 const CURRENT_DB_VERSION: u32 = 1;
 
 /// Example migration step to version 2
-fn migration_to_v2(_db: &DatabaseEnv) -> Result<(), DatabaseError> {
+const fn migration_to_v2(_db: &DatabaseEnv) -> Result<(), DatabaseError> {
     // template for future migrations
     // update the database schema version here
     Ok(())
