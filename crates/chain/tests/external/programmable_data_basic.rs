@@ -55,7 +55,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     let storage_config = irys_types::StorageConfig::new(&testnet_config);
     let main_address = config.mining_signer.address();
-    let account1 = IrysSigner::random_signer(testnet_config.chain_id);
+    let account1 = IrysSigner::random_signer(&testnet_config);
 
     config.extend_genesis_accounts(vec![
         (

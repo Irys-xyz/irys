@@ -191,7 +191,7 @@ mod tests {
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        let irys = IrysSigner::random_signer_with_chunk_size(&testnet_config);
+        let irys = IrysSigner::random_signer(&testnet_config);
         let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
         let tx = irys.sign_transaction(tx).unwrap();
 

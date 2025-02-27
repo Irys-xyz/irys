@@ -14,7 +14,7 @@ pub struct IrysChainSpecBuilder {
 
 impl IrysChainSpecBuilder {
     /// Construct a new builder from the mainnet chain spec.
-    pub fn mainnet() -> Self {
+    pub fn testnet() -> Self {
         let mut genesis = IrysBlockHeader::new_mock_header();
         genesis.height = 0;
         Self {

@@ -532,7 +532,7 @@ mod tests {
 
         // Create a bunch of signed TX from the chunks
         // Loop though all the data_chunks and create wrapper tx for them
-        let signer = IrysSigner::random_signer_with_chunk_size(&context.testnet_config);
+        let signer = IrysSigner::random_signer(&context.testnet_config);
         let mut txs: Vec<IrysTransaction> = Vec::new();
 
         for chunks in &data_chunks {
@@ -567,7 +567,7 @@ mod tests {
         let (_tmp, context) = init().await;
 
         // Create a signed TX from the chunks
-        let signer = IrysSigner::random_signer_with_chunk_size(&context.testnet_config);
+        let signer = IrysSigner::random_signer(&context.testnet_config);
         let mut txs: Vec<IrysTransaction> = Vec::new();
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
@@ -576,14 +576,10 @@ mod tests {
         txs.push(tx);
 
         let poa_tx_num = 0;
-
+        let chunk_size = context.testnet_config.chunk_size as usize;
         for poa_chunk_num in 0..2 {
-            let mut poa_chunk: Vec<u8> = data[poa_chunk_num
-                * (context.testnet_config.chunk_size as usize)
-                ..std::cmp::min(
-                    (poa_chunk_num + 1) * (context.testnet_config.chunk_size as usize),
-                    data.len(),
-                )]
+            let mut poa_chunk: Vec<u8> = data[poa_chunk_num * (chunk_size)
+                ..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())]
                 .to_vec();
             poa_test(
                 &context,
@@ -592,7 +588,7 @@ mod tests {
                 poa_tx_num,
                 poa_chunk_num,
                 2,
-                context.testnet_config.chunk_size as usize,
+                chunk_size,
             )
             .await;
         }

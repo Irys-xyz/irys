@@ -5,7 +5,6 @@ use irys_storage::reth_provider::IrysRethProviderInner;
 use revm_primitives::{
     Bytes, Env, PrecompileError, PrecompileErrors, PrecompileOutput, PrecompileResult,
 };
-use tracing::info;
 
 use super::utils::ParsedAccessLists;
 
@@ -180,7 +179,6 @@ pub fn read_bytes_range(
                 "Unable to read chunk with part offset {}",
                 &i,
             ))))?;
-        info!("JESSEDEBUG: Read PD chunk {}", &i);
 
         // TODO: the mempool should request & unpack PD chunks in advance
         let unpacked_chunk = unpack(

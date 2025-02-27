@@ -32,18 +32,7 @@ impl IrysSigner {
     }
 
     #[cfg(any(feature = "test-utils", test))]
-    pub fn random_signer(irys_chain_id: u64) -> Self {
-        use rand::rngs::OsRng;
-
-        IrysSigner {
-            signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: irys_chain_id,
-            chunk_size: crate::MAX_CHUNK_SIZE,
-        }
-    }
-
-    #[cfg(any(feature = "test-utils", test))]
-    pub fn random_signer_with_chunk_size(config: &Config) -> Self {
+    pub fn random_signer(config: &Config) -> Self {
         use rand::rngs::OsRng;
 
         IrysSigner {
@@ -171,7 +160,7 @@ mod tests {
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Create a new Irys API instance
-        let irys = IrysSigner::random_signer(config.chain_id);
+        let irys = IrysSigner::random_signer(&config);
 
         // Create a transaction from the random bytes
         let mut tx = irys.create_transaction(data_bytes.clone(), None).unwrap();

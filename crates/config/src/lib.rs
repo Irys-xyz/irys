@@ -31,19 +31,15 @@ pub struct IrysNodeConfig {
 #[cfg(any(feature = "test-utils", test))]
 impl Default for IrysNodeConfig {
     fn default() -> Self {
+        use irys_types::Config;
         let base_dir = env::current_dir()
             .expect("Unable to determine working dir, aborting")
             .join(".irys");
 
-        let chainspec_builder = IrysChainSpecBuilder::mainnet();
+        let testent_config = Config::testnet();
+        let chainspec_builder = IrysChainSpecBuilder::testnet();
         Self {
-            mining_signer: IrysSigner::random_signer(
-                chainspec_builder
-                    .reth_builder
-                    .chain
-                    .expect("chain id must be present")
-                    .id(),
-            ),
+            mining_signer: IrysSigner::random_signer(&testent_config),
             chainspec_builder,
             instance_number: None, // no instance dir
             base_directory: base_dir,
@@ -66,7 +62,7 @@ impl IrysNodeConfig {
             base_directory: env::current_dir()
                 .expect("Unable to determine working dir, aborting")
                 .join(".irys"),
-            chainspec_builder: IrysChainSpecBuilder::mainnet(),
+            chainspec_builder: IrysChainSpecBuilder::testnet(),
         }
     }
 

@@ -51,8 +51,8 @@ async fn serial_double_root_data_promotion_test() {
     let temp_dir = setup_tracing_and_temp_dir(Some("double_root_data_promotion_test"), false);
     let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
-    let signer = IrysSigner::random_signer_with_chunk_size(&testnet_config);
-    let signer2 = IrysSigner::random_signer_with_chunk_size(&testnet_config);
+    let signer = IrysSigner::random_signer(&testnet_config);
+    let signer2 = IrysSigner::random_signer(&testnet_config);
 
     config.extend_genesis_accounts(vec![
         (

@@ -6,7 +6,7 @@ use std::{
     collections::VecDeque,
     sync::{Arc, RwLock},
 };
-use tracing::{info, warn};
+use tracing::info;
 
 use irys_types::{block_production::Seed, Config, DatabaseProvider};
 
@@ -99,10 +99,6 @@ pub fn calc_capacity(config: &Config) -> usize {
             .try_into()
             .unwrap(),
     );
-
-    if capacity <= DEFAULT_CAPACITY {
-        warn!("Capacity is clamped to 10k, which may not be sufficient for mining a partition.");
-    }
 
     capacity
 }
