@@ -290,6 +290,9 @@ mod tests {
         );
         assert_eq!(config.port, 8080);
         assert_eq!(config.decay_params.safe_minimum_number_of_years, 200);
-        assert_eq!(config.storage_fees.ingress_fee, rust_decimal_macros::dec!(0.01));
+        assert_eq!(
+            config.storage_fees.ingress_fee,
+            rust_decimal_macros::dec!(0.01)
+        );
     }
 }
