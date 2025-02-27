@@ -20,9 +20,7 @@ use std::{
 
 use tracing::{debug, error, trace, warn};
 
-use crate::block_index_service::{
-    BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage,
-};
+use crate::block_index_service::BlockIndexReadGuard;
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
 
 /// Allows for overriding of the consensus parameters for ledgers and partitions
