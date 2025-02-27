@@ -135,7 +135,6 @@ fn get_block_by_hash(
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-
 pub struct CombinedBlockHeader {
     #[serde(flatten)]
     pub irys: IrysBlockHeader,
@@ -144,7 +143,6 @@ pub struct CombinedBlockHeader {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-
 pub struct ExecutionHeader {
     #[serde(flatten)]
     pub header: Header,
