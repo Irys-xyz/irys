@@ -42,7 +42,7 @@ pub struct PackingActor {
     task_executor: TaskExecutor,
     /// list of all the pending packing jobs
     pending_jobs: PackingJobsBySM,
-    /// semaphore to control concurrency -- sm_id => semaphore
+    /// semaphore to control concurrency -- `sm_id` => semaphore
     semaphore: PackingSemaphores,
     /// packing process configuration
     config: PackingConfig,
