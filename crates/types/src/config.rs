@@ -62,10 +62,10 @@ pub struct StorageFees {
 }
 
 pub const DEFAULT_BLOCK_TIME: u64 = 5;
-pub(crate) const ANNUALIZED_COST_OF_STORING_1GIB: f64 = 0.01110839844;
-pub(crate) const ANNUALIZED_COST_OF_OPERATING_16TIB: f64 = 44.0;
-pub(crate) const TIB_PER_PARTITION: u64 = 16;
-pub(crate) const MINER_FEE: f64 = 0.05;
+pub(crate) const ANNUALIZED_COST_OF_STORING_1GB: f64 = 0.01110839844;
+pub(crate) const ANNUALIZED_COST_OF_OPERATING_16TB: f64 = 44.0;
+pub(crate) const TB_PER_PARTITION: u64 = 16;
+pub(crate) const MINER_PERCENTAGE_FEE: f64 = 0.05;
 
 pub const CONFIG: Config = load_toml!(
     "CONFIG_TOML_PATH",
