@@ -1,9 +1,6 @@
 use crate::{
-    ANNUALIZED_COST_OF_OPERATING_16TB, ANNUALIZED_COST_OF_STORING_1GB, 
-    Config, 
-    GIBIBYTE,
-    MINER_PERCENTAGE_FEE, TB_PER_PARTITION, 
-    TEBIBYTE,
+    Config, ANNUALIZED_COST_OF_OPERATING_16TB, ANNUALIZED_COST_OF_STORING_1GB, GIBIBYTE,
+    MINER_PERCENTAGE_FEE, TB_PER_PARTITION, TEBIBYTE,
 };
 use eyre::{ensure, Error};
 use rust_decimal::Decimal;
@@ -16,7 +13,10 @@ impl PriceCalc {
         1.0
     }
 
-    pub fn calc_perm_storage_price(number_of_bytes_to_store: u64, config: &Config) -> Result<f64, Error> {
+    pub fn calc_perm_storage_price(
+        number_of_bytes_to_store: u64,
+        config: &Config,
+    ) -> Result<f64, Error> {
         ensure!(config.chunk_size != 0, "Chunk size should not be 0");
         let perm_cost = Self::calc_perm_cost_per_gib(
             config.decay_params.safe_minimum_number_of_years,

@@ -1,12 +1,15 @@
+use crate::ApiState;
 use actix_web::{
     web::{self, Path},
     HttpResponse,
 };
 use irys_database::Ledger;
 use irys_types::perm_storage_price::PriceCalc;
-use crate::ApiState;
 
-pub async fn get_price(path: Path<(String, u64)>, state: web::Data<ApiState>) -> actix_web::Result<HttpResponse> {
+pub async fn get_price(
+    path: Path<(String, u64)>,
+    state: web::Data<ApiState>,
+) -> actix_web::Result<HttpResponse> {
     let (ledger, size) = path.into_inner();
 
     match Ledger::try_from(ledger.as_str()) {
