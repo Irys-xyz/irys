@@ -140,7 +140,7 @@ pub fn difficulty_is_valid(
     }
 }
 
-/// Checks PoA data chunk data solution partitions has not expired
+/// Checks `PoA` data chunk data solution partitions has not expired
 pub fn check_poa_data_expiration(
     poa: &PoaData,
     partitions_guard: &PartitionAssignmentsReadGuard,

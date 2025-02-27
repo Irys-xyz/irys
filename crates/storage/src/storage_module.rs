@@ -99,7 +99,7 @@ pub struct StorageModule {
     pub storage_config: StorageConfig,
 }
 
-/// On-disk metadata for StorageModule persistence
+/// On-disk metadata for `StorageModule` persistence
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageModuleInfo {
     /// An integer uniquely identifying the module
@@ -107,7 +107,7 @@ pub struct StorageModuleInfo {
     /// Hash of partition this storage module belongs to, if assigned
     pub partition_assignment: Option<PartitionAssignment>,
     /// Range of chunk offsets and path for each submodule
-    /// pub submodules: Vec<(Interval<PartitionChunkOffset>, SubmodulePath)>,
+    /// pub submodules: Vec<(Interval<PartitionChunkOffset>, `SubmodulePath`)>,
     pub submodules: Vec<(Interval<PartitionChunkOffset>, SubmodulePath)>,
 }
 
@@ -190,7 +190,7 @@ impl StorageModules {
 }
 
 impl StorageModule {
-    /// Initializes a new StorageModule
+    /// Initializes a new `StorageModule`
     pub fn new(
         base_path: &PathBuf,
         storage_module_info: &StorageModuleInfo,
@@ -339,7 +339,7 @@ impl StorageModule {
         })
     }
 
-    /// Returns the StorageModules partition_hash if assigned
+    /// Returns the `StorageModules` `partition_hash` if assigned
     pub fn partition_hash(&self) -> Option<PartitionHash> {
         if let Some(part_assign) = self.partition_assignment {
             Some(part_assign.partition_hash)
@@ -373,7 +373,7 @@ impl StorageModule {
         Ok(storage_interval)
     }
 
-    /// Returns whether the given chunk offset falls within this StorageModules assigned range
+    /// Returns whether the given chunk offset falls within this `StorageModules` assigned range
     pub fn contains_offset(&self, chunk_offset: LedgerChunkOffset) -> bool {
         self.partition_assignment
             .and_then(|part| part.slot_index)
@@ -568,7 +568,7 @@ impl StorageModule {
     /// - Intervals are touching (e.g., 0-5 and 6-10)
     /// - Intervals overlap (e.g., 0-5 and 3-8)
     ///
-    /// Returns a NoditSet containing the merged intervals for efficient range operations
+    /// Returns a `NoditSet` containing the merged intervals for efficient range operations
     pub fn get_intervals(&self, chunk_type: ChunkType) -> Vec<Interval<PartitionChunkOffset>> {
         let intervals = self.intervals.read().unwrap();
         let mut set = NoditSet::new();
@@ -602,7 +602,7 @@ impl StorageModule {
     }
 
     /// Indexes transaction data by mapping chunks to transaction paths across storage submodules.
-    /// Stores three mappings: tx path hashes -> tx_path, chunk offsets -> tx paths, and data roots -> start offset.
+    /// Stores three mappings: tx path hashes -> `tx_path`, chunk offsets -> tx paths, and data roots -> start offset.
     /// Updates all overlapping submodules within the given chunk range.
     ///
     /// # Errors
@@ -650,7 +650,7 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Stores the data_path and offset lookups in the correct submodule index
+    /// Stores the `data_path` and offset lookups in the correct submodule index
     pub fn add_data_path_to_index(
         &self,
         data_path_hash: ChunkPathHash,
@@ -702,7 +702,7 @@ impl StorageModule {
         Ok(write_offsets)
     }
 
-    /// Writes chunk data and its data_path to relevant storage locations
+    /// Writes chunk data and its `data_path` to relevant storage locations
     pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> eyre::Result<()> {
         let data_path = &chunk.data_path.0;
         let data_path_hash = UnpackedChunk::hash_data_path(data_path);
@@ -722,8 +722,8 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Internal helper function to find all the RelativeStartOffsets for a data_root
-    /// in this StorageModule
+    /// Internal helper function to find all the `RelativeStartOffsets` for a `data_root`
+    /// in this `StorageModule`
     pub fn collect_start_offsets(&self, data_root: DataRoot) -> eyre::Result<RelativeStartOffsets> {
         let mut offsets = RelativeStartOffsets::default();
         for (_, submodule) in self.submodules.iter() {
@@ -741,7 +741,7 @@ impl StorageModule {
     ///
     /// This function:
     /// 1. Retrieves and validates tx and data paths
-    /// 2. Extracts data_root and size from merkle proofs
+    /// 2. Extracts `data_root` and size from merkle proofs
     /// 3. Calculates chunk position within its parent transaction
     /// 4. Returns None if any step fails or chunk not found
     ///
@@ -821,7 +821,7 @@ impl StorageModule {
         }))
     }
 
-    /// Gets the tx_path and data_path for a chunk using its ledger relative offset
+    /// Gets the `tx_path` and `data_path` for a chunk using its ledger relative offset
     pub fn read_tx_data_path(
         &self,
         chunk_offset: LedgerChunkOffset,
@@ -885,25 +885,25 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Utility method asking the StorageModule to return its chunk range in
+    /// Utility method asking the `StorageModule` to return its chunk range in
     /// ledger relative coordinates
     pub fn get_storage_module_range(&self) -> eyre::Result<LedgerChunkRange> {
         if let Some(part_assign) = self.partition_assignment {
             if let Some(slot_index) = part_assign.slot_index {
                 let start = slot_index as u64 * self.storage_config.num_chunks_in_partition;
                 let end = start + self.storage_config.num_chunks_in_partition;
-                return Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)));
+                Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)))
             } else {
-                return Err(eyre::eyre!("Ledger slot not assigned!"));
+                Err(eyre::eyre!("Ledger slot not assigned!"))
             }
         } else {
-            return Err(eyre::eyre!("Partition not assigned!"));
+            Err(eyre::eyre!("Partition not assigned!"))
         }
     }
 
     /// Internal utility function to take a ledger relative range and make it
     /// Partition relative (relative to the partition assigned to the
-    /// StorageModule)
+    /// `StorageModule`)
     fn make_range_partition_relative(
         &self,
         chunk_range: LedgerChunkRange,
@@ -919,7 +919,7 @@ impl StorageModule {
 
     /// utility function to take a ledger relative offset and makes it
     /// Partition relative (relative to the partition assigned to the
-    /// StorageModule)
+    /// `StorageModule`)
     pub fn make_offset_partition_relative(
         &self,
         start_offset: LedgerChunkOffset,
@@ -931,7 +931,7 @@ impl StorageModule {
 
     /// utility function to take a ledger relative offset and makes it
     /// Partition relative (relative to the partition assigned to the
-    /// StorageModule)
+    /// `StorageModule`)
     /// This version will return an Err if the provided ledger chunk offset is out of range for this storage module
     pub fn make_offset_partition_relative_guarded(
         &self,
@@ -945,7 +945,7 @@ impl StorageModule {
         Ok(local_offset as u32)
     }
 
-    /// Test utility function to mark a StorageModule as packed
+    /// Test utility function to mark a `StorageModule` as packed
     pub fn pack_with_zeros(&self) {
         let entropy_bytes = vec![0u8; self.storage_config.chunk_size as usize];
         for chunk_offset in 0..self.storage_config.num_chunks_in_partition as u32 {
@@ -979,7 +979,7 @@ fn ensure_default_intervals(
 /// Reads and deserializes intervals from storage state file
 ///
 /// Loads the stored interval mapping that tracks chunk states.
-/// Expects a JSON-formatted file containing StorageIntervals.
+/// Expects a JSON-formatted file containing `StorageIntervals`.
 pub fn read_intervals_file(mut file: &File) -> eyre::Result<StorageIntervals> {
     let size = file.metadata().unwrap().len() as usize;
 

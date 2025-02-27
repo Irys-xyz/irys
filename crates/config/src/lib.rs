@@ -67,7 +67,7 @@ impl IrysNodeConfig {
     }
 
     /// get the instance-specific directory path
-    /// this will return the base directory if instance_number is not `Some`
+    /// this will return the base directory if `instance_number` is not `Some`
     pub fn instance_directory(&self) -> PathBuf {
         self.instance_number
             .map_or(self.base_directory.clone(), |i| {
