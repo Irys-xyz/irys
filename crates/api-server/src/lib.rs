@@ -60,10 +60,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
 }
 
-pub async fn run_server(app_state: ApiState) {
+pub async fn run_server(app_state: ApiState, mut shutdown_rx: tokio::sync::mpsc::Receiver<()>) {
     info!("Starting API server on port {}", CONFIG.port);
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         let awc_client = awc::Client::new();
         App::new()
             .app_data(web::Data::new(app_state.clone()))
@@ -83,9 +83,17 @@ pub async fn run_server(app_state: ApiState) {
     })
     .bind(("0.0.0.0", CONFIG.port))
     .unwrap()
-    .run()
-    .await
-    .unwrap();
+    .run();
+
+    let server_handle = server.handle();
+
+    actix_rt::spawn(async move {
+        let _ = shutdown_rx.recv().await;
+        debug!("API shutdown signal received via channel. Stopping server...");
+        server_handle.stop(true).await;
+    });
+
+    server.await.unwrap()
 }
 
 //==============================================================================
