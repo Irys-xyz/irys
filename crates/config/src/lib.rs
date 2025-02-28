@@ -187,7 +187,7 @@ impl StorageSubmodulesConfig {
                     fs::remove_file(config_path_local).expect("able to delete file");
                 }
                 tracing::info!("Loading config from {:?}", config_path_home);
-                let config = StorageSubmodulesConfig::from_toml(config_path_home).unwrap();
+                let config = Self::from_toml(config_path_home).unwrap();
 
                 // Create symlinks for each submodule if user provides paths
                 let submodule_paths = &config.submodule_paths;
