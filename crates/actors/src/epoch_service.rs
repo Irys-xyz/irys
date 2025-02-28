@@ -999,7 +999,7 @@ mod tests {
                 all_txs: Arc::new(vec![]),
             };
             match block_index_actor.send(msg).await {
-                Ok(_) => info!("block indexed"),
+                Ok(_) => debug!("block indexed"),
                 Err(err) => panic!("Failed to index block {:?}", err),
             }
 
@@ -1028,7 +1028,7 @@ mod tests {
                 all_txs: Arc::new(vec![]),
             };
             match block_index_actor.send(msg).await {
-                Ok(_) => info!("block indexed"),
+                Ok(_) => debug!("block indexed"),
                 Err(_) => panic!("Failed to index block"),
             }
 
@@ -1085,7 +1085,7 @@ mod tests {
             num_writes_before_sync: 1,
             chunk_migration_depth: 1,
             capacity_scalar: 100,
-            submit_ledger_epoch_length: 100,
+            submit_ledger_epoch_length: 5,
             ..Config::testnet()
         };
         let mining_address = testnet_config.miner_address();
@@ -1104,7 +1104,7 @@ mod tests {
         // Create epoch service
         let config = EpochServiceConfig {
             capacity_scalar: 100,
-            num_blocks_in_epoch: 100,
+            num_blocks_in_epoch: num_blocks_in_epoch,
             num_capacity_partitions: Some(123),
             storage_config: storage_config.clone(),
         };
@@ -1289,7 +1289,7 @@ mod tests {
                 all_txs: Arc::new(vec![]),
             };
             match block_index_actor.send(msg).await {
-                Ok(_) => info!("block indexed"),
+                Ok(_) => debug!("block indexed {}", height),
                 Err(_) => panic!("Failed to index block {}", height),
             }
 
