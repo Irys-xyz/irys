@@ -367,7 +367,7 @@ impl StorageModule {
         for (_interval, submodule) in self.submodules.iter() {
             submodule
                 .db
-                .update_eyre(|tx| clear_submodule_database(tx))?;
+                .update_eyre(clear_submodule_database)?;
         }
 
         Ok(storage_interval)
