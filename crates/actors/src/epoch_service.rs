@@ -1,5 +1,5 @@
 use actix::SystemService;
-use actix::{Actor, Context, Handler, Message, MessageResponse};
+use actix::{Actor, ActorContext, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
 use irys_config::StorageSubmodulesConfig;
@@ -236,6 +236,19 @@ impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
     ) -> Self::Result {
         let pa = self.partition_assignments.read().unwrap();
         pa.get_assignment(msg.0)
+    }
+}
+
+/// Stop the actor
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct Stop;
+
+impl Handler<Stop> for EpochServiceActor {
+    type Result = ();
+
+    fn handle(&mut self, _msg: Stop, ctx: &mut Self::Context) {
+        ctx.stop();
     }
 }
 

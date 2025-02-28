@@ -39,6 +39,7 @@ use irys_types::{
     vdf_config::VDFStepsConfig, StorageConfig, CHUNK_SIZE, CONFIG, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
+use reth::core::irys_ext::ReloadPayload;
 use reth::rpc::eth::EthApiServer as _;
 use reth::{
     builder::FullNode,
@@ -46,9 +47,7 @@ use reth::{
     core::irys_ext::NodeExitReason,
     tasks::{TaskExecutor, TaskManager},
 };
-use reth_cli_runner::{
-    run_to_completion_or_panic, run_until_ctrl_c, run_until_ctrl_c_or_channel_message,
-};
+use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
 use std::sync::atomic::AtomicU64;
 use std::{
@@ -58,17 +57,16 @@ use std::{
 };
 use tracing::{debug, error, info};
 
+use crate::vdf::run_vdf;
+use irys_database::migration::check_db_version_and_run_migrations_if_needed;
+use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use tokio::{
     runtime::Handle,
     sync::oneshot::{self},
 };
 
-use crate::vdf::run_vdf;
-use irys_database::migration::check_db_version_and_run_migrations_if_needed;
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-
-use crate::clonable_join_handle::ClonableJoinHandle;
+use crate::clonable_join_handle::{ClonableJoinHandle, DestroyableArc};
 
 pub async fn start() -> eyre::Result<IrysNodeCtx> {
     let config: IrysNodeConfig = IrysNodeConfig {
@@ -139,8 +137,13 @@ pub struct IrysNodeCtx {
     pub storage_config: StorageConfig,
     pub api_server_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
+    pub consensus_engine_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     pub main_actor_thread_handle: Option<ClonableJoinHandle<()>>,
     pub reth_thread_handle: Option<ClonableJoinHandle<()>>,
+
+    pub reth_arbiter: DestroyableArc<Arbiter>,
+    pub block_producer_arbiter: DestroyableArc<Arbiter>,
+    pub block_discovery_arbiter: DestroyableArc<Arbiter>,
 }
 
 impl IrysNodeCtx {
@@ -150,10 +153,40 @@ impl IrysNodeCtx {
         if let Some(main_actor_thread_handle) = self.main_actor_thread_handle {
             main_actor_thread_handle.join().unwrap();
         }
+
+        debug!("Sending shutdown signal to consensus engine");
+        self.consensus_engine_shutdown_sender.try_send(()).unwrap();
+
+        let reth_arbiter = self.reth_arbiter.destroy();
+        reth_arbiter.stop();
+        reth_arbiter.join().unwrap();
+
+        let block_producer_arbiter = self.block_producer_arbiter.destroy();
+        block_producer_arbiter.stop();
+        block_producer_arbiter.join().unwrap();
+
+        let block_discovery_arbiter = self.block_discovery_arbiter.destroy();
+        block_discovery_arbiter.stop();
+        block_discovery_arbiter.join().unwrap();
+
+        let chain_spec_arc = self.reth_handle.chain_spec();
+        let chain_spec = (*chain_spec_arc).clone();
+
+        self.reth_handle
+            .irys_ext
+            .as_ref()
+            .unwrap()
+            .reload
+            .write()
+            .unwrap()
+            .send(ReloadPayload::ReloadConfig(chain_spec))
+            .unwrap();
+
         self.reth_shutdown_sender.try_send(()).unwrap();
         if let Some(reth_thread_handle) = self.reth_thread_handle {
             reth_thread_handle.join().unwrap();
         }
+
         debug!("Main actor thread and reth thread stopped");
     }
 }
@@ -239,11 +272,10 @@ pub async fn start_irys_node(
 
     // clone as this gets `move`d into the thread
     let irys_provider_1 = irys_provider.clone();
-    let irys_db_env = Arc::new(open_or_create_irys_consensus_data_db(
-        &arc_config.irys_consensus_data_dir(),
-    )?);
 
     let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
+    let (consensus_engine_shutdown_sender, consensus_engine_shutdown_receiver) =
+        tokio::sync::mpsc::channel::<()>(1);
 
     let actor_main_thread_handle = std::thread::Builder::new()
         .name("actor-main-thread".to_string())
@@ -251,10 +283,13 @@ pub async fn start_irys_node(
         .spawn(move || {
             let node_config = arc_config_copy.clone();
             System::new().block_on(async move {
+                let irys_db_env = open_or_create_irys_consensus_data_db(
+                    &arc_config.irys_consensus_data_dir(),
+                ).unwrap();
                 // the RethNodeHandle doesn't *need* to be Arc, but it will reduce the copy cost
                 let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
                 let reth_db = DatabaseProvider(reth_node.provider.database.db.clone());
-                let irys_db = DatabaseProvider(irys_db_env.clone());
+                let irys_db = DatabaseProvider(Arc::new(irys_db_env));
 
                 check_db_version_and_run_migrations_if_needed(&reth_db, &irys_db).unwrap();
 
@@ -654,9 +689,14 @@ pub async fn start_irys_node(
                     vdf_config: vdf_config.clone(),
                     storage_config: storage_config.clone(),
                     api_server_shutdown_sender: api_server_shutdown_tx,
-                    reth_shutdown_sender: reth_shutdown_sender,
+                    reth_shutdown_sender,
+                    consensus_engine_shutdown_sender,
                     main_actor_thread_handle: None,
                     reth_thread_handle: None,
+
+                    reth_arbiter: DestroyableArc::new(reth_arbiter),
+                    block_producer_arbiter: DestroyableArc::new(block_producer_arbiter),
+                    block_discovery_arbiter: DestroyableArc::new(block_discovery_arbiter),
                 });
 
                 run_server(ApiState {
@@ -690,15 +730,17 @@ pub async fn start_irys_node(
             let node_config= cloned_arc.clone();
             let tokio_runtime = /* Handle::current(); */ tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
             let mut task_manager = TaskManager::new(tokio_runtime.handle().clone());
-            let exec: reth::tasks::TaskExecutor = task_manager.executor();
+            let task_executor: reth::tasks::TaskExecutor = task_manager.executor();
 
             tokio_runtime.block_on(run_to_completion_or_panic(
                 &mut task_manager,
                 run_until_ctrl_c_or_channel_message(
-                    start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider, latest_block_height),
+                    start_reth_node(task_executor, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider, latest_block_height, consensus_engine_shutdown_receiver),
                     reth_shutdown_receiver
                 ),
             )).unwrap();
+
+            task_manager.graceful_shutdown();
             debug!("Reth thread finished");
         })?;
 
@@ -710,21 +752,23 @@ pub async fn start_irys_node(
 }
 
 async fn start_reth_node<T: HasName + HasTableType>(
-    exec: TaskExecutor,
+    task_executor: TaskExecutor,
     chainspec: ChainSpec,
     irys_config: Arc<IrysNodeConfig>,
     tables: &[T],
     sender: oneshot::Sender<FullNode<RethNode, RethNodeAddOns>>,
     irys_provider: IrysRethProvider,
     latest_block: u64,
+    consensus_engine_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
 ) -> eyre::Result<NodeExitReason> {
     let node_handle = irys_reth_node_bridge::run_node(
         Arc::new(chainspec),
-        exec,
+        task_executor,
         irys_config,
         tables,
         irys_provider,
         latest_block,
+        consensus_engine_shutdown_receiver,
     )
     .await?;
     debug!("Reth node started");

@@ -73,6 +73,8 @@ pub struct CustomEngineNodeLauncher {
     pub irys_provider: IrysRethProvider,
 
     pub latest_irys_block_height: u64,
+
+    pub consensus_engine_shutdown: tokio::sync::mpsc::Receiver<()>,
 }
 
 impl CustomEngineNodeLauncher {
@@ -83,12 +85,14 @@ impl CustomEngineNodeLauncher {
         engine_tree_config: TreeConfig,
         irys_provider: IrysRethProvider,
         latest_block: u64,
+        consensus_engine_shutdown: tokio::sync::mpsc::Receiver<()>,
     ) -> Self {
         Self {
             ctx: LaunchContext::new(task_executor, data_dir),
             engine_tree_config,
             irys_provider,
             latest_irys_block_height: latest_block,
+            consensus_engine_shutdown,
         }
     }
 }
@@ -117,6 +121,7 @@ where
             engine_tree_config,
             irys_provider,
             latest_irys_block_height,
+            mut consensus_engine_shutdown,
         } = self;
         let NodeBuilderWithComponents {
             adapter: NodeTypesAdapter { database },
@@ -483,6 +488,10 @@ where
             // advance the chain and await payloads built locally to add into the engine api tree handler to prevent re-execution if that block is received as payload from the CL
             loop {
                 tokio::select! {
+                    shutdown = consensus_engine_shutdown.recv() => {
+                        debug!("Received shutdown signal for consensus engine, shutting down...");
+                        break;
+                    }
                     payload = built_payloads.select_next_some() => {
                         if let Some(executed_block) = payload.executed_block() {
                             debug!(target: "reth::cli", block=?executed_block.block().num_hash(),  "inserting built payload");
@@ -524,6 +533,7 @@ where
                 }
             }
 
+            debug!("Consensus engine stopped");
             let _ = exit.send(res);
         });
 
