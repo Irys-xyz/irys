@@ -14,8 +14,9 @@ use irys_types::{
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
 use tracing::error;
-
 use crate::block_producer::BlockFinalizedMessage;
+
+type ComplexReturnType = Vec<((H256, Proof), (DataRoot, u64))>;
 
 /// Central coordinator for chunk storage operations.
 ///
@@ -235,7 +236,7 @@ fn get_tx_path_pairs(
     block: &IrysBlockHeader,
     ledger: Ledger,
     txs: &[IrysTransactionHeader],
-) -> eyre::Result<Vec<((H256, Proof), (DataRoot, u64))>> {
+) -> eyre::Result<ComplexReturnType> {
     let (tx_root, proofs) = TransactionLedger::merklize_tx_root(txs);
 
     if tx_root != block.ledgers[ledger].tx_root {
