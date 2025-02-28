@@ -179,6 +179,11 @@ impl IrysBlockHeader {
         self.signature
             .validate_signature(self.signature_hash(), self.miner_address)
     }
+
+    // treat any block whose height is a multiple of blocks_in_epoch (and not zero) as epoch boundary
+    pub fn is_epoch(&self, blocks_in_epoch: u64) -> bool {
+        self.height != 0 && (self.height % blocks_in_epoch == 0)
+    }
 }
 
 #[derive(

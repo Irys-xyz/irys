@@ -17,6 +17,7 @@ irys-types.workspace = true
 futures-concurrency.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
+heapless.workspace = true
 
 [lints]
 workspace = true
