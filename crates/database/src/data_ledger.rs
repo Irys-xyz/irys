@@ -289,6 +289,10 @@ impl Ledgers {
         1 + self.term.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Get all of the partition hashes that have expired out of term ledgers
     pub fn get_expired_partition_hashes(&mut self, epoch_height: u64) -> Vec<H256> {
         let mut expired_hashes: Vec<H256> = Vec::new();
