@@ -329,7 +329,7 @@ impl StorageModule {
         // Attempt to load a global set of intervals from the submodules
         let loaded_intervals = Self::load_intervals_from_submodules(&submodule_map);
 
-        Ok(StorageModule {
+        Ok(Self {
             id: storage_module_info.id,
             partition_assignment: storage_module_info.partition_assignment,
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
