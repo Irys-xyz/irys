@@ -202,7 +202,7 @@ pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U2
     Ok(tx
         .get::<PlainAccountState>(address)?
         .map(|a| U256::from_little_endian(a.balance.as_le_slice()))
-        .unwrap_or(U256::from(0)))
+        .unwrap_or_else(|| U256::from(0)))
 }
 
 pub fn walk_all<T: Table>(

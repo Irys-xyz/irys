@@ -80,7 +80,7 @@ impl PartitionAssignments {
         self.data_partitions
             .get(&partition_hash)
             .copied()
-            .or(self.capacity_partitions.get(&partition_hash).copied())
+            .or_else(|| self.capacity_partitions.get(&partition_hash).copied())
     }
 }
 

@@ -782,7 +782,7 @@ impl BlockTreeCache {
             .iter()
             .map(|(hash, entry)| (entry.block.cumulative_diff, *hash))
             .max_by_key(|(diff, _)| *diff)
-            .unwrap_or((U256::zero(), BlockHash::default()))
+            .unwrap_or_else(||(U256::zero(), BlockHash::default()))
     }
 
     pub fn get_canonical_chain(&self) -> (Vec<ChainCacheEntry>, usize) {

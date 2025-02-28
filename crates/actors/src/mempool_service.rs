@@ -207,7 +207,7 @@ impl Handler<TxIngressMessage> for MempoolService {
             .read()
             .get_canonical_chain();
 
-        let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
+        let (_, latest_height, _, _) = canon_chain.0.last().ok_or_else(|| TxIngressError::Other(
             "unable to get canonical chain from block tree".to_string(),
         ))?;
 
@@ -570,14 +570,14 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
             let canon_chain = self
                 .block_tree_read_guard
                 .clone()
-                .ok_or(eyre!("mempool_service is uninitialized"))?
+                .ok_or_else(|| eyre!("mempool_service is uninitialized"))?
                 .read()
                 .get_canonical_chain();
 
             let (_, latest_height, _, _) = canon_chain
                 .0
                 .last()
-                .ok_or(eyre!("mempool_service is uninitialized"))?;
+                .ok_or_else(|| eyre!("mempool_service is uninitialized"))?;
 
             let mut_tx = db.tx_mut()?;
             let mut cursor = mut_tx.cursor_write::<IngressProofLRU>()?;
