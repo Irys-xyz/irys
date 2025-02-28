@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
 };
 
-use crate::{RelativeChunkOffset, CONFIG};
+use crate::{Config, RelativeChunkOffset};
 use derive_more::{Add, Div, From, Into, Mul, Sub};
 use nodit::{
     interval::{ie, ii},
@@ -390,15 +390,13 @@ pub struct PartitionStorageProviderConfig {
 pub struct StorageModuleConfig {
     pub directory_path: PathBuf,
     pub size_bytes: u64,
-    // pub chunks_per_lock_segment: u32,
 }
 
-impl Default for StorageModuleConfig {
-    fn default() -> Self {
+impl StorageModuleConfig {
+    pub fn new(config: &Config) -> Self {
         Self {
             directory_path: "/tmp".into(),
-            size_bytes: 100 * CONFIG.chunk_size,
-            // chunks_per_lock_segment: 800, // 200MB
+            size_bytes: 100 * config.chunk_size,
         }
     }
 }
@@ -472,7 +470,7 @@ pub enum ChunkState {
 /// * `step` - Number of elements in each chunk
 ///
 /// # Returns
-/// * `Result<Vec<Interval>, IntervalSplitError>` - Vector of splitted chunks
+/// * `Result<Vec<Interval>, IntervalSplitError>` - Vector of split chunks
 ///
 /// # Examples
 /// ```

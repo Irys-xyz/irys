@@ -14,6 +14,8 @@ pub mod db_cache;
 
 /// Data in the indexes is confirmed data
 pub mod db_index;
+pub mod metadata;
+pub mod migration;
 /// Tables & methods specific to submodule databases
 pub mod submodule;
 /// Local macro definition of chain specific mdbx tables

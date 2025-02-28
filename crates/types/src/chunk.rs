@@ -99,7 +99,7 @@ pub struct PackedChunk {
     pub bytes: Base64,
     /// the Address used to pack this chunk
     pub packing_address: Address,
-    /// the partiton relative chunk offset
+    /// the partition relative chunk offset
     pub partition_offset: PartitionChunkOffset,
     /// Index of the chunk in the transaction starting with 0
     pub tx_offset: TxChunkOffset,
@@ -125,7 +125,7 @@ pub struct PartialChunk {
     /// Raw bytes to be stored, should be CHUNK_SIZE in length unless it is the
     /// last chunk in the transaction
     pub bytes: Option<Base64>,
-    /// the partiton relative chunk offset
+    /// the partition relative chunk offset
     pub partition_relative_offset: Option<PartitionChunkOffset>,
     /// the Address used to pack this chunk
     pub packing_address: Option<Address>,

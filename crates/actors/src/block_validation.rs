@@ -324,6 +324,7 @@ pub fn poa_is_valid(
             config.entropy_packing_iterations,
             config.chunk_size as usize,
             &mut entropy_chunk,
+            config.chain_id,
         );
 
         let mut poa_chunk: Vec<u8> = poa.chunk.clone().into();
@@ -358,6 +359,7 @@ pub fn poa_is_valid(
             config.entropy_packing_iterations,
             config.chunk_size as usize,
             &mut entropy_chunk,
+            config.chain_id,
         );
 
         if entropy_chunk != poa.chunk.0 {
@@ -375,9 +377,6 @@ pub fn poa_is_valid(
     Ok(())
 }
 
-//==============================================================================
-// Tests
-//------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -394,7 +393,7 @@ mod tests {
     use irys_database::{BlockIndex, Initialized};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, H256List,
+        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, Config, H256List,
         IrysTransaction, IrysTransactionHeader, Signature, TransactionLedger, H256, U256,
     };
     use std::sync::{Arc, RwLock};
@@ -412,6 +411,7 @@ mod tests {
         pub miner_address: Address,
         pub partition_hash: H256,
         pub partition_assignment: PartitionAssignment,
+        pub testnet_config: Config,
     }
 
     async fn init() -> (TempDir, TestContext) {
@@ -424,34 +424,31 @@ mod tests {
             .try_init();
 
         let mut genesis_block = IrysBlockHeader::new_mock_header();
-        let data_dir = temporary_directory(Some("block_validation_tests"), false);
         genesis_block.height = 0;
-        let arc_genesis = Arc::new(genesis_block);
-
-        let miner_address = Address::random();
         let chunk_size = 32;
-
-        // Create epoch service with random miner address
-        let storage_config = StorageConfig {
+        let testnet_config = Config {
             chunk_size,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
-            num_partitions_in_slot: 1,
-            miner_address,
-            min_writes_before_sync: 1,
+            num_partitions_per_slot: 1,
+            num_writes_before_sync: 1,
             entropy_packing_iterations: 1_000,
-            chunk_migration_depth: 1, // Testnet / single node config
+            chunk_migration_depth: 1,
+            ..Config::testnet()
         };
 
-        let config = EpochServiceConfig {
-            storage_config: storage_config.clone(),
-            ..Default::default()
-        };
+        let data_dir = temporary_directory(Some("block_validation_tests"), false);
+        let arc_genesis = Arc::new(genesis_block);
+        let signer = testnet_config.irys_signer();
+        let miner_address = signer.address();
 
-        let arc_config = Arc::new(IrysNodeConfig {
-            base_directory: data_dir.path().to_path_buf(),
-            ..Default::default()
-        });
+        // Create epoch service with random miner address
+        let storage_config = StorageConfig::new(&testnet_config);
+        let epoch_config = EpochServiceConfig::new(&testnet_config);
+
+        let mut config = IrysNodeConfig::new(&testnet_config);
+        config.base_directory = data_dir.path().to_path_buf();
+        let arc_config = Arc::new(config);
 
         let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
             BlockIndex::default()
@@ -462,16 +459,15 @@ mod tests {
                 .unwrap(),
         ));
 
-        let block_index_actor =
-            BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
         SystemRegistry::set(block_index_actor.clone());
 
         let block_index_guard = block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
             .unwrap();
-
-        let epoch_service = EpochServiceActor::new(Some(config.clone()), block_index_guard);
+        
+        let epoch_service = EpochServiceActor::new(epoch_config.clone(), &testnet_config, block_index_guard);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers
@@ -496,7 +492,6 @@ mod tests {
         let sub_slots = ledgers.get_slots(Ledger::Submit);
 
         let partition_hash = sub_slots[0].partitions[0];
-
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),
             all_txs: Arc::new(vec![]),
@@ -525,13 +520,13 @@ mod tests {
                 miner_address,
                 partition_hash,
                 partition_assignment,
+                testnet_config,
             },
         )
     }
 
     #[actix::test]
     async fn poa_test_3_complete_txs() {
-        let chunk_size: usize = 32;
         let (_tmp, context) = init().await;
         // Create a bunch of TX chunks
         let data_chunks = vec![
@@ -542,7 +537,7 @@ mod tests {
 
         // Create a bunch of signed TX from the chunks
         // Loop though all the data_chunks and create wrapper tx for them
-        let signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
+        let signer = IrysSigner::random_signer(&context.testnet_config);
         let mut txs: Vec<IrysTransaction> = Vec::new();
 
         for chunks in &data_chunks {
@@ -565,7 +560,7 @@ mod tests {
                     poa_tx_num,
                     poa_chunk_num,
                     9,
-                    chunk_size,
+                    context.testnet_config.chunk_size as usize,
                 )
                 .await;
             }
@@ -575,10 +570,9 @@ mod tests {
     #[actix::test]
     async fn poa_not_complete_last_chunk_test() {
         let (_tmp, context) = init().await;
-        let chunk_size: usize = 32;
 
         // Create a signed TX from the chunks
-        let signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
+        let signer = IrysSigner::random_signer(&context.testnet_config);
         let mut txs: Vec<IrysTransaction> = Vec::new();
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
@@ -587,9 +581,9 @@ mod tests {
         txs.push(tx);
 
         let poa_tx_num = 0;
-
+        let chunk_size = context.testnet_config.chunk_size as usize;
         for poa_chunk_num in 0..2 {
-            let mut poa_chunk: Vec<u8> = data[poa_chunk_num * chunk_size
+            let mut poa_chunk: Vec<u8> = data[poa_chunk_num * (chunk_size)
                 ..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())]
                 .to_vec();
             poa_test(
@@ -628,6 +622,7 @@ mod tests {
             context.storage_config.entropy_packing_iterations,
             chunk_size,
             &mut entropy_chunk,
+            context.storage_config.chain_id,
         );
 
         xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);

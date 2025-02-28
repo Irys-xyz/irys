@@ -1117,6 +1117,7 @@ pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::R
         sm.storage_config.entropy_packing_iterations,
         chunk_size.try_into()?,
         &mut out,
+        sm.storage_config.chain_id,
     );
 
     Ok(out == chunk)

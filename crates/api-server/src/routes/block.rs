@@ -219,7 +219,7 @@ impl FromStr for BlockParam {
 //             None => error!("block not found, test db error!"),
 //             Some(blk_get) => {
 //                 info!("block found!");
-//                 assert_eq!(blk, blk_get, "retrived another block");
+//                 assert_eq!(blk, blk_get, "retrieved another block");
 //             }
 //         };
 

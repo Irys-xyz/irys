@@ -386,6 +386,7 @@ fn warn_mismatches(a: &H256List, b: &H256List) {
 #[cfg(test)]
 mod tests {
     use base58::{FromBase58, ToBase58};
+    use irys_types::Config;
 
     use super::*;
     fn _generate_next_vdf_step() {
@@ -396,21 +397,16 @@ mod tests {
                 .unwrap(),
         );
 
+        let testnet_config = Config::testnet();
         let reset_seed = H256([0; 32]);
-        // seed = apply_reset_seed(seed, reset_seed);
-        // println!("seed after reset {:?}", seed);
 
         let start_step_number = 0;
         let mut hasher = Sha256::new();
-        let mut salt = U256::from(step_number_to_salt_number(
-            &VDFStepsConfig::default(),
-            start_step_number,
-        ));
+
+        let config = VDFStepsConfig::new(&testnet_config);
+        let mut salt = U256::from(step_number_to_salt_number(&config, start_step_number));
 
         let mut checkpoints: Vec<H256> = vec![H256::default(); 25];
-
-        //seed = apply_reset_seed(seed, reset_seed);
-
         vdf_sha(
             &mut hasher,
             &mut salt,
@@ -445,12 +441,14 @@ mod tests {
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block() {
         // step: 44398 output: 0x893d
+        let testnet_config = Config::testnet();
         let vdf_info = VDFLimiterInfo {
             output: to_hash("AEj76XfsPWoB2CjcDm3RXTwaM5AKs7SbWnkHR8umvgmW"),
             global_step_number: 44398,
             seed: to_hash("11111111111111111111111111111111"),
             next_seed: to_hash("11111111111111111111111111111111"),
             prev_output: to_hash("8oYs33LUVjtsB6rz6BRXBsVS48WbZJovgbyviKziV6ar"),
+            // spellchecker:off
             last_step_checkpoints: H256List(vec![
                 to_hash("5YGk1yQMi5TwLf2iHAaLWnS8iDSdzQEhm3fambxy5Syy"),
                 to_hash("FM8XvtafL5pEsMkwJZDEZpppQpbCWQHxSSijffSjHVaX"),
@@ -481,14 +479,13 @@ mod tests {
             steps: H256List(vec![to_hash(
                 "AEj76XfsPWoB2CjcDm3RXTwaM5AKs7SbWnkHR8umvgmW",
             )]),
+            // spellchecker:on
             vdf_difficulty: None,
             next_vdf_difficulty: None,
         };
 
-        let config = VDFStepsConfig {
-            vdf_difficulty: 100_000,
-            ..VDFStepsConfig::default()
-        };
+        let mut config = VDFStepsConfig::new(&testnet_config);
+        config.vdf_difficulty = 100_000;
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
@@ -520,6 +517,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block_before_reset() {
+        let testnet_config = Config::testnet();
         // step: 44398 output: 0x893d
         let vdf_info = VDFLimiterInfo {
             output: H256(
@@ -709,10 +707,8 @@ mod tests {
             next_vdf_difficulty: None,
         };
 
-        let config = VDFStepsConfig {
-            vdf_difficulty: 100_000,
-            ..VDFStepsConfig::default()
-        };
+        let mut config = VDFStepsConfig::new(&testnet_config);
+        config.vdf_difficulty = 100_000;
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
@@ -740,6 +736,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block_after_reset() {
+        let mut testnet_config = Config::testnet();
+        testnet_config.vdf_sha_1s = 100_000;
+
         // step: 44398 output: 0x893d
         let vdf_info = VDFLimiterInfo {
             output: H256(
@@ -929,10 +928,7 @@ mod tests {
             next_vdf_difficulty: None,
         };
 
-        let config = VDFStepsConfig {
-            vdf_difficulty: 100_000,
-            ..VDFStepsConfig::default()
-        };
+        let config = VDFStepsConfig::new(&testnet_config);
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
@@ -941,6 +937,9 @@ mod tests {
     // one special case that do not apply reset seed
     #[tokio::test]
     async fn test_checkpoints_for_single_step_one() {
+        let mut testnet_config = Config::testnet();
+        testnet_config.vdf_sha_1s = 100_000;
+
         let vdf_info = VDFLimiterInfo {
             output: H256(
                 hex::decode("68230a9b96fbd924982a3d29485ad2c67285d76f2c8fc0a4770d50ed5fd41efd")
@@ -1129,11 +1128,7 @@ mod tests {
             next_vdf_difficulty: None,
         };
 
-        let config = VDFStepsConfig {
-            vdf_difficulty: 100_000,
-            ..VDFStepsConfig::default()
-        };
-
+        let config = VDFStepsConfig::new(&testnet_config);
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
 
