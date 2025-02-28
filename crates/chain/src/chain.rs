@@ -339,7 +339,7 @@ pub async fn start_irys_node(
                     });
                 SystemRegistry::set(broadcast_mining_service.clone());
 
-                let mut epoch_service = EpochServiceActor::new(Some(config), block_index_guard.clone());
+                let mut epoch_service = EpochServiceActor::new(Some(config.clone()), block_index_guard.clone());
                 epoch_service.initialize(&db).await;
                 let epoch_service_actor_addr = epoch_service.start();
 
@@ -478,6 +478,7 @@ pub async fn start_irys_node(
                     vdf_config.clone(),
                     vdf_steps_guard.clone(),
                     block_tree_guard.clone(),
+                    config.clone(),
                 );
                 let block_producer_addr =
                     BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {

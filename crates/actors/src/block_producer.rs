@@ -20,7 +20,7 @@ use irys_types::{
     next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
     Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
     IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
-    CONFIG, H256, U256,
+    config, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -34,7 +34,7 @@ use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::BlockTreeReadGuard,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage, NewEpochMessage},
+    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage, NewEpochMessage, EpochServiceConfig},
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
 };
@@ -69,6 +69,8 @@ pub struct BlockProducerActor {
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Get the head of the chain
     pub block_tree_guard: BlockTreeReadGuard,
+    /// Epoch config
+    pub epoch_config: EpochServiceConfig,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -89,6 +91,7 @@ impl BlockProducerActor {
         vdf_config: VDFStepsConfig,
         vdf_steps_guard: VdfStepsReadGuard,
         block_tree_guard: BlockTreeReadGuard,
+        epoch_config: EpochServiceConfig,
     ) -> Self {
         Self {
             db,
@@ -101,6 +104,7 @@ impl BlockProducerActor {
             vdf_config,
             vdf_steps_guard,
             block_tree_guard,
+            epoch_config,
         }
     }
 }
@@ -146,7 +150,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let difficulty_config = self.difficulty_config;
         let chunk_size = self.storage_config.chunk_size;
         let block_tree_guard = self.block_tree_guard.clone();
-
+        let epoch_config = self.epoch_config.clone();
         let vdf_steps = self.vdf_steps_guard.clone();
 
         AtomicResponse::new(Box::pin( async move {
@@ -471,7 +475,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-            if block_height > 0 && block_height % CONFIG.num_blocks_in_epoch == 0 {
+            if block_height > 0 && block_height % epoch_config.num_blocks_in_epoch == 0 {
                 epoch_service_addr.do_send(NewEpochMessage(block.clone()));
             }
 
