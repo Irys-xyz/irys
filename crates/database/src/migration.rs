@@ -71,7 +71,7 @@ pub fn check_db_version_and_run_migrations_if_needed(
     new_db: &DatabaseEnv,
 ) -> eyre::Result<()> {
     debug!("Checking if database migration is needed.");
-    let version = new_db.view(|tx| crate::database_schema_version(tx))??;
+    let version = new_db.view(crate::database_schema_version)??;
     debug!("Database version: {:?}", version);
     debug!("Current database version: {:?}", CURRENT_DB_VERSION);
     if let Some(v) = version {
