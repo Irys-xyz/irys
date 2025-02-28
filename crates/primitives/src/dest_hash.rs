@@ -55,16 +55,10 @@ impl DestHash {
         }
     }
     pub fn is_address(&self) -> bool {
-        match self {
-            DestHash::Address(_) => true,
-            _ => false,
-        }
+        matches!(self, DestHash::Address(_))
     }
     pub fn is_part_hash(&self) -> bool {
-        match self {
-            DestHash::PartitionHash(_) => true,
-            _ => false,
-        }
+        matches!(self, DestHash::PartitionHash(_))
     }
 }
 
