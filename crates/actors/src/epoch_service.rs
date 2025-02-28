@@ -243,7 +243,11 @@ impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
 
 impl EpochServiceActor {
     /// Create a new instance of the epoch service actor
-    pub fn new(epoch_config: EpochServiceConfig, config: &Config, block_index_guard: BlockIndexReadGuard) -> Self {
+    pub fn new(
+        epoch_config: EpochServiceConfig,
+        config: &Config,
+        block_index_guard: BlockIndexReadGuard,
+    ) -> Self {
         Self {
             last_epoch_hash: H256::zero(),
             ledgers: Arc::new(RwLock::new(Ledgers::new(config))),
@@ -747,6 +751,7 @@ fn truncate_to_3_decimals(value: f64) -> f64 {
 mod tests {
     use std::{any::Any, collections::VecDeque, sync::atomic::AtomicU64, time::Duration};
 
+    use crate::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
     use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_config::IrysNodeConfig;
@@ -754,7 +759,6 @@ mod tests {
     use irys_storage::{ie, StorageModule, StorageModuleVec};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{partition_chunk_offset_ie, Address, PartitionChunkRange};
-    use crate::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
     use tokio::time::sleep;
     use tracing::info;
 
@@ -797,7 +801,8 @@ mod tests {
             .await
             .unwrap();
 
-        let mut epoch_service = EpochServiceActor::new(config.clone(), &testnet_config, block_index_guard);
+        let mut epoch_service =
+            EpochServiceActor::new(config.clone(), &testnet_config, block_index_guard);
         let miner_address = config.storage_config.miner_address;
 
         // Process genesis message directly instead of through actor system
@@ -964,7 +969,6 @@ mod tests {
             .send(GetBlockIndexGuardMessage)
             .await
             .unwrap();
-
 
         let mut epoch_service = EpochServiceActor::new(config, &testnet_config, block_index_guard);
 
@@ -1292,7 +1296,8 @@ mod tests {
             height += 1;
         }
 
-        new_epoch_block.height = (testnet_config.submit_ledger_epoch_length + 1) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
+        new_epoch_block.height =
+            (testnet_config.submit_ledger_epoch_length + 1) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
 
         let _ = epoch_service_actor
