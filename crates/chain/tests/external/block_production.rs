@@ -7,7 +7,7 @@ use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, Address, Config, MAX_CHUNK_SIZE,
+    block_production::SolutionContext, irys::IrysSigner, Address, Config,
 };
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
@@ -35,7 +35,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     config.mining_signer = IrysSigner {
         signer: SigningKey::from_slice(dev_wallet.as_slice())?,
         chain_id: testnet_config.chain_id,
-        chunk_size: MAX_CHUNK_SIZE,
+        chunk_size: testnet_config.chunk_size as usize,
     };
     config.base_directory = temp_dir.path().to_path_buf();
     let storage_config = irys_types::StorageConfig::new(&testnet_config);
@@ -49,7 +49,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let account1 = IrysSigner {
         signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
         chain_id: testnet_config.chain_id,
-        chunk_size: MAX_CHUNK_SIZE,
+        chunk_size: testnet_config.chunk_size as usize,
     };
     assert_eq!(
         account1.address(),

@@ -98,7 +98,7 @@ mod tests {
 
     use crate::{
         generate_data_root, generate_leaves, hash_sha256, ingress::verify_ingress_proof,
-        irys::IrysSigner, Config, H256, MAX_CHUNK_SIZE,
+        irys::IrysSigner, Config, H256,
     };
 
     use super::generate_ingress_proof;
@@ -106,11 +106,11 @@ mod tests {
     #[test]
     fn interleave_test() -> eyre::Result<()> {
         let testnet_config = Config::testnet();
-        let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
+        let data_size = (testnet_config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
         let signer = IrysSigner::random_signer(&testnet_config);
-        let leaves = generate_leaves(&data_bytes, MAX_CHUNK_SIZE)?;
+        let leaves = generate_leaves(&data_bytes, testnet_config.chunk_size as usize)?;
         let interleave_value = signer.address();
         let interleave_hash = hash_sha256(&interleave_value.0 .0)?;
 
@@ -130,18 +130,18 @@ mod tests {
     fn basic() -> eyre::Result<()> {
         // Create some random data
         let testnet_config = Config::testnet();
-        let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
+        let data_size = (testnet_config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Build a merkle tree and data_root from the chunks
-        let leaves = generate_leaves(&data_bytes, MAX_CHUNK_SIZE).unwrap();
+        let leaves = generate_leaves(&data_bytes, testnet_config.chunk_size as usize).unwrap();
         let root = generate_data_root(leaves)?;
         let data_root = H256(root.id);
 
         // Generate an ingress proof
         let signer = IrysSigner::random_signer(&testnet_config);
-        let chunks: Vec<&[u8]> = data_bytes.chunks(MAX_CHUNK_SIZE).collect();
+        let chunks: Vec<&[u8]> = data_bytes.chunks(testnet_config.chunk_size as usize).collect();
         let proof = generate_ingress_proof(signer.clone(), data_root, &chunks)?;
 
         // Verify the ingress proof
