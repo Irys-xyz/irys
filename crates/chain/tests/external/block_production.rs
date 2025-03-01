@@ -6,9 +6,7 @@ use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, Address, Config,
-};
+use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, Config};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
 use reth_db::Database as _;

@@ -149,9 +149,7 @@ impl<'de> Deserialize<'de> for IrysSignature {
 mod tests {
     use super::*;
 
-    use crate::{
-        irys::IrysSigner, Config, IrysTransaction, IrysTransactionHeader, H256,
-    };
+    use crate::{irys::IrysSigner, Config, IrysTransaction, IrysTransactionHeader, H256};
     use alloy_core::hex::{self};
     use alloy_primitives::Address;
     use k256::ecdsa::SigningKey;

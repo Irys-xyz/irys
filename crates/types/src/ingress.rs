@@ -141,7 +141,9 @@ mod tests {
 
         // Generate an ingress proof
         let signer = IrysSigner::random_signer(&testnet_config);
-        let chunks: Vec<&[u8]> = data_bytes.chunks(testnet_config.chunk_size as usize).collect();
+        let chunks: Vec<&[u8]> = data_bytes
+            .chunks(testnet_config.chunk_size as usize)
+            .collect();
         let proof = generate_ingress_proof(signer.clone(), data_root, &chunks)?;
 
         // Verify the ingress proof
