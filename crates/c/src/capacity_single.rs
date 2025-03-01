@@ -1,5 +1,4 @@
 use irys_primitives::Address;
-use irys_types::CONFIG;
 use openssl::sha;
 
 pub const SHA_HASH_SIZE: usize = 32;
@@ -9,12 +8,13 @@ pub fn compute_seed_hash(
     address: Address,
     offset: std::ffi::c_ulong,
     hash: [u8; SHA_HASH_SIZE],
+    irys_chain_id: u64,
 ) -> [u8; SHA_HASH_SIZE] {
     let mut hasher = sha::Sha256::new();
     let address_buffer: [u8; 20] = address.0.into();
     hasher.update(&address_buffer);
     hasher.update(&hash);
-    hasher.update(&CONFIG.irys_chain_id.to_le_bytes());
+    hasher.update(&irys_chain_id.to_le_bytes());
     hasher.update(&offset.to_le_bytes());
     hasher.finish()
 }
@@ -30,8 +30,10 @@ pub fn compute_entropy_chunk(
     iterations: u32,
     chunk_size: usize,
     out_entropy_chunk: &mut Vec<u8>,
+    irys_chain_id: u64,
 ) {
-    let mut previous_segment = compute_seed_hash(mining_address, chunk_offset, partition_hash);
+    let mut previous_segment =
+        compute_seed_hash(mining_address, chunk_offset, partition_hash, irys_chain_id);
     out_entropy_chunk.clear();
     // Phase 1: sequential hashing
     for _i in 0..(chunk_size / SHA_HASH_SIZE) {
@@ -70,23 +72,26 @@ mod tests {
         capacity_single::{self, SHA_HASH_SIZE},
     };
     use irys_primitives::Address;
-    use irys_types::{CHUNK_SIZE, CONFIG};
+    use irys_types::{Config, CHUNK_SIZE};
     use rand;
     use rand::Rng;
     use std::time::Instant;
 
     #[test]
     fn test_seed_hash() {
+        let testnet_config = Config::testnet();
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-
         let now = Instant::now();
-
-        let rust_hash =
-            capacity_single::compute_seed_hash(mining_address, chunk_offset, partition_hash);
+        let rust_hash = capacity_single::compute_seed_hash(
+            mining_address,
+            chunk_offset,
+            partition_hash,
+            testnet_config.chain_id,
+        );
 
         let elapsed = now.elapsed();
         println!("Rust seed implementation: {:.2?}", elapsed);
@@ -100,7 +105,7 @@ mod tests {
         let c_hash_ptr = c_hash.as_ptr() as *mut u8;
 
         let now = Instant::now();
-        let chain_id: u64 = CONFIG.irys_chain_id;
+        let chain_id = testnet_config.chain_id;
 
         unsafe {
             compute_seed_hash(
@@ -124,6 +129,7 @@ mod tests {
 
     #[test]
     fn test_compute_entropy_chunk() {
+        let testnet_config = Config::testnet();
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
@@ -140,8 +146,9 @@ mod tests {
             chunk_offset,
             partition_hash,
             iterations,
-            CONFIG.chunk_size as usize,
+            testnet_config.chunk_size as usize,
             &mut chunk,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -157,7 +164,7 @@ mod tests {
         let c_chunk_ptr = c_chunk.as_ptr() as *mut u8;
 
         let now = Instant::now();
-        let chain_id: u64 = CONFIG.irys_chain_id;
+        let chain_id = testnet_config.chain_id;
 
         unsafe {
             compute_entropy_chunk(

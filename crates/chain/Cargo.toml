@@ -7,34 +7,34 @@ version = "0.1.0"
 name = "irys"
 path = "src/main.rs"
 
-
 [features]
 nvidia = ["irys-actors/nvidia"]
-
 
 [dependencies]
 # Irys
 irys-database.workspace = true
 irys-storage.workspace = true
 irys-reth-node-bridge.workspace = true
-irys-types.workspace = true
+irys-types = { workspace = true, features = ["test-utils"] }
 irys-api-server.workspace = true
 irys-config.workspace = true
 irys-testing-utils.workspace = true
 irys-actors.workspace = true
 irys-packing.workspace = true
 irys-vdf.workspace = true
-awc = "3.5.1"
-base58 = "0.2.0"
-clap = "4.5.20"
-eyre = "0.6.8"
-rand = "0.8.5"
+
+base58.workspace = true
+color-eyre.workspace = true
+tracing-error.workspace = true
+eyre.workspace = true
+rand.workspace = true
 nodit.workspace = true
 reth-db.workspace = true
 reth-primitives.workspace = true
 reth.workspace = true
-serde_json = "1.0.107"
-sha2 = "0.10.8"
+toml.workspace = true
+serde_json = "1"
+sha2 = "0.10"
 actix-rt.workspace = true
 actix-web.workspace = true
 actix-http.workspace = true
@@ -48,18 +48,21 @@ alloy-core.workspace = true
 actix.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
+
+modular-bitfield.workspace = true
 reth-cli-runner.workspace = true
 futures.workspace = true
 reth-tracing.workspace = true
 hex.workspace = true
 test-fuzz.workspace = true
-k256 = { version = "0.13", default-features = false, features = [
-	"ecdsa",
-	"serde",
-] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "serde"] }
 alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-provider.workspace = true
 core_affinity = "0.8.1"
+
+[dev-dependencies]
+awc = "3.5"
+irys-actors = { workspace = true, features = ["test-utils"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true
 
