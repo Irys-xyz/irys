@@ -66,12 +66,8 @@ impl IrysSigner {
         transaction.header.term_fee = 1;
 
         // Fetch and set last_tx if not provided (primarily for testing).
-        let anchor = if let Some(anchor) = anchor {
-            anchor
-        } else {
-            // TODO: Retrieve an acceptable block_hash anchor
-            H256::default()
-        };
+        // TODO: Retrieve an acceptable block_hash anchor if anchor is None
+        let anchor = anchor.unwrap_or_default();
         transaction.header.anchor = anchor;
 
         Ok(transaction)
