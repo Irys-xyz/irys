@@ -602,12 +602,11 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
             Ok(())
         }()
         // closure so we can "catch" and log all errs, so we don't need to log and return an err everywhere
-        .map_err(|e| {
+        .inspect_err(|e| {
             error!(
                 "Unexpected Mempool error while processing BlockConfirmedMessage: {}",
-                &e
+                e
             );
-            e
         })
     }
 }
