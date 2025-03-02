@@ -18,7 +18,7 @@ pub mod vdf_state;
 /// # Arguments
 ///
 /// * `step_number` - The step the checkpoint belongs to, add 1 to the salt for
-/// each subsequent checkpoint calculation.
+///     each subsequent checkpoint calculation.
 pub const fn step_number_to_salt_number(config: &VDFStepsConfig, step_number: u64) -> u64 {
     match step_number {
         0 => 0,
