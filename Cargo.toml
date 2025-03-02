@@ -238,45 +238,47 @@ rust.unused_imports = "warn"
 # rust.unnameable-types = "warn"
 
 [workspace.lints.clippy]
-cargo = { priority = -1, level = "warn" }
+# cargo = { priority = -1, level = "warn" }
 complexity = { priority = -2, level = "warn" }
 perf = { priority = -3, level = "warn" }
 correctness = { priority = -4, level = "warn" }
-restriction = { priority = -5, level = "warn" }
+# restriction = { priority = -5, level = "warn" }
 style = { priority = -6, level = "warn" }
 suspicious = { priority = -7, level = "warn" }
-pedantic = { priority = -8, level = "warn" }
-nursery = { priority = -9, level = "warn" }
+# pedantic = { priority = -8, level = "warn" }
+# nursery = { priority = -9, level = "warn" }
 
-cargo_common_metadata = "allow"
-pattern_type_mismatch = "allow"
-missing_docs_in_private_items = "allow"
-blanket_clippy_restriction_lints = "allow"
-implicit_return = "allow"
-dbg_macro = "allow"
-single_call_fn = "allow"
-missing_inline_in_public_items = "allow"
-question_mark_used = "allow"
-absolute_paths = "allow"
-missing_trait_methods = "allow"
-wildcard_imports = "allow"
-shadow_reuse = "allow"
-exhaustive_enums = "allow"
-ref_patterns = "allow"
-pub_use = "allow"
-single_char_lifetime_names = "allow"
-multiple_crate_versions = "allow"
-exhaustive_structs = "allow"
-separated_literal_suffix = "allow"
-mod_module_files = "allow"
-negative_feature_names = "allow"
-std_instead_of_alloc = "allow"
-expect_used = "allow"
-pub_with_shorthand = "allow"
-option_if_let_else = "allow"
-self_named_module_files = "allow"
-shadow_unrelated = "allow"
-arbitrary_source_item_ordering = "allow"
+module_inception = "allow"
+too_many_arguments = "allow"
+
+# cargo_common_metadata = "allow"
+# pattern_type_mismatch = "allow"
+# missing_docs_in_private_items = "allow"
+# blanket_clippy_restriction_lints = "allow"
+# implicit_return = "allow"
+# dbg_macro = "allow"
+# single_call_fn = "allow"
+# missing_inline_in_public_items = "allow"
+# question_mark_used = "allow"
+# absolute_paths = "allow"
+# missing_trait_methods = "allow"
+# wildcard_imports = "allow"
+# shadow_reuse = "allow"
+# exhaustive_enums = "allow"
+# ref_patterns = "allow"
+# pub_use = "allow"
+# single_char_lifetime_names = "allow"
+# multiple_crate_versions = "allow"
+# exhaustive_structs = "allow"
+# separated_literal_suffix = "allow"
+# mod_module_files = "allow"
+# negative_feature_names = "allow"
+# std_instead_of_alloc = "allow"
+# expect_used = "allow"
+# pub_with_shorthand = "allow"
+# option_if_let_else = "allow"
+# self_named_module_files = "allow"
+# shadow_unrelated = "allow"
 
 # These are some of clippy's nursery (i.e., experimental) lints that we like.
 # By default, nursery lints are allowed. Some of the lints below have made good
@@ -346,20 +348,20 @@ useless_let_if_seq = "warn"
 while_float = "warn"
 zero_sized_map_values = "warn"
 
-# These are nursery lints which have findings. Allow them for now. Some are not
-# quite mature enough for use in our codebase and some we don't really want.
-# Explicitly listing should make it easier to fix in the future.
-as_ptr_cast_mut = "allow"
-cognitive_complexity = "allow"
-debug_assert_with_mut_call = "allow"
-fallible_impl_from = "allow"
-future_not_send = "allow"
-needless_collect = "allow"
-non_send_fields_in_send_ty = "allow"
-redundant_pub_crate = "allow"
-significant_drop_in_scrutinee = "allow"
-significant_drop_tightening = "allow"
-too_long_first_doc_paragraph = "allow"
+# # These are nursery lints which have findings. Allow them for now. Some are not
+# # quite mature enough for use in our codebase and some we don't really want.
+# # Explicitly listing should make it easier to fix in the future.
+# as_ptr_cast_mut = "allow"
+# cognitive_complexity = "allow"
+# debug_assert_with_mut_call = "allow"
+# fallible_impl_from = "allow"
+# future_not_send = "allow"
+# needless_collect = "allow"
+# non_send_fields_in_send_ty = "allow"
+# redundant_pub_crate = "allow"
+# significant_drop_in_scrutinee = "allow"
+# significant_drop_tightening = "allow"
+# too_long_first_doc_paragraph = "allow"
 
 [workspace.metadata.cargo-machete]
 ignored = ["modular-bitfield", "test-fuzz"]
