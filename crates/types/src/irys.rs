@@ -132,7 +132,6 @@ impl IrysSigner {
             data: Base64(data),
             chunks,
             proofs,
-            ..Default::default()
         })
     }
 }
