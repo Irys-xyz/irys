@@ -11,8 +11,8 @@ use irys_types::CHUNK_SIZE; // do not change where is used for CONFIG.chunk_size
 #[cfg(feature = "nvidia")]
 pub use irys_c::capacity_cuda;
 
-/// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
-/// unpacking & trimming the data, and passing through metadata (size, tx_offset, etc)
+/// Unpacks a `PackedChunk` into an `UnpackedChunk` by recomputing the required entropy,
+/// unpacking & trimming the data, and passing through metadata (size, `tx_offset`, etc)
 pub fn unpack(
     packed_chunk: &PackedChunk,
     entropy_packing_iterations: u32,
@@ -41,7 +41,7 @@ pub fn unpack(
     }
 }
 
-/// Unpacks a PackedChunk using the supplied entropy, returning *just the unpacked data*
+/// Unpacks a `PackedChunk` using the supplied entropy, returning *just the unpacked data*
 #[inline]
 pub fn unpack_with_entropy(
     packed_chunk: &PackedChunk,
@@ -70,8 +70,8 @@ pub fn unpack_with_entropy(
 }
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
-/// defaults to [`PACKING_SHA_1_5_S`]`, returns entropy chunk in out_entropy_chunk parameter.
-/// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (defined in capacity.h file) capacity
+/// defaults to [`PACKING_SHA_1_5_S`], returns entropy chunk in `out_entropy_chunk` parameter.
+/// Precondition: `out_entropy_chunk` should have at least `DATA_CONFIG`.`chunk_size` = 256KB (defined in capacity.h file) capacity
 /// Uses C 2D Packing implementation
 pub fn capacity_pack_range_c(
     mining_address: Address,
@@ -242,15 +242,15 @@ pub fn capacity_pack_range_with_data_c(
 }
 
 #[inline]
-pub fn xor_vec_u8_arrays_in_place(a: &mut Vec<u8>, b: &Vec<u8>) {
+pub fn xor_vec_u8_arrays_in_place(a: &mut [u8], b: &[u8]) {
     for i in 0..a.len() {
         a[i] = a[i].bitxor(b[i]);
     }
 }
 
-/// Specialized variant, used when we pass in the entropy as argument a (which will always be chunk_size), and unpacked data in b (which can be smaller than chunk_size)
+/// Specialized variant, used when we pass in the entropy as argument a (which will always be `chunk_size`), and unpacked data in b (which can be smaller than `chunk_size`)
 /// as xor is commutative, this allows us to avoid a clone of the chunk's data when writing, as oftentimes we have mutable access to the required entropy, but only a ref to the unpacked data.
-/// note: this will always produce full chunk_size vecs, as expected by the storage module
+/// note: this will always produce full `chunk_size` vecs, as expected by the storage module
 #[inline]
 pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
     debug_assert!(data.len() <= entropy.len());
