@@ -17,7 +17,10 @@ pub async fn get_price(
             Ok(perm_storage_price) => Ok(HttpResponse::Ok().body(perm_storage_price.to_string())),
             Err(e) => Ok(HttpResponse::BadRequest().body(format!("{e:?}"))),
         },
-        Ok(Ledger::Submit) => Ok(HttpResponse::BadRequest().body("term not yet implemented")),
+        Ok(Ledger::Submit) => match PriceCalc::calc_term_storage_price(size, &state.config) {
+            Ok(term_storage_price) => Ok(HttpResponse::Ok().body(term_storage_price.to_string())),
+            Err(e) => Ok(HttpResponse::BadRequest().body(format!("{e:?}"))),
+        },
         Err(_) => Ok(HttpResponse::BadRequest().body("Ledger type not supported")),
     }
 }
