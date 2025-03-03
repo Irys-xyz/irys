@@ -33,7 +33,6 @@ tempfile.workspace = true
 irys-testing-utils.workspace = true
 base58.workspace = true
 futures.workspace = true
-futures-util.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }

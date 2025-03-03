@@ -3995,7 +3995,6 @@ dependencies = [
  "env_logger",
  "eyre",
  "futures",
- "futures-util",
  "irys-config",
  "irys-database",
  "irys-efficient-sampling",
