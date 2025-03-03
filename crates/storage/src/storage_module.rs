@@ -213,6 +213,7 @@ impl StorageModule {
                     .read(true)
                     .write(true)
                     .create(true) // Optional: creates file if it doesn't exist
+                    .truncate(true) // do we want to truncate here, or append if it exists?
                     .open(&path)
                     .map_err(|e| {
                         eyre!(
@@ -270,6 +271,7 @@ impl StorageModule {
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(true) // do we want to truncate here, or append if it exists?
                 .open(&intervals_file_path)
                 .wrap_err_with(|| {
                     format!(
@@ -1012,6 +1014,7 @@ pub fn write_info_file(path: &Path, info: &StorageModuleInfo) -> eyre::Result<()
     let mut info_file = OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(true) // do we want to truncate here, or append if it exists?
         .open(path)
         .unwrap_or_else(|_| panic!("Failed to open: {}", path.display()));
 

@@ -352,6 +352,7 @@ fn load_index_from_file(config: &IrysNodeConfig) -> io::Result<Vec<BlockIndexIte
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true) // do we want to truncate here, or append if it exists?
         .open(path)?;
 
     // Determine the file size
