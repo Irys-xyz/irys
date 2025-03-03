@@ -265,7 +265,7 @@ impl Actor for PackingActor {
     type Context = Context<Self>;
 
     fn start(self) -> actix::Addr<Self> {
-        let keys = self.pending_jobs.keys().cloned().collect::<Vec<usize>>();
+        let keys = self.pending_jobs.keys().copied().collect::<Vec<usize>>();
         for key in keys {
             self.actix_runtime_handle.spawn(Self::process_jobs(
                 self.clone(),
