@@ -20,5 +20,6 @@ irys-testing-utils.workspace = true
 irys-packing.workspace = true
 derive_more.workspace = true
 base58.workspace = true
+
 [lints]
 workspace = true
