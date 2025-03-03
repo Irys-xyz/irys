@@ -185,7 +185,7 @@ pub async fn start_irys_node(
                             .unwrap()
                     })
                     .map(Arc::new)
-                    .unwrap_or(arc_genesis.clone());
+                    .unwrap_or_else(|| arc_genesis.clone());
 
                 // Initialize the epoch_service actor to handle partition ledger assignments
                 let epoch_config = EpochServiceConfig::new(&config);
