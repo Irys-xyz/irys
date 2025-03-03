@@ -140,7 +140,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             data.extend_from_slice(&chunk);
         }
         let bytes = 1024 * 257;
-        let tx = signer.create_transaction(data, None, bytes).unwrap();
+        let tx = signer.create_transaction(&testnet_config,data, None, bytes).unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
         txs.push(tx);
     }

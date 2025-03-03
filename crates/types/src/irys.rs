@@ -159,7 +159,7 @@ mod tests {
 
         let bytes = 1024 * 257;
         // Create a transaction from the random bytes
-        let mut tx = irys.create_transaction(data_bytes.clone(), None, bytes).unwrap();
+        let mut tx = irys.create_transaction(&config, data_bytes.clone(), None, bytes).unwrap();
 
         // Sign the transaction
         tx = irys.sign_transaction(tx).unwrap();

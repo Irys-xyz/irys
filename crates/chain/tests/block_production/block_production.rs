@@ -67,7 +67,7 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
     for a in [&account1, &account2, &account3] {
         let data_bytes = "Hello, world!".as_bytes().to_vec();
         let bytes = 1024 * 257;
-        let tx = a.create_transaction(data_bytes, None, bytes).unwrap();
+        let tx = a.create_transaction(&testnet_config, data_bytes, None, bytes).unwrap();
         let tx = a.sign_transaction(tx).unwrap();
         // submit to mempool
         let _tx_res = node
@@ -371,7 +371,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
         let data_bytes = "Hello, world!".as_bytes().to_vec();
         let bytes = 1024 * 257;
-        let tx = a.create_transaction(data_bytes, None, bytes).unwrap();
+        let tx = a.create_transaction(&testnet_config, data_bytes, None, bytes).unwrap();
         let tx = a.sign_transaction(tx).unwrap();
         // submit to mempool
         let _tx_res = node

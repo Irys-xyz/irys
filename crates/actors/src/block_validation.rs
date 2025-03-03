@@ -541,7 +541,7 @@ mod tests {
                 data.extend_from_slice(chunk);
             }
             let bytes = 1024 * 257;
-            let tx = signer.create_transaction(data, None, bytes).unwrap();
+            let tx = signer.create_transaction(&context.testnet_config, data, None, bytes).unwrap();
             let tx = signer.sign_transaction(tx).unwrap();
             txs.push(tx);
         }
@@ -573,7 +573,7 @@ mod tests {
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
         let bytes = 1024 * 257;
-        let tx = signer.create_transaction(data.clone(), None, bytes).unwrap();
+        let tx = signer.create_transaction(&context.testnet_config, data.clone(), None, bytes).unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
         txs.push(tx);
 

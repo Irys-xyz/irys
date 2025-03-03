@@ -96,7 +96,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     // Create a new Irys API instance & a signed transaction
     let irys = IrysSigner::random_signer(&testnet_config);
     let size_of_bytes_to_store = 1024 * 257;
-    let tx = irys.create_transaction(data_bytes.clone(), None, size_of_bytes_to_store).unwrap();
+    let tx = irys.create_transaction(&testnet_config, data_bytes.clone(), None, size_of_bytes_to_store).unwrap();
     let tx = irys.sign_transaction(tx).unwrap();
 
     // Make a POST request with JSON payload
