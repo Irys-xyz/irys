@@ -286,7 +286,7 @@ impl StorageModule {
             // that maintains system resources connected to the files in that submodule
             submodule_map
                 .insert_strict(
-                    submodule_interval.clone(),
+                    submodule_interval,
                     StorageSubmodule {
                         path: dir,
                         file: chunks_file,
@@ -574,7 +574,7 @@ impl StorageModule {
         let mut set = NoditSet::new();
         for (interval, ct) in intervals.iter() {
             if *ct == chunk_type {
-                let _ = set.insert_merge_touching_or_overlapping(interval.clone());
+                let _ = set.insert_merge_touching_or_overlapping(*interval);
             }
         }
         // NoditSet is a BTreeMap underneath, meaning collecting them into a vec
@@ -638,7 +638,7 @@ impl StorageModule {
                         add_tx_path_hash_to_offset_index(
                             tx,
                             part_offset,
-                            Some(tx_path_hash.clone()),
+                            Some(tx_path_hash),
                         )?;
                     }
                     // Also update the start offset by data_root index
