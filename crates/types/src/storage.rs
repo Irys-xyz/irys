@@ -1,7 +1,9 @@
 use std::{
-    fmt,
-    ops::{Add, AddAssign, Deref, DerefMut, Rem},
-    path::PathBuf,
+    cmp::Ordering, fmt,
+    ops::{Add, 
+        AddAssign,
+        Deref, DerefMut, Rem},
+    path::PathBuf
 };
 
 use crate::{Config, RelativeChunkOffset};
@@ -490,14 +492,14 @@ pub fn split_interval(
         return Err(eyre::eyre!("Invalid zero step for split interval"));
     }
 
-    let start = interval.start();
-    let end = interval.end();
+    let start: PartitionChunkOffset = interval.start();
+    let end: PartitionChunkOffset = interval.end();
 
-    if start > end {
-        return Err(eyre::eyre!("Invalid interval bounds: [{}, {}]", start, end));
-    } else if start == end {
-        return Ok(vec![PartitionChunkRange(ii(start, end))]);
-    }
+    match start.cmp(&end) {
+        Ordering::Greater => return Err(eyre::eyre!("Invalid interval bounds: [{}, {}]", start, end)),
+        Ordering::Equal => return Ok(vec![PartitionChunkRange(ii(start, end))]),
+        Ordering::Less => (),
+    };
 
     let n = if (end - start + 1) % step == PartitionChunkOffset(0) {
         ((end - start + 1) / step).try_into().unwrap()
