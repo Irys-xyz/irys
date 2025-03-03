@@ -2,8 +2,10 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use alloy_eips::BlockNumberOrTag;
+use irys_actors::cache_service::ChunkCacheServiceHandle;
 use irys_actors::packing::PackingConfig;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
+use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -38,7 +40,7 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
     StorageConfig, CHUNK_SIZE, H256,
 };
-use irys_types::{Config, DifficultyAdjustmentConfig, PartitionChunkRange};
+use irys_types::{Config, DifficultyAdjustmentConfig, PartitionChunkRange, RethDatabaseProvider};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::rpc::eth::EthApiServer as _;
 use reth::{
@@ -164,6 +166,13 @@ pub async fn start_irys_node(
         &arc_config.irys_consensus_data_dir(),
     )?);
 
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut task_manager = TaskManager::new(tokio_runtime.handle().clone());
+    let task_exec = task_manager.executor();
+
     std::thread::Builder::new()
         .name("actor-main-thread".to_string())
         .stack_size(32 * 1024 * 1024)
@@ -172,11 +181,14 @@ pub async fn start_irys_node(
             System::new().block_on(async move {
                 // the RethNodeHandle doesn't *need* to be Arc, but it will reduce the copy cost
                 let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
-                let reth_db = DatabaseProvider(reth_node.provider.database.db.clone());
+                let reth_db = RethDatabaseProvider(reth_node.provider.database.db.clone());
                 let irys_db = DatabaseProvider(irys_db_env.clone());
                 let vdf_config = VDFStepsConfig::new(&config);
 
                 check_db_version_and_run_migrations_if_needed(&reth_db, &irys_db).unwrap();
+
+                let (service_senders, mut service_receivers) = ServiceSenders::init();
+                let _ = ChunkCacheServiceHandle::spawn_service(service_senders.chunk_cache.clone(), service_receivers.chunk_cache.take().unwrap(), task_exec, irys_db.clone(), config.clone());
 
                 let latest_block = latest_block_index
                     .map(|b| {
@@ -359,6 +371,7 @@ pub async fn start_irys_node(
                     storage_modules.clone(),
                     block_tree_guard.clone(),
                     &config,
+                    service_senders.clone()
                 );
                 let mempool_arbiter = Arbiter::new();
                 SystemRegistry::set(MempoolService::start_in_arbiter(
@@ -372,6 +385,7 @@ pub async fn start_irys_node(
                     storage_config.clone(),
                     storage_modules.clone(),
                     irys_db.clone(),
+                    service_senders.clone()
                 );
                 SystemRegistry::set(chunk_migration_service.start());
 
@@ -580,19 +594,28 @@ pub async fn start_irys_node(
 
     // run reth in it's own thread w/ it's own tokio runtime
     // this is done as reth exhibits strange behaviour (notably channel dropping) when not in it's own context/when the exit future isn't been awaited
+    let exec: reth::tasks::TaskExecutor = task_manager.executor();
 
-    std::thread::Builder::new().name("reth-thread".to_string())
+    std::thread::Builder::new()
+        .name("reth-thread".to_string())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
-            let node_config= cloned_arc.clone();
-            let tokio_runtime = /* Handle::current(); */ tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-            let mut task_manager = TaskManager::new(tokio_runtime.handle().clone());
-            let exec: reth::tasks::TaskExecutor = task_manager.executor();
+            let node_config = cloned_arc.clone();
 
-            tokio_runtime.block_on(run_to_completion_or_panic(
-                &mut task_manager,
-                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider, latest_block_height)),
-            )).unwrap();
+            tokio_runtime
+                .block_on(run_to_completion_or_panic(
+                    &mut task_manager,
+                    run_until_ctrl_c(start_reth_node(
+                        exec,
+                        reth_chainspec,
+                        node_config,
+                        IrysTables::ALL,
+                        reth_handle_sender,
+                        irys_provider,
+                        latest_block_height,
+                    )),
+                ))
+                .unwrap();
         })?;
 
     // wait for the full handle to be send over by the actix thread

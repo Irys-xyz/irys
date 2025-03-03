@@ -145,7 +145,6 @@ impl BlockTreeService {
             &block_header.block_hash.0.to_base58(),
             &block_header.height
         );
-
         let chunk_migration = ChunkMigrationService::from_registry();
         let block_index = BlockIndexService::from_registry();
         let block_finalized_message = BlockFinalizedMessage {
@@ -232,7 +231,7 @@ impl BlockTreeService {
             panic!("Block tree and index out of sync");
         }
         debug!(
-            "JESSEDEBUG finalizing irys block {} ({})",
+            "finalizing irys block {} ({})",
             &finalized_hash, &finalized_height
         );
 

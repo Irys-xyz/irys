@@ -130,6 +130,11 @@ fn db_subkey_test() -> eyre::Result<()> {
     // delete the key, which also deletes all the associated duplicate values
     let w_tx = db.tx_mut()?;
     w_tx.delete::<CachedChunks2>(key, None)?;
+
+    // or delete a specific duplicate value
+    // w_tx.delete::<CachedChunks2>(key, Some(chunk.clone()))?;
+    //
+
     w_tx.commit()?;
 
     // new cursor - MDBX has isolation, so a new tx is required to "see" the changes

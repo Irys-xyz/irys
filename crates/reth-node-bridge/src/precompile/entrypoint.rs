@@ -55,12 +55,14 @@ fn programmable_data_precompile(
         ))
     })?;
 
-    match decoded_id {
+    let res = match decoded_id {
         PdFunctionId::ReadFullByteRange => {
             read_bytes_range_by_index(call_data, gas_limit, env, state_provider, parsed)
         }
         PdFunctionId::ReadPartialByteRange => {
             read_partial_byte_range(call_data, gas_limit, env, state_provider, parsed)
         }
-    }
+    };
+    // debug!("JESSEDEBUG PD invocation result: {:?}", &res);
+    res
 }

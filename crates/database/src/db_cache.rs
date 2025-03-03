@@ -1,6 +1,64 @@
+use alloy_primitives::aliases::U232;
 use arbitrary::Arbitrary;
-use irys_types::{Base64, ChunkPathHash, Compact, TxChunkOffset, UnpackedChunk, H256};
+use bytes::Buf as _;
+use irys_types::{
+    partition::PartitionHash, Base64, ChunkPathHash, Compact, TxChunkOffset, UnpackedChunk, H256,
+};
+use reth_db::table::{Decode, Encode};
+use reth_db::DatabaseError;
 use serde::{Deserialize, Serialize};
+
+// TODO: move all of these into types
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
+/// partition hashes
+/// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
+pub struct PartitionHashes(pub Vec<PartitionHash>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
+pub struct DataRootLRUEntry {
+    /// The last block height this data_root was used
+    pub last_height: u64,
+    pub ingress_proof: bool, // TODO: use bitflags
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize, Default, Arbitrary,
+)]
+
+// """constrained""" by PD: maximum addressible partitions: u200, with a u32 chunk offset
+pub struct GlobalChunkOffset(U232);
+
+impl Encode for GlobalChunkOffset {
+    type Encoded = [u8; 29];
+
+    fn encode(self) -> Self::Encoded {
+        self.0.to_le_bytes()
+    }
+}
+impl Decode for GlobalChunkOffset {
+    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
+        Ok(GlobalChunkOffset(
+            U232::try_from_le_slice(value).ok_or(DatabaseError::Decode)?,
+        ))
+    }
+}
+
+impl Compact for GlobalChunkOffset {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        buf.put_slice(&self.0.to_le_bytes::<29>());
+        29
+    }
+
+    fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let o = GlobalChunkOffset(U232::from_le_slice(buf));
+        buf.advance(len);
+        (o, buf)
+    }
+}
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
 pub struct CachedDataRoot {

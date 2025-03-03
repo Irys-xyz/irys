@@ -1,8 +1,8 @@
 use actix::{Actor, Context, Handler, Message, Supervised, SystemService};
 use base58::ToBase58;
 use eyre::eyre;
-use irys_database::db_cache::data_size_to_chunk_count;
-use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofLRU, IngressProofs};
+use irys_database::db_cache::{data_size_to_chunk_count, DataRootLRUEntry};
+use irys_database::tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs};
 use irys_database::{insert_tx_header, tx_header_by_txid, Ledger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
@@ -10,7 +10,7 @@ use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
     IrysTransactionHeader, H256,
 };
-use irys_types::{Config, DataRoot, StorageConfig, U256};
+use irys_types::{Config, DataRoot, RethDatabaseProvider, StorageConfig, U256};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbCursorRO;
 use reth_db::cursor::DbDupCursorRO;
@@ -24,11 +24,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::block_producer::BlockConfirmedMessage;
 use crate::block_tree_service::BlockTreeReadGuard;
+use crate::services::ServiceSenders;
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug, Default)]
 pub struct MempoolService {
     irys_db: Option<DatabaseProvider>,
-    reth_db: Option<DatabaseProvider>,
+    reth_db: Option<RethDatabaseProvider>,
     /// Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
     /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
@@ -42,6 +43,7 @@ pub struct MempoolService {
     max_data_txs_per_block: u64,
     storage_modules: StorageModuleVec,
     block_tree_read_guard: Option<BlockTreeReadGuard>,
+    service_channels: Option<ServiceSenders>,
 }
 
 impl Actor for MempoolService {
@@ -58,13 +60,14 @@ impl MempoolService {
     /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
     pub fn new(
         irys_db: DatabaseProvider,
-        reth_db: DatabaseProvider,
+        reth_db: RethDatabaseProvider,
         task_exec: TaskExecutor,
         signer: IrysSigner,
         storage_config: StorageConfig,
         storage_modules: StorageModuleVec,
         block_tree_read_guard: BlockTreeReadGuard,
         config: &Config,
+        service_channels: ServiceSenders,
     ) -> Self {
         info!("service started");
         Self {
@@ -79,6 +82,7 @@ impl MempoolService {
             max_data_txs_per_block: config.max_data_txs_per_block,
             anchor_expiry_depth: config.anchor_expiry_depth.into(),
             block_tree_read_guard: Some(block_tree_read_guard),
+            service_channels: Some(service_channels),
         }
     }
 }
@@ -216,13 +220,13 @@ impl Handler<TxIngressMessage> for MempoolService {
             Ok(Some(hdr)) if hdr.height + self.anchor_expiry_depth >= *latest_height => {
                 debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id);
                 // update any associated ingress proofs
-                if let Ok(Some(old_expiry)) = read_tx.get::<IngressProofLRU>(tx.data_root) {
+                if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
                     let new_expiry = hdr.height + self.anchor_expiry_depth;
                     debug!(
                         "Updating ingress proof for data root {} expiry from {} -> {}",
-                        &tx.data_root, &old_expiry, &new_expiry
+                        &tx.data_root, &old_expiry.last_height, &new_expiry
                     );
-                    db.update(|write_tx| write_tx.put::<IngressProofLRU>(tx.data_root, new_expiry))
+                    db.update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
                         .map_err(|e| {
                             error!(
                                 "Error updating ingress proof expiry for {} - {}",
@@ -262,9 +266,6 @@ impl Handler<TxIngressMessage> for MempoolService {
             println!("Signature is NOT valid");
             return Err(TxIngressError::InvalidSignature);
         }
-
-        // TODO: Check if the signer has funds to post the tx
-        //return Err(TxIngressError::Unfunded);
 
         // Cache the data_root in the database
 
@@ -438,10 +439,9 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                 .last()
                 .ok_or(ChunkIngressError::ServiceUninitialized)?;
 
-            let target_height = latest_height + self.anchor_expiry_depth;
-
             let db1 = self.irys_db.clone().unwrap();
             let signer1 = self.signer.clone().unwrap();
+            let latest_height1 = *latest_height;
             self.task_exec.clone().unwrap().spawn_blocking(async move {
                 generate_ingress_proof(
                     db1.clone(),
@@ -452,9 +452,17 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                 )
                 // TODO: handle results instead of unwrapping
                 .unwrap();
-                db1.update(|wtx| wtx.put::<IngressProofLRU>(root_hash, target_height))
-                    .unwrap()
-                    .unwrap();
+                db1.update(|wtx| {
+                    wtx.put::<DataRootLRU>(
+                        root_hash,
+                        DataRootLRUEntry {
+                            last_height: latest_height1,
+                            ingress_proof: true,
+                        },
+                    )
+                })
+                .unwrap()
+                .unwrap();
             });
         }
 
@@ -564,35 +572,6 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
 
                 let _ = mut_tx.commit();
             }
-
-            // prune ingress proofs
-
-            let canon_chain = self
-                .block_tree_read_guard
-                .clone()
-                .ok_or(eyre!("mempool_service is uninitialized"))?
-                .read()
-                .get_canonical_chain();
-
-            let (_, latest_height, _, _) = canon_chain
-                .0
-                .last()
-                .ok_or(eyre!("mempool_service is uninitialized"))?;
-
-            let mut_tx = db.tx_mut()?;
-            let mut cursor = mut_tx.cursor_write::<IngressProofLRU>()?;
-            let mut walker = cursor.walk(None)?;
-            while let Some((k, expiry_height)) = walker.next().transpose()? {
-                if expiry_height < *latest_height {
-                    debug!(
-                        "expiring ingress proof {} (expiry: {}, latest: {})",
-                        &k, &expiry_height, latest_height
-                    );
-                    mut_tx.delete::<IngressProofLRU>(k, None)?;
-                    mut_tx.delete::<IngressProofs>(k, None)?;
-                }
-            }
-            mut_tx.commit()?;
 
             info!(
                 "Removing confirmed tx - Block height: {} num tx: {}",

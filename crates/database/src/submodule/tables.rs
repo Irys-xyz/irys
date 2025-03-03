@@ -8,6 +8,8 @@ use reth_db::{HasName, HasTableType, TableType, TableViewer};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::metadata::MetadataKey;
+
 // Per-submodule database tables
 tables! {
     SubmoduleTables;
@@ -28,6 +30,9 @@ tables! {
 
     /// Maps a data root to the list of submodule-relative start offsets
     table StartOffsetsByDataRoot<Key = DataRoot, Value = RelativeStartOffsets>;
+
+    /// Table to store various metadata, such as the current db schema version
+    table Metadata<Key = MetadataKey, Value = Vec<u8>>;
 
 }
 

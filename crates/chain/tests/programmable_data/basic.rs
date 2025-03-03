@@ -44,12 +44,10 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
 #[actix_web::test]
 async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "info");
-
     let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
     let mut testnet_config = Config::testnet();
     testnet_config.chunk_size = 32;
-
+    testnet_config.finalization_depth = 2; // PD reads chunks from the chunk cache rn
     let main_address = testnet_config.miner_address();
     let account1 = IrysSigner::random_signer(&testnet_config);
     let mut config = IrysNodeConfig {

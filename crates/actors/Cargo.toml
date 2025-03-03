@@ -38,6 +38,7 @@ futures-util.workspace = true
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-config = { workspace = true, features = ["test-utils"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

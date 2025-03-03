@@ -44,7 +44,7 @@ pub struct Config {
     /// - 6 confirmations protects against attackers with <25% hashpower
     /// - 20 confirmations protects against attackers with <40% hashpower
     /// - No number of confirmations is secure against attackers with >50% hashpower
-    pub chunk_migration_depth: u32,
+    pub finalization_depth: u32,
     #[serde(
         deserialize_with = "serde_utils::signing_key_from_hex",
         serialize_with = "serde_utils::serializes_signing_key"
@@ -64,6 +64,8 @@ pub struct Config {
     /// defines the range of how much can the token fluctuate since the last EMA price for it to be accepted
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub token_price_safe_range: Amount<Percentage>,
+    /// number of blocks cache cleaning will lag behind block finalization
+    pub cache_clean_lag: u8,
 }
 
 impl Config {
@@ -103,7 +105,7 @@ impl Config {
             num_partitions_per_slot: 1,
             num_writes_before_sync: 1,
             reset_state_on_restart: false,
-            chunk_migration_depth: 1,
+            finalization_depth: 1,
             mining_key: SigningKey::from_slice(
                 &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
                     .expect("valid hex"),
@@ -117,6 +119,7 @@ impl Config {
                 .expect("valid token amount"),
             token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
                 .expect("valid percentage"),
+            cache_clean_lag: 2,
         }
     }
 }
@@ -203,35 +206,36 @@ mod tests {
     #[test]
     fn test_deserialize_config_from_toml() {
         let toml_data = r#"
-block_time = 10
-max_data_txs_per_block = 20
-difficulty_adjustment_interval = 100
-max_difficulty_adjustment_factor = "4"
-min_difficulty_adjustment_factor = "0.25"
-chunk_size = 262144
-num_chunks_in_partition = 10
-num_chunks_in_recall_range = 2
-vdf_reset_frequency = 1200
-vdf_parallel_verification_thread_limit = 4
-num_checkpoints_in_vdf_step = 25
-vdf_sha_1s = 7000
-entropy_packing_iterations = 22500000
-chain_id = 1275
-capacity_scalar = 100
-num_blocks_in_epoch = 100
-submit_ledger_epoch_length = 5
-num_partitions_per_slot = 1
-num_writes_before_sync = 5
-reset_state_on_restart = false
-chunk_migration_depth = 1
-mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
-num_capacity_partitions = 16
-port = 8080
-anchor_expiry_depth = 10
-genesis_price_valid_for_n_epochs = 2
-genesis_token_price = "1.0"
-token_price_safe_range = "0.25"
-"#;
+            block_time = 10
+            max_data_txs_per_block = 20
+            difficulty_adjustment_interval = 100
+            max_difficulty_adjustment_factor = "4"
+            min_difficulty_adjustment_factor = "0.25"
+            chunk_size = 262144
+            num_chunks_in_partition = 10
+            num_chunks_in_recall_range = 2
+            vdf_reset_frequency = 1200
+            vdf_parallel_verification_thread_limit = 4
+            num_checkpoints_in_vdf_step = 25
+            vdf_sha_1s = 7000
+            entropy_packing_iterations = 22500000
+            chain_id = 1275
+            capacity_scalar = 100
+            num_blocks_in_epoch = 100
+            submit_ledger_epoch_length = 5
+            num_partitions_per_slot = 1
+            num_writes_before_sync = 5
+            reset_state_on_restart = false
+            finalization_depth = 1
+            mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+            num_capacity_partitions = 16
+            port = 8080
+            anchor_expiry_depth = 10
+            genesis_price_valid_for_n_epochs = 2
+            genesis_token_price = "1.0"
+            token_price_safe_range = "0.25"
+            cache_clean_lag = 2
+            "#;
 
         // Attempt to deserialize the TOML string into a Config
         let config: Config =
