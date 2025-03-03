@@ -54,7 +54,7 @@ pub fn vdf_sha(
     seed: &mut H256,
     num_checkpoints: usize,
     num_iterations: u64,
-    checkpoints: &mut Vec<H256>,
+    checkpoints: &mut [H256],
 ) {
     let mut local_salt: [u8; 32] = [0; 32];
 

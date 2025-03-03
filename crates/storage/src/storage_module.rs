@@ -192,7 +192,7 @@ impl StorageModules {
 impl StorageModule {
     /// Initializes a new `StorageModule`
     pub fn new(
-        base_path: &PathBuf,
+        base_path: &Path,
         storage_module_info: &StorageModuleInfo,
         storage_config: StorageConfig,
     ) -> eyre::Result<Self> {
