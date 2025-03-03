@@ -337,7 +337,7 @@ pub async fn wait_for_packing(
             {
                 // try to get all the semaphore permits - this is how we know that the packing is done
                 let _permit =
-                    futures::future::join_all(internals.semaphore.iter().map(|(_, s)| {
+                    futures::future::join_all(internals.semaphore.values().map(|s| {
                         s.as_ref().acquire_many(internals.config.concurrency as u32)
                     }))
                     .await
