@@ -23,7 +23,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::block_producer::BlockConfirmedMessage;
 use crate::block_tree_service::BlockTreeReadGuard;
-use crate::services::ServiceSenders;
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug, Default)]
 pub struct MempoolService {
