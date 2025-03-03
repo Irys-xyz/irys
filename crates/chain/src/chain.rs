@@ -463,7 +463,7 @@ pub async fn start_irys_node(
 
                 let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
 
-                let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
+                let sm_ids = storage_modules.iter().map(|s| (s).id).collect();
 
                 let packing_actor_addr = PackingActor::new(
                     Handle::current(),
