@@ -550,7 +550,7 @@ pub async fn start_irys_node(
                         shutdown_rx,
                         broadcast_mining_service.clone(),
                         vdf_service.clone(),
-                        atomic_global_step_number.clone(),
+                        atomic_global_step_number,
                     )
                 });
 
