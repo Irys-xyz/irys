@@ -65,8 +65,8 @@ impl PackingConfig {
     pub fn new(config: &Config) -> Self {
         Self {
             poll_duration: Duration::from_millis(1000),
-            concurrency: 4,
-            max_chunks: 1024,
+            concurrency: config.cpu_packing_concurrency,
+            max_chunks: config.gpu_packing_batch_size,
             chain_id: config.chain_id,
         }
     }
