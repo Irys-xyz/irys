@@ -34,7 +34,7 @@ impl Decompress for IngressProof {
     }
 }
 
-pub fn generate_ingress_proof_tree(chunks: Vec<&[u8]>, address: Address) -> eyre::Result<Node> {
+pub fn generate_ingress_proof_tree(chunks: &[&[u8]], address: Address) -> eyre::Result<Node> {
     let chunks = generate_ingress_leaves(chunks, address)?;
     let root = generate_data_root(chunks.clone())?;
     Ok(root)
