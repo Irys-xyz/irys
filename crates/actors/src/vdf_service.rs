@@ -20,7 +20,7 @@ pub struct VdfService {
 impl VdfService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
     pub fn new(block_index: BlockIndexReadGuard, db: DatabaseProvider, config: &Config) -> Self {
-        let vdf_state = create_state(block_index, db, &config);
+        let vdf_state = create_state(block_index, db, config);
 
         Self {
             vdf_state: Arc::new(RwLock::new(vdf_state)),
