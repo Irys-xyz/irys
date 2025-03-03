@@ -834,9 +834,9 @@ impl BlockTreeCache {
 
             if entry.block.height == 0 {
                 break;
-            } else {
+            } 
                 current = entry.block.previous_block_hash;
-            }
+            
         }
 
         pairs.reverse();
