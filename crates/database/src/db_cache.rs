@@ -26,7 +26,7 @@ pub struct DataRootLRUEntry {
     Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize, Default, Arbitrary,
 )]
 
-// """constrained""" by PD: maximum addressible partitions: u200, with a u32 chunk offset
+// """constrained""" by PD: maximum addressable partitions: u200, with a u32 chunk offset
 pub struct GlobalChunkOffset(U232);
 
 impl Encode for GlobalChunkOffset {

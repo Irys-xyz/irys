@@ -40,7 +40,7 @@ impl std::fmt::Debug for ServiceTask {
 }
 
 impl ServiceTask {
-    /// Creates a new clonable task pair
+    /// Creates a new cloneable task pair
     pub fn new() -> (ServiceJobSender, Self) {
         let (tx, rx) = mpsc::channel(1);
         (ServiceJobSender { tx }, Self::with_receiver(rx))
