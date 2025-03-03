@@ -93,14 +93,12 @@ fn create_state(
 
 pub fn calc_capacity(config: &Config) -> usize {
     const DEFAULT_CAPACITY: usize = 10_000;
-    let capacity = std::cmp::max(
+    std::cmp::max(
         DEFAULT_CAPACITY,
         (config.num_chunks_in_partition / config.num_chunks_in_recall_range)
             .try_into()
             .unwrap(),
-    );
-
-    capacity
+    )
 }
 
 impl Supervised for VdfService {}
