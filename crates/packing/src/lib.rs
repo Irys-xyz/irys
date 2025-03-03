@@ -173,7 +173,7 @@ pub fn capacity_pack_range_with_data_cuda_c(
     xor_vec_u8_arrays_in_place(data, &entropy);
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum PackingType {
     CPU,
     #[cfg(feature = "nvidia")]
