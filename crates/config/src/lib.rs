@@ -57,7 +57,7 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
 impl IrysNodeConfig {
     pub fn new(config: &config::Config) -> Self {
         Self {
-            mining_signer: IrysSigner::from_config(&config),
+            mining_signer: IrysSigner::from_config(config),
             instance_number: None,
             base_directory: env::current_dir()
                 .expect("Unable to determine working dir, aborting")
@@ -205,7 +205,7 @@ impl StorageSubmodulesConfig {
                         debug_assert!(dest.exists());
 
                         #[cfg(unix)]
-                        std::os::unix::fs::symlink(&dest, &sm_path).expect("to create symlink");
+                        std::os::unix::fs::symlink(dest, &sm_path).expect("to create symlink");
                         #[cfg(windows)]
                         std::os::windows::fs::symlink_dir(&dest, &sm_path)
                             .expect("to create symlink");

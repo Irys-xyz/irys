@@ -138,7 +138,7 @@ impl PackingParams {
 
     pub fn write_to_disk(&self, path: &Path) {
         let toml = toml::to_string(self).expect("Able to serialize config");
-        fs::write(&path, toml).unwrap_or_else(|_| panic!("Failed to write config to {:?}", path));
+        fs::write(path, toml).unwrap_or_else(|_| panic!("Failed to write config to {:?}", path));
     }
 }
 
