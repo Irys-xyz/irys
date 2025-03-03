@@ -222,7 +222,7 @@ impl StorageSubmodulesConfig {
         } else {
             // Create default config with hardcoded paths in dev if none exists
             tracing::info!("Creating default config at {:?}", config_path_local);
-            let config = StorageSubmodulesConfig {
+            let config = Self {
                 is_using_hardcoded_paths: true,
                 submodule_paths: vec![
                     Path::new(&instance_dir).join("storage_modules/submodule_0"),
@@ -242,9 +242,9 @@ impl StorageSubmodulesConfig {
             for path in &config.submodule_paths {
                 fs::create_dir_all(path).expect("to create submodule dir");
             }
-
-            // Load the config to verify it parses
-            StorageSubmodulesConfig::from_toml(config_path_local)
         }
+
+        // Load the config to verify it parses
+        Self::from_toml(config_path_local)
     }
 }
