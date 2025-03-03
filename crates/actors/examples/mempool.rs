@@ -250,7 +250,7 @@ mod tests {
     };
 
     use irys_actors::mempool_service::TxIngressError;
-    use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, SimpleRNG};
+    use irys_types::{irys::IrysSigner, Config, IrysTransaction, IrysTransactionHeader, SimpleRNG};
     use reth::tasks::TaskManager;
     use tokio::{runtime::Handle, sync::oneshot, time::sleep};
     use tracing::level_filters::LevelFilter;
@@ -287,7 +287,7 @@ mod tests {
             header: tx_h,
             ..Default::default()
         };
-        let i_tx = IrysSigner::random_signer().sign_transaction(tx)?;
+        let i_tx = IrysSigner::random_signer(&Config::testnet()).sign_transaction(tx)?;
         let (tx, rx) = oneshot::channel();
         handle
             .sender

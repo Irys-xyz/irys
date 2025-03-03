@@ -12,7 +12,6 @@ use irys_types::{
 };
 use irys_types::{Config, DataRoot, RethDatabaseProvider, StorageConfig, U256};
 use reth::tasks::TaskExecutor;
-use reth_db::cursor::DbCursorRO;
 use reth_db::cursor::DbDupCursorRO;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
@@ -43,7 +42,6 @@ pub struct MempoolService {
     max_data_txs_per_block: u64,
     storage_modules: StorageModuleVec,
     block_tree_read_guard: Option<BlockTreeReadGuard>,
-    service_channels: Option<ServiceSenders>,
 }
 
 impl Actor for MempoolService {
@@ -67,7 +65,6 @@ impl MempoolService {
         storage_modules: StorageModuleVec,
         block_tree_read_guard: BlockTreeReadGuard,
         config: &Config,
-        service_channels: ServiceSenders,
     ) -> Self {
         info!("service started");
         Self {
@@ -82,7 +79,6 @@ impl MempoolService {
             max_data_txs_per_block: config.max_data_txs_per_block,
             anchor_expiry_depth: config.anchor_expiry_depth.into(),
             block_tree_read_guard: Some(block_tree_read_guard),
-            service_channels: Some(service_channels),
         }
     }
 }
@@ -94,7 +90,7 @@ impl MempoolService {
 pub struct TxIngressMessage(pub IrysTransactionHeader);
 
 /// Reasons why Transaction Ingress might fail
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxIngressError {
     /// The transaction's signature is invalid
     InvalidSignature,

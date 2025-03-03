@@ -371,7 +371,6 @@ pub async fn start_irys_node(
                     storage_modules.clone(),
                     block_tree_guard.clone(),
                     &config,
-                    service_senders.clone()
                 );
                 let mempool_arbiter = Arbiter::new();
                 SystemRegistry::set(MempoolService::start_in_arbiter(
