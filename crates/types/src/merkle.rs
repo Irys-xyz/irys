@@ -186,7 +186,7 @@ pub fn validate_path(
 }
 
 /// Utility method for logging a proof out to the terminal.
-pub fn print_debug(proof: &Vec<u8>, target_offset: u128) -> Result<([u8; 32], u128, u128), Error> {
+pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128, u128), Error> {
     // Split proof into branches and leaf. Leaf is at the end and branches are
     // ordered from root to leaf.
     let (branches, leaf) = proof.split_at(proof.len() - HASH_SIZE - NOTE_SIZE);
@@ -298,7 +298,7 @@ pub fn validate_chunk(
 }
 
 /// Generates data chunks from which the calculation of root id starts.
-pub fn generate_leaves(data: &Vec<u8>, chunk_size: usize) -> Result<Vec<Node>, Error> {
+pub fn generate_leaves(data: &[u8], chunk_size: usize) -> Result<Vec<Node>, Error> {
     let data_chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
     generate_leaves_from_chunks(&data_chunks)
 }
@@ -357,7 +357,7 @@ pub struct DataRootLeave {
 
 /// Generates merkle leaves from data roots
 pub fn generate_leaves_from_data_roots(
-    data_roots: &Vec<DataRootLeave>,
+    data_roots: &[DataRootLeave],
 ) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;

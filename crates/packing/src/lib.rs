@@ -190,7 +190,7 @@ pub const PACKING_TYPE: PackingType = PackingType::CUDA;
 
 /// 2D Packing Rust implementation
 pub fn capacity_pack_range_with_data(
-    data: &mut Vec<ChunkBytes>,
+    data: &mut [ChunkBytes],
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
@@ -218,7 +218,7 @@ pub fn capacity_pack_range_with_data(
 
 /// 2D Packing C implementation
 pub fn capacity_pack_range_with_data_c(
-    data: &mut Vec<ChunkBytes>,
+    data: &mut [ChunkBytes],
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
