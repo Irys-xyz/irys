@@ -170,8 +170,7 @@ impl BlockIndex<Initialized> {
         // an exact match. We are looking for the position of the closest element
         // so we ignore the Result enum values and extract the pos return val.
         let index = match result {
-            Ok(pos) => pos,
-            Err(pos) => pos,
+            Err(pos) | Ok(pos) => pos,
         };
 
         Ok((index, &self.items[index]))
