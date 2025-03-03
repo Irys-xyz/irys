@@ -45,7 +45,7 @@ pub fn generate_ingress_proof(
     data_root: DataRoot,
     chunks: &Vec<&[u8]>,
 ) -> eyre::Result<IngressProof> {
-    let root = generate_ingress_proof_tree(chunks.clone(), signer.address())?;
+    let root = generate_ingress_proof_tree(chunks, signer.address())?;
     let proof: [u8; 32] = root.id;
 
     // Combine proof and data_root into a single digest to sign
@@ -75,7 +75,7 @@ pub fn verify_ingress_proof(proof: IngressProof, chunks: &Vec<&[u8]>) -> eyre::R
         .ok_or_eyre("Unable to recover signer")?;
 
     // re-compute the proof
-    let proof_root = generate_ingress_proof_tree(chunks.clone(), recovered_address)?;
+    let proof_root = generate_ingress_proof_tree(chunks, recovered_address)?;
     let nodes = generate_leaves_from_chunks(chunks)?;
 
     // re-compute the data_root
