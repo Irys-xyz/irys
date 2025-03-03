@@ -228,12 +228,12 @@ pub async fn last_step_checkpoints_is_valid(
 
     let is_valid = test == vdf_info.last_step_checkpoints;
 
-    if !is_valid {
+    if is_valid {
+        Ok(())
+    } else {
         // Compare the blocks list with the calculated one, looking for mismatches
         warn_mismatches(&vdf_info.last_step_checkpoints, &H256List(test));
         Err(eyre::eyre!("Checkpoints are invalid"))
-    } else {
-        Ok(())
     }
 }
 

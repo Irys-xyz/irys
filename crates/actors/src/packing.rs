@@ -344,9 +344,9 @@ pub async fn wait_for_packing(
                     .iter()
                     .map(|r| r.as_ref().unwrap());
                 break Some(());
-            } else {
+            } 
                 sleep(Duration::from_millis(100)).await
-            }
+            
         }
     })
     .await?
