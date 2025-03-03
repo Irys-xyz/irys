@@ -24,7 +24,7 @@ pub enum EmaServiceMessage {
     GetCurrentEma {
         response: oneshot::Sender<Amount<(Ema, Usd)>>,
     },
-    NewFinalizedBlock(IrysBlockHeader),
+    NewConfirmedBlock(IrysBlockHeader),
 }
 
 #[derive(Debug, Clone)]
@@ -61,7 +61,6 @@ impl EmaService {
             self.blocks_in_epoch <= (MAX_BLOCK_PRICES as u64),
             "blocks in epoch exceed the max allowed"
         );
-        // todo implement "recovery" strategy to figure this out upon startup
         let mut current_ema = Amount::token(dec!(1.0)).unwrap();
         let mut current_height = 0;
         let mut block_prices_in_epoch =
@@ -73,17 +72,19 @@ impl EmaService {
                     EmaServiceMessage::GetCurrentEma { response } => {
                         let _ = response.send(current_ema);
                     }
-                    EmaServiceMessage::NewFinalizedBlock(irys_block_header) => {
-                        // todo how to handle fork chains?
+                    EmaServiceMessage::NewConfirmedBlock(irys_block_header) => {
                         if irys_block_header.is_epoch(self.blocks_in_epoch) {
-                            // after we reach an epoch block, we calculate EMA for the last 8 blocks.
+                            // after we reach an epoch block, we calculate EMA for the last n blocks.
                             let diff = current_height - irys_block_header.height;
                             let new_ema = irys_block_header
                                 .irys_price
                                 .calculate_ema(diff, current_ema)
                                 .unwrap();
+
+                            // update the latest price info
                             current_ema = new_ema;
                             current_height = irys_block_header.height;
+                            block_prices_in_epoch.clear();
                         } else {
                             // we only record the price until we reach a new epoch block
                             let idx = irys_block_header
