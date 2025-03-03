@@ -32,6 +32,10 @@ tempfile.workspace = true
 irys-testing-utils.workspace = true
 base58.workspace = true
 futures.workspace = true
+futures-concurrency.workspace = true
+rust_decimal_macros.workspace = true
+rust_decimal.workspace = true
+heapless.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
