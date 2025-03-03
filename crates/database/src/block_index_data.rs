@@ -139,8 +139,7 @@ impl BlockIndex<Initialized> {
     /// For a given byte offset in a ledger, what block was responsible for adding
     /// that byte to the data ledger?
     pub fn get_block_bounds(&self, ledger: Ledger, chunk_offset: u64) -> BlockBounds {
-        let mut block_bounds: BlockBounds = Default::default();
-        block_bounds.ledger = ledger;
+        let mut block_bounds = BlockBounds {ledger, ..Default::default()};
 
         let result = self.get_block_index_item(ledger, chunk_offset);
         if let Ok((block_height, found_item)) = result {
@@ -285,11 +284,11 @@ impl BlockIndexItem {
 
     // Deserialize bytes to BlockIndexItem
     fn from_bytes(bytes: &[u8]) -> Self {
-        let mut item = Self::default();
-
-        // Read fixed fields
-        item.block_hash = H256::from_slice(&bytes[0..32]);
-        item.num_ledgers = bytes[32];
+        let mut item = Self {
+            block_hash: H256::from_slice(&bytes[0..32]),
+            num_ledgers : bytes[32],
+            ..Default::default()
+        };
 
         // Read ledger items
         let num_ledgers = item.num_ledgers as usize;
