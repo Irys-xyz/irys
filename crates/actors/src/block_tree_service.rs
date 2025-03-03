@@ -244,7 +244,7 @@ impl BlockTreeService {
             panic!("Unable to send finalisation message to reth: {}", &e)
         }
 
-        if let Err(_) = self.send_storage_finalized_message(finalized_hash) {
+        if self.send_storage_finalized_message(finalized_hash).is_err() {
             error!("Unable to send block finalized message");
         }
     }
@@ -335,7 +335,7 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
                 let mut cache = binding.write().unwrap();
 
                 // Mark block as validated in cache
-                if let Err(_) = cache.mark_block_as_valid(&block_hash) {
+                if cache.mark_block_as_valid(&block_hash).is_err() {
                     error!(
                         "Unable to mark block as Validated: {}",
                         block_hash.0.to_base58()
