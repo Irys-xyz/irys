@@ -35,11 +35,11 @@ impl PriceCalc {
         // Chunk
         let chunks = Self::get_chunks_from_bytes(number_of_bytes_to_store, config.chunk_size);
         // Chunk/GB
-        let chunks_per_gb = GIGABYTE as u64 / config.chunk_size;
+        let chunks_per_gb = f64::trunc(GIGABYTE as f64 / config.chunk_size as f64);
         // $USD/GB
         let immediate_miner_reward = perm_cost * MINER_PERCENTAGE_FEE;
         // Chunk/Chunk/GB * ($USD/GB + $USD/GB + $USD/GB) * $IRYS/$USD => GB * $USD/GB * $IRYS/$USD = $IRYS
-        Ok((chunks as f64 / chunks_per_gb as f64)
+        Ok((chunks as f64 / chunks_per_gb)
             * (ingress_perm_fee + perm_cost + immediate_miner_reward)
             * approximate_usd_irys_price)
     }
@@ -77,9 +77,9 @@ impl PriceCalc {
         );
 
         let total_cost = Self::ANNUALIZED_COST_OF_STORING_1GB
-            * (1.0
+            * (1.
                 - f64::powi(
-                    1.0 - annualized_decay_rate,
+                    1. - annualized_decay_rate,
                     safe_minimum_number_of_years as i32,
                 ))
             / annualized_decay_rate;
