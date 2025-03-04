@@ -146,14 +146,12 @@ impl StorageSubmodulesConfig {
         let config: Self = toml::from_str(&contents)?;
 
         let submodule_count = config.submodule_paths.len();
-        if submodule_count < 3 {
             // Eventually this should be based off the genesis config, but
             // hard coded for now to help debug config / env issues.
-            panic!(
+        assert!((submodule_count >= 3), 
                 "Insufficient submodules: found {}, but minimum of 3 required in .irys_submodules.toml for chain initialization",
                 submodule_count
             );
-        }
 
         Ok(config)
     }
