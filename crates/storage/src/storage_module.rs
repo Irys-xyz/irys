@@ -683,7 +683,7 @@ impl StorageModule {
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let start_offsets = self.collect_start_offsets(chunk.data_root)?;
 
-        if start_offsets.0.len() == 0 {
+        if start_offsets.0.is_empty() {
             return Err(eyre::eyre!("Chunks data_root not found in storage module"));
         }
 
