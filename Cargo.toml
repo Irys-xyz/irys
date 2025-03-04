@@ -16,6 +16,7 @@ members = [
   "crates/macros",
   "crates/debug-utils",
   "xtask",
+  "crates/price-oracle",
 ]
 resolver = "2"
 
