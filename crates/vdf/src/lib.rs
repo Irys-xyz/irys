@@ -263,13 +263,12 @@ pub fn vdf_steps_are_valid(
     match vdf_steps_guard.read().get_steps(ii(start, end)) {
         Ok(steps) => {
             debug!("Validating VDF steps from VdfStepsReadGuard!");
-            if steps != vdf_info.steps {
-                warn_mismatches(&steps, &vdf_info.steps);
-                return Err(eyre::eyre!("VDF steps are invalid!"));
-            } else {
+            if steps == vdf_info.steps {
                 // Do not need to check last step checkpoints here, were checked in pre validation
                 return Ok(())
             }
+            warn_mismatches(&steps, &vdf_info.steps);
+            return Err(eyre::eyre!("VDF steps are invalid!"));
         },
         Err(err) =>
             debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err)

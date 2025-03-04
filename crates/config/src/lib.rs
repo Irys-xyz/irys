@@ -209,15 +209,12 @@ impl StorageSubmodulesConfig {
                             .expect("to create symlink");
                     }
                 }
-
                 return Ok(config);
             }
         }
 
         // Try .irys directory config in dev/local environment
-        if config_path_local.exists() {
-            return StorageSubmodulesConfig::from_toml(config_path_local);
-        } else {
+        if !config_path_local.exists() {
             // Create default config with hardcoded paths in dev if none exists
             tracing::info!("Creating default config at {:?}", config_path_local);
             let config = Self {
