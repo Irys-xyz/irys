@@ -147,7 +147,6 @@ mod tests {
     use super::{CacheServiceAction, ExampleChunkCacheServiceHandle};
     use futures::TryFutureExt;
 
-    #[tokio::test(flavor = "multi_thread")]
     async fn cache_service_test() -> eyre::Result<()> {
         let _ = SubscriberBuilder::default()
             .with_max_level(LevelFilter::DEBUG)
@@ -167,7 +166,6 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread")]
     async fn cache_service_shutdown_test() -> eyre::Result<()> {
         let _ = SubscriberBuilder::default()
             .with_max_level(LevelFilter::DEBUG)

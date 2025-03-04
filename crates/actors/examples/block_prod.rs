@@ -171,7 +171,6 @@ mod tests {
 
     use crate::{BlockProducerAction, BlockProducerHandle};
 
-    #[tokio::test(flavor = "multi_thread")]
     async fn block_prod_actor_test() -> eyre::Result<()> {
         let _ = SubscriberBuilder::default()
             .with_max_level(LevelFilter::DEBUG)
@@ -191,7 +190,6 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread")]
     async fn cache_service_shutdown_test() -> eyre::Result<()> {
         let _ = SubscriberBuilder::default()
             .with_max_level(LevelFilter::DEBUG)

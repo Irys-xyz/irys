@@ -260,7 +260,6 @@ mod tests {
 
     use crate::{ExampleMempoolService, MempoolServiceAction, MempoolServiceHandle};
 
-    #[tokio::test(flavor = "multi_thread")]
     async fn mempool_service_test() -> eyre::Result<()> {
         let _ = SubscriberBuilder::default()
             .with_max_level(LevelFilter::DEBUG)
@@ -298,7 +297,6 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread")]
     async fn mempool_service_shutdown_test() -> eyre::Result<()> {
         let _ = SubscriberBuilder::default()
             .with_max_level(LevelFilter::DEBUG)
