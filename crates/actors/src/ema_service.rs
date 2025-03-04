@@ -73,10 +73,10 @@ impl EmaService {
                         let _ = response.send(context.two_epochs_ago_block.irys_price);
                     }
                     EmaServiceMessage::GetEmaForNextEpoch { response } => {
-                        // example EMA calculation at Epoch29:
-                        // I need to take the registered Irys price in block 18 (non epoch block) and the stored EMA in E19 (epoch block).
-                        // Using these values I must compute EMA for E29. In this case the n (number of block prices) would be 10 (E29.height - E19.height).
-                        // This is the price that will be used in the interval 39->49, which will be reported to other systems querying for EMA prices.
+                        // example EMA calculation at Epoch on block 29:
+                        // 1. take the registered Irys price in block 18 (non epoch block) and the stored irys price in block 19 (epoch block).
+                        // 2. using these values must compute EMA for block 29. In this case the *n* (number of block prices) would be 10 (E29.height - E19.height).
+                        // 3. this is the price that will be used in the interval 39->49, which will be reported to other systems querying for EMA prices.
 
                         // the amount of blocks in between the 2 epoch values
                         let blocks_in_between = self.blocks_in_epoch;
