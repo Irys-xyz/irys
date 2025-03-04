@@ -16,7 +16,6 @@ members = [
   "crates/macros",
   "crates/debug-utils",
   "xtask",
-  "crates/ema-service",
 ]
 resolver = "2"
 

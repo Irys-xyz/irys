@@ -2847,21 +2847,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ema-service"
-version = "0.1.0"
-dependencies = [
- "futures",
- "futures-concurrency",
- "heapless",
- "irys-types",
- "reth",
- "rust_decimal",
- "rust_decimal_macros",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
