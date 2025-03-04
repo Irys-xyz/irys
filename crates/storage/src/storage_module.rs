@@ -1018,7 +1018,7 @@ pub fn write_info_file(path: &Path, info: &StorageModuleInfo) -> eyre::Result<()
         .open(path)
         .unwrap_or_else(|_| panic!("Failed to open: {}", path.display()));
 
-    info_file.write_all(serde_json::to_string_pretty(&*info)?.as_bytes())?;
+    info_file.write_all(serde_json::to_string_pretty(info)?.as_bytes())?;
     Ok(())
 }
 
