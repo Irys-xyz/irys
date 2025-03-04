@@ -164,6 +164,8 @@ mod test {
                 .expect("valid token amount"),
             token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
                 .expect("valid percentage"),
+            cpu_packing_concurrency: u16::default(),
+            gpu_packing_batch_size: u32::default()
         }
     }
 
