@@ -1,7 +1,7 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
-use alloy_eips::BlockNumberOrTag;
+use alloy_eips::{BlockId, BlockNumberOrTag};
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::{block_discovery::BlockDiscoveryActor, block_index_service, block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage}, block_producer::BlockProducerActor, block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage}, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}, chunk_migration_service, chunk_migration_service::ChunkMigrationService, epoch_service, epoch_service::{
     EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
@@ -41,6 +41,8 @@ use std::{
     sync::{mpsc, Arc, OnceLock, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use reth::network::NetworkInfo;
+use reth::rpc::api::eth::helpers::LoadBlock;
 use tracing::{debug, error, info};
 
 use crate::vdf::run_vdf;
@@ -210,6 +212,8 @@ impl IrysNodeCtx {
             .send(ReloadPayload::ReloadConfig(chain_spec))
             .unwrap();
 
+        // self.reth_handle.task_executor.
+
         self.reth_shutdown_sender.try_send(()).unwrap();
         if let Some(reth_thread_handle) = self.reth_thread_handle {
             reth_thread_handle.join().unwrap();
@@ -219,6 +223,21 @@ impl IrysNodeCtx {
         System::current().stop();
         debug!("Main actor thread and reth thread stopped");
         debug!("Amount of active db references: {}", Arc::strong_count(&self.db));
+
+        for (i, actor) in self.actor_addresses.partitions.iter().enumerate() {
+            debug!("Is partition {} actor running? {}", i, self.actor_addresses.partitions.get(i).unwrap().connected());
+        }
+
+        let network_status = self.reth_handle.rpc_registry.eth_api().network().network_status().await;
+        debug!("Network status: {:?}", network_status);
+        &self.reth_handle.rpc_server_handles.auth.clone().stop();
+        &self.reth_handle.rpc_server_handles.rpc.clone().stop();
+
+        debug!("Is block producer actor running? {}", self.actor_addresses.block_producer.connected());
+        debug!("Is packing actor running? {}", self.actor_addresses.packing.connected());
+        debug!("Is mempool actor running? {}", self.actor_addresses.mempool.connected());
+        debug!("Is block index actor running? {}", self.actor_addresses.block_index.connected());
+        debug!("Is epoch service actor running? {}", self.actor_addresses.epoch_service.connected());
     }
 }
 
@@ -698,7 +717,7 @@ pub async fn start_irys_node(
                 };
 
                 let chunk_provider =
-                    ChunkProvider::new(storage_config.clone(), storage_modules.clone(), irys_db.clone());
+                    ChunkProvider::new(storage_config.clone(), storage_modules.clone());
                 let arc_chunk_provider = Arc::new(chunk_provider);
                 // this OnceLock is due to the cyclic chain between Reth & the Irys node, where the IrysRethProvider requires both
                 // this is "safe", as the OnceLock is always set before this start function returns
@@ -709,7 +728,7 @@ pub async fn start_irys_node(
                     })
                     .expect("Unable to set IrysRethProvider OnceLock");
 
-                let (api_server_shutdown_tx, api_server_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+                let (api_server_shutdown_tx, mut api_server_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
                 let _ = irys_node_handle_sender.send(IrysNodeCtx {
                     actor_addresses: actor_addresses.clone(),
@@ -784,7 +803,7 @@ pub async fn start_irys_node(
     // wait for the full handle to be send over by the actix thread
     let mut node = irys_node_handle_receiver.await?;
     node.main_actor_thread_handle = Some(actor_main_thread_handle.into());
-    node.reth_thread_handle = Some(reth_thread_handler.into());
+    // node.reth_thread_handle = Some(reth_thread_handler.into());
     Ok(node)
 }
 
