@@ -130,7 +130,7 @@ async fn should_resume_from_the_same_block() -> eyre::Result<()> {
     let weak_count = Arc::weak_count(&db);
     let strong_count = Arc::strong_count(&db);
 
-    node.stop();
+    node.stop().await;
 
     debug!("Stopping the node after 3 blocks");
     debug!("The last block hash is {:?}", last_block_hash);
@@ -144,7 +144,7 @@ async fn should_resume_from_the_same_block() -> eyre::Result<()> {
             assert!(matches!(e, awc::error::SendRequestError::Connect(_)));
         }
     };
-
+    
     debug!(
         "Amount of weak references to the database prior to node stop: {}",
         weak_count
@@ -161,8 +161,10 @@ async fn should_resume_from_the_same_block() -> eyre::Result<()> {
         "Amount of strong references to the database: {}",
         Arc::strong_count(&db)
     );
+
+    assert!(matches!(strong_count, 1));
     debug!("Waitin a little");
-    tokio::time::sleep(Duration::from_secs(100)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Checking that the data directory is still there
     let data_directory = config.irys_consensus_data_dir();
@@ -179,7 +181,7 @@ async fn should_resume_from_the_same_block() -> eyre::Result<()> {
 
     let restarted_node = start_irys_node(config.clone(), storage_config.clone()).await?;
 
-    restarted_node.stop();
+    restarted_node.stop().await;
 
     Ok(())
 }

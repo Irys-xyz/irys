@@ -1,4 +1,4 @@
-use actix::{Actor, Context, Handler, Message, Supervised, SystemService};
+use actix::{Actor, ActorContext, Context, Handler, Message, Supervised, SystemService};
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::db_cache::data_size_to_chunk_count;

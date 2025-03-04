@@ -144,6 +144,19 @@ impl Handler<GetVdfStateMessage> for VdfService {
     }
 }
 
+#[derive(Message, Debug, Clone)]
+#[rtype(result = "()")]
+pub struct Stop;
+
+// Handler for SeedMessage
+impl Handler<Stop> for VdfService {
+    type Result = ();
+
+    fn handle(&mut self, _msg: Stop, ctx: &mut Context<Self>) -> Self::Result {
+        ctx.stop();
+    }
+}
+
 // Tests
 #[cfg(test)]
 mod tests {

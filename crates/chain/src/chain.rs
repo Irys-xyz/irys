@@ -3,24 +3,10 @@ use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use alloy_eips::BlockNumberOrTag;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
-use irys_actors::{
-    block_discovery::BlockDiscoveryActor,
-    block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
-    block_producer::BlockProducerActor,
-    block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
-    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    chunk_migration_service::ChunkMigrationService,
-    epoch_service::{
-        EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
-        GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
-    },
-    mempool_service::MempoolService,
-    mining::PartitionMiningActor,
-    packing::{PackingActor, PackingRequest},
-    validation_service::ValidationService,
-    vdf_service::{GetVdfStateMessage, VdfService},
-    ActorAddresses, BlockFinalizedMessage,
-};
+use irys_actors::{block_discovery::BlockDiscoveryActor, block_index_service, block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage}, block_producer::BlockProducerActor, block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage}, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}, chunk_migration_service, chunk_migration_service::ChunkMigrationService, epoch_service, epoch_service::{
+    EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
+    GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
+}, mempool_service::MempoolService, mining::PartitionMiningActor, packing::{PackingActor, PackingRequest}, validation_service::ValidationService, vdf_service, vdf_service::{GetVdfStateMessage, VdfService}, ActorAddresses, BlockFinalizedMessage};
 use irys_api_server::{run_server, ApiState};
 use irys_config::{decode_hex, IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
@@ -47,7 +33,7 @@ use reth::{
     core::irys_ext::NodeExitReason,
     tasks::{TaskExecutor, TaskManager},
 };
-use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
+use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message, tokio_runtime};
 use reth_db::{Database as _, HasName, HasTableType};
 use std::sync::atomic::AtomicU64;
 use std::{
@@ -135,19 +121,28 @@ pub struct IrysNodeCtx {
     pub vdf_steps_guard: VdfStepsReadGuard,
     pub vdf_config: VDFStepsConfig,
     pub storage_config: StorageConfig,
+    // Shutdown channels
     pub api_server_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     pub consensus_engine_shutdown_sender: tokio::sync::mpsc::Sender<()>,
+    // Thread handles spawned by the start function
     pub main_actor_thread_handle: Option<ClonableJoinHandle<()>>,
     pub reth_thread_handle: Option<ClonableJoinHandle<()>>,
-
+    // Arbiters that run actors
     pub reth_arbiter: DestroyableArc<Arbiter>,
     pub block_producer_arbiter: DestroyableArc<Arbiter>,
     pub block_discovery_arbiter: DestroyableArc<Arbiter>,
+    pub mempool_arbiter: DestroyableArc<Arbiter>,
+    pub block_tree_service_arbiter: DestroyableArc<Arbiter>,
+
+    // TODO: this doesn't seem to do anything
+    pub validaton_service_arbiter: DestroyableArc<Arbiter>,
+
+    pub partition_mining_arbiters: Vec<DestroyableArc<Arbiter>>,
 }
 
 impl IrysNodeCtx {
-    pub fn stop(self) {
+    pub async fn stop(self) {
         self.api_server_shutdown_sender.try_send(()).unwrap();
         // We need to make sure that all our actors has stopped before attempting to stop reth
         if let Some(main_actor_thread_handle) = self.main_actor_thread_handle {
@@ -168,6 +163,39 @@ impl IrysNodeCtx {
         let block_discovery_arbiter = self.block_discovery_arbiter.destroy();
         block_discovery_arbiter.stop();
         block_discovery_arbiter.join().unwrap();
+        
+        let block_tree_service_arbiter = self.block_tree_service_arbiter.destroy();
+        block_tree_service_arbiter.stop();
+        block_tree_service_arbiter.join().unwrap();
+        
+        let mempool_arbiter = self.mempool_arbiter.destroy();
+        mempool_arbiter.stop();
+        mempool_arbiter.join().unwrap();
+
+
+        let chunk_migration = ChunkMigrationService::from_registry();
+        chunk_migration.send(chunk_migration_service::Stop).await.unwrap();
+
+        let vdf_service = VdfService::from_registry();
+        vdf_service.send(vdf_service::Stop).await.unwrap();
+        // self.actor_addresses.epoch_service.send(epoch_service::Stop).await;
+
+        let validation_service_arbiter = self.validaton_service_arbiter.destroy();
+        validation_service_arbiter.stop();
+        validation_service_arbiter.join().unwrap();
+
+        for arbiter in self.partition_mining_arbiters {
+            let arbiter = arbiter.destroy();
+            arbiter.stop();
+            arbiter.join().unwrap();
+        }
+
+        // let validation_service = ValidationService::from_registry();
+        // validation_service.send(validation_service::Stop).await.unwrap();
+
+        // let block_index_service = BlockIndexService::from_registry();
+        // No need to stop, stopped by the arbiter
+        // let reth_service_actor = RethServiceActor::from_registry();
 
         let chain_spec_arc = self.reth_handle.chain_spec();
         let chain_spec = (*chain_spec_arc).clone();
@@ -187,7 +215,10 @@ impl IrysNodeCtx {
             reth_thread_handle.join().unwrap();
         }
 
+        // That doesn't seem to do anything
+        System::current().stop();
         debug!("Main actor thread and reth thread stopped");
+        debug!("Amount of active db references: {}", Arc::strong_count(&self.db));
     }
 }
 
@@ -569,6 +600,7 @@ pub async fn start_irys_node(
                 )
                 .start();
 
+                let mut partition_arbiters = Vec::new();
                 for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
@@ -585,6 +617,7 @@ pub async fn start_irys_node(
                         &part_arbiter.handle(),
                         |_| partition_mining_actor,
                     ));
+                    partition_arbiters.push(DestroyableArc::new(part_arbiter));
                 }
 
                 // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
@@ -697,6 +730,10 @@ pub async fn start_irys_node(
                     reth_arbiter: DestroyableArc::new(reth_arbiter),
                     block_producer_arbiter: DestroyableArc::new(block_producer_arbiter),
                     block_discovery_arbiter: DestroyableArc::new(block_discovery_arbiter),
+                    mempool_arbiter: DestroyableArc::new(mempool_arbiter),
+                    block_tree_service_arbiter: DestroyableArc::new(block_tree_arbiter),
+                    validaton_service_arbiter: DestroyableArc::new(validation_arbiter),
+                    partition_mining_arbiters: partition_arbiters,
                 });
 
                 run_server(ApiState {
@@ -715,7 +752,7 @@ pub async fn start_irys_node(
                 debug!("Waiting for VDF thread to finish");
                 // Wait for vdf thread to finish & save steps
                 vdf_thread_handler.join().unwrap();
-
+                
                 debug!("VDF thread finished");
             });
             debug!("Main actor thread finished");

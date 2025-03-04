@@ -16,6 +16,7 @@ use std::sync::{Arc, RwLock};
 use tracing::error;
 
 use crate::block_producer::BlockFinalizedMessage;
+use crate::epoch_service::EpochServiceActor;
 
 /// Central coordinator for chunk storage operations.
 ///
@@ -117,6 +118,19 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
 
             Ok(())
         })
+    }
+}
+
+/// Stop the actor
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct Stop;
+
+impl Handler<Stop> for ChunkMigrationService {
+    type Result = ();
+
+    fn handle(&mut self, _msg: Stop, ctx: &mut Self::Context) {
+        ctx.stop();
     }
 }
 
