@@ -22,7 +22,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.85"
 homepage = "http://irys.xyz/"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/Irys-xyz/irys"
@@ -83,6 +83,7 @@ color-eyre = "0.6"
 itertools = "0.13"
 futures = "0.3"
 bytemuck = "1"
+test-log = { version = "0.2", features = ["trace"] }
 
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.11"
