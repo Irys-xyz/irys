@@ -320,7 +320,7 @@ impl StorageModule {
             storage_config.num_chunks_in_partition as u32,
             u32::MAX
         )];
-        if &gaps != &expected {
+        if gaps != expected {
             return Err(eyre!(
                 "Invalid storage module config, expected range {:?}, got range {:?}",
                 &expected,
