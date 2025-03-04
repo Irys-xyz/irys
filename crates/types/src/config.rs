@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
-        phantoms::{Percentage, Usd},
+        phantoms::{IrysPrice, Percentage, Usd},
         Amount,
     },
     IrysTokenPrice,
@@ -60,7 +60,7 @@ pub struct Config {
     pub genesis_price_valid_for_n_epochs: u8,
     /// defines the genesis price of the $IRYS, expressed in $USD
     #[serde(deserialize_with = "serde_utils::token_amount")]
-    pub genesis_token_price: Amount<(IrysTokenPrice, Usd)>,
+    pub genesis_token_price: Amount<(IrysPrice, Usd)>,
     /// defines the range of how much can the token fluctuate since the last EMA price for it to be accepted
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub token_price_safe_range: Amount<Percentage>,

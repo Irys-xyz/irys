@@ -785,7 +785,9 @@ impl BlockTreeCache {
             .unwrap_or((U256::zero(), BlockHash::default()))
     }
 
-    // Returns: cache of longest chain: (block/tx pairs, count of non-onchain blocks)
+    /// Returns: cache of longest chain: (block/tx pairs, count of non-onchain blocks)
+    /// 0th element -- genesis block
+    /// last element -- the latest block
     pub fn get_canonical_chain(&self) -> (Vec<ChainCacheEntry>, usize) {
         self.longest_chain_cache.clone()
     }

@@ -63,6 +63,7 @@ impl EmaService {
         );
         let mut current_ema = Amount::token(dec!(1.0)).unwrap();
         let mut current_height = 0;
+        // todo implement the logic to keep track of fork chains and build the map in-memory
         let mut block_prices_in_epoch =
             heapless::Vec::<(u64, Amount<(IrysPrice, Usd)>), MAX_BLOCK_PRICES>::new();
 
