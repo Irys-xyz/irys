@@ -178,8 +178,8 @@ impl StorageSubmodulesConfig {
             });
 
         // Try HOME directory config in deployed environments
-        if is_deployed {
-            if config_path_home.exists() {
+        if is_deployed 
+            && config_path_home.exists() {
                 // Remove the .irys directory config so there's no confusion
                 if config_path_local.exists() {
                     fs::remove_file(config_path_local).expect("able to delete file");
@@ -210,7 +210,6 @@ impl StorageSubmodulesConfig {
                     }
                 }
                 return Ok(config);
-            }
         }
 
         // Try .irys directory config in dev/local environment
