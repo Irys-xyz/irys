@@ -58,7 +58,7 @@ pub fn vdf_sha(
 ) {
     let mut local_salt: [u8; 32] = [0; 32];
 
-    for checkpoint_idx in 0..num_checkpoints {
+    for checkpoint_idx in checkpoints.iter_mut().take(num_checkpoints) {
         salt.to_little_endian(&mut local_salt);
 
         for _ in 0..num_iterations {
@@ -68,7 +68,7 @@ pub fn vdf_sha(
         }
 
         // Store the result at the correct checkpoint index
-        checkpoints[checkpoint_idx] = *seed;
+        *checkpoint_idx = *seed;
 
         // Increment the salt for the next checkpoint calculation
         *salt = *salt + 1;
