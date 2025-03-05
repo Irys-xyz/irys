@@ -330,7 +330,7 @@ pub fn generate_leaves_from_chunks(chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Err
 pub fn generate_ingress_leaves(chunks: &[&[u8]], address: Address) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
-    for chunk in chunks.into_iter() {
+    for chunk in chunks.iter() {
         let data_hash = hash_ingress_sha256(chunk, address)?;
         let max_byte_range = min_byte_range + chunk.len();
         let offset = max_byte_range.to_note_vec();
