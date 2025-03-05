@@ -157,7 +157,7 @@ impl LedgerCore for PermanentLedger {
 
 impl LedgerCore for TermLedger {
     fn slot_count(&self) -> usize {
-        self.slots.len()
+        self.slots.iter().filter(|slot| !slot.is_expired).count()
     }
     fn ledger_id(&self) -> u32 {
         self.ledger_id
