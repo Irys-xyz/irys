@@ -418,7 +418,7 @@ pub async fn start_irys_node(
                 // set up the price oracle
                 let price_oracle = match config.oracle_config {
                     OracleConfig::Mock { initial_price, percent_change, smoothing_interval } => {
-                        IrysPriceOracle::MockOracle(MockOracle::new(initial_price, percent_change, smoothing_interval))    
+                        IrysPriceOracle::MockOracle(MockOracle::new(initial_price, percent_change, smoothing_interval))
                     },
                     // note: depending on the oracle, it may require spawning an async background service.
                 };
@@ -594,18 +594,32 @@ pub async fn start_irys_node(
     // run reth in it's own thread w/ it's own tokio runtime
     // this is done as reth exhibits strange behaviour (notably channel dropping) when not in it's own context/when the exit future isn't been awaited
 
-    std::thread::Builder::new().name("reth-thread".to_string())
+    std::thread::Builder::new()
+        .name("reth-thread".to_string())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
-            let node_config= cloned_arc.clone();
-            let tokio_runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+            let node_config = cloned_arc.clone();
+            let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             let mut task_manager = TaskManager::new(tokio_runtime.handle().clone());
             let exec: reth::tasks::TaskExecutor = task_manager.executor();
 
-            tokio_runtime.block_on(run_to_completion_or_panic(
-                &mut task_manager,
-                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider, latest_block_height)),
-            )).unwrap();
+            tokio_runtime
+                .block_on(run_to_completion_or_panic(
+                    &mut task_manager,
+                    run_until_ctrl_c(start_reth_node(
+                        exec,
+                        reth_chainspec,
+                        node_config,
+                        IrysTables::ALL,
+                        reth_handle_sender,
+                        irys_provider,
+                        latest_block_height,
+                    )),
+                ))
+                .unwrap();
         })?;
 
     // wait for the full handle to be send over by the actix thread

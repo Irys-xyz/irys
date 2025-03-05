@@ -8,7 +8,6 @@ use crate::{
         phantoms::{IrysPrice, Percentage, Usd},
         Amount,
     },
-    IrysTokenPrice,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
