@@ -172,7 +172,7 @@ pub type TxPathHash = H256;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{irys::IrysSigner, MAX_CHUNK_SIZE};
+    use crate::irys::IrysSigner;
 
     use alloy_rlp::Decodable;
 
@@ -229,7 +229,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: MAX_CHUNK_SIZE,
+            chunk_size: config.chunk_size as usize,
         };
         let tx = IrysTransaction {
             header: dec,

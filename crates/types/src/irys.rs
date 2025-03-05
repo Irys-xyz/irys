@@ -145,7 +145,7 @@ impl From<IrysSigner> for LocalSigner<SigningKey> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{hash_sha256, validate_chunk, MAX_CHUNK_SIZE};
+    use crate::{hash_sha256, validate_chunk};
     use rand::Rng;
     use reth_primitives::transaction::recover_signer;
 
@@ -155,7 +155,7 @@ mod tests {
     async fn create_and_sign_transaction() {
         // Create 2.5 chunks worth of data *  fill the data with random bytes
         let config = crate::Config::testnet();
-        let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
+        let data_size = (config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
@@ -183,7 +183,7 @@ mod tests {
         // after chunking the rest of the data at MAX_CHUNK_SIZE intervals.
         let last_chunk = tx.chunks.last().unwrap();
         assert_eq!(
-            data_size % MAX_CHUNK_SIZE,
+            data_size % config.chunk_size as usize,
             last_chunk.max_byte_range - last_chunk.min_byte_range
         );
 
