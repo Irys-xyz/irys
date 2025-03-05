@@ -10,7 +10,7 @@ use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
     IrysTransactionHeader, H256,
 };
-use irys_types::{DataRoot, StorageConfig, CONFIG, U256};
+use irys_types::{Config, DataRoot, StorageConfig, U256};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbCursorRO;
 use reth_db::cursor::DbDupCursorRO;
@@ -27,7 +27,8 @@ use crate::block_tree_service::BlockTreeReadGuard;
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug, Default)]
 pub struct MempoolService {
-    db: Option<DatabaseProvider>,
+    irys_db: Option<DatabaseProvider>,
+    reth_db: Option<DatabaseProvider>,
     /// Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
     /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
@@ -37,6 +38,8 @@ pub struct MempoolService {
     signer: Option<IrysSigner>,
     invalid_tx: Vec<H256>,
     storage_config: StorageConfig,
+    anchor_expiry_depth: u64,
+    max_data_txs_per_block: u64,
     storage_modules: StorageModuleVec,
     block_tree_read_guard: Option<BlockTreeReadGuard>,
 }
@@ -48,32 +51,33 @@ impl Actor for MempoolService {
 /// Allows this actor to live in the the local service registry
 impl Supervised for MempoolService {}
 
-impl SystemService for MempoolService {
-    fn service_started(&mut self, _ctx: &mut Context<Self>) {
-        println!("mempool_service started");
-    }
-}
+impl SystemService for MempoolService {}
 
 impl MempoolService {
     /// Create a new instance of the mempool actor passing in a reference
     /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
     pub fn new(
-        db: DatabaseProvider,
+        irys_db: DatabaseProvider,
+        reth_db: DatabaseProvider,
         task_exec: TaskExecutor,
         signer: IrysSigner,
         storage_config: StorageConfig,
         storage_modules: StorageModuleVec,
         block_tree_read_guard: BlockTreeReadGuard,
+        config: &Config,
     ) -> Self {
-        println!("service started: mempool");
+        info!("service started");
         Self {
-            db: Some(db),
+            irys_db: Some(irys_db),
+            reth_db: Some(reth_db),
             valid_tx: BTreeMap::new(),
             invalid_tx: Vec::new(),
             signer: Some(signer),
             task_exec: Some(task_exec),
             storage_config,
             storage_modules,
+            max_data_txs_per_block: config.max_data_txs_per_block,
+            anchor_expiry_depth: config.anchor_expiry_depth.into(),
             block_tree_read_guard: Some(block_tree_read_guard),
         }
     }
@@ -161,7 +165,11 @@ impl Handler<TxIngressMessage> for MempoolService {
     type Result = Result<(), TxIngressError>;
 
     fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        if self.db.is_none() {
+        if self.irys_db.is_none() {
+            return Err(TxIngressError::ServiceUninitialized);
+        }
+
+        if self.reth_db.is_none() {
             return Err(TxIngressError::ServiceUninitialized);
         }
 
@@ -179,10 +187,15 @@ impl Handler<TxIngressMessage> for MempoolService {
         }
 
         let db = self
-            .db
+            .irys_db
             .clone()
             .ok_or(TxIngressError::ServiceUninitialized)?;
         let read_tx = &db.tx().map_err(|_| TxIngressError::DatabaseError)?; // we use `&` here to make this a `temporary`, which means rust will automatically drop it when we're done using it, instead of at the end of a block like usual
+        let reth_db = self
+            .reth_db
+            .clone()
+            .ok_or(TxIngressError::ServiceUninitialized)?;
+        let read_reth_tx = &reth_db.tx().map_err(|_| TxIngressError::DatabaseError)?;
 
         // validate the `anchor` value
         // it should be a block hash for a known, confirmed block (TODO: add tx hash support!)
@@ -200,11 +213,11 @@ impl Handler<TxIngressMessage> for MempoolService {
 
         match irys_database::block_header_by_hash(read_tx, &tx.anchor) {
             // note: we use addition here as it's safer
-            Ok(Some(hdr)) if hdr.height + (CONFIG.anchor_expiry_depth as u64) >= *latest_height => {
+            Ok(Some(hdr)) if hdr.height + self.anchor_expiry_depth >= *latest_height => {
                 debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id);
                 // update any associated ingress proofs
                 if let Ok(Some(old_expiry)) = read_tx.get::<IngressProofLRU>(tx.data_root) {
-                    let new_expiry = hdr.height + (CONFIG.anchor_expiry_depth as u64);
+                    let new_expiry = hdr.height + self.anchor_expiry_depth;
                     debug!(
                         "Updating ingress proof for data root {} expiry from {} -> {}",
                         &tx.data_root, &old_expiry, &new_expiry
@@ -233,7 +246,7 @@ impl Handler<TxIngressMessage> for MempoolService {
             }
         };
 
-        if irys_database::get_account_balance(read_tx, tx_msg.0.signer)
+        if irys_database::get_account_balance(read_reth_tx, tx_msg.0.signer)
             .map_err(|_| TxIngressError::DatabaseError)?
             < U256::from(tx_msg.0.total_fee())
         {
@@ -272,13 +285,17 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // TODO: maintain a shared read transaction so we have read isolation
         let chunk: UnpackedChunk = chunk_msg.0;
 
-        if self.db.is_none() || self.task_exec.is_none() || self.signer.is_none() {
+        if self.irys_db.is_none()
+            || self.task_exec.is_none()
+            || self.signer.is_none()
+            || self.reth_db.is_none()
+        {
             return Err(ChunkIngressError::Other(
                 "mempool_service not initialized".to_string(),
             ));
         }
 
-        let db = self.db.clone().unwrap();
+        let db = self.irys_db.clone().unwrap();
 
         // Check to see if we have a cached data_root for this chunk
         let read_tx = db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
@@ -294,7 +311,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         let target_offset = chunk.byte_offset(self.storage_config.chunk_size) as u128;
         let path_buff = &chunk.data_path;
 
-        println!(
+        info!(
             "chunk_offset:{} data_size:{} offset:{}",
             chunk.tx_offset, chunk.data_size, target_offset
         );
@@ -421,9 +438,9 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                 .last()
                 .ok_or(ChunkIngressError::ServiceUninitialized)?;
 
-            let target_height = latest_height + CONFIG.anchor_expiry_depth as u64;
+            let target_height = latest_height + self.anchor_expiry_depth;
 
-            let db1 = self.db.clone().unwrap();
+            let db1 = self.irys_db.clone().unwrap();
             let signer1 = self.signer.clone().unwrap();
             self.task_exec.clone().unwrap().spawn_blocking(async move {
                 generate_ingress_proof(
@@ -454,7 +471,7 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
     type Result = Vec<IrysTransactionHeader>;
 
     fn handle(&mut self, _msg: GetBestMempoolTxs, _ctx: &mut Self::Context) -> Self::Result {
-        let db = self.db.clone().unwrap();
+        let reth_db = self.reth_db.clone().unwrap();
         let mut fees_spent_per_address = HashMap::new();
 
         // TODO sort by fee
@@ -462,7 +479,7 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
             .iter()
             .filter(|(_, tx)| {
                 let current_spent = *fees_spent_per_address.get(&tx.signer).unwrap_or(&0_u64);
-                let valid = irys_database::get_account_balance(&db.tx().unwrap(), tx.signer)
+                let valid = irys_database::get_account_balance(&reth_db.tx().unwrap(), tx.signer)
                     .unwrap()
                     >= U256::from(current_spent + tx.total_fee());
                 match fees_spent_per_address.get_mut(&tx.signer) {
@@ -475,7 +492,7 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
                 };
                 valid
             })
-            .take(CONFIG.max_data_txs_per_block.try_into().unwrap())
+            .take(self.max_data_txs_per_block.try_into().unwrap())
             .map(|(_, header)| header.clone())
             .collect()
     }
@@ -485,7 +502,7 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
     type Result = eyre::Result<()>;
     fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         || -> eyre::Result<()> {
-            let db = self.db.clone().ok_or_else(|| {
+            let db = self.irys_db.clone().ok_or_else(|| {
                 error!("mempool_service is uninitialized");
                 eyre!("mempool_service is uninitialized")
             })?;
@@ -673,206 +690,3 @@ pub fn generate_ingress_proof(
 
     Ok(())
 }
-
-//==============================================================================
-// Tests
-//------------------------------------------------------------------------------
-// #[cfg(test)]
-// mod tests {
-//     use std::{sync::Arc, time::Duration};
-
-//     use assert_matches::assert_matches;
-//     use irys_database::{open_or_create_db, tables::IrysTables};
-//     use irys_packing::xor_vec_u8_arrays_in_place;
-//     use irys_storage::{ii, ChunkType, StorageModule, StorageModuleInfo};
-//     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-//     use irys_types::{
-//         irys::IrysSigner,
-//         partition::{PartitionAssignment, PartitionHash},
-//         Address, Base64, MAX_CHUNK_SIZE,
-//     };
-//     use rand::Rng;
-//     use reth::tasks::TaskManager;
-//     use tokio::time::{sleep, timeout};
-
-//     use super::*;
-
-//     use actix::prelude::*;
-
-//     #[actix::test]
-//     async fn post_transaction_and_chunks() -> eyre::Result<()> {
-//         let tmp_dir = setup_tracing_and_temp_dir(Some("post_transaction_and_chunks"), false);
-//         let base_path = tmp_dir.path().to_path_buf();
-
-//         let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
-//         let arc_db1 = DatabaseProvider(Arc::new(db));
-//         let arc_db2 = DatabaseProvider(Arc::clone(&arc_db1));
-
-//         // Create an instance of the mempool actor
-//         let task_manager = TaskManager::current();
-
-//         let storage_config = StorageConfig::default();
-//         let chunk_size = storage_config.chunk_size;
-
-//         let storage_module_info = StorageModuleInfo {
-//             id: 0,
-//             partition_assignment: Some(PartitionAssignment {
-//                 partition_hash: PartitionHash::zero(),
-//                 miner_address: Address::random(),
-//                 ledger_id: Some(0),
-//                 slot_index: Some(0),
-//             }),
-//             submodules: vec![
-//                 (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
-//             ],
-//         };
-
-//         // Override the default StorageModule config for testing
-//         let config = StorageConfig {
-//             min_writes_before_sync: 1,
-//             chunk_size,
-//             num_chunks_in_partition: 5,
-//             ..Default::default()
-//         };
-
-//         let storage_module = Arc::new(StorageModule::new(
-//             &base_path,
-//             &storage_module_info,
-//             config,
-//         )?);
-
-//         storage_module.pack_with_zeros();
-
-//         let mempool = MempoolService::new(
-//             arc_db1,
-//             task_manager.executor(),
-//             IrysSigner::random_signer(),
-//             storage_config,
-//             vec![storage_module.clone()],
-//         );
-//         let addr: Addr<MempoolService> = mempool.start();
-
-//         // Create 2.5 chunks worth of data *  fill the data with random bytes
-//         let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
-//         let mut data_bytes = vec![0u8; data_size];
-//         rand::thread_rng().fill(&mut data_bytes[..]);
-
-//         // Create a new Irys API instance & a signed transaction
-//         let irys = IrysSigner::random_signer();
-//         let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
-//         let tx = irys.sign_transaction(tx).unwrap();
-
-//         println!("{:?}", tx.header);
-//         println!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
-
-//         for proof in &tx.proofs {
-//             println!("offset: {}", proof.offset);
-//         }
-
-//         // Wrap the transaction in a TxIngressMessage
-//         let data_root = tx.header.data_root;
-//         let data_size = tx.header.data_size;
-//         let tx_ingress_msg = TxIngressMessage(tx.header);
-
-//         // Post the TxIngressMessage to the handle method on the mempool actor
-//         let result = addr.send(tx_ingress_msg).await.unwrap();
-
-//         // Verify the transaction was added
-//         assert_matches!(result, Ok(()));
-
-//         let db_tx = arc_db2.tx()?;
-
-//         // Verify the data_root was added to the cache
-//         let result = irys_database::cached_data_root_by_data_root(&db_tx, data_root).unwrap();
-//         assert_matches!(result, Some(_));
-//         let last_index = tx.chunks.len() - 1;
-//         // Loop though each of the transaction chunks
-//         for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
-//             let min = chunk_node.min_byte_range;
-//             let max = chunk_node.max_byte_range;
-//             let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
-//             let key: H256 = hash_sha256(&data_path.0).unwrap().into();
-//             let chunk_bytes = Base64(data_bytes[min..max].to_vec());
-//             // Create a ChunkIngressMessage for each chunk
-//             let chunk_ingress_msg = ChunkIngressMessage(UnpackedChunk {
-//                 data_root,
-//                 data_size,
-//                 data_path: data_path.clone(),
-//                 bytes: chunk_bytes.clone(),
-//                 tx_offset: tx_chunk_offset as u32,
-//             });
-
-//             let is_last_chunk = tx_chunk_offset == last_index;
-//             let interval = ii(0, last_index as u64);
-//             if is_last_chunk {
-//                 // artificially index the chunk with the submodule
-//                 // this will cause the last chunk to show up in cache & on disk
-//                 storage_module.index_transaction_data(vec![0], data_root, interval.into())?;
-//             }
-
-//             // Post the ChunkIngressMessage to the handle method on the mempool
-//             let result = addr.send(chunk_ingress_msg).await.unwrap();
-
-//             // Verify the chunk was added
-//             assert_matches!(result, Ok(()));
-
-//             // Verify the chunk is added to the ChunksCache
-//             // use a new read tx so we can see the writes
-//             let db_tx = arc_db2.tx()?;
-
-//             let (meta, chunk) = irys_database::cached_chunk_by_chunk_offset(
-//                 &db_tx,
-//                 data_root,
-//                 tx_chunk_offset as u32,
-//             )
-//             .unwrap()
-//             .unwrap();
-//             assert_eq!(meta.chunk_path_hash, key);
-//             assert_eq!(chunk.data_path, data_path);
-//             assert_eq!(chunk.chunk, Some(chunk_bytes.clone()));
-
-//             let result = irys_database::cached_chunk_by_chunk_path_hash(&db_tx, &key).unwrap();
-//             assert_matches!(result, Some(_));
-
-//             storage_module.sync_pending_chunks()?;
-
-//             if is_last_chunk {
-//                 // read the set of chunks
-//                 // only offset 2 (last chunk) should have data
-//                 let res = storage_module.read_chunks(ii(0, last_index as u32))?;
-//                 let r = res.get(&2).unwrap();
-//                 let mut packed_bytes = r.0.clone();
-//                 // unpack the data (packing was all 0's)
-//                 xor_vec_u8_arrays_in_place(&mut packed_bytes, &vec![0u8; chunk_size as usize]);
-//                 let packed_bytes_slice = &packed_bytes[0..chunk_bytes.0.len()];
-//                 let chunk_bytes = chunk_bytes.0;
-//                 assert_eq!(packed_bytes_slice.len(), chunk_bytes.len());
-//                 assert_eq!(packed_bytes_slice, chunk_bytes);
-//                 assert_eq!(r.1, ChunkType::Data);
-//             }
-//         }
-
-//         // Modify one of the chunks
-
-//         // Attempt to post the chunk
-
-//         // Verify there chunk is not accepted
-
-//         task_manager.graceful_shutdown_with_timeout(Duration::from_secs(5));
-//         // check the ingress proof is in the DB
-//         let timed_get = timeout(Duration::from_secs(5), async {
-//             loop {
-//                 // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
-//                 let ro_tx = &arc_db2.tx().unwrap();
-//                 match ro_tx.get::<IngressProofs>(data_root).unwrap() {
-//                     Some(ip) => break ip,
-//                     None => sleep(Duration::from_millis(100)).await,
-//                 }
-//             }
-//         })
-//         .await?;
-//         assert_eq!(&timed_get.data_root, &data_root);
-
-//         Ok(())
-//     }
-// }

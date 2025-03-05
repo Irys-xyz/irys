@@ -449,6 +449,7 @@ mod tests {
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1,
             chunk_migration_depth: 1, // Testnet / single node config
+            chain_id: 1,
         };
 
         let infos = vec![StorageModuleInfo {
@@ -633,8 +634,10 @@ mod tests {
             max_seeds_num: 5,
             seeds: VecDeque::new(),
         };
-
-        let vdf_service = VdfService::from_atomic_state(Arc::new(RwLock::new(vdf_state))).start();
+        let vdf_service = VdfService {
+            vdf_state: Arc::new(RwLock::new(vdf_state)),
+        }
+        .start();
         let vdf_steps_guard: VdfStepsReadGuard =
             vdf_service.send(GetVdfStateMessage).await.unwrap();
 

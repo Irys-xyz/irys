@@ -1,3 +1,7 @@
+use irys_chain::start_irys_node;
+use irys_config::IrysNodeConfig;
+use irys_types::Config;
+
 #[actix_web::test]
 async fn serial_data_promotion_test() {
     use actix_web::{
@@ -11,7 +15,6 @@ async fn serial_data_promotion_test() {
     use base58::ToBase58;
     use irys_actors::packing::wait_for_packing;
     use irys_api_server::{routes, ApiState};
-    use irys_chain::start_for_testing;
     use irys_database::Ledger;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
@@ -24,27 +27,25 @@ async fn serial_data_promotion_test() {
 
     use crate::utils::{get_block_parent, get_chunk, post_chunk, verify_published_chunk};
 
-    let chunk_size = 32; // 32Byte chunks
+    let chunk_size = 32_u64; // 32 byte chunks
 
-    let miner_signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
-
-    let storage_config = StorageConfig {
-        chunk_size: chunk_size as u64,
+    let mut testnet_config = Config {
+        chunk_size,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
-        num_partitions_in_slot: 1,
-        miner_address: miner_signer.address(),
-        min_writes_before_sync: 1,
+        num_partitions_per_slot: 1,
+        num_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
         chunk_migration_depth: 1, // Testnet / single node config
+        ..Config::testnet()
     };
+    testnet_config.chunk_size = chunk_size;
+    let storage_config = StorageConfig::new(&testnet_config);
 
     let temp_dir = setup_tracing_and_temp_dir(Some("data_promotion_test"), false);
-    let mut config = irys_config::IrysNodeConfig {
-        base_directory: temp_dir.path().to_path_buf(),
-        ..Default::default()
-    };
-    let signer = IrysSigner::random_signer_with_chunk_size(chunk_size as usize);
+    let mut config = IrysNodeConfig::new(&testnet_config);
+    config.base_directory = temp_dir.path().to_path_buf();
+    let signer = IrysSigner::random_signer(&testnet_config);
 
     config.extend_genesis_accounts(vec![(
         signer.address(),
@@ -55,7 +56,13 @@ async fn serial_data_promotion_test() {
     )]);
 
     // This will create 3 storage modules, one for submit, one for publish, and one for capacity
-    let node_context = start_for_testing(config.clone()).await.unwrap();
+    let node_context = start_irys_node(
+        config.clone(),
+        storage_config.clone(),
+        testnet_config.clone(),
+    )
+    .await
+    .unwrap();
 
     wait_for_packing(
         node_context.actor_addresses.packing.clone(),
@@ -73,6 +80,7 @@ async fn serial_data_promotion_test() {
         db: node_context.db.clone(),
         mempool: node_context.actor_addresses.mempool,
         chunk_provider: node_context.chunk_provider.clone(),
+        config: testnet_config,
     };
 
     // Initialize the app

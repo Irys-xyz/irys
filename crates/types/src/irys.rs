@@ -1,6 +1,6 @@
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, IrysBlockHeader,
-    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, CONFIG, H256, MAX_CHUNK_SIZE,
+    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, Config, IrysBlockHeader,
+    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, H256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -8,7 +8,6 @@ use alloy_signer::utils::secret_key_to_address;
 use alloy_signer_local::LocalSigner;
 use eyre::Result;
 use k256::ecdsa::SigningKey;
-use rand::rngs::OsRng;
 
 #[derive(Debug, Clone)]
 
@@ -21,32 +20,28 @@ pub struct IrysSigner {
 /// Encapsulates an Irys API for doing client type things, making transactions,
 /// signing them, posting them etc.
 impl IrysSigner {
-    pub fn mainnet_from_slice(key_slice: &[u8]) -> Self {
+    pub fn from_config(config: &Config) -> Self {
         IrysSigner {
-            signer: k256::ecdsa::SigningKey::from_slice(key_slice).unwrap(),
-            chain_id: CONFIG.irys_chain_id,
-            chunk_size: CONFIG.chunk_size.try_into().unwrap(),
+            signer: config.mining_key.clone(),
+            chain_id: config.chain_id,
+            chunk_size: config
+                .chunk_size
+                .try_into()
+                .expect("invalid chunk size specified in the config"),
         }
     }
 
-    // DO NOT USE IN PROD
-    pub fn random_signer() -> Self {
-        IrysSigner {
-            signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: CONFIG.irys_chain_id,
-            chunk_size: MAX_CHUNK_SIZE,
-        }
-    }
+    #[cfg(any(feature = "test-utils", test))]
+    pub fn random_signer(config: &Config) -> Self {
+        use rand::rngs::OsRng;
 
-    pub fn random_signer_with_chunk_size<T>(chunk_size: T) -> Self
-    where
-        T: TryInto<usize>,
-        <T as TryInto<usize>>::Error: std::fmt::Debug,
-    {
         IrysSigner {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: CONFIG.irys_chain_id,
-            chunk_size: chunk_size.try_into().unwrap(),
+            chain_id: config.chain_id,
+            chunk_size: config
+                .chunk_size
+                .try_into()
+                .expect("invalid chunk size specified"),
         }
     }
 
@@ -150,8 +145,7 @@ impl From<IrysSigner> for LocalSigner<SigningKey> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{hash_sha256, validate_chunk, MAX_CHUNK_SIZE};
-    use assert_matches::assert_matches;
+    use crate::{hash_sha256, validate_chunk};
     use rand::Rng;
     use reth_primitives::transaction::recover_signer;
 
@@ -160,12 +154,13 @@ mod tests {
     #[tokio::test]
     async fn create_and_sign_transaction() {
         // Create 2.5 chunks worth of data *  fill the data with random bytes
-        let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
+        let config = crate::Config::testnet();
+        let data_size = (config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Create a new Irys API instance
-        let irys = IrysSigner::random_signer();
+        let irys = IrysSigner::random_signer(&config);
 
         // Create a transaction from the random bytes
         let mut tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
@@ -188,7 +183,7 @@ mod tests {
         // after chunking the rest of the data at MAX_CHUNK_SIZE intervals.
         let last_chunk = tx.chunks.last().unwrap();
         assert_eq!(
-            data_size % MAX_CHUNK_SIZE,
+            data_size % config.chunk_size as usize,
             last_chunk.max_byte_range - last_chunk.min_byte_range
         );
 
@@ -206,7 +201,7 @@ mod tests {
             let root_id = tx.header.data_root.0;
             let proof = tx.proofs[index].clone();
             let proof_result = validate_chunk(root_id, chunk_node, &proof);
-            assert_matches!(proof_result, Ok(_));
+            assert!(proof_result.is_ok());
 
             // Ensure the data_hash is valid by hashing the chunk data
             let chunk_bytes: &[u8] = &data_bytes[min..max];

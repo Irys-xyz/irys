@@ -16,7 +16,7 @@ use {
 };
 
 use irys_storage::{ChunkType, StorageModule};
-use irys_types::{PartitionChunkOffset, PartitionChunkRange, StorageConfig};
+use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, StorageConfig};
 use reth::tasks::TaskExecutor;
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
@@ -57,13 +57,17 @@ pub struct PackingConfig {
     /// Max. number of chunks send to GPU packing
     #[allow(unused)]
     pub max_chunks: u32,
+    /// Irys chain id
+    pub chain_id: u64,
 }
-impl Default for PackingConfig {
-    fn default() -> Self {
+
+impl PackingConfig {
+    pub fn new(config: &Config) -> Self {
         Self {
             poll_duration: Duration::from_millis(1000),
-            concurrency: 4,
-            max_chunks: 1024,
+            concurrency: config.cpu_packing_concurrency,
+            max_chunks: config.gpu_packing_batch_size,
+            chain_id: config.chain_id,
         }
     }
 }
@@ -74,9 +78,8 @@ impl PackingActor {
         actix_runtime_handle: Handle,
         task_executor: TaskExecutor,
         storage_module_ids: Vec<usize>,
-        config: Option<PackingConfig>,
+        config: PackingConfig,
     ) -> Self {
-        let config = config.unwrap_or_default();
         let semaphore = storage_module_ids
             .iter()
             .map(|s| (*s, Arc::new(Semaphore::new(config.concurrency.into()))))
@@ -163,6 +166,7 @@ impl PackingActor {
                                 entropy_packing_iterations,
                                 chunk_size as usize,
                                 &mut out,
+                                self.config.chain_id
                             );
 
                             debug!(target: "irys::packing::progress", "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
@@ -218,6 +222,8 @@ impl PackingActor {
                                 partition_hash,
                                 Some(entropy_packing_iterations),
                                 &mut out,
+                                entropy_packing_iterations,
+                                self.config.chain_id,
                             );
                             for i in 0..num_chunks {
                                 storage_module.write_chunk(
@@ -357,20 +363,30 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
-        partition_chunk_offset_ii, Address, PartitionChunkOffset, PartitionChunkRange,
+        partition_chunk_offset_ii, Address, Config, PartitionChunkOffset, PartitionChunkRange,
         StorageConfig,
     };
     use reth::tasks::TaskManager;
     use tokio::runtime::Handle;
 
     use crate::packing::{
-        cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingRequest,
+        cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingConfig, PackingRequest,
     };
 
     #[actix::test]
     async fn test_packing_actor() -> eyre::Result<()> {
+        // setup
         let mining_address = Address::random();
         let partition_hash = PartitionHash::zero();
+        let testnet_config = Config {
+            num_writes_before_sync: 1,
+            entropy_packing_iterations: 1000,
+            num_chunks_in_partition: 5,
+            chunk_size: 32,
+            ..Config::testnet()
+        };
+        let config = PackingConfig::new(&testnet_config);
+
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
@@ -383,18 +399,9 @@ mod tests {
                 (partition_chunk_offset_ii!(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         }];
-
-        // Override the default StorageModule config for testing
-        let storage_config = StorageConfig {
-            min_writes_before_sync: 1,
-            entropy_packing_iterations: 1_000,
-            num_chunks_in_partition: 5,
-            ..Default::default()
-        };
-
+        let storage_config = StorageConfig::new(&testnet_config);
         let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
         let base_path = tmp_dir.path().to_path_buf();
-
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
         let storage_module = Arc::new(StorageModule::new(
@@ -409,18 +416,21 @@ mod tests {
         };
         // Create an instance of the mempool actor
         let task_manager = TaskManager::current();
-
         let sm_ids = vec![storage_module.id];
-
-        let packing = PackingActor::new(Handle::current(), task_manager.executor(), sm_ids, None);
-
+        let packing = PackingActor::new(
+            Handle::current(),
+            task_manager.executor(),
+            sm_ids,
+            config.clone(),
+        );
         let packing_addr = packing.start();
 
+        // action
         packing_addr.send(request).await?;
-
         wait_for_packing(packing_addr, None).await?;
-
         storage_module.sync_pending_chunks()?;
+
+        // assert
         // check that the chunks are marked as packed
         let intervals = storage_module.get_intervals(ChunkType::Entropy);
         assert_eq!(
@@ -446,6 +456,7 @@ mod tests {
                 storage_config.entropy_packing_iterations,
                 storage_config.chunk_size.try_into().unwrap(),
                 &mut out,
+                config.chain_id,
             );
             assert_eq!(chunk.0.first(), out.first());
         }

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{StorageConfig, CONFIG, U256};
+use crate::{Config, StorageConfig, U256};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -20,9 +20,16 @@ pub struct DifficultyAdjustmentConfig {
     pub max_difficulty: U256,
 }
 
-impl Default for DifficultyAdjustmentConfig {
-    fn default() -> Self {
-        CONFIG.into()
+impl DifficultyAdjustmentConfig {
+    pub fn new(config: &Config) -> Self {
+        DifficultyAdjustmentConfig {
+            target_block_time: config.block_time,
+            adjustment_interval: config.difficulty_adjustment_interval,
+            max_adjustment_factor: config.max_difficulty_adjustment_factor,
+            min_adjustment_factor: config.min_difficulty_adjustment_factor,
+            min_difficulty: U256::one(), // TODO: make this customizable if desirable
+            max_difficulty: U256::MAX,
+        }
     }
 }
 
@@ -58,6 +65,9 @@ pub fn calculate_initial_difficulty(
     Ok(initial_difficulty)
 }
 
+/// - if `actual_time_ms` < `target_time_ms`,the difficulty increases i.e. block.difficulty > previous_block.difficulty.
+/// -  if `actual_time_ms` > `target_time_ms`,the difficulty decreases i.e. block.difficulty < previous_block.difficulty.
+/// - if the `percent_diff` < `min_threshold`, the difficulty remains unchanged.
 pub fn adjust_difficulty(current_diff: U256, actual_time_ms: u128, target_time_ms: u128) -> U256 {
     let max_u256 = U256::MAX;
     let scale = U256::from(1000);
@@ -142,9 +152,7 @@ pub fn next_cumulative_diff(previous_cumulative_diff: U256, new_diff: U256) -> U
     let network_hash_rate = max_diff / (max_diff - new_diff);
     previous_cumulative_diff + network_hash_rate
 }
-//==============================================================================
-// Tests
-//------------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -153,14 +161,13 @@ mod tests {
     use alloy_primitives::Address;
     use openssl::sha;
 
-    use crate::{
-        adjust_difficulty, calculate_initial_difficulty, StorageConfig, CONFIG, H256, U256,
-    };
+    use crate::{adjust_difficulty, calculate_initial_difficulty, StorageConfig, H256, U256};
 
     use super::DifficultyAdjustmentConfig;
 
     #[test]
     fn test_adjustments() {
+        let config = Config::testnet();
         let difficulty_config = DifficultyAdjustmentConfig {
             target_block_time: 5,              // 5 seconds
             adjustment_interval: 10,           // every X blocks
@@ -177,8 +184,9 @@ mod tests {
             num_partitions_in_slot: 1,
             miner_address: Address::random(),
             min_writes_before_sync: 1,
-            entropy_packing_iterations: CONFIG.entropy_packing_iterations,
+            entropy_packing_iterations: config.entropy_packing_iterations,
             chunk_migration_depth: 1, // Testnet / single node config
+            chain_id: config.chain_id,
         };
 
         let mut storage_module_count = 3;

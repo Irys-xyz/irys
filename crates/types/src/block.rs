@@ -338,12 +338,11 @@ impl IrysBlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::{irys::IrysSigner, validate_path, TxIngressProof, CONFIG, MAX_CHUNK_SIZE};
+    use crate::{validate_path, Config, TxIngressProof};
 
     use super::*;
     use alloy_primitives::Signature;
     use alloy_rlp::Decodable;
-    use k256::ecdsa::SigningKey;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use serde_json;
     use zerocopy::IntoBytes;
@@ -486,13 +485,8 @@ mod tests {
     fn test_irys_block_header_signing() {
         // setup
         let mut header = mock_header();
-        let mut rng = rand::thread_rng();
-        let signer = SigningKey::random(&mut rng);
-        let signer = IrysSigner {
-            signer,
-            chain_id: CONFIG.irys_chain_id,
-            chunk_size: MAX_CHUNK_SIZE,
-        };
+        let testnet_config = Config::testnet();
+        let signer = testnet_config.irys_signer();
 
         // action
         // sign the block header
