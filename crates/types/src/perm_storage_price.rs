@@ -1,5 +1,5 @@
 use crate::{Config, ANNUALIZED_COST_OF_OPERATING_16TB, GIGABYTE, MINER_PERCENTAGE_FEE, TERABYTE};
-use eyre::{ensure, Error};
+use eyre::ensure;
 use rust_decimal::Decimal;
 
 pub struct PriceCalc;
@@ -9,15 +9,17 @@ impl PriceCalc {
     const ANNUALIZED_COST_OF_STORING_1GB: f64 =
         ANNUALIZED_COST_OF_OPERATING_16TB / (Self::TB_REDUCE as f64 * (TERABYTE / GIGABYTE) as f64);
 
+    // Get the current USD/IRYS exchange rate
     fn get_usd_to_irys_conversion_rate() -> f64 {
         // 1 USD = how many $IRYS. end result is in $IRYS
         1.0
     }
 
+    /// Quote an IRYS price to store a number of bytes in perm storage
     pub fn calc_perm_storage_price(
         number_of_bytes_to_store: u64,
         config: &Config,
-    ) -> Result<f64, Error> {
+    ) -> eyre::Result<f64> {
         ensure!(config.chunk_size != 0, "Chunk size should not be 0");
         // $USD/GB
         let perm_cost = Self::calc_perm_cost_per_gb(
@@ -44,7 +46,7 @@ impl PriceCalc {
             * approximate_usd_irys_price)
     }
 
-    // data size to chunk count
+    // Data size to chunk count
     fn get_chunks_from_bytes(number_of_bytes_to_store: u64, chunk_size: u64) -> u64 {
         if number_of_bytes_to_store == 0 {
             return 0;
@@ -62,11 +64,12 @@ impl PriceCalc {
         }
     }
 
+    // Calculate the decay rate for one GB of perm storage
     fn calc_perm_cost_per_gb(
         safe_minimum_number_of_years: u32,
         annualized_decay_rate: f64,
         partitions: u64,
-    ) -> Result<f64, Error> {
+    ) -> eyre::Result<f64> {
         ensure!(
             safe_minimum_number_of_years != 0,
             "Minimum number of years must be at least one"
@@ -86,10 +89,11 @@ impl PriceCalc {
         Ok(total_cost * partitions as f64)
     }
 
+    // Calculate the perm fee for a number of ingress proofs
     fn calc_perm_fee_per_ingress_gb(
         ingress_proofs: u32,
         ingress_fee: Decimal,
-    ) -> Result<f64, Error> {
+    ) -> eyre::Result<f64> {
         ensure!(ingress_proofs != 0, "Ingress proofs must be > 0");
         let ingress_fee = f64::try_from(ingress_fee)?;
         Ok(Self::ANNUALIZED_COST_OF_STORING_1GB + ingress_fee * ingress_proofs as f64)
@@ -165,7 +169,7 @@ mod test {
             token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
                 .expect("valid percentage"),
             cpu_packing_concurrency: u16::default(),
-            gpu_packing_batch_size: u32::default()
+            gpu_packing_batch_size: u32::default(),
         }
     }
 
