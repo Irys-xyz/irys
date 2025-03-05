@@ -343,11 +343,7 @@ impl StorageModule {
 
     /// Returns the `StorageModules` `partition_hash` if assigned
     pub fn partition_hash(&self) -> Option<PartitionHash> {
-        if let Some(part_assign) = self.partition_assignment {
-            Some(part_assign.partition_hash)
-        } else {
-            None
-        }
+        self.partition_assignment.map(|part_assign| part_assign.partition_hash)
     }
 
     /// Reinit intervals setting them as Uninitialized, and erase db
