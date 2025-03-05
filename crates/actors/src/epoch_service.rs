@@ -1661,16 +1661,16 @@ mod tests {
 
         //            +---+
         //            |sm0|
-        //            +-+-+  |    |
+        //            +-|-+  |    |
         // Publish 0----+----+----+---
         //              |    |    |
         //              0    1    2
         //                  +---+ +---+ +---+
         //                  |sm2| |sm1| | ? |
-        //                  +-+-+ +-+-+ +-+-+
-        // Submit 1 +----+----+----+-----+----+---
-        //          |    |    |     |    |
-        //          0    1    2     3    4
+        //                  +-|-+ +-|-+ +-|-+
+        // Submit 1 +----+----+-----+-----+----+---
+        //          |    |    |     |     |
+        //          0    1    2     3     4
         // Capacity
 
         // Get the genesis storage modules and their assigned partitions
@@ -1700,164 +1700,218 @@ mod tests {
         }
     }
 
-    // async fn partitions_assignment_determinism_test() {
-    //     let testnet_config = Config::testnet();
-    //     // Initialize genesis block at height 0
-    //     let mut genesis_block = IrysBlockHeader::new_mock_header();
-    //     genesis_block.last_epoch_hash = H256::zero(); // for partitions hash determinism
-    //     genesis_block.height = 0;
+    #[actix::test]
+    async fn partitions_assignment_determinism_test() {
+        let testnet_config = Config {
+            submit_ledger_epoch_length: 2,
+            ..Config::testnet()
+        };
+        // Initialize genesis block at height 0
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
+        genesis_block.last_epoch_hash = H256::zero(); // for partitions hash determinism
+        genesis_block.height = 0;
 
-    //     // Create a storage config for testing
-    //     let storage_config = StorageConfig {
-    //         chunk_size: 32,
-    //         num_chunks_in_partition: 10,
-    //         num_chunks_in_recall_range: 2,
-    //         num_partitions_in_slot: 1,
-    //         miner_address: Address::random(),
-    //         min_writes_before_sync: 1,
-    //         entropy_packing_iterations: testnet_config.entropy_packing_iterations,
-    //         chunk_migration_depth: 1, // Testnet / single node config
-    //         chain_id: 1,
-    //     };
-    //     let num_chunks_in_partition = storage_config.num_chunks_in_partition;
+        // Create a storage config for testing
+        let storage_config = StorageConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: 10,
+            num_chunks_in_recall_range: 2,
+            num_partitions_in_slot: 1,
+            miner_address: Address::random(),
+            min_writes_before_sync: 1,
+            entropy_packing_iterations: testnet_config.entropy_packing_iterations,
+            chunk_migration_depth: 1, // Testnet / single node config
+            chain_id: 1,
+        };
+        let num_chunks_in_partition = storage_config.num_chunks_in_partition;
 
-    //     // Create epoch service
-    //     let config = EpochServiceConfig {
-    //         capacity_scalar: 100,
-    //         num_blocks_in_epoch: 100,
-    //         num_capacity_partitions: None,
-    //         storage_config,
-    //     };
-    //     let num_blocks_in_epoch = config.num_blocks_in_epoch;
+        // Create epoch service
+        let config = EpochServiceConfig {
+            capacity_scalar: 100,
+            num_blocks_in_epoch: 100,
+            num_capacity_partitions: None,
+            storage_config: storage_config.clone(),
+        };
+        let num_blocks_in_epoch = config.num_blocks_in_epoch;
 
-    //     let mut epoch_service = EpochServiceActor::new(config.clone(), &testnet_config);
-    //     let _ = epoch_service.handle(NewEpochMessage(genesis_block.into()), &mut ctx);
+        let tmp_dir = setup_tracing_and_temp_dir(Some("epoch_block_reinitialization_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        let arc_config = Arc::new(IrysNodeConfig {
+            base_directory: base_path.clone(),
+            ..IrysNodeConfig::default()
+        });
 
-    //     // Now create a new epoch block & give the Submit ledger enough size to add a slot
-    //     let total_epoch_messages = 6;
-    //     let mut epoch_num = 1;
-    //     let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-    //     new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition;
-    //     new_epoch_block.ledgers[Ledger::Publish].max_chunk_offset = num_chunks_in_partition;
+        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
+            BlockIndex::default()
+                .reset(&arc_config.clone())
+                .unwrap()
+                .init(arc_config.clone())
+                .await
+                .unwrap(),
+        ));
 
-    //     while epoch_num <= total_epoch_messages {
-    //         new_epoch_block.height =
-    //             (testnet_config.submit_ledger_epoch_length * epoch_num) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
-    //         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
-    //         epoch_num += 1;
-    //     }
+        let block_index_actor =
+        BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        SystemRegistry::set(block_index_actor.clone());
 
-    //     // Check determinism in assigned partitions
-    //     let publish_slot_0 = H256(
-    //         hex::decode("12771355e46cd47c71ed1721fd5319b383cca3a1f9fce3aa1c8cd3bd37af20d7")
-    //             .unwrap()
-    //             .try_into()
-    //             .unwrap(),
-    //     );
+        let block_index_guard = block_index_actor
+            .send(GetBlockIndexGuardMessage)
+            .await
+            .unwrap();
 
-    //     if let Some(publish_assignment) = epoch_service
-    //         .partition_assignments
-    //         .read()
-    //         .unwrap()
-    //         .data_partitions
-    //         .get(&publish_slot_0)
-    //     {
-    //         assert_eq!(
-    //             publish_assignment.ledger_id,
-    //             Some(Ledger::Publish.get_id()),
-    //             "Should be assigned to publish ledger"
-    //         );
-    //         assert_eq!(
-    //             publish_assignment.slot_index,
-    //             Some(0),
-    //             "Should be assigned to slot 0"
-    //         );
-    //     } else {
-    //         panic!("Should have an assignment");
-    //     };
 
-    //     let publish_slot_1 = H256(
-    //         hex::decode("12d7fd61841c114d9a4011710874c5b4857c35266ef13b1ac3f3b476780e9b53")
-    //             .unwrap()
-    //             .try_into()
-    //             .unwrap(),
-    //     );
+        let mut epoch_service = EpochServiceActor::new(config.clone(), &testnet_config, block_index_guard.clone());
+        let mut ctx = Context::new();
+        let _ = epoch_service.handle(NewEpochMessage(genesis_block.clone().into()), &mut ctx);
 
-    //     if let Some(publish_assignment) = epoch_service
-    //         .partition_assignments
-    //         .read()
-    //         .unwrap()
-    //         .data_partitions
-    //         .get(&publish_slot_1)
-    //     {
-    //         assert_eq!(
-    //             publish_assignment.ledger_id,
-    //             Some(Ledger::Publish.get_id()),
-    //             "Should be assigned to publish ledger"
-    //         );
-    //         assert_eq!(
-    //             publish_assignment.slot_index,
-    //             Some(1),
-    //             "Should be assigned to slot 1"
-    //         );
-    //     } else {
-    //         panic!("Should have an assignment");
-    //     };
+        let msg = BlockFinalizedMessage {
+            block_header: Arc::new(genesis_block.clone()),
+            all_txs: Arc::new(vec![]),
+        };
+        match block_index_actor.send(msg).await {
+            Ok(_) => info!("Genesis block indexed"),
+            Err(_) => panic!("Failed to index genesis block"),
+        }
 
-    //     let submit_slot_11 = H256(
-    //         hex::decode("07a0f53a2326c4e19d72d9901769c7275a5dfeddd68b49c6ed77c96e19bb6f2d")
-    //             .unwrap()
-    //             .try_into()
-    //             .unwrap(),
-    //     );
+        // Now create a new epoch block & give the Submit ledger enough size to add a slot
+        let total_epoch_messages = 6;
+        let mut epoch_num = 1;
+        let mut new_epoch_block = IrysBlockHeader::new_mock_header();
+        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition;
+        new_epoch_block.ledgers[Ledger::Publish].max_chunk_offset = num_chunks_in_partition;
 
-    //     if let Some(submit_assignment) = epoch_service
-    //         .partition_assignments
-    //         .read()
-    //         .unwrap()
-    //         .data_partitions
-    //         .get(&submit_slot_11)
-    //     {
-    //         assert_eq!(
-    //             submit_assignment.ledger_id,
-    //             Some(Ledger::Submit.get_id()),
-    //             "Should be assigned to submit ledger"
-    //         );
-    //         assert_eq!(
-    //             submit_assignment.slot_index,
-    //             Some(11),
-    //             "Should be assigned to slot 11"
-    //         );
-    //     } else {
-    //         panic!("Should have an assignment");
-    //     };
+        let mut height = 1;
+        while epoch_num <= total_epoch_messages {
+            new_epoch_block.height = height;
+                //(testnet_config.submit_ledger_epoch_length * epoch_num) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
+            let msg = BlockFinalizedMessage {
+                block_header: Arc::new(new_epoch_block.clone()),
+                all_txs: Arc::new(vec![]),
+            };
+            match block_index_actor.send(msg).await {
+                Ok(_) => (), // debug!("block indexed"),
+                Err(err) => panic!("Failed to index block {:?}", err),
+            }
+    
+            if height % num_blocks_in_epoch == 0 {
+                epoch_num += 1;
+                debug!("epoch block {}", height);
+                let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
+            }
+            height += 1;            
+        }
 
-    //     let submit_slot_12 = H256(
-    //         hex::decode("fe4af4eb44d9b92afdc3113bc3fba48531502d6367ad42de3a7f1d1ea4065ba4")
-    //             .unwrap()
-    //             .try_into()
-    //             .unwrap(),
-    //     );
+        // Check determinism in assigned partitions
+        let publish_slot_0 = H256(
+            hex::decode("12771355e46cd47c71ed1721fd5319b383cca3a1f9fce3aa1c8cd3bd37af20d7")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
 
-    //     if let Some(submit_assignment) = epoch_service
-    //         .partition_assignments
-    //         .read()
-    //         .unwrap()
-    //         .data_partitions
-    //         .get(&submit_slot_12)
-    //     {
-    //         assert_eq!(
-    //             submit_assignment.ledger_id,
-    //             Some(Ledger::Submit.get_id()),
-    //             "Should be assigned to submit ledger"
-    //         );
-    //         assert_eq!(
-    //             submit_assignment.slot_index,
-    //             Some(12),
-    //             "Should be assigned to slot 12"
-    //         );
-    //     } else {
-    //         panic!("Should have an assignment");
-    //     };
-    // }
+        if let Some(publish_assignment) = epoch_service
+            .partition_assignments
+            .read()
+            .unwrap()
+            .data_partitions
+            .get(&publish_slot_0)
+        {
+            assert_eq!(
+                publish_assignment.ledger_id,
+                Some(Ledger::Publish.get_id()),
+                "Should be assigned to publish ledger"
+            );
+            assert_eq!(
+                publish_assignment.slot_index,
+                Some(0),
+                "Should be assigned to slot 0"
+            );
+        } else {
+            panic!("Should have an assignment");
+        };
+
+        let publish_slot_1 = H256(
+            hex::decode("12d7fd61841c114d9a4011710874c5b4857c35266ef13b1ac3f3b476780e9b53")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+
+        if let Some(publish_assignment) = epoch_service
+            .partition_assignments
+            .read()
+            .unwrap()
+            .data_partitions
+            .get(&publish_slot_1)
+        {
+            assert_eq!(
+                publish_assignment.ledger_id,
+                Some(Ledger::Publish.get_id()),
+                "Should be assigned to publish ledger"
+            );
+            assert_eq!(
+                publish_assignment.slot_index,
+                Some(1),
+                "Should be assigned to slot 1"
+            );
+        } else {
+            panic!("Should have an assignment");
+        };
+
+        let submit_slot_11 = H256(
+            hex::decode("07a0f53a2326c4e19d72d9901769c7275a5dfeddd68b49c6ed77c96e19bb6f2d")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+
+        if let Some(submit_assignment) = epoch_service
+            .partition_assignments
+            .read()
+            .unwrap()
+            .data_partitions
+            .get(&submit_slot_11)
+        {
+            assert_eq!(
+                submit_assignment.ledger_id,
+                Some(Ledger::Publish.get_id()),
+                "Should be assigned to publish ledger"
+            );
+            assert_eq!(
+                submit_assignment.slot_index,
+                Some(7),
+                "Should be assigned to publish slot 7"
+            );
+        } else {
+            panic!("Should have an assignment");
+        };
+
+        let submit_slot_15 = H256(
+            hex::decode("fe4af4eb44d9b92afdc3113bc3fba48531502d6367ad42de3a7f1d1ea4065ba4")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+
+        if let Some(submit_assignment) = epoch_service
+            .partition_assignments
+            .read()
+            .unwrap()
+            .data_partitions
+            .get(&submit_slot_15)
+        {
+            assert_eq!(
+                submit_assignment.ledger_id,
+                Some(Ledger::Submit.get_id()),
+                "Should be assigned to submit ledger"
+            );
+            assert_eq!(
+                submit_assignment.slot_index,
+                Some(15),
+                "Should be assigned to slot 15"
+            );
+        } else {
+            panic!("Should have an assignment");
+        };
+    }
 }
