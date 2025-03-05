@@ -12,8 +12,8 @@ use irys_actors::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
     epoch_service::{
-        EpochServiceActor, EpochServiceConfig,
-        GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
+        EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
+        GetPartitionAssignmentsGuardMessage,
     },
     mempool_service::MempoolService,
     mining::PartitionMiningActor,

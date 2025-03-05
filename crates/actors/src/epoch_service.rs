@@ -1374,7 +1374,7 @@ mod tests {
                 sub_slots[0].is_expired && sub_slots[0].partitions.len() == 0,
                 "Slot 0 should have expired and have no assigned partition!"
             );
-            
+
             assert!(!sub_slots[1].is_expired && sub_slots[1].partitions.len() == 1 && capacity_partitions.contains(&sub_slots[1].partitions[0]),"Slot 1 should not be expired and have a new fresh partition from previous capacity ones!");
             assert!(
                 !sub_slots[2].is_expired
@@ -1751,7 +1751,7 @@ mod tests {
         ));
 
         let block_index_actor =
-        BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+            BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
         SystemRegistry::set(block_index_actor.clone());
 
         let block_index_guard = block_index_actor
@@ -1759,8 +1759,8 @@ mod tests {
             .await
             .unwrap();
 
-
-        let mut epoch_service = EpochServiceActor::new(config.clone(), &testnet_config, block_index_guard.clone());
+        let mut epoch_service =
+            EpochServiceActor::new(config.clone(), &testnet_config, block_index_guard.clone());
         let mut ctx = Context::new();
         let _ = epoch_service.handle(NewEpochMessage(genesis_block.clone().into()), &mut ctx);
 
@@ -1783,7 +1783,7 @@ mod tests {
         let mut height = 1;
         while epoch_num <= total_epoch_messages {
             new_epoch_block.height = height;
-                //(testnet_config.submit_ledger_epoch_length * epoch_num) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
+            //(testnet_config.submit_ledger_epoch_length * epoch_num) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
             let msg = BlockFinalizedMessage {
                 block_header: Arc::new(new_epoch_block.clone()),
                 all_txs: Arc::new(vec![]),
@@ -1792,13 +1792,14 @@ mod tests {
                 Ok(_) => (), // debug!("block indexed"),
                 Err(err) => panic!("Failed to index block {:?}", err),
             }
-    
+
             if height % num_blocks_in_epoch == 0 {
                 epoch_num += 1;
                 debug!("epoch block {}", height);
-                let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
+                let _ =
+                    epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
             }
-            height += 1;            
+            height += 1;
         }
 
         // Check determinism in assigned partitions
