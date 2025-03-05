@@ -308,7 +308,7 @@ pub async fn start_irys_node(
                     .send(GetPartitionAssignmentsGuardMessage)
                     .await
                     .unwrap();
-                
+
                 // Create a list of storage modules wrapping the storage files
                 for info in storage_module_infos {
                     let arc_module = Arc::new(
