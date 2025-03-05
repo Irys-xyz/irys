@@ -8,23 +8,25 @@ use irys_types::storage_pricing::{
     phantoms::{IrysPrice, Usd},
 };
 
-/// A trait representing a price oracle for IRYS tokens (in USD).
-pub trait IrysPriceOracle {
-    /// The error to be returned upon unsuccessful price retrieval
-    type Error;
-
-    /// Returns the current price of IRYS in USD.
-    ///
-    /// The returned value is an [`Amount`] struct carrying a [`Decimal`]
-    /// representing the price in USD.
-    fn current_price(&self) -> impl Future<Output = Result<Amount<(IrysPrice, Usd)>, Self::Error>>;
+/// An enum representing a price oracle for IRYS tokens (in USD).
+#[derive(Debug)]
+pub enum IrysPriceOracle {
+    MockOracle(mock_oracle::MockOracle),
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+impl IrysPriceOracle {
+    /// Returns the current price of IRYS in USD.
+    pub async fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
+        use IrysPriceOracle::*;
+        match self {
+            MockOracle(mock_oracle) => mock_oracle.current_price().await,
+        }
+    }
+}
+
 pub mod mock_oracle {
     use irys_types::storage_pricing::phantoms::Percentage;
     use std::sync::Mutex;
-    use tracing::{Instrument, debug_span};
 
     use super::*;
 
@@ -58,43 +60,35 @@ pub mod mock_oracle {
                 going_up: Mutex::new(true),
             }
         }
-    }
 
-    impl IrysPriceOracle for MockOracle {
-        type Error = eyre::Report;
-        fn current_price(
-            &self,
-        ) -> impl Future<Output = Result<Amount<(IrysPrice, Usd)>, eyre::Report>> {
-            async move {
-                let mut price = self.price.lock().unwrap();
-                let mut calls = self.calls.lock().unwrap();
-                let mut going_up = self.going_up.lock().unwrap();
+        pub async fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
+            let mut price = self.price.lock().unwrap();
+            let mut calls = self.calls.lock().unwrap();
+            let mut going_up = self.going_up.lock().unwrap();
 
-                *calls += 1;
+            *calls += 1;
 
-                // Each time we hit the smoothing interval, toggle the direction
-                if *calls % self.smoothing_interval == 0 {
-                    *going_up = !*going_up;
-                    *calls = 0;
-                    tracing::debug!(new_direction_is_up =? going_up, "inverting the delta direction");
-                }
-
-                // Update the price in the current direction
-                if *going_up {
-                    // Price goes up by percent_change
-                    *price = price
-                        .add_multiplier(self.percent_change)
-                        .expect("could not add multiplier");
-                } else {
-                    // Price goes down by percent_change
-                    *price = price
-                        .sub_multiplier(self.percent_change)
-                        .expect("could not deduct multiplier");
-                }
-
-                Ok(Amount::new(price.amount))
+            // Each time we hit the smoothing interval, toggle the direction
+            if *calls % self.smoothing_interval == 0 {
+                *going_up = !*going_up;
+                *calls = 0;
+                tracing::debug!(new_direction_is_up =? going_up, "inverting the delta direction");
             }
-            .instrument(debug_span!("fetching price"))
+
+            // Update the price in the current direction
+            if *going_up {
+                // Price goes up by percent_change
+                *price = price
+                    .add_multiplier(self.percent_change)
+                    .expect("could not add multiplier");
+            } else {
+                // Price goes down by percent_change
+                *price = price
+                    .sub_multiplier(self.percent_change)
+                    .expect("could not deduct multiplier");
+            }
+
+            Ok(Amount::new(price.amount))
         }
     }
 

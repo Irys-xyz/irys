@@ -26,6 +26,8 @@ use irys_api_server::{run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
 use irys_packing::{PackingType, PACKING_TYPE};
+use irys_price_oracle::mock_oracle::MockOracle;
+use irys_price_oracle::IrysPriceOracle;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
@@ -38,7 +40,7 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
     StorageConfig, CHUNK_SIZE, H256,
 };
-use irys_types::{Config, DifficultyAdjustmentConfig, PartitionChunkRange};
+use irys_types::{Config, DifficultyAdjustmentConfig, OracleConfig, PartitionChunkRange};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::rpc::eth::EthApiServer as _;
 use reth::{
@@ -413,19 +415,30 @@ pub async fn start_irys_node(
                     |_| block_discovery_actor,
                 );
 
+                // set up the price oracle
+                let price_oracle = match config.oracle_config {
+                    OracleConfig::Mock { initial_price, percent_change, smoothing_interval } => {
+                        IrysPriceOracle::MockOracle(MockOracle::new(initial_price, percent_change, smoothing_interval))    
+                    },
+                    // note: depending on the oracle, it may require spawning an async background service.
+                };
+                let price_oracle = Arc::new(price_oracle);
+
+                // set up the block producer
                 let block_producer_arbiter = Arbiter::new();
-                let block_producer_actor = BlockProducerActor::new(
-                    irys_db.clone(),
-                    mempool_addr.clone(),
-                    block_discovery_addr.clone(),
-                    epoch_service_actor_addr.clone(),
-                    reth_node.clone(),
-                    storage_config.clone(),
-                    difficulty_adjustment_config,
-                    vdf_config.clone(),
-                    vdf_steps_guard.clone(),
-                    block_tree_guard.clone(),
-                );
+                let block_producer_actor = BlockProducerActor {
+                    db: irys_db.clone(),
+                    mempool_addr: mempool_addr.clone(),
+                    block_discovery_addr,
+                    epoch_service: epoch_service_actor_addr.clone(),
+                    reth_provider: reth_node.clone(),
+                    storage_config: storage_config.clone(),
+                    difficulty_config: difficulty_adjustment_config,
+                    vdf_config: vdf_config.clone(),
+                    vdf_steps_guard: vdf_steps_guard.clone(),
+                    block_tree_guard: block_tree_guard.clone(),
+                    price_oracle,
+                };
                 let block_producer_addr =
                     BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
                         block_producer_actor
@@ -585,7 +598,7 @@ pub async fn start_irys_node(
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
             let node_config= cloned_arc.clone();
-            let tokio_runtime = /* Handle::current(); */ tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+            let tokio_runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
             let mut task_manager = TaskManager::new(tokio_runtime.handle().clone());
             let exec: reth::tasks::TaskExecutor = task_manager.executor();
 

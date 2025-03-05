@@ -1,5 +1,5 @@
 [package]
-name = "price-oracle"
+name = "irys-price-oracle"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
@@ -10,19 +10,15 @@ authors.workspace = true
 
 [dependencies]
 irys-types.workspace = true
-eyre = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-rust_decimal = { workspace = true, optional = true }
-rust_decimal_macros = { workspace = true, optional = true }
-
-[dev-dependencies]
-test-log = { workspace = true }
 eyre = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, optional = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+test-log = { workspace = true }
 
 [lints]
 workspace = true
@@ -30,9 +26,5 @@ workspace = true
 [features]
 test-utils = [
   "irys-types/test-utils",
-  "dep:eyre",
-  "dep:tracing",
   "dep:tokio",
-  "dep:rust_decimal",
-  "dep:rust_decimal_macros",
 ]
