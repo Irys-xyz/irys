@@ -234,7 +234,7 @@ impl StorageModule {
             })?;
 
             let params_path = sub_base_path.join("packing_params.toml");
-            if params_path.exists() == false {
+            if !params_path.exists() {
                 let mut params = PackingParams {
                     packing_address: storage_config.miner_address,
                     ..Default::default()
