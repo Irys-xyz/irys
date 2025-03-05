@@ -289,7 +289,8 @@ pub async fn start_irys_node(
                 SystemRegistry::set(broadcast_mining_service.clone());
 
                 let mut epoch_service = EpochServiceActor::new(epoch_config.clone(), &config, block_index_guard.clone());
-                epoch_service.initialize(&irys_db).await;
+                // initialize the epoch service from block 1
+                let storage_module_infos = epoch_service.initialize(&irys_db, storage_module_config.clone()).await;
                 let epoch_service_actor_addr = epoch_service.start();
 
                 // Retrieve ledger assignments
@@ -307,12 +308,7 @@ pub async fn start_irys_node(
                     .send(GetPartitionAssignmentsGuardMessage)
                     .await
                     .unwrap();
-                // Get the genesis storage modules and their assigned partitions
-                let storage_module_infos = epoch_service_actor_addr
-                    .send(GetGenesisStorageModulesMessage(storage_module_config))
-                    .await
-                    .unwrap();
-
+                
                 // Create a list of storage modules wrapping the storage files
                 for info in storage_module_infos {
                     let arc_module = Arc::new(

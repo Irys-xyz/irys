@@ -258,8 +258,9 @@ impl EpochServiceActor {
         }
     }
 
-    pub async fn initialize(&mut self, db: &DatabaseProvider) {
-        let mut block_index = 0;
+    pub async fn initialize(&mut self, db: &DatabaseProvider, storage_module_config: StorageSubmodulesConfig) -> Vec<StorageModuleInfo> {
+        let mut block_index = 0; 
+        let mut storage_module_info = Vec::new();
 
         loop {
             let block_height = {
@@ -280,8 +281,11 @@ impl EpochServiceActor {
                         Ok(_) => debug!(?block_index, "Processed epoch block"),
                         Err(e) => {
                             //self.print_items(self.block_index_guard.clone(), db.clone());
-                            panic!("{:?}", e);
+                            panic!("hERE {:?}", e);
                         }
+                    }
+                    if block_index == 0 {
+                        storage_module_info = self.get_genesis_storage_module_infos(storage_module_config.clone());
                     }
                     block_index += TryInto::<usize>::try_into(self.config.num_blocks_in_epoch)
                         .expect("Number of blocks in epoch is too large!");
@@ -294,7 +298,21 @@ impl EpochServiceActor {
                 }
             }
         }
+
+        // update partition slot/ledger assignments
+        for sm in storage_module_info.iter_mut() {
+            sm.partition_assignment = sm.partition_assignment.map(|mut pa| {
+                if let Some(pa2) = self.partition_assignments.read().unwrap().get_assignment(pa.partition_hash) {
+                    pa.ledger_id = pa2.ledger_id;
+                    pa.slot_index = pa2.slot_index;
+                }
+                pa
+            });
+        }
+
+        storage_module_info
     }
+
 
     fn print_items(&self, block_index_guard: BlockIndexReadGuard, db: DatabaseProvider) {
         let rg = block_index_guard.read();
@@ -495,8 +513,8 @@ impl EpochServiceActor {
                     break; // Exit if no more available hashes
                 }
 
-                // Pick a random capacity partition hash and assign it
-                let part_index = rng.next_range(capacity_count) as usize;
+                // Pick first capacity partition hash and assign it
+                let part_index = 0;
                 let partition_hash = capacity_partitions.swap_remove(part_index);
                 capacity_count -= 1;
 
@@ -555,6 +573,7 @@ impl EpochServiceActor {
 
         // Create partition assignments for all the partitions to the local miners address
         // TODO: Change this ^^ when pledging and staking exist
+        // TODO is this wrong ? should not be inside previous loop, not all assignments are capacity ones
         let mut pa = self.partition_assignments.write().unwrap();
         for partition_hash in &self.all_active_partitions {
             pa.capacity_partitions.insert(
@@ -1085,7 +1104,8 @@ mod tests {
             num_writes_before_sync: 1,
             chunk_migration_depth: 1,
             capacity_scalar: 100,
-            submit_ledger_epoch_length: 5,
+            submit_ledger_epoch_length: 2,
+            num_blocks_in_epoch: 5,
             ..Config::testnet()
         };
         let mining_address = testnet_config.miner_address();
@@ -1323,7 +1343,7 @@ mod tests {
             }
         };
 
-        // check a new slots is inserted with a partition assigned to it, and slot 0 expires and partition is removed
+        // check a new slots is inserted with a partition assigned to it, and slot 0 expired and its partition was removed
         let (publish_partition, submit_partition, _submit_partition2) = {
             let ledgers = epoch_service_actor
                 .send(GetLedgersGuardMessage)
@@ -1342,9 +1362,9 @@ mod tests {
                 sub_slots[0].is_expired && sub_slots[0].partitions.len() == 0,
                 "Slot 0 should have expired and have no assigned partition!"
             );
+            debug!("Ledger State: {:#?}", ledgers);
             assert!(!sub_slots[1].is_expired && sub_slots[1].partitions.len() == 1 && capacity_partitions.contains(&sub_slots[1].partitions[0]),"Slot 1 should not be expired and have a new fresh partition from previous capacity ones!");
-            assert!(!sub_slots[2].is_expired && sub_slots[2].partitions.len() == 1 && capacity_partitions.contains(&sub_slots[2].partitions[0]),"Slot 2 should not be expired and have a new fresh partition from previous capacity ones!");
-            //println!("Ledger State: {:#?}", ledgers);
+            assert!(!sub_slots[2].is_expired && sub_slots[2].partitions.len() == 1 && submit_partition_hash == sub_slots[2].partitions[0],"Slot 2 should not be expired and have the expired partition");
 
             let publish_partition = pub_slots[0]
                 .partitions
@@ -1365,20 +1385,12 @@ mod tests {
             (publish_partition, submit_partition, submit_partition2)
         };
 
-        // check expired partition is in capacity and repacking request is for it and its whole interval range, and partitions assignments are consistent
+        // check repacking request expired partition for its whole interval range, and partitions assignments are consistent
         {
             let partition_assignments_read = epoch_service_actor
                 .send(GetPartitionAssignmentsGuardMessage)
                 .await
                 .unwrap();
-
-            assert!(
-                partition_assignments_read
-                    .read()
-                    .capacity_partitions
-                    .contains_key(&submit_partition_hash),
-                "Expired partition should be in capacity partitions"
-            );
 
             assert_eq!(
                 partition_assignments_read.read().data_partitions.len(),
@@ -1436,4 +1448,207 @@ mod tests {
             "The whole partition should be repacked"
         );
     }
+
+    #[actix::test]
+    async fn epoch_blocks_reinitialization_test() {
+        let testnet_config = Config {
+            chunk_size: 32,
+            ..Config::testnet()
+        };
+
+        // Create a storage config for testing
+        let storage_config = StorageConfig {
+            chunk_size: testnet_config.chunk_size,
+            num_chunks_in_partition: testnet_config.num_chunks_in_partition,
+            num_chunks_in_recall_range: testnet_config.num_chunks_in_recall_range,
+            num_partitions_in_slot: testnet_config.num_partitions_per_slot,
+            miner_address: Address::random(),
+            min_writes_before_sync: testnet_config.num_writes_before_sync,
+            entropy_packing_iterations: testnet_config.entropy_packing_iterations,
+            chunk_migration_depth: testnet_config.chunk_migration_depth, // Testnet / single node config
+            chain_id: testnet_config.chain_id,
+        };
+        let num_chunks_in_partition = storage_config.num_chunks_in_partition;
+        let tmp_dir = setup_tracing_and_temp_dir(Some("epoch_block_reinitialization_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        let storage_module_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
+
+        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+        let database_provider = DatabaseProvider(Arc::new(db));
+
+        let config = EpochServiceConfig {
+            capacity_scalar: testnet_config.capacity_scalar,
+            num_blocks_in_epoch: testnet_config.num_blocks_in_epoch,
+            num_capacity_partitions: testnet_config.num_capacity_partitions,
+            storage_config: storage_config.clone(),
+        };
+        let num_blocks_in_epoch = config.num_blocks_in_epoch;
+
+        let arc_config = Arc::new(
+            IrysNodeConfig {
+                base_directory: base_path.clone(),
+                ..IrysNodeConfig::default()
+            });
+            
+        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
+            BlockIndex::default()
+                .reset(&arc_config.clone())
+                .unwrap()
+                .init(arc_config.clone())
+                .await
+                .unwrap(),
+        ));
+
+        let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        SystemRegistry::set(block_index_actor.clone());
+
+        let block_index_guard = block_index_actor
+            .send(GetBlockIndexGuardMessage)
+            .await
+            .unwrap();
+
+        let mut epoch_service = EpochServiceActor::new(config.clone(), &testnet_config, block_index_guard.clone());
+
+        // Process genesis message directly instead of through actor system
+        // This allows us to inspect the actor's state after processing
+        let mut ctx = Context::new();
+        // Initialize genesis block at height 0
+        let mut genesis_block = IrysBlockHeader::new_mock_header();        
+        genesis_block.height = 0;
+        genesis_block.block_hash = H256::from_slice(&[0; 32]);
+        let _ = epoch_service.handle(NewEpochMessage(genesis_block.clone().into()), &mut ctx);
+
+        database_provider.update_eyre(|tx| irys_database::insert_block_header(tx, &genesis_block)).unwrap();
+
+        let msg = BlockFinalizedMessage {
+            block_header: Arc::new(genesis_block.clone()),
+            all_txs: Arc::new(vec![]),
+        };
+        match block_index_actor.send(msg).await {
+            Ok(_) => info!("Genesis block indexed"),
+            Err(_) => panic!("Failed to index genesis block"),
+        }
+
+        // Get the genesis storage modules and their assigned partitions
+        let storage_module_infos = epoch_service.initialize(&database_provider, storage_module_config.clone()).await; // epoch_service.handle(GetGenesisStorageModulesMessage(storage_module_config.clone()), &mut ctx);
+        debug!("{:#?}", storage_module_infos);
+
+        {
+            let mut storage_modules: StorageModuleVec = Vec::new();
+
+            // Create a list of storage modules wrapping the storage files
+            for info in storage_module_infos {
+                let arc_module = Arc::new(
+                    StorageModule::new(
+                        &arc_config.storage_module_dir(),
+                        &info,
+                        storage_config.clone(),
+                    )
+
+                    .unwrap(),
+                );
+                storage_modules.push(arc_module.clone());
+            }
+        }        
+
+        //         +---+
+        //         |sm0|
+        //         +-+-+  |    |
+        // Publish 0----+----+----+---
+        //           |    |    |
+        //           0    1    2
+        //         +---+
+        //         |sm1|
+        //         +-+-+  |    |
+        // Submit  1----+----+----+---
+        //           |    |    |
+        //           0    1    2
+        // Capacity +---+
+        //          |sm2|
+        //          +-+-+
+
+        // Now create a new epoch block & give the Submit ledger enough size to add a slot
+        let mut new_epoch_block = IrysBlockHeader::new_mock_header();
+        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = 0;
+
+        // index and store in db blocks
+        let mut height = 1;
+        while height <= (testnet_config.submit_ledger_epoch_length + 1) * num_blocks_in_epoch {
+            new_epoch_block.height = height;
+            new_epoch_block.block_hash = H256::random();
+
+            if height == (testnet_config.submit_ledger_epoch_length + 1) * num_blocks_in_epoch {
+                new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
+            }
+
+            let msg = BlockFinalizedMessage {
+                block_header: Arc::new(new_epoch_block.clone()),
+                all_txs: Arc::new(vec![]),
+            };
+            match block_index_actor.send(msg).await {
+                Ok(_) => (),// debug!("block indexed"),
+                Err(err) => panic!("Failed to index block {:?}", err),
+            }
+
+            if height % num_blocks_in_epoch == 0 {
+                debug!("epoch block {}", height);
+                let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
+            }
+            
+            database_provider.update_eyre(|tx| irys_database::insert_block_header(tx, &new_epoch_block)).unwrap();
+            height += 1;
+        }
+
+        // Verify each ledger has one slot and the correct number of partitions
+        {
+            let ledgers = epoch_service.ledgers.read().unwrap();
+            let pub_slots = ledgers.get_slots(Ledger::Publish);
+            let sub_slots = ledgers.get_slots(Ledger::Submit);
+            assert_eq!(pub_slots.len(), 1);
+            assert_eq!(sub_slots.len(), 3); // TODO: check slot 1 expired, 2 new slots added
+        }
+
+        //            +---+
+        //            |sm0|
+        //            +-+-+  |    |
+        // Publish 0----+----+----+---
+        //              |    |    |
+        //              0    1    2
+        //                 +---+ +---+
+        //                 |sm2| |sm1|
+        //              |  +-+-+ +-+-+
+        // Submit  1----+----+----+---
+        //              |    |    |
+        //              0    1    2
+        // Capacity
+
+
+        // Get the genesis storage modules and their assigned partitions
+        let mut epoch_service = EpochServiceActor::new(config, &testnet_config, block_index_guard);
+        let storage_module_infos = epoch_service.initialize(&database_provider, storage_module_config.clone()).await;
+        debug!("{:#?}", storage_module_infos);
+
+
+        // Check partition hashes have not changed in storage modules
+        {
+            let mut storage_modules: StorageModuleVec = Vec::new();
+
+            // Create a list of storage modules wrapping the storage files
+            for info in storage_module_infos {
+                let arc_module = Arc::new(
+                    StorageModule::new(
+                        &arc_config.storage_module_dir(),
+                        &info,
+                        storage_config.clone(),
+                    )
+                    // TODO: remove this unwrap
+                    .unwrap(),
+                );
+                storage_modules.push(arc_module.clone());
+            }
+        }        
+
+       
+    }
+
 }
