@@ -1,6 +1,6 @@
 //! # Irys Price Oracle Module
 //!
-//! This module defines the `IrysPriceOracle` trait, which is responsible for
+//! This module defines the `IrysPriceOracle` enum, which is responsible for
 //! fetching the current price of IRYS tokens in USD.
 
 use irys_types::storage_pricing::{
@@ -8,9 +8,10 @@ use irys_types::storage_pricing::{
     phantoms::{IrysPrice, Usd},
 };
 
-/// An enum representing a price oracle for IRYS tokens (in USD).
+/// An enum representing all the possible price oracles for IRYS tokens.
 #[derive(Debug)]
 pub enum IrysPriceOracle {
+    /// An Oracle that generates the price locally, not suitable for production usage.
     MockOracle(mock_oracle::MockOracle),
 }
 
