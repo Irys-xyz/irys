@@ -735,8 +735,8 @@ mod tests {
     use irys_storage::{ie, StorageModule, StorageModuleVec};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{partition_chunk_offset_ie, Address, PartitionChunkRange};
-    use tokio::time::sleep;
     use reth::revm::primitives::hex;
+    use tokio::time::sleep;
 
     use crate::{
         mining::PartitionMiningActor,
@@ -1296,7 +1296,6 @@ mod tests {
 
     #[actix::test]
     async fn partitions_assignment_determinism_test() {
-
         let testnet_config = Config::testnet();
         // Initialize genesis block at height 0
         let mut genesis_block = IrysBlockHeader::new_mock_header();
