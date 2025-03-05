@@ -41,18 +41,24 @@ pub mod mock_oracle {
 
     use super::*;
 
-    type PriceContext = (Amount<(IrysPrice, Usd)>, u64, bool);
+    #[derive(Debug)]
+    struct PriceContext {
+        // Shared price
+        price: Amount<(IrysPrice, Usd)>,
+        // Counts how many times `current_price` has been called
+        calls: u64,
+        // Tracks whether the price is going up (true) or down (false)
+        going_up: bool,
+    }
 
     /// Mock oracle that will return fluctuating prices for the Irys token
     #[derive(Debug)]
     pub struct MockOracle {
-        // Shared price
-        // Counts how many times `current_price` has been called
-        // Tracks whether we're going up (true) or down (false)
+        /// mutable price state
         context: Mutex<PriceContext>,
-        // Percent change in decimal form; e.g. dec!(0.05) means 5%
+        /// Percent change in decimal form; e.g. dec!(0.05) means 5%
         percent_change: Amount<Percentage>,
-        // After this many calls, we toggle the direction of change (up/down)
+        /// After this many calls, we toggle the direction of change (up/down)
         smoothing_interval: u64,
     }
 
@@ -64,8 +70,13 @@ pub mod mock_oracle {
             percent_change: Amount<Percentage>,
             smoothing_interval: u64,
         ) -> Self {
+            let price_context = PriceContext {
+                price: initial_price,
+                calls: 0,
+                going_up: true,
+            };
             Self {
-                context: Mutex::new((initial_price, 0, true)),
+                context: Mutex::new(price_context),
                 percent_change,
                 smoothing_interval,
             }
@@ -83,36 +94,38 @@ pub mod mock_oracle {
         )]
         pub fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
             let mut guard = self.context.lock().expect("irrecoverable lock poisoned");
-            let (price, calls, going_up) = &mut *guard;
 
             // increment the amount of calls we have made
-            *calls = calls.wrapping_add(1);
+            guard.calls = guard.calls.wrapping_add(1);
 
             // Each time we hit the smoothing interval, toggle the direction
-            if calls
+            if guard
+                .calls
                 .checked_rem(self.smoothing_interval)
                 .unwrap_or_default()
                 == 0
             {
-                *going_up = !*going_up;
-                *calls = 0;
-                tracing::debug!(new_direction_is_up =? going_up, "inverting the delta direction");
+                guard.going_up = !guard.going_up;
+                guard.calls = 0;
+                tracing::debug!(new_direction_is_up =? guard.going_up, "inverting the delta direction");
             }
 
             // Update the price in the current direction
-            if *going_up {
+            if guard.going_up {
                 // Price goes up by percent_change
-                *price = price
+                guard.price = guard
+                    .price
                     .add_multiplier(self.percent_change)
                     .unwrap_or_else(|_| Amount::token(dec!(1.0)).expect("valid token price"));
             } else {
                 // Price goes down by percent_change
-                *price = price
+                guard.price = guard
+                    .price
                     .sub_multiplier(self.percent_change)
                     .unwrap_or_else(|_| Amount::token(dec!(1.0)).expect("valid token price"));
             }
 
-            Ok(Amount::new(price.amount))
+            Ok(Amount::new(guard.price.amount))
         }
     }
 
@@ -156,8 +169,7 @@ pub mod mock_oracle {
             let _unused_price = oracle.current_price().unwrap();
             let price_after_first = oracle.current_price().unwrap();
 
-            // Price should have gone from 1.0 to 1.0 * (1 + 0.10) = 1.10
-            assert_eq!(price_after_first.token_to_decimal().unwrap(), dec!(1.10));
+            assert_eq!(price_after_first.token_to_decimal().unwrap(), dec!(1.21));
         }
 
         /// Test that after the smoothing interval is reached, the direction toggles (up to down).
