@@ -1,12 +1,6 @@
+use crate::utils::{capacity_chunk_solution, future_or_mine_on_timeout};
 use actix_http::StatusCode;
-use alloy_core::primitives::aliases::U200;
 use alloy_core::primitives::U256;
-use alloy_eips::eip2930::AccessListItem;
-use alloy_eips::BlockNumberOrTag;
-use alloy_network::EthereumWallet;
-use alloy_provider::ProviderBuilder;
-use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_macro::sol;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_actors::SolutionFoundMessage;
@@ -16,23 +10,14 @@ use irys_config::IrysNodeConfig;
 use irys_database::get_chunk_cache_size;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, Address};
+use irys_types::irys::IrysSigner;
 use irys_types::{Base64, Config, IrysTransactionHeader, TxChunkOffset, UnpackedChunk};
-
-use k256::ecdsa::SigningKey;
 use reth::providers::BlockReader as _;
-use reth::rpc::eth::EthApiServer;
 use reth_db::Database as _;
-use reth_primitives::irys_primitives::precompile::IrysPrecompileOffsets;
-use reth_primitives::irys_primitives::range_specifier::{
-    ByteRangeSpecifier, PdAccessListArgSerde, U18, U34,
-};
-use reth_primitives::{irys_primitives::range_specifier::ChunkRangeSpecifier, GenesisAccount};
+use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
-
-use crate::utils::{capacity_chunk_solution, future_or_mine_on_timeout};
 
 #[actix_web::test]
 async fn serial_test_cache_pruning() -> eyre::Result<()> {
