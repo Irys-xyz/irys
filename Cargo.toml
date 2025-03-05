@@ -262,6 +262,7 @@ pub_with_shorthand = "allow"
 option_if_let_else = "allow"
 self_named_module_files = "allow"
 shadow_unrelated = "allow"
+arbitrary_source_item_ordering = "allow"
 
 # These are some of clippy's nursery (i.e., experimental) lints that we like.
 # By default, nursery lints are allowed. Some of the lints below have made good

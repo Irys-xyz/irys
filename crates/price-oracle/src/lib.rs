@@ -17,60 +17,83 @@ pub enum IrysPriceOracle {
 
 impl IrysPriceOracle {
     /// Returns the current price of IRYS in USD.
+    ///
+    /// # Errors
+    ///
+    /// If the underlying `current_price()` call fails.
+    #[expect(
+        clippy::unused_async,
+        reason = "will be async once proper oracles get added"
+    )]
     pub async fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
         use IrysPriceOracle::*;
         match self {
-            MockOracle(mock_oracle) => mock_oracle.current_price().await,
+            MockOracle(mock_oracle) => mock_oracle.current_price(),
         }
     }
 }
 
+/// Self-contained module for the `MockOracle` implementation
 pub mod mock_oracle {
     use irys_types::storage_pricing::phantoms::Percentage;
+    use rust_decimal_macros::dec;
     use std::sync::Mutex;
 
     use super::*;
+
+    type PriceContext = (Amount<(IrysPrice, Usd)>, u64, bool);
 
     /// Mock oracle that will return fluctuating prices for the Irys token
     #[derive(Debug)]
     pub struct MockOracle {
         // Shared price
-        price: Mutex<Amount<(IrysPrice, Usd)>>,
+        // Counts how many times `current_price` has been called
+        // Tracks whether we're going up (true) or down (false)
+        context: Mutex<PriceContext>,
         // Percent change in decimal form; e.g. dec!(0.05) means 5%
         percent_change: Amount<Percentage>,
-        // Counts how many times `current_price` has been called
-        calls: Mutex<u64>,
         // After this many calls, we toggle the direction of change (up/down)
         smoothing_interval: u64,
-        // Tracks whether we're going up (true) or down (false)
-        going_up: Mutex<bool>,
     }
 
     impl MockOracle {
         /// Initialize a new mock oracle
-        pub fn new(
+        #[must_use]
+        pub const fn new(
             initial_price: Amount<(IrysPrice, Usd)>,
             percent_change: Amount<Percentage>,
             smoothing_interval: u64,
         ) -> Self {
             Self {
-                price: Mutex::new(initial_price),
+                context: Mutex::new((initial_price, 0, true)),
                 percent_change,
-                calls: Mutex::new(0),
                 smoothing_interval,
-                going_up: Mutex::new(true),
             }
         }
 
-        pub async fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
-            let mut price = self.price.lock().unwrap();
-            let mut calls = self.calls.lock().unwrap();
-            let mut going_up = self.going_up.lock().unwrap();
+        /// Computes the new Irys price and returns it
+        ///
+        /// # Panics
+        ///
+        /// If the undrlying mutex gets poisoned.
+        #[tracing::instrument(skip_all, err)]
+        #[expect(
+            clippy::unwrap_in_result,
+            reason = "lock poisoning is considered irrecoverable in the mock oracle context"
+        )]
+        pub fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
+            let mut guard = self.context.lock().expect("irrecoverable lock poisoned");
+            let (price, calls, going_up) = &mut *guard;
 
-            *calls += 1;
+            // increment the amount of calls we have made
+            *calls = calls.wrapping_add(1);
 
             // Each time we hit the smoothing interval, toggle the direction
-            if *calls % self.smoothing_interval == 0 {
+            if calls
+                .checked_rem(self.smoothing_interval)
+                .unwrap_or_default()
+                == 0
+            {
                 *going_up = !*going_up;
                 *calls = 0;
                 tracing::debug!(new_direction_is_up =? going_up, "inverting the delta direction");
@@ -81,12 +104,12 @@ pub mod mock_oracle {
                 // Price goes up by percent_change
                 *price = price
                     .add_multiplier(self.percent_change)
-                    .expect("could not add multiplier");
+                    .unwrap_or_else(|_| Amount::token(dec!(1.0)).expect("valid token price"));
             } else {
                 // Price goes down by percent_change
                 *price = price
                     .sub_multiplier(self.percent_change)
-                    .expect("could not deduct multiplier");
+                    .unwrap_or_else(|_| Amount::token(dec!(1.0)).expect("valid token price"));
             }
 
             Ok(Amount::new(price.amount))
@@ -94,6 +117,7 @@ pub mod mock_oracle {
     }
 
     #[cfg(test)]
+    #[expect(clippy::unwrap_used, reason = "simplifier tests")]
     mod tests {
         use super::*;
         use irys_types::storage_pricing::Amount;
@@ -110,10 +134,7 @@ pub mod mock_oracle {
             );
 
             // Because this is an async method, we must block on the returned Future in a synchronous test.
-            let price = oracle
-                .current_price()
-                .await
-                .expect("Unable to get current price");
+            let price = oracle.current_price().expect("Unable to get current price");
             assert_eq!(
                 price,
                 Amount::token(dec!(1.05)).unwrap(),
@@ -132,8 +153,8 @@ pub mod mock_oracle {
             );
 
             // First call -> should go up by 10%
-            let _ = oracle.current_price();
-            let price_after_first = oracle.current_price().await.unwrap();
+            let _unused_price = oracle.current_price().unwrap();
+            let price_after_first = oracle.current_price().unwrap();
 
             // Price should have gone from 1.0 to 1.0 * (1 + 0.10) = 1.10
             assert_eq!(price_after_first.token_to_decimal().unwrap(), dec!(1.10));
@@ -150,13 +171,13 @@ pub mod mock_oracle {
             );
 
             // Call #1 -> going_up = true => 1.0 -> 1.1
-            let price_after_first = oracle.current_price().await.unwrap();
+            let price_after_first = oracle.current_price().unwrap();
             assert_eq!(price_after_first.token_to_decimal().unwrap(), dec!(1.1));
 
             // Call #2 -> we've now hit the smoothing interval (2),
             //            so it toggles going_up to false before applying the change
             //            => 1.1 -> 1.1 * (1 - 0.10) = 0.99
-            let price_after_second = oracle.current_price().await.unwrap();
+            let price_after_second = oracle.current_price().unwrap();
             assert_eq!(price_after_second.token_to_decimal().unwrap(), dec!(0.99));
         }
     }

@@ -13,12 +13,12 @@ irys-types.workspace = true
 eyre = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, optional = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 test-log = { workspace = true }
-rust_decimal = { workspace = true }
-rust_decimal_macros = { workspace = true }
 
 [lints]
 workspace = true
