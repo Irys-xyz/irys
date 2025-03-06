@@ -49,6 +49,7 @@ async fn mine_three_blocks(node: &IrysNodeCtx) -> BlockHash {
 #[ignore]
 #[actix_web::test]
 async fn should_resume_from_the_same_block() -> eyre::Result<()> {
+    // console_subscriber::init();
     std::env::set_var("RUST_LOG", "debug");
 
     let client = awc::Client::builder()
@@ -152,7 +153,7 @@ async fn should_resume_from_the_same_block() -> eyre::Result<()> {
     //     Arc::weak_count(&db)
     // );
     debug!("Waitin a little");
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_secs(15)).await;
 
     // debug!(
     //     "Amount of strong references to the database: {}",

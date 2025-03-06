@@ -42,11 +42,13 @@ fn programmable_data_precompile(
     let decoded_id = PdFunctionId::try_from(call_data_vec[0])
         .map_err(|e| PrecompileErrors::Error(PrecompileError::Other(format!("{}", &e))))?;
 
-    let state_provider = state_provider
-        .provider
-        .get()
+    let provider_guard = state_provider.provider.read()
+        .map_err(|_| PrecompileErrors::Error(PrecompileError::Other(
+            "Failed to acquire read lock on IrysRethProvider".to_owned(),
+        )))?;
+    let state_provider = provider_guard.as_ref()
         .ok_or(PrecompileErrors::Error(PrecompileError::Other(
-            "Internal error - provider uninitialised".to_owned(),
+            "IrysRethProvider not initialized".to_owned(),
         )))?;
 
     let parsed = parse_access_list(access_list).map_err(|_| {

@@ -145,59 +145,67 @@ pub struct IrysNodeCtx {
 
 impl IrysNodeCtx {
     pub async fn stop(self) {
+        debug!("Initial reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
+        
+        // First stop the API server and RPC endpoints to prevent new requests
         self.api_server_shutdown_sender.try_send(()).unwrap();
+        debug!("Stopping RPC servers...");
+        &self.reth_handle.rpc_server_handles.auth.clone().stop();
+        &self.reth_handle.rpc_server_handles.rpc.clone().stop();
+        
         // We need to make sure that all our actors has stopped before attempting to stop reth
         if let Some(main_actor_thread_handle) = self.main_actor_thread_handle {
             main_actor_thread_handle.join().unwrap();
         }
 
+        debug!("After main actor thread shutdown, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
+
         debug!("Sending shutdown signal to consensus engine");
         self.consensus_engine_shutdown_sender.try_send(()).unwrap();
 
         let reth_arbiter = self.reth_arbiter.destroy();
+        debug!("Before reth arbiter stop, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
         reth_arbiter.stop();
         reth_arbiter.join().unwrap();
+        debug!("After reth arbiter shutdown, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
 
         let block_producer_arbiter = self.block_producer_arbiter.destroy();
+        debug!("Before block producer arbiter stop, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
         block_producer_arbiter.stop();
         block_producer_arbiter.join().unwrap();
+        debug!("After block producer arbiter shutdown, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
 
         let block_discovery_arbiter = self.block_discovery_arbiter.destroy();
+        debug!("Before block discovery arbiter stop, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
         block_discovery_arbiter.stop();
         block_discovery_arbiter.join().unwrap();
+        debug!("After block discovery arbiter shutdown, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
         
         let block_tree_service_arbiter = self.block_tree_service_arbiter.destroy();
+        debug!("Before block tree service arbiter stop, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
         block_tree_service_arbiter.stop();
         block_tree_service_arbiter.join().unwrap();
+        debug!("After block tree service arbiter shutdown, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
         
         let mempool_arbiter = self.mempool_arbiter.destroy();
+        debug!("Before mempool arbiter stop, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
         mempool_arbiter.stop();
         mempool_arbiter.join().unwrap();
-
-
-        let chunk_migration = ChunkMigrationService::from_registry();
-        chunk_migration.send(chunk_migration_service::Stop).await.unwrap();
-
-        let vdf_service = VdfService::from_registry();
-        vdf_service.send(vdf_service::Stop).await.unwrap();
-        // self.actor_addresses.epoch_service.send(epoch_service::Stop).await;
+        debug!("After mempool arbiter shutdown, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
 
         let validation_service_arbiter = self.validaton_service_arbiter.destroy();
+        debug!("Before validation service arbiter stop, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
         validation_service_arbiter.stop();
         validation_service_arbiter.join().unwrap();
+        debug!("After validation service arbiter shutdown, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
 
-        for arbiter in self.partition_mining_arbiters {
+        for (i, arbiter) in self.partition_mining_arbiters.into_iter().enumerate() {
             let arbiter = arbiter.destroy();
+            debug!("Before partition mining arbiter {} stop, reth DB references: {}", i, Arc::strong_count(&self.reth_handle.provider.database.db));
             arbiter.stop();
             arbiter.join().unwrap();
+            debug!("After partition mining arbiter {} shutdown, reth DB references: {}", i, Arc::strong_count(&self.reth_handle.provider.database.db));
         }
-
-        // let validation_service = ValidationService::from_registry();
-        // validation_service.send(validation_service::Stop).await.unwrap();
-
-        // let block_index_service = BlockIndexService::from_registry();
-        // No need to stop, stopped by the arbiter
-        // let reth_service_actor = RethServiceActor::from_registry();
 
         let chain_spec_arc = self.reth_handle.chain_spec();
         let chain_spec = (*chain_spec_arc).clone();
@@ -212,17 +220,21 @@ impl IrysNodeCtx {
             .send(ReloadPayload::ReloadConfig(chain_spec))
             .unwrap();
 
-        // self.reth_handle.task_executor.
-
-        self.reth_shutdown_sender.try_send(()).unwrap();
         if let Some(reth_thread_handle) = self.reth_thread_handle {
             reth_thread_handle.join().unwrap();
         }
 
-        // That doesn't seem to do anything
+        // Clean up the IrysRethProvider
+        if let Some(irys_provider) = self.reth_handle.irys_ext.as_ref().map(|ext| ext.provider.clone()) {
+            debug!("Before IrysRethProvider cleanup, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
+            irys_storage::reth_provider::cleanup_provider(&irys_provider);
+            debug!("After IrysRethProvider cleanup, reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
+        }
+
         System::current().stop();
         debug!("Main actor thread and reth thread stopped");
-        debug!("Amount of active db references: {}", Arc::strong_count(&self.db));
+        debug!("Final count of active db references: {}", Arc::strong_count(&self.db));
+        debug!("Final count of reth DB references: {}", Arc::strong_count(&self.reth_handle.provider.database.db));
 
         for (i, actor) in self.actor_addresses.partitions.iter().enumerate() {
             debug!("Is partition {} actor running? {}", i, self.actor_addresses.partitions.get(i).unwrap().connected());
@@ -230,14 +242,9 @@ impl IrysNodeCtx {
 
         let network_status = self.reth_handle.rpc_registry.eth_api().network().network_status().await;
         debug!("Network status: {:?}", network_status);
-        &self.reth_handle.rpc_server_handles.auth.clone().stop();
-        &self.reth_handle.rpc_server_handles.rpc.clone().stop();
 
         debug!("Is block producer actor running? {}", self.actor_addresses.block_producer.connected());
         debug!("Is packing actor running? {}", self.actor_addresses.packing.connected());
-        debug!("Is mempool actor running? {}", self.actor_addresses.mempool.connected());
-        debug!("Is block index actor running? {}", self.actor_addresses.block_index.connected());
-        debug!("Is epoch service actor running? {}", self.actor_addresses.epoch_service.connected());
     }
 }
 
@@ -318,7 +325,7 @@ pub async fn start_irys_node(
 
     // Spawn thread and runtime for actors
     let arc_config_copy = arc_config.clone();
-    let irys_provider: IrysRethProvider = Arc::new(OnceLock::new());
+    let irys_provider = irys_storage::reth_provider::create_provider();
 
     // clone as this gets `move`d into the thread
     let irys_provider_1 = irys_provider.clone();
@@ -721,12 +728,10 @@ pub async fn start_irys_node(
                 let arc_chunk_provider = Arc::new(chunk_provider);
                 // this OnceLock is due to the cyclic chain between Reth & the Irys node, where the IrysRethProvider requires both
                 // this is "safe", as the OnceLock is always set before this start function returns
-                irys_provider_1
-                    .set(IrysRethProviderInner {
-                        db: reth_node.provider.database.db.clone(),
-                        chunk_provider: arc_chunk_provider.clone(),
-                    })
-                    .expect("Unable to set IrysRethProvider OnceLock");
+                *irys_provider_1.write().unwrap() = Some(IrysRethProviderInner {
+                    db: reth_node.provider.database.db.clone(),
+                    chunk_provider: arc_chunk_provider.clone(),
+                });
 
                 let (api_server_shutdown_tx, mut api_server_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -788,13 +793,26 @@ pub async fn start_irys_node(
             let mut task_manager = TaskManager::new(tokio_runtime.handle().clone());
             let task_executor: reth::tasks::TaskExecutor = task_manager.executor();
 
-            tokio_runtime.block_on(run_to_completion_or_panic(
-                &mut task_manager,
-                run_until_ctrl_c_or_channel_message(
-                    start_reth_node(task_executor, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider, latest_block_height, consensus_engine_shutdown_receiver),
-                    reth_shutdown_receiver
-                ),
-            )).unwrap();
+            tokio_runtime.block_on(async move {
+               let res = start_reth_node(
+                    task_executor,
+                    reth_chainspec,
+                    node_config,
+                    &IrysTables::ALL,
+                    reth_handle_sender,
+                    irys_provider,
+                    latest_block_height,
+                    consensus_engine_shutdown_receiver,
+               ).await;
+                debug!("Reth node heh: {:?}", res);
+            });
+            // let heh = tokio_runtime.block_on(run_to_completion_or_panic(
+            //     &mut task_manager,
+            //     run_until_ctrl_c_or_channel_message(
+            //         start_reth_node(task_executor, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider, latest_block_height, consensus_engine_shutdown_receiver),
+            //         reth_shutdown_receiver
+            //     ),
+            // )).unwrap();
 
             task_manager.graceful_shutdown();
             debug!("Reth thread finished");
@@ -803,7 +821,7 @@ pub async fn start_irys_node(
     // wait for the full handle to be send over by the actix thread
     let mut node = irys_node_handle_receiver.await?;
     node.main_actor_thread_handle = Some(actor_main_thread_handle.into());
-    // node.reth_thread_handle = Some(reth_thread_handler.into());
+    node.reth_thread_handle = Some(reth_thread_handler.into());
     Ok(node)
 }
 
@@ -833,6 +851,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
         .expect("unable to send reth node handle");
 
     let exit_reason = node_handle.node_exit_future.await?;
+
     debug!("Reth node exited with reason: {:?}", exit_reason);
     Ok(exit_reason)
 }

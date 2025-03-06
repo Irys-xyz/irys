@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{fs::canonicalize, future::Future, ops::Deref, sync::Arc};
+use std::{fs::canonicalize, future::Future, ops::Deref, sync::Arc, sync::RwLock};
 
 use clap::{command, Args, Parser};
 use irys_config::IrysNodeConfig;

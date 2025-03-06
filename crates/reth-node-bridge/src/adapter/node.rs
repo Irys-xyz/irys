@@ -69,7 +69,7 @@ where
                 _marker: PhantomData::<Engine>,
             },
             rpc: RpcContext {
-                inner: node.rpc_registry,
+                inner: node.rpc_registry.clone(),
             },
         })
     }

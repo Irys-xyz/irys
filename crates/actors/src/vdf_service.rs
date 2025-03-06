@@ -6,7 +6,7 @@ use std::{
     collections::VecDeque,
     sync::{Arc, RwLock},
 };
-use tracing::info;
+use tracing::{debug, info};
 
 use irys_types::{block_production::Seed, DatabaseProvider, CONFIG};
 
@@ -26,6 +26,7 @@ impl Default for VdfService {
 impl VdfService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
     pub fn new(block_index: Option<BlockIndexReadGuard>, db: Option<DatabaseProvider>) -> Self {
+        debug!("Called new on VDF service");
         let vdf_state = Self::create_state(block_index, db);
 
         Self {
@@ -42,6 +43,7 @@ impl VdfService {
         block_index: Option<BlockIndexReadGuard>,
         db: Option<DatabaseProvider>,
     ) -> VdfState {
+        debug!("Creating VDF state");
         // set up a minimum cache size of 10_000 steps for testing purposes, chunks number can be very low in testing setups so may need more cached steps than strictly efficient sampling needs.
         let capacity = std::cmp::max(
             10_000,
