@@ -5,6 +5,7 @@ use crate::reth_db::{
 };
 use std::fmt::Debug;
 use tracing::debug;
+use crate::db::RethDbWrapper;
 
 /// Bump this every time you need to migrate data
 const CURRENT_DB_VERSION: u32 = 1;
@@ -67,7 +68,7 @@ mod v0_to_v1 {
 
 /// This function migrates data from an old DB instance to a new DB instance.
 pub fn check_db_version_and_run_migrations_if_needed(
-    old_db: &DatabaseEnv,
+    old_db: &RethDbWrapper,
     new_db: &DatabaseEnv,
 ) -> eyre::Result<()> {
     debug!("Checking if database migration is needed.");

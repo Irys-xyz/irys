@@ -20,6 +20,7 @@ pub mod migration;
 pub mod submodule;
 /// Local macro definition of chain specific mdbx tables
 pub mod tables;
+pub mod db;
 
 pub use block_index_data::*;
 pub use data_ledger::*;

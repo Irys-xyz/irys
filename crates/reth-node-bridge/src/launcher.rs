@@ -537,6 +537,8 @@ where
             let _ = exit.send(res);
         });
 
+        let adapter = ctx.node_adapter();
+
         let full_node = FullNode {
             evm_config: ctx.components().evm_config().clone(),
             block_executor: ctx.components().block_executor().clone(),

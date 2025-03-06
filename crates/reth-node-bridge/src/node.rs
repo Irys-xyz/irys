@@ -16,6 +16,7 @@ use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::NodeCommand;
 use reth_consensus::Consensus;
 use reth_db::{init_db, DatabaseEnv, HasName, HasTableType};
+use reth_db::database_metrics::DatabaseMetadata;
 use reth_engine_tree::tree::TreeConfig;
 use reth_ethereum_engine_primitives::EthereumEngineValidator;
 use reth_node_api::{FullNodeTypesAdapter, NodeTypesWithDBAdapter};
@@ -33,7 +34,9 @@ use reth_transaction_pool::{
     EthTransactionValidator, Pool, TransactionValidationTaskExecutor,
 };
 use tracing::info;
-
+use irys_database::db::RethDbWrapper;
+use irys_database::reth_db::database_metrics::{DatabaseMetadataValue, DatabaseMetrics};
+use irys_database::reth_db::DatabaseError;
 use crate::{
     launcher::CustomEngineNodeLauncher,
     precompile::irys_executor::{
@@ -54,18 +57,18 @@ macro_rules! vec_of_strings {
 // reth node with custom IrysExecutor
 pub type RethNode = NodeAdapter<
     FullNodeTypesAdapter<
-        NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
-        BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+        NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+        BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
     >,
     Components<
         FullNodeTypesAdapter<
-            NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
-            BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+            NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+            BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
         >,
         Pool<
             TransactionValidationTaskExecutor<
                 EthTransactionValidator<
-                    BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+                    BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
                     EthPooledTransaction,
                 >,
             >,
@@ -82,18 +85,18 @@ pub type RethNode = NodeAdapter<
 // reth node with the standard EVM
 pub type RethNodeStandard = NodeAdapter<
     FullNodeTypesAdapter<
-        NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
-        BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+        NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+        BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
     >,
     Components<
         FullNodeTypesAdapter<
-            NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
-            BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+            NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+            BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
         >,
         Pool<
             TransactionValidationTaskExecutor<
                 EthTransactionValidator<
-                    BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+                    BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
                     EthPooledTransaction,
                 >,
             >,
@@ -250,7 +253,7 @@ pub async fn run_node<T: HasName + HasTableType>(
 
     tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
     let database =
-        Arc::new(init_db(db_path.clone(), db.database_args())?.with_metrics_and_tables(tables));
+        RethDbWrapper::new(init_db(db_path.clone(), db.database_args())?.with_metrics_and_tables(tables));
 
     let irys_provider = provider;
 
@@ -274,7 +277,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     let handle =
         builder
             .with_types_and_provider::<EthereumNode, BlockchainProvider2<
-                NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
+                NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
             >>()
             .with_components(
                 EthereumNode::components()
@@ -345,7 +348,7 @@ pub async fn run_custom_node<Ext, C, L, Fut>(
 where
     C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks + EthChainSpec>,
     Ext: clap::Args + Clone + fmt::Debug,
-    L: Fn(WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, C::ChainSpec>>, Ext) -> Fut,
+    L: Fn(WithLaunchContext<NodeBuilder<RethDbWrapper, C::ChainSpec>>, Ext) -> Fut,
     Fut: Future<Output = eyre::Result<NodeExitReason>>,
 {
     // from reth/bin/reth/src/commands/node/mod.rs:137
@@ -405,7 +408,7 @@ where
     let db_path = data_dir.db();
 
     tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
-    let database = Arc::new(init_db(db_path.clone(), db.database_args())?.with_metrics());
+    let database = RethDbWrapper::new(init_db(db_path.clone(), db.database_args())?.with_metrics());
 
     if with_unused_ports {
         node_config = node_config.with_unused_ports();
