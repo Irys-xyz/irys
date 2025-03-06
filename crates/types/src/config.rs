@@ -64,6 +64,10 @@ pub struct Config {
     /// defines the range of how much can the token fluctuate since the last EMA price for it to be accepted
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub token_price_safe_range: Amount<Percentage>,
+
+    ///packing specific config
+    pub cpu_packing_concurrency: u16,
+    pub gpu_packing_batch_size: u32,
 }
 
 impl Config {
@@ -117,6 +121,8 @@ impl Config {
                 .expect("valid token amount"),
             token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
                 .expect("valid percentage"),
+            cpu_packing_concurrency: 4,
+            gpu_packing_batch_size: 1024,
         }
     }
 }
@@ -231,6 +237,8 @@ anchor_expiry_depth = 10
 genesis_price_valid_for_n_epochs = 2
 genesis_token_price = "1.0"
 token_price_safe_range = "0.25"
+cpu_packing_concurrency = 4
+gpu_packing_batch_size = 1024
 "#;
 
         // Attempt to deserialize the TOML string into a Config
