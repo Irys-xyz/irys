@@ -31,11 +31,11 @@ fn main() {
 
 fn env_inner(name: &str) -> Option<OsString> {
     let var = env::var_os(name);
-    println!("cargo:rerun-if-env-changed={name}");
+    println!("cargo:rerun-if-env-changed={}", name);
 
     match var {
         Some(ref v) => println!("{} = {}", name, v.to_string_lossy()),
-        None => println!("{name} unset"),
+        None => println!("{} unset", name),
     }
 
     var
@@ -43,11 +43,11 @@ fn env_inner(name: &str) -> Option<OsString> {
 
 fn env(name: &str) -> Option<OsString> {
     let prefix = env::var("TARGET").unwrap().to_uppercase().replace('-', "_");
-    let prefixed = format!("{prefix}_{name}");
+    let prefixed = format!("{}_{}", prefix, name);
     env_inner(&prefixed).or_else(|| env_inner(name))
 }
 
-#[must_use] pub fn build_openssl() -> (PathBuf, PathBuf) {
+pub fn build_openssl() -> (PathBuf, PathBuf) {
     let openssl_config_dir = env("OPENSSL_CONFIG_DIR");
 
     let mut openssl_src_build = openssl_src::Build::new();

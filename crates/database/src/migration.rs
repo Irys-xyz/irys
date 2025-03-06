@@ -2,7 +2,7 @@ use crate::db::RethDbWrapper;
 use crate::reth_db::{
     table::TableImporter,
     transaction::{DbTx, DbTxMut},
-    Database as _, DatabaseEnv, DatabaseError,
+    Database, DatabaseEnv, DatabaseError,
 };
 use core::fmt::Debug;
 use tracing::debug;
@@ -11,7 +11,7 @@ use tracing::debug;
 const CURRENT_DB_VERSION: u32 = 1;
 
 /// Example migration step to version 2
-const fn migration_to_v2(_db: &DatabaseEnv) -> Result<(), DatabaseError> {
+fn migration_to_v2(_db: &DatabaseEnv) -> Result<(), DatabaseError> {
     // template for future migrations
     // update the database schema version here
     Ok(())
@@ -24,7 +24,7 @@ mod v0_to_v1 {
         IrysBlockHeaders, IrysTxHeaders,
     };
     use reth_db::table::Table;
-    use reth_db_api::cursor::DbCursorRO as _;
+    use reth_db_api::cursor::DbCursorRO;
 
     pub(crate) fn migrate<TXOld, TXNew>(tx_old: &TXOld, tx_new: &TXNew) -> Result<(), DatabaseError>
     where

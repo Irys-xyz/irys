@@ -1,6 +1,6 @@
 use irys_types::{Compact, Config, TransactionLedger, H256};
 use serde::{Deserialize, Serialize};
-use core::ops::{Index, IndexMut};
+use std::ops::{Index, IndexMut};
 /// Manages the global ledger state within the epoch service, tracking:
 /// - All ledger types (Publish, Submit, etc.)
 /// - Their associated partitions
@@ -45,7 +45,7 @@ pub struct TermLedger {
 
 impl PermanentLedger {
     /// Constructs a permanent ledger, always with `Ledger::Publish` as the id
-    #[must_use] pub const fn new(config: &Config) -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: Ledger::Publish as u32,
@@ -56,7 +56,7 @@ impl PermanentLedger {
 
 impl TermLedger {
     /// Creates a term ledger with specified index and duration
-    #[must_use] pub const fn new(ledger: Ledger, config: &Config) -> Self {
+    pub fn new(ledger: Ledger, config: &Config) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: ledger as u32,
@@ -67,7 +67,7 @@ impl TermLedger {
     }
 
     /// Returns a slice of the ledgers slots
-    #[must_use] pub const fn get_slots(&self) -> &Vec<LedgerSlot> {
+    pub fn get_slots(&self) -> &Vec<LedgerSlot> {
         &self.slots
     }
 
@@ -222,7 +222,7 @@ impl Ledger {
         Self::ALL.iter().copied()
     }
     /// get the associated numeric ID
-    #[must_use] pub const fn get_id(&self) -> u32 {
+    pub fn get_id(&self) -> u32 {
         *self as u32
     }
 
@@ -277,7 +277,7 @@ pub struct Ledgers {
 
 impl Ledgers {
     /// Instantiate a Ledgers struct with the correct Ledgers
-    #[must_use] pub fn new(config: &Config) -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
             perm: PermanentLedger::new(config),
             term: vec![TermLedger::new(Ledger::Submit, config)],
@@ -285,7 +285,7 @@ impl Ledgers {
     }
 
     /// The number of ledgers being managed
-    #[must_use] pub fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         1 + self.term.len()
     }
 
@@ -319,14 +319,14 @@ impl Ledgers {
             .unwrap_or_else(|| panic!("Term ledger {ledger:?} not found"))
     }
 
-    #[must_use] pub fn get_slots(&self, ledger: Ledger) -> &Vec<LedgerSlot> {
+    pub fn get_slots(&self, ledger: Ledger) -> &Vec<LedgerSlot> {
         match ledger {
             Ledger::Publish => self.perm.get_slots(),
             ledger => self.get_term_ledger(ledger).get_slots(),
         }
     }
 
-    #[must_use] pub fn get_slot_needs(&self, ledger: Ledger) -> Vec<(usize, usize)> {
+    pub fn get_slot_needs(&self, ledger: Ledger) -> Vec<(usize, usize)> {
         match ledger {
             Ledger::Publish => self.perm.get_slot_needs(),
             ledger => self.get_term_ledger(ledger).get_slot_needs(),

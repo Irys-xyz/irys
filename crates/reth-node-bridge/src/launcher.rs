@@ -374,29 +374,29 @@ where
 
         info!(target: "reth::cli", "Consensus engine initialized");
 
-        // let events = stream_select!(
-        //     ctx.components().network().event_listener().map(Into::into),
-        //     beacon_engine_handle.event_listener().map(Into::into),
-        //     pipeline_events.map(Into::into),
-        //     if ctx.node_config().debug.tip.is_none() && !ctx.is_dev() {
-        //         Either::Left(
-        //             ConsensusLayerHealthEvents::new(Box::new(ctx.blockchain_db().clone()))
-        //                 .map(Into::into),
-        //         )
-        //     } else {
-        //         Either::Right(stream::empty())
-        //     },
-        //     pruner_events.map(Into::into),
-        //     static_file_producer_events.map(Into::into),
-        // );
-        // ctx.task_executor().spawn_critical(
-        //     "events task",
-        //     node::handle_events(
-        //         Some(Box::new(ctx.components().network().clone())),
-        //         Some(ctx.head().number),
-        //         events,
-        //     ),
-        // );
+        let events = stream_select!(
+            ctx.components().network().event_listener().map(Into::into),
+            beacon_engine_handle.event_listener().map(Into::into),
+            pipeline_events.map(Into::into),
+            if ctx.node_config().debug.tip.is_none() && !ctx.is_dev() {
+                Either::Left(
+                    ConsensusLayerHealthEvents::new(Box::new(ctx.blockchain_db().clone()))
+                        .map(Into::into),
+                )
+            } else {
+                Either::Right(stream::empty())
+            },
+            pruner_events.map(Into::into),
+            static_file_producer_events.map(Into::into),
+        );
+        ctx.task_executor().spawn_critical(
+            "events task",
+            node::handle_events(
+                Some(Box::new(ctx.components().network().clone())),
+                Some(ctx.head().number),
+                events,
+            ),
+        );
 
         let client = ClientVersionV1 {
             code: CLIENT_CODE,
@@ -455,12 +455,12 @@ where
                 rpc_server_handles.auth.clone(),
                 Arc::new(block_provider),
             );
-            // ctx.task_executor()
-            //     .spawn_critical("etherscan consensus client", async move {
-            //         rpc_consensus_client
-            //             .run::<<Types as NodeTypesWithEngine>::Engine>()
-            //             .await
-            //     });
+            ctx.task_executor()
+                .spawn_critical("etherscan consensus client", async move {
+                    rpc_consensus_client
+                        .run::<<Types as NodeTypesWithEngine>::Engine>()
+                        .await
+                });
         }
 
         // Run consensus engine to completion
@@ -477,7 +477,7 @@ where
         let chainspec = ctx.chain_spec();
         let (exit, _rx) = oneshot::channel();
         info!(target: "reth::cli", "Starting consensus engine");
-        let consensus_engine_handle = ctx.task_executor().spawn_critical("consensus engine", async move {
+        ctx.task_executor().spawn_critical("consensus engine", async move {
             if let Some(initial_target) = initial_target {
                 debug!(target: "reth::cli", %initial_target,  "start backfill sync");
                 eth_service.orchestrator_mut().start_backfill_sync(initial_target);
@@ -536,8 +536,6 @@ where
             debug!("Consensus engine stopped");
             let _ = exit.send(res);
         });
-
-        let adapter = ctx.node_adapter();
 
         let full_node = FullNode {
             evm_config: ctx.components().evm_config().clone(),

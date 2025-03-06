@@ -22,7 +22,7 @@ impl Decode for MetadataKey {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
         let value = u32::decode(value)?;
         match value {
-            1 => Ok(Self::DBSchemaVersion),
+            1 => Ok(MetadataKey::DBSchemaVersion),
             _ => Err(DatabaseError::Decode),
         }
     }

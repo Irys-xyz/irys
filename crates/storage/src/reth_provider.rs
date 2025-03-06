@@ -9,7 +9,6 @@ use crate::ChunkProvider;
 
 #[derive(Debug, Clone)]
 pub struct IrysRethProviderInner {
-    // pub db: Arc<DatabaseEnv>,
     pub chunk_provider: Arc<ChunkProvider>,
 }
 

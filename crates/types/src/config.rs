@@ -72,7 +72,7 @@ pub struct Config {
 
 impl Config {
     pub fn irys_signer(&self) -> IrysSigner {
-        IrysSigner::from_config(self)
+        IrysSigner::from_config(&self)
     }
 
     pub fn miner_address(&self) -> Address {

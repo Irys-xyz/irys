@@ -62,10 +62,10 @@ impl From<CachedChunkIndexEntry> for CachedChunkIndexMetadata {
 }
 
 /// note: the total size + the subkey must be < 2022 bytes (half a 4k DB page size - see MDBX .`set_geometry`)
-const _: () = assert!(core::mem::size_of::<CachedChunkIndexEntry>() <= 2022);
+const _: () = assert!(std::mem::size_of::<CachedChunkIndexEntry>() <= 2022);
 
 // used for the Compact impl
-const KEY_BYTES: usize = core::mem::size_of::<TxChunkOffset>();
+const KEY_BYTES: usize = std::mem::size_of::<TxChunkOffset>();
 
 // NOTE: Removing reth_codec and manually encode subkey
 // and compress second part of the value. If we have compression

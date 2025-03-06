@@ -18,8 +18,6 @@ pub struct ChunkProvider {
     pub storage_config: StorageConfig,
     /// Collection of storage modules for distributing chunk data
     pub storage_modules: Vec<Arc<StorageModule>>,
-    // /// Persistent database for storing chunk metadata and indices
-    // pub db: DatabaseProvider,
 }
 
 impl ChunkProvider {
@@ -27,12 +25,10 @@ impl ChunkProvider {
     pub const fn new(
         storage_config: StorageConfig,
         storage_modules: Vec<Arc<StorageModule>>,
-        // db: DatabaseProvider,
     ) -> Self {
         Self {
             storage_config,
             storage_modules,
-            // db,
         }
     }
 
