@@ -76,7 +76,7 @@ use tokio::{
     sync::oneshot::{self},
 };
 
-use crate::clonable_join_handle::{ClonableJoinHandle, DestroyableArc};
+use crate::clonable_join_handle::{CloneableJoinHandle, ArbiterHandle};
 
 pub async fn start(config: Config) -> eyre::Result<IrysNodeCtx> {
     let irys_node_config = IrysNodeConfig::new(&config);
@@ -101,19 +101,9 @@ pub struct IrysNodeCtx {
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     pub consensus_engine_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
-    pub main_actor_thread_handle: Option<ClonableJoinHandle<()>>,
-    pub reth_thread_handle: Option<ClonableJoinHandle<()>>,
-    // Arbiters that run actors
-    pub reth_arbiter: DestroyableArc<Arbiter>,
-    pub block_producer_arbiter: DestroyableArc<Arbiter>,
-    pub block_discovery_arbiter: DestroyableArc<Arbiter>,
-    pub mempool_arbiter: DestroyableArc<Arbiter>,
-    pub block_tree_service_arbiter: DestroyableArc<Arbiter>,
-
-    // TODO: this doesn't seem to do anything
-    pub validaton_service_arbiter: DestroyableArc<Arbiter>,
-
-    pub partition_mining_arbiters: Vec<DestroyableArc<Arbiter>>,
+    pub main_actor_thread_handle: Option<CloneableJoinHandle<()>>,
+    pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
+    pub arbiters: Vec<ArbiterHandle>,
 }
 
 impl IrysNodeCtx {
@@ -132,34 +122,8 @@ impl IrysNodeCtx {
         debug!("Sending shutdown signal to consensus engine");
         self.consensus_engine_shutdown_sender.try_send(()).unwrap();
 
-        let reth_arbiter = self.reth_arbiter.destroy();
-        reth_arbiter.stop();
-        reth_arbiter.join().unwrap();
-
-        let block_producer_arbiter = self.block_producer_arbiter.destroy();
-        block_producer_arbiter.stop();
-        block_producer_arbiter.join().unwrap();
-
-        let block_discovery_arbiter = self.block_discovery_arbiter.destroy();
-        block_discovery_arbiter.stop();
-        block_discovery_arbiter.join().unwrap();
-
-        let block_tree_service_arbiter = self.block_tree_service_arbiter.destroy();
-        block_tree_service_arbiter.stop();
-        block_tree_service_arbiter.join().unwrap();
-
-        let mempool_arbiter = self.mempool_arbiter.destroy();
-        mempool_arbiter.stop();
-        mempool_arbiter.join().unwrap();
-
-        let validation_service_arbiter = self.validaton_service_arbiter.destroy();
-        validation_service_arbiter.stop();
-        validation_service_arbiter.join().unwrap();
-
-        for (i, arbiter) in self.partition_mining_arbiters.into_iter().enumerate() {
-            let arbiter = arbiter.destroy();
-            arbiter.stop();
-            arbiter.join().unwrap();
+        for arbiter in self.arbiters.into_iter() {
+            arbiter.stop_and_join();
         }
 
         let chain_spec_arc = self.reth_handle.chain_spec();
@@ -281,6 +245,7 @@ pub async fn start_irys_node(
         .spawn(move || {
             let node_config = arc_config_copy.clone();
             System::new().block_on(async move {
+                let mut arbiters = Vec::new();
                 let irys_db_env = open_or_create_irys_consensus_data_db(
                     &arc_config.irys_consensus_data_dir(),
                 ).unwrap();
@@ -313,6 +278,7 @@ pub async fn start_irys_node(
                     &reth_arbiter.handle(),
                     |_| reth_service,
                 ));
+                arbiters.push(reth_arbiter.into());
 
                 debug!(
                     "JESSEDEBUG setting head to block {} ({})",
@@ -457,6 +423,7 @@ pub async fn start_irys_node(
                     |_| block_tree_service,
                 ));
                 let block_tree_service = BlockTreeService::from_registry();
+                arbiters.push(block_tree_arbiter.into());
 
                 let block_tree_guard = block_tree_service
                     .send(GetBlockTreeGuardMessage)
@@ -480,6 +447,7 @@ pub async fn start_irys_node(
                     |_| mempool_service,
                 ));
                 let mempool_addr = MempoolService::from_registry();
+                arbiters.push(mempool_arbiter.into());
 
                 let chunk_migration_service = ChunkMigrationService::new(
                     block_index.clone(),
@@ -508,6 +476,7 @@ pub async fn start_irys_node(
                     &validation_arbiter.handle(),
                     |_| validation_service,
                 ));
+                arbiters.push(validation_arbiter.into());
 
                 let (global_step_number, seed) = vdf_steps_guard.read().get_last_step_and_seed();
                 info!("Starting at global step number: {}", global_step_number);
@@ -526,6 +495,7 @@ pub async fn start_irys_node(
                     &block_discovery_arbiter.handle(),
                     |_| block_discovery_actor,
                 );
+                arbiters.push(block_discovery_arbiter.into());
 
                 let block_producer_arbiter = Arbiter::new();
                 let block_producer_actor = BlockProducerActor::new(
@@ -544,6 +514,7 @@ pub async fn start_irys_node(
                     BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
                         block_producer_actor
                     });
+                arbiters.push(block_producer_arbiter.into());
 
                 let mut part_actors = Vec::new();
 
@@ -559,7 +530,6 @@ pub async fn start_irys_node(
                 )
                 .start();
 
-                let mut partition_arbiters = Vec::new();
                 for sm in &storage_modules {
                     let partition_mining_actor = PartitionMiningActor::new(
                         miner_address,
@@ -576,7 +546,7 @@ pub async fn start_irys_node(
                         &part_arbiter.handle(),
                         |_| partition_mining_actor,
                     ));
-                    partition_arbiters.push(DestroyableArc::new(part_arbiter));
+                    arbiters.push(ArbiterHandle::new(part_arbiter));
                 }
 
                 // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
@@ -678,14 +648,7 @@ pub async fn start_irys_node(
                     consensus_engine_shutdown_sender,
                     main_actor_thread_handle: None,
                     reth_thread_handle: None,
-
-                    reth_arbiter: DestroyableArc::new(reth_arbiter),
-                    block_producer_arbiter: DestroyableArc::new(block_producer_arbiter),
-                    block_discovery_arbiter: DestroyableArc::new(block_discovery_arbiter),
-                    mempool_arbiter: DestroyableArc::new(mempool_arbiter),
-                    block_tree_service_arbiter: DestroyableArc::new(block_tree_arbiter),
-                    validaton_service_arbiter: DestroyableArc::new(validation_arbiter),
-                    partition_mining_arbiters: partition_arbiters,
+                    arbiters,
                 });
 
                 run_server(ApiState {
