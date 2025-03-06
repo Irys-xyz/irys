@@ -234,18 +234,7 @@ impl StorageModule {
             })?;
 
             let params_path = sub_base_path.join("packing_params.toml");
-            if !params_path.exists() {
-                let mut params = PackingParams {
-                    packing_address: storage_config.miner_address,
-                    ..Default::default()
-                };
-                if let Some(pa) = storage_module_info.partition_assignment {
-                    params.partition_hash = Some(pa.partition_hash);
-                    params.ledger = pa.ledger_id;
-                    params.slot = pa.slot_index;
-                }
-                params.write_to_disk(&params_path);
-            } else {
+            if params_path.exists() {
                 // Load the packing params and check to see if they match
                 let params = PackingParams::from_toml(params_path).expect("packing params to load");
                 let pa = storage_module_info.partition_assignment.unwrap();
@@ -260,6 +249,17 @@ impl StorageModule {
                         pa.partition_hash.0.to_base58(),
                         params.partition_hash.unwrap().0.to_base58(),
                     );
+            } else {
+                let mut params = PackingParams {
+                    packing_address: storage_config.miner_address,
+                    ..Default::default()
+                };
+                if let Some(pa) = storage_module_info.partition_assignment {
+                    params.partition_hash = Some(pa.partition_hash);
+                    params.ledger = pa.ledger_id;
+                    params.slot = pa.slot_index;
+                }
+                params.write_to_disk(&params_path);
             }
 
             let intervals_file_path = sub_base_path.join("intervals.json");
