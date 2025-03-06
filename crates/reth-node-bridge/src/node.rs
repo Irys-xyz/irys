@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{fs::canonicalize, future::Future, ops::Deref, sync::Arc, sync::RwLock};
+use std::{fs::canonicalize, future::Future, ops::Deref, sync::Arc};
 
 use crate::{
     launcher::CustomEngineNodeLauncher,

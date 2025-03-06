@@ -4,7 +4,7 @@ use crate::reth_db::{
     transaction::{DbTx, DbTxMut},
     Database, DatabaseEnv, DatabaseError,
 };
-use core::fmt::Debug;
+use std::fmt::Debug;
 use tracing::debug;
 
 /// Bump this every time you need to migrate data

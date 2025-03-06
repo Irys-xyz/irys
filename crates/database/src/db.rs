@@ -16,7 +16,7 @@ impl RethDbWrapper {
         }
     }
 
-    /// DO NOT USE IT! IT IS TEMPORARY
+    /// Close underlying DB connection
     pub fn close(&self) {
         if let Ok(mut db) = self.db.write() {
             db.take();
