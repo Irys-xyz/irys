@@ -14,9 +14,12 @@ use reth_codecs::Compact;
 use reth_db::table::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
-pub const MEGABYTE: usize = 1024 * 1024;
-pub const GIGABYTE: usize = MEGABYTE * 1024;
-pub const TERABYTE: usize = GIGABYTE * 1024;
+pub const MEBIBYTE: usize = 1024 * 1024;
+pub const GIBIBYTE: usize = MEBIBYTE * 1024;
+pub const TEBIBYTE: usize = GIBIBYTE * 1024;
+pub const MEGABYTE: usize = 1000 * 1000;
+pub const GIGABYTE: usize = MEGABYTE * 1000;
+pub const TERABYTE: usize = GIGABYTE * 1000;
 
 /// Partition relative chunk offsets
 #[derive(

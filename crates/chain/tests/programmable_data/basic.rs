@@ -142,9 +142,10 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
 
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
+    let bytes = 1024 * 257;
     // post a tx, mine a block
     let tx = account1
-        .create_transaction(data_bytes.clone(), None)
+        .create_transaction(&testnet_config, data_bytes.clone(), None, bytes)
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
 
