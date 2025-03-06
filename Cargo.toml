@@ -83,7 +83,7 @@ itertools = "0.13"
 futures = "0.3"
 bytemuck = "1"
 futures-concurrency = "7"
-heapless = "0.8"
+test-log = { version = "0.2", features = ["trace"] }
 
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.11"
