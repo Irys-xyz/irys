@@ -8,12 +8,10 @@ use std::{
 
 use chain::chainspec::IrysChainSpecBuilder;
 use irys_primitives::GenesisAccount;
-use irys_types::{irys::IrysSigner, Address, CONFIG};
+use irys_types::{config, irys::IrysSigner, Address};
 use serde::{Deserialize, Serialize};
 
 pub mod chain;
-
-// TODO: convert this into a set of clap args
 
 #[derive(Debug, Clone)]
 /// Top level configuration struct for the node
@@ -30,15 +28,19 @@ pub struct IrysNodeConfig {
 }
 
 /// "sane" default configuration
+#[cfg(any(feature = "test-utils", test))]
 impl Default for IrysNodeConfig {
     fn default() -> Self {
+        use irys_types::Config;
         let base_dir = env::current_dir()
             .expect("Unable to determine working dir, aborting")
             .join(".irys");
 
+        let testent_config = Config::testnet();
+        let chainspec_builder = IrysChainSpecBuilder::testnet();
         Self {
-            chainspec_builder: IrysChainSpecBuilder::mainnet(),
-            mining_signer: IrysSigner::random_signer(),
+            mining_signer: IrysSigner::random_signer(&testent_config),
+            chainspec_builder,
             instance_number: None, // no instance dir
             base_directory: base_dir,
         }
@@ -53,14 +55,14 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
 }
 
 impl IrysNodeConfig {
-    pub fn mainnet() -> Self {
+    pub fn new(config: &config::Config) -> Self {
         Self {
-            mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(CONFIG.mining_key).unwrap()),
+            mining_signer: IrysSigner::from_config(&config),
             instance_number: None,
             base_directory: env::current_dir()
                 .expect("Unable to determine working dir, aborting")
                 .join(".irys"),
-            chainspec_builder: IrysChainSpecBuilder::mainnet(),
+            chainspec_builder: IrysChainSpecBuilder::testnet(),
         }
     }
 
@@ -108,59 +110,6 @@ impl IrysNodeConfig {
         self
     }
 }
-
-// pub struct IrysConfigBuilder {
-//     /// Signer instance used for mining
-//     pub mining_signer: IrysSigner,
-//     /// Node ID/instance number: used for testing
-//     pub instance_number: u32,
-//     /// configuration of partitions and their associated storage providers
-
-//     /// base data directory, i.e `./.tmp`
-//     /// should not be used directly, instead use the appropriate methods, i.e `instance_directory`
-//     pub base_directory: PathBuf,
-//     /// ChainSpec builder - used to generate ChainSpec, which defines most of the chain-related parameters
-//     pub chainspec_builder: IrysChainSpecBuilder,
-// }
-
-// impl Default for IrysConfigBuilder {
-//     fn default() -> Self {
-//         Self {
-//             instance_number: 0,
-//             base_directory:absolute(PathBuf::from_str("../../.tmp").unwrap()).unwrap(),
-//             chainspec_builder: IrysChainSpecBuilder::mainnet(),
-//             mining_signer: IrysSigner::random_signer(),
-//         }
-//     }
-// }
-
-// impl IrysConfigBuilder {
-//     pub fn new() -> Self {
-//         return IrysConfigBuilder::default();
-//     }
-//     pub fn instance_number(mut self, number: u32) -> Self {
-//         self.instance_number = number;
-//         self
-//     }
-//     pub fn base_directory(mut self, path: PathBuf) -> Self {
-//         self.base_directory = path;
-//         self
-//     }
-//     // pub fn base_directory(mut self, path: PathBuf) -> Self {
-//     //     self.base_directory = path;
-//     //     self
-//     // }
-//     // pub fn add_partition_and_sm(mut self, partition: Partition, storage_module: )
-//     pub fn mainnet() -> Self {
-//         return IrysConfigBuilder::new()
-//             .base_directory(absolute(PathBuf::from_str("../../.irys").unwrap()).unwrap());
-//     }
-
-//     pub fn build(mut self) -> IrysNodeConfig {
-//
-//         return self.config;
-//     }
-// }
 
 pub const PRICE_PER_CHUNK_PERM: u128 = 10000;
 pub const PRICE_PER_CHUNK_5_EPOCH: u128 = 10;
@@ -297,6 +246,5 @@ impl StorageSubmodulesConfig {
             // Load the config to verify it parses
             StorageSubmodulesConfig::from_toml(config_path_local)
         }
-        // let _ = STORAGE_SUBMODULES_CONFIG.submodule_paths.len();
     }
 }

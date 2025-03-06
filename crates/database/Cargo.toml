@@ -7,7 +7,6 @@ rust-version.workspace = true
 [dependencies]
 alloy-primitives.workspace = true
 actix.workspace = true
-assert_matches.workspace = true
 base58.workspace = true
 tokio.workspace = true
 reth-node-metrics.workspace = true
@@ -25,6 +24,9 @@ tempfile.workspace = true
 tracing.workspace = true
 irys-testing-utils.workspace = true
 test-fuzz.workspace = true
+
+[dev-dependencies]
+irys-config = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true

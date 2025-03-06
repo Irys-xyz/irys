@@ -33,8 +33,13 @@ irys-testing-utils.workspace = true
 base58.workspace = true
 futures.workspace = true
 
+[dev-dependencies]
+irys-types = { workspace = true, features = ["test-utils"] }
+irys-config = { workspace = true, features = ["test-utils"] }
+
 [lints]
 workspace = true
 
 [features]
 nvidia = ["irys-packing/nvidia"]
+test-utils = ["irys-types/test-utils", "irys-config/test-utils"]

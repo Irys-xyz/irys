@@ -1,6 +1,6 @@
 use irys_primitives::{Genesis, GenesisAccount, U256};
-use irys_types::{Address, IrysBlockHeader, CONFIG};
-use once_cell::sync::{Lazy, OnceCell};
+use irys_types::{Address, IrysBlockHeader};
+use once_cell::sync::OnceCell;
 use reth_chainspec::EthereumHardfork::{
     ArrowGlacier, Berlin, Byzantium, Cancun, Constantinople, Dao, Frontier, GrayGlacier, Homestead,
     Istanbul, London, MuirGlacier, Paris, Petersburg, Shanghai, SpuriousDragon, Tangerine,
@@ -9,14 +9,13 @@ use reth_chainspec::{BaseFeeParams, BaseFeeParamsKind, Chain, ChainSpec, ForkCon
 use reth_primitives::constants::ETHEREUM_BLOCK_GAS_LIMIT;
 use reth_primitives::revm_primitives::hex;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
-pub const SUPPORTED_CHAINS: &[&str] = &["mainnet" /* , "devnet", "testnet" */];
+pub const IRYS_TESTNET_CHAIN_ID: u64 = 1275;
 
-/// note: for testing this is overridden
-pub static IRYS_MAINNET: Lazy<Arc<ChainSpec>> = Lazy::new(|| {
+pub static IRYS_TESTNET: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
     let mut spec = ChainSpec {
-        chain: Chain::from_id(CONFIG.irys_chain_id),
+        chain: Chain::from_id(IRYS_TESTNET_CHAIN_ID),
         // TODO: A proper genesis block
         genesis: Genesis {
             gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,
