@@ -249,21 +249,17 @@ impl StorageModule {
                 // Load the packing params and check to see if they match
                 let params = PackingParams::from_toml(params_path).expect("packing params to load");
                 let pa = storage_module_info.partition_assignment.unwrap();
-                if params.packing_address != storage_config.miner_address {
-                    panic!(
+                assert!(params.packing_address == storage_config.miner_address,
                         "Active mining address: {} does not match partition packing address {}",
                         storage_config.miner_address, params.packing_address
                     );
-                }
-                if params.partition_hash != Some(pa.partition_hash) {
-                    panic!(
+                assert!(params.partition_hash == Some(pa.partition_hash), 
                         "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
                         This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
                         assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
                         pa.partition_hash.0.to_base58(),
                         params.partition_hash.unwrap().0.to_base58(),
                     );
-                }
             }
 
             let intervals_file_path = sub_base_path.join("intervals.json");
