@@ -16,7 +16,6 @@ use std::sync::{Arc, RwLock};
 use tracing::error;
 
 use crate::block_producer::BlockFinalizedMessage;
-use crate::epoch_service::EpochServiceActor;
 
 /// Central coordinator for chunk storage operations.
 ///
