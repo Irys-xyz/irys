@@ -180,9 +180,32 @@ impl IrysBlockHeader {
             .validate_signature(self.signature_hash(), self.miner_address)
     }
 
-    // treat any block whose height is a multiple of blocks_in_epoch (and not zero) as epoch boundary
-    pub fn is_epoch(&self, blocks_in_epoch: u64) -> bool {
-        self.height != 0 && (self.height % blocks_in_epoch == 0)
+    // treat any block whose height is a multiple of blocks_in_price_adjustment_interval (and not zero) as epoch boundary
+    pub fn is_ema_recalculation_block(&self, blocks_in_price_adjustment_interval: u64) -> bool {
+        self.height != 0 && (self.height % blocks_in_price_adjustment_interval == 0)
+    }
+
+    /// Returns the height of the "previous" EMA recalculation block.
+    ///
+    /// - For the first two intervals (`height < 2 * blocks_in_price_adjustment_interval`), always return 0.
+    /// - Otherwise, return the largest multiple of `blocks_in_price_adjustment_interval` less than `height`.
+    ///   (If the current block is exactly on an interval boundary, step one interval back.)
+    pub fn previous_ema_recalculation_block_height(
+        &self,
+        blocks_in_price_adjustment_interval: u64,
+    ) -> u64 {
+        if self.height < 2 * blocks_in_price_adjustment_interval {
+            return 0;
+        }
+
+        let remainder = self.height % blocks_in_price_adjustment_interval;
+        if remainder == 0 {
+            // If the current block is on an interval boundary, go one interval back.
+            self.height - blocks_in_price_adjustment_interval
+        } else {
+            // Otherwise, drop the remainder.
+            self.height - remainder
+        }
     }
 }
 
@@ -468,6 +491,57 @@ mod tests {
 
         // assert
         assert_eq!(derived_header, header);
+    }
+
+    #[test]
+    fn test_previous_ema_for_first_two_intervals_returns_zero() {
+        let interval = 10;
+        // Anything less than 2 * 10 = 20 should return 0
+        for height in 0..20 {
+            let header = IrysBlockHeader {
+                height,
+                ..Default::default()
+            };
+            let result = header.previous_ema_recalculation_block_height(interval);
+            assert_eq!(
+                result, 0,
+                "For height={height} (< 2 * interval), expected 0 but got {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_previous_ema_for_multiple_intervals() {
+        let interval = 10;
+        // (height, expected)
+        let cases = vec![
+            (0, 0),
+            (1, 0),
+            (15, 0),
+            (19, 0),
+            (20, 10), // exactly at 2 intervals, returns 1 interval behind
+            (21, 20),
+            (29, 20),
+            (30, 20),
+            (31, 30),
+            (39, 30),
+            (40, 30),
+            (41, 40),
+            (99, 90),
+            (100, 90),
+        ];
+
+        for (height, expected) in cases {
+            let header = IrysBlockHeader {
+                height,
+                ..Default::default()
+            };
+            let result = header.previous_ema_recalculation_block_height(interval);
+            assert_eq!(
+                result, expected,
+                "For height={height}, expected {expected} but got {result}"
+            );
+        }
     }
 
     #[test]

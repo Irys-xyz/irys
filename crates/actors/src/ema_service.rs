@@ -27,13 +27,13 @@ pub struct EmaServiceHandle {
 
 impl EmaServiceHandle {
     pub fn spawn_service(
-        exec: TaskExecutor,
+        exec: &TaskExecutor,
         block_tree: Addr<BlockTreeService>,
         config: &Config,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let genesis_token_price = config.genesis_token_price;
-        let blocks_in_epoch = config.num_blocks_in_epoch;
+        let blocks_in_interval = config.price_adjustment_interval;
         exec.spawn_critical_with_graceful_shutdown_signal("EMA Service", |shutdown| async move {
             let block_tree_read_guard = block_tree
                 .send(GetBlockTreeGuardMessage)
@@ -41,7 +41,7 @@ impl EmaServiceHandle {
                 .expect("could not retrieve block tree read guard");
             let cache_service = EmaService {
                 shutdown,
-                blocks_in_epoch,
+                blocks_in_interval,
                 msg_rx: rx,
                 block_tree_read_guard,
                 genesis_token_price,
@@ -55,7 +55,7 @@ impl EmaServiceHandle {
 #[derive(Debug)]
 pub struct EmaService {
     pub shutdown: GracefulShutdown,
-    pub blocks_in_epoch: u64,
+    pub blocks_in_interval: u64,
     pub msg_rx: UnboundedReceiver<EmaServiceMessage>,
     pub block_tree_read_guard: BlockTreeReadGuard,
     pub genesis_token_price: IrysTokenPrice,
@@ -70,24 +70,24 @@ impl EmaService {
             while let Some(msg) = self.msg_rx.recv().await {
                 match msg {
                     EmaServiceMessage::GetCurrentEma { response } => {
-                        let _ = response.send(context.two_epochs_ago_block.irys_price);
+                        let _ = response.send(context.blosk_two_price_intervals_ago.irys_price);
                     }
                     EmaServiceMessage::GetEmaForNextEpoch { response } => {
-                        // example EMA calculation at Epoch on block 29:
-                        // 1. take the registered Irys price in block 18 (non epoch block) and the stored irys price in block 19 (epoch block).
-                        // 2. using these values must compute EMA for block 29. In this case the *n* (number of block prices) would be 10 (E29.height - E19.height).
+                        // example EMA calculation on block 29:
+                        // 1. take the registered Irys price in block 18 (non EMA block) and the stored irys price in block 19 (EMA block).
+                        // 2. using these values compute EMA for block 29. In this case the *n* (number of block prices) would be 10 (E29.height - E19.height).
                         // 3. this is the price that will be used in the interval 39->49, which will be reported to other systems querying for EMA prices.
 
-                        // the amount of blocks in between the 2 epoch values
-                        let blocks_in_between = self.blocks_in_epoch;
+                        // the amount of blocks in between the 2 EMA calculation values
+                        let blocks_in_between = self.blocks_in_interval;
 
                         // calculate the new EMA
                         let new_ema = context
-                            .previous_epoch_block_predecessor
+                            .block_previous_interval_predecessor
                             .irys_price
                             .calculate_ema(
                                 blocks_in_between,
-                                context.previous_epoch_block.irys_price.to_ema(),
+                                context.block_previous_interval.irys_price.to_ema(),
                             )
                             .unwrap();
 
@@ -112,9 +112,9 @@ impl EmaService {
 }
 
 struct PriceCacheContext {
-    previous_epoch_block: IrysBlockHeader,
-    previous_epoch_block_predecessor: IrysBlockHeader,
-    two_epochs_ago_block: IrysBlockHeader,
+    block_previous_interval: IrysBlockHeader,
+    block_previous_interval_predecessor: IrysBlockHeader,
+    blosk_two_price_intervals_ago: IrysBlockHeader,
 }
 
 impl PriceCacheContext {
@@ -144,9 +144,9 @@ impl PriceCacheContext {
         .await;
 
         Self {
-            previous_epoch_block,
-            previous_epoch_block_predecessor,
-            two_epochs_ago_block,
+            block_previous_interval: previous_epoch_block,
+            block_previous_interval_predecessor: previous_epoch_block_predecessor,
+            blosk_two_price_intervals_ago: two_epochs_ago_block,
         }
     }
 }
