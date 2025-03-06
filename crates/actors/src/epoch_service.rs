@@ -1192,17 +1192,16 @@ mod tests {
                 sub_slots[0].is_expired && sub_slots[0].partitions.len() == 0,
                 "Slot 0 should have expired and have no assigned partition!"
             );
-            assert!(!sub_slots[1].is_expired 
-                    && sub_slots[1].partitions.len() == 1 
-                    && (capacity_partitions.contains(&sub_slots[1].partitions[0]) 
+            assert!(!sub_slots[1].is_expired
+                    && sub_slots[1].partitions.len() == 1
+                    && (capacity_partitions.contains(&sub_slots[1].partitions[0])
                         || sub_slots[1].partitions[0] == submit_partition_hash),
                     "Slot 1 should not be expired and have a new fresh partition from previous capacity ones or the expired one!");
-            assert!(!sub_slots[2].is_expired 
+            assert!(!sub_slots[2].is_expired
                     && sub_slots[2].partitions.len() == 1
-                    && (capacity_partitions.contains(&sub_slots[2].partitions[0]) 
+                    && (capacity_partitions.contains(&sub_slots[2].partitions[0])
                         || sub_slots[2].partitions[0] == submit_partition_hash),
                     "Slot 2 should not be expired and have a new fresh partition from previous capacity ones or the expired one!");
-            //println!("Ledger State: {:#?}", ledgers);
 
             let publish_partition = pub_slots[0]
                 .partitions
