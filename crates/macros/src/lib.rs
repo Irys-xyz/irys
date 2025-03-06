@@ -1,7 +1,7 @@
 use derive_syn_parse::Parse;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, ToTokens};
+use quote::{quote, ToTokens as _};
 use std::{collections::HashSet, env, fs};
 use syn::{parse2, parse_quote, Error, Expr, ExprStruct, Ident, Lit, LitStr, Result, Token};
 
@@ -31,35 +31,32 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
     let struct_ident = default_value.path.segments.last().unwrap().ident.clone();
 
     // Retrieve the environment variable
-    let file_path = match env::var(env_var.value()) {
-        Ok(path) => {
-            // println!("USING CONFIG FILE: {}", path);
-            path
-        }
-        Err(_) => {
-            // println!("USING DEFAULT CONFIG");
-            // Use the provided default if the environment variable is not set
-            let mut default_value = default_value;
-            default_value.fields = default_value
-                .fields
-                .into_iter()
-                .map(|f| {
-                    let Expr::Lit(lit) = &f.expr else {
-                        return f;
-                    };
-                    let Lit::Float(float) = &lit.lit else {
-                        return f;
-                    };
-                    let f_raw: TokenStream2 = float.to_string().parse().unwrap();
-                    let mut f = f;
-                    f.expr = parse_quote!(rust_decimal_macros::dec![#f_raw]);
-                    f
-                })
-                .collect();
-            return Ok(quote! {
-                #default_value
-            });
-        }
+    let file_path = if let Ok(path) = env::var(env_var.value()) {
+        // println!("USING CONFIG FILE: {}", path);
+        path
+    } else {
+        // println!("USING DEFAULT CONFIG");
+        // Use the provided default if the environment variable is not set
+        let mut default_value = default_value;
+        default_value.fields = default_value
+            .fields
+            .into_iter()
+            .map(|f| {
+                let Expr::Lit(lit) = &f.expr else {
+                    return f;
+                };
+                let Lit::Float(float) = &lit.lit else {
+                    return f;
+                };
+                let f_raw: TokenStream2 = float.to_string().parse().unwrap();
+                let mut f = f;
+                f.expr = parse_quote!(rust_decimal_macros::dec![#f_raw]);
+                f
+            })
+            .collect();
+        return Ok(quote! {
+            #default_value
+        });
     };
 
     let optional_fields = default_value
@@ -84,7 +81,7 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
         Err(_) => {
             return Err(Error::new_spanned(
                 env_var,
-                format!("Failed to read file at '{}'.", file_path),
+                format!("Failed to read file at '{file_path}'."),
             ));
         }
     };
@@ -94,7 +91,7 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
         Err(_) => {
             return Err(Error::new_spanned(
                 env_var,
-                format!("Failed to parse TOML from file at '{}'.", file_path),
+                format!("Failed to parse TOML from file at '{file_path}'."),
             ));
         }
     };
@@ -107,7 +104,7 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
             if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 return Err(Error::new_spanned(
                     env_var,
-                    format!("Invalid key '{}' in TOML. Only alphanumeric and underscore characters are allowed.", key),
+                    format!("Invalid key '{key}' in TOML. Only alphanumeric and underscore characters are allowed."),
                 ));
             }
 
@@ -127,7 +124,7 @@ fn load_toml_impl(tokens: impl Into<TokenStream2>) -> Result<TokenStream2> {
                 _ => {
                     return Err(Error::new_spanned(
                         env_var,
-                        format!("Unsupported value for key '{}'. Nested or complex values are not allowed.", key),
+                        format!("Unsupported value for key '{key}'. Nested or complex values are not allowed."),
                     ));
                 }
             };

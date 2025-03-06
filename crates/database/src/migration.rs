@@ -1,17 +1,17 @@
+use crate::db::RethDbWrapper;
 use crate::reth_db::{
     table::TableImporter,
     transaction::{DbTx, DbTxMut},
-    Database, DatabaseEnv, DatabaseError,
+    Database as _, DatabaseEnv, DatabaseError,
 };
-use std::fmt::Debug;
+use core::fmt::Debug;
 use tracing::debug;
-use crate::db::RethDbWrapper;
 
 /// Bump this every time you need to migrate data
 const CURRENT_DB_VERSION: u32 = 1;
 
 /// Example migration step to version 2
-fn migration_to_v2(_db: &DatabaseEnv) -> Result<(), DatabaseError> {
+const fn migration_to_v2(_db: &DatabaseEnv) -> Result<(), DatabaseError> {
     // template for future migrations
     // update the database schema version here
     Ok(())
@@ -24,7 +24,7 @@ mod v0_to_v1 {
         IrysBlockHeaders, IrysTxHeaders,
     };
     use reth_db::table::Table;
-    use reth_db_api::cursor::DbCursorRO;
+    use reth_db_api::cursor::DbCursorRO as _;
 
     pub(crate) fn migrate<TXOld, TXNew>(tx_old: &TXOld, tx_new: &TXNew) -> Result<(), DatabaseError>
     where
@@ -72,7 +72,7 @@ pub fn check_db_version_and_run_migrations_if_needed(
     new_db: &DatabaseEnv,
 ) -> eyre::Result<()> {
     debug!("Checking if database migration is needed.");
-    let version = new_db.view(|tx| crate::database_schema_version(tx))??;
+    let version = new_db.view(crate::database_schema_version)??;
     debug!("Database version: {:?}", version);
     debug!("Current database version: {:?}", CURRENT_DB_VERSION);
     if let Some(v) = version {

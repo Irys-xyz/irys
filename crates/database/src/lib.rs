@@ -12,6 +12,7 @@ pub mod database;
 /// it is not suitable for mining.
 pub mod db_cache;
 
+pub mod db;
 /// Data in the indexes is confirmed data
 pub mod db_index;
 pub mod metadata;
@@ -20,7 +21,6 @@ pub mod migration;
 pub mod submodule;
 /// Local macro definition of chain specific mdbx tables
 pub mod tables;
-pub mod db;
 
 pub use block_index_data::*;
 pub use data_ledger::*;

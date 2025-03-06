@@ -2,13 +2,30 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use alloy_eips::{BlockId, BlockNumberOrTag};
-use alloy_eips::BlockNumberOrTag;
 use irys_actors::packing::PackingConfig;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
-use irys_actors::{block_discovery::BlockDiscoveryActor, block_index_service, block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage}, block_producer::BlockProducerActor, block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage}, broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService}, chunk_migration_service, chunk_migration_service::ChunkMigrationService, epoch_service, epoch_service::{
-    EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
-    GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
-}, mempool_service::MempoolService, mining::PartitionMiningActor, packing::{PackingActor, PackingRequest}, validation_service::ValidationService, vdf_service, vdf_service::{GetVdfStateMessage, VdfService}, ActorAddresses, BlockFinalizedMessage};
+use irys_actors::{
+    block_discovery::BlockDiscoveryActor,
+    block_index_service,
+    block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
+    block_producer::BlockProducerActor,
+    block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
+    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    chunk_migration_service,
+    chunk_migration_service::ChunkMigrationService,
+    epoch_service,
+    epoch_service::{
+        EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
+        GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
+    },
+    mempool_service::MempoolService,
+    mining::PartitionMiningActor,
+    packing::{PackingActor, PackingRequest},
+    validation_service::ValidationService,
+    vdf_service,
+    vdf_service::{GetVdfStateMessage, VdfService},
+    ActorAddresses, BlockFinalizedMessage,
+};
 use irys_api_server::{run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
@@ -17,7 +34,6 @@ use irys_reth_node_bridge::adapter::node::RethNodeContext;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
-use reth_db::DatabaseEnv;
 use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
@@ -29,6 +45,8 @@ use irys_types::{
 use irys_types::{Config, DifficultyAdjustmentConfig, PartitionChunkRange};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::core::irys_ext::ReloadPayload;
+use reth::network::NetworkInfo;
+use reth::rpc::api::eth::helpers::LoadBlock;
 use reth::rpc::eth::EthApiServer as _;
 use reth::{
     builder::FullNode,
@@ -36,7 +54,10 @@ use reth::{
     core::irys_ext::NodeExitReason,
     tasks::{TaskExecutor, TaskManager},
 };
-use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message, tokio_runtime};
+use reth_cli_runner::{
+    run_to_completion_or_panic, run_until_ctrl_c_or_channel_message, tokio_runtime,
+};
+use reth_db::DatabaseEnv;
 use reth_db::{Database as _, HasName, HasTableType};
 use std::sync::atomic::AtomicU64;
 use std::{
@@ -44,8 +65,6 @@ use std::{
     sync::{mpsc, Arc, OnceLock, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use reth::network::NetworkInfo;
-use reth::rpc::api::eth::helpers::LoadBlock;
 use tracing::{debug, error, info};
 
 use crate::vdf::run_vdf;
@@ -58,38 +77,6 @@ use tokio::{
 };
 
 use crate::clonable_join_handle::{ClonableJoinHandle, DestroyableArc};
-
-pub async fn start() -> eyre::Result<IrysNodeCtx> {
-    let config: IrysNodeConfig = IrysNodeConfig {
-        mining_signer: IrysSigner::mainnet_from_slice(&decode_hex(CONFIG.mining_key).unwrap()),
-        ..IrysNodeConfig::default()
-    };
-
-    let storage_config = StorageConfig {
-        chunk_size: CONFIG.chunk_size,
-        num_chunks_in_partition: CONFIG.num_chunks_in_partition,
-        num_chunks_in_recall_range: CONFIG.num_chunks_in_recall_range,
-        num_partitions_in_slot: CONFIG.num_partitions_per_slot,
-        miner_address: config.mining_signer.address(),
-        min_writes_before_sync: 1,
-        entropy_packing_iterations: CONFIG.entropy_packing_iterations,
-        chunk_migration_depth: CONFIG.chunk_migration_depth, // Testnet / single node config
-    };
-
-    start_irys_node(config, storage_config).await
-}
-
-pub async fn start_for_testing(config: IrysNodeConfig) -> eyre::Result<IrysNodeCtx> {
-    let storage_config = StorageConfig {
-        chunk_size: 32,
-        num_chunks_in_partition: 10,
-        num_chunks_in_recall_range: 2,
-        num_partitions_in_slot: 1,
-        miner_address: config.mining_signer.address(),
-        min_writes_before_sync: 1,
-        entropy_packing_iterations: 1_000,
-        chunk_migration_depth: 1, // Testnet / single node config
-    };
 
 pub async fn start(config: Config) -> eyre::Result<IrysNodeCtx> {
     let irys_node_config = IrysNodeConfig::new(&config);
@@ -193,7 +180,12 @@ impl IrysNodeCtx {
         }
 
         // Clean up the IrysRethProvider
-        if let Some(irys_provider) = self.reth_handle.irys_ext.as_ref().map(|ext| ext.provider.clone()) {
+        if let Some(irys_provider) = self
+            .reth_handle
+            .irys_ext
+            .as_ref()
+            .map(|ext| ext.provider.clone())
+        {
             irys_storage::reth_provider::cleanup_provider(&irys_provider);
         }
 

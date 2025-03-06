@@ -1,18 +1,18 @@
-use std::sync::Arc;
+use crate::reth_db::DatabaseError;
 use reth_db::DatabaseEnv;
 use reth_db_api::database_metrics::{DatabaseMetadata, DatabaseMetadataValue, DatabaseMetrics};
+use std::sync::Arc;
 use std::sync::RwLock;
-use crate::reth_db::DatabaseError;
 
 #[derive(Clone, Debug)]
 pub struct RethDbWrapper {
-    db: Arc<RwLock<Option<DatabaseEnv>>>
+    db: Arc<RwLock<Option<DatabaseEnv>>>,
 }
 
 impl RethDbWrapper {
-    pub fn new(db: DatabaseEnv) -> Self {
+    #[must_use] pub fn new(db: DatabaseEnv) -> Self {
         Self {
-            db: Arc::new(RwLock::new(Some(db)))
+            db: Arc::new(RwLock::new(Some(db))),
         }
     }
 
@@ -40,7 +40,7 @@ impl reth_db::Database for RethDbWrapper {
 
     fn view<T, F>(&self, f: F) -> Result<T, DatabaseError>
     where
-        F: FnOnce(&Self::TX) -> T
+        F: FnOnce(&Self::TX) -> T,
     {
         let guard = self.db.read().unwrap();
         guard.as_ref().unwrap().view(f)
@@ -48,7 +48,7 @@ impl reth_db::Database for RethDbWrapper {
 
     fn view_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where
-        F: FnOnce(&Self::TX) -> eyre::Result<T>
+        F: FnOnce(&Self::TX) -> eyre::Result<T>,
     {
         let guard = self.db.read().unwrap();
         guard.as_ref().unwrap().view_eyre(f)
@@ -56,7 +56,7 @@ impl reth_db::Database for RethDbWrapper {
 
     fn update<T, F>(&self, f: F) -> Result<T, DatabaseError>
     where
-        F: FnOnce(&Self::TXMut) -> T
+        F: FnOnce(&Self::TXMut) -> T,
     {
         let guard = self.db.read().unwrap();
         guard.as_ref().unwrap().update(f)
@@ -64,16 +64,14 @@ impl reth_db::Database for RethDbWrapper {
 
     fn update_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where
-        F: FnOnce(&Self::TXMut) -> eyre::Result<T>
+        F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
     {
         let guard = self.db.read().unwrap();
         guard.as_ref().unwrap().update_eyre(f)
     }
 }
 
-impl DatabaseMetrics for RethDbWrapper {
-
-}
+impl DatabaseMetrics for RethDbWrapper {}
 
 impl DatabaseMetadata for RethDbWrapper {
     fn metadata(&self) -> DatabaseMetadataValue {

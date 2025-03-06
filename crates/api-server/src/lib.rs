@@ -61,7 +61,7 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
 }
 
-pub async fn run_server(app_state: ApiState,  mut shutdown_rx: tokio::sync::mpsc::Receiver<()>) {
+pub async fn run_server(app_state: ApiState, mut shutdown_rx: tokio::sync::mpsc::Receiver<()>) {
     let port = app_state.config.port;
     info!(?port, "Starting API server");
 

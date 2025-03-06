@@ -86,7 +86,10 @@ pub fn run_vdf(
             reset_seed = h;
         }
     }
-    debug!("VDF thread stopped at global_step_number {}", global_step_number);
+    debug!(
+        "VDF thread stopped at global_step_number {}",
+        global_step_number
+    );
 }
 
 #[cfg(test)]

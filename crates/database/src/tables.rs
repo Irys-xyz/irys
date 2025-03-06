@@ -39,7 +39,7 @@ macro_rules! add_wrapper_struct {
 							}
 					}
 
-					impl std::ops::Deref for $wrapper {
+					impl core::ops::Deref for $wrapper {
 							type Target = $name;
 
 							fn deref(&self) -> &Self::Target {

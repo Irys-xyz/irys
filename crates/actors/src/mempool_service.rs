@@ -1,6 +1,9 @@
+use crate::block_producer::BlockConfirmedMessage;
+use crate::block_tree_service::BlockTreeReadGuard;
 use actix::{Actor, ActorContext, Context, Handler, Message, Supervised, SystemService};
 use base58::ToBase58;
 use eyre::eyre;
+use irys_database::db::RethDbWrapper;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofLRU, IngressProofs};
 use irys_database::{insert_tx_header, tx_header_by_txid, Ledger};
@@ -21,9 +24,6 @@ use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 use tracing::{debug, error, info, warn};
-use irys_database::db::RethDbWrapper;
-use crate::block_producer::BlockConfirmedMessage;
-use crate::block_tree_service::BlockTreeReadGuard;
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug, Default)]
 pub struct MempoolService {

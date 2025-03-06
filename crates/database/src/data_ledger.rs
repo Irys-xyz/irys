@@ -1,6 +1,6 @@
 use irys_types::{Compact, Config, TransactionLedger, H256};
 use serde::{Deserialize, Serialize};
-use std::ops::{Index, IndexMut};
+use core::ops::{Index, IndexMut};
 /// Manages the global ledger state within the epoch service, tracking:
 /// - All ledger types (Publish, Submit, etc.)
 /// - Their associated partitions
@@ -45,7 +45,7 @@ pub struct TermLedger {
 
 impl PermanentLedger {
     /// Constructs a permanent ledger, always with `Ledger::Publish` as the id
-    pub fn new(config: &Config) -> Self {
+    #[must_use] pub const fn new(config: &Config) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: Ledger::Publish as u32,
@@ -56,7 +56,7 @@ impl PermanentLedger {
 
 impl TermLedger {
     /// Creates a term ledger with specified index and duration
-    pub fn new(ledger: Ledger, config: &Config) -> Self {
+    #[must_use] pub const fn new(ledger: Ledger, config: &Config) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: ledger as u32,
@@ -67,7 +67,7 @@ impl TermLedger {
     }
 
     /// Returns a slice of the ledgers slots
-    pub const fn get_slots(&self) -> &Vec<LedgerSlot> {
+    #[must_use] pub const fn get_slots(&self) -> &Vec<LedgerSlot> {
         &self.slots
     }
 
@@ -222,14 +222,14 @@ impl Ledger {
         Self::ALL.iter().copied()
     }
     /// get the associated numeric ID
-    pub const fn get_id(&self) -> u32 {
+    #[must_use] pub const fn get_id(&self) -> u32 {
         *self as u32
     }
 
     // Takes "perm" or some term e.g. "1year", or an integer ID
     pub fn from_url(s: &str) -> eyre::Result<Self> {
         if let Ok(ledger_id) = s.parse::<u32>() {
-            return Ledger::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
+            return Self::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
         }
         match s {
             "perm" => eyre::Result::Ok(Self::Publish),
@@ -277,7 +277,7 @@ pub struct Ledgers {
 
 impl Ledgers {
     /// Instantiate a Ledgers struct with the correct Ledgers
-    pub fn new(config: &Config) -> Self {
+    #[must_use] pub fn new(config: &Config) -> Self {
         Self {
             perm: PermanentLedger::new(config),
             term: vec![TermLedger::new(Ledger::Submit, config)],
@@ -285,7 +285,7 @@ impl Ledgers {
     }
 
     /// The number of ledgers being managed
-    pub fn len(&self) -> usize {
+    #[must_use] pub fn len(&self) -> usize {
         1 + self.term.len()
     }
 
@@ -309,24 +309,24 @@ impl Ledgers {
         self.term
             .iter()
             .find(|l| l.ledger_id == ledger as u32)
-            .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
+            .unwrap_or_else(|| panic!("Term ledger {ledger:?} not found"))
     }
 
     fn get_term_ledger_mut(&mut self, ledger: Ledger) -> &mut TermLedger {
         self.term
             .iter_mut()
             .find(|l| l.ledger_id == ledger as u32)
-            .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
+            .unwrap_or_else(|| panic!("Term ledger {ledger:?} not found"))
     }
 
-    pub fn get_slots(&self, ledger: Ledger) -> &Vec<LedgerSlot> {
+    #[must_use] pub fn get_slots(&self, ledger: Ledger) -> &Vec<LedgerSlot> {
         match ledger {
             Ledger::Publish => self.perm.get_slots(),
             ledger => self.get_term_ledger(ledger).get_slots(),
         }
     }
 
-    pub fn get_slot_needs(&self, ledger: Ledger) -> Vec<(usize, usize)> {
+    #[must_use] pub fn get_slot_needs(&self, ledger: Ledger) -> Vec<(usize, usize)> {
         match ledger {
             Ledger::Publish => self.perm.get_slot_needs(),
             ledger => self.get_term_ledger(ledger).get_slot_needs(),
@@ -383,7 +383,7 @@ impl Index<Ledger> for Ledgers {
                 .term
                 .iter()
                 .find(|l| l.ledger_id == ledger as u32)
-                .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger)),
+                .unwrap_or_else(|| panic!("Term ledger {ledger:?} not found")),
         }
     }
 }

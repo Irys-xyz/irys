@@ -12,7 +12,7 @@ use irys_types::{
     Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
     IrysTransactionId, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
 };
-use reth_db::cursor::DbDupCursorRO;
+use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::tx::Tx;
 use reth_db::mdbx::RO;
 use reth_db::table::Table;
@@ -201,8 +201,7 @@ pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
 pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U256> {
     Ok(tx
         .get::<PlainAccountState>(address)?
-        .map(|a| U256::from_little_endian(a.balance.as_le_slice()))
-        .unwrap_or(U256::from(0)))
+        .map_or(U256::from(0), |a| U256::from_little_endian(a.balance.as_le_slice())))
 }
 
 pub fn walk_all<T: Table>(
@@ -221,7 +220,7 @@ pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseE
     if let Some(bytes) = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)? {
         let arr: [u8; 4] = bytes.as_slice().try_into().map_err(|_| {
             DatabaseError::Other(
-                "Db schema version metadata does not have exactly 4 bytes".to_string(),
+                "Db schema version metadata does not have exactly 4 bytes".to_owned(),
             )
         })?;
 

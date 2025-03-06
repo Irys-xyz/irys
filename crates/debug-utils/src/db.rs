@@ -5,7 +5,7 @@ use irys_database::{
     walk_all,
 };
 
-pub fn load_db() -> DatabaseEnv {
+#[must_use] pub fn load_db() -> DatabaseEnv {
     let path = "/workspaces/irys-rs/.irys/1/reth/db";
     open_or_create_db(path, IrysTables::ALL, None).unwrap()
 }
