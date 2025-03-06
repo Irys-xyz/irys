@@ -67,7 +67,7 @@ impl TermLedger {
     }
 
     /// Returns a slice of the ledgers slots
-    pub fn get_slots(&self) -> &Vec<LedgerSlot> {
+    pub const fn get_slots(&self) -> &Vec<LedgerSlot> {
         &self.slots
     }
 
@@ -222,14 +222,14 @@ impl Ledger {
         Self::ALL.iter().copied()
     }
     /// get the associated numeric ID
-    pub fn get_id(&self) -> u32 {
+    pub const fn get_id(&self) -> u32 {
         *self as u32
     }
 
     // Takes "perm" or some term e.g. "1year", or an integer ID
     pub fn from_url(s: &str) -> eyre::Result<Self> {
         if let Ok(ledger_id) = s.parse::<u32>() {
-            return Self::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
+            return Ledger::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
         }
         match s {
             "perm" => eyre::Result::Ok(Self::Publish),
@@ -309,14 +309,14 @@ impl Ledgers {
         self.term
             .iter()
             .find(|l| l.ledger_id == ledger as u32)
-            .unwrap_or_else(|| panic!("Term ledger {ledger:?} not found"))
+            .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
     }
 
     fn get_term_ledger_mut(&mut self, ledger: Ledger) -> &mut TermLedger {
         self.term
             .iter_mut()
             .find(|l| l.ledger_id == ledger as u32)
-            .unwrap_or_else(|| panic!("Term ledger {ledger:?} not found"))
+            .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
     }
 
     pub fn get_slots(&self, ledger: Ledger) -> &Vec<LedgerSlot> {
@@ -383,7 +383,7 @@ impl Index<Ledger> for Ledgers {
                 .term
                 .iter()
                 .find(|l| l.ledger_id == ledger as u32)
-                .unwrap_or_else(|| panic!("Term ledger {ledger:?} not found")),
+                .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger)),
         }
     }
 }

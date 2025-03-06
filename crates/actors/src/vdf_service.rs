@@ -6,7 +6,7 @@ use std::{
     collections::VecDeque,
     sync::{Arc, RwLock},
 };
-use tracing::{debug, info};
+use tracing::info;
 
 use irys_types::{block_production::Seed, Config, DatabaseProvider};
 
