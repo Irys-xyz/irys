@@ -35,7 +35,7 @@ futures.workspace = true
 futures-concurrency.workspace = true
 rust_decimal_macros.workspace = true
 rust_decimal.workspace = true
-heapless.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
