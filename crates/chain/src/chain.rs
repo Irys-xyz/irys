@@ -56,7 +56,7 @@ use std::{
     sync::{mpsc, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::vdf::run_vdf;
 use irys_database::migration::check_db_version_and_run_migrations_if_needed;
@@ -87,7 +87,6 @@ pub struct IrysNodeCtx {
     pub vdf_config: VDFStepsConfig,
     pub storage_config: StorageConfig,
     // Shutdown channels
-    pub api_server_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
     pub main_actor_thread_handle: Option<CloneableJoinHandle<()>>,
@@ -96,14 +95,7 @@ pub struct IrysNodeCtx {
 
 impl IrysNodeCtx {
     pub async fn stop(self) {
-        // First stop the API server and RPC endpoints to prevent new requests
-        self.api_server_shutdown_sender.try_send(()).unwrap();
-
-        // We need to make sure that all our actors has stopped before attempting to stop reth
-        if let Some(main_actor_thread_handle) = self.main_actor_thread_handle {
-            main_actor_thread_handle.join().unwrap();
-        }
-
+        // Shutting down reth node will propagate to the main actor thread eventually
         let chain_spec_arc = self.reth_handle.chain_spec();
         let chain_spec = (*chain_spec_arc).clone();
 
@@ -117,12 +109,8 @@ impl IrysNodeCtx {
             .send(ReloadPayload::ReloadConfig(chain_spec))
             .unwrap();
 
-        if let Some(reth_thread_handle) = self.reth_thread_handle {
-           match reth_thread_handle.join() {
-               Ok(_) => { debug!("reth thread successfully reloaded") ; },
-               Err(e) => { error!("reth thread panicked: {:?}", e) },
-           };
-        }
+        self.reth_thread_handle.unwrap().join().unwrap();
+        self.main_actor_thread_handle.unwrap().join().unwrap();
 
         // Clean up the IrysRethProvider
         if let Some(irys_provider) = self
@@ -215,6 +203,7 @@ pub async fn start_irys_node(
     let irys_provider_1 = irys_provider.clone();
 
     let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
+    let (api_server_shutdown_tx, api_server_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (consensus_engine_shutdown_sender, consensus_engine_shutdown_receiver) =
         tokio::sync::mpsc::channel::<()>(1);
 
@@ -610,8 +599,6 @@ pub async fn start_irys_node(
                     chunk_provider: arc_chunk_provider.clone(),
                 });
 
-                let (api_server_shutdown_tx, api_server_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
-
                 let _ = irys_node_handle_sender.send(IrysNodeCtx {
                     actor_addresses: actor_addresses.clone(),
                     reth_handle: reth_node.clone(),
@@ -622,12 +609,10 @@ pub async fn start_irys_node(
                     vdf_steps_guard: vdf_steps_guard.clone(),
                     vdf_config: vdf_config.clone(),
                     storage_config: storage_config.clone(),
-                    api_server_shutdown_sender: api_server_shutdown_tx,
+                    // api_server_shutdown_sender: api_server_shutdown_tx,
                     reth_shutdown_sender,
-                    // consensus_engine_shutdown_sender,
                     main_actor_thread_handle: None,
                     reth_thread_handle: None,
-                    // arbiters,
                 });
 
                 run_server(ApiState {
@@ -672,7 +657,7 @@ pub async fn start_irys_node(
             tokio_runtime.block_on(run_to_completion_or_panic(
                 &mut task_manager,
                 run_until_ctrl_c_or_channel_message(
-                    start_reth_node(task_executor, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider, latest_block_height, consensus_engine_shutdown_receiver),
+                    start_reth_node(task_executor, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider, latest_block_height, consensus_engine_shutdown_receiver, api_server_shutdown_tx),
                     reth_shutdown_receiver
                 ),
             )).unwrap();
@@ -703,6 +688,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
     irys_provider: IrysRethProvider,
     latest_block: u64,
     consensus_engine_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
+    main_actor_thread_shutdown_sender: tokio::sync::mpsc::Sender<()>,
 ) -> eyre::Result<NodeExitReason> {
     let node_handle = irys_reth_node_bridge::run_node(
         Arc::new(chainspec),
@@ -721,6 +707,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
 
     let exit_reason = node_handle.node_exit_future.await?;
 
+    let _ = main_actor_thread_shutdown_sender.try_send(());
     debug!("Stopping RPC servers...");
     let _ = &node_handle.node.rpc_server_handles.auth.clone().stop();
     let _ = &node_handle.node.rpc_server_handles.rpc.clone().stop();
