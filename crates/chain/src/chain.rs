@@ -51,12 +51,12 @@ use reth::{
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
 use std::sync::atomic::AtomicU64;
+use std::thread::JoinHandle;
 use std::{
     fs,
     sync::{mpsc, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use std::thread::JoinHandle;
 use tracing::{debug, error, info};
 
 use crate::vdf::run_vdf;
@@ -697,7 +697,10 @@ async fn start_reth_node<T: HasName + HasTableType>(
 
     let exit_reason = node_handle.node_exit_future.await?;
 
-    debug!("Sending shutdown signal to main actor thread {:?}", exit_reason);
+    debug!(
+        "Sending shutdown signal to main actor thread {:?}",
+        exit_reason
+    );
     let _ = main_actor_thread_shutdown_sender.try_send(());
     debug!("Waiting for the main actor thread to finish");
     main_actor_thread_handle.join().unwrap();
