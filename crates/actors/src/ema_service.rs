@@ -55,10 +55,12 @@ impl EmaServiceHandle {
                 .expect("could not retrieve block tree read guard");
             let cache_service = EmaService {
                 shutdown,
-                blocks_in_interval,
                 msg_rx: rx,
-                block_tree_read_guard,
-                genesis_token_price,
+                inner: Inner {
+                    blocks_in_interval,
+                    block_tree_read_guard,
+                    genesis_token_price,
+                },
             };
             cache_service.start().await
         });
@@ -69,66 +71,76 @@ impl EmaServiceHandle {
 #[derive(Debug)]
 pub struct EmaService {
     pub shutdown: GracefulShutdown,
-    pub blocks_in_interval: u64,
     pub msg_rx: UnboundedReceiver<EmaServiceMessage>,
+    pub inner: Inner,
+}
+
+#[derive(Debug)]
+pub struct Inner {
+    pub blocks_in_interval: u64,
     pub block_tree_read_guard: BlockTreeReadGuard,
     pub genesis_token_price: IrysTokenPrice,
+}
+
+impl Inner {
+    async fn handle_message(&mut self, msg: EmaServiceMessage, context: &mut PriceCacheContext) {
+        match msg {
+            EmaServiceMessage::GetCurrentEma { response } => {
+                let _ = response.send(context.block_two_adj_intervals_ago.irys_price);
+            }
+            EmaServiceMessage::GetEmaForNextAdjustmentPeriod {
+                response,
+                height_of_new_adjustment_block,
+            } => {
+                // sanity check to ensure we only compute a new EMA on boundary blocks
+                if context.next_ema_adjustment_height != height_of_new_adjustment_block {
+                    let _ = response.send(Err(EmaCalculationError::HeightIsNotEmaAdjustmentBlock));
+                    return;
+                }
+
+                // example EMA calculation on block 29:
+                // 1. take the registered Irys price in block 18 (non EMA block) and the stored irys price in block 19 (EMA block).
+                // 2. using these values compute EMA for block 29. In this case the *n* (number of block prices) would be 10 (E29.height - E19.height).
+                // 3. this is the price that will be used in the interval 39->49, which will be reported to other systems querying for EMA prices.
+
+                // the amount of blocks in between the 2 EMA calculation values
+                let blocks_in_between = self.blocks_in_interval;
+
+                // calculate the new EMA
+                let new_ema = context
+                    .block_previous_interval_predecessor
+                    .irys_price
+                    .calculate_ema(
+                        blocks_in_between,
+                        context.block_previous_interval.irys_price.to_ema(),
+                    )
+                    .unwrap();
+
+                let _ = response.send(Ok(new_ema.to_irys_price()));
+            }
+            EmaServiceMessage::NewConfirmedBlock => {
+                // Rebuild the entire data cache just like we do at startup.
+                *context = PriceCacheContext::from_canonical_chain(
+                    self.block_tree_read_guard.clone(),
+                    self.blocks_in_interval,
+                )
+                .await;
+            }
+        }
+    }
 }
 
 impl EmaService {
     async fn start(mut self) {
         let mut context = PriceCacheContext::from_canonical_chain(
-            self.block_tree_read_guard.clone(),
-            self.blocks_in_interval,
+            self.inner.block_tree_read_guard.clone(),
+            self.inner.blocks_in_interval,
         )
         .await;
 
         let msg_processor = async {
             while let Some(msg) = self.msg_rx.recv().await {
-                match msg {
-                    EmaServiceMessage::GetCurrentEma { response } => {
-                        let _ = response.send(context.block_two_adj_intervals_ago.irys_price);
-                    }
-                    EmaServiceMessage::GetEmaForNextAdjustmentPeriod {
-                        response,
-                        height_of_new_adjustment_block,
-                    } => {
-                        // sanity check to ensure we only compute a new EMA on boundary blocks
-                        if context.next_ema_adjustment_height != height_of_new_adjustment_block {
-                            let _ = response
-                                .send(Err(EmaCalculationError::HeightIsNotEmaAdjustmentBlock));
-                            continue;
-                        }
-
-                        // example EMA calculation on block 29:
-                        // 1. take the registered Irys price in block 18 (non EMA block) and the stored irys price in block 19 (EMA block).
-                        // 2. using these values compute EMA for block 29. In this case the *n* (number of block prices) would be 10 (E29.height - E19.height).
-                        // 3. this is the price that will be used in the interval 39->49, which will be reported to other systems querying for EMA prices.
-
-                        // the amount of blocks in between the 2 EMA calculation values
-                        let blocks_in_between = self.blocks_in_interval;
-
-                        // calculate the new EMA
-                        let new_ema = context
-                            .block_previous_interval_predecessor
-                            .irys_price
-                            .calculate_ema(
-                                blocks_in_between,
-                                context.block_previous_interval.irys_price.to_ema(),
-                            )
-                            .unwrap();
-
-                        let _ = response.send(Ok(new_ema.to_irys_price()));
-                    }
-                    EmaServiceMessage::NewConfirmedBlock => {
-                        // Rebuild the entire data cache just like we do at startup.
-                        context = PriceCacheContext::from_canonical_chain(
-                            self.block_tree_read_guard.clone(),
-                            self.blocks_in_interval,
-                        )
-                        .await;
-                    }
-                }
+                self.inner.handle_message(msg, &mut context).await;
             }
         };
 
@@ -136,12 +148,16 @@ impl EmaService {
             let _ = self.shutdown.await;
         };
         msg_processor.race(shutdown_handler).await;
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.inner.handle_message(msg, &mut context).await;
+        }
     }
 }
 
 mod price_cache_context {
     use super::*;
 
+    #[derive(Debug)]
     pub(super) struct PriceCacheContext {
         pub(super) block_previous_interval: IrysBlockHeader,
         pub(super) block_previous_interval_predecessor: IrysBlockHeader,
@@ -158,6 +174,8 @@ mod price_cache_context {
             // Rebuild the entire data cache just like we do at startup.
             let canonical_chain = get_canonical_chain(block_tree_read_guard.clone()).await.0;
             let (_latest_block_hash, latest_block_height, ..) = canonical_chain.last().unwrap();
+            dbg!(&canonical_chain);
+            dbg!(&latest_block_height);
 
             // Derive indexes
             // if the latest block is an EMA recalculation block
@@ -172,6 +190,7 @@ mod price_cache_context {
                     blocks_in_price_adjustment_interval,
                 )
             };
+            dbg!(&previous_epoch_block_height);
             let block_previous_interval_predecessor = previous_epoch_block_height.saturating_sub(1);
             let two_epochs_ago_block = previous_ema_recalculation_block_height(
                 previous_epoch_block_height,
@@ -253,7 +272,7 @@ mod price_cache_context {
 
         use std::sync::{Arc, RwLock};
 
-        use crate::block_tree_service::BlockTreeCache;
+        use crate::block_tree_service::{BlockState, BlockTreeCache, ChainState};
 
         use super::*;
 
@@ -349,23 +368,35 @@ mod price_cache_context {
         }
 
         fn genesis_tree(blocks: &mut [IrysBlockHeader]) -> BlockTreeReadGuard {
-            let mut hash = H256::random();
+            let mut block_hash = H256::random();
             let mut iter = blocks.into_iter();
             let genesis_block = iter.next().unwrap();
-            genesis_block.block_hash = hash;
+            genesis_block.block_hash = block_hash;
+            genesis_block.cumulative_diff = 0.into();
 
             let mut block_tree_cache = BlockTreeCache::new(&genesis_block);
+            block_tree_cache.mark_tip(&block_hash).unwrap();
             for block in iter {
                 // update the prev block hash
-                block.previous_block_hash = hash;
+                block.previous_block_hash = block_hash;
+                block.cumulative_diff = block.height.into();
 
                 // generate a new block hash
-                hash = H256::random();
-                block.block_hash = hash;
+                block_hash = H256::random();
+                block.block_hash = block_hash;
                 block_tree_cache
-                    .add_block(block, Arc::new(Vec::new()))
+                    .add_common(
+                        block.block_hash.clone(),
+                        block,
+                        Arc::new(Vec::new()),
+                        ChainState::Onchain,
+                    )
                     .unwrap();
+                block_tree_cache.mark_tip(&block_hash).unwrap();
+                // let (.., state) = block_tree_cache.get_block_and_status(&block_hash).unwrap();
+                // assert_eq!(state, &ChainState::Onchain);
             }
+
             let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));
             let block_tree_guard = BlockTreeReadGuard::new(block_tree_cache);
             block_tree_guard
