@@ -5,7 +5,6 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders, Metadata,
-    ProgrammableDataCache,
 };
 
 use crate::metadata::MetadataKey;
@@ -226,8 +225,6 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
     while let Some((_k, c)) = walker.next().transpose()? {
         // delete them
         tx.delete::<CachedChunks>(c.meta.chunk_path_hash, None)?;
-        // remove the specific subkey
-        // tx.delete::<CachedChunksIndex>(data_root, Some(c))?; // delete just a specific dupsort entry by subkey
         chunks_pruned += 1;
     }
     // delete the key (and all subkeys) from the index
@@ -238,14 +235,6 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
 pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Result<(u64, u64)> {
     let chunk_count: usize = tx.entries::<T>()?;
     Ok((chunk_count as u64, chunk_count as u64 * chunk_size))
-}
-
-pub fn get_chunk_cache_size<T: DbTx>(tx: &T, chunk_size: u64) -> eyre::Result<(u64, u64)> {
-    get_cache_size::<CachedChunks, T>(tx, chunk_size)
-}
-
-pub fn get_pd_cache_size<T: DbTx>(tx: &T, chunk_size: u64) -> eyre::Result<(u64, u64)> {
-    get_cache_size::<ProgrammableDataCache, T>(tx, chunk_size)
 }
 
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]

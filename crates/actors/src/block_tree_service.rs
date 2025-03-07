@@ -15,14 +15,14 @@ use crate::{
     BlockFinalizedMessage,
 };
 use actix::prelude::*;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::ensure;
 use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, Initialized, Ledger};
 use irys_types::{
     Address, BlockHash, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
     IrysTransactionId, StorageConfig, H256, U256,
 };
-use reth_db::{transaction::DbTx, Database};
+use reth_db::{transaction::DbTx, Database as _};
 use tracing::{debug, error, info};
 
 //==============================================================================
@@ -230,10 +230,7 @@ impl BlockTreeService {
             }
             panic!("Block tree and index out of sync");
         }
-        debug!(
-            "finalizing irys block {} ({})",
-            &finalized_hash, &finalized_height
-        );
+        debug!(?finalized_hash, ?finalized_height, "finalizing irys block");
 
         if let Err(e) = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
             head_hash: BlockHashType::Irys(cache.tip),
@@ -462,7 +459,7 @@ pub enum BlockState {
 impl BlockTreeCache {
     /// Create a new cache initialized with a starting block. The block is marked as
     /// on-chain and set as the tip.
-    pub fn new(block: &IrysBlockHeader) -> Self {
+    #[must_use] pub fn new(block: &IrysBlockHeader) -> Self {
         let block_hash = block.block_hash;
         let solution_hash = block.solution_hash;
         let height = block.height;
@@ -784,7 +781,7 @@ impl BlockTreeCache {
             .unwrap_or((U256::zero(), BlockHash::default()))
     }
 
-    pub fn get_canonical_chain(&self) -> (Vec<ChainCacheEntry>, usize) {
+    #[must_use] pub fn get_canonical_chain(&self) -> (Vec<ChainCacheEntry>, usize) {
         self.longest_chain_cache.clone()
     }
 
@@ -957,12 +954,12 @@ impl BlockTreeCache {
     }
 
     /// Gets block by hash
-    pub fn get_block(&self, block_hash: &BlockHash) -> Option<&IrysBlockHeader> {
+    #[must_use] pub fn get_block(&self, block_hash: &BlockHash) -> Option<&IrysBlockHeader> {
         self.blocks.get(block_hash).map(|entry| &entry.block)
     }
 
     /// Gets block and its current validation status    
-    pub fn get_block_and_status(
+    #[must_use] pub fn get_block_and_status(
         &self,
         block_hash: &BlockHash,
     ) -> Option<(&IrysBlockHeader, &ChainState)> {
@@ -994,7 +991,7 @@ impl BlockTreeCache {
 
     /// Finds the earliest not validated block, walking back the chain
     /// until finding a validated block, reaching block height 0, or exceeding cache depth
-    pub fn get_earliest_not_onchain<'a>(
+    #[must_use] pub fn get_earliest_not_onchain<'a>(
         &'a self,
         block: &'a BlockEntry,
     ) -> Option<(&'a BlockEntry, Vec<&'a IrysBlockHeader>, SystemTime)> {
@@ -1027,7 +1024,7 @@ impl BlockTreeCache {
 
     /// Get the earliest unvalidated block from the longest chain
     /// Relies on the `longest_chain_cache`
-    pub fn get_earliest_not_onchain_in_longest_chain(
+    #[must_use] pub fn get_earliest_not_onchain_in_longest_chain(
         &self,
     ) -> Option<(&BlockEntry, Vec<&IrysBlockHeader>, SystemTime)> {
         // Get the block with max cumulative difficulty
@@ -1061,7 +1058,7 @@ impl BlockTreeCache {
     /// - Has matching `solution_hash`
     /// - Is not the excluded block
     /// - Either has same `cumulative_diff` as input or meets double-signing criteria
-    pub fn get_by_solution_hash(
+    #[must_use] pub fn get_by_solution_hash(
         &self,
         solution_hash: &H256,
         excluding: &BlockHash,
@@ -1162,7 +1159,7 @@ impl BlockTreeCache {
     }
 
     /// Returns true if solution hash exists in cache
-    pub fn is_known_solution_hash(&self, solution_hash: &H256) -> bool {
+    #[must_use] pub fn is_known_solution_hash(&self, solution_hash: &H256) -> bool {
         self.solutions.contains_key(solution_hash)
     }
 }

@@ -169,8 +169,7 @@ pub async fn start_irys_node(
 
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()
-        .unwrap();
+        .build()?;
     let mut task_manager = TaskManager::new(tokio_runtime.handle().clone());
     let task_exec = task_manager.executor();
     std::thread::Builder::new()
@@ -187,10 +186,10 @@ pub async fn start_irys_node(
 
                 check_db_version_and_run_migrations_if_needed(&reth_db, &irys_db).unwrap();
 
-                let (service_senders, mut service_receivers) = ServiceSenders::init();
+                let (service_senders, service_receivers) = ServiceSenders::init();
 
-                let _ = ChunkCacheServiceHandle::spawn_service(service_senders.chunk_cache.clone(), service_receivers.chunk_cache.take().unwrap(), task_exec, irys_db.clone(), config.clone());
-
+                ChunkCacheServiceHandle::spawn_service(service_senders.chunk_cache.clone(), service_receivers.chunk_cache, task_exec, irys_db.clone(), config.clone());
+                
                 let latest_block = latest_block_index
                     .map(|b| {
                         database::block_header_by_hash(&irys_db.tx().unwrap(), &b.block_hash)
@@ -602,7 +601,6 @@ pub async fn start_irys_node(
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
             let node_config = cloned_arc.clone();
-
             tokio_runtime
                 .block_on(run_to_completion_or_panic(
                     &mut task_manager,
@@ -616,7 +614,6 @@ pub async fn start_irys_node(
                         latest_block_height,
                     )),
                 ))
-                .unwrap();
         })?;
 
     // wait for the full handle to be send over by the actix thread

@@ -1,5 +1,5 @@
 use actix::{Actor, Context, Handler, Message, Supervised, SystemService};
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::db_cache::{data_size_to_chunk_count, DataRootLRUEntry};
 use irys_database::tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs};
@@ -12,13 +12,13 @@ use irys_types::{
 };
 use irys_types::{Config, DataRoot, RethDatabaseProvider, StorageConfig, U256};
 use reth::tasks::TaskExecutor;
-use reth_db::cursor::DbDupCursorRO;
-use reth_db::transaction::DbTx;
-use reth_db::transaction::DbTxMut;
-use reth_db::Database;
+use reth_db::cursor::DbDupCursorRO as _;
+use reth_db::transaction::DbTx as _;
+use reth_db::transaction::DbTxMut as _;
+use reth_db::Database as _;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Display;
+use core::fmt::Display;
 use tracing::{debug, error, info, warn};
 
 use crate::block_producer::BlockConfirmedMessage;
@@ -125,7 +125,7 @@ impl TxIngressError {
 pub struct ChunkIngressMessage(pub UnpackedChunk);
 
 impl ChunkIngressMessage {
-    pub fn into_inner(self) -> UnpackedChunk {
+    #[must_use] pub fn into_inner(self) -> UnpackedChunk {
         self.0
     }
 }
@@ -207,7 +207,7 @@ impl Handler<TxIngressMessage> for MempoolService {
             .get_canonical_chain();
 
         let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
-            "unable to get canonical chain from block tree".to_string(),
+            "unable to get canonical chain from block tree".to_owned(),
         ))?;
 
         match irys_database::block_header_by_hash(read_tx, &tx.anchor) {
@@ -235,7 +235,7 @@ impl Handler<TxIngressMessage> for MempoolService {
                                 &tx.data_root, &e
                             );
                             TxIngressError::DatabaseError
-                        })?
+                        })?;
                 }
             }
             _ => {
@@ -287,7 +287,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             || self.reth_db.is_none()
         {
             return Err(ChunkIngressError::Other(
-                "mempool_service not initialized".to_string(),
+                "mempool_service not initialized".to_owned(),
             ));
         }
 
@@ -304,7 +304,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // Next validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
         let root_hash = chunk.data_root.0;
-        let target_offset = chunk.byte_offset(self.storage_config.chunk_size) as u128;
+        let target_offset = u128::from(chunk.byte_offset(self.storage_config.chunk_size));
         let path_buff = &chunk.data_path;
 
         info!(
@@ -338,7 +338,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
 
         // Is this chunk index any of the chunks before the last in the tx?
         let num_chunks_in_tx = cached_data_root.data_size.div_ceil(chunk_size);
-        if (*chunk.tx_offset as u64) < num_chunks_in_tx - 1 {
+        if u64::from(*chunk.tx_offset) < num_chunks_in_tx - 1 {
             // Ensure prefix chunks are all exactly chunk_size
             if chunk_len != chunk_size {
                 error!(
@@ -434,24 +434,24 @@ impl Handler<ChunkIngressMessage> for MempoolService {
                 .last()
                 .ok_or(ChunkIngressError::ServiceUninitialized)?;
 
-            let db1 = self.irys_db.clone().unwrap();
-            let signer1 = self.signer.clone().unwrap();
-            let latest_height1 = *latest_height;
+            let db = self.irys_db.clone().unwrap();
+            let signer = self.signer.clone().unwrap();
+            let latest_height = *latest_height;
             self.task_exec.clone().unwrap().spawn_blocking(async move {
                 generate_ingress_proof(
-                    db1.clone(),
+                    db.clone(),
                     root_hash,
                     cached_data_root.data_size,
                     chunk_size,
-                    signer1,
+                    signer,
                 )
                 // TODO: handle results instead of unwrapping
                 .unwrap();
-                db1.update(|wtx| {
+                db.update(|wtx| {
                     wtx.put::<DataRootLRU>(
                         root_hash,
                         DataRootLRUEntry {
-                            last_height: latest_height1,
+                            last_height: latest_height,
                             ingress_proof: true,
                         },
                     )
@@ -576,12 +576,11 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
             Ok(())
         }()
         // closure so we can "catch" and log all errs, so we don't need to log and return an err everywhere
-        .map_err(|e| {
+        .inspect_err(|e| {
             error!(
                 "Unexpected Mempool error while processing BlockConfirmedMessage: {}",
-                &e
+                e
             );
-            e
         })
     }
 }
@@ -636,8 +635,7 @@ pub fn generate_ingress_proof(
             .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
             .unwrap_or_else(|| {
                 panic!(
-                    "unable to get chunk {} for data root {} from DB",
-                    chunk_path_hash, data_root
+                    "unable to get chunk {chunk_path_hash} for data root {data_root} from DB"
                 )
             });
         let chunk_bin = chunk.chunk.unwrap().0;
@@ -646,7 +644,7 @@ pub fn generate_ingress_proof(
     }
 
     // Now create the slice references
-    chunks.extend(owned_chunks.iter().map(|c| c.as_slice()));
+    chunks.extend(owned_chunks.iter().map(std::vec::Vec::as_slice));
 
     assert_eq!(chunks.len() as u32, expected_chunk_count);
     assert_eq!(data_size, size);

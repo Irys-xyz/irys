@@ -22,15 +22,18 @@ pub struct DataRootLRUEntry {
     pub ingress_proof: bool, // TODO: use bitflags
 }
 
+// """constrained""" by PD: maximum addressable partitions: u200, with a u32 chunk offset
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize, Default, Arbitrary,
 )]
 
-// """constrained""" by PD: maximum addressable partitions: u200, with a u32 chunk offset
 pub struct GlobalChunkOffset(U232);
 
+// 29 bytes, u232 -> 232 bits, 29 bytes
+pub const GLOBAL_CHUNK_OFFSET_BYTES: usize = 29;
+
 impl Encode for GlobalChunkOffset {
-    type Encoded = [u8; 29];
+    type Encoded = [u8; GLOBAL_CHUNK_OFFSET_BYTES];
 
     fn encode(self) -> Self::Encoded {
         self.0.to_le_bytes()
@@ -38,7 +41,7 @@ impl Encode for GlobalChunkOffset {
 }
 impl Decode for GlobalChunkOffset {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
-        Ok(GlobalChunkOffset(
+        Ok(Self(
             U232::try_from_le_slice(value).ok_or(DatabaseError::Decode)?,
         ))
     }
@@ -49,8 +52,8 @@ impl Compact for GlobalChunkOffset {
     where
         B: bytes::BufMut + AsMut<[u8]>,
     {
-        buf.put_slice(&self.0.to_le_bytes::<29>());
-        29
+        buf.put_slice(&self.0.to_le_bytes::<GLOBAL_CHUNK_OFFSET_BYTES>());
+        GLOBAL_CHUNK_OFFSET_BYTES
     }
 
     fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
@@ -58,6 +61,19 @@ impl Compact for GlobalChunkOffset {
         buf.advance(len);
         (o, buf)
     }
+}
+#[cfg(test)]
+#[test]
+fn global_chunk_offset_compact_roundtrip() {
+    use bytes::BytesMut;
+
+    let original_value = GlobalChunkOffset(U232::MAX);
+    let mut buf = BytesMut::with_capacity(29);
+    original_value.to_compact(&mut buf);
+    // Call from_compact to convert the bytes back to U256
+    let (decoded_value, _) = GlobalChunkOffset::from_compact(&buf[..], buf.len());
+    // Check that the decoded value matches the original value
+    assert_eq!(decoded_value, original_value);
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]

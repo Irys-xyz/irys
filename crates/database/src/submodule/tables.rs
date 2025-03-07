@@ -1,3 +1,4 @@
+use crate::metadata::MetadataKey;
 use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset, TxPath,
     TxPathHash, H256,
@@ -7,8 +8,6 @@ use reth_db::tables;
 use reth_db::{HasName, HasTableType, TableType, TableViewer};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-
-use crate::metadata::MetadataKey;
 
 // Per-submodule database tables
 tables! {

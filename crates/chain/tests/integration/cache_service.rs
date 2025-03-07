@@ -7,7 +7,8 @@ use irys_actors::SolutionFoundMessage;
 use irys_api_server::routes::tx::TxOffset;
 use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
-use irys_database::get_chunk_cache_size;
+use irys_database::get_cache_size;
+use irys_database::tables::CachedChunks;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
@@ -187,7 +188,7 @@ async fn serial_test_cache_pruning() -> eyre::Result<()> {
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
     let (chunk_cache_count, _) = &node
         .db
-        .view_eyre(|tx| get_chunk_cache_size(tx, testnet_config.chunk_size))?;
+        .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, testnet_config.chunk_size))?;
 
     assert_eq!(*chunk_cache_count, tx.chunks.len() as u64);
 
@@ -222,9 +223,10 @@ async fn serial_test_cache_pruning() -> eyre::Result<()> {
         // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
         sleep(Duration::from_millis(1500)).await;
     }
+
     let (chunk_cache_count, _) = &node
         .db
-        .view_eyre(|tx| get_chunk_cache_size(tx, testnet_config.chunk_size))?;
+        .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, testnet_config.chunk_size))?;
     assert_eq!(*chunk_cache_count, 0);
 
     // make sure we can read the chunks

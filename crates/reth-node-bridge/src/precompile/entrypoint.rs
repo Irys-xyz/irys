@@ -63,6 +63,5 @@ fn programmable_data_precompile(
             read_partial_byte_range(call_data, gas_limit, env, state_provider, parsed)
         }
     };
-    // debug!("JESSEDEBUG PD invocation result: {:?}", &res);
     res
 }

@@ -1,3 +1,10 @@
+use crate::db_cache::{DataRootLRUEntry, GlobalChunkOffset, PartitionHashes};
+use crate::metadata::MetadataKey;
+use crate::submodule::tables::RelativeStartOffsets;
+use crate::{
+    db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
+    submodule::tables::{ChunkOffsets, ChunkPathHashes},
+};
 use irys_types::{
     ingress::IngressProof, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, H256,
 };
@@ -7,14 +14,6 @@ use reth_db::{HasName, HasTableType, TableType, TableViewer};
 use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-
-use crate::db_cache::{DataRootLRUEntry, GlobalChunkOffset, PartitionHashes};
-use crate::metadata::MetadataKey;
-use crate::submodule::tables::RelativeStartOffsets;
-use crate::{
-    db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
-    submodule::tables::{ChunkOffsets, ChunkPathHashes},
-};
 
 /// Adds wrapper structs for some primitive types so they can use `StructFlags` from Compact, when
 /// used as pure table values.
