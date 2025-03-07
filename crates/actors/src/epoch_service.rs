@@ -1389,19 +1389,25 @@ mod tests {
                 "Slot 0 should have expired and have no assigned partition!"
             );
 
-            assert!(!sub_slots[1].is_expired && sub_slots[1].partitions.len() == 1 
-                && (capacity_partitions.contains(&sub_slots[1].partitions[0])  || submit_partition_hash == sub_slots[1].partitions[0]),
-                "Slot 1 should not be expired and have a capacity or the just expired partition");
+            assert!(
+                !sub_slots[1].is_expired
+                    && sub_slots[1].partitions.len() == 1
+                    && (capacity_partitions.contains(&sub_slots[1].partitions[0])
+                        || submit_partition_hash == sub_slots[1].partitions[0]),
+                "Slot 1 should not be expired and have a capacity or the just expired partition"
+            );
             assert!(
                 !sub_slots[2].is_expired
                     && sub_slots[2].partitions.len() == 1
-                    && (capacity_partitions.contains(&sub_slots[2].partitions[0]) || submit_partition_hash == sub_slots[2].partitions[0]),
+                    && (capacity_partitions.contains(&sub_slots[2].partitions[0])
+                        || submit_partition_hash == sub_slots[2].partitions[0]),
                 "Slot 2 should not be expired and have a capacity or the just expired partition"
             );
             assert!(
                 !sub_slots[3].is_expired
                     && sub_slots[3].partitions.len() == 1
-                    && (capacity_partitions.contains(&sub_slots[3].partitions[0]) || submit_partition_hash == sub_slots[3].partitions[0]),
+                    && (capacity_partitions.contains(&sub_slots[3].partitions[0])
+                        || submit_partition_hash == sub_slots[3].partitions[0]),
                 "Slot 3 should not be expired have a capacity or the just expired partition"
             );
 
