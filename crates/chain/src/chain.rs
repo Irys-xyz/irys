@@ -14,8 +14,8 @@ use irys_actors::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
     epoch_service::{
-        EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
-        GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
+        EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
+        GetPartitionAssignmentsGuardMessage,
     },
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
@@ -272,6 +272,11 @@ pub async fn start_irys_node(
                 SystemRegistry::set(block_index_actor.start());
                 let block_index_actor_addr = BlockIndexService::from_registry();
 
+                let block_index_guard = block_index_actor_addr
+                    .send(GetBlockIndexGuardMessage)
+                    .await
+                    .unwrap();
+
                 if at_genesis {
                     let msg = BlockFinalizedMessage {
                         block_header: arc_genesis.clone(),
@@ -295,8 +300,9 @@ pub async fn start_irys_node(
                     });
                 SystemRegistry::set(broadcast_mining_service.clone());
 
-                let mut epoch_service = EpochServiceActor::new(epoch_config, &config);
-                epoch_service.initialize(&irys_db).await;
+                let mut epoch_service = EpochServiceActor::new(epoch_config.clone(), &config, block_index_guard.clone());
+                // initialize the epoch service from block 1
+                let storage_module_infos = epoch_service.initialize(&irys_db, storage_module_config.clone()).await;
                 let epoch_service_actor_addr = epoch_service.start();
 
                 // Retrieve ledger assignments
@@ -312,17 +318,6 @@ pub async fn start_irys_node(
 
                 let partition_assignments_guard = epoch_service_actor_addr
                     .send(GetPartitionAssignmentsGuardMessage)
-                    .await
-                    .unwrap();
-
-                let block_index_guard = block_index_actor_addr
-                    .send(GetBlockIndexGuardMessage)
-                    .await
-                    .unwrap();
-
-                // Get the genesis storage modules and their assigned partitions
-                let storage_module_infos = epoch_service_actor_addr
-                    .send(GetGenesisStorageModulesMessage(storage_module_config))
                     .await
                     .unwrap();
 
@@ -438,6 +433,7 @@ pub async fn start_irys_node(
                     vdf_config.clone(),
                     vdf_steps_guard.clone(),
                     block_tree_guard.clone(),
+                    epoch_config.clone(),
                 );
                 let block_producer_addr =
                     BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
