@@ -22,6 +22,4 @@ serde.workspace = true
 actix.workspace = true
 actix-web.workspace = true
 actix-cors = "0.7.0"
-actix-rt.workspace = true
-tokio.workspace = true
 tracing.workspace = true

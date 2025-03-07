@@ -51,7 +51,6 @@ use reth::{
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
 use std::sync::atomic::AtomicU64;
-use std::thread::JoinHandle;
 use std::{
     fs,
     sync::{mpsc, Arc, RwLock},

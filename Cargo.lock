@@ -4020,7 +4020,6 @@ version = "0.1.0"
 dependencies = [
  "actix",
  "actix-cors",
- "actix-rt",
  "actix-web",
  "awc",
  "base58",
@@ -4034,7 +4033,6 @@ dependencies = [
  "reth-db",
  "serde",
  "serde_json",
- "tokio",
  "tracing",
 ]
 
