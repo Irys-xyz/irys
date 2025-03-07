@@ -7,7 +7,7 @@ pub struct SimpleRNG {
 
 impl SimpleRNG {
     /// Creates new PRNG with given seed
-    pub fn new(seed: u32) -> Self {
+    pub const fn new(seed: u32) -> Self {
         Self { seed }
     }
 

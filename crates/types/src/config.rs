@@ -99,7 +99,7 @@ impl Config {
 
         const DEFAULT_BLOCK_TIME: u64 = 5;
 
-        Config {
+        Self {
             block_time: DEFAULT_BLOCK_TIME,
             max_data_txs_per_block: 100,
             difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME)

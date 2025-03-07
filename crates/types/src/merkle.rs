@@ -23,14 +23,14 @@ pub struct Node {
 }
 
 /// Concatenated ids and offsets for full set of nodes for an original data chunk, starting with the root.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Proof {
     pub offset: usize,
     pub proof: Vec<u8>,
 }
 /// Populated with data from deserialized [`Proof`] for original data chunk (Leaf [`Node`]).
 #[repr(C)]
-#[derive(BorshDeserialize, Debug, PartialEq, Clone)]
+#[derive(BorshDeserialize, Debug, Eq, PartialEq, Clone)]
 pub struct LeafProof {
     data_hash: [u8; HASH_SIZE],
     notepad: [u8; NOTE_SIZE - 8],
@@ -38,7 +38,7 @@ pub struct LeafProof {
 }
 
 /// Populated with data from deserialized [`Proof`] for branch [`Node`] (hash of pair of child nodes).
-#[derive(BorshDeserialize, Debug, PartialEq, Clone)]
+#[derive(BorshDeserialize, Debug, Eq, PartialEq, Clone)]
 pub struct BranchProof {
     left_id: [u8; HASH_SIZE],
     right_id: [u8; HASH_SIZE],
@@ -53,9 +53,9 @@ pub trait ProofDeserialize<T> {
     fn hash(&self) -> Option<[u8; HASH_SIZE]>;
 }
 
-impl ProofDeserialize<LeafProof> for LeafProof {
+impl ProofDeserialize<Self> for LeafProof {
     fn try_from_proof_slice(slice: &[u8]) -> Result<Self, Error> {
-        let proof = LeafProof::try_from_slice(slice)?;
+        let proof = Self::try_from_slice(slice)?;
         Ok(proof)
     }
     fn offset(&self) -> usize {
@@ -67,9 +67,9 @@ impl ProofDeserialize<LeafProof> for LeafProof {
     }
 }
 
-impl ProofDeserialize<BranchProof> for BranchProof {
+impl ProofDeserialize<Self> for BranchProof {
     fn try_from_proof_slice(slice: &[u8]) -> Result<Self, Error> {
-        let proof = BranchProof::try_from_slice(slice)?;
+        let proof = Self::try_from_slice(slice)?;
         Ok(proof)
     }
     fn offset(&self) -> usize {
@@ -90,7 +90,7 @@ pub trait Helpers<T> {
     fn to_note_vec(&self) -> Vec<u8>;
 }
 
-impl Helpers<usize> for usize {
+impl Helpers<Self> for usize {
     fn to_note_vec(&self) -> Vec<u8> {
         let mut note = vec![0; NOTE_SIZE - 8];
         note.extend((*self as u64).to_be_bytes());
@@ -131,7 +131,7 @@ pub fn validate_path(
     let mut expected_path_hash = root_hash;
 
     // Validate branches.
-    for branch_proof in branch_proofs.iter() {
+    for branch_proof in &branch_proofs {
         // Calculate the path_hash from the proof elements.
         let path_hash = hash_all_sha256(vec![
             &branch_proof.left_id,
@@ -201,7 +201,7 @@ pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128,
     let mut left_bound: u128 = 0;
 
     // Validate branches.
-    for branch_proof in branch_proofs.iter() {
+    for branch_proof in &branch_proofs {
         // Calculate the id from the proof.
         let path_hash = hash_all_sha256(vec![
             &branch_proof.left_id,
@@ -263,7 +263,7 @@ pub fn validate_chunk(
             let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
 
             // Validate branches.
-            for branch_proof in branch_proofs.iter() {
+            for branch_proof in &branch_proofs {
                 // Calculate the id from the proof.
                 let id = hash_all_sha256(vec![
                     &branch_proof.left_id,
@@ -307,7 +307,7 @@ pub fn generate_leaves(data: &[u8], chunk_size: usize) -> Result<Vec<Node>, Erro
 pub fn generate_leaves_from_chunks(chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
-    for chunk in chunks.iter() {
+    for chunk in chunks {
         let data_hash = hash_sha256(chunk)?;
         let max_byte_range = min_byte_range + chunk.len();
         let offset = max_byte_range.to_note_vec();
@@ -330,7 +330,7 @@ pub fn generate_leaves_from_chunks(chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Err
 pub fn generate_ingress_leaves(chunks: &[&[u8]], address: Address) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
-    for chunk in chunks.iter() {
+    for chunk in chunks {
         let data_hash = hash_ingress_sha256(chunk, address)?;
         let max_byte_range = min_byte_range + chunk.len();
         let offset = max_byte_range.to_note_vec();
@@ -350,6 +350,7 @@ pub fn generate_ingress_leaves(chunks: &[&[u8]], address: Address) -> Result<Vec
     Ok(leaves)
 }
 
+#[derive(Debug)]
 pub struct DataRootLeave {
     pub data_root: H256,
     pub tx_size: usize,
@@ -361,7 +362,7 @@ pub fn generate_leaves_from_data_roots(
 ) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
-    for data_root in data_roots.iter() {
+    for data_root in data_roots {
         let data_root_hash = &data_root.data_root.0;
         let max_byte_range = min_byte_range + data_root.tx_size;
         let offset = max_byte_range.to_note_vec();

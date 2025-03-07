@@ -36,7 +36,7 @@ pub struct IrysTransactionHeader {
     /// The transaction's version
     pub version: u8,
 
-    /// block_hash of a recent (last 50) blocks or the a recent transaction id
+    /// `block_hash` of a recent (last 50) blocks or the a recent transaction id
     /// from the signer. Multiple transactions can share the same anchor.
     pub anchor: H256,
 
@@ -125,7 +125,7 @@ impl IrysTransactionHeader {
     }
 }
 
-/// Wrapper for the underlying IrysTransactionHeader fields, this wrapper
+/// Wrapper for the underlying `IrysTransactionHeader` fields, this wrapper
 /// contains the data/chunk/proof info that is necessary for clients to seed
 /// a transactions data to the network.
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
@@ -146,7 +146,7 @@ impl IrysTransaction {
 
 impl IrysTransactionHeader {
     pub fn new(config: &Config) -> Self {
-        IrysTransactionHeader {
+        Self {
             id: H256::zero(),
             anchor: H256::zero(),
             signer: Address::default(),
@@ -166,7 +166,7 @@ impl IrysTransactionHeader {
 
 pub type TxPath = Vec<u8>;
 
-/// sha256(tx_path)
+/// sha256(`tx_path`)
 pub type TxPathHash = H256;
 
 #[cfg(test)]

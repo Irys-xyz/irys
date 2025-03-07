@@ -28,7 +28,7 @@ impl Compress for IngressProof {
     }
 }
 impl Decompress for IngressProof {
-    fn decompress(value: &[u8]) -> Result<IngressProof, DatabaseError> {
+    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
         let (obj, _) = Compact::from_compact(value, value.len());
         Ok(obj)
     }
@@ -36,7 +36,7 @@ impl Decompress for IngressProof {
 
 pub fn generate_ingress_proof_tree(chunks: &[&[u8]], address: Address) -> eyre::Result<Node> {
     let chunks = generate_ingress_leaves(chunks, address)?;
-    let root = generate_data_root(chunks.clone())?;
+    let root = generate_data_root(chunks)?;
     Ok(root)
 }
 
@@ -79,7 +79,7 @@ pub fn verify_ingress_proof(proof: IngressProof, chunks: &Vec<&[u8]>) -> eyre::R
     let nodes = generate_leaves_from_chunks(chunks)?;
 
     // re-compute the data_root
-    let root = generate_data_root(nodes.clone())?;
+    let root = generate_data_root(nodes)?;
     let data_root = H256(root.id);
 
     // re-compute the prehash (combining data_root and proof)

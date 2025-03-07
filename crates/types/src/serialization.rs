@@ -62,7 +62,7 @@ impl<'a> Arbitrary<'a> for U256 {
         let mut bytes = [0u8; 32]; // 32 bytes for 256 bits
         rng.fill_bytes(&mut bytes);
 
-        Ok(U256::from_big_endian(&bytes))
+        Ok(Self::from_big_endian(&bytes))
     }
 }
 
@@ -77,7 +77,7 @@ impl Encode for U256 {
 impl Decode for U256 {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
         let res = bytemuck::try_from_bytes::<[u64; 4]>(value).map_err(|_| DatabaseError::Decode)?;
-        let res = U256(*res);
+        let res = Self(*res);
         Ok(res)
     }
 }
@@ -134,7 +134,7 @@ construct_fixed_hash! {
 // Manually implement Arbitrary for H256
 impl<'a> Arbitrary<'a> for H256 {
     fn arbitrary(_u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(H256::random())
+        Ok(Self::random())
     }
 }
 
@@ -317,12 +317,12 @@ impl Serialize for U256 {
 
 /// Implement Deserialize for U256
 impl<'de> Deserialize<'de> for U256 {
-    fn deserialize<D>(deserializer: D) -> Result<U256, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let s: String = Deserialize::deserialize(deserializer)?;
-        U256::from_dec_str(&s).map_err(serde::de::Error::custom)
+        Self::from_dec_str(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -372,11 +372,11 @@ impl DecodeHash for H256 {
     fn from(base58_string: &str) -> Result<Self, String> {
         FromBase58::from_base58(base58_string)
             .map_err(|e| format!("Failed to decode from base58 {:?}", e))
-            .map(|bytes| H256::from_slice(bytes.as_slice()))
+            .map(|bytes| Self::from_slice(bytes.as_slice()))
     }
 
     fn empty() -> Self {
-        H256::zero()
+        Self::zero()
     }
 }
 
@@ -394,7 +394,7 @@ impl Compact for H256 {
         // Disambiguate and call the correct H256::from method
         let (v, remaining_buf) = <[u8; 32]>::from_compact(buf, len);
         // Fully qualify this call to avoid calling DecodeHash::from
-        (<H256 as From<[u8; 32]>>::from(v), remaining_buf)
+        (<Self as From<[u8; 32]>>::from(v), remaining_buf)
     }
 }
 
@@ -407,7 +407,7 @@ impl Compress for H256 {
 }
 
 impl Decompress for H256 {
-    fn decompress(value: &[u8]) -> Result<H256, DatabaseError> {
+    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
         let (obj, _) = Compact::from_compact(value, value.len());
         Ok(obj)
     }
@@ -423,7 +423,7 @@ impl Decompress for H256 {
 pub struct Base64(pub Vec<u8>);
 
 impl std::fmt::Display for Base64 {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // format larger (>8 bytes) Base64 strings as <abcd>...<wxyz>
         let trunc_len = 4;
         if self.0.len() <= 2 * trunc_len {
@@ -507,7 +507,7 @@ impl<'de> Deserialize<'de> for Base64 {
         impl serde::de::Visitor<'_> for Vis {
             type Value = Base64;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("a base64 string")
             }
 
@@ -530,13 +530,13 @@ pub struct H256List(pub Vec<H256>);
 
 impl H256List {
     // Constructor for an empty H256List
-    pub fn new() -> Self {
-        H256List(Vec::new())
+    pub const fn new() -> Self {
+        Self(Vec::new())
     }
 
     // Constructor for an initialized H256List
     pub fn with_capacity(capacity: usize) -> Self {
-        H256List(Vec::with_capacity(capacity))
+        Self(Vec::with_capacity(capacity))
     }
 
     pub fn push(&mut self, value: H256) {

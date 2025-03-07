@@ -17,23 +17,23 @@ pub struct IrysSignature(Signature);
 // TODO: eventually implement ERC-2098 to save a byte
 
 impl IrysSignature {
-    pub fn new(signature: Signature) -> IrysSignature {
-        IrysSignature(signature).with_eth_parity()
+    pub fn new(signature: Signature) -> Self {
+        Self(signature).with_eth_parity()
     }
 
-    /// converts the parity to a bool, then to the Ethereum standard NonEip155 parity (27 or 28)
+    /// converts the parity to a bool, then to the Ethereum standard `NonEip155` parity (27 or 28)
     pub fn with_eth_parity(mut self) -> Self {
         self.0 = self.0.with_parity(Parity::NonEip155(self.0.v().y_parity()));
         self
     }
 
-    /// Passthrough to the inner signature.as_bytes()
+    /// Passthrough to the inner `signature`.`as_bytes`()
     pub fn as_bytes(&self) -> [u8; 65] {
         self.0.as_bytes()
     }
 
-    /// Return the inner reth_signature
-    pub fn reth_signature(&self) -> Signature {
+    /// Return the inner `reth_signature`
+    pub const fn reth_signature(&self) -> Signature {
         self.0
     }
 
@@ -46,7 +46,7 @@ impl IrysSignature {
 
 impl Default for IrysSignature {
     fn default() -> Self {
-        IrysSignature::new(Signature::new(
+        Self::new(Signature::new(
             RethU256::ZERO,
             RethU256::ZERO,
             Parity::Parity(false),
@@ -56,7 +56,7 @@ impl Default for IrysSignature {
 
 impl From<Signature> for IrysSignature {
     fn from(signature: Signature) -> Self {
-        IrysSignature::new(signature)
+        Self::new(signature)
     }
 }
 
@@ -98,7 +98,7 @@ impl Compact for IrysSignature {
         let s = U256::from_le_slice(&buf[32..64]);
         let signature = Signature::new(r, s, Parity::NonEip155(buf[64] == 1));
         buf.advance(65);
-        (IrysSignature::new(signature), buf)
+        (Self::new(signature), buf)
     }
 }
 
@@ -139,7 +139,7 @@ impl<'de> Deserialize<'de> for IrysSignature {
         let sig = Signature::try_from(bytes.as_slice()).map_err(de::Error::custom)?;
 
         // Return the IrysSignature by wrapping the Signature
-        Ok(IrysSignature::new(sig))
+        Ok(Self::new(sig))
     }
 }
 

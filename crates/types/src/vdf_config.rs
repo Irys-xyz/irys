@@ -14,8 +14,8 @@ pub struct VDFStepsConfig {
 }
 
 impl VDFStepsConfig {
-    pub fn new(config: &Config) -> Self {
-        VDFStepsConfig {
+    pub const fn new(config: &Config) -> Self {
+        Self {
             num_checkpoints_in_vdf_step: config.num_checkpoints_in_vdf_step,
             vdf_reset_frequency: config.vdf_reset_frequency,
             vdf_difficulty: config.vdf_sha_1s,

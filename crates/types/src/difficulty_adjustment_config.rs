@@ -21,8 +21,8 @@ pub struct DifficultyAdjustmentConfig {
 }
 
 impl DifficultyAdjustmentConfig {
-    pub fn new(config: &Config) -> Self {
-        DifficultyAdjustmentConfig {
+    pub const fn new(config: &Config) -> Self {
+        Self {
             target_block_time: config.block_time,
             adjustment_interval: config.difficulty_adjustment_interval,
             max_adjustment_factor: config.max_difficulty_adjustment_factor,
@@ -65,8 +65,8 @@ pub fn calculate_initial_difficulty(
     Ok(initial_difficulty)
 }
 
-/// - if `actual_time_ms` < `target_time_ms`,the difficulty increases i.e. block.difficulty > previous_block.difficulty.
-/// -  if `actual_time_ms` > `target_time_ms`,the difficulty decreases i.e. block.difficulty < previous_block.difficulty.
+/// - if `actual_time_ms` < `target_time_ms`,the difficulty increases i.e. block.difficulty > `previous_block`.difficulty.
+/// -  if `actual_time_ms` > `target_time_ms`,the difficulty decreases i.e. block.difficulty < `previous_block`.difficulty.
 /// - if the `percent_diff` < `min_threshold`, the difficulty remains unchanged.
 pub fn adjust_difficulty(current_diff: U256, actual_time_ms: u128, target_time_ms: u128) -> U256 {
     let max_u256 = U256::MAX;
@@ -90,6 +90,7 @@ pub fn adjust_difficulty(current_diff: U256, actual_time_ms: u128, target_time_m
     max_u256 - new_target
 }
 
+#[derive(Debug)]
 pub struct AdjustmentStats {
     pub actual_block_time: Duration,
     pub target_block_time: Duration,
@@ -146,7 +147,7 @@ pub fn calculate_difficulty(
 }
 
 /// Calculates the next cumulative difficulty by adding the expected hashes needed
-/// (max_diff / (max_diff - new_diff)) to the previous cumulative difficulty.
+/// (`max_diff` / (`max_diff` - `new_diff`)) to the previous cumulative difficulty.
 pub fn next_cumulative_diff(previous_cumulative_diff: U256, new_diff: U256) -> U256 {
     let max_diff = U256::MAX;
     let network_hash_rate = max_diff / (max_diff - new_diff);

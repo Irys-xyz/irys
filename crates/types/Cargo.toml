@@ -52,5 +52,5 @@ test-fuzz.workspace = true
 [build-dependencies]
 build-print = "0"
 
-# [lints]
-# workspace = true
+[lints]
+workspace = true

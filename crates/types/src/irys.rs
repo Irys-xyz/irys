@@ -21,7 +21,7 @@ pub struct IrysSigner {
 /// signing them, posting them etc.
 impl IrysSigner {
     pub fn from_config(config: &Config) -> Self {
-        IrysSigner {
+        Self {
             signer: config.mining_key.clone(),
             chain_id: config.chain_id,
             chunk_size: config
@@ -35,7 +35,7 @@ impl IrysSigner {
     pub fn random_signer(config: &Config) -> Self {
         use rand::rngs::OsRng;
 
-        IrysSigner {
+        Self {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
             chain_id: config.chain_id,
             chunk_size: config
@@ -52,7 +52,7 @@ impl IrysSigner {
 
     /// Creates a transaction from a data buffer, optional anchor hash for the
     /// transaction is supported. The txid will not be set until the transaction
-    /// is signed with [sign_transaction]
+    /// is signed with [`sign_transaction`]
     pub fn create_transaction(
         &self,
         data: Vec<u8>,
@@ -134,7 +134,7 @@ impl IrysSigner {
 
 impl From<IrysSigner> for LocalSigner<SigningKey> {
     fn from(val: IrysSigner) -> Self {
-        LocalSigner::from_signing_key(val.signer)
+        Self::from_signing_key(val.signer)
     }
 }
 
