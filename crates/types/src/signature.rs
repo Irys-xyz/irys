@@ -149,9 +149,7 @@ impl<'de> Deserialize<'de> for IrysSignature {
 mod tests {
     use super::*;
 
-    use crate::{
-        irys::IrysSigner, Config, IrysTransaction, IrysTransactionHeader, H256, MAX_CHUNK_SIZE,
-    };
+    use crate::{irys::IrysSigner, Config, IrysTransaction, IrysTransactionHeader, H256};
     use alloy_core::hex::{self};
     use alloy_primitives::Address;
     use k256::ecdsa::SigningKey;
@@ -173,7 +171,7 @@ mod tests {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
             chain_id: testnet_config.chain_id,
-            chunk_size: MAX_CHUNK_SIZE,
+            chunk_size: testnet_config.chunk_size as usize,
         };
 
         let original_header = IrysTransactionHeader {
