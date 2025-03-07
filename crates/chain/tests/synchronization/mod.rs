@@ -149,7 +149,7 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
 
     let restarted_node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
 
-    let (latest_block_right_after_restart, earlies_block) = {
+    let (latest_block_right_after_restart, earliest_block) = {
         let context = RethNodeContext::new(restarted_node.reth_handle.clone().into()).await?;
 
         let latest = context
@@ -165,7 +165,6 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
             .eth_api()
             .block_by_number(BlockNumberOrTag::Earliest, false)
             .await?;
-
 
         (latest.unwrap(), earliest.unwrap())
     };
@@ -188,19 +187,37 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
     tokio::time::sleep(Duration::from_secs(2)).await;
     restarted_node.stop().await;
 
-    debug!("Earliest hash: {:?}", earlies_block.header.hash);
-    debug!("Latest parent hash: {:?}", latest_block_right_after_restart.header.parent_hash);
-    debug!("Latest hash before restart: {:?}", latest_block_before_restart.header.hash);
-    debug!("Latest hash after restart: {:?}", latest_block_right_after_restart.header.hash);
+    debug!("Earliest hash: {:?}", earliest_block.header.hash);
+    debug!(
+        "Latest parent hash: {:?}",
+        latest_block_right_after_restart.header.parent_hash
+    );
+    debug!(
+        "Latest hash before restart: {:?}",
+        latest_block_before_restart.header.hash
+    );
+    debug!(
+        "Latest hash after restart: {:?}",
+        latest_block_right_after_restart.header.hash
+    );
     debug!("Next block parent: {:?}", next_block.header.parent_hash);
     debug!("Next block hash: {:?}", next_block.header.hash);
 
     // Check that we aren't on genesis
-    assert_eq!(earlies_block.header.hash, latest_block_before_restart.header.parent_hash);
+    assert_eq!(
+        earliest_block.header.hash,
+        latest_block_before_restart.header.parent_hash
+    );
     // Check that the header hash is the same
-    assert_eq!(latest_block_before_restart.header.hash, latest_block_right_after_restart.header.hash);
+    assert_eq!(
+        latest_block_before_restart.header.hash,
+        latest_block_right_after_restart.header.hash
+    );
     // Check that the chain advanced correctly
-    assert_eq!(next_block.header.parent_hash, latest_block_right_after_restart.header.hash);
+    assert_eq!(
+        next_block.header.parent_hash,
+        latest_block_right_after_restart.header.hash
+    );
 
     Ok(())
 }
