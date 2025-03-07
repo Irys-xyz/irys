@@ -1,41 +1,23 @@
 use actix_http::StatusCode;
 use alloy_eips::BlockNumberOrTag;
-use alloy_network::EthereumWallet;
-use alloy_provider::ProviderBuilder;
-use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_macro::sol;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, Address};
+use irys_types::irys::IrysSigner;
 use irys_types::{Config, IrysTransactionHeader};
 
 use crate::utils::{future_or_mine_on_timeout, mine_blocks};
-use k256::ecdsa::SigningKey;
 use reth::rpc::eth::EthApiServer;
-use reth_primitives::irys_primitives::precompile::IrysPrecompileOffsets;
 use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-// Codegen from artifact.
-// taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
-sol!(
-    #[allow(missing_docs)]
-    #[sol(rpc)]
-    IrysProgrammableDataBasic,
-    "../../fixtures/contracts/out/IrysProgrammableDataBasic.sol/ProgrammableDataBasic.json"
-);
-
-const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
-const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
-
 #[actix_web::test]
-async fn should_resume_from_the_same_block() -> eyre::Result<()> {
+async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
     let temp_dir = setup_tracing_and_temp_dir(Some("node_resume_test"), false);
@@ -63,13 +45,6 @@ async fn should_resume_from_the_same_block() -> eyre::Result<()> {
                 ..Default::default()
             },
         ),
-        (
-            Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice()),
-            GenesisAccount {
-                balance: alloy_core::primitives::U256::from(4200000000000000000_u128),
-                ..Default::default()
-            },
-        ),
     ]);
     let storage_config = irys_types::StorageConfig::new(&testnet_config);
 
@@ -84,43 +59,6 @@ async fn should_resume_from_the_same_block() -> eyre::Result<()> {
         Some(Duration::from_secs(10)),
     )
     .await?;
-
-    // let signer: PrivateKeySigner = config.mining_signer.signer.into();
-    // let wallet = EthereumWallet::from(signer.clone());
-
-    // use a constant signer so we get constant deploy addresses (for the same bytecode!)
-    let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
-    let signer: PrivateKeySigner = SigningKey::from_slice(dev_wallet.as_slice())?.into();
-    let wallet = EthereumWallet::from(signer);
-
-    let alloy_provider = ProviderBuilder::new()
-        .with_recommended_fillers()
-        .wallet(wallet)
-        .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
-
-    let deploy_builder =
-        IrysProgrammableDataBasic::deploy_builder(alloy_provider.clone()).gas(29506173);
-
-    let mut deploy_fut = Box::pin(deploy_builder.deploy());
-
-    let contract_address = future_or_mine_on_timeout(
-        node.clone(),
-        &mut deploy_fut,
-        Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
-    )
-    .await??;
-
-    let contract = IrysProgrammableDataBasic::new(contract_address, alloy_provider.clone());
-
-    let precompile_address: Address = IrysPrecompileOffsets::ProgrammableData.into();
-    info!(
-        "Contract address is {:?}, precompile address is {:?}",
-        contract.address(),
-        precompile_address
-    );
 
     let http_url = "http://127.0.0.1:8080";
 
