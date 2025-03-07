@@ -17,7 +17,7 @@ pub struct PartitionHashes(pub Vec<PartitionHash>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
 pub struct DataRootLRUEntry {
-    /// The last block height this data_root was used
+    /// The last block height this `data_root` was used
     pub last_height: u64,
     pub ingress_proof: bool, // TODO: use bitflags
 }
@@ -57,7 +57,7 @@ impl Compact for GlobalChunkOffset {
     }
 
     fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let o = GlobalChunkOffset(U232::from_le_slice(buf));
+        let o = Self(U232::from_le_slice(buf));
         buf.advance(len);
         (o, buf)
     }
