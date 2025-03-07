@@ -378,6 +378,16 @@ impl Amount<(IrysPrice, Usd)> {
 
         Ok(Amount::new(ema_value))
     }
+
+    pub fn to_ema(self) -> Amount<(Ema, Usd)> {
+        Amount::new(self.amount)
+    }
+}
+
+impl Amount<(Ema, Usd)> {
+    pub fn to_irys_price(self) -> Amount<(IrysPrice, Usd)> {
+        Amount::new(self.amount)
+    }
 }
 
 /// Basic Display impl
