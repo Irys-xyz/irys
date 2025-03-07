@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
     time::Duration,
 };
-use tracing::error;
+use tracing::{error, info};
 
 //==============================================================================
 // BlockIndexReadGuard
@@ -192,7 +192,7 @@ impl BlockIndexService {
 
         if self.num_blocks % 10 == 0 {
             let mut prev_entry: Option<&BlockLogEntry> = None;
-            //println!("block_height, block_time(ms), difficulty");
+            info!("block_height, block_time(ms), difficulty");
             for entry in &self.block_log {
                 let duration = if let Some(pe) = prev_entry {
                     if entry.timestamp >= pe.timestamp {
@@ -203,7 +203,7 @@ impl BlockIndexService {
                 } else {
                     Duration::from_millis(0)
                 };
-                //println!("{}, {:?}, {}", entry.height, duration, entry.difficulty);
+                info!("{}, {:?}, {}", entry.height, duration, entry.difficulty);
                 prev_entry = Some(entry);
             }
         }
