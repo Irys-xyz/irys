@@ -1,3 +1,4 @@
+use crate::metadata::MetadataKey;
 use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset, TxPath,
     TxPathHash, H256,
@@ -28,6 +29,9 @@ tables! {
 
     /// Maps a data root to the list of submodule-relative start offsets
     table StartOffsetsByDataRoot<Key = DataRoot, Value = RelativeStartOffsets>;
+
+    /// Table to store various metadata, such as the current db schema version
+    table Metadata<Key = MetadataKey, Value = Vec<u8>>;
 
 }
 

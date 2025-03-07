@@ -1106,7 +1106,7 @@ mod tests {
             part_actors.push(partition_address);
         }
 
-        let submit_partition_hash = {
+        let assign_submit_partition_hash = {
             let partition_assignments_read = epoch_service_actor
                 .send(GetPartitionAssignmentsGuardMessage)
                 .await
@@ -1123,7 +1123,7 @@ mod tests {
             partition_hash
         };
 
-        {
+        let (publish_partition_hash, submit_partition_hash) = {
             let ledgers = epoch_service_actor
                 .send(GetLedgersGuardMessage)
                 .await
@@ -1133,7 +1133,11 @@ mod tests {
             let sub_slots = ledgers.read().get_slots(Ledger::Submit).clone();
             assert_eq!(pub_slots.len(), 1);
             assert_eq!(sub_slots.len(), 1);
-        }
+
+            (pub_slots[0].partitions[0], sub_slots[0].partitions[0])
+        };
+
+        assert_eq!(assign_submit_partition_hash, submit_partition_hash);
 
         let capacity_partitions = {
             let partition_assignments_read = epoch_service_actor
@@ -1147,6 +1151,16 @@ mod tests {
                 .keys()
                 .map(|partition| partition.clone())
                 .collect();
+
+            assert!(
+                !capacity_partitions.contains(&publish_partition_hash),
+                "Publish partition should not be in capacity partitions"
+            );
+
+            assert!(
+                !capacity_partitions.contains(&submit_partition_hash),
+                "Submit partition should not be in capacity partitions"
+            );
 
             capacity_partitions
         };
@@ -1193,9 +1207,16 @@ mod tests {
                 sub_slots[0].is_expired && sub_slots[0].partitions.len() == 0,
                 "Slot 0 should have expired and have no assigned partition!"
             );
-            assert!(!sub_slots[1].is_expired && sub_slots[1].partitions.len() == 1 && capacity_partitions.contains(&sub_slots[1].partitions[0]),"Slot 1 should not be expired and have a new fresh partition from previous capacity ones!");
-            assert!(!sub_slots[2].is_expired && sub_slots[2].partitions.len() == 1 && capacity_partitions.contains(&sub_slots[2].partitions[0]),"Slot 2 should not be expired and have a new fresh partition from previous capacity ones!");
-            //println!("Ledger State: {:#?}", ledgers);
+            assert!(!sub_slots[1].is_expired
+                    && sub_slots[1].partitions.len() == 1
+                    && (capacity_partitions.contains(&sub_slots[1].partitions[0])
+                        || sub_slots[1].partitions[0] == submit_partition_hash),
+                    "Slot 1 should not be expired and have a new fresh partition from previous capacity ones or the expired one!");
+            assert!(!sub_slots[2].is_expired
+                    && sub_slots[2].partitions.len() == 1
+                    && (capacity_partitions.contains(&sub_slots[2].partitions[0])
+                        || sub_slots[2].partitions[0] == submit_partition_hash),
+                    "Slot 2 should not be expired and have a new fresh partition from previous capacity ones or the expired one!");
 
             let publish_partition = pub_slots[0]
                 .partitions
