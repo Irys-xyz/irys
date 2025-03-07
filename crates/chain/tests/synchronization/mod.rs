@@ -140,6 +140,10 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
         latest
     };
 
+    // mine_blocks(&node, 1).await?;
+    // // Waiting a little for the block
+    // tokio::time::sleep(Duration::from_secs(1)).await;
+
     node.stop().await;
 
     let latest_block = latest.unwrap();
