@@ -12,6 +12,7 @@ pub mod database;
 /// it is not suitable for mining.
 pub mod db_cache;
 
+pub mod db;
 /// Data in the indexes is confirmed data
 pub mod db_index;
 pub mod metadata;

@@ -5,4 +5,5 @@ mod external;
 pub mod integration;
 pub mod programmable_data;
 pub mod promotion;
+pub mod synchronization;
 pub mod utils;

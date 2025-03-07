@@ -1,3 +1,4 @@
+use crate::db::RethDbWrapper;
 use crate::reth_db::{
     table::TableImporter,
     transaction::{DbTx, DbTxMut},
@@ -67,11 +68,11 @@ mod v0_to_v1 {
 
 /// This function migrates data from an old DB instance to a new DB instance.
 pub fn check_db_version_and_run_migrations_if_needed(
-    old_db: &DatabaseEnv,
+    old_db: &RethDbWrapper,
     new_db: &DatabaseEnv,
 ) -> eyre::Result<()> {
     debug!("Checking if database migration is needed.");
-    let version = new_db.view(|tx| crate::database_schema_version(tx))??;
+    let version = new_db.view(crate::database_schema_version)??;
     debug!("Database version: {:?}", version);
     debug!("Current database version: {:?}", CURRENT_DB_VERSION);
     if let Some(v) = version {
@@ -100,6 +101,7 @@ pub fn check_db_version_and_run_migrations_if_needed(
 
 #[cfg(test)]
 mod tests {
+    use crate::db::RethDbWrapper;
     use crate::migration::check_db_version_and_run_migrations_if_needed;
     use crate::open_or_create_db;
     use crate::{
@@ -114,7 +116,7 @@ mod tests {
     #[test]
     fn should_migrate_from_v0_to_v1() -> Result<(), Box<dyn std::error::Error>> {
         let old_db_path = temporary_directory(None, false);
-        let old_db = open_or_create_db(old_db_path, IrysTables::ALL, None)?;
+        let old_db = RethDbWrapper::new(open_or_create_db(old_db_path, IrysTables::ALL, None)?);
 
         let new_db_path = temporary_directory(None, false);
         let new_db = open_or_create_db(new_db_path, IrysTables::ALL, None)?;

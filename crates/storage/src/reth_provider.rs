@@ -1,13 +1,24 @@
-use std::sync::{Arc, OnceLock};
-
-use reth_db::DatabaseEnv;
+use std::{
+    fmt::Debug,
+    sync::{Arc, RwLock},
+};
 
 use crate::ChunkProvider;
 
 #[derive(Debug, Clone)]
 pub struct IrysRethProviderInner {
-    pub db: Arc<DatabaseEnv>,
     pub chunk_provider: Arc<ChunkProvider>,
 }
 
-pub type IrysRethProvider = Arc<OnceLock<IrysRethProviderInner>>;
+pub type IrysRethProvider = Arc<RwLock<Option<IrysRethProviderInner>>>;
+
+pub fn create_provider() -> IrysRethProvider {
+    Arc::new(RwLock::new(None))
+}
+
+pub fn cleanup_provider(provider: &IrysRethProvider) {
+    if let Ok(mut inner) = provider.write() {
+        // Replace the inner value with None to drop references
+        *inner = None;
+    }
+}

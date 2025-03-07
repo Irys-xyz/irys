@@ -133,6 +133,19 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
     }
 }
 
+/// Stop the actor
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct Stop;
+
+impl Handler<Stop> for ChunkMigrationService {
+    type Result = ();
+
+    fn handle(&mut self, _msg: Stop, ctx: &mut Self::Context) {
+        ctx.stop();
+    }
+}
+
 fn process_ledger_transactions(
     block: &Arc<IrysBlockHeader>,
     ledger: Ledger,

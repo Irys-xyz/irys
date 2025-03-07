@@ -1,9 +1,14 @@
+use crate::block_producer::BlockConfirmedMessage;
+use crate::block_tree_service::BlockTreeReadGuard;
 use actix::{Actor, Context, Handler, Message, Supervised, SystemService};
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
-use irys_database::db_cache::{data_size_to_chunk_count, DataRootLRUEntry};
-use irys_database::tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs};
+use irys_database::db::RethDbWrapper;
+use irys_database::db_cache::data_size_to_chunk_count;
+use irys_database::db_cache::DataRootLRUEntry;
+use irys_database::tables::DataRootLRU;
+use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_database::{insert_tx_header, tx_header_by_txid, Ledger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
@@ -11,7 +16,7 @@ use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
     IrysTransactionHeader, H256,
 };
-use irys_types::{Config, DataRoot, RethDatabaseProvider, StorageConfig, U256};
+use irys_types::{Config, DataRoot, StorageConfig, U256};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::transaction::DbTx as _;
@@ -20,14 +25,11 @@ use reth_db::Database as _;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, error, info, warn};
-
-use crate::block_producer::BlockConfirmedMessage;
-use crate::block_tree_service::BlockTreeReadGuard;
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug, Default)]
 pub struct MempoolService {
     irys_db: Option<DatabaseProvider>,
-    reth_db: Option<RethDatabaseProvider>,
+    reth_db: Option<RethDbWrapper>,
     /// Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
     /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
@@ -57,7 +59,7 @@ impl MempoolService {
     /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
     pub fn new(
         irys_db: DatabaseProvider,
-        reth_db: RethDatabaseProvider,
+        reth_db: RethDbWrapper,
         task_exec: TaskExecutor,
         signer: IrysSigner,
         storage_config: StorageConfig,
