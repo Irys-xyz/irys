@@ -142,7 +142,6 @@ mod tests {
     use crate::StorageModuleInfo;
 
     use super::*;
-    use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
