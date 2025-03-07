@@ -1093,7 +1093,7 @@ mod tests {
             part_actors.push(partition_address);
         }
 
-        let submit_partition_hash = {
+        let assign_submit_partition_hash = {
             let partition_assignments_read = epoch_service_actor
                 .send(GetPartitionAssignmentsGuardMessage)
                 .await
@@ -1124,7 +1124,7 @@ mod tests {
             (pub_slots[0].partitions[0], sub_slots[0].partitions[0])
         };
 
-        assert_eq!(submit_partition_hash, submit_partition_hash);
+        assert_eq!(assign_submit_partition_hash, submit_partition_hash);
 
         let capacity_partitions = {
             let partition_assignments_read = epoch_service_actor
