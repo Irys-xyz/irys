@@ -1,3 +1,4 @@
+use atomic_write_file::AtomicWriteFile;
 use base58::ToBase58;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, Context, OptionExt, Result};
@@ -151,8 +152,16 @@ pub struct StorageSubmodule {
     pub path: PathBuf,
     /// Persistent storage handle
     file: Arc<Mutex<File>>,
-    /// Intervals file handle
-    intervals_file: Arc<Mutex<File>>,
+    /// Mutex containing the inteval file path
+    /// we create an [`AtomicWriteFile`] for each interval file update, to ensure we are never left with interrupted writes
+    intervals_file: Arc<Mutex<PathBuf>>,
+}
+
+pub fn get_atomic_file<P: AsRef<Path> + std::fmt::Debug>(path: P) -> eyre::Result<AtomicWriteFile> {
+    Ok(AtomicWriteFile::options()
+        .read(true)
+        .open(&path)
+        .wrap_err_with(|| format!("Failed to create or open atomic file for {:?}", &path))?)
 }
 
 /// Defines how chunk data is processed and stored
@@ -266,17 +275,8 @@ impl StorageModule {
             }
 
             let intervals_file_path = sub_base_path.join("intervals.json");
-            let submodules_intervals_file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(&intervals_file_path)
-                .wrap_err_with(|| {
-                    format!(
-                        "Failed to create or open intervals file at {}",
-                        path.display()
-                    )
-                })?;
+
+            let submodules_intervals_file = PathBuf::from(&intervals_file_path);
 
             // Ensure the intervals.json has a default range
             ensure_default_intervals(&submodule_interval, &submodules_intervals_file)
@@ -471,11 +471,11 @@ impl StorageModule {
                         .expect("to insert a default range to the submodule intervals");
                 }
 
-                let mut file = submodule.intervals_file.lock().unwrap();
-                // let intervals = self.intervals.read().unwrap();
-                file.set_len(0)?;
-                file.seek(SeekFrom::Start(0))?;
+                let path = submodule.intervals_file.lock().unwrap();
+                let mut file = get_atomic_file(path.clone())?;
+                // this `file` is actually a temporary file that will get renamed over the original, once we commit
                 file.write_all(serde_json::to_string(&submodule_intervals)?.as_bytes())?;
+                file.commit()?;
             }
         }
         Ok(())
@@ -961,17 +961,18 @@ impl StorageModule {
 
 fn ensure_default_intervals(
     submodule_interval: &Interval<PartitionChunkOffset>,
-    mut file: &File,
+    intervals_path: &PathBuf,
 ) -> eyre::Result<()> {
     let mut intervals = StorageIntervals::new();
     intervals
         .insert_merge_touching_if_values_equal(*submodule_interval, ChunkType::Uninitialized)
         .expect("to insert a default interval to the submodule intervals");
 
+    let mut file = get_atomic_file(&intervals_path)?;
     let file_size = file.metadata()?.len();
     if file_size == 0 {
-        file.seek(SeekFrom::Start(0))?;
         file.write_all(serde_json::to_string(&intervals)?.as_bytes())?;
+        file.commit()?;
     }
     Ok(())
 }
@@ -980,7 +981,18 @@ fn ensure_default_intervals(
 ///
 /// Loads the stored interval mapping that tracks chunk states.
 /// Expects a JSON-formatted file containing StorageIntervals.
-pub fn read_intervals_file(mut file: &File) -> eyre::Result<StorageIntervals> {
+pub fn read_intervals_file(path: &PathBuf) -> eyre::Result<StorageIntervals> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .create(true)
+        .open(&path)
+        .wrap_err_with(|| {
+            format!(
+                "Failed to create or open intervals file at {}",
+                path.display()
+            )
+        })?;
+
     let size = file.metadata().unwrap().len() as usize;
 
     if size == 0 {
