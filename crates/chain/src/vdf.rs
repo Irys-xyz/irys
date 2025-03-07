@@ -87,8 +87,8 @@ pub fn run_vdf(
         }
     }
     debug!(
-        "VDF thread stopped at global_step_number {}",
-        global_step_number
+        ?global_step_number,
+        "VDF thread stopped"
     );
 }
 
