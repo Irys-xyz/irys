@@ -114,7 +114,7 @@ impl Config {
             num_checkpoints_in_vdf_step: 25,
             vdf_sha_1s: 7_000,
             entropy_packing_iterations: 1000,
-            chain_id: 1275,
+            chain_id: 1270,
             capacity_scalar: 100,
             num_blocks_in_epoch: 100,
             submit_ledger_epoch_length: 5,
@@ -244,7 +244,7 @@ mod tests {
             num_checkpoints_in_vdf_step = 25
             vdf_sha_1s = 7000
             entropy_packing_iterations = 22500000
-            chain_id = 1275
+            chain_id = 1270
             capacity_scalar = 100
             num_blocks_in_epoch = 100
             submit_ledger_epoch_length = 5
