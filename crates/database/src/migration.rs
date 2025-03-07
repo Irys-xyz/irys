@@ -108,11 +108,12 @@ mod tests {
     use irys_types::H256;
     use reth_db_api::transaction::{DbTx, DbTxMut};
     use reth_db_api::Database;
+    use crate::db::RethDbWrapper;
 
     #[test]
     fn should_migrate_from_v0_to_v1() -> Result<(), Box<dyn std::error::Error>> {
         let old_db_path = temporary_directory(None, false);
-        let old_db = open_or_create_db(old_db_path, IrysTables::ALL, None)?;
+        let old_db = RethDbWrapper::new(open_or_create_db(old_db_path, IrysTables::ALL, None)?);
 
         let new_db_path = temporary_directory(None, false);
         let new_db = open_or_create_db(new_db_path, IrysTables::ALL, None)?;
