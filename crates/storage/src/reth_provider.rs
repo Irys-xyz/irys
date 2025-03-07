@@ -3,8 +3,6 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use reth_db::DatabaseEnv;
-
 use crate::ChunkProvider;
 
 #[derive(Debug, Clone)]

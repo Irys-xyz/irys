@@ -1,8 +1,7 @@
 use eyre::OptionExt;
 use irys_database::Ledger;
 use irys_types::{
-    ChunkFormat, DataRoot, DatabaseProvider, LedgerChunkOffset, PackedChunk, StorageConfig,
-    TxChunkOffset,
+    ChunkFormat, DataRoot, LedgerChunkOffset, PackedChunk, StorageConfig, TxChunkOffset,
 };
 use std::sync::Arc;
 
@@ -174,7 +173,6 @@ mod tests {
         let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
         let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
-        let arc_db = DatabaseProvider(Arc::new(db));
 
         // Override the default StorageModule config for testing
         let config = StorageConfig::new(&testnet_config);
