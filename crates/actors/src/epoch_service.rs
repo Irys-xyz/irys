@@ -1110,6 +1110,8 @@ mod tests {
             partition_hash
         };
 
+
+
         let (publish_partition_hash, submit_partition_hash) = {
             let ledgers = epoch_service_actor
                 .send(GetLedgersGuardMessage)
@@ -1123,6 +1125,8 @@ mod tests {
 
             (pub_slots[0].partitions[0], sub_slots[0].partitions[0])
         };
+
+        assert_eq!(submit_partition_hash, submit_partition_hash);
 
         let capacity_partitions = {
             let partition_assignments_read = epoch_service_actor
