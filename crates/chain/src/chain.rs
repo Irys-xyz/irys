@@ -93,7 +93,7 @@ pub struct IrysNodeCtx {
     // Thread handles spawned by the start function
     pub main_actor_thread_handle: Option<CloneableJoinHandle<()>>,
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
-    pub arbiters: Vec<ArbiterHandle>,
+    // pub arbiters: Vec<ArbiterHandle>,
 }
 
 impl IrysNodeCtx {
@@ -112,9 +112,9 @@ impl IrysNodeCtx {
         debug!("Sending shutdown signal to consensus engine");
         self.consensus_engine_shutdown_sender.try_send(()).unwrap();
 
-        for arbiter in self.arbiters.into_iter() {
-            arbiter.stop_and_join();
-        }
+        // for arbiter in self.arbiters.into_iter() {
+        //     arbiter.stop_and_join();
+        // }
 
         let chain_spec_arc = self.reth_handle.chain_spec();
         let chain_spec = (*chain_spec_arc).clone();
@@ -638,7 +638,7 @@ pub async fn start_irys_node(
                     consensus_engine_shutdown_sender,
                     main_actor_thread_handle: None,
                     reth_thread_handle: None,
-                    arbiters,
+                    // arbiters,
                 });
 
                 run_server(ApiState {
@@ -654,6 +654,11 @@ pub async fn start_irys_node(
 
                 // Send shutdown signal
                 shutdown_tx.send(()).unwrap();
+
+                debug!("Stopping actors");
+                for arbiter in arbiters {
+                    arbiter.stop_and_join();
+                }
 
                 debug!("Waiting for VDF thread to finish");
                 // Wait for vdf thread to finish & save steps
