@@ -611,7 +611,7 @@ impl BlockTreeCache {
         Ok(all_txs)
     }
 
-    fn add_common(
+    pub fn add_common(
         &mut self,
         hash: BlockHash,
         block: &IrysBlockHeader,
@@ -673,6 +673,7 @@ impl BlockTreeCache {
             self.blocks.get(&hash).map(|b| b.chain_state.clone()),
             Some(ChainState::Onchain)
         ) {
+            debug!(?hash, "already part of the main chian state");
             return Ok(());
         }
         self.add_common(
@@ -799,11 +800,15 @@ impl BlockTreeCache {
     }
 
     fn update_longest_chain_cache(&mut self) {
-        let mut pairs = Vec::new();
+        let pairs = {
+            self.longest_chain_cache.0.clear();
+            &mut self.longest_chain_cache.0
+        };
         let mut not_onchain_count = 0;
 
         let mut current = self.max_cumulative_difficulty.1;
         let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
+        tracing::debug!(latest_cache_tip =? current, "updating canonical chain cache");
 
         while let Some(entry) = self.blocks.get(&current) {
             match &entry.chain_state {
@@ -851,7 +856,7 @@ impl BlockTreeCache {
         }
 
         pairs.reverse();
-        self.longest_chain_cache = (pairs, not_onchain_count);
+        self.longest_chain_cache.1 = not_onchain_count;
     }
 
     /// Helper to mark off-chain blocks in a set
@@ -929,13 +934,13 @@ impl BlockTreeCache {
             block.height
         );
 
-        RethServiceActor::from_registry()
-            .try_send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Irys(*block_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            })
-            .map_err(|e| eyre::eyre!("Error sending FCU to reth service - {}", &e))?;
+        // RethServiceActor::from_registry()
+        //     .try_send(ForkChoiceUpdateMessage {
+        //         head_hash: BlockHashType::Irys(*block_hash),
+        //         confirmed_hash: None,
+        //         finalized_hash: None,
+        //     })
+        //     .map_err(|e| eyre::eyre!("Error sending FCU to reth service - {}", &e))?;
 
         Ok(old_tip != *block_hash)
     }

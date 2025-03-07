@@ -1,5 +1,7 @@
+use std::pin::pin;
+
 use actix::Addr;
-use futures::join;
+use futures::{join, FutureExt};
 use futures_concurrency::prelude::*;
 use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height, Config, IrysBlockHeader,
@@ -82,11 +84,35 @@ pub struct Inner {
     pub genesis_token_price: IrysTokenPrice,
 }
 
+impl EmaService {
+    async fn start(mut self) {
+        let mut context = PriceCacheContext::from_canonical_chain(
+            self.inner.block_tree_read_guard.clone(),
+            self.inner.blocks_in_interval,
+        )
+        .await;
+
+        let msg_processor = async {
+            while let Some(msg) = self.msg_rx.recv().await {
+                self.inner.handle_message(msg, &mut context).await;
+            }
+        };
+
+        let shutdown_handler = async {
+            let _ = self.shutdown.await;
+        };
+        msg_processor.race(shutdown_handler).await;
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.inner.handle_message(msg, &mut context).await;
+        }
+    }
+}
+
 impl Inner {
     async fn handle_message(&mut self, msg: EmaServiceMessage, context: &mut PriceCacheContext) {
         match msg {
             EmaServiceMessage::GetCurrentEma { response } => {
-                let _ = response.send(context.block_two_adj_intervals_ago.irys_price);
+                let _ = response.send(context.ema_price_to_use());
             }
             EmaServiceMessage::GetEmaForNextAdjustmentPeriod {
                 response,
@@ -129,31 +155,6 @@ impl Inner {
         }
     }
 }
-
-impl EmaService {
-    async fn start(mut self) {
-        let mut context = PriceCacheContext::from_canonical_chain(
-            self.inner.block_tree_read_guard.clone(),
-            self.inner.blocks_in_interval,
-        )
-        .await;
-
-        let msg_processor = async {
-            while let Some(msg) = self.msg_rx.recv().await {
-                self.inner.handle_message(msg, &mut context).await;
-            }
-        };
-
-        let shutdown_handler = async {
-            let _ = self.shutdown.await;
-        };
-        msg_processor.race(shutdown_handler).await;
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg, &mut context).await;
-        }
-    }
-}
-
 mod price_cache_context {
     use super::*;
 
@@ -174,15 +175,13 @@ mod price_cache_context {
             // Rebuild the entire data cache just like we do at startup.
             let canonical_chain = get_canonical_chain(block_tree_read_guard.clone()).await.0;
             let (_latest_block_hash, latest_block_height, ..) = canonical_chain.last().unwrap();
-            dbg!(&canonical_chain);
-            dbg!(&latest_block_height);
 
             // Derive indexes
-            // if the latest block is an EMA recalculation block
             let previous_epoch_block_height = if is_ema_recalculation_block(
                 *latest_block_height,
                 blocks_in_price_adjustment_interval,
             ) {
+                dbg!("is recalc");
                 *latest_block_height
             } else {
                 previous_ema_recalculation_block_height(
@@ -190,6 +189,7 @@ mod price_cache_context {
                     blocks_in_price_adjustment_interval,
                 )
             };
+            dbg!(&latest_block_height);
             dbg!(&previous_epoch_block_height);
             let block_previous_interval_predecessor = previous_epoch_block_height.saturating_sub(1);
             let two_epochs_ago_block = previous_ema_recalculation_block_height(
@@ -198,19 +198,21 @@ mod price_cache_context {
             );
 
             // fetch the blocks
-            let fetch_block_from_idx = async |idx: u64| {
-                // todo recalculate the idx based on the latest entry in the `canonical_chain` and the length of the canonical chain
-                let (hash, height, ..) = canonical_chain.get(idx as usize).unwrap();
+            let fetch_block_with_height = async |height: u64| {
+                let canonical_len = canonical_chain.len();
+                let diff_from_latest_height = latest_block_height.saturating_sub(height) as usize;
+                let adjusted_index = canonical_len - diff_from_latest_height - 1;
+                let (hash, new_height, ..) = canonical_chain.get(adjusted_index).unwrap();
                 assert_eq!(
-                    previous_epoch_block_height, *height,
+                    height, *new_height,
                     "height mismatch in the canonical chain data"
                 );
                 get_block(block_tree_read_guard.clone(), *hash).await
             };
-            let block_previous_interval = fetch_block_from_idx(previous_epoch_block_height);
+            let block_previous_interval = fetch_block_with_height(previous_epoch_block_height);
             let block_previous_interval_predecessor =
-                fetch_block_from_idx(block_previous_interval_predecessor);
-            let block_two_price_intervals_ago = fetch_block_from_idx(two_epochs_ago_block);
+                fetch_block_with_height(block_previous_interval_predecessor);
+            let block_two_price_intervals_ago = fetch_block_with_height(two_epochs_ago_block);
 
             // await concurrently
             let (
@@ -227,19 +229,18 @@ mod price_cache_context {
                 block_previous_interval_predecessor,
                 block_two_adj_intervals_ago: block_two_price_intervals_ago,
                 next_ema_adjustment_height: {
-                    // for the first interval we skip EMA recalculation
-                    // we subtract 1 because the block heights are 0 indexed
-                    let ema_interval_beginning = blocks_in_price_adjustment_interval
-                        .saturating_mul(2)
-                        .saturating_sub(1);
-                    if latest_block_height < &ema_interval_beginning {
-                        ema_interval_beginning
+                    if previous_epoch_block_height == 0 {
+                        blocks_in_price_adjustment_interval - 1
                     } else {
                         previous_epoch_block_height
                             .saturating_add(blocks_in_price_adjustment_interval)
                     }
                 },
             }
+        }
+
+        pub fn ema_price_to_use(&self) -> IrysTokenPrice {
+            self.block_two_adj_intervals_ago.irys_price
         }
     }
 
@@ -290,10 +291,10 @@ mod price_cache_context {
                 PriceCacheContext::from_canonical_chain(block_tree_guard, interval).await;
 
             // assert
-            assert_eq!(price_cache.next_ema_adjustment_height, 19);
             assert_eq!(price_cache.block_previous_interval.height, 0);
             assert_eq!(price_cache.block_previous_interval_predecessor.height, 0);
             assert_eq!(price_cache.block_two_adj_intervals_ago.height, 0);
+            assert_eq!(price_cache.next_ema_adjustment_height, 9);
         }
 
         #[test_log::test(tokio::test)]
@@ -313,10 +314,10 @@ mod price_cache_context {
                 PriceCacheContext::from_canonical_chain(block_tree_guard, interval).await;
 
             // assert
-            assert_eq!(price_cache.next_ema_adjustment_height, 19);
-            assert_eq!(price_cache.block_previous_interval.height, 0);
-            assert_eq!(price_cache.block_previous_interval_predecessor.height, 0);
             assert_eq!(price_cache.block_two_adj_intervals_ago.height, 0);
+            assert_eq!(price_cache.next_ema_adjustment_height, 19);
+            assert_eq!(price_cache.block_previous_interval.height, 9);
+            assert_eq!(price_cache.block_previous_interval_predecessor.height, 8);
         }
 
         #[test_log::test(tokio::test)]
@@ -336,10 +337,10 @@ mod price_cache_context {
                 PriceCacheContext::from_canonical_chain(block_tree_guard, interval).await;
 
             // assert
-            assert_eq!(price_cache.next_ema_adjustment_height, 19);
-            assert_eq!(price_cache.block_previous_interval.height, 0);
-            assert_eq!(price_cache.block_previous_interval_predecessor.height, 0);
-            assert_eq!(price_cache.block_two_adj_intervals_ago.height, 0);
+            assert_eq!(price_cache.next_ema_adjustment_height, 29);
+            assert_eq!(price_cache.block_previous_interval.height, 19);
+            assert_eq!(price_cache.block_previous_interval_predecessor.height, 18);
+            assert_eq!(price_cache.block_two_adj_intervals_ago.height, 9);
         }
 
         /// The underlyig ieda of the test -- after we go through the first 2 epochs where
@@ -367,6 +368,29 @@ mod price_cache_context {
             assert_eq!(price_cache.block_two_adj_intervals_ago.height, 9);
         }
 
+        #[test_log::test(tokio::test)]
+        async fn test_valid_price_after_100_blocks() {
+            // setup
+            let interval = 10;
+            let mut blocks = (0..100)
+                .map(|height| IrysBlockHeader {
+                    height,
+                    ..IrysBlockHeader::new_mock_header()
+                })
+                .collect::<Vec<_>>();
+            let block_tree_guard = genesis_tree(&mut blocks);
+
+            // actoin
+            let price_cache =
+                PriceCacheContext::from_canonical_chain(block_tree_guard, interval).await;
+
+            // assert
+            assert_eq!(price_cache.next_ema_adjustment_height, 109);
+            assert_eq!(price_cache.block_previous_interval.height, 99);
+            assert_eq!(price_cache.block_previous_interval_predecessor.height, 98);
+            assert_eq!(price_cache.block_two_adj_intervals_ago.height, 89);
+        }
+
         fn genesis_tree(blocks: &mut [IrysBlockHeader]) -> BlockTreeReadGuard {
             let mut block_hash = H256::random();
             let mut iter = blocks.into_iter();
@@ -392,9 +416,6 @@ mod price_cache_context {
                         ChainState::Onchain,
                     )
                     .unwrap();
-                block_tree_cache.mark_tip(&block_hash).unwrap();
-                // let (.., state) = block_tree_cache.get_block_and_status(&block_hash).unwrap();
-                // assert_eq!(state, &ChainState::Onchain);
             }
 
             let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));

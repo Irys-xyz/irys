@@ -3,6 +3,7 @@
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
 use std::fmt;
+use std::ops::Add;
 
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
@@ -174,7 +175,7 @@ impl IrysBlockHeader {
 
     /// Validates the block hash signature by:
     /// 1.) generating the prehash
-    /// 2.) recovering the sender address, and comparing it to the block header's miner_address (miner_address MUST be part of the prehash)
+    /// 2.) recovering the sender address, and comparing it to the block headers miner_address (miner_address MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> bool {
         self.signature
             .validate_signature(self.signature_hash(), self.miner_address)
@@ -200,29 +201,21 @@ impl IrysBlockHeader {
 
 // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
 pub fn is_ema_recalculation_block(height: u64, blocks_in_price_adjustment_interval: u64) -> bool {
-    height % blocks_in_price_adjustment_interval == 0
+    (height + 1) % blocks_in_price_adjustment_interval == 0
 }
 
 /// Returns the height of the "previous" EMA recalculation block.
-///
-/// - For the first two intervals (`height < 2 * blocks_in_price_adjustment_interval`), always return 0.
-/// - Otherwise, return the largest multiple of `blocks_in_price_adjustment_interval` less than `height`.
-///   (If the current block is exactly on an interval boundary, step one interval back.)
 pub fn previous_ema_recalculation_block_height(
     height: u64,
     blocks_in_price_adjustment_interval: u64,
 ) -> u64 {
-    if height < 2 * blocks_in_price_adjustment_interval {
-        return 0;
-    }
-
-    let remainder = height % blocks_in_price_adjustment_interval;
+    let remainder = (height + 1) % blocks_in_price_adjustment_interval;
     if remainder == 0 {
         // If the current block is on an interval boundary, go one interval back.
-        height - blocks_in_price_adjustment_interval
+        height.saturating_sub(blocks_in_price_adjustment_interval)
     } else {
         // Otherwise, drop the remainder.
-        height - remainder
+        height.saturating_sub(remainder)
     }
 }
 
@@ -511,41 +504,24 @@ mod tests {
     }
 
     #[test]
-    fn test_previous_ema_for_first_two_intervals_returns_zero() {
-        let interval = 10;
-        // Anything less than 2 * 10 = 20 should return 0
-        for height in 0..20 {
-            let header = IrysBlockHeader {
-                height,
-                ..Default::default()
-            };
-            let result = header.previous_ema_recalculation_block_height(interval);
-            assert_eq!(
-                result, 0,
-                "For height={height} (< 2 * interval), expected 0 but got {result}"
-            );
-        }
-    }
-
-    #[test]
     fn test_previous_ema_for_multiple_intervals() {
         let interval = 10;
         // (height, expected)
         let cases = vec![
             (0, 0),
             (1, 0),
-            (15, 0),
-            (19, 0),
-            (20, 10), // exactly at 2 intervals, returns 1 interval behind
-            (21, 20),
-            (29, 20),
-            (30, 20),
-            (31, 30),
-            (39, 30),
-            (40, 30),
-            (41, 40),
-            (99, 90),
-            (100, 90),
+            (15, 9),
+            (19, 9),
+            (20, 19),
+            (21, 19),
+            (29, 19),
+            (30, 29),
+            (31, 29),
+            (39, 29),
+            (40, 39),
+            (41, 39),
+            (99, 89),
+            (100, 99),
         ];
 
         for (height, expected) in cases {
@@ -566,17 +542,17 @@ mod tests {
         let interval = 10;
         // (height, is_ema_recalculation)
         let cases = vec![
-            (0, true),
+            (0, false),
             (1, false),
-            (9, false),
-            (10, true),
+            (9, true),
+            (10, false),
             (11, false),
-            (19, false),
-            (20, true),
+            (19, true),
+            (20, false),
             (21, false),
-            (30, true),
-            (99, false),
-            (100, true),
+            (30, false),
+            (99, true),
+            (100, false),
         ];
 
         for (height, expected_is_ema) in cases {
