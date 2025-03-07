@@ -127,7 +127,7 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
     // Waiting a little for the block
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let latest = {
+    let latest_block_before_restart = {
         let context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
 
         let latest = context
@@ -137,21 +137,19 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
             .block_by_number(BlockNumberOrTag::Latest, false)
             .await?;
 
-        latest
+        latest.unwrap()
     };
 
-    // mine_blocks(&node, 1).await?;
-    // // Waiting a little for the block
-    // tokio::time::sleep(Duration::from_secs(1)).await;
+    // Add one block on top to confirm previous one
+    mine_blocks(&node, 1).await?;
+    // Waiting a little for the block
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     node.stop().await;
 
-    let latest_block = latest.unwrap();
-    debug!("Latest block: {:?}", latest_block);
-
     let restarted_node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
 
-    let latest_block_right_after_restart = {
+    let (latest_block_right_after_restart, earlies_block) = {
         let context = RethNodeContext::new(restarted_node.reth_handle.clone().into()).await?;
 
         let latest = context
@@ -161,7 +159,15 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
             .block_by_number(BlockNumberOrTag::Latest, false)
             .await?;
 
-        latest.unwrap()
+        let earliest = context
+            .rpc
+            .inner
+            .eth_api()
+            .block_by_number(BlockNumberOrTag::Earliest, false)
+            .await?;
+
+
+        (latest.unwrap(), earliest.unwrap())
     };
 
     mine_blocks(&restarted_node, 1).await?;
@@ -182,22 +188,17 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
     tokio::time::sleep(Duration::from_secs(2)).await;
     restarted_node.stop().await;
 
-    debug!("Latest before stop: {:?}", latest_block.header.hash);
-    debug!(
-        "Latest parent before stop: {:?}",
-        latest_block.header.parent_hash
-    );
+    debug!("Earliest hash: {:?}", earlies_block.header.hash);
+    debug!("Latest hash before restart: {:?}", latest_block_before_restart.header.hash);
+    debug!("Latest hash after restart: {:?}", latest_block_right_after_restart.header.hash);
+    debug!("Next hash: {:?}", next_block.header.hash);
 
-    debug!(
-        "Block hash right after restart: {:?}",
-        latest_block_right_after_restart.header.hash
-    );
-
-    debug!(
-        "Hash after a block was mined after restart: {:?}",
-        next_block.header.hash
-    );
-    debug!("Parent hash: {:?}", next_block.header.parent_hash);
+    // Check that we aren't on genesis
+    assert_eq!(earlies_block.header.hash, latest_block_before_restart.header.parent_hash);
+    // Check that the header hash is the same
+    assert_eq!(latest_block_before_restart.header.hash, latest_block_right_after_restart.header.hash);
+    // Check that the chain advanced correctly
+    assert_eq!(next_block.header.parent_hash, latest_block_right_after_restart.header.hash);
 
     Ok(())
 }
