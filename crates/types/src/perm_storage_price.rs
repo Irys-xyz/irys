@@ -113,10 +113,9 @@ impl PriceCalc {
 mod test {
     use super::*;
     use crate::{storage_pricing::Amount, DecayParams, StorageFees};
-    use approx::assert_abs_diff_eq;
     use k256::ecdsa::SigningKey;
 
-    const EPSILON: f64 = 1e-9;
+    const EPSILON: Decimal = dec!(1e-9);
 
     fn get_expected_chunk_price() -> Option<Decimal> {
         // These values come from 200 years, 1% decay rate, n partitions, 5% miner fee
@@ -219,7 +218,6 @@ mod test {
         assert_eq!(expected, res)
     }
 
-    #[ignore = "reason"]
     #[test]
     fn test_calc_perm_storage_price_2_chunks() {
         let config = get_config();
@@ -227,11 +225,9 @@ mod test {
         let price = PriceCalc::calc_perm_storage_price(bytes_to_store, &config).unwrap();
         let res = Decimal::from(price) / SCALE_FACTOR;
         let expected = Decimal::from(2) * get_expected_chunk_price().unwrap();
-        assert_eq!(expected, res)
-        // assert_abs_diff_eq!(expected, res, epsilon = EPSILON);
+        assert!((expected - res).abs() < EPSILON)
     }
 
-    #[ignore = "reason"]
     #[test]
     fn test_calc_perm_storage_price_1_mib() {
         let config = get_config();
@@ -239,10 +235,9 @@ mod test {
         let price = PriceCalc::calc_perm_storage_price(bytes_to_store, &config).unwrap();
         let res = Decimal::from(price) / SCALE_FACTOR;
         let expected = dec!(4) * get_expected_chunk_price().unwrap();
-        assert_eq!(expected, res)
+        assert!((expected - res).abs() < EPSILON)
     }
 
-    #[ignore = "reason"]
     #[test]
     fn test_calc_perm_storage_price_1_gib() {
         let config = get_config();
@@ -250,7 +245,7 @@ mod test {
         let price = PriceCalc::calc_perm_storage_price(bytes_to_store, &config).unwrap();
         let res = Decimal::from(price) / SCALE_FACTOR;
         let expected = dec!(4) * dec!(1024) * get_expected_chunk_price().unwrap();
-        assert_eq!(expected, res)
+        assert!((expected - res).abs() < EPSILON)
     }
 
     #[test]
@@ -266,8 +261,8 @@ mod test {
             annualized_cost_of_storing_1gib,
         )
         .unwrap();
-        let res = f64::try_from(res).unwrap();
-        assert_abs_diff_eq!(0.025678641965, res, epsilon = EPSILON);
+        let expected = dec!(0.025678641965);
+        assert!((expected - res).abs() < EPSILON)
     }
 
     #[test]
@@ -283,8 +278,8 @@ mod test {
             annualized_cost_of_storing_1gib,
         )
         .unwrap();
-        let res = f64::try_from(res).unwrap();
-        assert_abs_diff_eq!(0.23257381778, res, epsilon = EPSILON);
+        let expected = dec!(0.23257381778);
+        assert!((expected - res).abs() < EPSILON)
     }
 
     #[test]
