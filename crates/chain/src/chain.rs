@@ -1,3 +1,5 @@
+use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
+use crate::vdf::run_vdf;
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
@@ -27,6 +29,7 @@ use irys_actors::{
 use irys_api_server::{run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
+use irys_database::migration::check_db_version_and_run_migrations_if_needed;
 use irys_packing::{PackingType, PACKING_TYPE};
 use irys_price_oracle::mock_oracle::MockOracle;
 use irys_price_oracle::IrysPriceOracle;
@@ -34,6 +37,7 @@ use irys_reth_node_bridge::adapter::node::RethNodeContext;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
+use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
@@ -60,17 +64,11 @@ use std::{
     sync::{mpsc, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, error, info};
-
-use crate::vdf::run_vdf;
-use irys_database::migration::check_db_version_and_run_migrations_if_needed;
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use tokio::{
     runtime::Handle,
     sync::oneshot::{self},
 };
-
-use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
+use tracing::{debug, error, info};
 
 pub async fn start(config: Config) -> eyre::Result<IrysNodeCtx> {
     let irys_node_config = IrysNodeConfig::new(&config);
