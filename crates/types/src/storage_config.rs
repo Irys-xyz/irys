@@ -40,7 +40,7 @@ impl StorageConfig {
             min_writes_before_sync: config.num_writes_before_sync,
             // TODO: revert this back
             entropy_packing_iterations: 1_000, /* PACKING_SHA_1_5_S */
-            chunk_migration_depth: config.finalization_depth,
+            chunk_migration_depth: config.chunk_migration_depth,
         }
     }
 }
