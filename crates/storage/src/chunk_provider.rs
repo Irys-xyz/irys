@@ -172,7 +172,6 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
 
         // Override the default StorageModule config for testing
         let config = StorageConfig::new(&testnet_config);
