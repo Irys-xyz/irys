@@ -199,6 +199,15 @@ mod test {
     }
 
     #[test]
+    fn test_calc_perm_storage_price_no_chunk() {
+        let bytes_to_store = 0;
+        let mut config = get_config();
+        config.chunk_size = 0;
+        let res = PriceCalc::calc_perm_storage_price(bytes_to_store, &config);
+        assert!(res.is_err())
+    }
+
+    #[test]
     fn test_calc_perm_storage_price_256_bytes() {
         let bytes_to_store = 256;
         let config = get_config();
