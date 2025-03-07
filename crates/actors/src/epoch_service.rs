@@ -675,7 +675,7 @@ impl EpochServiceActor {
                 .try_into()
                 .expect("Height is too large!");
             let last_epoch_block = rg.get_item(previous_epoch_block_height).expect(&format!(
-                "Needed previous epoch block with hight {} is not available in block index!",
+                "Needed previous epoch block with height {} is not available in block index!",
                 previous_epoch_block_height
             ));
             let data_added: u64 = ledger_size - last_epoch_block.ledgers[ledger].max_chunk_offset;
