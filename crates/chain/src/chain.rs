@@ -584,7 +584,6 @@ pub async fn start_irys_node(
                 // this OnceLock is due to the cyclic chain between Reth & the Irys node, where the IrysRethProvider requires both
                 // this is "safe", as the OnceLock is always set before this start function returns
                 *irys_provider_1.write().unwrap() = Some(IrysRethProviderInner {
-                    // db: reth_node.provider.database.db.clone(),
                     chunk_provider: arc_chunk_provider.clone(),
                 });
 
