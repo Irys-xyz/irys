@@ -1,6 +1,6 @@
+use actix_rt::Arbiter;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use actix_rt::Arbiter;
 
 #[derive(Debug)]
 pub struct ArbiterHandle {

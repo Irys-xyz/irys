@@ -101,6 +101,7 @@ pub fn check_db_version_and_run_migrations_if_needed(
 
 #[cfg(test)]
 mod tests {
+    use crate::db::RethDbWrapper;
     use crate::migration::check_db_version_and_run_migrations_if_needed;
     use crate::open_or_create_db;
     use crate::tables::{IngressProofLRU, IrysTables};
@@ -108,7 +109,6 @@ mod tests {
     use irys_types::H256;
     use reth_db_api::transaction::{DbTx, DbTxMut};
     use reth_db_api::Database;
-    use crate::db::RethDbWrapper;
 
     #[test]
     fn should_migrate_from_v0_to_v1() -> Result<(), Box<dyn std::error::Error>> {

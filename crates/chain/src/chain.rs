@@ -76,7 +76,7 @@ use tokio::{
     sync::oneshot::{self},
 };
 
-use crate::arbiter_handle::{CloneableJoinHandle, ArbiterHandle};
+use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
 
 pub async fn start(config: Config) -> eyre::Result<IrysNodeCtx> {
     let irys_node_config = IrysNodeConfig::new(&config);

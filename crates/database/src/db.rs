@@ -10,7 +10,8 @@ pub struct RethDbWrapper {
 }
 
 impl RethDbWrapper {
-    #[must_use] pub fn new(db: DatabaseEnv) -> Self {
+    #[must_use]
+    pub fn new(db: DatabaseEnv) -> Self {
         Self {
             db: Arc::new(RwLock::new(Some(db))),
         }

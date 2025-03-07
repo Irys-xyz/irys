@@ -230,8 +230,7 @@ mod tests {
         }
         storage_module.sync_pending_chunks()?;
 
-        let chunk_provider =
-            ChunkProvider::new(config.clone(), vec![Arc::new(storage_module)]);
+        let chunk_provider = ChunkProvider::new(config.clone(), vec![Arc::new(storage_module)]);
 
         for original_chunk in unpacked_chunks {
             let chunk = chunk_provider
