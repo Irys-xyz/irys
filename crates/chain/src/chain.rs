@@ -189,7 +189,7 @@ pub async fn start_irys_node(
                 let (service_senders, service_receivers) = ServiceSenders::init();
 
                 ChunkCacheServiceHandle::spawn_service(service_senders.chunk_cache.clone(), service_receivers.chunk_cache, task_exec, irys_db.clone(), config.clone());
-                
+
                 let latest_block = latest_block_index
                     .map(|b| {
                         database::block_header_by_hash(&irys_db.tx().unwrap(), &b.block_hash)
@@ -601,19 +601,18 @@ pub async fn start_irys_node(
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
             let node_config = cloned_arc.clone();
-            tokio_runtime
-                .block_on(run_to_completion_or_panic(
-                    &mut task_manager,
-                    run_until_ctrl_c(start_reth_node(
-                        exec,
-                        reth_chainspec,
-                        node_config,
-                        IrysTables::ALL,
-                        reth_handle_sender,
-                        irys_provider,
-                        latest_block_height,
-                    )),
-                ))
+            tokio_runtime.block_on(run_to_completion_or_panic(
+                &mut task_manager,
+                run_until_ctrl_c(start_reth_node(
+                    exec,
+                    reth_chainspec,
+                    node_config,
+                    IrysTables::ALL,
+                    reth_handle_sender,
+                    irys_provider,
+                    latest_block_height,
+                )),
+            ))
         })?;
 
     // wait for the full handle to be send over by the actix thread

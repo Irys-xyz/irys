@@ -459,7 +459,8 @@ pub enum BlockState {
 impl BlockTreeCache {
     /// Create a new cache initialized with a starting block. The block is marked as
     /// on-chain and set as the tip.
-    #[must_use] pub fn new(block: &IrysBlockHeader) -> Self {
+    #[must_use]
+    pub fn new(block: &IrysBlockHeader) -> Self {
         let block_hash = block.block_hash;
         let solution_hash = block.solution_hash;
         let height = block.height;
@@ -781,7 +782,8 @@ impl BlockTreeCache {
             .unwrap_or((U256::zero(), BlockHash::default()))
     }
 
-    #[must_use] pub fn get_canonical_chain(&self) -> (Vec<ChainCacheEntry>, usize) {
+    #[must_use]
+    pub fn get_canonical_chain(&self) -> (Vec<ChainCacheEntry>, usize) {
         self.longest_chain_cache.clone()
     }
 
@@ -954,12 +956,14 @@ impl BlockTreeCache {
     }
 
     /// Gets block by hash
-    #[must_use] pub fn get_block(&self, block_hash: &BlockHash) -> Option<&IrysBlockHeader> {
+    #[must_use]
+    pub fn get_block(&self, block_hash: &BlockHash) -> Option<&IrysBlockHeader> {
         self.blocks.get(block_hash).map(|entry| &entry.block)
     }
 
     /// Gets block and its current validation status    
-    #[must_use] pub fn get_block_and_status(
+    #[must_use]
+    pub fn get_block_and_status(
         &self,
         block_hash: &BlockHash,
     ) -> Option<(&IrysBlockHeader, &ChainState)> {
@@ -991,7 +995,8 @@ impl BlockTreeCache {
 
     /// Finds the earliest not validated block, walking back the chain
     /// until finding a validated block, reaching block height 0, or exceeding cache depth
-    #[must_use] pub fn get_earliest_not_onchain<'a>(
+    #[must_use]
+    pub fn get_earliest_not_onchain<'a>(
         &'a self,
         block: &'a BlockEntry,
     ) -> Option<(&'a BlockEntry, Vec<&'a IrysBlockHeader>, SystemTime)> {
@@ -1024,7 +1029,8 @@ impl BlockTreeCache {
 
     /// Get the earliest unvalidated block from the longest chain
     /// Relies on the `longest_chain_cache`
-    #[must_use] pub fn get_earliest_not_onchain_in_longest_chain(
+    #[must_use]
+    pub fn get_earliest_not_onchain_in_longest_chain(
         &self,
     ) -> Option<(&BlockEntry, Vec<&IrysBlockHeader>, SystemTime)> {
         // Get the block with max cumulative difficulty
@@ -1058,7 +1064,8 @@ impl BlockTreeCache {
     /// - Has matching `solution_hash`
     /// - Is not the excluded block
     /// - Either has same `cumulative_diff` as input or meets double-signing criteria
-    #[must_use] pub fn get_by_solution_hash(
+    #[must_use]
+    pub fn get_by_solution_hash(
         &self,
         solution_hash: &H256,
         excluding: &BlockHash,
@@ -1159,7 +1166,8 @@ impl BlockTreeCache {
     }
 
     /// Returns true if solution hash exists in cache
-    #[must_use] pub fn is_known_solution_hash(&self, solution_hash: &H256) -> bool {
+    #[must_use]
+    pub fn is_known_solution_hash(&self, solution_hash: &H256) -> bool {
         self.solutions.contains_key(solution_hash)
     }
 }

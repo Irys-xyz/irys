@@ -1,5 +1,6 @@
 use actix::{Actor, Context, Handler, Message, Supervised, SystemService};
 use base58::ToBase58 as _;
+use core::fmt::Display;
 use eyre::eyre;
 use irys_database::db_cache::{data_size_to_chunk_count, DataRootLRUEntry};
 use irys_database::tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs};
@@ -18,7 +19,6 @@ use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
-use core::fmt::Display;
 use tracing::{debug, error, info, warn};
 
 use crate::block_producer::BlockConfirmedMessage;
@@ -125,7 +125,8 @@ impl TxIngressError {
 pub struct ChunkIngressMessage(pub UnpackedChunk);
 
 impl ChunkIngressMessage {
-    #[must_use] pub fn into_inner(self) -> UnpackedChunk {
+    #[must_use]
+    pub fn into_inner(self) -> UnpackedChunk {
         self.0
     }
 }
@@ -634,9 +635,7 @@ pub fn generate_ingress_proof(
         let chunk = ro_tx
             .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
             .unwrap_or_else(|| {
-                panic!(
-                    "unable to get chunk {chunk_path_hash} for data root {data_root} from DB"
-                )
+                panic!("unable to get chunk {chunk_path_hash} for data root {data_root} from DB")
             });
         let chunk_bin = chunk.chunk.unwrap().0;
         data_size += chunk_bin.len() as u64;
