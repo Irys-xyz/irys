@@ -209,8 +209,10 @@ mod price_cache_context {
                 block_two_adj_intervals_ago: block_two_price_intervals_ago,
                 next_ema_adjustment_height: {
                     // for the first interval we skip EMA recalculation
-                    let ema_interval_beginning =
-                        blocks_in_price_adjustment_interval.saturating_mul(2);
+                    // we subtract 1 because the block heights are 0 indexed
+                    let ema_interval_beginning = blocks_in_price_adjustment_interval
+                        .saturating_mul(2)
+                        .saturating_sub(1);
                     if latest_block_height < &ema_interval_beginning {
                         ema_interval_beginning
                     } else {
@@ -258,7 +260,7 @@ mod price_cache_context {
         #[test_log::test(tokio::test)]
         async fn test_build_valid_price_context_when_only_genesis_exists() {
             // setup
-            let block_tree_guard = genesis_tree(&[IrysBlockHeader {
+            let block_tree_guard = genesis_tree(&mut [IrysBlockHeader {
                 height: 0,
                 ..IrysBlockHeader::new_mock_header()
             }]);
@@ -269,18 +271,100 @@ mod price_cache_context {
                 PriceCacheContext::from_canonical_chain(block_tree_guard, interval).await;
 
             // assert
-            assert_eq!(price_cache.next_ema_adjustment_height, 20);
+            assert_eq!(price_cache.next_ema_adjustment_height, 19);
             assert_eq!(price_cache.block_previous_interval.height, 0);
             assert_eq!(price_cache.block_previous_interval_predecessor.height, 0);
             assert_eq!(price_cache.block_two_adj_intervals_ago.height, 0);
         }
 
-        fn genesis_tree(blocks: &[IrysBlockHeader]) -> BlockTreeReadGuard {
+        #[test_log::test(tokio::test)]
+        async fn test_valid_price_after_first_epoch() {
+            // setup
+            let interval = 10;
+            let mut blocks = (0..=10)
+                .map(|height| IrysBlockHeader {
+                    height,
+                    ..IrysBlockHeader::new_mock_header()
+                })
+                .collect::<Vec<_>>();
+            let block_tree_guard = genesis_tree(&mut blocks);
+
+            // actoin
+            let price_cache =
+                PriceCacheContext::from_canonical_chain(block_tree_guard, interval).await;
+
+            // assert
+            assert_eq!(price_cache.next_ema_adjustment_height, 19);
+            assert_eq!(price_cache.block_previous_interval.height, 0);
+            assert_eq!(price_cache.block_previous_interval_predecessor.height, 0);
+            assert_eq!(price_cache.block_two_adj_intervals_ago.height, 0);
+        }
+
+        #[test_log::test(tokio::test)]
+        async fn test_valid_price_after_second_epoch() {
+            // setup
+            let interval = 10;
+            let mut blocks = (0..=19)
+                .map(|height| IrysBlockHeader {
+                    height,
+                    ..IrysBlockHeader::new_mock_header()
+                })
+                .collect::<Vec<_>>();
+            let block_tree_guard = genesis_tree(&mut blocks);
+
+            // actoin
+            let price_cache =
+                PriceCacheContext::from_canonical_chain(block_tree_guard, interval).await;
+
+            // assert
+            assert_eq!(price_cache.next_ema_adjustment_height, 19);
+            assert_eq!(price_cache.block_previous_interval.height, 0);
+            assert_eq!(price_cache.block_previous_interval_predecessor.height, 0);
+            assert_eq!(price_cache.block_two_adj_intervals_ago.height, 0);
+        }
+
+        /// The underlyig ieda of the test -- after we go through the first 2 epochs where
+        /// the genesis block is used, we start using E9 block
+        #[test_log::test(tokio::test)]
+        async fn test_valid_price_after_21_blocks() {
+            // setup
+            let interval = 10;
+            let mut blocks = (0..=20)
+                .map(|height| IrysBlockHeader {
+                    height,
+                    ..IrysBlockHeader::new_mock_header()
+                })
+                .collect::<Vec<_>>();
+            let block_tree_guard = genesis_tree(&mut blocks);
+
+            // actoin
+            let price_cache =
+                PriceCacheContext::from_canonical_chain(block_tree_guard, interval).await;
+
+            // assert
+            assert_eq!(price_cache.next_ema_adjustment_height, 29);
+            assert_eq!(price_cache.block_previous_interval.height, 19);
+            assert_eq!(price_cache.block_previous_interval_predecessor.height, 18);
+            assert_eq!(price_cache.block_two_adj_intervals_ago.height, 9);
+        }
+
+        fn genesis_tree(blocks: &mut [IrysBlockHeader]) -> BlockTreeReadGuard {
+            let mut hash = H256::random();
             let mut iter = blocks.into_iter();
             let genesis_block = iter.next().unwrap();
+            genesis_block.block_hash = hash;
+
             let mut block_tree_cache = BlockTreeCache::new(&genesis_block);
             for block in iter {
-                block_tree_cache.add_block(block, Arc::new(Vec::new()));
+                // update the prev block hash
+                block.previous_block_hash = hash;
+
+                // generate a new block hash
+                hash = H256::random();
+                block.block_hash = hash;
+                block_tree_cache
+                    .add_block(block, Arc::new(Vec::new()))
+                    .unwrap();
             }
             let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));
             let block_tree_guard = BlockTreeReadGuard::new(block_tree_cache);
