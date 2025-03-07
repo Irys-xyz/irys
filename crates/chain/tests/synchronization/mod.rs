@@ -38,7 +38,7 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 async fn should_resume_from_the_same_block() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
+    let temp_dir = setup_tracing_and_temp_dir(Some("node_resume_test"), false);
     let mut testnet_config = Config::testnet();
     testnet_config.chunk_size = 32;
 
