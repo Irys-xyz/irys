@@ -89,7 +89,7 @@ pub struct IrysNodeCtx {
     // Shutdown channels
     pub api_server_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
-    pub consensus_engine_shutdown_sender: tokio::sync::mpsc::Sender<()>,
+    // pub consensus_engine_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
     pub main_actor_thread_handle: Option<CloneableJoinHandle<()>>,
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
@@ -108,13 +108,6 @@ impl IrysNodeCtx {
         if let Some(main_actor_thread_handle) = self.main_actor_thread_handle {
             main_actor_thread_handle.join().unwrap();
         }
-
-        debug!("Sending shutdown signal to consensus engine");
-        self.consensus_engine_shutdown_sender.try_send(()).unwrap();
-
-        // for arbiter in self.arbiters.into_iter() {
-        //     arbiter.stop_and_join();
-        // }
 
         let chain_spec_arc = self.reth_handle.chain_spec();
         let chain_spec = (*chain_spec_arc).clone();
@@ -145,8 +138,6 @@ impl IrysNodeCtx {
 
         System::current().stop();
         debug!("Main actor thread and reth thread stopped");
-
-        self.reth_handle.provider.database.db.close();
     }
 }
 
@@ -635,7 +626,7 @@ pub async fn start_irys_node(
                     storage_config: storage_config.clone(),
                     api_server_shutdown_sender: api_server_shutdown_tx,
                     reth_shutdown_sender,
-                    consensus_engine_shutdown_sender,
+                    // consensus_engine_shutdown_sender,
                     main_actor_thread_handle: None,
                     reth_thread_handle: None,
                     // arbiters,
@@ -689,6 +680,8 @@ pub async fn start_irys_node(
             )).unwrap();
 
             task_manager.graceful_shutdown();
+            debug!("Sending shutdown signal to consensus engine");
+            consensus_engine_shutdown_sender.try_send(()).unwrap();
             debug!("Reth thread finished");
         })?;
 
@@ -725,6 +718,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
         .expect("unable to send reth node handle");
 
     let exit_reason = node_handle.node_exit_future.await?;
+    node_handle.node.provider.database.db.close();
 
     debug!("Reth node exited with reason: {:?}", exit_reason);
     Ok(exit_reason)
