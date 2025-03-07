@@ -1,7 +1,3 @@
-use alloy_primitives::Address;
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
-
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
@@ -10,6 +6,15 @@ use crate::{
     },
     IrysTokenPrice,
 };
+use alloy_primitives::Address;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use serde::{Deserialize, Serialize};
+
+// $44.0 comes from the following doc:
+// https://docs.google.com/spreadsheets/d/1VMcMgguVRBcUUXIRwlUY7FgSTicasvzg_OWJZqk8rrs/edit?gid=0#gid=0
+pub(crate) const ANNUALIZED_COST_OF_OPERATING_16TB: Decimal = dec!(44.0);
+pub(crate) const MINER_PERCENTAGE_FEE: Decimal = dec!(0.05);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
@@ -68,6 +73,20 @@ pub struct Config {
     ///packing specific config
     pub cpu_packing_concurrency: u16,
     pub gpu_packing_batch_size: u32,
+    pub decay_params: DecayParams,
+    pub storage_fees: StorageFees,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DecayParams {
+    pub safe_minimum_number_of_years: u32,
+    pub annualized_decay_rate: Decimal,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StorageFees {
+    pub ingress_fee: Decimal,
+    pub number_of_ingress_proofs: u32,
 }
 
 impl Config {
@@ -123,6 +142,14 @@ impl Config {
                 .expect("valid percentage"),
             cpu_packing_concurrency: 4,
             gpu_packing_batch_size: 1024,
+            decay_params: DecayParams {
+                safe_minimum_number_of_years: 200,
+                annualized_decay_rate: rust_decimal_macros::dec!(0.01),
+            },
+            storage_fees: StorageFees {
+                number_of_ingress_proofs: 10,
+                ingress_fee: rust_decimal_macros::dec!(0.01),
+            },
         }
     }
 }
@@ -239,6 +266,10 @@ genesis_token_price = "1.0"
 token_price_safe_range = "0.25"
 cpu_packing_concurrency = 4
 gpu_packing_batch_size = 1024
+decay_params.safe_minimum_number_of_years = 200
+decay_params.annualized_decay_rate = "0.01"
+storage_fees.number_of_ingress_proofs = 10
+storage_fees.ingress_fee = "0.01"
 "#;
 
         // Attempt to deserialize the TOML string into a Config
@@ -255,5 +286,10 @@ gpu_packing_batch_size = 1024
             Amount::token(dec!(1.0)).unwrap()
         );
         assert_eq!(config.port, 8080);
+        assert_eq!(config.decay_params.safe_minimum_number_of_years, 200);
+        assert_eq!(
+            config.storage_fees.ingress_fee,
+            rust_decimal_macros::dec!(0.01)
+        );
     }
 }
