@@ -151,7 +151,7 @@ alloy-network = { path = "./ext/alloy/crates/network" }
 revm = { path = "./ext/revm/crates/revm", features = ["std", "serde-json"] }
 revm-primitives = { path = "./ext/revm/crates/primitives" }
 reth-payload-builder = { path = "./ext/reth/crates/payload/builder" }
-rust_decimal = "1"
+rust_decimal = { version = "1.36.0", features = ["maths"] }
 rust_decimal_macros = "1"
 serde = { version = "1", default-features = false }
 reth-rpc-layer = { path = "./ext/reth/crates/rpc/rpc-layer" }

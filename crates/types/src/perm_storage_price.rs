@@ -1,49 +1,59 @@
-use crate::{Config, ANNUALIZED_COST_OF_OPERATING_16TB, GIGABYTE, MINER_PERCENTAGE_FEE, TERABYTE};
-use eyre::ensure;
-use rust_decimal::Decimal;
+use crate::{Config, ANNUALIZED_COST_OF_OPERATING_16TB, GIBIBYTE, MINER_PERCENTAGE_FEE, TEBIBYTE};
+use eyre::{ensure, OptionExt};
+use rust_decimal::{Decimal, MathematicalOps};
+use rust_decimal_macros::dec;
+
+const SCALE_FACTOR: Decimal = dec!(1e18);
 
 pub struct PriceCalc;
 
 impl PriceCalc {
-    const TB_REDUCE: u64 = 16; // used to scale from 16TB to 1TB
-    const ANNUALIZED_COST_OF_STORING_1GB: f64 =
-        ANNUALIZED_COST_OF_OPERATING_16TB / (Self::TB_REDUCE as f64 * (TERABYTE / GIGABYTE) as f64);
+    const TB_REDUCE: Decimal = dec!(16); // used to scale from 16TB to 1TB
 
     // Get the current USD/IRYS exchange rate
-    fn get_usd_to_irys_conversion_rate() -> f64 {
+    fn get_usd_to_irys_conversion_rate() -> Decimal {
         // 1 USD = how many $IRYS. end result is in $IRYS
-        1.0
+        dec!(1)
     }
 
     /// Quote an IRYS price to store a number of bytes in perm storage
     pub fn calc_perm_storage_price(
         number_of_bytes_to_store: u64,
         config: &Config,
-    ) -> eyre::Result<f64> {
+    ) -> eyre::Result<u64> {
         ensure!(config.chunk_size != 0, "Chunk size should not be 0");
-        // $USD/GB
-        let perm_cost = Self::calc_perm_cost_per_gb(
-            config.decay_params.safe_minimum_number_of_years,
-            config.decay_params.annualized_decay_rate.try_into()?,
-            config.num_partitions_per_slot,
-        )?;
-        // $USD/GB
-        let ingress_perm_fee = Self::calc_perm_fee_per_ingress_gb(
-            config.storage_fees.number_of_ingress_proofs,
-            config.storage_fees.ingress_fee,
+        let annualized_cost_of_storing_1gib = ANNUALIZED_COST_OF_OPERATING_16TB
+            .checked_div(
+                (Self::TB_REDUCE.checked_mul(Decimal::try_from(TEBIBYTE / GIBIBYTE)?))
+                    .ok_or_eyre("Decimal operation failed")?,
+            )
+            .ok_or_eyre("Decimal operation failed")?;
+
+        // $USD/GiB
+        let perm_cost = Self::calc_perm_cost_per_gib(
+            Decimal::from(config.decay_params.safe_minimum_number_of_years),
+            config.decay_params.annualized_decay_rate,
+            Decimal::from(config.num_partitions_per_slot),
+            annualized_cost_of_storing_1gib,
         )?;
         // $IRYS/$USD
         let approximate_usd_irys_price = Self::get_usd_to_irys_conversion_rate();
-        // Chunk
-        let chunks = Self::get_chunks_from_bytes(number_of_bytes_to_store, config.chunk_size);
-        // Chunk/GB
-        let chunks_per_gb = f64::trunc(GIGABYTE as f64 / config.chunk_size as f64);
-        // $USD/GB
-        let immediate_miner_reward = perm_cost * MINER_PERCENTAGE_FEE;
-        // Chunk/Chunk/GB * ($USD/GB + $USD/GB + $USD/GB) * $IRYS/$USD => GB * $USD/GB * $IRYS/$USD = $IRYS
-        Ok((chunks as f64 / chunks_per_gb)
-            * (ingress_perm_fee + perm_cost + immediate_miner_reward)
-            * approximate_usd_irys_price)
+        let perm_cost_per_gib_irys = perm_cost
+            .checked_mul(approximate_usd_irys_price)
+            .ok_or_eyre("Decimal operation failed")?;
+        let num_chunks = Self::get_chunks_from_bytes(number_of_bytes_to_store, config.chunk_size);
+        let chunks_per_gib = f64::trunc(GIBIBYTE as f64 / config.chunk_size as f64);
+        // $USD
+        let base_fee_irys = Decimal::try_from(num_chunks as f64 / chunks_per_gib)?
+            .checked_mul(perm_cost_per_gib_irys)
+            .ok_or_eyre("Decimal operation failed")?;
+        let final_fee = base_fee_irys
+            .checked_mul(MINER_PERCENTAGE_FEE)
+            .ok_or_eyre("Decimal operation failed")?;
+        let scaled_fee = final_fee
+            .checked_mul(SCALE_FACTOR)
+            .ok_or_eyre("Decimal operation failed")?;
+        u64::try_from(scaled_fee).map_err(|e| eyre::eyre!("Conversion failed for fee: {}", e))
     }
 
     // Data size to chunk count
@@ -65,38 +75,37 @@ impl PriceCalc {
     }
 
     // Calculate the decay rate for one GB of perm storage
-    fn calc_perm_cost_per_gb(
-        safe_minimum_number_of_years: u32,
-        annualized_decay_rate: f64,
-        partitions: u64,
-    ) -> eyre::Result<f64> {
+    fn calc_perm_cost_per_gib(
+        safe_minimum_number_of_years: Decimal,
+        annualized_decay_rate: Decimal,
+        partitions: Decimal,
+        annualized_cost_of_storing_1gib: Decimal,
+    ) -> eyre::Result<Decimal> {
         ensure!(
-            safe_minimum_number_of_years != 0,
+            safe_minimum_number_of_years != Decimal::ZERO,
             "Minimum number of years must be at least one"
         );
         ensure!(
-            annualized_decay_rate > 0.0,
+            annualized_decay_rate > Decimal::ZERO,
             "Decay rate must be non-zero and positive"
         );
 
-        let total_cost = Self::ANNUALIZED_COST_OF_STORING_1GB
-            * (1.
-                - f64::powi(
-                    1. - annualized_decay_rate,
-                    safe_minimum_number_of_years as i32,
-                ))
-            / annualized_decay_rate;
-        Ok(total_cost * partitions as f64)
-    }
-
-    // Calculate the perm fee for a number of ingress proofs
-    fn calc_perm_fee_per_ingress_gb(
-        ingress_proofs: u32,
-        ingress_fee: Decimal,
-    ) -> eyre::Result<f64> {
-        ensure!(ingress_proofs != 0, "Ingress proofs must be > 0");
-        let ingress_fee = f64::try_from(ingress_fee)?;
-        Ok(Self::ANNUALIZED_COST_OF_STORING_1GB + ingress_fee * ingress_proofs as f64)
+        let inner = Decimal::ONE
+            .checked_sub(annualized_decay_rate)
+            .ok_or_eyre("Decimal operation failed")?;
+        let inner_exp = inner.powu(u64::try_from(safe_minimum_number_of_years)?);
+        let dividend = Decimal::ONE
+            .checked_sub(inner_exp)
+            .ok_or_eyre("Decimal operation failed")?;
+        let quotient = dividend
+            .checked_div(annualized_decay_rate)
+            .ok_or_eyre("Decimal operation failed")?;
+        let total_cost = annualized_cost_of_storing_1gib
+            .checked_mul(quotient)
+            .ok_or_eyre("Decimal operation failed")?;
+        total_cost
+            .checked_mul(partitions)
+            .ok_or_eyre("Decimal operation failed")
     }
 }
 

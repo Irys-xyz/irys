@@ -1,7 +1,3 @@
-use alloy_primitives::Address;
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
-
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
@@ -9,11 +5,15 @@ use crate::{
         Amount,
     },
 };
+use alloy_primitives::Address;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use serde::{Deserialize, Serialize};
 
 // $44.0 comes from the following doc:
 // https://docs.google.com/spreadsheets/d/1VMcMgguVRBcUUXIRwlUY7FgSTicasvzg_OWJZqk8rrs/edit?gid=0#gid=0
-pub(crate) const ANNUALIZED_COST_OF_OPERATING_16TB: f64 = 44.0;
-pub(crate) const MINER_PERCENTAGE_FEE: f64 = 0.05;
+pub(crate) const ANNUALIZED_COST_OF_OPERATING_16TB: Decimal = dec!(44.0);
+pub(crate) const MINER_PERCENTAGE_FEE: Decimal = dec!(0.05);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
