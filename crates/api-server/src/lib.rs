@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use actix::Addr;
 use actix_cors::Cors;
+use actix_web::dev::Server;
 use actix_web::{
     dev::HttpServiceFactory,
     error::InternalError,
     web::{self, JsonConfig},
     App, HttpResponse, HttpServer,
 };
-use actix_web::dev::Server;
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,

@@ -192,7 +192,8 @@ pub async fn start_irys_node(
     let irys_provider_1 = irys_provider.clone();
 
     let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
-    let (main_actor_thread_shutdown_tx, mut main_actor_thread_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let (main_actor_thread_shutdown_tx, mut main_actor_thread_shutdown_rx) =
+        tokio::sync::mpsc::channel::<()>(1);
     let (consensus_engine_shutdown_sender, consensus_engine_shutdown_receiver) =
         tokio::sync::mpsc::channel::<()>(1);
 
