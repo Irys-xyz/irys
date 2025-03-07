@@ -26,7 +26,7 @@ impl IrysPriceOracle {
         reason = "will be async once proper oracles get added"
     )]
     pub async fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
-        use IrysPriceOracle::*;
+        use IrysPriceOracle::MockOracle;
         match self {
             MockOracle(mock_oracle) => mock_oracle.current_price(),
         }
