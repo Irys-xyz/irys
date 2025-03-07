@@ -10,7 +10,7 @@ use actix_web::{
     web::{self, JsonConfig},
     App, HttpResponse, HttpServer,
 };
-
+use actix_web::dev::Server;
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,
@@ -61,7 +61,7 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
 }
 
-pub async fn run_server(app_state: ApiState, mut shutdown_rx: tokio::sync::mpsc::Receiver<()>) {
+pub async fn run_server(app_state: ApiState) -> Server {
     let port = app_state.config.port;
     info!(?port, "Starting API server");
 
@@ -87,15 +87,7 @@ pub async fn run_server(app_state: ApiState, mut shutdown_rx: tokio::sync::mpsc:
     .unwrap()
     .run();
 
-    let server_handle = server.handle();
-
-    actix_rt::spawn(async move {
-        let _ = shutdown_rx.recv().await;
-        debug!("API shutdown signal received via channel. Stopping server...");
-        server_handle.stop(true).await;
-    });
-
-    server.await.unwrap()
+    server
 }
 
 //==============================================================================

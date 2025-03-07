@@ -192,7 +192,7 @@ pub async fn start_irys_node(
     let irys_provider_1 = irys_provider.clone();
 
     let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
-    let (api_server_shutdown_tx, api_server_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let (main_actor_thread_shutdown_tx, mut main_actor_thread_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (consensus_engine_shutdown_sender, consensus_engine_shutdown_receiver) =
         tokio::sync::mpsc::channel::<()>(1);
 
@@ -602,7 +602,7 @@ pub async fn start_irys_node(
                     reth_thread_handle: None,
                 });
 
-                run_server(ApiState {
+                let server = run_server(ApiState {
                     mempool: mempool_addr,
                     chunk_provider: arc_chunk_provider.clone(),
                     db: irys_db,
@@ -610,16 +610,26 @@ pub async fn start_irys_node(
                     block_tree: Some(block_tree_guard.clone()),
                     block_index: Some(block_index_guard.clone()),
                     config
-                }, api_server_shutdown_rx)
+                })
                 .await;
+
+                let server_handle = server.handle();
+
+                actix_rt::spawn(async move {
+                    let _ = main_actor_thread_shutdown_rx.recv().await;
+                    debug!("Main actor thread received shutdown signal");
+                    debug!("Stopping actors");
+                    for arbiter in arbiters {
+                        arbiter.stop_and_join();
+                    }
+                    debug!("Stopping API server");
+                    server_handle.stop(true).await;
+                });
+
+                server.await.unwrap();
 
                 // Send shutdown signal
                 shutdown_tx.send(()).unwrap();
-
-                debug!("Stopping actors");
-                for arbiter in arbiters {
-                    arbiter.stop_and_join();
-                }
 
                 debug!("Waiting for VDF thread to finish");
                 // Wait for vdf thread to finish & save steps
@@ -644,16 +654,13 @@ pub async fn start_irys_node(
             tokio_runtime.block_on(run_to_completion_or_panic(
                 &mut task_manager,
                 run_until_ctrl_c_or_channel_message(
-                    start_reth_node(task_executor, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider.clone(), latest_block_height, consensus_engine_shutdown_receiver, api_server_shutdown_tx, actor_main_thread_handle),
+                    start_reth_node(task_executor, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider.clone(), latest_block_height, consensus_engine_shutdown_receiver, main_actor_thread_shutdown_tx, consensus_engine_shutdown_sender),
                     reth_shutdown_receiver
                 ),
             )).unwrap();
 
-            debug!("Sending shutdown signal to consensus engine");
-            match consensus_engine_shutdown_sender.try_send(()) {
-                Ok(_) => debug!("Shutdown signal sent to consensus engine"),
-                Err(e) => error!("Failed to send shutdown signal to consensus engine: {:?}", e),
-            }
+            debug!("Waiting for the main actor thread to finish");
+            actor_main_thread_handle.join().unwrap();
 
             task_manager.graceful_shutdown();
 
@@ -678,7 +685,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
     latest_block: u64,
     consensus_engine_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
     main_actor_thread_shutdown_sender: tokio::sync::mpsc::Sender<()>,
-    main_actor_thread_handle: JoinHandle<()>,
+    consensus_engine_shutdown_sender: tokio::sync::mpsc::Sender<()>,
 ) -> eyre::Result<NodeExitReason> {
     let node_handle = irys_reth_node_bridge::run_node(
         Arc::new(chainspec),
@@ -697,13 +704,11 @@ async fn start_reth_node<T: HasName + HasTableType>(
 
     let exit_reason = node_handle.node_exit_future.await?;
 
-    debug!(
-        "Sending shutdown signal to main actor thread {:?}",
-        exit_reason
-    );
-    let _ = main_actor_thread_shutdown_sender.try_send(());
-    debug!("Waiting for the main actor thread to finish");
-    main_actor_thread_handle.join().unwrap();
+    debug!("Sending shutdown signal to main actor thread");
+    main_actor_thread_shutdown_sender.try_send(()).unwrap();
+
+    debug!("Sending shutdown signal to consensus engine");
+    consensus_engine_shutdown_sender.try_send(()).unwrap();
 
     debug!("Stopping RPC servers...");
     let _ = &node_handle.node.rpc_server_handles.auth.clone().stop();
