@@ -1,6 +1,5 @@
 use alloy_rpc_types::BlockId;
 use alloy_signer_local::PrivateKeySigner;
-use foldhash::fast::RandomState;
 use irys_primitives::{Address, Genesis, ShadowReceipt};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use jsonrpsee_core::async_trait;
@@ -128,7 +127,7 @@ impl AccountStateExtApiServer for AccountStateExt {
         dbg!(&addr);
         let socket_addr = SocketAddr::from_str(addr.as_str()).map_err(|e| {
             ErrorObjectOwned::owned::<String>(
-                -32073, // TOOD @JesseTheRobot add a RPC error registry so we don't overlap with error codes/numbers
+                -32073, // TODO @JesseTheRobot add a RPC error registry so we don't overlap with error codes/numbers
                 "unable to convert address into SocketAddr",
                 Some(e.to_string()),
             )
@@ -368,10 +367,7 @@ impl AccountStateExtApiServer for AccountStateExt {
             .with_bundle_update()
             .build();
         // TODO @JesseTheRobot - fix this (it seems like it's a dep & feature re-export issue)
-        let mut journaled_state = JournaledState::new(
-            SpecId::LATEST,
-            HashSet::<Address, RandomState>::with_hasher(RandomState::default()),
-        );
+        let mut journaled_state = JournaledState::new(SpecId::LATEST, HashSet::<Address>::new());
         // let res = apply_shadow(shadow, &mut journaled_state, &mut db);
         let res = simulate_apply_shadow_thin(shadow, &mut journaled_state, &mut db);
         res.map_err(|e| {

@@ -3,7 +3,7 @@ use std::ops::BitXor;
 pub use irys_c::{capacity, capacity_single};
 
 use irys_types::{
-    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk, CONFIG,
+    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk,
 };
 
 use irys_types::CHUNK_SIZE; // do not change where is used for CONFIG.chunk_size as this is hardcoded in C implementation
@@ -17,15 +17,17 @@ pub fn unpack(
     packed_chunk: &PackedChunk,
     entropy_packing_iterations: u32,
     chunk_size: usize,
+    irys_chain_id: u64,
 ) -> UnpackedChunk {
     let mut entropy: Vec<u8> = Vec::with_capacity(chunk_size);
     capacity_single::compute_entropy_chunk(
         packed_chunk.packing_address,
-        packed_chunk.partition_offset as u64,
+        *packed_chunk.partition_offset as u64,
         packed_chunk.partition_hash.0,
         entropy_packing_iterations,
         chunk_size,
         &mut entropy,
+        irys_chain_id,
     );
 
     let unpacked_data = unpack_with_entropy(packed_chunk, entropy, chunk_size);
@@ -57,7 +59,7 @@ pub fn unpack_with_entropy(
     let data_size = packed_chunk.data_size;
     let num_chunks_in_tx = data_size.div_ceil(chunk_size_u64);
     // trim if this is the last chunk & if data_size isn't aligned to chunk_size
-    if (packed_chunk.tx_offset as u64) == num_chunks_in_tx - 1 {
+    if (*packed_chunk.tx_offset as u64) == num_chunks_in_tx - 1 {
         let trailing_bytes = data_size % chunk_size_u64;
         // 0 means this last chunk is a full chunk
         if trailing_bytes != 0 {
@@ -69,7 +71,7 @@ pub fn unpack_with_entropy(
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
 /// defaults to [`PACKING_SHA_1_5_S`]`, returns entropy chunk in out_entropy_chunk parameter.
-/// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (definded in capacity.h file) capacity
+/// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (defined in capacity.h file) capacity
 /// Uses C 2D Packing implementation
 pub fn capacity_pack_range_c(
     mining_address: Address,
@@ -77,6 +79,8 @@ pub fn capacity_pack_range_c(
     partition_hash: PartitionHash,
     iterations: Option<u32>,
     out_entropy_chunk: &mut Vec<u8>,
+    entropy_packing_iterations: u32,
+    irys_chain_id: u64,
 ) {
     let mining_addr_len = mining_address.len(); // note: might not line up with capacity? that should be fine...
     let partition_hash_len = partition_hash.0.len();
@@ -84,15 +88,14 @@ pub fn capacity_pack_range_c(
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
     let entropy_chunk_ptr = out_entropy_chunk.as_ptr() as *mut u8;
 
-    let iterations: u32 = iterations.unwrap_or(CONFIG.entropy_packing_iterations);
-    let chain_id: u64 = CONFIG.irys_chain_id;
+    let iterations: u32 = iterations.unwrap_or(entropy_packing_iterations);
 
     unsafe {
         capacity::compute_entropy_chunk(
             mining_addr,
             mining_addr_len,
             chunk_offset,
-            chain_id,
+            irys_chain_id,
             partition_hash,
             partition_hash_len,
             entropy_chunk_ptr,
@@ -112,23 +115,24 @@ pub fn capacity_pack_range_cuda_c(
     partition_hash: PartitionHash,
     iterations: Option<u32>,
     entropy: &mut Vec<u8>,
+    entropy_packing_iterations: u32,
+    irys_chain_id: u64,
 ) -> u32 {
     let mining_addr_len = mining_address.len();
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
-    let iterations: u32 = iterations.unwrap_or(CONFIG.entropy_packing_iterations);
+    let iterations = iterations.unwrap_or(entropy_packing_iterations);
 
     let entropy_ptr = entropy.as_ptr() as *mut u8;
-    let chain_id: u64 = CONFIG.irys_chain_id;
 
-    let mut result: u32 = 1;
+    let result;
     unsafe {
         result = capacity_cuda::compute_entropy_chunks_cuda(
             mining_addr,
             mining_addr_len,
             chunk_offset,
-            chain_id,
+            irys_chain_id,
             num_chunks as i64,
             partition_hash,
             partition_hash_len,
@@ -149,6 +153,8 @@ pub fn capacity_pack_range_with_data_cuda_c(
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
     iterations: Option<u32>,
+    entropy_packing_iterations: u32,
+    irys_chain_id: u64,
 ) {
     let num_chunks: u32 = data.len() as u32 / CHUNK_SIZE as u32; // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
     let mut entropy: Vec<u8> = Vec::with_capacity(data.len());
@@ -159,6 +165,8 @@ pub fn capacity_pack_range_with_data_cuda_c(
         partition_hash,
         iterations,
         &mut entropy,
+        entropy_packing_iterations,
+        irys_chain_id,
     );
 
     // TODO: check if it is worth to move this to GPU ? implies big data transfer from host to device that now is not needed
@@ -188,8 +196,10 @@ pub fn capacity_pack_range_with_data(
     partition_hash: PartitionHash,
     iterations: Option<u32>,
     chunk_size: usize,
+    entropy_packing_iterations: u32,
+    irys_chain_id: u64,
 ) {
-    let iterations: u32 = iterations.unwrap_or(CONFIG.entropy_packing_iterations);
+    let iterations: u32 = iterations.unwrap_or(entropy_packing_iterations);
 
     let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
     data.iter_mut().enumerate().for_each(|(pos, chunk)| {
@@ -200,6 +210,7 @@ pub fn capacity_pack_range_with_data(
             iterations,
             chunk_size,
             &mut entropy_chunk,
+            irys_chain_id,
         );
         xor_vec_u8_arrays_in_place(chunk, &entropy_chunk);
     })
@@ -212,6 +223,8 @@ pub fn capacity_pack_range_with_data_c(
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
     iterations: Option<u32>,
+    entropy_packing_iterations: u32,
+    irys_chain_id: u64,
 ) {
     let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
     data.iter_mut().enumerate().for_each(|(pos, chunk)| {
@@ -221,6 +234,8 @@ pub fn capacity_pack_range_with_data_c(
             partition_hash,
             iterations,
             &mut entropy_chunk,
+            entropy_packing_iterations,
+            irys_chain_id,
         );
         xor_vec_u8_arrays_in_place(chunk, &entropy_chunk);
     })
@@ -249,7 +264,7 @@ pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
 mod tests {
     use crate::capacity_single::SHA_HASH_SIZE;
     use crate::*;
-    use irys_types::H256;
+    use irys_types::{Config, PartitionChunkOffset, TxChunkOffset, H256};
     use rand::{Rng, RngCore};
     use std::time::*;
 
@@ -258,13 +273,14 @@ mod tests {
     #[test]
     fn test_compute_entropy_chunk() {
         let mut rng = rand::thread_rng();
-        let mining_address = Address::random();
+        let testnet_config = Config::testnet();
+        let mining_address = testnet_config.miner_address();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
         let iterations = 2 * CHUNK_SIZE as u32;
 
-        // Please do not change CHUNK_SIZE to CHUNK_SIZE as this compares with C implementation that uses harcoded 256KB
+        // Please do not change CHUNK_SIZE to CHUNK_SIZE as this compares with C implementation that uses hardcoded 256KB
         let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
         let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
 
@@ -277,6 +293,7 @@ mod tests {
             iterations,
             CHUNK_SIZE as usize,
             &mut chunk,
+            testnet_config.chain_id,
         );
 
         capacity_single::compute_entropy_chunk(
@@ -286,6 +303,7 @@ mod tests {
             iterations,
             CHUNK_SIZE as usize,
             &mut chunk2,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -301,6 +319,8 @@ mod tests {
             partition_hash.into(),
             Some(iterations),
             &mut c_chunk,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         capacity_pack_range_c(
@@ -309,6 +329,8 @@ mod tests {
             partition_hash.into(),
             Some(iterations),
             &mut c_chunk2,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -327,6 +349,8 @@ mod tests {
             partition_hash.into(),
             Some(iterations),
             &mut c_chunk_cuda,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         println!("CUDA result: {}", result);
@@ -352,6 +376,7 @@ mod tests {
 
     #[test]
     fn test_bench_chunks_packing() {
+        let testnet_config = Config::testnet();
         let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
@@ -384,6 +409,8 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -398,6 +425,8 @@ mod tests {
             partition_hash.into(),
             iterations,
             CHUNK_SIZE as usize,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -405,7 +434,7 @@ mod tests {
 
         assert_eq!(chunks, chunks_rust, "Rust and C packing should be equal");
 
-        // calculate entropy for choosen random chunk
+        // calculate entropy for chosen random chunk
         let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE.try_into().unwrap());
         capacity_pack_range_c(
             mining_address,
@@ -413,6 +442,8 @@ mod tests {
             partition_hash.into(),
             iterations,
             &mut entropy_chunk,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         // sign picked random chunk with entropy
@@ -424,6 +455,7 @@ mod tests {
     #[cfg(feature = "nvidia")]
     #[test]
     fn test_bench_chunks_packing_cuda() {
+        let testnet_config = Config::testnet();
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
@@ -452,6 +484,8 @@ mod tests {
             chunk_offset,
             partition_hash.into(),
             iterations,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -465,6 +499,8 @@ mod tests {
             partition_hash.into(),
             iterations,
             CHUNK_SIZE as usize,
+            testnet_config.entropy_packing_iterations,
+            testnet_config.chain_id,
         );
 
         let elapsed = now.elapsed();
@@ -482,6 +518,7 @@ mod tests {
     fn test_chunk_packing_unpacking() {
         let mut rng = rand::thread_rng();
 
+        let testnet_config = Config::testnet();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0u8; SHA_HASH_SIZE];
@@ -499,6 +536,7 @@ mod tests {
             iterations,
             chunk_size,
             &mut entropy_chunk,
+            testnet_config.chain_id,
         );
 
         // simulate a smaller end chunk
@@ -514,13 +552,18 @@ mod tests {
             data_size: data_size as u64,
             data_path: Base64(vec![]),
             bytes: Base64(packed_data.clone()),
-            tx_offset: 0,
+            tx_offset: TxChunkOffset::from(0),
             packing_address: mining_address,
-            partition_offset: chunk_offset as u32,
+            partition_offset: PartitionChunkOffset::from(chunk_offset as u32),
             partition_hash: H256::from(partition_hash),
         };
 
-        let unpacked_chunk = unpack(&packed_chunk, iterations, chunk_size);
+        let unpacked_chunk = unpack(
+            &packed_chunk,
+            iterations,
+            chunk_size,
+            testnet_config.chain_id,
+        );
 
         assert_eq!(unpacked_chunk.bytes.0, data_bytes);
     }

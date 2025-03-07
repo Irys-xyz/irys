@@ -5,7 +5,7 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{ChunkIngressError, ChunkIngressMessage};
 use irys_types::UnpackedChunk;
-use log::info;
+use tracing::info;
 
 use crate::ApiState;
 

@@ -2,7 +2,7 @@ use eyre::OptionExt;
 use irys_database::Ledger;
 use irys_types::{
     ChunkFormat, DataRoot, DatabaseProvider, LedgerChunkOffset, PackedChunk, StorageConfig,
-    TxRelativeChunkOffset,
+    TxChunkOffset,
 };
 use std::sync::Arc;
 
@@ -53,7 +53,7 @@ impl ChunkProvider {
         &self,
         ledger: Ledger,
         data_root: DataRoot,
-        data_tx_offset: TxRelativeChunkOffset,
+        data_tx_offset: TxChunkOffset,
     ) -> eyre::Result<Option<ChunkFormat>> {
         // TODO: read from the cache
 
@@ -81,15 +81,17 @@ impl ChunkProvider {
                 .0
                 .iter()
                 .filter_map(|so| {
-                    checked_add_i32_u64(*so, sm_range_start) // translate into ledger-relative space
-                    .map(|mapped_start| mapped_start + (data_tx_offset as u64))
+                    checked_add_i32_u64(**so, *sm_range_start) // translate into ledger-relative space
+                    .map(|mapped_start| mapped_start + (*data_tx_offset as u64))
                 })
                 .collect::<Vec<_>>();
 
             for ledger_relative_offset in offsets {
                 // try other offsets and sm's if we get an Error or a None
                 // TODO: if we keep this resolver, make generate_full_chunk more modular so we can pass in work we've already done (getting the ledger relative offset, etc)
-                if let Ok(Some(r)) = sm.generate_full_chunk(ledger_relative_offset) {
+                if let Ok(Some(r)) =
+                    sm.generate_full_chunk(LedgerChunkOffset::from(ledger_relative_offset))
+                {
                     return Ok(Some(ChunkFormat::Packed(r)));
                 }
             }
@@ -128,7 +130,7 @@ impl ChunkProvider {
                 .0
                 .iter()
                 .filter_map(|so| {
-                    checked_add_i32_u64(*so, sm_range_start) // translate into ledger-relative space
+                    checked_add_i32_u64(**so, sm_range_start.into()) // translate into ledger-relative space
                 })
                 .collect::<Vec<_>>();
 
@@ -149,7 +151,8 @@ mod tests {
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, Base64, LedgerChunkRange,
+        irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
+        partition_chunk_offset_ie, Base64, Config, LedgerChunkRange, PartitionChunkOffset,
         TransactionLedger, UnpackedChunk,
     };
     use nodit::interval::{ie, ii};
@@ -157,10 +160,19 @@ mod tests {
 
     #[test]
     fn get_by_data_tx_offset_test() -> eyre::Result<()> {
+        let testnet_config = Config {
+            num_writes_before_sync: 1,
+            chunk_size: 32,
+            num_chunks_in_partition: 100,
+            ..Config::testnet()
+        };
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
-            submodules: vec![(ie(0, 50), "hdd0".into()), (ie(50, 100), "hdd1".into())],
+            submodules: vec![
+                (partition_chunk_offset_ie!(0, 50), "hdd0".into()),
+                (partition_chunk_offset_ie!(50, 100), "hdd1".into()),
+            ],
         }];
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
@@ -169,12 +181,7 @@ mod tests {
         let arc_db = DatabaseProvider(Arc::new(db));
 
         // Override the default StorageModule config for testing
-        let config = StorageConfig {
-            min_writes_before_sync: 1,
-            chunk_size: 32,
-            num_chunks_in_partition: 100,
-            ..Default::default()
-        };
+        let config = StorageConfig::new(&testnet_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
@@ -184,7 +191,7 @@ mod tests {
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        let irys = IrysSigner::random_signer_with_chunk_size(config.chunk_size);
+        let irys = IrysSigner::random_signer(&testnet_config);
         let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
         let tx = irys.sign_transaction(tx).unwrap();
 
@@ -200,7 +207,7 @@ mod tests {
 
         storage_module.pack_with_zeros();
 
-        let chunk_range = ii(49, 51);
+        let chunk_range = ledger_chunk_offset_ii!(49, 51);
         let _ = storage_module.index_transaction_data(
             tx_path,
             data_root,
@@ -220,7 +227,7 @@ mod tests {
                 data_size: data_size as u64,
                 data_path: data_path.clone(),
                 bytes: chunk_bytes.clone(),
-                tx_offset: tx_chunk_offset as u32,
+                tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
             };
             storage_module.write_data_chunk(&chunk)?;
             unpacked_chunks.push(chunk);

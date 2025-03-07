@@ -2,13 +2,11 @@ use std::time::Duration;
 
 use alloy_core::primitives::{TxHash, U256};
 use irys_actors::block_producer::SolutionFoundMessage;
-use irys_chain::chain::start_for_testing;
+use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, Address, CONFIG, MAX_CHUNK_SIZE,
-};
+use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, Config};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
 use reth_db::Database as _;
@@ -22,22 +20,23 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 const DEV2_PRIVATE_KEY: &str = "9687cbc3f9f3a0b6dffbf01ec30143e33b7c49f789257d7836eb54b9ae5d27e2";
 const DEV2_ADDRESS: &str = "Bea4f456A5801cf9Af196a582D6Ec425c970c2C6";
 
-// #[tokio::test]
-/// WARNING DO NOT RUN AUTOMATICALLY
-/// THIS TEST BLOCKS EXPECTING AN EXTERNAL TX TO BE SUBMITTED, THROUGH A TOOL LIKE METAMASK
-async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
+#[ignore]
+#[tokio::test]
+/// This test is designed as a utility for external tooling integrations (Js Client, metamask, etc) - it will wait to be sent an EVM transaction,
+/// After which it will mine blocks continuously until stopped.
+async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
     let expected_addr = hex::decode(DEV_ADDRESS)?;
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let mut config = IrysNodeConfig {
-        mining_signer: IrysSigner {
-            signer: SigningKey::from_slice(dev_wallet.as_slice())?,
-            chain_id: CONFIG.irys_chain_id,
-            chunk_size: MAX_CHUNK_SIZE,
-        },
-        base_directory: temp_dir.path().to_path_buf(),
-        ..Default::default()
+    let testnet_config = Config::testnet();
+    let temp_dir = setup_tracing_and_temp_dir(Some("continuous_blockprod_evm_tx"), false);
+    let mut config = IrysNodeConfig::new(&testnet_config);
+    config.mining_signer = IrysSigner {
+        signer: SigningKey::from_slice(dev_wallet.as_slice())?,
+        chain_id: testnet_config.chain_id,
+        chunk_size: testnet_config.chunk_size as usize,
     };
+    config.base_directory = temp_dir.path().to_path_buf();
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
 
     assert_eq!(
         config.mining_signer.address(),
@@ -47,8 +46,8 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
     let account1_address = hex::decode(DEV2_ADDRESS)?;
     let account1 = IrysSigner {
         signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
-        chain_id: CONFIG.irys_chain_id,
-        chunk_size: MAX_CHUNK_SIZE,
+        chain_id: testnet_config.chain_id,
+        chunk_size: testnet_config.chunk_size as usize,
     };
     assert_eq!(
         account1.address(),
@@ -79,7 +78,7 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
         ),
     ]);
 
-    let node = start_for_testing(config).await?;
+    let node = start_irys_node(config, storage_config, testnet_config).await?;
 
     let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
 
@@ -120,5 +119,6 @@ async fn test_basic_blockprod_extern_tx_src() -> eyre::Result<()> {
         sleep(Duration::from_millis(10_000)).await;
     }
 
+    #[allow(unreachable_code)]
     Ok(())
 }

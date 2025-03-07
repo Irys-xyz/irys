@@ -15,14 +15,14 @@ use crate::{
     BlockFinalizedMessage,
 };
 use actix::prelude::*;
-use base58::ToBase58;
+use base58::ToBase58 as _;
 use eyre::ensure;
 use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, Initialized, Ledger};
 use irys_types::{
     Address, BlockHash, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
     IrysTransactionId, StorageConfig, H256, U256,
 };
-use reth_db::{transaction::DbTx, Database};
+use reth_db::{transaction::DbTx, Database as _};
 use tracing::{debug, error, info};
 
 //==============================================================================
@@ -36,7 +36,7 @@ pub struct BlockTreeReadGuard {
 }
 
 impl BlockTreeReadGuard {
-    /// Creates a new `ReadGard` for the `block_tree` cache
+    /// Creates a new `ReadGuard` for the `block_tree` cache
     pub const fn new(block_tree_cache: Arc<RwLock<BlockTreeCache>>) -> Self {
         Self { block_tree_cache }
     }
@@ -145,7 +145,6 @@ impl BlockTreeService {
             &block_header.block_hash.0.to_base58(),
             &block_header.height
         );
-
         let chunk_migration = ChunkMigrationService::from_registry();
         let block_index = BlockIndexService::from_registry();
         let block_finalized_message = BlockFinalizedMessage {
@@ -231,10 +230,7 @@ impl BlockTreeService {
             }
             panic!("Block tree and index out of sync");
         }
-        debug!(
-            "JESSEDEBUG finalizing irys block {} ({})",
-            &finalized_hash, &finalized_height
-        );
+        debug!(?finalized_hash, ?finalized_height, "finalizing irys block");
 
         if let Err(e) = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
             head_hash: BlockHashType::Irys(cache.tip),
@@ -463,6 +459,7 @@ pub enum BlockState {
 impl BlockTreeCache {
     /// Create a new cache initialized with a starting block. The block is marked as
     /// on-chain and set as the tip.
+    #[must_use]
     pub fn new(block: &IrysBlockHeader) -> Self {
         let block_hash = block.block_hash;
         let solution_hash = block.solution_hash;
@@ -785,6 +782,7 @@ impl BlockTreeCache {
             .unwrap_or((U256::zero(), BlockHash::default()))
     }
 
+    #[must_use]
     pub fn get_canonical_chain(&self) -> (Vec<ChainCacheEntry>, usize) {
         self.longest_chain_cache.clone()
     }
@@ -958,11 +956,13 @@ impl BlockTreeCache {
     }
 
     /// Gets block by hash
+    #[must_use]
     pub fn get_block(&self, block_hash: &BlockHash) -> Option<&IrysBlockHeader> {
         self.blocks.get(block_hash).map(|entry| &entry.block)
     }
 
     /// Gets block and its current validation status    
+    #[must_use]
     pub fn get_block_and_status(
         &self,
         block_hash: &BlockHash,
@@ -995,6 +995,7 @@ impl BlockTreeCache {
 
     /// Finds the earliest not validated block, walking back the chain
     /// until finding a validated block, reaching block height 0, or exceeding cache depth
+    #[must_use]
     pub fn get_earliest_not_onchain<'a>(
         &'a self,
         block: &'a BlockEntry,
@@ -1028,6 +1029,7 @@ impl BlockTreeCache {
 
     /// Get the earliest unvalidated block from the longest chain
     /// Relies on the `longest_chain_cache`
+    #[must_use]
     pub fn get_earliest_not_onchain_in_longest_chain(
         &self,
     ) -> Option<(&BlockEntry, Vec<&IrysBlockHeader>, SystemTime)> {
@@ -1062,6 +1064,7 @@ impl BlockTreeCache {
     /// - Has matching `solution_hash`
     /// - Is not the excluded block
     /// - Either has same `cumulative_diff` as input or meets double-signing criteria
+    #[must_use]
     pub fn get_by_solution_hash(
         &self,
         solution_hash: &H256,
@@ -1163,14 +1166,12 @@ impl BlockTreeCache {
     }
 
     /// Returns true if solution hash exists in cache
+    #[must_use]
     pub fn is_known_solution_hash(&self, solution_hash: &H256) -> bool {
         self.solutions.contains_key(solution_hash)
     }
 }
 
-//==============================================================================
-// Tests
-//------------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1901,7 +1902,7 @@ mod tests {
     }
 
     fn random_block(cumulative_diff: U256) -> IrysBlockHeader {
-        let mut block = IrysBlockHeader::new();
+        let mut block = IrysBlockHeader::new_mock_header();
         block.block_hash = BlockHash::random();
         block.solution_hash = H256::random(); // Ensure unique solution hash
         block.height = 0; // Default to genesis

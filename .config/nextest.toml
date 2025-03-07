@@ -1,0 +1,13 @@
+# default config can be viewed at https://nexte.st/docs/configuration/
+[test-groups]
+serial = { max-threads = 1 }
+
+# serial tests
+[[profile.default.overrides]]
+filter = 'test(/.*serial_.*/)'
+test-group = 'serial'
+
+# heavy tests
+[[profile.default.overrides]]
+filter = 'test(/^heavy/)'
+threads-required = 2

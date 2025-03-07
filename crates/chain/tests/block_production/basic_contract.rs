@@ -1,19 +1,15 @@
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 
 use alloy_core::primitives::U256;
 use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use futures::future::select;
-use irys_actors::block_producer::SolutionFoundMessage;
-use irys_chain::{chain::start_for_testing, IrysNodeCtx};
+use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, StorageConfig, VDFStepsConfig};
-use irys_vdf::vdf_state::VdfStepsReadGuard;
+use irys_types::{irys::IrysSigner, Config};
 use reth_primitives::GenesisAccount;
-use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::future_or_mine_on_timeout;
@@ -25,15 +21,15 @@ sol!(
     IrysERC20,
     "../../fixtures/contracts/out/IrysERC20.sol/IrysERC20.json"
 );
-
 #[tokio::test]
-async fn test_erc20() -> eyre::Result<()> {
+async fn serial_test_erc20() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_erc20"), false);
-    let mut config = IrysNodeConfig::default();
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
     let main_address = config.mining_signer.address();
 
-    let account1 = IrysSigner::random_signer();
+    let account1 = IrysSigner::random_signer(&testnet_config);
 
     config.extend_genesis_accounts(vec![
         (
@@ -52,15 +48,15 @@ async fn test_erc20() -> eyre::Result<()> {
         ),
     ]);
 
-    let node = start_for_testing(config.clone()).await?;
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let signer: PrivateKeySigner = config.mining_signer.clone().into();
 
-    let signer: PrivateKeySigner = config.mining_signer.signer.into();
-    let wallet: EthereumWallet = EthereumWallet::from(signer);
+    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
 
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
-        .wallet(wallet)
-        .on_http("http://localhost:8080".parse()?);
+        .wallet(EthereumWallet::from(signer))
+        .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
 
     let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.address()));
 

@@ -1,18 +1,25 @@
+use std::sync::Arc;
+
 use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
-    BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService, Subscribe, Unsubscribe,
+    BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService,
+    BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
 };
+use crate::packing::PackingRequest;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
+use eyre::WrapErr;
 use irys_efficient_sampling::Ranges;
 use irys_storage::{ie, ii, StorageModule};
 use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
-use irys_types::{Address, AtomicVdfStepNumber, H256List, PartitionChunkOffset};
+use irys_types::{
+    partition_chunk_offset_ie, Address, AtomicVdfStepNumber, H256List, LedgerChunkOffset,
+    PartitionChunkOffset, PartitionChunkRange,
+};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
-use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
@@ -20,6 +27,7 @@ pub struct PartitionMiningActor {
     mining_address: Address,
     _database_provider: DatabaseProvider,
     block_producer_actor: Recipient<SolutionFoundMessage>,
+    packing_actor: Recipient<PackingRequest>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
     difficulty: U256,
@@ -36,6 +44,7 @@ impl PartitionMiningActor {
         mining_address: Address,
         _database_provider: DatabaseProvider,
         block_producer_addr: Recipient<SolutionFoundMessage>,
+        packing_actor: Recipient<PackingRequest>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStepsReadGuard,
@@ -45,6 +54,7 @@ impl PartitionMiningActor {
             mining_address,
             _database_provider,
             block_producer_actor: block_producer_addr,
+            packing_actor,
             ranges: Ranges::new(
                 (storage_module.storage_config.num_chunks_in_partition
                     / storage_module.storage_config.num_chunks_in_recall_range)
@@ -68,7 +78,6 @@ impl PartitionMiningActor {
         let next_ranges_step = self.ranges.last_step_num + 1; // next consecutive step expected to be calculated by ranges
         if next_ranges_step >= step {
             debug!("Step {} already processed or next consecutive one", step);
-            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64)
         } else {
             debug!(
                 "Non consecutive step {} may need to reconstruct ranges",
@@ -91,15 +100,17 @@ impl PartitionMiningActor {
             } else {
                 next_ranges_step
             };
-            // check if we need to reconstruct steps, that is inverval start..=step-1 is not empty
-            if start <= step - 1 {
+            // check if we need to reconstruct steps, that is interval start..=step-1 is not empty
+            if start < step {
                 debug!("Getting stored steps from ({}..={})", start, step - 1);
                 let vdf_steps = self.steps_guard.read();
                 let steps = vdf_steps.get_steps(ii(start, step - 1))?; // -1 because last step is calculated in next get_recall_range call, with its corresponding argument seed
                 self.ranges.reconstruct(&steps, partition_hash);
             };
-            Ok(self.ranges.get_recall_range(step, seed, partition_hash) as u64) // calculates step range
         }
+
+        u64::try_from(self.ranges.get_recall_range(step, seed, partition_hash)?)
+            .wrap_err("recall range larger than u64")
     }
 
     fn mine_partition_with_seed(
@@ -131,9 +142,9 @@ impl PartitionMiningActor {
         //     recall_range_index, start_chunk_offset
         // );
 
-        let read_range = ie(
-            start_chunk_offset as u32,
-            start_chunk_offset + config.num_chunks_in_recall_range as u32,
+        let read_range = partition_chunk_offset_ie!(
+            start_chunk_offset,
+            start_chunk_offset + config.num_chunks_in_recall_range as u32
         );
 
         // haven't tested this, but it looks correct
@@ -154,14 +165,14 @@ impl PartitionMiningActor {
         for (index, (_chunk_offset, (chunk_bytes, chunk_type))) in chunks.iter().enumerate() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
             let partition_chunk_offset =
-                (start_chunk_offset + index as u32) as PartitionChunkOffset;
+                PartitionChunkOffset::from(start_chunk_offset + index as u32);
 
             // Only include the tx_path and data_path for chunks that contain data
             let (tx_path, data_path) = match chunk_type {
                 irys_storage::ChunkType::Entropy => (None, None),
                 irys_storage::ChunkType::Data => self
                     .storage_module
-                    .read_tx_data_path(partition_chunk_offset as u64)?,
+                    .read_tx_data_path(LedgerChunkOffset::from(*partition_chunk_offset))?,
                 irys_storage::ChunkType::Uninitialized => {
                     return Err(eyre::eyre!("Cannot mine uninitialized chunks"))
                 }
@@ -191,7 +202,7 @@ impl PartitionMiningActor {
 
                 let solution = SolutionContext {
                     partition_hash,
-                    chunk_offset: partition_chunk_offset,
+                    chunk_offset: *partition_chunk_offset,
                     recall_chunk_index: index as u32,
                     mining_address: self.mining_address,
                     tx_path, // capacity partitions have no tx_path nor data_path
@@ -298,6 +309,35 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
     }
 }
 
+impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
+    type Result = ();
+
+    fn handle(&mut self, msg: BroadcastPartitionsExpiration, _ctx: &mut Context<Self>) {
+        self.storage_module.partition_hash().map(|partition_hash| {
+            let msg = msg.0;
+            if msg.0.contains(&partition_hash) {
+                if let Ok(interval) = self.storage_module.reset() {
+                    debug!(?partition_hash, ?interval, "Expiring partition hash");
+                    self.packing_actor.do_send(PackingRequest {
+                        storage_module: self.storage_module.clone(),
+                        chunk_range: PartitionChunkRange(interval),
+                    });
+                } else {
+                    error!(
+                        ?partition_hash,
+                        "Expiring partition hash, could not reset its storage module!"
+                    );
+                    return Err(eyre::eyre!(
+                        "Could not reset storage module with partition hash {}",
+                        partition_hash
+                    ));
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 /// Message type for controlling mining
@@ -334,7 +374,9 @@ mod tests {
     };
     use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
     use crate::mining::{PartitionMiningActor, Seed};
+    use crate::packing::PackingActor;
     use crate::vdf_service::{GetVdfStateMessage, VdfSeed, VdfService};
+    use actix::actors::mocker::Mocker;
     use actix::{Actor, Addr, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_database::{open_or_create_db, tables::IrysTables};
@@ -344,7 +386,7 @@ mod tests {
         app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
     };
-    use irys_types::{partition, H256List, IrysBlockHeader};
+    use irys_types::{ledger_chunk_offset_ie, H256List, IrysBlockHeader, LedgerChunkOffset};
     use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
     use std::any::Any;
     use std::collections::VecDeque;
@@ -387,6 +429,10 @@ mod tests {
 
         let mocked_block_producer = get_mocked_block_producer(closure_arc);
 
+        let packing = Mocker::<PackingActor>::mock(Box::new(move |_msg, _ctx| {
+            Box::new(Some(())) as Box<dyn Any>
+        }));
+
         let block_producer_actor_addr: Addr<BlockProducerMockActor> = mocked_block_producer.start();
         let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
         let mocked_addr = MockedBlockProducerAddr(recipient);
@@ -403,6 +449,7 @@ mod tests {
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1,
             chunk_migration_depth: 1, // Testnet / single node config
+            chain_id: 1,
         };
 
         let infos = vec![StorageModuleInfo {
@@ -414,7 +461,7 @@ mod tests {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ie(0, chunk_count), "hdd0".into()), // 0 to 3 inclusive, 4 chunks
+                (partition_chunk_offset_ie!(0, chunk_count), "hdd0".into()), // 0 to 3 inclusive, 4 chunks
             ],
         }];
 
@@ -444,7 +491,7 @@ mod tests {
         let _ = storage_module.index_transaction_data(
             tx_path.to_vec(),
             data_root,
-            LedgerChunkRange(ie(0, chunk_count as u64)),
+            LedgerChunkRange(ledger_chunk_offset_ie!(0, chunk_count)),
         );
 
         for tx_chunk_offset in 0..chunk_count {
@@ -453,7 +500,7 @@ mod tests {
                 data_size: chunk_size,
                 data_path: data_path.to_vec().into(),
                 bytes: chunk_data.to_vec().into(),
-                tx_offset: tx_chunk_offset,
+                tx_offset: tx_chunk_offset.into(),
             };
             storage_module.write_data_chunk(&chunk).unwrap();
         }
@@ -473,6 +520,7 @@ mod tests {
             mining_address,
             database_provider.clone(),
             mocked_addr.0,
+            packing.start().recipient(),
             storage_module,
             true,
             vdf_steps_guard.clone(),
@@ -550,7 +598,7 @@ mod tests {
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
             submodules: vec![
-                (ie(0, 10), "hdd0".into()), // 10 chunks
+                (partition_chunk_offset_ie!(0, 10), "hdd0".into()), // 10 chunks
             ],
         }];
 
@@ -586,8 +634,10 @@ mod tests {
             max_seeds_num: 5,
             seeds: VecDeque::new(),
         };
-
-        let vdf_service = VdfService::from_atomic_state(Arc::new(RwLock::new(vdf_state))).start();
+        let vdf_service = VdfService {
+            vdf_state: Arc::new(RwLock::new(vdf_state)),
+        }
+        .start();
         let vdf_steps_guard: VdfStepsReadGuard =
             vdf_service.send(GetVdfStateMessage).await.unwrap();
 
@@ -605,10 +655,15 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
+        let packing = Mocker::<PackingActor>::mock(Box::new(move |_msg, _ctx| {
+            Box::new(Some(())) as Box<dyn Any>
+        }));
+
         let mut partition_mining_actor = PartitionMiningActor::new(
             mining_address,
             database_provider.clone(),
             mocked_addr.0,
+            packing.start().recipient(),
             storage_module,
             false,
             vdf_steps_guard.clone(),
@@ -620,14 +675,14 @@ mod tests {
             .unwrap();
 
         let mut ranges = Ranges::new(5);
-        ranges.get_recall_range(1, &hash, &partition_hash);
-        ranges.get_recall_range(2, &hash, &partition_hash);
-        ranges.get_recall_range(3, &hash, &partition_hash);
-        ranges.get_recall_range(4, &hash, &partition_hash);
-        ranges.get_recall_range(5, &hash, &partition_hash);
+        ranges.get_recall_range(1, &hash, &partition_hash).unwrap();
+        ranges.get_recall_range(2, &hash, &partition_hash).unwrap();
+        ranges.get_recall_range(3, &hash, &partition_hash).unwrap();
+        ranges.get_recall_range(4, &hash, &partition_hash).unwrap();
+        ranges.get_recall_range(5, &hash, &partition_hash).unwrap();
         // reset
-        ranges.get_recall_range(6, &hash, &partition_hash);
-        let range2 = ranges.get_recall_range(7, &hash, &partition_hash) as u64;
+        ranges.get_recall_range(6, &hash, &partition_hash).unwrap();
+        let range2 = ranges.get_recall_range(7, &hash, &partition_hash).unwrap() as u64;
 
         assert_eq!(range, range2, "Ranges should be equal");
     }

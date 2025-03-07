@@ -15,8 +15,8 @@ use {
     irys_types::{split_interval, CHUNK_SIZE},
 };
 
-use irys_storage::{ChunkType, InclusiveInterval, StorageModule};
-use irys_types::{PartitionChunkRange, StorageConfig};
+use irys_storage::{ChunkType, StorageModule};
+use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, StorageConfig};
 use reth::tasks::TaskExecutor;
 use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
@@ -57,13 +57,17 @@ pub struct PackingConfig {
     /// Max. number of chunks send to GPU packing
     #[allow(unused)]
     pub max_chunks: u32,
+    /// Irys chain id
+    pub chain_id: u64,
 }
-impl Default for PackingConfig {
-    fn default() -> Self {
+
+impl PackingConfig {
+    pub fn new(config: &Config) -> Self {
         Self {
             poll_duration: Duration::from_millis(1000),
-            concurrency: 4,
-            max_chunks: 1024,
+            concurrency: config.cpu_packing_concurrency,
+            max_chunks: config.gpu_packing_batch_size,
+            chain_id: config.chain_id,
         }
     }
 }
@@ -74,9 +78,8 @@ impl PackingActor {
         actix_runtime_handle: Handle,
         task_executor: TaskExecutor,
         storage_module_ids: Vec<usize>,
-        config: Option<PackingConfig>,
+        config: PackingConfig,
     ) -> Self {
-        let config = config.unwrap_or_default();
         let semaphore = storage_module_ids
             .iter()
             .map(|s| (*s, Arc::new(Semaphore::new(config.concurrency.into()))))
@@ -95,7 +98,7 @@ impl PackingActor {
         }
     }
 
-    async fn process_jobs(self, storage_module_id: usize, pending_jobs: AtomicPackingJobQueue) {
+    async fn process_jobs(self, _storage_module_id: usize, pending_jobs: AtomicPackingJobQueue) {
         loop {
             // block as the compiler can't reason about explicit read guard drops with Send bounds apparently
             let front = {
@@ -137,9 +140,12 @@ impl PackingActor {
             let storage_module_id = storage_module.id;
             let semaphore = self.semaphore.get(&storage_module_id).unwrap();
 
+            let start_value = *chunk_range.0.start();
+            let end_value = *chunk_range.0.end();
+
             match PACKING_TYPE {
                 PackingType::CPU => {
-                    for i in chunk_range.start()..=chunk_range.end() {
+                    for i in start_value..=end_value {
                         // each semaphore permit corresponds to a single chunk to be packed, as we assume it'll use an entire CPU thread's worth of compute.
                         // when we implement GPU packing, this is where we need to fork the logic between the two methods - GPU can take larger contiguous segments
                         // whereas CPU will do this permit system
@@ -152,29 +158,30 @@ impl PackingActor {
                         let permit = semaphore.acquire_owned().await.unwrap();
                         //debug!(target: "irys::packing", "Packing chunk {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
                         self.task_executor.spawn_blocking(async move {
-                            let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
+                            let mut out = Vec::with_capacity(chunk_size as usize);
                             compute_entropy_chunk(
                                 mining_address,
                                 i as u64,
                                 partition_hash.0,
                                 entropy_packing_iterations,
-                                chunk_size.try_into().unwrap(),
+                                chunk_size as usize,
                                 &mut out,
+                                self.config.chain_id
                             );
 
                             debug!(target: "irys::packing::progress", "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                             // write the chunk
                             //debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.id);
-                            storage_module.write_chunk(i, out, ChunkType::Entropy);
+                            storage_module.write_chunk(PartitionChunkOffset::from(i), out, ChunkType::Entropy);
                             let _ = storage_module.sync_pending_chunks();
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                         });
 
                         if i % 1000 == 0 {
-                            debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", chunk_range.start(), &i, chunk_range.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                            debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", chunk_range.0.start(), &i, chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                         }
                     }
-                    debug!(target: "irys::packing::done", "CPU Packed chunk {} - {} for SM {} partition_hash {} mining_address {} iterations {}",  chunk_range.start(),chunk_range.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                    debug!(target: "irys::packing::done", "CPU Packed chunk {} - {} for SM {} partition_hash {} mining_address {} iterations {}",  chunk_range.0.start(),chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                 }
                 #[cfg(feature = "nvidia")]
                 PackingType::CUDA => {
@@ -182,18 +189,22 @@ impl PackingActor {
                         chunk_size, CHUNK_SIZE,
                         "Chunk size is not aligned with C code"
                     );
+
                     for chunk_range_split in split_interval(&chunk_range, self.config.max_chunks)
                         .unwrap()
                         .iter()
                     {
+                        let start: u32 = *(*chunk_range_split).start();
+                        let end: u32 = *(*chunk_range_split).end();
+
+                        let num_chunks = end - start + 1;
+
                         debug!(
-                            "Packing using CUDA C implementation, start:{} end:{}!",
-                            chunk_range_split.start(),
-                            chunk_range_split.end()
+                            "Packing using CUDA C implementation, start:{} end:{} (len: {})",
+                            &start, &end, &num_chunks
                         );
-                        let num_chunks = chunk_range_split.end() - chunk_range_split.start() + 1;
+
                         let storage_module = storage_module.clone();
-                        let chunk_range_split = chunk_range_split.clone();
 
                         let semaphore = self.semaphore.get(&storage_module_id).unwrap().clone();
                         // wait for the permit before spawning the thread
@@ -207,14 +218,16 @@ impl PackingActor {
                             capacity_pack_range_cuda_c(
                                 num_chunks,
                                 mining_address,
-                                chunk_range_split.start() as u64,
+                                start as u64,
                                 partition_hash,
                                 Some(entropy_packing_iterations),
                                 &mut out,
+                                entropy_packing_iterations,
+                                self.config.chain_id,
                             );
                             for i in 0..num_chunks {
                                 storage_module.write_chunk(
-                                    chunk_range_split.start() + i,
+                                    (start + i).into(),
                                     out[(i * chunk_size as u32) as usize
                                         ..((i + 1) * chunk_size as u32) as usize]
                                         .to_vec(),
@@ -224,7 +237,7 @@ impl PackingActor {
                             }
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                         });
-                        debug!(target: "irys::packing::update", "CUDA Packed chunks {} - {} for SM {} partition_hash {} mining_address {} iterations {}", chunk_range_split.start(), chunk_range_split.end(), &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                        debug!(target: "irys::packing::update", "CUDA Packed chunks {} - {} for SM {} partition_hash {} mining_address {} iterations {}", start, end, &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
                     }
                 }
                 _ => unimplemented!(),
@@ -273,7 +286,7 @@ impl Handler<PackingRequest> for PackingActor {
     type Result = ();
 
     fn handle(&mut self, msg: PackingRequest, _ctx: &mut Self::Context) -> Self::Result {
-        debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.start(), &msg.chunk_range.end(), &msg.storage_module.id);
+        debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.0.start(), &msg.chunk_range.0.end(), &msg.storage_module.id);
         self.pending_jobs
             .get(&msg.storage_module.id)
             .unwrap()
@@ -350,19 +363,30 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
-        Address, StorageConfig,
+        partition_chunk_offset_ii, Address, Config, PartitionChunkOffset, PartitionChunkRange,
+        StorageConfig,
     };
     use reth::tasks::TaskManager;
     use tokio::runtime::Handle;
 
     use crate::packing::{
-        cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingRequest,
+        cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingConfig, PackingRequest,
     };
 
     #[actix::test]
     async fn test_packing_actor() -> eyre::Result<()> {
+        // setup
         let mining_address = Address::random();
         let partition_hash = PartitionHash::zero();
+        let testnet_config = Config {
+            num_writes_before_sync: 1,
+            entropy_packing_iterations: 1000,
+            num_chunks_in_partition: 5,
+            chunk_size: 32,
+            ..Config::testnet()
+        };
+        let config = PackingConfig::new(&testnet_config);
+
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
@@ -372,21 +396,12 @@ mod tests {
                 slot_index: None,
             }),
             submodules: vec![
-                (ii(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
+                (partition_chunk_offset_ii!(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
             ],
         }];
-
-        // Override the default StorageModule config for testing
-        let storage_config = StorageConfig {
-            min_writes_before_sync: 1,
-            entropy_packing_iterations: 1_000,
-            num_chunks_in_partition: 5,
-            ..Default::default()
-        };
-
+        let storage_config = StorageConfig::new(&testnet_config);
         let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
         let base_path = tmp_dir.path().to_path_buf();
-
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
         let storage_module = Arc::new(StorageModule::new(
@@ -397,31 +412,43 @@ mod tests {
 
         let request = PackingRequest {
             storage_module: storage_module.clone(),
-            chunk_range: ii(0, 3).into(),
+            chunk_range: PartitionChunkRange(partition_chunk_offset_ii!(0, 3)),
         };
         // Create an instance of the mempool actor
         let task_manager = TaskManager::current();
-
         let sm_ids = vec![storage_module.id];
-
-        let packing = PackingActor::new(Handle::current(), task_manager.executor(), sm_ids, None);
-
+        let packing = PackingActor::new(
+            Handle::current(),
+            task_manager.executor(),
+            sm_ids,
+            config.clone(),
+        );
         let packing_addr = packing.start();
 
+        // action
         packing_addr.send(request).await?;
-
         wait_for_packing(packing_addr, None).await?;
-
         storage_module.sync_pending_chunks()?;
+
+        // assert
         // check that the chunks are marked as packed
         let intervals = storage_module.get_intervals(ChunkType::Entropy);
-        assert_eq!(intervals, vec![ii(0, 3)]);
-        let stored_entropy = storage_module.read_chunks(ii(0, 3))?;
+        assert_eq!(
+            intervals,
+            vec![ii(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(3)
+            )]
+        );
+        let stored_entropy = storage_module.read_chunks(ii(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(3),
+        ))?;
         // verify the packing
         for i in 0..=3 {
-            let chunk = stored_entropy.get(&i).unwrap();
+            let chunk = stored_entropy.get(&PartitionChunkOffset::from(i)).unwrap();
 
-            let mut out = Vec::with_capacity(storage_config.chunk_size.try_into().unwrap());
+            let mut out = Vec::with_capacity(storage_config.chunk_size as usize);
             compute_entropy_chunk(
                 mining_address,
                 i as u64,
@@ -429,6 +456,7 @@ mod tests {
                 storage_config.entropy_packing_iterations,
                 storage_config.chunk_size.try_into().unwrap(),
                 &mut out,
+                config.chain_id,
             );
             assert_eq!(chunk.0.first(), out.first());
         }
@@ -448,6 +476,6 @@ mod tests {
     #[should_panic(expected = "wrong input N 3")]
     fn test_casting_error() {
         let v: Vec<u8> = (1..=10).collect();
-        let c2 = cast_vec_u8_to_vec_u8_array::<3>(v);
+        let _c2 = cast_vec_u8_to_vec_u8_array::<3>(v);
     }
 }

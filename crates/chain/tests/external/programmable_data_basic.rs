@@ -9,10 +9,11 @@ use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
 use irys_actors::SolutionFoundMessage;
 use irys_api_server::routes::tx::TxOffset;
-use irys_chain::chain::start_for_testing;
+use irys_chain::start_irys_node;
+use irys_config::IrysNodeConfig;
 use irys_database::tables::IngressProofs;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, Address};
+use irys_types::{irys::IrysSigner, Address, Config};
 use k256::ecdsa::SigningKey;
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
@@ -37,18 +38,24 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
 #[ignore]
 #[actix_web::test]
+/// This test is the counterpart test to the programmable data basic test in the JS Client https://github.com/Irys-xyz/irys-js
+/// It waits for a valid storage tx header & chunks, mines and confirms it, then mines a couple more blocks, which will include the programmable data EVM tx.
+/// we then halt so the client has time to make the getStorage call and read the contract state.
+/// Instructions:
+/// Run this test, until you see `waiting for tx header...`, then start the JS client test
+/// that's it!, just kill this test once the JS client test finishes.
 async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "info");
 
     let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic_external"), false);
-    let mut config = irys_config::IrysNodeConfig {
-        base_directory: temp_dir.path().to_path_buf(),
 
-        ..Default::default()
-    };
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
+    config.base_directory = temp_dir.path().to_path_buf();
+
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
     let main_address = config.mining_signer.address();
-
-    let account1 = IrysSigner::random_signer();
+    let account1 = IrysSigner::random_signer(&testnet_config);
 
     config.extend_genesis_accounts(vec![
         (
@@ -74,7 +81,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         ),
     ]);
 
-    let node = start_for_testing(config.clone()).await?;
+    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     node.actor_addresses.stop_mining()?;
     wait_for_packing(
         node.actor_addresses.packing.clone(),
@@ -155,7 +162,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     // now we wait for an ingress proof to be generated for this tx (automatic once all chunks have been uploaded)
     let ingress_proof = loop {
-        // don't reuse the tx! it has read isolation (won't see anything commited after it's creation)
+        // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
         let ro_tx = &node.db.0.tx().unwrap();
         match ro_tx.get::<IngressProofs>(recv_tx.data_root).unwrap() {
             Some(ip) => break ip,
@@ -196,7 +203,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         None
     });
 
-    let start_offset = future_or_mine_on_timeout(
+    let _start_offset = future_or_mine_on_timeout(
         node.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
@@ -207,7 +214,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     .await?
     .unwrap();
 
-    for i in 1..10 {
+    for _i in 1..10 {
         let poa_solution = capacity_chunk_solution(
             node.config.mining_signer.address(),
             node.vdf_steps_guard.clone(),

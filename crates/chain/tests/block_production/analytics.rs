@@ -9,6 +9,8 @@ use alloy_provider::Provider;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::LocalSigner;
 use alloy_signer_local::PrivateKeySigner;
+use irys_types::Config;
+use irys_types::TxChunkOffset;
 use irys_types::UnpackedChunk;
 use rand::Rng;
 
@@ -17,9 +19,7 @@ use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{
-    irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG, StorageConfig, CONFIG,
-};
+use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG, StorageConfig};
 use k256::ecdsa::SigningKey;
 use reth::rpc::types::TransactionRequest;
 use reth_primitives::GenesisAccount;
@@ -35,12 +35,13 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let mut config = IrysNodeConfig::default();
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
 
-    let account1 = IrysSigner::random_signer_with_chunk_size(32);
-    let account2 = IrysSigner::random_signer_with_chunk_size(32);
-    let account3 = IrysSigner::random_signer_with_chunk_size(32);
+    let account1 = IrysSigner::random_signer(&testnet_config);
+    let account2 = IrysSigner::random_signer(&testnet_config);
+    let account3 = IrysSigner::random_signer(&testnet_config);
     config.extend_genesis_accounts(vec![
         (
             account1.address(),
@@ -76,10 +77,12 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             min_writes_before_sync: 1,
             entropy_packing_iterations: 1_000,
             chunk_migration_depth: 1, // Testnet / single node config
+            chain_id: testnet_config.chain_id,
         },
+        testnet_config.clone(),
     )
     .await?;
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let _reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
 
     let http_url = "http://127.0.0.1:8080";
 
@@ -89,7 +92,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .timeout(Duration::from_secs(10_000))
         .finish();
 
-    let response = client
+    let _response = client
         .get(format!("{}/v1/info", http_url))
         .send()
         .await
@@ -129,7 +132,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             ProviderBuilder::new()
                 .with_recommended_fillers()
                 .wallet(EthereumWallet::from(signer))
-                .on_http("http://localhost:8080".parse().unwrap())
+                .on_http("http://localhost:8080/v1/execution-rpc".parse().unwrap())
         })
         .collect::<Vec<_>>();
 
@@ -155,7 +158,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 gas: Some(21000),
                 value: Some(U256::from(simple_rng.next_range(20_000))),
                 nonce: Some(alloy_provider.get_transaction_count(a.address()).await?),
-                chain_id: Some(CONFIG.irys_chain_id),
+                chain_id: Some(testnet_config.chain_id),
                 ..Default::default()
             };
 
@@ -195,7 +198,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     data_size,
                     data_path,
                     bytes: Base64(data_bytes[min..max].to_vec()),
-                    tx_offset: tx_chunk_offset as u32,
+                    tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
                 };
 
                 // Make a POST request with JSON payload
@@ -235,7 +238,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     data_size,
                     data_path,
                     bytes: Base64(data_bytes[min..max].to_vec()),
-                    tx_offset: tx_chunk_offset as u32,
+                    tx_offset: (tx_chunk_offset as u32).into(),
                 };
 
                 let resp = client
@@ -256,7 +259,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         )
         .await;
 
-        let (block, reth_exec_env) = node
+        let (_block, _reth_exec_env) = node
             .actor_addresses
             .block_producer
             .send(SolutionFoundMessage(poa_solution))

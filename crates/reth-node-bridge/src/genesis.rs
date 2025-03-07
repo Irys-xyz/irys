@@ -1,4 +1,3 @@
-use foldhash::fast::RandomState;
 use irys_primitives::shadow::Shadows;
 use irys_primitives::{Address, Genesis, GenesisAccount};
 use jsonrpsee::core::RpcResult;
@@ -111,10 +110,7 @@ pub fn add_genesis_block(
     let db = StateProviderDatabase::new(provider.latest().unwrap());
     let mut cache_db = CacheDB::new(db);
     // let random_state = RandomState::default();
-    let mut journaled_state = JournaledState::new(
-        SpecId::LATEST,
-        HashSet::<Address, RandomState>::with_hasher(RandomState::default()),
-    );
+    let mut journaled_state = JournaledState::new(SpecId::LATEST, HashSet::<Address>::new());
 
     // TODO: inhereting alloc from the loaded chain requires that we add reth state resets between runs in a single erlang shell
     // otherwise the 'new' genesis alloc will have different values
@@ -215,7 +211,7 @@ pub fn add_genesis_block(
     error!("Written genesis block (hash: {}), reloading...", &hash);
 
     // WARNING: RACE CONDITION
-    // the reload operation doesn't wait for the reponse response of this method/RPC call to finish, it *does* have a 500ms delay, but that might not be
+    // the reload operation doesn't wait for the response of this method/RPC call to finish, it *does* have a 500ms delay, but that might not be
     // sufficient in certain conditions
     let _res = sender.send(ReloadPayload::ReloadConfig(chain.clone()));
 

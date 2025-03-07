@@ -1,12 +1,14 @@
 use crate::utils::{mine_blocks, post_chunk};
 use awc::http::StatusCode;
+use irys_chain::start_irys_node;
+use irys_config::IrysNodeConfig;
 use irys_database::Ledger;
 
+use irys_types::Config;
 use tracing::debug;
 
-#[cfg(test)]
 #[actix_web::test]
-async fn double_root_data_promotion_test() {
+async fn serial_double_root_data_promotion_test() {
     use std::time::Duration;
 
     use actix_web::{
@@ -19,10 +21,11 @@ async fn double_root_data_promotion_test() {
     use base58::ToBase58;
     use irys_actors::packing::wait_for_packing;
     use irys_api_server::{routes, ApiState};
-    use irys_chain::start_for_testing;
     use irys_database::{tables::IngressProofs, walk_all};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, StorageConfig};
+    use irys_types::{
+        irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset, StorageConfig,
+    };
     use reth_db::Database as _;
     use reth_primitives::GenesisAccount;
     use tokio::time::sleep;
@@ -30,30 +33,26 @@ async fn double_root_data_promotion_test() {
 
     use crate::utils::{get_block_parent, get_chunk, mine_block, verify_published_chunk};
 
-    // std::env::set_var("RUST_LOG", "debug");
-
-    let chunk_size = 32; // 32Byte chunks
-
-    let miner_signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
-
-    let storage_config = StorageConfig {
+    let chunk_size = 32; // 32 byte chunks
+    let mut testnet_config = Config {
         chunk_size: chunk_size as u64,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
-        num_partitions_in_slot: 1,
-        miner_address: miner_signer.address(),
-        min_writes_before_sync: 1,
+        num_partitions_per_slot: 1,
+        num_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
-        chunk_migration_depth: 1, // Testnet / single node config
+        finalization_depth: 1, // Testnet / single node config
+        ..Config::testnet()
     };
+    testnet_config.chunk_size = chunk_size;
+
+    let storage_config = StorageConfig::new(&testnet_config);
 
     let temp_dir = setup_tracing_and_temp_dir(Some("double_root_data_promotion_test"), false);
-    let mut config = irys_config::IrysNodeConfig {
-        base_directory: temp_dir.path().to_path_buf(),
-        ..Default::default()
-    };
-    let signer = IrysSigner::random_signer_with_chunk_size(chunk_size as usize);
-    let signer2 = IrysSigner::random_signer_with_chunk_size(chunk_size as usize);
+    let mut config = IrysNodeConfig::new(&testnet_config);
+    config.base_directory = temp_dir.path().to_path_buf();
+    let signer = IrysSigner::random_signer(&testnet_config);
+    let signer2 = IrysSigner::random_signer(&testnet_config);
 
     config.extend_genesis_accounts(vec![
         (
@@ -73,7 +72,13 @@ async fn double_root_data_promotion_test() {
     ]);
 
     // This will create 3 storage modules, one for submit, one for publish, and one for capacity
-    let node_context = start_for_testing(config.clone()).await.unwrap();
+    let node_context = start_irys_node(
+        config.clone(),
+        storage_config.clone(),
+        testnet_config.clone(),
+    )
+    .await
+    .unwrap();
 
     wait_for_packing(
         node_context.actor_addresses.packing.clone(),
@@ -93,6 +98,7 @@ async fn double_root_data_promotion_test() {
         db: node_context.db.clone(),
         mempool: node_context.actor_addresses.mempool.clone(),
         chunk_provider: node_context.chunk_provider.clone(),
+        config: testnet_config,
     };
 
     // Initialize the app
@@ -183,7 +189,7 @@ async fn double_root_data_promotion_test() {
     // ==============================
     // Post Tx chunks out of order
     // ------------------------------
-    let tx_index = 2;
+    let _tx_index = 2;
 
     // // Last Tx, last chunk
     // let chunk_index = 2;
@@ -268,7 +274,9 @@ async fn double_root_data_promotion_test() {
 
     // wait for the first set of chunks chunk to appear in the publish ledger
     for _attempts in 1..20 {
-        if let Some(_packed_chunk) = get_chunk(&app, Ledger::Publish, 0).await {
+        if let Some(_packed_chunk) =
+            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(0)).await
+        {
             println!("First set of chunks found!");
             break;
         }
@@ -277,7 +285,9 @@ async fn double_root_data_promotion_test() {
 
     // wait for the second set of chunks to appear in the publish ledger
     for _attempts in 1..20 {
-        if let Some(_packed_chunk) = get_chunk(&app, Ledger::Publish, 3).await {
+        if let Some(_packed_chunk) =
+            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(3)).await
+        {
             println!("Second set of chunks found!");
             break;
         }
@@ -289,7 +299,7 @@ async fn double_root_data_promotion_test() {
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
     let first_tx_index: usize;
-    let next_tx_index: usize;
+    let _next_tx_index: usize;
 
     // if block_tx1.block_hash == block_tx2.block_hash {
     //     // Extract the transaction order
@@ -329,15 +339,33 @@ async fn double_root_data_promotion_test() {
 
     let chunk_offset = 0;
     let expected_bytes = &data_chunks[tx_index][0];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     let chunk_offset = 1;
     let expected_bytes = &data_chunks[tx_index][1];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     let chunk_offset = 2;
     let expected_bytes = &data_chunks[tx_index][2];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     // Part 2
     debug!("PHASE 2");
@@ -348,7 +376,7 @@ async fn double_root_data_promotion_test() {
 
     // ensure the ingress proof still exists
     let ingress_proofs = db
-        .view(|rtx| walk_all::<IngressProofs>(rtx))
+        .view(|rtx| walk_all::<IngressProofs, _>(rtx))
         .unwrap()
         .unwrap();
     assert_eq!(ingress_proofs.len(), 1);
@@ -361,7 +389,7 @@ async fn double_root_data_promotion_test() {
 
     let mut txs: Vec<IrysTransaction> = Vec::new();
 
-    for (i, chunks) in data_chunks.iter().enumerate() {
+    for (_i, chunks) in data_chunks.iter().enumerate() {
         let mut data: Vec<u8> = Vec::new();
         for chunk in chunks {
             data.extend_from_slice(chunk);
@@ -489,7 +517,9 @@ async fn double_root_data_promotion_test() {
 
     // wait for the second set of chunks to appear in the publish ledger
     for _attempts in 1..20 {
-        if let Some(_packed_chunk) = get_chunk(&app, Ledger::Publish, 3).await {
+        if let Some(_packed_chunk) =
+            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(3)).await
+        {
             println!("Second set of chunks found!");
             break;
         }
@@ -517,15 +547,33 @@ async fn double_root_data_promotion_test() {
 
     let chunk_offset = 0;
     let expected_bytes = &data_chunks[tx_index][0];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     let chunk_offset = 1;
     let expected_bytes = &data_chunks[tx_index][1];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     let chunk_offset = 2;
     let expected_bytes = &data_chunks[tx_index][2];
-    verify_published_chunk(&app, chunk_offset, expected_bytes, &storage_config).await;
+    verify_published_chunk(
+        &app,
+        LedgerChunkOffset::from(chunk_offset),
+        expected_bytes,
+        &storage_config,
+    )
+    .await;
 
     // // Verify the chunks of the second promoted transaction
     // let tx_index = next_tx_index;
@@ -547,7 +595,7 @@ async fn double_root_data_promotion_test() {
     mine_blocks(&node_context, 5).await.unwrap();
     // ensure the ingress proof is gone
     let ingress_proofs = db
-        .view(|rtx| walk_all::<IngressProofs>(rtx))
+        .view(|rtx| walk_all::<IngressProofs, _>(rtx))
         .unwrap()
         .unwrap();
     assert_eq!(ingress_proofs.len(), 0);

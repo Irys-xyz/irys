@@ -4,18 +4,16 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders,
-    PartitionHashes,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders, Metadata,
 };
 
-use irys_types::partition::PartitionHash;
+use crate::metadata::MetadataKey;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionId, TxRelativeChunkOffset, UnpackedChunk, MEGABYTE, U256,
+    IrysTransactionId, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
 };
 use reth_db::cursor::DbDupCursorRO;
-use reth_db::mdbx::tx::Tx;
-use reth_db::mdbx::RO;
+
 use reth_db::table::Table;
 use reth_db::transaction::DbTx;
 use reth_db::transaction::DbTxMut;
@@ -51,6 +49,22 @@ pub fn open_or_create_db<P: AsRef<Path>, T: HasName + HasTableType>(
 
     Ok(db)
 }
+
+pub fn open_or_create_cache_db<P: AsRef<Path>, T: HasName + HasTableType>(
+    path: P,
+    tables: &[T],
+    args: Option<DatabaseArguments>,
+) -> eyre::Result<DatabaseEnv> {
+    let args = args.unwrap_or(
+        DatabaseArguments::new(ClientVersion::default())
+            .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
+            // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
+            .with_growth_step((50 * MEGABYTE).try_into()?)
+            .with_shrink_threshold((100 * MEGABYTE).try_into()?),
+    );
+    open_or_create_db(path, tables, Some(args))
+}
+
 /// Inserts a [`IrysBlockHeader`] into [`IrysBlockHeaders`]
 pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre::Result<()> {
     Ok(tx.put::<IrysBlockHeaders>(block.block_hash, block.clone().into())?)
@@ -157,11 +171,11 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
 pub fn cached_chunk_meta_by_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
-    chunk_offset: TxRelativeChunkOffset,
+    chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<CachedChunkIndexMetadata>> {
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
     Ok(cursor
-        .seek_by_key_subkey(data_root, chunk_offset)?
+        .seek_by_key_subkey(data_root, *chunk_offset)?
         // make sure we find the exact subkey - dupsort seek can seek to the value, or a value greater than if it doesn't exist.
         .filter(|result| result.index == chunk_offset)
         .map(|index_entry| index_entry.meta))
@@ -170,12 +184,12 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
 pub fn cached_chunk_by_chunk_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
-    chunk_offset: TxRelativeChunkOffset,
+    chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
 
     if let Some(index_entry) = cursor
-        .seek_by_key_subkey(data_root, chunk_offset)?
+        .seek_by_key_subkey(data_root, *chunk_offset)?
         .filter(|e| e.index == chunk_offset)
     {
         let meta: CachedChunkIndexMetadata = index_entry.into();
@@ -198,6 +212,31 @@ pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
     tx.get::<CachedChunks>(*key)
 }
 
+/// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkPathHash`] in [`CachedChunksIndex`]
+/// It also removes the index values
+pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+) -> eyre::Result<u64> {
+    let mut chunks_pruned = 0;
+    // get all chunks specified by the `CachedChunksIndex`
+    let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
+    let mut walker = cursor.walk_dup(Some(data_root), None)?; // iterate a specific key's subkeys
+    while let Some((_k, c)) = walker.next().transpose()? {
+        // delete them
+        tx.delete::<CachedChunks>(c.meta.chunk_path_hash, None)?;
+        chunks_pruned += 1;
+    }
+    // delete the key (and all subkeys) from the index
+    tx.delete::<CachedChunksIndex>(data_root, None)?;
+    Ok(chunks_pruned)
+}
+
+pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Result<(u64, u64)> {
+    let chunk_count: usize = tx.entries::<T>()?;
+    Ok((chunk_count as u64, chunk_count as u64 * chunk_size))
+}
+
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
 pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U256> {
     Ok(tx
@@ -206,12 +245,30 @@ pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U2
         .unwrap_or(U256::from(0)))
 }
 
-pub fn walk_all<T: Table>(
-    read_tx: &Tx<RO>,
+pub fn walk_all<T: Table, TX: DbTx>(
+    read_tx: &TX,
 ) -> eyre::Result<Vec<(<T as Table>::Key, <T as Table>::Value)>> {
     let mut read_cursor = read_tx.cursor_read::<T>()?;
     let walker = read_cursor.walk(None)?;
     Ok(walker.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn set_database_schema_version<T: DbTxMut>(tx: &T, version: u32) -> Result<(), DatabaseError> {
+    tx.put::<Metadata>(MetadataKey::DBSchemaVersion, version.to_le_bytes().to_vec())
+}
+
+pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseError> {
+    if let Some(bytes) = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)? {
+        let arr: [u8; 4] = bytes.as_slice().try_into().map_err(|_| {
+            DatabaseError::Other(
+                "Db schema version metadata does not have exactly 4 bytes".to_string(),
+            )
+        })?;
+
+        Ok(Some(u32::from_le_bytes(arr)))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -239,7 +296,7 @@ mod tests {
         let result = db.view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?;
         assert_eq!(result, Some(tx_header));
 
-        let mut block_header = IrysBlockHeader::new();
+        let mut block_header = IrysBlockHeader::new_mock_header();
         block_header.block_hash.0[0] = 1;
 
         // Write a Block

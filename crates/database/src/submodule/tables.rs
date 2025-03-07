@@ -1,3 +1,4 @@
+use crate::metadata::MetadataKey;
 use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset, TxPath,
     TxPathHash, H256,
@@ -8,7 +9,7 @@ use reth_db::{HasName, HasTableType, TableType, TableViewer};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Per-submodule database tables
+// Per-submodule database tables
 tables! {
     SubmoduleTables;
 
@@ -28,6 +29,9 @@ tables! {
 
     /// Maps a data root to the list of submodule-relative start offsets
     table StartOffsetsByDataRoot<Key = DataRoot, Value = RelativeStartOffsets>;
+
+    /// Table to store various metadata, such as the current db schema version
+    table Metadata<Key = MetadataKey, Value = Vec<u8>>;
 
 }
 
@@ -75,9 +79,12 @@ mod tests {
             tx_path_hash: Some(tx_path_hash),
         };
 
-        write_tx.put::<ChunkPathHashByOffset>(1, path_hashes.clone())?;
-        write_tx.put::<ChunkPathHashByOffset>(100, path_hashes.clone())?;
-        write_tx.put::<ChunkPathHashByOffset>(0, path_hashes.clone())?;
+        write_tx
+            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(1), path_hashes.clone())?;
+        write_tx
+            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(100), path_hashes.clone())?;
+        write_tx
+            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(0), path_hashes.clone())?;
 
         write_tx.commit()?;
 
@@ -92,9 +99,9 @@ mod tests {
         assert_eq!(
             res,
             vec![
-                (0, path_hashes.clone()),
-                (1, path_hashes.clone()),
-                (100, path_hashes)
+                (PartitionChunkOffset::from(0), path_hashes.clone()),
+                (PartitionChunkOffset::from(1), path_hashes.clone()),
+                (PartitionChunkOffset::from(100), path_hashes)
             ]
         );
 

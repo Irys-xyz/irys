@@ -31,8 +31,8 @@ impl ReadBytesRangeByIndexArgs {
 
 pub fn read_bytes_range_by_index(
     call_data: &Bytes,
-    gas_limit: u64,
-    env: &Env,
+    _gas_limit: u64,
+    _env: &Env,
     state_provider: &IrysRethProviderInner,
     access_lists: ParsedAccessLists,
 ) -> PrecompileResult {
@@ -45,7 +45,7 @@ pub fn read_bytes_range_by_index(
             .ok_or(PrecompileErrors::Error(PrecompileError::Other(
                 "Internal error - unable to parse access list".to_owned(),
             )))?;
-    read_bytes_range(bytes_range, gas_limit, env, state_provider, access_lists)
+    read_bytes_range(bytes_range, state_provider, access_lists)
 }
 
 struct ReadPartialByteRangeArgs {
@@ -72,8 +72,8 @@ impl ReadPartialByteRangeArgs {
 // this method overrides the length, and augments the start
 pub fn read_partial_byte_range(
     call_data: &Bytes,
-    gas_limit: u64,
-    env: &Env,
+    _gas_limit: u64,
+    _env: &Env,
     state_provider: &IrysRethProviderInner,
     access_lists: ParsedAccessLists,
 ) -> PrecompileResult {
@@ -112,13 +112,11 @@ pub fn read_partial_byte_range(
         ))
     })?;
 
-    read_bytes_range(bytes_range, gas_limit, env, state_provider, access_lists)
+    read_bytes_range(bytes_range, state_provider, access_lists)
 }
 
 pub fn read_bytes_range(
     bytes_range: ByteRangeSpecifier,
-    gas_limit: u64,
-    env: &Env,
     state_provider: &IrysRethProviderInner,
     access_lists: ParsedAccessLists,
 ) -> PrecompileResult {
@@ -170,7 +168,7 @@ pub fn read_bytes_range(
     for i in translated_chunks_start_offset..translated_chunks_end_offset {
         let chunk = state_provider
             .chunk_provider
-            .get_chunk_by_ledger_offset(irys_database::Ledger::Publish, i)
+            .get_chunk_by_ledger_offset(irys_database::Ledger::Publish, i.into())
             .map_err(|e| {
                 PrecompileErrors::Error(PrecompileError::Other(format!(
                     "Error reading chunk with part offset {} - {}",
@@ -187,6 +185,7 @@ pub fn read_bytes_range(
             &chunk,
             storage_config.entropy_packing_iterations,
             storage_config.chunk_size as usize,
+            storage_config.chain_id,
         );
         bytes.extend(unpacked_chunk.bytes.0)
     }

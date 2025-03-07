@@ -1,4 +1,4 @@
-use irys_types::{Compact, TransactionLedger, CONFIG, H256};
+use irys_types::{Compact, Config, TransactionLedger, H256};
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 /// Manages the global ledger state within the epoch service, tracking:
@@ -27,6 +27,7 @@ pub struct PermanentLedger {
     pub slots: Vec<LedgerSlot>,
     /// Unique identifier for this ledger, see `Ledger` enum
     pub ledger_id: u32,
+    pub num_partitions_per_slot: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -38,31 +39,30 @@ pub struct TermLedger {
     pub ledger_id: u32,
     /// Number of epochs slots in this ledger exist for
     pub epoch_length: u64,
-}
-
-impl Default for PermanentLedger {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub num_blocks_in_epoch: u64,
+    pub num_partitions_per_slot: u64,
 }
 
 impl PermanentLedger {
     /// Constructs a permanent ledger, always with `Ledger::Publish` as the id
-    pub const fn new() -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: Ledger::Publish as u32,
+            num_partitions_per_slot: config.num_partitions_per_slot,
         }
     }
 }
 
 impl TermLedger {
     /// Creates a term ledger with specified index and duration
-    pub const fn new(ledger: Ledger, epoch_length: u64) -> Self {
+    pub fn new(ledger: Ledger, config: &Config) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: ledger as u32,
-            epoch_length,
+            epoch_length: config.submit_ledger_epoch_length,
+            num_blocks_in_epoch: config.num_blocks_in_epoch,
+            num_partitions_per_slot: config.num_partitions_per_slot,
         }
     }
 
@@ -76,11 +76,11 @@ impl TermLedger {
         let mut expired_indices = Vec::new();
 
         // Make sure enough blocks have transpired before calculating expiry height
-        if epoch_height < self.epoch_length * CONFIG.num_blocks_in_epoch {
+        if epoch_height < self.epoch_length * self.num_blocks_in_epoch {
             return expired_indices;
         }
 
-        let expiry_height = epoch_height - self.epoch_length * CONFIG.num_blocks_in_epoch;
+        let expiry_height = epoch_height - self.epoch_length * self.num_blocks_in_epoch;
 
         // Collect indices of slots to expire
         for (idx, slot) in self.slots.iter().enumerate() {
@@ -130,7 +130,7 @@ impl LedgerCore for PermanentLedger {
                 is_expired: false,
                 last_height: 0,
             });
-            num_partitions_added += CONFIG.num_partitions_per_slot;
+            num_partitions_added += self.num_partitions_per_slot;
         }
         num_partitions_added
     }
@@ -139,7 +139,7 @@ impl LedgerCore for PermanentLedger {
             .iter()
             .enumerate()
             .filter_map(|(idx, slot)| {
-                let needed = CONFIG.num_partitions_per_slot as usize - slot.partitions.len();
+                let needed = self.num_partitions_per_slot as usize - slot.partitions.len();
                 if needed > 0 {
                     Some((idx, needed))
                 } else {
@@ -157,7 +157,7 @@ impl LedgerCore for PermanentLedger {
 
 impl LedgerCore for TermLedger {
     fn slot_count(&self) -> usize {
-        self.slots.len()
+        self.slots.iter().filter(|slot| !slot.is_expired).count()
     }
     fn ledger_id(&self) -> u32 {
         self.ledger_id
@@ -170,7 +170,7 @@ impl LedgerCore for TermLedger {
                 is_expired: false,
                 last_height: 0,
             });
-            num_partitions_added += CONFIG.num_partitions_per_slot;
+            num_partitions_added += self.num_partitions_per_slot;
         }
         num_partitions_added
     }
@@ -180,8 +180,8 @@ impl LedgerCore for TermLedger {
             .iter()
             .enumerate()
             .filter_map(|(idx, slot)| {
-                let needed = CONFIG.num_partitions_per_slot as usize - slot.partitions.len();
-                if needed > 0 {
+                let needed = self.num_partitions_per_slot as usize - slot.partitions.len();
+                if needed > 0 && !slot.is_expired {
                     Some((idx, needed))
                 } else {
                     None
@@ -275,21 +275,12 @@ pub struct Ledgers {
     term: Vec<TermLedger>,
 }
 
-impl Default for Ledgers {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Ledgers {
     /// Instantiate a Ledgers struct with the correct Ledgers
-    pub fn new() -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
-            perm: PermanentLedger::new(),
-            term: vec![TermLedger::new(
-                Ledger::Submit,
-                CONFIG.submit_ledger_epoch_length,
-            )],
+            perm: PermanentLedger::new(config),
+            term: vec![TermLedger::new(Ledger::Submit, config)],
         }
     }
 

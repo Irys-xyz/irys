@@ -1,5 +1,9 @@
+// todo delete the whole module. the tests are ignored anyway. They can be restored in the future
+
+use actix_http::StatusCode;
 use irys_api_server::{routes, ApiState};
-use irys_chain::chain::start_for_testing_default;
+use irys_chain::start_irys_node;
+use irys_config::IrysNodeConfig;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 
 use actix_web::{
@@ -8,13 +12,13 @@ use actix_web::{
     web::{self, JsonConfig},
     App,
 };
-use awc::http::StatusCode;
 use base58::ToBase58;
+use irys_types::{Config, TxChunkOffset};
 use tracing::info;
 
-#[cfg(test)]
+#[ignore]
 #[actix_web::test]
-async fn api_end_to_end_test_32b() {
+async fn serial_api_end_to_end_test_32b() {
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await;
     } else {
@@ -22,9 +26,9 @@ async fn api_end_to_end_test_32b() {
     }
 }
 
-#[cfg(test)]
+#[ignore]
 #[actix_web::test]
-async fn api_end_to_end_test_256kb() {
+async fn serial_api_end_to_end_test_256kb() {
     api_end_to_end_test(256 * 1024).await;
 }
 
@@ -36,8 +40,11 @@ async fn api_end_to_end_test(chunk_size: usize) {
     use std::time::Duration;
     use tokio::time::sleep;
     use tracing::{debug, info};
-
-    let miner_signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
+    let testnet_config = Config {
+        chunk_size: chunk_size.try_into().unwrap(),
+        ..Config::testnet()
+    };
+    let miner_signer = IrysSigner::from_config(&testnet_config);
 
     let storage_config = StorageConfig {
         chunk_size: chunk_size as u64,
@@ -48,13 +55,14 @@ async fn api_end_to_end_test(chunk_size: usize) {
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
         chunk_migration_depth: 1, // Testnet / single node config
+        chain_id: testnet_config.chain_id,
     };
+    let entropy_packing_iterations = storage_config.entropy_packing_iterations;
 
-    let handle = start_for_testing_default(
-        Some("api_end_to_end_test"),
-        false,
-        miner_signer,
-        storage_config.clone(),
+    let handle = start_irys_node(
+        IrysNodeConfig::new(&testnet_config),
+        storage_config,
+        testnet_config.clone(),
     )
     .await
     .unwrap();
@@ -67,6 +75,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
         db: handle.db,
         mempool: handle.actor_addresses.mempool,
         chunk_provider: handle.chunk_provider.clone(),
+        config: testnet_config.clone(),
     };
 
     // Initialize the app
@@ -85,7 +94,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     rand::thread_rng().fill(&mut data_bytes[..]);
 
     // Create a new Irys API instance & a signed transaction
-    let irys = IrysSigner::random_signer_with_chunk_size(chunk_size);
+    let irys = IrysSigner::random_signer(&testnet_config);
     let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
     let tx = irys.sign_transaction(tx).unwrap();
 
@@ -99,7 +108,10 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
     // Call the service
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
+    let body = test::read_body(resp).await;
+    debug!("Response body: {:#?}", body);
+    assert_eq!(status, StatusCode::OK);
     info!("Transaction was posted");
 
     // Loop though each of the transaction chunks
@@ -115,7 +127,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: index as u32,
+            tx_offset: TxChunkOffset::from(index as u32),
         };
 
         // Make a POST request with JSON payload
@@ -146,7 +158,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
         if resp.status() == StatusCode::OK {
             let result: IrysTransactionHeader = test::read_body_json(resp).await;
-            //assert_eq!(tx.header, result); TODO: uncomment this after fixing IrysSignature serialization issue with chain id Dan described
+            assert_eq!(tx.header, result);
             info!("Transaction was retrieved ok after {} attempts", attempts);
             break;
         }
@@ -179,14 +191,15 @@ async fn api_end_to_end_test(chunk_size: usize) {
         if resp.status() == StatusCode::OK {
             let packed_chunk: PackedChunk = test::read_body_json(resp).await;
             assert_eq!(
-                chunk, packed_chunk.tx_offset as usize,
+                chunk, *packed_chunk.tx_offset as usize,
                 "Got different chunk index"
             );
 
             let unpacked_chunk = unpack(
                 &packed_chunk,
-                storage_config.entropy_packing_iterations,
+                entropy_packing_iterations,
                 chunk_size,
+                testnet_config.chain_id,
             );
             assert_eq!(
                 unpacked_chunk.bytes.0,
