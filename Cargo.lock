@@ -4012,7 +4012,9 @@ dependencies = [
  "reth-db",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

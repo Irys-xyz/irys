@@ -54,7 +54,7 @@ pub mod mock_oracle {
     /// Mock oracle that will return fluctuating prices for the Irys token
     #[derive(Debug)]
     pub struct MockOracle {
-        /// mutable price state
+        /// Mutable price state
         context: Mutex<PriceContext>,
         /// Percent change in decimal form; e.g. dec!(0.05) means 5%
         percent_change: Amount<Percentage>,
@@ -86,7 +86,7 @@ pub mod mock_oracle {
         ///
         /// # Panics
         ///
-        /// If the undrlying mutex gets poisoned.
+        /// If the underlying mutex gets poisoned.
         #[tracing::instrument(skip_all, err)]
         #[expect(
             clippy::unwrap_in_result,
@@ -130,7 +130,7 @@ pub mod mock_oracle {
     }
 
     #[cfg(test)]
-    #[expect(clippy::unwrap_used, reason = "simplifier tests")]
+    #[expect(clippy::unwrap_used, reason = "simpler tests")]
     mod tests {
         use super::*;
         use irys_types::storage_pricing::Amount;

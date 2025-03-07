@@ -26,7 +26,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         num_partitions_per_slot: 1,
         num_writes_before_sync: 1,
         entropy_packing_iterations: 1,
-        chunk_migration_depth: 1,
+        finalization_depth: 1,
         ..Config::testnet()
     };
     // Set up the storage geometry for this test
