@@ -155,6 +155,7 @@ impl Inner {
         }
     }
 }
+
 mod price_cache_context {
     use super::*;
 
@@ -239,7 +240,7 @@ mod price_cache_context {
             }
         }
 
-        pub fn ema_price_to_use(&self) -> IrysTokenPrice {
+        pub(crate) fn ema_price_to_use(&self) -> IrysTokenPrice {
             self.block_two_adj_intervals_ago.irys_price
         }
     }
