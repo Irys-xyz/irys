@@ -984,6 +984,7 @@ fn ensure_default_intervals(
 pub fn read_intervals_file(path: &PathBuf) -> eyre::Result<StorageIntervals> {
     let mut file = OpenOptions::new()
         .read(true)
+        .write(true)
         .create(true)
         .open(&path)
         .wrap_err_with(|| {
