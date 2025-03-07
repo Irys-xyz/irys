@@ -56,7 +56,7 @@ use std::{
     sync::{mpsc, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::vdf::run_vdf;
 use irys_database::migration::check_db_version_and_run_migrations_if_needed;
@@ -89,20 +89,15 @@ pub struct IrysNodeCtx {
     // Shutdown channels
     pub api_server_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
-    // pub consensus_engine_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
     pub main_actor_thread_handle: Option<CloneableJoinHandle<()>>,
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
-    // pub arbiters: Vec<ArbiterHandle>,
 }
 
 impl IrysNodeCtx {
     pub async fn stop(self) {
         // First stop the API server and RPC endpoints to prevent new requests
         self.api_server_shutdown_sender.try_send(()).unwrap();
-        debug!("Stopping RPC servers...");
-        let _ = &self.reth_handle.rpc_server_handles.auth.clone().stop();
-        let _ = &self.reth_handle.rpc_server_handles.rpc.clone().stop();
 
         // We need to make sure that all our actors has stopped before attempting to stop reth
         if let Some(main_actor_thread_handle) = self.main_actor_thread_handle {
@@ -123,7 +118,10 @@ impl IrysNodeCtx {
             .unwrap();
 
         if let Some(reth_thread_handle) = self.reth_thread_handle {
-            reth_thread_handle.join().unwrap();
+           match reth_thread_handle.join() {
+               Ok(_) => { debug!("reth thread successfully reloaded") ; },
+               Err(e) => { error!("reth thread panicked: {:?}", e) },
+           };
         }
 
         // Clean up the IrysRethProvider
@@ -679,9 +677,13 @@ pub async fn start_irys_node(
                 ),
             )).unwrap();
 
-            task_manager.graceful_shutdown();
             debug!("Sending shutdown signal to consensus engine");
-            consensus_engine_shutdown_sender.try_send(()).unwrap();
+            match consensus_engine_shutdown_sender.try_send(()) {
+                Ok(_) => debug!("Shutdown signal sent to consensus engine"),
+                Err(e) => error!("Failed to send shutdown signal to consensus engine: {:?}", e),
+            }
+
+            task_manager.graceful_shutdown();
             debug!("Reth thread finished");
         })?;
 
@@ -718,6 +720,12 @@ async fn start_reth_node<T: HasName + HasTableType>(
         .expect("unable to send reth node handle");
 
     let exit_reason = node_handle.node_exit_future.await?;
+
+    debug!("Stopping RPC servers...");
+    let _ = &node_handle.node.rpc_server_handles.auth.clone().stop();
+    let _ = &node_handle.node.rpc_server_handles.rpc.clone().stop();
+
+    debug!("Closing Reth DB connection");
     node_handle.node.provider.database.db.close();
 
     debug!("Reth node exited with reason: {:?}", exit_reason);
