@@ -1,8 +1,8 @@
 use crate::reth_db::DatabaseError;
 use reth_db::DatabaseEnv;
 use reth_db_api::database_metrics::{DatabaseMetadata, DatabaseMetadataValue, DatabaseMetrics};
-use std::sync::{Arc, PoisonError, RwLockReadGuard};
 use std::sync::RwLock;
+use std::sync::{Arc, PoisonError, RwLockReadGuard};
 
 /// In the reth library, there's a nested circular Arc reference. This circular dependency prevents
 /// the DB connection from being dropped even when external references are removed, thereby making
@@ -50,7 +50,10 @@ impl reth_db::Database for RethDbWrapper {
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
         let guard = self.db.read().map_err(db_read_error)?;
-        guard.as_ref().ok_or_else(db_connection_closed_error)?.tx_mut()
+        guard
+            .as_ref()
+            .ok_or_else(db_connection_closed_error)?
+            .tx_mut()
     }
 
     fn view<T, F>(&self, f: F) -> Result<T, DatabaseError>
@@ -58,7 +61,10 @@ impl reth_db::Database for RethDbWrapper {
         F: FnOnce(&Self::TX) -> T,
     {
         let guard = self.db.read().map_err(db_read_error)?;
-        guard.as_ref().ok_or_else(db_connection_closed_error)?.view(f)
+        guard
+            .as_ref()
+            .ok_or_else(db_connection_closed_error)?
+            .view(f)
     }
 
     fn view_eyre<T, F>(&self, f: F) -> eyre::Result<T>
@@ -66,7 +72,10 @@ impl reth_db::Database for RethDbWrapper {
         F: FnOnce(&Self::TX) -> eyre::Result<T>,
     {
         let guard = self.db.read().map_err(db_read_error)?;
-        guard.as_ref().ok_or_else(db_connection_closed_error)?.view_eyre(f)
+        guard
+            .as_ref()
+            .ok_or_else(db_connection_closed_error)?
+            .view_eyre(f)
     }
 
     fn update<T, F>(&self, f: F) -> Result<T, DatabaseError>
@@ -74,7 +83,10 @@ impl reth_db::Database for RethDbWrapper {
         F: FnOnce(&Self::TXMut) -> T,
     {
         let guard = self.db.read().map_err(db_read_error)?;
-        guard.as_ref().ok_or_else(db_connection_closed_error)?.update(f)
+        guard
+            .as_ref()
+            .ok_or_else(db_connection_closed_error)?
+            .update(f)
     }
 
     fn update_eyre<T, F>(&self, f: F) -> eyre::Result<T>
@@ -82,7 +94,10 @@ impl reth_db::Database for RethDbWrapper {
         F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
     {
         let guard = self.db.read().map_err(db_read_error)?;
-        guard.as_ref().ok_or_else(db_connection_closed_error)?.update_eyre(f)
+        guard
+            .as_ref()
+            .ok_or_else(db_connection_closed_error)?
+            .update_eyre(f)
     }
 }
 

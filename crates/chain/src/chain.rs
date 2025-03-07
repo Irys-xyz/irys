@@ -42,9 +42,7 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
     StorageConfig, CHUNK_SIZE, H256,
 };
-use irys_types::{
-    Config, DifficultyAdjustmentConfig, OracleConfig, PartitionChunkRange,
-};
+use irys_types::{Config, DifficultyAdjustmentConfig, OracleConfig, PartitionChunkRange};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::core::irys_ext::ReloadPayload;
 use reth::rpc::eth::EthApiServer as _;
@@ -676,23 +674,28 @@ pub async fn start_irys_node(
         .name("reth-thread".to_string())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
-            let node_config= cloned_arc.clone();
+            let node_config = cloned_arc.clone();
 
-            tokio_runtime.block_on(run_to_completion_or_panic(
-                &mut task_manager,
-                run_until_ctrl_c_or_channel_message(start_reth_node(
-                    exec,
-                    reth_chainspec,
-                    node_config,
-                    IrysTables::ALL,
-                    reth_handle_sender,
-                    irys_provider.clone(),
-                    latest_block_height,
-                    consensus_engine_shutdown_receiver,
-                    main_actor_thread_shutdown_tx,
-                    consensus_engine_shutdown_sender,
-                ), reth_shutdown_receiver),
-            )).unwrap();
+            tokio_runtime
+                .block_on(run_to_completion_or_panic(
+                    &mut task_manager,
+                    run_until_ctrl_c_or_channel_message(
+                        start_reth_node(
+                            exec,
+                            reth_chainspec,
+                            node_config,
+                            IrysTables::ALL,
+                            reth_handle_sender,
+                            irys_provider.clone(),
+                            latest_block_height,
+                            consensus_engine_shutdown_receiver,
+                            main_actor_thread_shutdown_tx,
+                            consensus_engine_shutdown_sender,
+                        ),
+                        reth_shutdown_receiver,
+                    ),
+                ))
+                .unwrap();
 
             debug!("Waiting for the main actor thread to finish");
             actor_main_thread_handle.join().unwrap();
