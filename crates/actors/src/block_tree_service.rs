@@ -45,6 +45,12 @@ impl BlockTreeReadGuard {
     pub fn read(&self) -> RwLockReadGuard<'_, BlockTreeCache> {
         self.block_tree_cache.read().unwrap()
     }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    /// Accessor method to get a write guard for the `block_tree` cache
+    pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, BlockTreeCache> {
+        self.block_tree_cache.write().unwrap()
+    }
 }
 
 /// Retrieve a read only reference to the `block_tree`'s cache
