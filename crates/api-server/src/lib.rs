@@ -65,7 +65,7 @@ pub async fn run_server(app_state: ApiState) -> Server {
     let port = app_state.config.port;
     info!(?port, "Starting API server");
 
-    let server = HttpServer::new(move || {
+    HttpServer::new(move || {
         let awc_client = awc::Client::new();
         App::new()
             .app_data(web::Data::new(app_state.clone()))
@@ -85,9 +85,7 @@ pub async fn run_server(app_state: ApiState) -> Server {
     })
     .bind(("0.0.0.0", port))
     .unwrap()
-    .run();
-
-    server
+    .run()
 }
 
 //==============================================================================
