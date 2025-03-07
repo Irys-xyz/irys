@@ -56,6 +56,7 @@ use std::{
     sync::{mpsc, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use std::thread::JoinHandle;
 use tracing::{debug, error, info};
 
 use crate::vdf::run_vdf;
@@ -89,7 +90,6 @@ pub struct IrysNodeCtx {
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
-    pub main_actor_thread_handle: Option<CloneableJoinHandle<()>>,
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
 }
 
@@ -110,17 +110,6 @@ impl IrysNodeCtx {
             .unwrap();
 
         self.reth_thread_handle.unwrap().join().unwrap();
-        self.main_actor_thread_handle.unwrap().join().unwrap();
-
-        // Clean up the IrysRethProvider
-        if let Some(irys_provider) = self
-            .reth_handle
-            .irys_ext
-            .as_ref()
-            .map(|ext| ext.provider.clone())
-        {
-            irys_storage::reth_provider::cleanup_provider(&irys_provider);
-        }
 
         System::current().stop();
         debug!("Main actor thread and reth thread stopped");
@@ -609,9 +598,7 @@ pub async fn start_irys_node(
                     vdf_steps_guard: vdf_steps_guard.clone(),
                     vdf_config: vdf_config.clone(),
                     storage_config: storage_config.clone(),
-                    // api_server_shutdown_sender: api_server_shutdown_tx,
                     reth_shutdown_sender,
-                    main_actor_thread_handle: None,
                     reth_thread_handle: None,
                 });
 
@@ -657,7 +644,7 @@ pub async fn start_irys_node(
             tokio_runtime.block_on(run_to_completion_or_panic(
                 &mut task_manager,
                 run_until_ctrl_c_or_channel_message(
-                    start_reth_node(task_executor, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider, latest_block_height, consensus_engine_shutdown_receiver, api_server_shutdown_tx),
+                    start_reth_node(task_executor, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider.clone(), latest_block_height, consensus_engine_shutdown_receiver, api_server_shutdown_tx, actor_main_thread_handle),
                     reth_shutdown_receiver
                 ),
             )).unwrap();
@@ -669,12 +656,14 @@ pub async fn start_irys_node(
             }
 
             task_manager.graceful_shutdown();
+
+            irys_storage::reth_provider::cleanup_provider(&irys_provider);
+
             debug!("Reth thread finished");
         })?;
 
     // wait for the full handle to be send over by the actix thread
     let mut node = irys_node_handle_receiver.await?;
-    node.main_actor_thread_handle = Some(actor_main_thread_handle.into());
     node.reth_thread_handle = Some(reth_thread_handler.into());
     Ok(node)
 }
@@ -689,6 +678,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
     latest_block: u64,
     consensus_engine_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
     main_actor_thread_shutdown_sender: tokio::sync::mpsc::Sender<()>,
+    main_actor_thread_handle: JoinHandle<()>,
 ) -> eyre::Result<NodeExitReason> {
     let node_handle = irys_reth_node_bridge::run_node(
         Arc::new(chainspec),
@@ -707,7 +697,11 @@ async fn start_reth_node<T: HasName + HasTableType>(
 
     let exit_reason = node_handle.node_exit_future.await?;
 
+    debug!("Sending shutdown signal to main actor thread {:?}", exit_reason);
     let _ = main_actor_thread_shutdown_sender.try_send(());
+    debug!("Waiting for the main actor thread to finish");
+    main_actor_thread_handle.join().unwrap();
+
     debug!("Stopping RPC servers...");
     let _ = &node_handle.node.rpc_server_handles.auth.clone().stop();
     let _ = &node_handle.node.rpc_server_handles.rpc.clone().stop();
