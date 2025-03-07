@@ -189,9 +189,11 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
     restarted_node.stop().await;
 
     debug!("Earliest hash: {:?}", earlies_block.header.hash);
+    debug!("Latest parent hash: {:?}", latest_block_right_after_restart.header.parent_hash);
     debug!("Latest hash before restart: {:?}", latest_block_before_restart.header.hash);
     debug!("Latest hash after restart: {:?}", latest_block_right_after_restart.header.hash);
-    debug!("Next hash: {:?}", next_block.header.hash);
+    debug!("Next block parent: {:?}", next_block.header.parent_hash);
+    debug!("Next block hash: {:?}", next_block.header.hash);
 
     // Check that we aren't on genesis
     assert_eq!(earlies_block.header.hash, latest_block_before_restart.header.parent_hash);
