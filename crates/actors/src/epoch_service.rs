@@ -284,7 +284,7 @@ impl EpochServiceActor {
                     match self.perform_epoch_tasks(Arc::new(block_header)) {
                         Ok(_) => debug!(?block_index, "Processed epoch block"),
                         Err(e) => {
-                            //self.print_items(self.block_index_guard.clone(), db.clone());
+                            self.print_items(self.block_index_guard.clone(), db.clone());
                             panic!("hERE {:?}", e);
                         }
                     }
@@ -330,7 +330,7 @@ impl EpochServiceActor {
             let item = rg.get_item(i as usize).unwrap();
             let block_hash = item.block_hash;
             let block = block_header_by_hash(&tx, &block_hash).unwrap().unwrap();
-            println!(
+            debug!(
                 "index: {} height: {} hash: {}",
                 i,
                 block.height,
@@ -522,8 +522,8 @@ impl EpochServiceActor {
                     break; // Exit if no more available hashes
                 }
 
-                // Pick first capacity partition hash and assign it
-                let part_index = 0;
+                // Pick a random capacity partition hash and assign it
+                let part_index = rng.next_range(capacity_count) as usize;
                 let partition_hash = capacity_partitions.swap_remove(part_index);
                 capacity_count -= 1;
 
