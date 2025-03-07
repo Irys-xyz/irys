@@ -29,7 +29,7 @@ impl VdfService {
 
     #[cfg(any(feature = "test-utils", test))]
     pub fn from_capacity(capacity: usize) -> Self {
-        VdfService {
+        Self {
             vdf_state: Arc::new(RwLock::new(VdfState {
                 global_step: 0,
                 max_seeds_num: capacity,

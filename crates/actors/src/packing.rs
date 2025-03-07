@@ -190,9 +190,8 @@ impl PackingActor {
                         "Chunk size is not aligned with C code"
                     );
 
-                    for chunk_range_split in split_interval(&chunk_range, self.config.max_chunks)
+                    for chunk_range_split in &split_interval(&chunk_range, self.config.max_chunks)
                         .unwrap()
-                        .iter()
                     {
                         let start: u32 = *(*chunk_range_split).start();
                         let end: u32 = *(*chunk_range_split).end();
