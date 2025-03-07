@@ -242,7 +242,7 @@ impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
 }
 
 /// Stop the actor
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub struct Stop;
 

@@ -1,6 +1,6 @@
 use crate::block_producer::BlockConfirmedMessage;
 use crate::block_tree_service::BlockTreeReadGuard;
-use actix::{Actor, ActorContext, Context, Handler, Message, Supervised, SystemService};
+use actix::{Actor, Context, Handler, Message, Supervised, SystemService};
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::db::RethDbWrapper;

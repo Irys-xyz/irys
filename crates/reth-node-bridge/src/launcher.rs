@@ -488,7 +488,7 @@ where
             // advance the chain and await payloads built locally to add into the engine api tree handler to prevent re-execution if that block is received as payload from the CL
             loop {
                 tokio::select! {
-                    shutdown = consensus_engine_shutdown.recv() => {
+                    _shutdown = consensus_engine_shutdown.recv() => {
                         debug!("Received shutdown signal for consensus engine, shutting down...");
                         break;
                     }

@@ -10,8 +10,6 @@ use crate::{
 use clap::{command, Args, Parser};
 use irys_config::IrysNodeConfig;
 use irys_database::db::RethDbWrapper;
-use irys_database::reth_db::database_metrics::{DatabaseMetadataValue, DatabaseMetrics};
-use irys_database::reth_db::DatabaseError;
 use irys_storage::reth_provider::IrysRethProvider;
 use reth::{
     chainspec::EthereumChainSpecParser,
@@ -24,8 +22,7 @@ use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::NodeCommand;
 use reth_consensus::Consensus;
-use reth_db::database_metrics::DatabaseMetadata;
-use reth_db::{init_db, DatabaseEnv, HasName, HasTableType};
+use reth_db::{init_db, HasName, HasTableType};
 use reth_engine_tree::tree::TreeConfig;
 use reth_ethereum_engine_primitives::EthereumEngineValidator;
 use reth_node_api::{FullNodeTypesAdapter, NodeTypesWithDBAdapter};

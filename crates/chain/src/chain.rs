@@ -1,19 +1,16 @@
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
-use alloy_eips::{BlockId, BlockNumberOrTag};
+use alloy_eips::BlockNumberOrTag;
 use irys_actors::packing::PackingConfig;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
-    block_index_service,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerActor,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    chunk_migration_service,
     chunk_migration_service::ChunkMigrationService,
-    epoch_service,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
         GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
@@ -22,7 +19,6 @@ use irys_actors::{
     mining::PartitionMiningActor,
     packing::{PackingActor, PackingRequest},
     validation_service::ValidationService,
-    vdf_service,
     vdf_service::{GetVdfStateMessage, VdfService},
     ActorAddresses, BlockFinalizedMessage,
 };
@@ -45,8 +41,6 @@ use irys_types::{
 use irys_types::{Config, DifficultyAdjustmentConfig, PartitionChunkRange};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::core::irys_ext::ReloadPayload;
-use reth::network::NetworkInfo;
-use reth::rpc::api::eth::helpers::LoadBlock;
 use reth::rpc::eth::EthApiServer as _;
 use reth::{
     builder::FullNode,
@@ -54,15 +48,12 @@ use reth::{
     core::irys_ext::NodeExitReason,
     tasks::{TaskExecutor, TaskManager},
 };
-use reth_cli_runner::{
-    run_to_completion_or_panic, run_until_ctrl_c_or_channel_message, tokio_runtime,
-};
-use reth_db::DatabaseEnv;
+use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
 use std::sync::atomic::AtomicU64;
 use std::{
     fs,
-    sync::{mpsc, Arc, OnceLock, RwLock},
+    sync::{mpsc, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tracing::{debug, error, info};
@@ -70,7 +61,6 @@ use tracing::{debug, error, info};
 use crate::vdf::run_vdf;
 use irys_database::migration::check_db_version_and_run_migrations_if_needed;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use tokio::{
     runtime::Handle,
     sync::oneshot::{self},
@@ -111,8 +101,8 @@ impl IrysNodeCtx {
         // First stop the API server and RPC endpoints to prevent new requests
         self.api_server_shutdown_sender.try_send(()).unwrap();
         debug!("Stopping RPC servers...");
-        &self.reth_handle.rpc_server_handles.auth.clone().stop();
-        &self.reth_handle.rpc_server_handles.rpc.clone().stop();
+        let _ = &self.reth_handle.rpc_server_handles.auth.clone().stop();
+        let _ = &self.reth_handle.rpc_server_handles.rpc.clone().stop();
 
         // We need to make sure that all our actors has stopped before attempting to stop reth
         if let Some(main_actor_thread_handle) = self.main_actor_thread_handle {
@@ -631,7 +621,7 @@ pub async fn start_irys_node(
                     chunk_provider: arc_chunk_provider.clone(),
                 });
 
-                let (api_server_shutdown_tx, mut api_server_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+                let (api_server_shutdown_tx, api_server_shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
                 let _ = irys_node_handle_sender.send(IrysNodeCtx {
                     actor_addresses: actor_addresses.clone(),

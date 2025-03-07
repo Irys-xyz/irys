@@ -121,7 +121,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
 }
 
 /// Stop the actor
-#[derive(Message)]
+#[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub struct Stop;
 
