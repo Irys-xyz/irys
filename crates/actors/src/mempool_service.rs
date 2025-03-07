@@ -6,9 +6,9 @@ use core::fmt::Display;
 use eyre::eyre;
 use irys_database::db::RethDbWrapper;
 use irys_database::db_cache::data_size_to_chunk_count;
-use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofLRU, IngressProofs};
-use irys_database::db_cache::{data_size_to_chunk_count, DataRootLRUEntry};
-use irys_database::tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs};
+use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
+use irys_database::db_cache::{DataRootLRUEntry};
+use irys_database::tables::{DataRootLRU};
 use irys_database::{insert_tx_header, tx_header_by_txid, Ledger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
@@ -16,7 +16,7 @@ use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
     IrysTransactionHeader, H256,
 };
-use irys_types::{Config, DataRoot, RethDatabaseProvider, StorageConfig, U256};
+use irys_types::{Config, DataRoot, StorageConfig, U256};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::transaction::DbTx as _;

@@ -43,7 +43,7 @@ use irys_types::{
     StorageConfig, CHUNK_SIZE, H256,
 };
 use irys_types::{
-    Config, DifficultyAdjustmentConfig, OracleConfig, PartitionChunkRange, RethDatabaseProvider,
+    Config, DifficultyAdjustmentConfig, OracleConfig, PartitionChunkRange,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::core::irys_ext::ReloadPayload;
@@ -625,7 +625,7 @@ pub async fn start_irys_node(
                     vdf_steps_guard: vdf_steps_guard.clone(),
                     vdf_config: vdf_config.clone(),
                     storage_config: storage_config.clone(),
-                    service_senders: service_senders.clone()
+                    service_senders: service_senders.clone(),
                     reth_shutdown_sender,
                     reth_thread_handle: None,
                 });
@@ -677,11 +677,7 @@ pub async fn start_irys_node(
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
             let node_config= cloned_arc.clone();
-            let tokio_runtime = /* Handle::current(); */ tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-            let mut task_manager = TaskManager::new(tokio_runtime.handle().clone());
-            let task_executor: reth::tasks::TaskExecutor = task_manager.executor();
 
-            let node_config = cloned_arc.clone();
             tokio_runtime.block_on(run_to_completion_or_panic(
                 &mut task_manager,
                 run_until_ctrl_c_or_channel_message(start_reth_node(
@@ -690,9 +686,12 @@ pub async fn start_irys_node(
                     node_config,
                     IrysTables::ALL,
                     reth_handle_sender,
-                    irys_provider,
+                    irys_provider.clone(),
                     latest_block_height,
-                )),
+                    consensus_engine_shutdown_receiver,
+                    main_actor_thread_shutdown_tx,
+                    consensus_engine_shutdown_sender,
+                ), reth_shutdown_receiver),
             )).unwrap();
 
             debug!("Waiting for the main actor thread to finish");
