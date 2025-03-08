@@ -968,9 +968,21 @@ fn ensure_default_intervals(
         .insert_merge_touching_if_values_equal(*submodule_interval, ChunkType::Uninitialized)
         .expect("to insert a default interval to the submodule intervals");
 
-    let mut file = get_atomic_file(&intervals_path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&intervals_path)
+        .wrap_err_with(|| {
+            format!(
+                "Failed to create or open intervals file at {}",
+                intervals_path.display()
+            )
+        })?;
+
     let file_size = file.metadata()?.len();
     if file_size == 0 {
+        let mut file = get_atomic_file(&intervals_path)?;
         file.write_all(serde_json::to_string(&intervals)?.as_bytes())?;
         file.commit()?;
     }
