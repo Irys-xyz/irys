@@ -18,7 +18,7 @@ pub mod vdf_state;
 /// # Arguments
 ///
 /// * `step_number` - The step the checkpoint belongs to, add 1 to the salt for
-/// each subsequent checkpoint calculation.
+///     each subsequent checkpoint calculation.
 pub const fn step_number_to_salt_number(config: &VDFStepsConfig, step_number: u64) -> u64 {
     match step_number {
         0 => 0,
@@ -54,11 +54,11 @@ pub fn vdf_sha(
     seed: &mut H256,
     num_checkpoints: usize,
     num_iterations: u64,
-    checkpoints: &mut Vec<H256>,
+    checkpoints: &mut [H256],
 ) {
     let mut local_salt: [u8; 32] = [0; 32];
 
-    for checkpoint_idx in 0..num_checkpoints {
+    for checkpoint_idx in checkpoints.iter_mut().take(num_checkpoints) {
         salt.to_little_endian(&mut local_salt);
 
         for _ in 0..num_iterations {
@@ -68,7 +68,7 @@ pub fn vdf_sha(
         }
 
         // Store the result at the correct checkpoint index
-        checkpoints[checkpoint_idx] = *seed;
+        *checkpoint_idx = *seed;
 
         // Increment the salt for the next checkpoint calculation
         *salt = *salt + 1;
@@ -228,12 +228,12 @@ pub async fn last_step_checkpoints_is_valid(
 
     let is_valid = test == vdf_info.last_step_checkpoints;
 
-    if !is_valid {
+    if is_valid {
+        Ok(())
+    } else {
         // Compare the blocks list with the calculated one, looking for mismatches
         warn_mismatches(&vdf_info.last_step_checkpoints, &H256List(test));
         Err(eyre::eyre!("Checkpoints are invalid"))
-    } else {
-        Ok(())
     }
 }
 
@@ -257,19 +257,18 @@ pub fn vdf_steps_are_valid(
         vdf_info.prev_output, vdf_info.seed
     );
 
-    let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1 as u64;
+    let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1_u64;
     let end: u64 = vdf_info.global_step_number;
 
     match vdf_steps_guard.read().get_steps(ii(start, end)) {
         Ok(steps) => {
             debug!("Validating VDF steps from VdfStepsReadGuard!");
-            if steps != vdf_info.steps {
-                warn_mismatches(&steps, &vdf_info.steps);
-                return Err(eyre::eyre!("VDF steps are invalid!"));
-            } else {
+            if steps == vdf_info.steps {
                 // Do not need to check last step checkpoints here, were checked in pre validation
                 return Ok(())
             }
+            warn_mismatches(&steps, &vdf_info.steps);
+            return Err(eyre::eyre!("VDF steps are invalid!"));
         },
         Err(err) =>
             debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err)

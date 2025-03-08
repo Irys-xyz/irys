@@ -9,3 +9,6 @@ irys-types.workspace = true
 eyre.workspace = true
 openssl.workspace = true
 tracing.workspace = true
+
+# [lints]
+# workspace = true

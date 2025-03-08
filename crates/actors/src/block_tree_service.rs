@@ -240,7 +240,7 @@ impl BlockTreeService {
             panic!("Unable to send finalisation message to reth: {}", &e)
         }
 
-        if let Err(_) = self.send_storage_finalized_message(finalized_hash) {
+        if self.send_storage_finalized_message(finalized_hash).is_err() {
             error!("Unable to send block finalized message");
         }
     }
@@ -331,7 +331,7 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
                 let mut cache = binding.write().unwrap();
 
                 // Mark block as validated in cache
-                if let Err(_) = cache.mark_block_as_valid(&block_hash) {
+                if cache.mark_block_as_valid(&block_hash).is_err() {
                     error!(
                         "Unable to mark block as Validated: {}",
                         block_hash.0.to_base58()
@@ -779,7 +779,7 @@ impl BlockTreeCache {
             .iter()
             .map(|(hash, entry)| (entry.block.cumulative_diff, *hash))
             .max_by_key(|(diff, _)| *diff)
-            .unwrap_or((U256::zero(), BlockHash::default()))
+            .unwrap_or_else(||(U256::zero(), BlockHash::default()))
     }
 
     #[must_use]
@@ -834,9 +834,9 @@ impl BlockTreeCache {
 
             if entry.block.height == 0 {
                 break;
-            } else {
+            } 
                 current = entry.block.previous_block_hash;
-            }
+            
         }
 
         pairs.reverse();

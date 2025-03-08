@@ -1,6 +1,6 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, path::Path};
 
-pub(crate) fn build_capacity(c_src: &PathBuf, _ssl_inc_dir: &PathBuf) {
+pub(crate) fn build_capacity(c_src: &Path, _ssl_inc_dir: &Path) {
     let mut cc = cc::Build::new();
     cc.flag("-O3");
     // TODO: enable below for debug
@@ -28,7 +28,7 @@ pub(crate) fn build_capacity(c_src: &PathBuf, _ssl_inc_dir: &PathBuf) {
     cc.compile("capacity_single");
 }
 
-pub(crate) fn bind_capacity(c_src: &PathBuf) {
+pub(crate) fn bind_capacity(c_src: &Path) {
     let bindings = bindgen::Builder::default()
         .header(c_src.join("capacity.h").to_string_lossy())
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
@@ -41,7 +41,7 @@ pub(crate) fn bind_capacity(c_src: &PathBuf) {
         .expect("Couldn't write bindings!");
 }
 
-pub(crate) fn build_capacity_cuda(c_src: &PathBuf, _ssl_inc_dir: &PathBuf) {
+pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
     let mut cc = cc::Build::new();
 
     cc.cuda(true);
@@ -71,7 +71,7 @@ pub(crate) fn build_capacity_cuda(c_src: &PathBuf, _ssl_inc_dir: &PathBuf) {
     cc.compile("capacity_cuda");
 }
 
-pub(crate) fn bind_capacity_cuda(c_src: &PathBuf) {
+pub(crate) fn bind_capacity_cuda(c_src: &Path) {
     let bindings = bindgen::Builder::default()
         .header(c_src.join("capacity_cuda.h").to_string_lossy())
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))

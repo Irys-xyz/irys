@@ -207,7 +207,7 @@ impl Handler<TxIngressMessage> for MempoolService {
             .read()
             .get_canonical_chain();
 
-        let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
+        let (_, latest_height, _, _) = canon_chain.0.last().ok_or_else(||TxIngressError::Other(
             "unable to get canonical chain from block tree".to_owned(),
         ))?;
 

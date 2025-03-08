@@ -20,7 +20,7 @@ pub struct VdfService {
 impl VdfService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
     pub fn new(block_index: BlockIndexReadGuard, db: DatabaseProvider, config: &Config) -> Self {
-        let vdf_state = create_state(block_index, db, &config);
+        let vdf_state = create_state(block_index, db, config);
 
         Self {
             vdf_state: Arc::new(RwLock::new(vdf_state)),
@@ -29,7 +29,7 @@ impl VdfService {
 
     #[cfg(any(feature = "test-utils", test))]
     pub fn from_capacity(capacity: usize) -> Self {
-        VdfService {
+        Self {
             vdf_state: Arc::new(RwLock::new(VdfState {
                 global_step: 0,
                 max_seeds_num: capacity,
@@ -93,14 +93,12 @@ fn create_state(
 
 pub fn calc_capacity(config: &Config) -> usize {
     const DEFAULT_CAPACITY: usize = 10_000;
-    let capacity = std::cmp::max(
+    std::cmp::max(
         DEFAULT_CAPACITY,
         (config.num_chunks_in_partition / config.num_chunks_in_recall_range)
             .try_into()
             .unwrap(),
-    );
-
-    capacity
+    )
 }
 
 impl Supervised for VdfService {}
