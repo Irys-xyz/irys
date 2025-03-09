@@ -25,7 +25,7 @@ async fn serial_test_cache_pruning() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("serial_test_cache_pruning"), false);
     let mut testnet_config = Config::testnet();
     testnet_config.chunk_size = 32;
-    testnet_config.finalization_depth = 2;
+    testnet_config.chunk_migration_depth = 2;
     let main_address = testnet_config.miner_address();
     let account1 = IrysSigner::random_signer(&testnet_config);
     let mut config = IrysNodeConfig {

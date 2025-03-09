@@ -43,7 +43,7 @@ pub struct Config {
     /// - 6 confirmations protects against attackers with <25% hashpower
     /// - 20 confirmations protects against attackers with <40% hashpower
     /// - No number of confirmations is secure against attackers with >50% hashpower
-    pub finalization_depth: u32,
+    pub chunk_migration_depth: u32,
     #[serde(
         deserialize_with = "serde_utils::signing_key_from_hex",
         serialize_with = "serde_utils::serializes_signing_key"
@@ -114,14 +114,14 @@ impl Config {
             num_checkpoints_in_vdf_step: 25,
             vdf_sha_1s: 7_000,
             entropy_packing_iterations: 1000,
-            chain_id: 1275,
+            chain_id: 1270,
             capacity_scalar: 100,
             num_blocks_in_epoch: 100,
             submit_ledger_epoch_length: 5,
             num_partitions_per_slot: 1,
             num_writes_before_sync: 1,
             reset_state_on_restart: false,
-            finalization_depth: 1,
+            chunk_migration_depth: 1,
             mining_key: SigningKey::from_slice(
                 &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
                     .expect("valid hex"),
@@ -244,14 +244,14 @@ mod tests {
             num_checkpoints_in_vdf_step = 25
             vdf_sha_1s = 7000
             entropy_packing_iterations = 22500000
-            chain_id = 1275
+            chain_id = 1270
             capacity_scalar = 100
             num_blocks_in_epoch = 100
             submit_ledger_epoch_length = 5
             num_partitions_per_slot = 1
             num_writes_before_sync = 5
             reset_state_on_restart = false
-            finalization_depth = 1
+            chunk_migration_depth = 1
             mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
             num_capacity_partitions = 16
             port = 8080

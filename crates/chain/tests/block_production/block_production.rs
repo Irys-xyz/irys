@@ -279,7 +279,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         num_partitions_per_slot: 1,
         num_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
-        finalization_depth: 1,
+        chunk_migration_depth: 1,
         ..Config::testnet()
     };
     let mut config = IrysNodeConfig::new(&testnet_config);

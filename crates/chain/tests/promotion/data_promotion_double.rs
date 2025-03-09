@@ -41,7 +41,7 @@ async fn serial_double_root_data_promotion_test() {
         num_partitions_per_slot: 1,
         num_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
-        finalization_depth: 1, // Testnet / single node config
+        chunk_migration_depth: 1, // Testnet / single node config
         ..Config::testnet()
     };
     testnet_config.chunk_size = chunk_size;
