@@ -80,7 +80,7 @@ async fn serial_data_promotion_test() {
         db: node_context.db.clone(),
         mempool: node_context.actor_addresses.mempool,
         chunk_provider: node_context.chunk_provider.clone(),
-        config: testnet_config,
+        config: testnet_config.clone(),
     };
 
     // Initialize the app
@@ -110,7 +110,7 @@ async fn serial_data_promotion_test() {
         for chunk in chunks {
             data.extend_from_slice(chunk);
         }
-        let tx = signer.create_transaction(data, None).unwrap();
+        let tx = signer.create_transaction(&testnet_config, data, None).unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
         println!("tx[{}] {}", i, tx.header.id.as_bytes().to_base58());
         txs.push(tx);
