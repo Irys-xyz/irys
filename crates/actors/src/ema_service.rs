@@ -7,6 +7,7 @@ use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height, Config, IrysBlockHeader,
     IrysTokenPrice, H256,
 };
+use openssl::ssl::ShutdownResult;
 use price_cache_context::PriceCacheContext;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use tokio::sync::{
@@ -86,25 +87,46 @@ pub struct Inner {
 
 impl EmaService {
     async fn start(mut self) {
-        let mut context = PriceCacheContext::from_canonical_chain(
+        tracing::info!("starting EMA service");
+        use futures::future::Either;
+
+        let mut price_ctx = PriceCacheContext::from_canonical_chain(
             self.inner.block_tree_read_guard.clone(),
             self.inner.blocks_in_interval,
         )
         .await;
 
-        let msg_processor = async {
-            while let Some(msg) = self.msg_rx.recv().await {
-                self.inner.handle_message(msg, &mut context).await;
-            }
+        let shutdown_guard = {
+            let mut msg_rx = pin!(self.msg_rx.recv());
+            let mut future2 = pin!(self.shutdown);
+
+            let shutdown_guard = loop {
+                match futures::future::select(&mut msg_rx, &mut future2).await {
+                    Either::Left((Some(msg), _)) => {
+                        self.inner.handle_message(msg, &mut price_ctx).await;
+                    }
+                    Either::Left((None, _)) => {
+                        tracing::warn!("receiver channel closed");
+                        break None;
+                    }
+                    Either::Right((shutdown, _)) => {
+                        tracing::warn!("shutdown signal received");
+                        break Some(shutdown);
+                    }
+                }
+            };
+            shutdown_guard
         };
 
-        let shutdown_handler = async {
-            let _ = self.shutdown.await;
-        };
-        msg_processor.race(shutdown_handler).await;
+        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdwon");
         while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg, &mut context).await;
+            self.inner.handle_message(msg, &mut price_ctx).await;
         }
+
+        // explicitly inform the TaskManager that we're shutting down
+        drop(shutdown_guard);
+
+        tracing::info!("shutting down EMA service");
     }
 }
 
@@ -182,7 +204,6 @@ mod price_cache_context {
                 *latest_block_height,
                 blocks_in_price_adjustment_interval,
             ) {
-                dbg!("is recalc");
                 *latest_block_height
             } else {
                 previous_ema_recalculation_block_height(
@@ -190,8 +211,6 @@ mod price_cache_context {
                     blocks_in_price_adjustment_interval,
                 )
             };
-            dbg!(&latest_block_height);
-            dbg!(&previous_epoch_block_height);
             let block_previous_interval_predecessor = previous_epoch_block_height.saturating_sub(1);
             let two_epochs_ago_block = previous_ema_recalculation_block_height(
                 previous_epoch_block_height,
@@ -424,4 +443,11 @@ mod price_cache_context {
             block_tree_guard
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // test --
 }
