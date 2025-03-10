@@ -380,7 +380,6 @@ impl EpochServiceActor {
         let expired_hashes: Vec<H256>;
         {
             let mut ledgers = self.ledgers.write().unwrap();
-            debug!("ledgers expire {:#?}", ledgers);
             expired_hashes = ledgers.get_expired_partition_hashes(epoch_height);
         }
 
@@ -468,10 +467,8 @@ impl EpochServiceActor {
         let slot_needs: Vec<(u64, usize)>;
         {
             let ledgers = self.ledgers.read().unwrap();
-            debug!("Ledgers: {:#?}", &ledgers);
             slot_needs = ledgers.get_slot_needs(ledger);
         }
-        debug!("Slot needs: {:#?}", &slot_needs);
         let mut capacity_count = capacity_partitions.len() as u32;
 
         // Iterate over slots that need partitions and assign them
