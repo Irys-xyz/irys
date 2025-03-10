@@ -112,7 +112,7 @@ impl PriceCalc {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{storage_pricing::Amount, DecayParams, StorageFees};
+    use crate::{storage_pricing::Amount, DecayParams, OracleConfig, StorageFees};
     use k256::ecdsa::SigningKey;
 
     const EPSILON: Decimal = dec!(1e-9);
@@ -186,6 +186,14 @@ mod test {
                 .expect("valid percentage"),
             cpu_packing_concurrency: u16::default(),
             gpu_packing_batch_size: u32::default(),
+            cache_clean_lag: u8::default(),
+            oracle_config: OracleConfig::Mock {
+                initial_price: Amount::token(rust_decimal_macros::dec!(1))
+                    .expect("valid token amount"),
+                percent_change: Amount::percentage(rust_decimal_macros::dec!(0.01))
+                    .expect("valid percentage"),
+                smoothing_interval: 15,
+            },
         }
     }
 

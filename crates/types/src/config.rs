@@ -75,6 +75,8 @@ pub struct Config {
     /// GPU kernel batch size
     pub gpu_packing_batch_size: u32,
     pub oracle_config: OracleConfig,
+    pub decay_params: DecayParams,
+    pub storage_fees: StorageFees,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +89,18 @@ pub enum OracleConfig {
         percent_change: Amount<Percentage>,
         smoothing_interval: u64,
     },
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DecayParams {
+    pub safe_minimum_number_of_years: u32,
+    pub annualized_decay_rate: Decimal,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StorageFees {
+    pub ingress_fee: Decimal,
+    pub number_of_ingress_proofs: u32,
 }
 
 impl Config {
@@ -149,6 +163,14 @@ impl Config {
                 percent_change: Amount::percentage(rust_decimal_macros::dec!(0.01))
                     .expect("valid percentage"),
                 smoothing_interval: 15,
+            },
+            decay_params: DecayParams {
+                safe_minimum_number_of_years: 200,
+                annualized_decay_rate: rust_decimal_macros::dec!(0.01),
+            },
+            storage_fees: StorageFees {
+                number_of_ingress_proofs: 10,
+                ingress_fee: rust_decimal_macros::dec!(0.01),
             },
         }
     }
@@ -267,6 +289,10 @@ mod tests {
             cpu_packing_concurrency = 4
             gpu_packing_batch_size = 1024   
             cache_clean_lag = 2
+            decay_params.safe_minimum_number_of_years = 200
+            decay_params.annualized_decay_rate = "0.01"
+            storage_fees.number_of_ingress_proofs = 10
+            storage_fees.ingress_fee = "0.01"
 
             [oracle_config]
             type = "mock"

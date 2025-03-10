@@ -59,8 +59,8 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: HasName + HasTableType>(
         DatabaseArguments::new(ClientVersion::default())
             .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
             // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
-            .with_growth_step((50 * MEGABYTE).try_into()?)
-            .with_shrink_threshold((100 * MEGABYTE).try_into()?),
+            .with_growth_step((50 * MEBIBYTE).try_into()?)
+            .with_shrink_threshold((100 * MEBIBYTE).try_into()?),
     );
     open_or_create_db(path, tables, Some(args))
 }
