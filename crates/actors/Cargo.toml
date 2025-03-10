@@ -41,6 +41,7 @@ thiserror.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-config = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

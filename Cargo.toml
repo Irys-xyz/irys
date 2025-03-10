@@ -73,6 +73,7 @@ alloy-contract = { path = "./ext/alloy/crates/contract" }
 alloy-provider = { path = "./ext/alloy/crates/provider", features = ["trace-api"] }
 
 arbitrary = { version = "1.3", features = ["derive"] }
+rstest = "0.25"
 once_cell = "1"
 assert_matches = "1"
 bytes = "1.5"

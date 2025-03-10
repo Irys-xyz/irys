@@ -1,13 +1,10 @@
 use std::pin::pin;
 
-use actix::Addr;
-use futures::{join, FutureExt};
-use futures_concurrency::prelude::*;
+use futures::join;
 use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height, Config, IrysBlockHeader,
     IrysTokenPrice, H256,
 };
-use openssl::ssl::ShutdownResult;
 use price_cache_context::PriceCacheContext;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use tokio::sync::{
@@ -45,17 +42,13 @@ pub struct EmaServiceHandle {
 impl EmaServiceHandle {
     pub fn spawn_service(
         exec: &TaskExecutor,
-        block_tree: Addr<BlockTreeService>,
+        block_tree_read_guard: BlockTreeReadGuard,
         config: &Config,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let genesis_token_price = config.genesis_token_price;
         let blocks_in_interval = config.price_adjustment_interval;
         exec.spawn_critical_with_graceful_shutdown_signal("EMA Service", |shutdown| async move {
-            let block_tree_read_guard = block_tree
-                .send(GetBlockTreeGuardMessage)
-                .await
-                .expect("could not retrieve block tree read guard");
             let cache_service = EmaService {
                 shutdown,
                 msg_rx: rx,
@@ -97,12 +90,13 @@ impl EmaService {
         .await;
 
         let shutdown_guard = {
-            let mut msg_rx = pin!(self.msg_rx.recv());
-            let mut future2 = pin!(self.shutdown);
+            let mut future2 = pin!(&mut self.shutdown);
 
             let shutdown_guard = loop {
+                let mut msg_rx = pin!(self.msg_rx.recv());
                 match futures::future::select(&mut msg_rx, &mut future2).await {
                     Either::Left((Some(msg), _)) => {
+                        tracing::debug!(?msg);
                         self.inner.handle_message(msg, &mut price_ctx).await;
                     }
                     Either::Left((None, _)) => {
@@ -163,6 +157,12 @@ impl Inner {
                         context.block_previous_interval.irys_price.to_ema(),
                     )
                     .unwrap();
+                tracing::info!(
+                    new_ema = ?new_ema.token_to_decimal().unwrap(),
+                    prev_predecessor_height = ?context.block_previous_interval_predecessor.height,
+                    prev_ema_height = ?context.block_previous_interval.height,
+                    "computing new EMA"
+                );
 
                 let _ = response.send(Ok(new_ema.to_irys_price()));
             }
@@ -317,6 +317,8 @@ mod price_cache_context {
             assert_eq!(price_cache.next_ema_adjustment_height, 9);
         }
 
+        // todo use rstest to parametrise the tests
+
         #[test_log::test(tokio::test)]
         async fn test_valid_price_after_first_epoch() {
             // setup
@@ -448,6 +450,241 @@ mod price_cache_context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reth::tasks::TaskManager;
+    use rust_decimal::Decimal;
+    use std::sync::{Arc, RwLock};
 
-    // test --
+    fn build_tree_with_n_blocks(blocks: u64) -> (BlockTreeReadGuard, Vec<IrysTokenPrice>) {
+        let mut blocks = (0..blocks)
+            .map(|height| {
+                let mut b = IrysBlockHeader::new_mock_header();
+                b.height = height;
+                // add a random constant to the price to differentiate it from the height
+                let price = IrysTokenPrice::token(Decimal::from(height + 5)).unwrap();
+                b.irys_price = price;
+                b
+            })
+            .collect::<Vec<_>>();
+        let prices = blocks
+            .iter()
+            .map(|block| block.irys_price.clone())
+            .collect::<Vec<_>>();
+        (genesis_tree(&mut blocks), prices)
+    }
+
+    fn genesis_tree(blocks: &mut [IrysBlockHeader]) -> BlockTreeReadGuard {
+        use crate::block_tree_service::{BlockTreeCache, ChainState};
+        let mut block_hash = H256::random();
+        let mut iter = blocks.iter_mut();
+        let genesis_block = iter.next().unwrap();
+        genesis_block.block_hash = block_hash;
+        genesis_block.cumulative_diff = 0.into();
+
+        let mut block_tree_cache = BlockTreeCache::new(genesis_block);
+        block_tree_cache.mark_tip(&block_hash).unwrap();
+        for block in iter {
+            block.previous_block_hash = block_hash;
+            block.cumulative_diff = block.height.into();
+            block_hash = H256::random();
+            block.block_hash = block_hash;
+            block_tree_cache
+                .add_common(
+                    block.block_hash.clone(),
+                    block,
+                    Arc::new(Vec::new()),
+                    ChainState::Onchain,
+                )
+                .unwrap();
+        }
+        let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));
+        BlockTreeReadGuard::new(block_tree_cache)
+    }
+
+    struct TestCtx {
+        guard: BlockTreeReadGuard,
+        config: Config,
+        task_manager: TaskManager,
+        task_executor: TaskExecutor,
+        ema_handle: EmaServiceHandle,
+        prices: Vec<IrysTokenPrice>,
+    }
+
+    impl TestCtx {
+        fn setup(block_count: u64, config: Config) -> Self {
+            let (block_tree_guard, prices) = build_tree_with_n_blocks(block_count);
+            assert_eq!(prices.len(), block_count as usize);
+            let task_manager = TaskManager::new(tokio::runtime::Handle::current());
+            let task_executor = task_manager.executor();
+            let service =
+                EmaServiceHandle::spawn_service(&task_executor, block_tree_guard.clone(), &config);
+            Self {
+                guard: block_tree_guard,
+                config,
+                task_manager,
+                task_executor,
+                ema_handle: service,
+                prices,
+            }
+        }
+    }
+    mod get_current_ema {
+        use super::*;
+        use rstest::rstest;
+        use test_log::test;
+
+        #[test(tokio::test)]
+        #[rstest]
+        #[case(1, 0)]
+        #[case(9, 0)]
+        #[case(19, 0)]
+        #[case(20, 9)] // use the 10th block price during 3rd EMA interval
+        #[case(29, 9)]
+        #[case(30, 19)]
+        #[timeout(std::time::Duration::from_millis(100))]
+        async fn test_when_on_genesis_block(
+            #[case] block_count: u64,
+            #[case] price_block_idx: usize,
+        ) {
+            // setup
+            let ctx = TestCtx::setup(
+                block_count,
+                Config {
+                    price_adjustment_interval: 10,
+                    ..Config::testnet()
+                },
+            );
+            let desired_block_price = ctx.prices[price_block_idx];
+
+            // action
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            ctx.ema_handle
+                .sender
+                .send(EmaServiceMessage::GetCurrentEma { response: tx })
+                .unwrap();
+            let response = rx.await.unwrap();
+
+            // assert
+            assert_eq!(response, desired_block_price);
+            assert!(!ctx.ema_handle.sender.is_closed());
+        }
+    }
+
+    mod get_ema_for_next_adjustment_period {
+        use super::*;
+        use rstest::rstest;
+        use test_log::test;
+
+        #[test(tokio::test)]
+        async fn first_adjustment_period() {
+            // prepare
+            let block_count = 9;
+            let price_adjustment_interval = 10;
+            let ctx = TestCtx::setup(
+                block_count,
+                Config {
+                    price_adjustment_interval,
+                    ..Config::testnet()
+                },
+            );
+
+            // action
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            ctx.ema_handle
+                .sender
+                .send(EmaServiceMessage::GetEmaForNextAdjustmentPeriod {
+                    height_of_new_adjustment_block: 9,
+                    response: tx,
+                })
+                .unwrap();
+            let ema_response = rx.await.unwrap().unwrap();
+
+            // assert
+            let prev_price = ctx.prices[0];
+            let ema_computed = ctx.prices[0]
+                .calculate_ema(price_adjustment_interval, prev_price.to_ema())
+                .unwrap();
+            assert_eq!(ema_computed, ema_response.to_ema());
+        }
+
+        #[test(tokio::test)]
+        #[rstest]
+        #[case(19, 9, 8)]
+        #[case(29, 19, 18)]
+        #[case(39, 29, 28)]
+        #[case(169, 159, 158)]
+        async fn nth_adjustment_period(
+            #[case] block_count: u64,
+            #[case] prev_ema_idx: usize,
+            #[case] prev_ema_predecessor_idx: usize,
+        ) {
+            // prepare
+            let price_adjustment_interval = 10;
+            let ctx = TestCtx::setup(
+                block_count,
+                Config {
+                    price_adjustment_interval,
+                    ..Config::testnet()
+                },
+            );
+
+            // action
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            ctx.ema_handle
+                .sender
+                .send(EmaServiceMessage::GetEmaForNextAdjustmentPeriod {
+                    height_of_new_adjustment_block: block_count,
+                    response: tx,
+                })
+                .unwrap();
+            let ema_response = rx.await.unwrap().unwrap();
+
+            // assert
+            let prev_price = ctx.prices[prev_ema_idx];
+            let ema_computed = ctx.prices[prev_ema_predecessor_idx]
+                .calculate_ema(price_adjustment_interval, prev_price.to_ema())
+                .unwrap();
+            assert_eq!(ema_computed, ema_response.to_ema());
+        }
+
+        #[test(tokio::test)]
+        #[rstest]
+        #[case(1, 2)]
+        #[case(1, 3)]
+        #[case(1, 8)]
+        #[case(15, 16)]
+        #[case(15, 17)]
+        #[case(15, 11)]
+        #[case(15, 18)]
+        async fn nth_invalid_ema_block_requsets(
+            #[case] block_count: u64,
+            #[case] height_of_new_adjustment_block: u64,
+        ) {
+            // prepare
+            let price_adjustment_interval = 10;
+            let ctx = TestCtx::setup(
+                block_count,
+                Config {
+                    price_adjustment_interval,
+                    ..Config::testnet()
+                },
+            );
+
+            // action
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            ctx.ema_handle
+                .sender
+                .send(EmaServiceMessage::GetEmaForNextAdjustmentPeriod {
+                    height_of_new_adjustment_block,
+                    response: tx,
+                })
+                .unwrap();
+            let ema_response = rx.await.unwrap();
+
+            // assert
+            assert!(matches!(
+                ema_response,
+                Err(EmaCalculationError::HeightIsNotEmaAdjustmentBlock)
+            ));
+        }
+    }
 }
