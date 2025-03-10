@@ -1,7 +1,10 @@
 use irys_types::{Compact, Config, H256List, TransactionLedger, H256};
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    ops::{Index, IndexMut},
+};
 use tracing::debug;
-use std::{collections::BTreeMap, ops::{Index, IndexMut}};
 /// Manages the global ledger state within the epoch service, tracking:
 /// - All ledger types (Publish, Submit, etc.)
 /// - Their associated partitions
@@ -35,7 +38,7 @@ pub struct PermanentLedger {
 /// Temporary ledger that exists for a fixed number of epochs
 pub struct TermLedger {
     /// Map between slots numbers and its ledger containing partition assignments  
-    pub slots: BTreeMap<u64 ,LedgerSlot>,
+    pub slots: BTreeMap<u64, LedgerSlot>,
     /// Nest slot index
     pub next_slot_idx: u64,
     /// Unique identifier for this ledger, see `Ledger` enum
@@ -76,7 +79,7 @@ impl TermLedger {
     }
 
     /// Returns indices of newly expired slots
-    pub fn expire_old_slots(&mut self, epoch_height: u64) -> Vec<(u64,H256List)> {
+    pub fn expire_old_slots(&mut self, epoch_height: u64) -> Vec<(u64, H256List)> {
         let mut expired_indices = Vec::new();
 
         // Make sure enough blocks have transpired before calculating expiry height
@@ -87,17 +90,19 @@ impl TermLedger {
 
         let expiry_height = epoch_height - self.epoch_length * self.num_blocks_in_epoch;
 
-
         // Collect indices of slots to expire
         for (idx, slot) in self.slots.iter() {
             if slot.last_height <= expiry_height {
-                debug!("Slot {} expired at height {}", slot.slot_number, expiry_height);
+                debug!(
+                    "Slot {} expired at height {}",
+                    slot.slot_number, expiry_height
+                );
                 expired_indices.push((*idx, H256List(slot.partitions.clone())));
             }
         }
 
         // Delete expired slots
-        for (idx,_) in &expired_indices {
+        for (idx, _) in &expired_indices {
             self.slots.remove(idx);
         }
 
@@ -173,12 +178,14 @@ impl LedgerCore for TermLedger {
     fn allocate_slots(&mut self, slots_num: usize) -> u64 {
         let mut num_partitions_added: u64 = 0;
         for _slot in 0..slots_num {
-            self.slots.insert(self.next_slot_idx,
-                 LedgerSlot {
+            self.slots.insert(
+                self.next_slot_idx,
+                LedgerSlot {
                     slot_number: self.next_slot_idx,
                     partitions: Vec::new(),
                     last_height: 0,
-                });
+                },
+            );
             self.next_slot_idx += 1;
             num_partitions_added += self.num_partitions_per_slot;
         }
@@ -350,7 +357,10 @@ impl Ledgers {
     ) {
         match ledger {
             Ledger::Publish => {
-                self.perm.slots[usize::try_from(slot_index).expect("slot index representation error")].partitions.push(partition_hash);
+                self.perm.slots
+                    [usize::try_from(slot_index).expect("slot index representation error")]
+                .partitions
+                .push(partition_hash);
             }
             ledger => {
                 self.get_term_ledger_mut(ledger)
@@ -369,9 +379,10 @@ impl Ledgers {
     ) {
         match ledger {
             Ledger::Publish => {
-                self.perm.slots[usize::try_from(slot_index).expect("slot index representation error")]
-                    .partitions
-                    .retain(|p| p != partition_hash);
+                self.perm.slots
+                    [usize::try_from(slot_index).expect("slot index representation error")]
+                .partitions
+                .retain(|p| p != partition_hash);
             }
             ledger => {
                 self.get_term_ledger_mut(ledger)

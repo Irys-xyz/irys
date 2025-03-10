@@ -603,7 +603,11 @@ impl EpochServiceActor {
     /// For a given ledger indicated by `Ledger`, calculate the number of
     /// partition slots to add to the ledger based on remaining capacity
     /// and data ingress this epoch
-    fn calculate_additional_slots(&self, new_epoch_block: &IrysBlockHeader, ledger: Ledger) -> usize {
+    fn calculate_additional_slots(
+        &self,
+        new_epoch_block: &IrysBlockHeader,
+        ledger: Ledger,
+    ) -> usize {
         let num_slots;
         {
             let ledgers = self.ledgers.read().unwrap();
@@ -611,7 +615,9 @@ impl EpochServiceActor {
             num_slots = ledger.slot_count();
         }
         // TODO: num_chunks in partition should be a usize ?
-        let partition_chunk_count = usize::try_from(self.config.storage_config.num_chunks_in_partition).expect("conversion error");
+        let partition_chunk_count =
+            usize::try_from(self.config.storage_config.num_chunks_in_partition)
+                .expect("conversion error");
         let max_chunk_capacity = num_slots * partition_chunk_count;
         let ledger_size = new_epoch_block.ledgers[ledger as usize].max_chunk_offset;
 
@@ -620,8 +626,10 @@ impl EpochServiceActor {
         let mut slots_to_add: usize = 0;
         if ledger_size >= add_capacity_threshold as u64 {
             // Add 1 slot for buffer plus enough slots to handle size above threshold
-            let excess = usize::try_from( ledger_size.saturating_sub(max_chunk_capacity as u64)).expect("conversion error");
-            slots_to_add = 1 + (excess / usize::try_from(partition_chunk_count).expect("conversion error"));
+            let excess = usize::try_from(ledger_size.saturating_sub(max_chunk_capacity as u64))
+                .expect("conversion error");
+            slots_to_add =
+                1 + (excess / usize::try_from(partition_chunk_count).expect("conversion error"));
 
             // Check if we need to add an additional slot for excess > half of
             // the partition size
