@@ -28,15 +28,15 @@ impl Compress for IngressProof {
     }
 }
 impl Decompress for IngressProof {
-    fn decompress(value: &[u8]) -> Result<IngressProof, DatabaseError> {
+    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
         let (obj, _) = Compact::from_compact(value, value.len());
         Ok(obj)
     }
 }
 
-pub fn generate_ingress_proof_tree(chunks: Vec<&[u8]>, address: Address) -> eyre::Result<Node> {
+pub fn generate_ingress_proof_tree(chunks: &[&[u8]], address: Address) -> eyre::Result<Node> {
     let chunks = generate_ingress_leaves(chunks, address)?;
-    let root = generate_data_root(chunks.clone())?;
+    let root = generate_data_root(chunks)?;
     Ok(root)
 }
 
@@ -45,7 +45,7 @@ pub fn generate_ingress_proof(
     data_root: DataRoot,
     chunks: &Vec<&[u8]>,
 ) -> eyre::Result<IngressProof> {
-    let root = generate_ingress_proof_tree(chunks.clone(), signer.address())?;
+    let root = generate_ingress_proof_tree(chunks, signer.address())?;
     let proof: [u8; 32] = root.id;
 
     // Combine proof and data_root into a single digest to sign
@@ -75,11 +75,11 @@ pub fn verify_ingress_proof(proof: IngressProof, chunks: &Vec<&[u8]>) -> eyre::R
         .ok_or_eyre("Unable to recover signer")?;
 
     // re-compute the proof
-    let proof_root = generate_ingress_proof_tree(chunks.clone(), recovered_address)?;
+    let proof_root = generate_ingress_proof_tree(chunks, recovered_address)?;
     let nodes = generate_leaves_from_chunks(chunks)?;
 
     // re-compute the data_root
-    let root = generate_data_root(nodes.clone())?;
+    let root = generate_data_root(nodes)?;
     let data_root = H256(root.id);
 
     // re-compute the prehash (combining data_root and proof)

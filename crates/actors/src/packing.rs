@@ -42,7 +42,7 @@ pub struct PackingActor {
     task_executor: TaskExecutor,
     /// list of all the pending packing jobs
     pending_jobs: PackingJobsBySM,
-    /// semaphore to control concurrency -- sm_id => semaphore
+    /// semaphore to control concurrency -- `sm_id` => semaphore
     semaphore: PackingSemaphores,
     /// packing process configuration
     config: PackingConfig,
@@ -62,7 +62,7 @@ pub struct PackingConfig {
 }
 
 impl PackingConfig {
-    pub fn new(config: &Config) -> Self {
+    pub const fn new(config: &Config) -> Self {
         Self {
             poll_duration: Duration::from_millis(1000),
             concurrency: config.cpu_packing_concurrency,
@@ -190,9 +190,8 @@ impl PackingActor {
                         "Chunk size is not aligned with C code"
                     );
 
-                    for chunk_range_split in split_interval(&chunk_range, self.config.max_chunks)
+                    for chunk_range_split in &split_interval(&chunk_range, self.config.max_chunks)
                         .unwrap()
-                        .iter()
                     {
                         let start: u32 = *(*chunk_range_split).start();
                         let end: u32 = *(*chunk_range_split).end();
@@ -265,7 +264,7 @@ impl Actor for PackingActor {
     type Context = Context<Self>;
 
     fn start(self) -> actix::Addr<Self> {
-        let keys = self.pending_jobs.keys().cloned().collect::<Vec<usize>>();
+        let keys = self.pending_jobs.keys().copied().collect::<Vec<usize>>();
         for key in keys {
             self.actix_runtime_handle.spawn(Self::process_jobs(
                 self.clone(),
@@ -337,16 +336,16 @@ pub async fn wait_for_packing(
             {
                 // try to get all the semaphore permits - this is how we know that the packing is done
                 let _permit =
-                    futures::future::join_all(internals.semaphore.iter().map(|(_, s)| {
+                    futures::future::join_all(internals.semaphore.values().map(|s| {
                         s.as_ref().acquire_many(internals.config.concurrency as u32)
                     }))
                     .await
                     .iter()
                     .map(|r| r.as_ref().unwrap());
                 break Some(());
-            } else {
+            } 
                 sleep(Duration::from_millis(100)).await
-            }
+            
         }
     })
     .await?

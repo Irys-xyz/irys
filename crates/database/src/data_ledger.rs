@@ -45,7 +45,7 @@ pub struct TermLedger {
 
 impl PermanentLedger {
     /// Constructs a permanent ledger, always with `Ledger::Publish` as the id
-    pub fn new(config: &Config) -> Self {
+    pub const fn new(config: &Config) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: Ledger::Publish as u32,
@@ -56,7 +56,7 @@ impl PermanentLedger {
 
 impl TermLedger {
     /// Creates a term ledger with specified index and duration
-    pub fn new(ledger: Ledger, config: &Config) -> Self {
+    pub const fn new(ledger: Ledger, config: &Config) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: ledger as u32,
@@ -229,7 +229,7 @@ impl Ledger {
     // Takes "perm" or some term e.g. "1year", or an integer ID
     pub fn from_url(s: &str) -> eyre::Result<Self> {
         if let Ok(ledger_id) = s.parse::<u32>() {
-            return Ledger::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
+            return Self::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
         }
         match s {
             "perm" => eyre::Result::Ok(Self::Publish),
@@ -287,6 +287,10 @@ impl Ledgers {
     /// The number of ledgers being managed
     pub fn len(&self) -> usize {
         1 + self.term.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Get all of the partition hashes that have expired out of term ledgers

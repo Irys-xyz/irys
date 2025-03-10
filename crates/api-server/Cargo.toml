@@ -23,3 +23,7 @@ actix.workspace = true
 actix-web.workspace = true
 actix-cors = "0.7.0"
 tracing.workspace = true
+
+
+# [lints]
+# workspace = true

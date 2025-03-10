@@ -77,3 +77,6 @@ reth-rpc-layer.workspace = true
 [features]
 default = ["jemalloc"]
 jemalloc = []
+
+# [lints]
+# workspace = true

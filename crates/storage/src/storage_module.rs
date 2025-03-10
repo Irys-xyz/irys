@@ -99,7 +99,7 @@ pub struct StorageModule {
     pub storage_config: StorageConfig,
 }
 
-/// On-disk metadata for StorageModule persistence
+/// On-disk metadata for `StorageModule` persistence
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageModuleInfo {
     /// An integer uniquely identifying the module
@@ -107,7 +107,7 @@ pub struct StorageModuleInfo {
     /// Hash of partition this storage module belongs to, if assigned
     pub partition_assignment: Option<PartitionAssignment>,
     /// Range of chunk offsets and path for each submodule
-    /// pub submodules: Vec<(Interval<PartitionChunkOffset>, SubmodulePath)>,
+    /// pub submodules: Vec<(Interval<PartitionChunkOffset>, `SubmodulePath`)>,
     pub submodules: Vec<(Interval<PartitionChunkOffset>, SubmodulePath)>,
 }
 
@@ -138,7 +138,7 @@ impl PackingParams {
 
     pub fn write_to_disk(&self, path: &Path) {
         let toml = toml::to_string(self).expect("Able to serialize config");
-        fs::write(&path, toml).unwrap_or_else(|_| panic!("Failed to write config to {:?}", path));
+        fs::write(path, toml).unwrap_or_else(|_| panic!("Failed to write config to {:?}", path));
     }
 }
 
@@ -190,9 +190,9 @@ impl StorageModules {
 }
 
 impl StorageModule {
-    /// Initializes a new StorageModule
+    /// Initializes a new `StorageModule`
     pub fn new(
-        base_path: &PathBuf,
+        base_path: &Path,
         storage_module_info: &StorageModuleInfo,
         storage_config: StorageConfig,
     ) -> eyre::Result<Self> {
@@ -213,6 +213,7 @@ impl StorageModule {
                     .read(true)
                     .write(true)
                     .create(true) // Optional: creates file if it doesn't exist
+                    .truncate(false) // do we want to truncate here, or append if it exists?
                     .open(&path)
                     .map_err(|e| {
                         eyre!(
@@ -233,7 +234,22 @@ impl StorageModule {
             })?;
 
             let params_path = sub_base_path.join("packing_params.toml");
-            if params_path.exists() == false {
+            if params_path.exists() {
+                // Load the packing params and check to see if they match
+                let params = PackingParams::from_toml(params_path).expect("packing params to load");
+                let pa = storage_module_info.partition_assignment.unwrap();
+                assert!(params.packing_address == storage_config.miner_address,
+                        "Active mining address: {} does not match partition packing address {}",
+                        storage_config.miner_address, params.packing_address
+                    );
+                assert!(params.partition_hash == Some(pa.partition_hash), 
+                        "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
+                        This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
+                        assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
+                        pa.partition_hash.0.to_base58(),
+                        params.partition_hash.unwrap().0.to_base58(),
+                    );
+            } else {
                 let mut params = PackingParams {
                     packing_address: storage_config.miner_address,
                     ..Default::default()
@@ -244,25 +260,6 @@ impl StorageModule {
                     params.slot = pa.slot_index;
                 }
                 params.write_to_disk(&params_path);
-            } else {
-                // Load the packing params and check to see if they match
-                let params = PackingParams::from_toml(params_path).expect("packing params to load");
-                let pa = storage_module_info.partition_assignment.unwrap();
-                if params.packing_address != storage_config.miner_address {
-                    panic!(
-                        "Active mining address: {} does not match partition packing address {}",
-                        storage_config.miner_address, params.packing_address
-                    );
-                }
-                if params.partition_hash != Some(pa.partition_hash) {
-                    panic!(
-                        "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
-                        This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
-                        assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
-                        pa.partition_hash.0.to_base58(),
-                        params.partition_hash.unwrap().0.to_base58(),
-                    );
-                }
             }
 
             let intervals_file_path = sub_base_path.join("intervals.json");
@@ -270,6 +267,7 @@ impl StorageModule {
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(false) // do we want to truncate here, or append if it exists?
                 .open(&intervals_file_path)
                 .wrap_err_with(|| {
                     format!(
@@ -286,7 +284,7 @@ impl StorageModule {
             // that maintains system resources connected to the files in that submodule
             submodule_map
                 .insert_strict(
-                    submodule_interval.clone(),
+                    submodule_interval,
                     StorageSubmodule {
                         path: dir,
                         file: chunks_file,
@@ -318,7 +316,7 @@ impl StorageModule {
             storage_config.num_chunks_in_partition as u32,
             u32::MAX
         )];
-        if &gaps != &expected {
+        if gaps != expected {
             return Err(eyre!(
                 "Invalid storage module config, expected range {:?}, got range {:?}",
                 &expected,
@@ -329,7 +327,7 @@ impl StorageModule {
         // Attempt to load a global set of intervals from the submodules
         let loaded_intervals = Self::load_intervals_from_submodules(&submodule_map);
 
-        Ok(StorageModule {
+        Ok(Self {
             id: storage_module_info.id,
             partition_assignment: storage_module_info.partition_assignment,
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
@@ -339,13 +337,9 @@ impl StorageModule {
         })
     }
 
-    /// Returns the StorageModules partition_hash if assigned
+    /// Returns the `StorageModules` `partition_hash` if assigned
     pub fn partition_hash(&self) -> Option<PartitionHash> {
-        if let Some(part_assign) = self.partition_assignment {
-            Some(part_assign.partition_hash)
-        } else {
-            None
-        }
+        self.partition_assignment.map(|part_assign| part_assign.partition_hash)
     }
 
     /// Reinit intervals setting them as Uninitialized, and erase db
@@ -367,13 +361,13 @@ impl StorageModule {
         for (_interval, submodule) in self.submodules.iter() {
             submodule
                 .db
-                .update_eyre(|tx| clear_submodule_database(tx))?;
+                .update_eyre(clear_submodule_database)?;
         }
 
         Ok(storage_interval)
     }
 
-    /// Returns whether the given chunk offset falls within this StorageModules assigned range
+    /// Returns whether the given chunk offset falls within this `StorageModules` assigned range
     pub fn contains_offset(&self, chunk_offset: LedgerChunkOffset) -> bool {
         self.partition_assignment
             .and_then(|part| part.slot_index)
@@ -568,13 +562,13 @@ impl StorageModule {
     /// - Intervals are touching (e.g., 0-5 and 6-10)
     /// - Intervals overlap (e.g., 0-5 and 3-8)
     ///
-    /// Returns a NoditSet containing the merged intervals for efficient range operations
+    /// Returns a `NoditSet` containing the merged intervals for efficient range operations
     pub fn get_intervals(&self, chunk_type: ChunkType) -> Vec<Interval<PartitionChunkOffset>> {
         let intervals = self.intervals.read().unwrap();
         let mut set = NoditSet::new();
         for (interval, ct) in intervals.iter() {
             if *ct == chunk_type {
-                let _ = set.insert_merge_touching_or_overlapping(interval.clone());
+                let _ = set.insert_merge_touching_or_overlapping(*interval);
             }
         }
         // NoditSet is a BTreeMap underneath, meaning collecting them into a vec
@@ -602,7 +596,7 @@ impl StorageModule {
     }
 
     /// Indexes transaction data by mapping chunks to transaction paths across storage submodules.
-    /// Stores three mappings: tx path hashes -> tx_path, chunk offsets -> tx paths, and data roots -> start offset.
+    /// Stores three mappings: tx path hashes -> `tx_path`, chunk offsets -> tx paths, and data roots -> start offset.
     /// Updates all overlapping submodules within the given chunk range.
     ///
     /// # Errors
@@ -638,7 +632,7 @@ impl StorageModule {
                         add_tx_path_hash_to_offset_index(
                             tx,
                             part_offset,
-                            Some(tx_path_hash.clone()),
+                            Some(tx_path_hash),
                         )?;
                     }
                     // Also update the start offset by data_root index
@@ -650,7 +644,7 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Stores the data_path and offset lookups in the correct submodule index
+    /// Stores the `data_path` and offset lookups in the correct submodule index
     pub fn add_data_path_to_index(
         &self,
         data_path_hash: ChunkPathHash,
@@ -681,7 +675,7 @@ impl StorageModule {
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let start_offsets = self.collect_start_offsets(chunk.data_root)?;
 
-        if start_offsets.0.len() == 0 {
+        if start_offsets.0.is_empty() {
             return Err(eyre::eyre!("Chunks data_root not found in storage module"));
         }
 
@@ -702,7 +696,7 @@ impl StorageModule {
         Ok(write_offsets)
     }
 
-    /// Writes chunk data and its data_path to relevant storage locations
+    /// Writes chunk data and its `data_path` to relevant storage locations
     pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> eyre::Result<()> {
         let data_path = &chunk.data_path.0;
         let data_path_hash = UnpackedChunk::hash_data_path(data_path);
@@ -722,8 +716,8 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Internal helper function to find all the RelativeStartOffsets for a data_root
-    /// in this StorageModule
+    /// Internal helper function to find all the `RelativeStartOffsets` for a `data_root`
+    /// in this `StorageModule`
     pub fn collect_start_offsets(&self, data_root: DataRoot) -> eyre::Result<RelativeStartOffsets> {
         let mut offsets = RelativeStartOffsets::default();
         for (_, submodule) in self.submodules.iter() {
@@ -741,7 +735,7 @@ impl StorageModule {
     ///
     /// This function:
     /// 1. Retrieves and validates tx and data paths
-    /// 2. Extracts data_root and size from merkle proofs
+    /// 2. Extracts `data_root` and size from merkle proofs
     /// 3. Calculates chunk position within its parent transaction
     /// 4. Returns None if any step fails or chunk not found
     ///
@@ -821,7 +815,7 @@ impl StorageModule {
         }))
     }
 
-    /// Gets the tx_path and data_path for a chunk using its ledger relative offset
+    /// Gets the `tx_path` and `data_path` for a chunk using its ledger relative offset
     pub fn read_tx_data_path(
         &self,
         chunk_offset: LedgerChunkOffset,
@@ -885,25 +879,25 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Utility method asking the StorageModule to return its chunk range in
+    /// Utility method asking the `StorageModule` to return its chunk range in
     /// ledger relative coordinates
     pub fn get_storage_module_range(&self) -> eyre::Result<LedgerChunkRange> {
         if let Some(part_assign) = self.partition_assignment {
             if let Some(slot_index) = part_assign.slot_index {
                 let start = slot_index as u64 * self.storage_config.num_chunks_in_partition;
                 let end = start + self.storage_config.num_chunks_in_partition;
-                return Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)));
+                Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)))
             } else {
-                return Err(eyre::eyre!("Ledger slot not assigned!"));
+                Err(eyre::eyre!("Ledger slot not assigned!"))
             }
         } else {
-            return Err(eyre::eyre!("Partition not assigned!"));
+            Err(eyre::eyre!("Partition not assigned!"))
         }
     }
 
     /// Internal utility function to take a ledger relative range and make it
     /// Partition relative (relative to the partition assigned to the
-    /// StorageModule)
+    /// `StorageModule`)
     fn make_range_partition_relative(
         &self,
         chunk_range: LedgerChunkRange,
@@ -919,7 +913,7 @@ impl StorageModule {
 
     /// utility function to take a ledger relative offset and makes it
     /// Partition relative (relative to the partition assigned to the
-    /// StorageModule)
+    /// `StorageModule`)
     pub fn make_offset_partition_relative(
         &self,
         start_offset: LedgerChunkOffset,
@@ -931,7 +925,7 @@ impl StorageModule {
 
     /// utility function to take a ledger relative offset and makes it
     /// Partition relative (relative to the partition assigned to the
-    /// StorageModule)
+    /// `StorageModule`)
     /// This version will return an Err if the provided ledger chunk offset is out of range for this storage module
     pub fn make_offset_partition_relative_guarded(
         &self,
@@ -945,7 +939,7 @@ impl StorageModule {
         Ok(local_offset as u32)
     }
 
-    /// Test utility function to mark a StorageModule as packed
+    /// Test utility function to mark a `StorageModule` as packed
     pub fn pack_with_zeros(&self) {
         let entropy_bytes = vec![0u8; self.storage_config.chunk_size as usize];
         for chunk_offset in 0..self.storage_config.num_chunks_in_partition as u32 {
@@ -979,7 +973,7 @@ fn ensure_default_intervals(
 /// Reads and deserializes intervals from storage state file
 ///
 /// Loads the stored interval mapping that tracks chunk states.
-/// Expects a JSON-formatted file containing StorageIntervals.
+/// Expects a JSON-formatted file containing `StorageIntervals`.
 pub fn read_intervals_file(mut file: &File) -> eyre::Result<StorageIntervals> {
     let size = file.metadata().unwrap().len() as usize;
 
@@ -1012,10 +1006,11 @@ pub fn write_info_file(path: &Path, info: &StorageModuleInfo) -> eyre::Result<()
     let mut info_file = OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false) // do we want to truncate here, or append if it exists?
         .open(path)
         .unwrap_or_else(|_| panic!("Failed to open: {}", path.display()));
 
-    info_file.write_all(serde_json::to_string_pretty(&*info)?.as_bytes())?;
+    info_file.write_all(serde_json::to_string_pretty(info)?.as_bytes())?;
     Ok(())
 }
 
@@ -1037,11 +1032,9 @@ pub fn get_overlapped_storage_modules(
         .filter(|module| {
             module
                 .partition_assignment
-                .and_then(|pa| pa.ledger_id)
-                .map_or(false, |id| id == ledger as u32)
+                .and_then(|pa| pa.ledger_id) == Some(ledger as u32)
                 && module
-                    .get_storage_module_range()
-                    .map_or(false, |range| range.overlaps(tx_chunk_range))
+                    .get_storage_module_range().is_ok_and(|range| range.overlaps(tx_chunk_range))
         })
         .cloned() // Clone the Arc, which is cheap
         .collect()
@@ -1059,11 +1052,9 @@ pub fn get_storage_module_at_offset(
         .find(|module| {
             module
                 .partition_assignment
-                .and_then(|pa| pa.ledger_id)
-                .map_or(false, |id| id == ledger as u32)
+                .and_then(|pa| pa.ledger_id) == Some(ledger as u32)
                 && module
-                    .get_storage_module_range()
-                    .map_or(false, |range| range.contains_point(chunk_offset))
+                    .get_storage_module_range().is_ok_and(|range| range.contains_point(chunk_offset))
         })
         .cloned()
 }

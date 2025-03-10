@@ -103,7 +103,7 @@ jobs:
         uses: ./.github/actions/setup-repo
 
       - name: cargo clippy
-        run: cargo xtask clippy -- --all-features
+        run: RUSTFLAGS="-D warnings" cargo xtask clippy -- --all-features
 
   cargo-doc:
     name: cargo doc

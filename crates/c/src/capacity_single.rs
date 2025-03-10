@@ -38,9 +38,7 @@ pub fn compute_entropy_chunk(
     // Phase 1: sequential hashing
     for _i in 0..(chunk_size / SHA_HASH_SIZE) {
         previous_segment = sha::sha256(&previous_segment);
-        for j in 0..SHA_HASH_SIZE {
-            out_entropy_chunk.push(previous_segment[j]); // inserting in [i * SHA_HASH_SIZE + j] entropy_chunk vector
-        }
+        previous_segment.iter().for_each(|j| out_entropy_chunk.push(*j));
     }
 
     // Phase 2: 2D hash packing

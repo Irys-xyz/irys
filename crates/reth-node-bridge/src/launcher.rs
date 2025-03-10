@@ -263,9 +263,7 @@ where
                     // we exit so that we make 100% sure no component is expecting the old state
                     std::process::exit(0);
                 }
-                Ok(false) => {
-                  ()
-                }
+                Ok(false) => {}
             };
             })
             .with_components(components_builder, on_component_initialized, Some(irys_ext.clone())).await?;
