@@ -89,27 +89,23 @@ impl EmaService {
         )
         .await;
 
-        let shutdown_guard = {
-            let mut future2 = pin!(&mut self.shutdown);
-
-            let shutdown_guard = loop {
-                let mut msg_rx = pin!(self.msg_rx.recv());
-                match futures::future::select(&mut msg_rx, &mut future2).await {
-                    Either::Left((Some(msg), _)) => {
-                        tracing::debug!(?msg);
-                        self.inner.handle_message(msg, &mut price_ctx).await;
-                    }
-                    Either::Left((None, _)) => {
-                        tracing::warn!("receiver channel closed");
-                        break None;
-                    }
-                    Either::Right((shutdown, _)) => {
-                        tracing::warn!("shutdown signal received");
-                        break Some(shutdown);
-                    }
+        let mut shutdown_future = pin!(&mut self.shutdown);
+        let shutdown_guard = loop {
+            let mut msg_rx = pin!(self.msg_rx.recv());
+            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
+                Either::Left((Some(msg), _)) => {
+                    tracing::debug!(?msg);
+                    self.inner.handle_message(msg, &mut price_ctx).await;
                 }
-            };
-            shutdown_guard
+                Either::Left((None, _)) => {
+                    tracing::warn!("receiver channel closed");
+                    break None;
+                }
+                Either::Right((shutdown, _)) => {
+                    tracing::warn!("shutdown signal received");
+                    break Some(shutdown);
+                }
+            }
         };
 
         tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdwon");
@@ -687,4 +683,7 @@ mod tests {
             ));
         }
     }
+
+    // todo test shutdown behaviour
+    // todo test `new confirmed block`
 }
