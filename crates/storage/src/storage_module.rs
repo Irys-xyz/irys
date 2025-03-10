@@ -125,7 +125,7 @@ pub struct PackingParams {
     pub packing_address: Address,
     pub partition_hash: Option<H256>,
     pub ledger: Option<u32>,
-    pub slot: Option<usize>,
+    pub slot: Option<u64>,
 }
 
 impl PackingParams {

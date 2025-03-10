@@ -380,6 +380,7 @@ impl EpochServiceActor {
         let expired_hashes: Vec<H256>;
         {
             let mut ledgers = self.ledgers.write().unwrap();
+            debug!("ledgers expire {:#?}", ledgers);
             expired_hashes = ledgers.get_expired_partition_hashes(epoch_height);
         }
 
@@ -464,11 +465,13 @@ impl EpochServiceActor {
     ) {
         debug!("Processing slot needs for ledger {:?}", &ledger);
         // Get slot needs for the specified ledger
-        let slot_needs: Vec<(usize, usize)>;
+        let slot_needs: Vec<(u64, usize)>;
         {
             let ledgers = self.ledgers.read().unwrap();
+            debug!("Ledgers: {:#?}", &ledgers);
             slot_needs = ledgers.get_slot_needs(ledger);
         }
+        debug!("Slot needs: {:#?}", &slot_needs);
         let mut capacity_count = capacity_partitions.len() as u32;
 
         // Iterate over slots that need partitions and assign them
@@ -582,7 +585,7 @@ impl EpochServiceActor {
 
     /// Takes a capacity partition hash and updates its `PartitionAssignment`
     /// state to indicate it is part of a data ledger
-    fn assign_partition_to_slot(&self, partition_hash: H256, ledger: Ledger, slot_index: usize) {
+    fn assign_partition_to_slot(&self, partition_hash: H256, ledger: Ledger, slot_index: u64) {
         debug!(
             "Assigning partition {} to slot {} of ledger {:?}",
             &partition_hash.0.to_base58(),
@@ -600,24 +603,25 @@ impl EpochServiceActor {
     /// For a given ledger indicated by `Ledger`, calculate the number of
     /// partition slots to add to the ledger based on remaining capacity
     /// and data ingress this epoch
-    fn calculate_additional_slots(&self, new_epoch_block: &IrysBlockHeader, ledger: Ledger) -> u64 {
-        let num_slots: u64;
+    fn calculate_additional_slots(&self, new_epoch_block: &IrysBlockHeader, ledger: Ledger) -> usize {
+        let num_slots;
         {
             let ledgers = self.ledgers.read().unwrap();
             let ledger = &ledgers[ledger];
-            num_slots = ledger.slot_count() as u64;
+            num_slots = ledger.slot_count();
         }
-        let partition_chunk_count = self.config.storage_config.num_chunks_in_partition;
+        // TODO: num_chunks in partition should be a usize ?
+        let partition_chunk_count = usize::try_from(self.config.storage_config.num_chunks_in_partition).expect("conversion error");
         let max_chunk_capacity = num_slots * partition_chunk_count;
         let ledger_size = new_epoch_block.ledgers[ledger as usize].max_chunk_offset;
 
         // Add capacity slots if ledger usage exceeds 50% of partition size from max capacity
         let add_capacity_threshold = max_chunk_capacity.saturating_sub(partition_chunk_count / 2);
-        let mut slots_to_add: u64 = 0;
-        if ledger_size >= add_capacity_threshold {
+        let mut slots_to_add: usize = 0;
+        if ledger_size >= add_capacity_threshold as u64 {
             // Add 1 slot for buffer plus enough slots to handle size above threshold
-            let excess = ledger_size.saturating_sub(max_chunk_capacity);
-            slots_to_add = 1 + (excess / partition_chunk_count);
+            let excess = usize::try_from( ledger_size.saturating_sub(max_chunk_capacity as u64)).expect("conversion error");
+            slots_to_add = 1 + (excess / usize::try_from(partition_chunk_count).expect("conversion error"));
 
             // Check if we need to add an additional slot for excess > half of
             // the partition size
@@ -799,7 +803,7 @@ mod tests {
                         &PartitionAssignment {
                             partition_hash,
                             ledger_id: Some(Ledger::Publish.into()),
-                            slot_index: Some(slot_idx),
+                            slot_index: Some(slot_idx as u64),
                             miner_address,
                         }
                     );
@@ -824,7 +828,7 @@ mod tests {
                         &PartitionAssignment {
                             partition_hash,
                             ledger_id: Some(Ledger::Submit.into()),
-                            slot_index: Some(slot_idx),
+                            slot_index: Some(slot_idx as u64),
                             miner_address,
                         }
                     );
@@ -1195,20 +1199,16 @@ mod tests {
                 1,
                 "Publish should still have only one slot"
             );
-            assert_eq!(sub_slots.len(), 3, "Submit slots should have two new not expired slots with a new fresh partition from available previous capacity ones!");
-            assert!(
-                sub_slots[0].is_expired && sub_slots[0].partitions.len() == 0,
-                "Slot 0 should have expired and have no assigned partition!"
-            );
-            assert!(!sub_slots[1].is_expired
+            assert_eq!(sub_slots.len(), 2, "Submit slots should have two new slots with a new fresh partition from available previous capacity ones!");
+            assert!(sub_slots[0].slot_number == 1
+                    && sub_slots[0].partitions.len() == 1
+                    && (capacity_partitions.contains(&sub_slots[0].partitions[0])
+                        || sub_slots[0].partitions[0] == submit_partition_hash),
+                    "Slot 1 should not be expired and have a new fresh partition from previous capacity ones or the expired one!");
+            assert!(sub_slots[1].slot_number == 2
                     && sub_slots[1].partitions.len() == 1
                     && (capacity_partitions.contains(&sub_slots[1].partitions[0])
                         || sub_slots[1].partitions[0] == submit_partition_hash),
-                    "Slot 1 should not be expired and have a new fresh partition from previous capacity ones or the expired one!");
-            assert!(!sub_slots[2].is_expired
-                    && sub_slots[2].partitions.len() == 1
-                    && (capacity_partitions.contains(&sub_slots[2].partitions[0])
-                        || sub_slots[2].partitions[0] == submit_partition_hash),
                     "Slot 2 should not be expired and have a new fresh partition from previous capacity ones or the expired one!");
 
             let publish_partition = pub_slots[0]
@@ -1216,12 +1216,12 @@ mod tests {
                 .get(0)
                 .expect("publish ledger slot 0 should have a partition assigned")
                 .clone();
-            let submit_partition = sub_slots[1]
+            let submit_partition = sub_slots[0]
                 .partitions
                 .get(0)
                 .expect("submit ledger slot 1 should have a partition assigned")
                 .clone();
-            let submit_partition2 = sub_slots[2]
+            let submit_partition2 = sub_slots[1]
                 .partitions
                 .get(0)
                 .expect("submit ledger slot 2 should have a partition assigned")

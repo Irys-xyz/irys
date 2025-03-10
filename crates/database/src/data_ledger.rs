@@ -1,6 +1,7 @@
-use irys_types::{Compact, Config, TransactionLedger, H256};
+use irys_types::{Compact, Config, H256List, TransactionLedger, H256};
 use serde::{Deserialize, Serialize};
-use std::ops::{Index, IndexMut};
+use tracing::debug;
+use std::{collections::BTreeMap, ops::{Index, IndexMut}};
 /// Manages the global ledger state within the epoch service, tracking:
 /// - All ledger types (Publish, Submit, etc.)
 /// - Their associated partitions
@@ -12,10 +13,10 @@ use std::ops::{Index, IndexMut};
 
 #[derive(Debug, Clone)]
 pub struct LedgerSlot {
+    /// slot number
+    pub slot_number: u64,
     /// Assigned partition hashes
     pub partitions: Vec<H256>,
-    /// Flag marking weather this ledger slot is expired or not
-    pub is_expired: bool,
     /// Block height of most recently added transaction data (chunks)
     pub last_height: u64,
 }
@@ -33,8 +34,10 @@ pub struct PermanentLedger {
 #[derive(Debug, Clone)]
 /// Temporary ledger that exists for a fixed number of epochs
 pub struct TermLedger {
-    /// Sequential ledger slots containing partition assignments  
-    pub slots: Vec<LedgerSlot>,
+    /// Map between slots numbers and its ledger containing partition assignments  
+    pub slots: BTreeMap<u64 ,LedgerSlot>,
+    /// Nest slot index
+    pub next_slot_idx: u64,
     /// Unique identifier for this ledger, see `Ledger` enum
     pub ledger_id: u32,
     /// Number of epochs slots in this ledger exist for
@@ -58,8 +61,9 @@ impl TermLedger {
     /// Creates a term ledger with specified index and duration
     pub fn new(ledger: Ledger, config: &Config) -> Self {
         Self {
-            slots: Vec::new(),
+            slots: BTreeMap::new(),
             ledger_id: ledger as u32,
+            next_slot_idx: 0,
             epoch_length: config.submit_ledger_epoch_length,
             num_blocks_in_epoch: config.num_blocks_in_epoch,
             num_partitions_per_slot: config.num_partitions_per_slot,
@@ -67,31 +71,34 @@ impl TermLedger {
     }
 
     /// Returns a slice of the ledgers slots
-    pub const fn get_slots(&self) -> &Vec<LedgerSlot> {
-        &self.slots
+    pub fn get_slots(&self) -> Vec<LedgerSlot> {
+        self.slots.range(..).map(|(_, slot)| slot.clone()).collect()
     }
 
     /// Returns indices of newly expired slots
-    pub fn expire_old_slots(&mut self, epoch_height: u64) -> Vec<usize> {
+    pub fn expire_old_slots(&mut self, epoch_height: u64) -> Vec<(u64,H256List)> {
         let mut expired_indices = Vec::new();
 
         // Make sure enough blocks have transpired before calculating expiry height
         if epoch_height < self.epoch_length * self.num_blocks_in_epoch {
+            debug!("Not enough blocks have transpired to expire slots");
             return expired_indices;
         }
 
         let expiry_height = epoch_height - self.epoch_length * self.num_blocks_in_epoch;
 
+
         // Collect indices of slots to expire
-        for (idx, slot) in self.slots.iter().enumerate() {
-            if slot.last_height <= expiry_height && !slot.is_expired {
-                expired_indices.push(idx);
+        for (idx, slot) in self.slots.iter() {
+            if slot.last_height <= expiry_height {
+                debug!("Slot {} expired at height {}", slot.slot_number, expiry_height);
+                expired_indices.push((*idx, H256List(slot.partitions.clone())));
             }
         }
 
-        // Mark collected slots as expired
-        for &idx in &expired_indices {
-            self.slots[idx].is_expired = true;
+        // Delete expired slots
+        for (idx,_) in &expired_indices {
+            self.slots.remove(idx);
         }
 
         expired_indices
@@ -107,12 +114,12 @@ pub trait LedgerCore {
     fn ledger_id(&self) -> u32;
 
     /// Adds slots to the ledger, reserving space for partitions
-    fn allocate_slots(&mut self, slots: u64) -> u64;
+    fn allocate_slots(&mut self, slots_num: usize) -> u64;
 
     /// Get the slot needs for the ledger, returning a vector of (slot index, number of partitions needed)
-    fn get_slot_needs(&self) -> Vec<(usize, usize)>;
+    fn get_slot_needs(&self) -> Vec<(u64, usize)>;
 
-    fn get_slots(&self) -> &Vec<LedgerSlot>;
+    fn get_slots(&self) -> Vec<LedgerSlot>;
 }
 
 impl LedgerCore for PermanentLedger {
@@ -122,26 +129,27 @@ impl LedgerCore for PermanentLedger {
     fn ledger_id(&self) -> u32 {
         self.ledger_id
     }
-    fn allocate_slots(&mut self, slots: u64) -> u64 {
+    fn allocate_slots(&mut self, slots_num: usize) -> u64 {
         let mut num_partitions_added = 0;
-        for _ in 0..slots {
+        let last_slot = self.slots.len() as u64;
+        for slot in 0..slots_num {
             self.slots.push(LedgerSlot {
+                slot_number: last_slot + slot as u64,
                 partitions: Vec::new(),
-                is_expired: false,
                 last_height: 0,
             });
             num_partitions_added += self.num_partitions_per_slot;
         }
         num_partitions_added
     }
-    fn get_slot_needs(&self) -> Vec<(usize, usize)> {
+    fn get_slot_needs(&self) -> Vec<(u64, usize)> {
         self.slots
             .iter()
             .enumerate()
             .filter_map(|(idx, slot)| {
                 let needed = self.num_partitions_per_slot as usize - slot.partitions.len();
                 if needed > 0 {
-                    Some((idx, needed))
+                    Some((idx as u64, needed))
                 } else {
                     None
                 }
@@ -150,39 +158,40 @@ impl LedgerCore for PermanentLedger {
     }
 
     /// Returns a slice of the ledgers slots
-    fn get_slots(&self) -> &Vec<LedgerSlot> {
-        &self.slots
+    fn get_slots(&self) -> Vec<LedgerSlot> {
+        self.slots.clone()
     }
 }
 
 impl LedgerCore for TermLedger {
     fn slot_count(&self) -> usize {
-        self.slots.iter().filter(|slot| !slot.is_expired).count()
+        self.slots.len()
     }
     fn ledger_id(&self) -> u32 {
         self.ledger_id
     }
-    fn allocate_slots(&mut self, slots: u64) -> u64 {
-        let mut num_partitions_added = 0;
-        for _ in 0..slots {
-            self.slots.push(LedgerSlot {
-                partitions: Vec::new(),
-                is_expired: false,
-                last_height: 0,
-            });
+    fn allocate_slots(&mut self, slots_num: usize) -> u64 {
+        let mut num_partitions_added: u64 = 0;
+        for _slot in 0..slots_num {
+            self.slots.insert(self.next_slot_idx,
+                 LedgerSlot {
+                    slot_number: self.next_slot_idx,
+                    partitions: Vec::new(),
+                    last_height: 0,
+                });
+            self.next_slot_idx += 1;
             num_partitions_added += self.num_partitions_per_slot;
         }
         num_partitions_added
     }
 
-    fn get_slot_needs(&self) -> Vec<(usize, usize)> {
+    fn get_slot_needs(&self) -> Vec<(u64, usize)> {
         self.slots
             .iter()
-            .enumerate()
             .filter_map(|(idx, slot)| {
                 let needed = self.num_partitions_per_slot as usize - slot.partitions.len();
-                if needed > 0 && !slot.is_expired {
-                    Some((idx, needed))
+                if needed > 0 {
+                    Some((*idx, needed))
                 } else {
                     None
                 }
@@ -190,9 +199,9 @@ impl LedgerCore for TermLedger {
             .collect()
     }
 
-    /// Returns a slice of the ledgers slots
-    fn get_slots(&self) -> &Vec<LedgerSlot> {
-        &self.slots
+    /// Returns ledgers slots
+    fn get_slots(&self) -> Vec<LedgerSlot> {
+        self.slots.range(..).map(|(_, slot)| slot.clone()).collect()
     }
 }
 
@@ -295,9 +304,9 @@ impl Ledgers {
 
         // Collect expired partition hashes from term ledgers
         for term_ledger in &mut self.term {
-            for expired_index in term_ledger.expire_old_slots(epoch_height) {
+            for (_expired_index, expired_partitions) in term_ledger.expire_old_slots(epoch_height) {
                 // Add each partition hash from expired slots
-                expired_hashes.extend(term_ledger.slots[expired_index].partitions.iter().copied());
+                expired_hashes.extend(expired_partitions.0.iter());
             }
         }
 
@@ -319,14 +328,14 @@ impl Ledgers {
             .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
     }
 
-    pub fn get_slots(&self, ledger: Ledger) -> &Vec<LedgerSlot> {
+    pub fn get_slots(&self, ledger: Ledger) -> Vec<LedgerSlot> {
         match ledger {
             Ledger::Publish => self.perm.get_slots(),
             ledger => self.get_term_ledger(ledger).get_slots(),
         }
     }
 
-    pub fn get_slot_needs(&self, ledger: Ledger) -> Vec<(usize, usize)> {
+    pub fn get_slot_needs(&self, ledger: Ledger) -> Vec<(u64, usize)> {
         match ledger {
             Ledger::Publish => self.perm.get_slot_needs(),
             ledger => self.get_term_ledger(ledger).get_slot_needs(),
@@ -336,17 +345,18 @@ impl Ledgers {
     pub fn push_partition_to_slot(
         &mut self,
         ledger: Ledger,
-        slot_index: usize,
+        slot_index: u64,
         partition_hash: H256,
     ) {
         match ledger {
             Ledger::Publish => {
-                self.perm.slots[slot_index].partitions.push(partition_hash);
+                self.perm.slots[usize::try_from(slot_index).expect("slot index representation error")].partitions.push(partition_hash);
             }
             ledger => {
-                self.get_term_ledger_mut(ledger).slots[slot_index]
-                    .partitions
-                    .push(partition_hash);
+                self.get_term_ledger_mut(ledger)
+                    .slots
+                    .get_mut(&slot_index)
+                    .map(|slot| slot.partitions.push(partition_hash));
             }
         }
     }
@@ -354,19 +364,20 @@ impl Ledgers {
     pub fn remove_partition_from_slot(
         &mut self,
         ledger: Ledger,
-        slot_index: usize,
+        slot_index: u64,
         partition_hash: &H256,
     ) {
         match ledger {
             Ledger::Publish => {
-                self.perm.slots[slot_index]
+                self.perm.slots[usize::try_from(slot_index).expect("slot index representation error")]
                     .partitions
                     .retain(|p| p != partition_hash);
             }
             ledger => {
-                self.get_term_ledger_mut(ledger).slots[slot_index]
-                    .partitions
-                    .retain(|p| p != partition_hash);
+                self.get_term_ledger_mut(ledger)
+                    .slots
+                    .get_mut(&slot_index)
+                    .map(|slot| slot.partitions.retain(|p| p != partition_hash));
             }
         }
     }
