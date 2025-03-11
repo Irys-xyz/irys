@@ -1192,7 +1192,7 @@ impl BlockTreeCache {
 }
 
 /// Returns the canonical chain where the first item in the Vec is the oldest block
-/// Implementation datail: utilises `tokio::task::spawn_blocking`
+/// Implementation detail: utilises `tokio::task::spawn_blocking`
 pub async fn get_canonical_chain(
     tree: BlockTreeReadGuard,
 ) -> eyre::Result<(Vec<(H256, u64, Vec<H256>, Vec<H256>)>, usize)> {
@@ -1202,7 +1202,7 @@ pub async fn get_canonical_chain(
 }
 
 /// Returns the block from the block tree at a given block hash
-/// Implementation datail: utilises `tokio::task::spawn_blocking`
+/// Implementation detail: utilises `tokio::task::spawn_blocking`
 pub async fn get_block(
     block_tree_read_guard: BlockTreeReadGuard,
     block_hash: H256,
