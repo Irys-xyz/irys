@@ -236,7 +236,7 @@ pub type DataRoot = H256;
     From,
     Into,
 )]
-pub struct TxChunkOffset(u32);
+pub struct TxChunkOffset(pub u32);
 impl TxChunkOffset {
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
         TxChunkOffset(u32::from_be_bytes(bytes))

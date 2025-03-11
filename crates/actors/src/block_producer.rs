@@ -13,6 +13,7 @@ use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
     Ledger,
 };
+use irys_price_oracle::IrysPriceOracle;
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
@@ -73,6 +74,8 @@ pub struct BlockProducerActor {
     pub block_tree_guard: BlockTreeReadGuard,
     /// Epoch config
     pub epoch_config: EpochServiceConfig,
+    /// The Irys price oracle
+    pub price_oracle: Arc<IrysPriceOracle>,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -80,44 +83,8 @@ pub struct BlockProducerActor {
 #[rtype(result = "()")]
 pub struct RegisterBlockProducerMessage(pub Addr<BlockProducerActor>);
 
-impl BlockProducerActor {
-    /// Initializes a new `BlockProducerActor`
-    pub const fn new(
-        db: DatabaseProvider,
-        mempool_addr: Addr<MempoolService>,
-        block_discover_addr: Addr<BlockDiscoveryActor>,
-        epoch_service: Addr<EpochServiceActor>,
-        reth_provider: RethNodeProvider,
-        storage_config: StorageConfig,
-        difficulty_config: DifficultyAdjustmentConfig,
-        vdf_config: VDFStepsConfig,
-        vdf_steps_guard: VdfStepsReadGuard,
-        block_tree_guard: BlockTreeReadGuard,
-        epoch_config: EpochServiceConfig,
-    ) -> Self {
-        Self {
-            db,
-            mempool_addr,
-            block_discovery_addr: block_discover_addr,
-            epoch_service,
-            reth_provider,
-            storage_config,
-            difficulty_config,
-            vdf_config,
-            vdf_steps_guard,
-            block_tree_guard,
-            epoch_config,
-        }
-    }
-}
-
 impl Actor for BlockProducerActor {
     type Context = Context<Self>;
-
-    fn started(&mut self, _ctx: &mut Self::Context) {
-        println!("block_producer actor started!");
-        // Or do any initialization you need
-    }
 }
 
 #[derive(Message, Debug)]
@@ -132,11 +99,11 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
     >;
 
     #[tracing::instrument(skip_all, fields(
-            minting_address = ?msg.0.mining_address,
-            partition_hash = ?msg.0.partition_hash,
-            chunk_offset = ?msg.0.chunk_offset,
-            tx_path = ?msg.0.tx_path.is_none(),
-            chunk = ?msg.0.chunk.len(),
+        minting_address = ?msg.0.mining_address,
+        partition_hash = ?msg.0.partition_hash,
+        chunk_offset = ?msg.0.chunk_offset,
+        tx_path = ?msg.0.tx_path.is_none(),
+        chunk = ?msg.0.chunk.len(),
     ))]
     fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
         let solution = msg.0;
@@ -154,6 +121,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let block_tree_guard = self.block_tree_guard.clone();
         let blocks_in_epoch = self.epoch_config.num_blocks_in_epoch;
         let vdf_steps = self.vdf_steps_guard.clone();
+        let price_oracle = self.price_oracle.clone();
 
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
@@ -324,6 +292,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
             steps.push(solution.seed.0);
 
+            // fetch the irys price from the oracle
+            let irys_price = price_oracle.current_price().await?;
+
+            // build a new block header 
             let mut irys_block = IrysBlockHeader {
                 block_hash,
                 height: block_height,
@@ -371,8 +343,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     steps,
                     ..Default::default()
                 },
-                // todo: update this in the future to get the data from an oracle / use EMA
-                irys_price: prev_block_header.irys_price
+                irys_price
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node

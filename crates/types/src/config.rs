@@ -5,10 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
-        phantoms::{Percentage, Usd},
+        phantoms::{IrysPrice, Percentage, Usd},
         Amount,
     },
-    IrysTokenPrice,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,14 +59,29 @@ pub struct Config {
     pub genesis_price_valid_for_n_epochs: u8,
     /// defines the genesis price of the $IRYS, expressed in $USD
     #[serde(deserialize_with = "serde_utils::token_amount")]
-    pub genesis_token_price: Amount<(IrysTokenPrice, Usd)>,
+    pub genesis_token_price: Amount<(IrysPrice, Usd)>,
     /// defines the range of how much can the token fluctuate since the last EMA price for it to be accepted
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub token_price_safe_range: Amount<Percentage>,
-
-    ///packing specific config
+    /// number of blocks cache cleaning will lag behind block finalization
+    pub cache_clean_lag: u8,
+    /// number of packing threads
     pub cpu_packing_concurrency: u16,
+    /// GPU kernel batch size
     pub gpu_packing_batch_size: u32,
+    pub oracle_config: OracleConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum OracleConfig {
+    Mock {
+        #[serde(deserialize_with = "serde_utils::token_amount")]
+        initial_price: Amount<(IrysPrice, Usd)>,
+        #[serde(deserialize_with = "serde_utils::percentage_amount")]
+        percent_change: Amount<Percentage>,
+        smoothing_interval: u64,
+    },
 }
 
 impl Config {
@@ -100,7 +114,7 @@ impl Config {
             num_checkpoints_in_vdf_step: 25,
             vdf_sha_1s: 7_000,
             entropy_packing_iterations: 1000,
-            chain_id: 1275,
+            chain_id: 1270,
             capacity_scalar: 100,
             num_blocks_in_epoch: 100,
             submit_ledger_epoch_length: 5,
@@ -121,8 +135,16 @@ impl Config {
                 .expect("valid token amount"),
             token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
                 .expect("valid percentage"),
+            cache_clean_lag: 2,
             cpu_packing_concurrency: 4,
             gpu_packing_batch_size: 1024,
+            oracle_config: OracleConfig::Mock {
+                initial_price: Amount::token(rust_decimal_macros::dec!(1))
+                    .expect("valid token amount"),
+                percent_change: Amount::percentage(rust_decimal_macros::dec!(0.01))
+                    .expect("valid percentage"),
+                smoothing_interval: 15,
+            },
         }
     }
 }
@@ -209,37 +231,44 @@ mod tests {
     #[test]
     fn test_deserialize_config_from_toml() {
         let toml_data = r#"
-block_time = 10
-max_data_txs_per_block = 20
-difficulty_adjustment_interval = 100
-max_difficulty_adjustment_factor = "4"
-min_difficulty_adjustment_factor = "0.25"
-chunk_size = 262144
-num_chunks_in_partition = 10
-num_chunks_in_recall_range = 2
-vdf_reset_frequency = 1200
-vdf_parallel_verification_thread_limit = 4
-num_checkpoints_in_vdf_step = 25
-vdf_sha_1s = 7000
-entropy_packing_iterations = 22500000
-chain_id = 1275
-capacity_scalar = 100
-num_blocks_in_epoch = 100
-submit_ledger_epoch_length = 5
-num_partitions_per_slot = 1
-num_writes_before_sync = 5
-reset_state_on_restart = false
-chunk_migration_depth = 1
-mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
-num_capacity_partitions = 16
-port = 8080
-anchor_expiry_depth = 10
-genesis_price_valid_for_n_epochs = 2
-genesis_token_price = "1.0"
-token_price_safe_range = "0.25"
-cpu_packing_concurrency = 4
-gpu_packing_batch_size = 1024
-"#;
+            block_time = 10
+            max_data_txs_per_block = 20
+            difficulty_adjustment_interval = 100
+            max_difficulty_adjustment_factor = "4"
+            min_difficulty_adjustment_factor = "0.25"
+            chunk_size = 262144
+            num_chunks_in_partition = 10
+            num_chunks_in_recall_range = 2
+            vdf_reset_frequency = 1200
+            vdf_parallel_verification_thread_limit = 4
+            num_checkpoints_in_vdf_step = 25
+            vdf_sha_1s = 7000
+            entropy_packing_iterations = 22500000
+            chain_id = 1270
+            capacity_scalar = 100
+            num_blocks_in_epoch = 100
+            submit_ledger_epoch_length = 5
+            num_partitions_per_slot = 1
+            num_writes_before_sync = 5
+            reset_state_on_restart = false
+            chunk_migration_depth = 1
+            mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+            num_capacity_partitions = 16
+            port = 8080
+            anchor_expiry_depth = 10
+            genesis_price_valid_for_n_epochs = 2
+            genesis_token_price = "1.0"
+            token_price_safe_range = "0.25"
+            cpu_packing_concurrency = 4
+            gpu_packing_batch_size = 1024   
+            cache_clean_lag = 2
+
+            [oracle_config]
+            type = "mock"
+            initial_price = "1"
+            percent_change = "0.01"
+            smoothing_interval = 15
+            "#;
 
         // Attempt to deserialize the TOML string into a Config
         let config: Config =

@@ -11,7 +11,7 @@ use reth_primitives::revm_primitives::hex;
 use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
 
-pub const IRYS_TESTNET_CHAIN_ID: u64 = 1275;
+pub const IRYS_TESTNET_CHAIN_ID: u64 = 1270;
 
 pub static IRYS_TESTNET: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
     let mut spec = ChainSpec {

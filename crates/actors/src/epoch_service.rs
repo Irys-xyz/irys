@@ -1354,23 +1354,29 @@ mod tests {
             .send(NewEpochMessage(new_epoch_block.into()))
             .await
             .unwrap();
-        // give computation time for broadcaster to receive and broadcast expiration
-        sleep(Duration::from_secs(1)).await;
 
         // busypoll the solution context rwlock
+        let mut max_pools = 10;
         let pack_req = 'outer: loop {
+            if max_pools == 0 {
+                panic!("Max. retries reached");
+            } else {
+                max_pools -= 1;
+            }
             match arc_rwlock.try_read() {
                 Ok(lck) => {
                     if lck.is_none() {
                         debug!("Packing request not ready waiting!");
-                        sleep(Duration::from_millis(50)).await;
                     } else {
                         debug!("Packing request received ready!");
                         break 'outer lck.as_ref().unwrap().clone();
                     }
                 }
-                Err(_) => sleep(Duration::from_millis(50)).await,
+                Err(err) => {
+                    debug!("Packing request read error {:?}", err);
+                }
             }
+            sleep(Duration::from_millis(50)).await;
         };
 
         // check a new slots is inserted with a partition assigned to it, and slot 0 expired and its partition was removed
