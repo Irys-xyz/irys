@@ -569,11 +569,13 @@ impl BlockTreeCache {
 
         let tip_hash = block_index.get_latest_item().unwrap().block_hash;
         cache.mark_tip(&tip_hash).unwrap();
-        let _ = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
-            head_hash: BlockHashType::Irys(tip_hash),
-            confirmed_hash: None,
-            finalized_hash: None,
-        });
+        RethServiceActor::from_registry()
+            .try_send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Irys(tip_hash),
+                confirmed_hash: None,
+                finalized_hash: None,
+            })
+            .expect("could not send message to `RethServiceActor`");
         cache
     }
 
@@ -1187,6 +1189,29 @@ impl BlockTreeCache {
     pub fn is_known_solution_hash(&self, solution_hash: &H256) -> bool {
         self.solutions.contains_key(solution_hash)
     }
+}
+
+/// Returns the canonical chain where the first item in the Vec is the oldest block
+/// Implementation datail: utilises `tokio::task::spawn_blocking`
+pub async fn get_canonical_chain(
+    tree: BlockTreeReadGuard,
+) -> eyre::Result<(Vec<(H256, u64, Vec<H256>, Vec<H256>)>, usize)> {
+    let canonical_chain =
+        tokio::task::spawn_blocking(move || tree.read().get_canonical_chain()).await?;
+    Ok(canonical_chain)
+}
+
+/// Returns the block from the block tree at a given block hash
+/// Implementation datail: utilises `tokio::task::spawn_blocking`
+pub async fn get_block(
+    block_tree_read_guard: BlockTreeReadGuard,
+    block_hash: H256,
+) -> eyre::Result<Option<IrysBlockHeader>> {
+    let res = tokio::task::spawn_blocking(move || {
+        block_tree_read_guard.read().get_block(&block_hash).cloned()
+    })
+    .await?;
+    Ok(res)
 }
 
 #[cfg(test)]

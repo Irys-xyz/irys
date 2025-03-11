@@ -65,7 +65,6 @@ pub struct Config {
     pub token_price_safe_range: Amount<Percentage>,
     /// Defines how frequently the Irys EMA price should be adjusted
     pub price_adjustment_interval: u64,
-    /// packing specific config
     /// number of blocks cache cleaning will lag behind block finalization
     pub cache_clean_lag: u8,
     /// number of packing threads
