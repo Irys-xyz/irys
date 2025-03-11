@@ -12,6 +12,7 @@ pub mod ingress;
 pub mod irys;
 mod merkle;
 pub mod partition;
+pub mod perm_storage_price;
 pub mod serialization;
 pub mod signature;
 pub mod simple_rng;
