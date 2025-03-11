@@ -49,7 +49,7 @@ impl ApiState {
 
         // Fetch peer list items
         let peer_list_items =
-            walk_all::<PeerListItems>(&read_tx).map_err(|e| eyre::eyre!("Read error: {}", e))?;
+            walk_all::<PeerListItems, _>(&read_tx).map_err(|e| eyre::eyre!("Read error: {}", e))?;
 
         // Extract IP addresses and Port (SocketAddr) into a Vec<String>
         let ips: Vec<SocketAddr> = peer_list_items

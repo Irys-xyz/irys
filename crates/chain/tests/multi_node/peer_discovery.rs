@@ -12,34 +12,33 @@ use actix_web::{
 use alloy_core::primitives::U256;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_chain::start_for_testing;
+use irys_chain::start_irys_node;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{build_user_agent, irys::IrysSigner, PeerResponse, StorageConfig, VersionRequest};
+use irys_types::Config;
+use irys_types::{build_user_agent, irys::IrysSigner, PeerResponse, VersionRequest};
 use reth_primitives::GenesisAccount;
 
 #[actix_web::test]
-async fn serial_peer_discovery() {
+async fn serial_peer_discovery() -> eyre::Result<()> {
     let chunk_size = 32; // 32Byte chunks
 
-    let miner_signer = IrysSigner::random_signer_with_chunk_size(chunk_size);
+    let mut test_config = Config::testnet();
 
-    let _storage_config = StorageConfig {
-        chunk_size: chunk_size as u64,
-        num_chunks_in_partition: 10,
-        num_chunks_in_recall_range: 2,
-        num_partitions_in_slot: 1,
-        miner_address: miner_signer.address(),
-        min_writes_before_sync: 1,
-        entropy_packing_iterations: 1_000,
-        chunk_migration_depth: 1, // Testnet / single node config
-    };
+    // Override testnet parameters for local test
+    test_config.chunk_size = chunk_size as u64;
+    test_config.num_chunks_in_partition = 10;
+    test_config.num_chunks_in_recall_range = 2;
+    test_config.num_partitions_per_slot = 1;
+    test_config.num_writes_before_sync = 1;
+    test_config.entropy_packing_iterations = 1_000;
+    test_config.chunk_migration_depth = 1;
 
     let temp_dir = setup_tracing_and_temp_dir(Some("data_promotion_test"), false);
     let mut config = irys_config::IrysNodeConfig {
         base_directory: temp_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let signer = IrysSigner::random_signer_with_chunk_size(chunk_size as usize);
+    let signer = IrysSigner::random_signer(&test_config);
 
     config.extend_genesis_accounts(vec![(
         signer.address(),
@@ -50,24 +49,24 @@ async fn serial_peer_discovery() {
     )]);
 
     // This will create 3 storage modules, one for submit, one for publish, and one for capacity
-    let node_context = start_for_testing(config.clone()).await.unwrap();
-
+    let storage_config = irys_types::StorageConfig::new(&test_config);
+    let node = start_irys_node(config, storage_config, test_config.clone()).await?;
     wait_for_packing(
-        node_context.actor_addresses.packing.clone(),
+        node.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
-    .await
-    .unwrap();
+    .await?;
 
-    node_context.actor_addresses.start_mining().unwrap();
+    node.node.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
         reth_provider: None,
         block_index: None,
         block_tree: None,
-        db: node_context.db.clone(),
-        mempool: node_context.actor_addresses.mempool,
-        chunk_provider: node_context.chunk_provider.clone(),
+        db: node.db.clone(),
+        mempool: node.actor_addresses.mempool,
+        chunk_provider: node.chunk_provider.clone(),
+        config: test_config.clone(),
     };
 
     // Initialize the app
@@ -95,7 +94,7 @@ async fn serial_peer_discovery() {
 
     // Post a 3 peer requests from different mining addresses, have them report
     // different IP addresses
-    let miner_signer_1 = IrysSigner::random_signer_with_chunk_size(chunk_size);
+    let miner_signer_1 = IrysSigner::random_signer(&test_config);
     let version_request = VersionRequest {
         mining_address: miner_signer_1.address(),
         chain_id: miner_signer_1.chain_id,
@@ -121,7 +120,7 @@ async fn serial_peer_discovery() {
         serde_json::to_string_pretty(&peer_response).expect("Failed to serialize to pretty JSON");
     println!("Pretty JSON:\n{}", pretty_json);
 
-    let miner_signer_2 = IrysSigner::random_signer_with_chunk_size(chunk_size);
+    let miner_signer_2 = IrysSigner::random_signer(&test_config);
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -163,7 +162,7 @@ async fn serial_peer_discovery() {
         PeerResponse::Rejected(_) => panic!("Expected Accepted response, got Rejected"),
     }
 
-    let miner_signer_3 = IrysSigner::random_signer_with_chunk_size(chunk_size);
+    let miner_signer_3 = IrysSigner::random_signer(&test_config);
     let version_request = VersionRequest {
         mining_address: miner_signer_3.address(),
         chain_id: miner_signer_3.chain_id,
@@ -221,4 +220,5 @@ async fn serial_peer_discovery() {
         }),
         "Peer list missing expected addresses"
     );
+    Ok(())
 }
