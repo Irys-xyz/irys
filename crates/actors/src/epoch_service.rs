@@ -625,8 +625,7 @@ impl EpochServiceActor {
             // Add 1 slot for buffer plus enough slots to handle size above threshold
             let excess = usize::try_from(ledger_size.saturating_sub(max_chunk_capacity as u64))
                 .expect("Slots adding overflow, number of slots to add is too large");
-            slots_to_add =
-                1 + (excess / partition_chunk_count);
+            slots_to_add = 1 + (excess / partition_chunk_count);
 
             // Check if we need to add an additional slot for excess > half of
             // the partition size
