@@ -89,12 +89,11 @@ impl EmaService {
         )
         .await;
 
-        let mut shutdown_future = pin!(&mut self.shutdown);
+        let mut shutdown_future = pin!(self.shutdown);
         let shutdown_guard = loop {
             let mut msg_rx = pin!(self.msg_rx.recv());
             match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
                 Either::Left((Some(msg), _)) => {
-                    tracing::debug!(?msg);
                     self.inner.handle_message(msg, &mut price_ctx).await;
                 }
                 Either::Left((None, _)) => {
@@ -121,6 +120,7 @@ impl EmaService {
 }
 
 impl Inner {
+    #[tracing::instrument(skip_all)]
     async fn handle_message(&mut self, msg: EmaServiceMessage, context: &mut PriceCacheContext) {
         match msg {
             EmaServiceMessage::GetCurrentEma { response } => {
@@ -261,7 +261,7 @@ mod price_cache_context {
     }
 
     /// rerturns the canonical chain where the first item in the Vec is the oldest block
-    async fn get_canonical_chain(
+    pub(crate) async fn get_canonical_chain(
         tree: BlockTreeReadGuard,
     ) -> (Vec<(H256, u64, Vec<H256>, Vec<H256>)>, usize) {
         let canonical_chain =
@@ -271,7 +271,7 @@ mod price_cache_context {
         canonical_chain
     }
 
-    async fn get_block(
+    pub(crate) async fn get_block(
         block_tree_read_guard: BlockTreeReadGuard,
         block_hash: H256,
     ) -> IrysBlockHeader {
@@ -348,13 +348,40 @@ mod price_cache_context {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use reth::tasks::TaskManager;
-    use rust_decimal::Decimal;
-    use std::sync::{Arc, RwLock};
+    use crate::block_tree_service::ChainState;
 
-    pub fn build_tree_with_n_blocks(blocks: u64) -> (BlockTreeReadGuard, Vec<IrysTokenPrice>) {
-        let mut blocks = (0..blocks)
+    use super::*;
+    use openssl::md_ctx;
+    use price_cache_context::get_canonical_chain;
+    use reth::tasks::TaskManager;
+    use rstest::rstest;
+    use rust_decimal::Decimal;
+    use std::{
+        sync::{Arc, RwLock},
+        time::Duration,
+    };
+    use test_log::test;
+
+    pub fn build_genesis_tree_with_n_blocks(
+        blocks: u64,
+    ) -> (BlockTreeReadGuard, Vec<IrysTokenPrice>) {
+        let (mut blocks, prices) = build_tree(0, blocks);
+        (genesis_tree(&mut blocks), prices)
+    }
+
+    fn build_tree(
+        init_height: u64,
+        blocks: u64,
+    ) -> (
+        Vec<IrysBlockHeader>,
+        Vec<
+            irys_types::storage_pricing::Amount<(
+                irys_types::storage_pricing::phantoms::IrysPrice,
+                irys_types::storage_pricing::phantoms::Usd,
+            )>,
+        >,
+    ) {
+        let blocks = (init_height..(blocks + init_height))
             .map(|height| {
                 let mut b = IrysBlockHeader::new_mock_header();
                 b.height = height;
@@ -368,7 +395,7 @@ mod tests {
             .iter()
             .map(|block| block.irys_price.clone())
             .collect::<Vec<_>>();
-        (genesis_tree(&mut blocks), prices)
+        (blocks, prices)
     }
 
     pub fn genesis_tree(blocks: &mut [IrysBlockHeader]) -> BlockTreeReadGuard {
@@ -410,7 +437,7 @@ mod tests {
 
     impl TestCtx {
         fn setup(block_count: u64, config: Config) -> Self {
-            let (block_tree_guard, prices) = build_tree_with_n_blocks(block_count);
+            let (block_tree_guard, prices) = build_genesis_tree_with_n_blocks(block_count);
             assert_eq!(prices.len(), block_count as usize);
             let task_manager = TaskManager::new(tokio::runtime::Handle::current());
             let task_executor = task_manager.executor();
@@ -470,7 +497,6 @@ mod tests {
 
     mod get_ema_for_next_adjustment_period {
         use super::*;
-        use rstest::rstest;
         use test_log::test;
 
         #[test(tokio::test)]
@@ -587,6 +613,107 @@ mod tests {
         }
     }
 
-    // todo test shutdown behaviour
-    // todo test `new confirmed block`
+    #[test(tokio::test)]
+    #[rstest]
+    #[timeout(std::time::Duration::from_secs(3))]
+    async fn test_ema_service_shutdown_no_pending_messages() {
+        // Setup
+        let block_count = 3;
+        let price_adjustment_interval = 10;
+        let ctx = TestCtx::setup(
+            block_count,
+            Config {
+                price_adjustment_interval,
+                ..Config::testnet()
+            },
+        );
+
+        // Send shutdown signal
+        tokio::task::spawn_blocking(|| {
+            ctx.task_manager.graceful_shutdown();
+        })
+        .await
+        .unwrap();
+
+        // Attempt to send a message and ensure it fails
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let send_result = ctx
+            .ema_handle
+            .sender
+            .send(EmaServiceMessage::GetCurrentEma { response: tx });
+
+        // assert
+        assert!(
+            send_result.is_err(),
+            "Service should not accept new messages after shutdown"
+        );
+        assert!(
+            ctx.ema_handle.sender.is_closed(),
+            "Service sender should be closed"
+        );
+    }
+
+    #[test(tokio::test)]
+    async fn test_ema_service_new_confirmed_block() {
+        // Setup
+        let initial_block_count = 10;
+        let price_adjustment_interval = 10;
+        let ctx = TestCtx::setup(
+            initial_block_count,
+            Config {
+                price_adjustment_interval,
+                ..Config::testnet()
+            },
+        );
+
+        // setup -- generate new blocks to be added
+        let (chain, ..) = get_canonical_chain(ctx.guard.clone()).await;
+        let (mut latest_block_hash, ..) = *chain.last().unwrap();
+        let (new_blocks, ..) = build_tree(initial_block_count, 100);
+
+        // extract the final price that we expect.
+        // in total there are 110 blocks once we add the new ones.
+        // The EMA to use is the 100th block (idx 89 in the `new_blocks`).
+        let expected_final_ema_price = new_blocks[89].irys_price;
+
+        // setup  -- add new blocks to the canonical chain post-initializatoin
+        let mut tree = ctx.guard.write();
+        for mut block in new_blocks {
+            block.previous_block_hash = latest_block_hash;
+            block.cumulative_diff = block.height.into();
+            latest_block_hash = H256::random();
+            block.block_hash = latest_block_hash;
+            tree.add_common(
+                block.block_hash.clone(),
+                &block,
+                Arc::new(Vec::new()),
+                ChainState::Onchain,
+            )
+            .unwrap();
+        }
+        drop(tree);
+
+        // Send a NewConfirmedBlock message
+        let send_result = ctx
+            .ema_handle
+            .sender
+            .send(EmaServiceMessage::NewConfirmedBlock);
+        assert!(
+            send_result.is_ok(),
+            "Service should accept new confirmed block messages"
+        );
+
+        // Verify that the price cache is updated
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        ctx.ema_handle
+            .sender
+            .send(EmaServiceMessage::GetCurrentEma { response: tx })
+            .unwrap();
+        let response = rx.await.unwrap();
+
+        assert_eq!(
+            response, expected_final_ema_price,
+            "Price cache should reset correctly"
+        );
+    }
 }
