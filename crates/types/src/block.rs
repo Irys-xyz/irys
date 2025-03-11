@@ -3,7 +3,6 @@
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
 use std::fmt;
-use std::ops::Add;
 
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
