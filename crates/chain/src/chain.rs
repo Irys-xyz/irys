@@ -120,14 +120,13 @@ pub async fn start_irys_node(
     let (irys_node_handle_sender, irys_node_handle_receiver) = oneshot::channel::<IrysNodeCtx>();
     let (reth_chainspec, mut irys_genesis) = node_config.chainspec_builder.build();
     let arc_config = Arc::new(node_config);
-    let mut difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
+    let difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
 
     // TODO: Hard coding 3 for storage module count isn't great here,
     // eventually we'll want to relate this to the genesis config
     irys_genesis.diff =
         calculate_initial_difficulty(&difficulty_adjustment_config, &storage_config, 3).unwrap();
 
-    difficulty_adjustment_config.target_block_time = 5;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     irys_genesis.timestamp = now.as_millis();
     irys_genesis.last_diff_timestamp = irys_genesis.timestamp;
