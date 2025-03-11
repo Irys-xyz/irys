@@ -271,7 +271,7 @@ mod price_cache_context {
         }
     }
 
-    /// rerturns the canonical chain where the first item in the Vec is the oldest block
+    /// returns the canonical chain where the first item in the Vec is the oldest block
     pub(crate) async fn get_canonical_chain(
         tree: BlockTreeReadGuard,
     ) -> eyre::Result<(Vec<(H256, u64, Vec<H256>, Vec<H256>)>, usize)> {
