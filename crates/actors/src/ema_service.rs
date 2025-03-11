@@ -1,6 +1,5 @@
 use std::pin::pin;
 
-use futures::join;
 use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height, Config, IrysBlockHeader,
     IrysTokenPrice, H256,
@@ -12,7 +11,7 @@ use tokio::sync::{
     oneshot,
 };
 
-use crate::block_tree_service::{BlockTreeReadGuard, BlockTreeService, GetBlockTreeGuardMessage};
+use crate::block_tree_service::BlockTreeReadGuard;
 
 #[derive(Debug)]
 pub enum EmaServiceMessage {
@@ -49,7 +48,7 @@ impl EmaServiceHandle {
         let genesis_token_price = config.genesis_token_price;
         let blocks_in_interval = config.price_adjustment_interval;
         exec.spawn_critical_with_graceful_shutdown_signal("EMA Service", |shutdown| async move {
-            let cache_service = EmaService {
+            let ema_service = EmaService {
                 shutdown,
                 msg_rx: rx,
                 inner: Inner {
@@ -58,7 +57,10 @@ impl EmaServiceHandle {
                     genesis_token_price,
                 },
             };
-            cache_service.start().await
+            ema_service
+                .start()
+                .await
+                .expect("ema service encountered an irrecoverable error")
         });
         EmaServiceHandle { sender: tx }
     }
@@ -79,7 +81,7 @@ pub struct Inner {
 }
 
 impl EmaService {
-    async fn start(mut self) {
+    async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting EMA service");
         use futures::future::Either;
 
@@ -87,14 +89,14 @@ impl EmaService {
             self.inner.block_tree_read_guard.clone(),
             self.inner.blocks_in_interval,
         )
-        .await;
+        .await?;
 
         let mut shutdown_future = pin!(self.shutdown);
         let shutdown_guard = loop {
             let mut msg_rx = pin!(self.msg_rx.recv());
             match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
                 Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg, &mut price_ctx).await;
+                    self.inner.handle_message(msg, &mut price_ctx).await?;
                 }
                 Either::Left((None, _)) => {
                     tracing::warn!("receiver channel closed");
@@ -109,19 +111,24 @@ impl EmaService {
 
         tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdwon");
         while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg, &mut price_ctx).await;
+            self.inner.handle_message(msg, &mut price_ctx).await?;
         }
 
         // explicitly inform the TaskManager that we're shutting down
         drop(shutdown_guard);
 
         tracing::info!("shutting down EMA service");
+        Ok(())
     }
 }
 
 impl Inner {
-    #[tracing::instrument(skip_all)]
-    async fn handle_message(&mut self, msg: EmaServiceMessage, context: &mut PriceCacheContext) {
+    #[tracing::instrument(skip_all, err)]
+    async fn handle_message(
+        &mut self,
+        msg: EmaServiceMessage,
+        context: &mut PriceCacheContext,
+    ) -> eyre::Result<()> {
         match msg {
             EmaServiceMessage::GetCurrentEma { response } => {
                 let _ = response.send(context.ema_price_to_use());
@@ -133,7 +140,7 @@ impl Inner {
                 // sanity check to ensure we only compute a new EMA on boundary blocks
                 if context.next_ema_adjustment_height != height_of_new_adjustment_block {
                     let _ = response.send(Err(EmaCalculationError::HeightIsNotEmaAdjustmentBlock));
-                    return;
+                    return Ok(());
                 }
 
                 // example EMA calculation on block 29:
@@ -151,8 +158,7 @@ impl Inner {
                     .calculate_ema(
                         blocks_in_between,
                         context.block_previous_ema.irys_price.to_ema(),
-                    )
-                    .unwrap();
+                    )?;
                 tracing::info!(
                     new_ema = ?new_ema.token_to_decimal().unwrap(),
                     prev_predecessor_height = ?context.block_previous_ema_predecessor.height,
@@ -168,13 +174,16 @@ impl Inner {
                     self.block_tree_read_guard.clone(),
                     self.blocks_in_interval,
                 )
-                .await;
+                .await?;
             }
         }
+        Ok(())
     }
 }
 
 mod price_cache_context {
+    use futures::try_join;
+
     use super::*;
 
     #[derive(Debug)]
@@ -190,9 +199,9 @@ mod price_cache_context {
         pub(super) async fn from_canonical_chain(
             block_tree_read_guard: BlockTreeReadGuard,
             blocks_in_price_adjustment_interval: u64,
-        ) -> Self {
+        ) -> eyre::Result<Self> {
             // Rebuild the entire data cache just like we do at startup.
-            let canonical_chain = get_canonical_chain(block_tree_read_guard.clone()).await.0;
+            let canonical_chain = get_canonical_chain(block_tree_read_guard.clone()).await?.0;
             let (_latest_block_hash, latest_block_height, ..) = canonical_chain.last().unwrap();
 
             // Derive indexes
@@ -223,7 +232,9 @@ mod price_cache_context {
                     height, *new_height,
                     "height mismatch in the canonical chain data"
                 );
-                get_block(block_tree_read_guard.clone(), *hash).await
+                get_block(block_tree_read_guard.clone(), *hash)
+                    .await
+                    .and_then(|block| block.ok_or_else(|| eyre::eyre!("block hash {hash:?} from canonical chain cannot be retrieved from the block index")))
             };
             let block_previous_interval = fetch_block_with_height(previous_epoch_block_height);
             let block_previous_interval_predecessor =
@@ -235,12 +246,12 @@ mod price_cache_context {
                 block_previous_interval,
                 block_previous_interval_predecessor,
                 block_two_price_intervals_ago,
-            ) = join!(
+            ) = try_join!(
                 block_previous_interval,
                 block_previous_interval_predecessor,
                 block_two_price_intervals_ago
-            );
-            Self {
+            )?;
+            Ok(Self {
                 block_previous_ema: block_previous_interval,
                 block_previous_ema_predecessor: block_previous_interval_predecessor,
                 block_two_adj_intervals_ago: block_two_price_intervals_ago,
@@ -252,7 +263,7 @@ mod price_cache_context {
                             .saturating_add(blocks_in_price_adjustment_interval)
                     }
                 },
-            }
+            })
         }
 
         pub(crate) fn ema_price_to_use(&self) -> IrysTokenPrice {
@@ -263,40 +274,28 @@ mod price_cache_context {
     /// rerturns the canonical chain where the first item in the Vec is the oldest block
     pub(crate) async fn get_canonical_chain(
         tree: BlockTreeReadGuard,
-    ) -> (Vec<(H256, u64, Vec<H256>, Vec<H256>)>, usize) {
+    ) -> eyre::Result<(Vec<(H256, u64, Vec<H256>, Vec<H256>)>, usize)> {
         let canonical_chain =
-            tokio::task::spawn_blocking(move || tree.read().get_canonical_chain())
-                .await
-                .unwrap();
-        canonical_chain
+            tokio::task::spawn_blocking(move || tree.read().get_canonical_chain()).await?;
+        Ok(canonical_chain)
     }
 
     pub(crate) async fn get_block(
         block_tree_read_guard: BlockTreeReadGuard,
         block_hash: H256,
-    ) -> IrysBlockHeader {
-        let block = tokio::task::spawn_blocking(move || {
+    ) -> eyre::Result<Option<IrysBlockHeader>> {
+        let res = tokio::task::spawn_blocking(move || {
             block_tree_read_guard.read().get_block(&block_hash).cloned()
         })
-        .await
-        .unwrap()
-        .unwrap();
-        block
+        .await?;
+        Ok(res)
     }
 
     #[cfg(test)]
     mod tests {
-
-        use std::sync::{Arc, RwLock};
-
-        use rstest::rstest;
-
-        use crate::{
-            block_tree_service::{BlockState, BlockTreeCache, ChainState},
-            ema_service::tests::genesis_tree,
-        };
-
         use super::*;
+        use crate::ema_service::tests::genesis_tree;
+        use rstest::rstest;
 
         #[test_log::test(tokio::test)]
         #[rstest]
@@ -325,8 +324,9 @@ mod price_cache_context {
             let block_tree_guard = genesis_tree(&mut blocks);
 
             // actoin
-            let price_cache =
-                PriceCacheContext::from_canonical_chain(block_tree_guard, interval).await;
+            let price_cache = PriceCacheContext::from_canonical_chain(block_tree_guard, interval)
+                .await
+                .unwrap();
 
             // assert
             assert_eq!(
@@ -348,39 +348,23 @@ mod price_cache_context {
 
 #[cfg(test)]
 mod tests {
-    use crate::block_tree_service::ChainState;
-
     use super::*;
-    use openssl::md_ctx;
+    use crate::block_tree_service::ChainState;
     use price_cache_context::get_canonical_chain;
     use reth::tasks::TaskManager;
     use rstest::rstest;
     use rust_decimal::Decimal;
-    use std::{
-        sync::{Arc, RwLock},
-        time::Duration,
-    };
+    use std::sync::{Arc, RwLock};
     use test_log::test;
 
-    pub fn build_genesis_tree_with_n_blocks(
+    pub(crate) fn build_genesis_tree_with_n_blocks(
         blocks: u64,
     ) -> (BlockTreeReadGuard, Vec<IrysTokenPrice>) {
         let (mut blocks, prices) = build_tree(0, blocks);
         (genesis_tree(&mut blocks), prices)
     }
 
-    fn build_tree(
-        init_height: u64,
-        blocks: u64,
-    ) -> (
-        Vec<IrysBlockHeader>,
-        Vec<
-            irys_types::storage_pricing::Amount<(
-                irys_types::storage_pricing::phantoms::IrysPrice,
-                irys_types::storage_pricing::phantoms::Usd,
-            )>,
-        >,
-    ) {
+    fn build_tree(init_height: u64, blocks: u64) -> (Vec<IrysBlockHeader>, Vec<IrysTokenPrice>) {
         let blocks = (init_height..(blocks + init_height))
             .map(|height| {
                 let mut b = IrysBlockHeader::new_mock_header();
@@ -398,7 +382,7 @@ mod tests {
         (blocks, prices)
     }
 
-    pub fn genesis_tree(blocks: &mut [IrysBlockHeader]) -> BlockTreeReadGuard {
+    pub(crate) fn genesis_tree(blocks: &mut [IrysBlockHeader]) -> BlockTreeReadGuard {
         use crate::block_tree_service::{BlockTreeCache, ChainState};
         let mut block_hash = H256::random();
         let mut iter = blocks.iter_mut();
@@ -426,6 +410,10 @@ mod tests {
         BlockTreeReadGuard::new(block_tree_cache)
     }
 
+    #[expect(
+        dead_code,
+        reason = "structs are held in-memory to prevent the `drop` to trigger"
+    )]
     struct TestCtx {
         guard: BlockTreeReadGuard,
         config: Config,
@@ -667,7 +655,7 @@ mod tests {
         );
 
         // setup -- generate new blocks to be added
-        let (chain, ..) = get_canonical_chain(ctx.guard.clone()).await;
+        let (chain, ..) = get_canonical_chain(ctx.guard.clone()).await.unwrap();
         let (mut latest_block_hash, ..) = *chain.last().unwrap();
         let (new_blocks, ..) = build_tree(initial_block_count, 100);
 
