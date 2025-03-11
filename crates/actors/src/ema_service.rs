@@ -1,44 +1,57 @@
-use std::pin::pin;
-
+//! EMA service module. It is responsible for keeping track of Irys token price readjustment period.
+//!
+//! example EMA calculation for block with height 29 (block heights start with 0, so this is for the 30th block):
+//! 1. take the registered Irys price in block height 18 (non EMA block) and the stored irys price in block with height 19 (EMA block).
+//! 2. using these values compute EMA for block with height 29. In this case the *n* (number of block prices) would be 10 (E29.height - E19.height).
+//! 3. this is the price that will be used in the interval 39->49, which will be reported to other systems querying for EMA prices.
+use crate::block_tree_service::BlockTreeReadGuard;
 use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height, Config, IrysBlockHeader,
     IrysTokenPrice, H256,
 };
 use price_cache_context::PriceCacheContext;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
+use std::pin::pin;
 use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
     oneshot,
 };
 
-use crate::block_tree_service::BlockTreeReadGuard;
-
+/// Messages that the EMA service supports
 #[derive(Debug)]
 pub enum EmaServiceMessage {
+    /// Return the current EMA that other components must use (eg pricing module)
     GetCurrentEma {
         response: oneshot::Sender<IrysTokenPrice>,
     },
+    /// Returns the EMA irys price that must be used in the next EMA adjustment block
     GetEmaForNextAdjustmentPeriod {
         height_of_new_adjustment_block: u64,
         response: oneshot::Sender<Result<IrysTokenPrice, EmaCalculationError>>,
     },
+    /// Supposted to be sent whenever Irys produces a new confirmed block. The EMA service will refrech its cache.
     NewConfirmedBlock,
 }
 
+/// Potenntial response errors that the EMA service may return
 #[derive(Debug, thiserror::Error)]
 pub enum EmaCalculationError {
+    /// Returned when requesting a new EMA to be included in the next EMA block,
+    /// but the desired block is not an EMA readjustment block.
     #[error(
         "the provided block height does not correspond to a block that requires EMA recomputation"
     )]
     HeightIsNotEmaAdjustmentBlock,
 }
 
+/// Sender handle for the EMA service
 #[derive(Debug, Clone)]
 pub struct EmaServiceHandle {
     pub sender: UnboundedSender<EmaServiceMessage>,
 }
 
 impl EmaServiceHandle {
+    /// Spawn a new EMA service
     pub fn spawn_service(
         exec: &TaskExecutor,
         block_tree_read_guard: BlockTreeReadGuard,
@@ -181,6 +194,8 @@ impl Inner {
     }
 }
 
+/// Utility module for that's responsible for extracting the desired blocks from the
+/// `BlockTree` to properly report prices & calculate new interval values
 mod price_cache_context {
     use futures::try_join;
 
