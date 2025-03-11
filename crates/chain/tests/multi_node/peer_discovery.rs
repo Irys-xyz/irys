@@ -57,7 +57,7 @@ async fn serial_peer_discovery() -> eyre::Result<()> {
     )
     .await?;
 
-    node.node.actor_addresses.start_mining().unwrap();
+    node.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
         reth_provider: None,
