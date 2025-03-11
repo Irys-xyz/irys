@@ -39,7 +39,8 @@ pub struct PermanentLedger {
 pub struct TermLedger {
     /// Map between slots numbers and its ledger containing partition assignments  
     pub slots: BTreeMap<u64, LedgerSlot>,
-    /// Nest slot index
+    /// Next slot index to be added to term ledger, this is used when adding slots at epoch blocks
+    /// At node initialization this is set to 0 and incremented as slots are added while reconstructing epoch events
     pub next_slot_idx: u64,
     /// Unique identifier for this ledger, see `Ledger` enum
     pub ledger_id: u32,
