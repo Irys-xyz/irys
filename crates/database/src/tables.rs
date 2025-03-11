@@ -1,6 +1,12 @@
+use crate::db_cache::{DataRootLRUEntry, GlobalChunkOffset, PartitionHashes};
+use crate::metadata::MetadataKey;
+use crate::submodule::tables::RelativeStartOffsets;
+use crate::{
+    db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
+    submodule::tables::{ChunkOffsets, ChunkPathHashes},
+};
 use irys_types::{
-    ingress::IngressProof, partition::PartitionHash, ChunkPathHash, DataRoot, IrysBlockHeader,
-    IrysTransactionHeader, H256,
+    ingress::IngressProof, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, H256,
 };
 use irys_types::{Address, PeerListItem};
 use reth_codecs::Compact;
@@ -9,13 +15,6 @@ use reth_db::{HasName, HasTableType, TableType, TableViewer};
 use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-
-use crate::metadata::MetadataKey;
-use crate::submodule::tables::RelativeStartOffsets;
-use crate::{
-    db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
-    submodule::tables::{ChunkOffsets, ChunkPathHashes},
-};
 
 /// Adds wrapper structs for some primitive types so they can use `StructFlags` from Compact, when
 /// used as pure table values.
@@ -78,6 +77,7 @@ add_wrapper_struct!((IrysBlockHeader, CompactIrysBlockHeader));
 add_wrapper_struct!((IrysTransactionHeader, CompactTxHeader));
 add_wrapper_struct!((PeerListItem, CompactPeerListItem));
 
+
 impl_compression_for_compact!(
     CompactIrysBlockHeader,
     CompactTxHeader,
@@ -88,7 +88,9 @@ impl_compression_for_compact!(
     ChunkOffsets,
     ChunkPathHashes,
     PartitionHashes,
-    RelativeStartOffsets
+    RelativeStartOffsets,
+    DataRootLRUEntry,
+    GlobalChunkOffset
 );
 
 tables! {
@@ -106,7 +108,7 @@ tables! {
     table CachedChunksIndex<Key = DataRoot, Value = CachedChunkIndexEntry, SubKey = u32>;
 
     /// Table mapping a chunk path hash to a cached chunk (with data)
-    table CachedChunks<Key =ChunkPathHash , Value = CachedChunk>;
+    table CachedChunks<Key = ChunkPathHash , Value = CachedChunk>;
 
     /// Indexes Ingress proofs by their data_root
     table IngressProofs<Key = DataRoot, Value = IngressProof>;
@@ -114,7 +116,14 @@ tables! {
     /// Maps an ingress proof (by data_root) to the latest possible height it could be used at, given known transactions.
     /// this value is updated every time we receive a valid to-be-promoted transaction to (<height of anchor block> + ANCHOR_EXPIRY_DEPTH)
     /// and is pruned if value > <current_height>
-    table IngressProofLRU<Key = DataRoot, Value = u64>;
+    table DataRootLRU<Key = DataRoot, Value = DataRootLRUEntry>;
+
+    /// Maps a global (perm) chunk offset to the last block height it was used by a transaction
+    /// this acts as an LRU cache for PD chunks, to reduce the bandwidth requirements for frequently used chunks
+    table ProgrammableDataLRU<Key = GlobalChunkOffset, Value =u64 >;
+
+    /// Maps a global offset to a cached chunk
+    table ProgrammableDataCache<Key = GlobalChunkOffset, Value = CachedChunk>;
 
     /// Tracks the peer list of known peers as well as their reputation score.
     /// While the node maintains connections to a subset of these peers - the
@@ -124,10 +133,4 @@ tables! {
 
     /// Table to store various metadata, such as the current db schema version
     table Metadata<Key = MetadataKey, Value = Vec<u8>>;
-
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
-/// partition hashes
-/// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
-pub struct PartitionHashes(pub Vec<PartitionHash>);

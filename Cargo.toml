@@ -16,12 +16,13 @@ members = [
   "crates/macros",
   "crates/debug-utils",
   "xtask",
+  "crates/price-oracle",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.85"
 homepage = "http://irys.xyz/"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/Irys-xyz/irys"
@@ -44,6 +45,7 @@ irys-packing = { path = "./crates/packing" }
 irys-chain = { path = "./crates/chain" }
 irys-vdf = { path = "./crates/vdf" }
 irys-efficient-sampling = { path = "./crates/efficient-sampling" }
+irys-price-oracle = { path = "./crates/price-oracle" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
@@ -51,26 +53,35 @@ actix-rt = "2.10.0"
 actix-web = "4.9.0"
 actix-http = "3.9.0"
 base58 = "0.2.0"
+tokio-stream = "0.1"
 alloy-consensus = { path = "./ext/alloy/crates/consensus", default-features = false }
 alloy-core = { path = "./ext/alloy-core/crates/core" }
 alloy-eips = { path = "./ext/alloy/crates/eips", default-features = false }
 alloy-genesis = { path = "./ext/alloy/crates/genesis", default-features = false }
-alloy-primitives = { path = "./ext/alloy-core/crates/primitives", features = ["arbitrary"] }
+alloy-primitives = { path = "./ext/alloy-core/crates/primitives", features = [
+  "arbitrary",
+] }
 rand = "0.8.5"
 hex = "0.4"
 base64-url = "2.0.0"
 alloy-rlp = "0.3.4"
 alloy-rpc-types = { path = "./ext/alloy/crates/rpc-types" }
-alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine", features = ["serde"] }
+alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine", features = [
+  "serde",
+] }
 
 alloy-rpc-types-trace = { path = "./ext/alloy/crates/rpc-types-trace" }
 reth-e2e-test-utils = { path = "./ext/reth/crates/e2e-test-utils" }
 alloy-serde = { path = "./ext/alloy/crates/serde", default-features = false }
 alloy-signer-local = { path = "./ext/alloy/crates/signer-local" }
-alloy-sol-macro = { path = "./ext/alloy-core/crates/sol-macro", features = ["json"] }
+alloy-sol-macro = { path = "./ext/alloy-core/crates/sol-macro", features = [
+  "json",
+] }
 alloy-sol-types = { path = "./ext/alloy-core/crates/sol-types" }
 alloy-contract = { path = "./ext/alloy/crates/contract" }
-alloy-provider = { path = "./ext/alloy/crates/provider", features = ["trace-api"] }
+alloy-provider = { path = "./ext/alloy/crates/provider", features = [
+  "trace-api",
+] }
 
 arbitrary = { version = "1.3", features = ["derive"] }
 once_cell = "1"
@@ -82,6 +93,7 @@ color-eyre = "0.6"
 itertools = "0.13"
 futures = "0.3"
 bytemuck = "1"
+test-log = { version = "0.2", features = ["trace"] }
 
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.11"
@@ -155,7 +167,12 @@ semver = "1.0"
 syn = { version = "2", features = ["full"] }
 tracing = "0.1.0"
 tracing-error = "0.2"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "env-filter",
+  "fmt",
+  "json",
+  "ansi",
+] }
 alloy-signer = { path = "./ext/alloy/crates/signer" }
 tempfile = "3"
 jsonrpsee = "0.24"
@@ -260,6 +277,7 @@ pub_with_shorthand = "allow"
 option_if_let_else = "allow"
 self_named_module_files = "allow"
 shadow_unrelated = "allow"
+arbitrary_source_item_ordering = "allow"
 
 # These are some of clippy's nursery (i.e., experimental) lints that we like.
 # By default, nursery lints are allowed. Some of the lints below have made good
@@ -350,7 +368,7 @@ ignored = ["modular-bitfield", "test-fuzz"]
 # https://github.com/crate-ci/typos/blob/master/docs/reference.md
 [workspace.metadata.typos]
 default.extend-ignore-re = [
-  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$", # disable a single line: spellchecker:disable-line
+  "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
   "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
 ]
 files.extend-exclude = ["ext/*", "fixtures/*"]

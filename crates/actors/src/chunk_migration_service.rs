@@ -15,7 +15,10 @@ use reth_db::Database;
 use std::sync::{Arc, RwLock};
 use tracing::error;
 
-use crate::block_producer::BlockFinalizedMessage;
+use crate::{
+    block_producer::BlockFinalizedMessage, cache_service::CacheServiceAction,
+    services::ServiceSenders,
+};
 
 /// Central coordinator for chunk storage operations.
 ///
@@ -34,6 +37,8 @@ pub struct ChunkMigrationService {
     pub storage_modules: Vec<Arc<StorageModule>>,
     /// Persistent database for storing chunk metadata and indices
     pub db: Option<DatabaseProvider>,
+    /// Service sender channels
+    pub service_senders: Option<ServiceSenders>,
 }
 
 impl Actor for ChunkMigrationService {
@@ -46,6 +51,7 @@ impl ChunkMigrationService {
         storage_config: StorageConfig,
         storage_modules: Vec<Arc<StorageModule>>,
         db: DatabaseProvider,
+        service_senders: ServiceSenders,
     ) -> Self {
         println!("service started: chunk_migration");
         Self {
@@ -53,6 +59,7 @@ impl ChunkMigrationService {
             storage_config,
             storage_modules,
             db: Some(db),
+            service_senders: Some(service_senders),
         }
     }
 }
@@ -83,12 +90,13 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
         let chunk_size = self.storage_config.chunk_size as usize;
         let storage_modules = Arc::new(self.storage_modules.clone());
         let db = Arc::new(self.db.clone().unwrap());
+        let service_senders = self.service_senders.clone().unwrap();
 
         // Extract transactions for each ledger
         let submit_tx_count = block.ledgers[Ledger::Submit].tx_ids.len();
         let submit_txs = all_txs[..submit_tx_count].to_vec();
         let publish_txs = all_txs[submit_tx_count..].to_vec();
-
+        let block_height = block.height;
         Box::pin(async move {
             // Process Submit ledger transactions
             process_ledger_transactions(
@@ -114,6 +122,11 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
                 &db,
             )
             .map_err(|_| eyre!("Unexpected error processing publish ledger transactions"))?;
+
+            // forward the finalization message to the cache service for cleanup
+            let _ = service_senders
+                .chunk_cache
+                .send(CacheServiceAction::OnFinalizedBlock(block_height, None));
 
             Ok(())
         })

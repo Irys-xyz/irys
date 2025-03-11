@@ -2,9 +2,11 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use alloy_eips::BlockNumberOrTag;
+use irys_actors::cache_service::ChunkCacheServiceHandle;
 use irys_actors::packing::PackingConfig;
 use irys_actors::peer_list_service::PeerListService;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
+use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -27,6 +29,8 @@ use irys_api_server::{run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
 use irys_packing::{PackingType, PACKING_TYPE};
+use irys_price_oracle::mock_oracle::MockOracle;
+use irys_price_oracle::IrysPriceOracle;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
@@ -39,7 +43,9 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
     StorageConfig, CHUNK_SIZE, H256,
 };
-use irys_types::{Config, DifficultyAdjustmentConfig, PartitionChunkRange};
+use irys_types::{
+    Config, DifficultyAdjustmentConfig, OracleConfig, PartitionChunkRange, RethDatabaseProvider,
+};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::rpc::eth::EthApiServer as _;
 use reth::{
@@ -85,6 +91,7 @@ pub struct IrysNodeCtx {
     pub vdf_steps_guard: VdfStepsReadGuard,
     pub vdf_config: VDFStepsConfig,
     pub storage_config: StorageConfig,
+    pub service_senders: ServiceSenders,
 }
 
 pub async fn start_irys_node(
@@ -114,14 +121,13 @@ pub async fn start_irys_node(
     let (irys_node_handle_sender, irys_node_handle_receiver) = oneshot::channel::<IrysNodeCtx>();
     let (reth_chainspec, mut irys_genesis) = node_config.chainspec_builder.build();
     let arc_config = Arc::new(node_config);
-    let mut difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
+    let difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
 
     // TODO: Hard coding 3 for storage module count isn't great here,
     // eventually we'll want to relate this to the genesis config
     irys_genesis.diff =
         calculate_initial_difficulty(&difficulty_adjustment_config, &storage_config, 3).unwrap();
 
-    difficulty_adjustment_config.target_block_time = 5;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     irys_genesis.timestamp = now.as_millis();
     irys_genesis.last_diff_timestamp = irys_genesis.timestamp;
@@ -165,6 +171,11 @@ pub async fn start_irys_node(
         &arc_config.irys_consensus_data_dir(),
     )?);
 
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let mut task_manager = TaskManager::new(tokio_runtime.handle().clone());
+    let task_exec = task_manager.executor();
     std::thread::Builder::new()
         .name("actor-main-thread".to_string())
         .stack_size(32 * 1024 * 1024)
@@ -173,11 +184,15 @@ pub async fn start_irys_node(
             System::new().block_on(async move {
                 // the RethNodeHandle doesn't *need* to be Arc, but it will reduce the copy cost
                 let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
-                let reth_db = DatabaseProvider(reth_node.provider.database.db.clone());
+                let reth_db = RethDatabaseProvider(reth_node.provider.database.db.clone());
                 let irys_db = DatabaseProvider(irys_db_env.clone());
                 let vdf_config = VDFStepsConfig::new(&config);
 
                 check_db_version_and_run_migrations_if_needed(&reth_db, &irys_db).unwrap();
+
+                let (service_senders, service_receivers) = ServiceSenders::init();
+
+                ChunkCacheServiceHandle::spawn_service(service_senders.chunk_cache.clone(), service_receivers.chunk_cache, task_exec, irys_db.clone(), config.clone());
 
                 let latest_block = latest_block_index
                     .map(|b| {
@@ -379,6 +394,7 @@ pub async fn start_irys_node(
                     storage_config.clone(),
                     storage_modules.clone(),
                     irys_db.clone(),
+                    service_senders.clone()
                 );
                 SystemRegistry::set(chunk_migration_service.start());
 
@@ -420,19 +436,30 @@ pub async fn start_irys_node(
                     |_| block_discovery_actor,
                 );
 
+                // set up the price oracle
+                let price_oracle = match config.oracle_config {
+                    OracleConfig::Mock { initial_price, percent_change, smoothing_interval } => {
+                        IrysPriceOracle::MockOracle(MockOracle::new(initial_price, percent_change, smoothing_interval))
+                    },
+                    // note: depending on the oracle, it may require spawning an async background service.
+                };
+                let price_oracle = Arc::new(price_oracle);
+
+                // set up the block producer
                 let block_producer_arbiter = Arbiter::new();
-                let block_producer_actor = BlockProducerActor::new(
-                    irys_db.clone(),
-                    mempool_addr.clone(),
-                    block_discovery_addr.clone(),
-                    epoch_service_actor_addr.clone(),
-                    reth_node.clone(),
-                    storage_config.clone(),
-                    difficulty_adjustment_config,
-                    vdf_config.clone(),
-                    vdf_steps_guard.clone(),
-                    block_tree_guard.clone(),
-                );
+                let block_producer_actor = BlockProducerActor {
+                    db: irys_db.clone(),
+                    mempool_addr: mempool_addr.clone(),
+                    block_discovery_addr,
+                    epoch_service: epoch_service_actor_addr.clone(),
+                    reth_provider: reth_node.clone(),
+                    storage_config: storage_config.clone(),
+                    difficulty_config: difficulty_adjustment_config,
+                    vdf_config: vdf_config.clone(),
+                    vdf_steps_guard: vdf_steps_guard.clone(),
+                    block_tree_guard: block_tree_guard.clone(),
+                    price_oracle,
+                };
                 let block_producer_addr =
                     BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
                         block_producer_actor
@@ -564,6 +591,7 @@ pub async fn start_irys_node(
                     vdf_steps_guard: vdf_steps_guard.clone(),
                     vdf_config: vdf_config.clone(),
                     storage_config: storage_config.clone(),
+                    service_senders: service_senders.clone()
                 });
 
                 run_server(ApiState {
@@ -587,19 +615,25 @@ pub async fn start_irys_node(
 
     // run reth in it's own thread w/ it's own tokio runtime
     // this is done as reth exhibits strange behaviour (notably channel dropping) when not in it's own context/when the exit future isn't been awaited
+    let exec: reth::tasks::TaskExecutor = task_manager.executor();
 
-    std::thread::Builder::new().name("reth-thread".to_string())
+    std::thread::Builder::new()
+        .name("reth-thread".to_string())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
-            let node_config= cloned_arc.clone();
-            let tokio_runtime = /* Handle::current(); */ tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-            let mut task_manager = TaskManager::new(tokio_runtime.handle().clone());
-            let exec: reth::tasks::TaskExecutor = task_manager.executor();
-
+            let node_config = cloned_arc.clone();
             tokio_runtime.block_on(run_to_completion_or_panic(
                 &mut task_manager,
-                run_until_ctrl_c(start_reth_node(exec, reth_chainspec, node_config, IrysTables::ALL, reth_handle_sender, irys_provider, latest_block_height)),
-            )).unwrap();
+                run_until_ctrl_c(start_reth_node(
+                    exec,
+                    reth_chainspec,
+                    node_config,
+                    IrysTables::ALL,
+                    reth_handle_sender,
+                    irys_provider,
+                    latest_block_height,
+                )),
+            ))
         })?;
 
     // wait for the full handle to be send over by the actix thread
