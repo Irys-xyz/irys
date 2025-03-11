@@ -262,7 +262,7 @@ impl EpochServiceActor {
         &mut self,
         db: &DatabaseProvider,
         storage_module_config: StorageSubmodulesConfig,
-    ) -> Vec<StorageModuleInfo> {
+    ) -> eyre::Result<Vec<StorageModuleInfo>> {
         let mut block_index = 0;
         let mut storage_module_info = Vec::new();
 
@@ -285,7 +285,7 @@ impl EpochServiceActor {
                         Ok(_) => debug!(?block_index, "Processed epoch block"),
                         Err(e) => {
                             self.print_items(self.block_index_guard.clone(), db.clone());
-                            panic!("hERE {:?}", e);
+                            return Err(eyre::eyre!("Error performing epoch tasks {:?}", e));
                         }
                     }
                     if block_index == 0 {
@@ -304,23 +304,27 @@ impl EpochServiceActor {
             }
         }
 
-        // update partition slot/ledger assignments
+        // update partition slot/ledger assignments in storage module info
         for sm in storage_module_info.iter_mut() {
-            sm.partition_assignment = sm.partition_assignment.map(|mut pa| {
-                if let Some(pa2) = self
+            let _ = sm.partition_assignment.map(|mut pa| {
+                match self
                     .partition_assignments
                     .read()
-                    .unwrap()
-                    .get_assignment(pa.partition_hash)
-                {
-                    pa.ledger_id = pa2.ledger_id;
-                    pa.slot_index = pa2.slot_index;
-                }
-                pa
-            });
+                    .map(|p| p.get_assignment(pa.partition_hash))
+                    {
+                        Ok(Some(pa2)) => {
+                            pa.ledger_id = pa2.ledger_id;
+                            pa.slot_index = pa2.slot_index;                            
+                            Ok(())
+                        },
+                        Ok(None) => Ok(()),
+                        Err(e) =>
+                            Err(eyre::eyre!("Error reading partition assignments: {:?}", e))
+                    }
+            }).ok_or(eyre::eyre!("Error reading partition assignments"))?;
         }
 
-        storage_module_info
+        Ok(storage_module_info)
     }
 
     fn print_items(&self, block_index_guard: BlockIndexReadGuard, db: DatabaseProvider) {
@@ -678,7 +682,7 @@ impl EpochServiceActor {
                 "Needed previous epoch block with height {} is not available in block index!",
                 previous_epoch_block_height
             ));
-            let data_added: u64 = ledger_size - last_epoch_block.ledgers[ledger].max_chunk_offset;
+            let data_added = ledger_size - last_epoch_block.ledgers[ledger].max_chunk_offset;
             slots_to_add += u64::div_ceil(
                 data_added,
                 self.config.storage_config.num_chunks_in_partition,
@@ -1599,7 +1603,8 @@ mod tests {
         // Get the genesis storage modules and their assigned partitions
         let storage_module_infos = epoch_service
             .initialize(&database_provider, storage_module_config.clone())
-            .await; // epoch_service.handle(GetGenesisStorageModulesMessage(storage_module_config.clone()), &mut ctx);
+            .await
+            .unwrap(); // epoch_service.handle(GetGenesisStorageModulesMessage(storage_module_config.clone()), &mut ctx);
         debug!("{:#?}", storage_module_infos);
 
         {
@@ -1699,7 +1704,8 @@ mod tests {
         let mut epoch_service = EpochServiceActor::new(config, &testnet_config, block_index_guard);
         let storage_module_infos = epoch_service
             .initialize(&database_provider, storage_module_config.clone())
-            .await;
+            .await
+            .unwrap();
         debug!("{:#?}", storage_module_infos);
 
         // Check partition hashes have not changed in storage modules

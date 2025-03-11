@@ -290,7 +290,7 @@ pub async fn start_irys_node(
 
                 let mut epoch_service = EpochServiceActor::new(epoch_config.clone(), &config, block_index_guard.clone());
                 // initialize the epoch service from block 1
-                let storage_module_infos = epoch_service.initialize(&irys_db, storage_module_config.clone()).await;
+                let storage_module_infos = epoch_service.initialize(&irys_db, storage_module_config.clone()).await.expect("Failed to initialize epoch service");
                 let epoch_service_actor_addr = epoch_service.start();
 
                 // Retrieve ledger assignments

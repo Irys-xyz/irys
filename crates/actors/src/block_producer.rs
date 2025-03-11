@@ -152,7 +152,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let difficulty_config = self.difficulty_config;
         let chunk_size = self.storage_config.chunk_size;
         let block_tree_guard = self.block_tree_guard.clone();
-        let epoch_config = self.epoch_config.clone();
+        let blocks_in_epoch = self.epoch_config.num_blocks_in_epoch;
         let vdf_steps = self.vdf_steps_guard.clone();
 
         AtomicResponse::new(Box::pin( async move {
@@ -477,7 +477,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-            if block_height > 0 && block_height % epoch_config.num_blocks_in_epoch == 0 {
+            if block_height > 0 && block_height % blocks_in_epoch == 0 {
                 epoch_service_addr.do_send(NewEpochMessage(block.clone()));
             }
 
