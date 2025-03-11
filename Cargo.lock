@@ -4353,6 +4353,7 @@ dependencies = [
  "reth-db",
  "reth-db-api",
  "reth-primitives",
+ "rstest",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",

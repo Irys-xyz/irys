@@ -383,6 +383,7 @@ mod tests {
     use alloy_primitives::Signature;
     use alloy_rlp::Decodable;
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rstest::rstest;
     use serde_json;
     use zerocopy::IntoBytes;
 
@@ -504,69 +505,62 @@ mod tests {
         assert_eq!(derived_header, header);
     }
 
-    #[test]
-    fn test_previous_ema_for_multiple_intervals() {
+    #[rstest]
+    #[case(0, 0)]
+    #[case(1, 0)]
+    #[case(15, 9)]
+    #[case(19, 9)]
+    #[case(20, 19)]
+    #[case(21, 19)]
+    #[case(29, 19)]
+    #[case(30, 29)]
+    #[case(31, 29)]
+    #[case(39, 29)]
+    #[case(40, 39)]
+    #[case(41, 39)]
+    #[case(99, 89)]
+    #[case(100, 99)]
+    fn test_previous_ema_for_multiple_intervals(
+        #[case] height: u64,
+        #[case] expected_prev_ema: u64,
+    ) {
         let interval = 10;
-        // (height, expected)
-        let cases = vec![
-            (0, 0),
-            (1, 0),
-            (15, 9),
-            (19, 9),
-            (20, 19),
-            (21, 19),
-            (29, 19),
-            (30, 29),
-            (31, 29),
-            (39, 29),
-            (40, 39),
-            (41, 39),
-            (99, 89),
-            (100, 99),
-        ];
+        let header = IrysBlockHeader {
+            height,
+            ..Default::default()
+        };
+        let result = header.previous_ema_recalculation_block_height(interval);
 
-        for (height, expected) in cases {
-            let header = IrysBlockHeader {
-                height,
-                ..Default::default()
-            };
-            let result = header.previous_ema_recalculation_block_height(interval);
-            assert_eq!(
-                result, expected,
-                "For height={height}, expected {expected} but got {result}"
-            );
-        }
+        assert_eq!(
+            result, expected_prev_ema,
+            "For height={height}, expected {expected_prev_ema} but got {result}"
+        );
     }
 
-    #[test]
-    fn test_is_ema_recalculation_block() {
+    #[rstest]
+    #[case(0, false)]
+    #[case(1, false)]
+    #[case(9, true)]
+    #[case(10, false)]
+    #[case(11, false)]
+    #[case(19, true)]
+    #[case(20, false)]
+    #[case(21, false)]
+    #[case(30, false)]
+    #[case(99, true)]
+    #[case(100, false)]
+    fn test_is_ema_recalculation_block(#[case] height: u64, #[case] expected_is_ema: bool) {
         let interval = 10;
-        // (height, is_ema_recalculation)
-        let cases = vec![
-            (0, false),
-            (1, false),
-            (9, true),
-            (10, false),
-            (11, false),
-            (19, true),
-            (20, false),
-            (21, false),
-            (30, false),
-            (99, true),
-            (100, false),
-        ];
+        let header = IrysBlockHeader {
+            height,
+            ..Default::default()
+        };
+        let is_ema = header.is_ema_recalculation_block(interval);
 
-        for (height, expected_is_ema) in cases {
-            let header = IrysBlockHeader {
-                height,
-                ..Default::default()
-            };
-            let is_ema = header.is_ema_recalculation_block(interval);
-            assert_eq!(
-                is_ema, expected_is_ema,
-                "For height={height}, expected is_ema_recalculation_block={expected_is_ema} but got {is_ema}"
-            );
-        }
+        assert_eq!(
+        is_ema, expected_is_ema,
+        "For height={height}, expected is_ema_recalculation_block={expected_is_ema} but got {is_ema}"
+    );
     }
 
     #[test]
