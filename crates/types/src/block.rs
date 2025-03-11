@@ -200,6 +200,7 @@ impl IrysBlockHeader {
 
 // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
 pub fn is_ema_recalculation_block(height: u64, blocks_in_price_adjustment_interval: u64) -> bool {
+    // heights are zero indexed hence adding +1
     (height + 1) % blocks_in_price_adjustment_interval == 0
 }
 
@@ -208,6 +209,7 @@ pub fn previous_ema_recalculation_block_height(
     height: u64,
     blocks_in_price_adjustment_interval: u64,
 ) -> u64 {
+    // heights are zero indexed hence adding +1
     let remainder = (height + 1) % blocks_in_price_adjustment_interval;
     if remainder == 0 {
         // If the current block is on an interval boundary, go one interval back.

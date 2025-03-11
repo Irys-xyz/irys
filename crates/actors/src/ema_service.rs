@@ -219,7 +219,7 @@ mod price_cache_context {
             let (_latest_block_hash, latest_block_height, ..) = canonical_chain.last().unwrap();
 
             // Derive indexes
-            let height_previous_epoch_block = if is_ema_recalculation_block(
+            let height_previous_ema_block = if is_ema_recalculation_block(
                 *latest_block_height,
                 blocks_in_price_adjustment_interval,
             ) {
@@ -230,10 +230,9 @@ mod price_cache_context {
                     blocks_in_price_adjustment_interval,
                 )
             };
-            let height_previous_interval_predecessor =
-                height_previous_epoch_block.saturating_sub(1);
-            let height_two_epochs_ago = previous_ema_recalculation_block_height(
-                height_previous_epoch_block,
+            let height_previous_interval_predecessor = height_previous_ema_block.saturating_sub(1);
+            let height_two_intervals_ago = previous_ema_recalculation_block_height(
+                height_previous_ema_block,
                 blocks_in_price_adjustment_interval,
             );
 
@@ -241,7 +240,9 @@ mod price_cache_context {
             let fetch_block_with_height = async |height: u64| {
                 let canonical_len = canonical_chain.len();
                 let diff_from_latest_height = latest_block_height.saturating_sub(height) as usize;
-                let adjusted_index = canonical_len - diff_from_latest_height - 1;
+                let adjusted_index = canonical_len
+                    .saturating_sub(diff_from_latest_height)
+                    .saturating_sub(1); // -1 because heights are zero based
                 let (hash, new_height, ..) = canonical_chain.get(adjusted_index).unwrap();
                 assert_eq!(
                     height, *new_height,
@@ -258,19 +259,26 @@ mod price_cache_context {
                 block_previous_interval_predecessor,
                 block_two_price_intervals_ago,
             ) = try_join!(
-                fetch_block_with_height(height_previous_epoch_block),
+                fetch_block_with_height(height_previous_ema_block),
                 fetch_block_with_height(height_previous_interval_predecessor),
-                fetch_block_with_height(height_two_epochs_ago)
+                fetch_block_with_height(height_two_intervals_ago)
             )?;
+
+            // Return an updated price cache
             Ok(Self {
                 block_previous_ema: block_previous_interval,
                 block_previous_ema_predecessor: block_previous_interval_predecessor,
                 block_two_adj_intervals_ago: block_two_price_intervals_ago,
                 next_ema_adjustment_height: {
-                    if height_previous_epoch_block == 0 {
-                        blocks_in_price_adjustment_interval - 1
+                    // If we're at the genesis block (height == 0), we set the next EMA block to be
+                    // one interval minus 1. This ensures the initial EMA is established properly
+                    // for the first interval, since there's no previous block to reference.
+                    if height_previous_ema_block == 0 {
+                        // Heights are zero-based, and as a result we'd offset the EMA calculation by 1
+                        // if we didn't do this special calculation.
+                        blocks_in_price_adjustment_interval.saturating_sub(1)
                     } else {
-                        height_previous_epoch_block
+                        height_previous_ema_block
                             .saturating_add(blocks_in_price_adjustment_interval)
                     }
                 },
