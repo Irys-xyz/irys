@@ -361,7 +361,13 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
                 let all_tx = block_entry.all_tx.clone();
 
                 // Now do mutable operations
-                if cache.mark_tip(&block_hash).is_ok() {
+                let mark_tip = cache.mark_tip(&block_hash);
+                let _ = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
+                    head_hash: BlockHashType::Irys(block_hash),
+                    confirmed_hash: None,
+                    finalized_hash: None,
+                });
+                if mark_tip.is_ok() {
                     self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
                 }
 
@@ -566,6 +572,11 @@ impl BlockTreeCache {
 
         let tip_hash = block_index.get_latest_item().unwrap().block_hash;
         cache.mark_tip(&tip_hash).unwrap();
+        let _ = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
+            head_hash: BlockHashType::Irys(tip_hash),
+            confirmed_hash: None,
+            finalized_hash: None,
+        });
         cache
     }
 
@@ -933,14 +944,6 @@ impl BlockTreeCache {
             block_hash.0.to_base58(),
             block.height
         );
-
-        // RethServiceActor::from_registry()
-        //     .try_send(ForkChoiceUpdateMessage {
-        //         head_hash: BlockHashType::Irys(*block_hash),
-        //         confirmed_hash: None,
-        //         finalized_hash: None,
-        //     })
-        //     .map_err(|e| eyre::eyre!("Error sending FCU to reth service - {}", &e))?;
 
         Ok(old_tip != *block_hash)
     }
