@@ -7,6 +7,7 @@ pub mod block_validation;
 pub mod broadcast_mining_service;
 pub mod cache_service;
 pub mod chunk_migration_service;
+pub mod ema_service;
 pub mod epoch_service;
 pub mod mempool_service;
 pub mod mining;
