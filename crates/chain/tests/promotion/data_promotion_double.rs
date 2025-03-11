@@ -376,7 +376,7 @@ async fn serial_double_root_data_promotion_test() {
 
     // ensure the ingress proof still exists
     let ingress_proofs = db
-        .view(|rtx| walk_all::<IngressProofs>(rtx))
+        .view(|rtx| walk_all::<IngressProofs, _>(rtx))
         .unwrap()
         .unwrap();
     assert_eq!(ingress_proofs.len(), 1);
@@ -595,7 +595,7 @@ async fn serial_double_root_data_promotion_test() {
     mine_blocks(&node_context, 5).await.unwrap();
     // ensure the ingress proof is gone
     let ingress_proofs = db
-        .view(|rtx| walk_all::<IngressProofs>(rtx))
+        .view(|rtx| walk_all::<IngressProofs, _>(rtx))
         .unwrap()
         .unwrap();
     assert_eq!(ingress_proofs.len(), 0);

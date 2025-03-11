@@ -16,12 +16,13 @@ members = [
   "crates/macros",
   "crates/debug-utils",
   "xtask",
+  "crates/price-oracle",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.85"
 homepage = "http://irys.xyz/"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/Irys-xyz/irys"
@@ -44,6 +45,7 @@ irys-packing = { path = "./crates/packing" }
 irys-chain = { path = "./crates/chain" }
 irys-vdf = { path = "./crates/vdf" }
 irys-efficient-sampling = { path = "./crates/efficient-sampling" }
+irys-price-oracle = { path = "./crates/price-oracle" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
@@ -51,6 +53,7 @@ actix-rt = "2.10.0"
 actix-web = "4.9.0"
 actix-http = "3.9.0"
 base58 = "0.2.0"
+tokio-stream = "0.1"
 alloy-consensus = { path = "./ext/alloy/crates/consensus", default-features = false }
 alloy-core = { path = "./ext/alloy-core/crates/core" }
 alloy-eips = { path = "./ext/alloy/crates/eips", default-features = false }
@@ -262,6 +265,7 @@ pub_with_shorthand = "allow"
 option_if_let_else = "allow"
 self_named_module_files = "allow"
 shadow_unrelated = "allow"
+arbitrary_source_item_ordering = "allow"
 
 # These are some of clippy's nursery (i.e., experimental) lints that we like.
 # By default, nursery lints are allowed. Some of the lints below have made good

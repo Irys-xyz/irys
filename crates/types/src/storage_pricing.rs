@@ -9,7 +9,7 @@
 use crate::U256;
 use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Arbitrary;
-use core::{fmt::Debug, marker::PhantomData, ops::Deref};
+use core::{fmt::Debug, marker::PhantomData};
 use eyre::{ensure, eyre, Result};
 use reth_codecs::Compact;
 use rust_decimal::Decimal;
@@ -34,7 +34,7 @@ const BPS_SCALE_NATIVE: u64 = 1_000_000;
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Arbitrary, Default,
 )]
 pub struct Amount<T> {
-    amount: U256,
+    pub amount: U256,
     _t: PhantomData<T>,
 }
 
@@ -156,13 +156,6 @@ impl<T: std::fmt::Debug> Amount<T> {
                 eyre::eyre!("decimal overflow: quotient={quotient} remainder={remainder}")
             })?;
         Ok(res)
-    }
-}
-
-impl<T> Deref for Amount<T> {
-    type Target = U256;
-    fn deref(&self) -> &Self::Target {
-        &self.amount
     }
 }
 
@@ -382,11 +375,67 @@ impl Amount<(IrysPrice, Usd)> {
     pub fn to_ema(self) -> Amount<(Ema, Usd)> {
         Amount::new(self.amount)
     }
+
+    /// Add extra percentage on top of the existing price.
+    /// Percentage must be expressed using BPS_SCALE.
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
+        // total = amount * (1 + percentage) / SCALE
+        let one_plus = safe_add(BPS_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
+        Ok(Self::new(total))
+    }
+
+    /// Remove extra percentage on top of the existing price.
+    /// Percentage must be expressed using BPS_SCALE.
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn sub_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
+        // total = amount * (1 - percentage) / SCALE
+        let one_plus = safe_sub(BPS_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
+        Ok(Self::new(total))
+    }
 }
 
 impl Amount<(Ema, Usd)> {
     pub fn to_irys_price(self) -> Amount<(IrysPrice, Usd)> {
         Amount::new(self.amount)
+    }
+
+    /// Add extra percentage on top of the existing price.
+    /// Percentage must be expressed using BPS_SCALE.
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
+        // total = amount * (1 + percentage) / SCALE
+        let one_plus = safe_add(BPS_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
+        Ok(Self::new(total))
+    }
+
+    /// Remove extra percentage on top of the existing price.
+    /// Percentage must be expressed using BPS_SCALE.
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn sub_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
+        // total = amount * (1 - percentage) / SCALE
+        let one_plus = safe_sub(BPS_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
+        Ok(Self::new(total))
     }
 }
 
