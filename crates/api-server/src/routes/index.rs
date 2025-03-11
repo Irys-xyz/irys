@@ -6,7 +6,6 @@ use actix_web::{
 use irys_types::H256;
 use serde::Serialize;
 
-
 #[derive(Debug, Default, Serialize)]
 struct NodeInfo {
     pub version: String,

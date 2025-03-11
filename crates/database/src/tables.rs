@@ -77,7 +77,6 @@ add_wrapper_struct!((IrysBlockHeader, CompactIrysBlockHeader));
 add_wrapper_struct!((IrysTransactionHeader, CompactTxHeader));
 add_wrapper_struct!((PeerListItem, CompactPeerListItem));
 
-
 impl_compression_for_compact!(
     CompactIrysBlockHeader,
     CompactTxHeader,

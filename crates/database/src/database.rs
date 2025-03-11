@@ -246,7 +246,6 @@ pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U2
         .unwrap_or(U256::from(0)))
 }
 
-
 pub fn insert_peer_list_item<T: DbTxMut>(
     tx: &T,
     mining_address: &Address,
