@@ -75,7 +75,7 @@ impl TermLedger {
 
     /// Returns a slice of the ledgers slots
     pub fn get_slots(&self) -> Vec<LedgerSlot> {
-        self.slots.range(..).map(|(_, slot)| slot.clone()).collect()
+        self.slots.iter().map(|(_, slot)| slot.clone()).collect()
     }
 
     /// Returns indices of newly expired slots
@@ -208,7 +208,7 @@ impl LedgerCore for TermLedger {
 
     /// Returns ledgers slots
     fn get_slots(&self) -> Vec<LedgerSlot> {
-        self.slots.range(..).map(|(_, slot)| slot.clone()).collect()
+        self.slots.iter().map(|(_, slot)| slot.clone()).collect()
     }
 }
 

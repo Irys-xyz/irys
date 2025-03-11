@@ -614,7 +614,7 @@ impl EpochServiceActor {
         // TODO: num_chunks in partition should be a usize ?
         let partition_chunk_count =
             usize::try_from(self.config.storage_config.num_chunks_in_partition)
-                .expect("conversion error");
+                .expect("Chunk number overflow");
         let max_chunk_capacity = num_slots * partition_chunk_count;
         let ledger_size = new_epoch_block.ledgers[ledger as usize].max_chunk_offset;
 
@@ -624,9 +624,9 @@ impl EpochServiceActor {
         if ledger_size >= add_capacity_threshold as u64 {
             // Add 1 slot for buffer plus enough slots to handle size above threshold
             let excess = usize::try_from(ledger_size.saturating_sub(max_chunk_capacity as u64))
-                .expect("conversion error");
+                .expect("Slots adding overflow, number of slots to add is too large");
             slots_to_add =
-                1 + (excess / usize::try_from(partition_chunk_count).expect("conversion error"));
+                1 + (excess / partition_chunk_count);
 
             // Check if we need to add an additional slot for excess > half of
             // the partition size
