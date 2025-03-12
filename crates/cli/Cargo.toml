@@ -19,11 +19,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 reth-tracing.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
-irys-storage.workspace = true
 irys-config.workspace = true
-# reth-storage-errors.workspace = true
 reth-node-core.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 clap = { workspace = true, features = ["derive"] }
 

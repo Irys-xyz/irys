@@ -34,7 +34,6 @@ tempfile.workspace = true
 irys-testing-utils.workspace = true
 base58.workspace = true
 futures.workspace = true
-semver.workspace = true
 rust_decimal.workspace = true
 thiserror.workspace = true
 
