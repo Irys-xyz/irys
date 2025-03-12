@@ -5,14 +5,14 @@ use irys_database::reth_db::{
 };
 use irys_types::Config;
 use reth_node_core::version::default_client_version;
-use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
+use reth_tracing::tracing_subscriber::util::SubscriberInitExt as _;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Write as _};
 use std::{path::PathBuf, sync::Arc};
 use tracing::info;
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
-use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
+use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
 
 #[derive(Debug, Parser, Clone)]
 pub struct IrysCli {
@@ -56,7 +56,7 @@ async fn main() -> eyre::Result<()> {
     let args = IrysCli::parse();
 
     match args.command {
-        Commands::BackupAccounts { args: _ } => backup_accounts()?,
+        Commands::BackupAccounts { .. } => backup_accounts()?,
     }
     Ok(())
 }
@@ -68,21 +68,22 @@ fn backup_accounts() -> eyre::Result<()> {
         .parse::<PathBuf>()
         .expect("invalid file path");
 
-    let config = std::fs::read_to_string(config_file)
-        .map(|config_file| toml::from_str::<Config>(&config_file).expect("invalid config file"))
-        .unwrap_or_else(|_err| {
+    let config = std::fs::read_to_string(config_file).map_or_else(
+        |_err| {
             tracing::warn!("config file not provided, defaulting to testnet config");
             Config::testnet()
-        });
+        },
+        |config_file| toml::from_str::<Config>(&config_file).expect("invalid config file"),
+    );
     let irys_node_config = IrysNodeConfig::new(&config);
 
-    // open the database, read the curent account state
+    // open the database, read the current account state
 
     let db_path = irys_node_config.reth_data_dir().join("db");
 
     let reth_db = Arc::new(
         init_db(
-            db_path.clone(),
+            db_path,
             irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
                 .with_log_level(None)
                 .with_exclusive(Some(false)),
@@ -115,8 +116,8 @@ fn backup_accounts() -> eyre::Result<()> {
     let mut accounts_saved = 0;
     let log_batch = 100;
 
-    while let Some(s) = walker.next().transpose()? {
-        serde_json::to_writer(&mut writer, &s)?;
+    while let Some(account) = walker.next().transpose()? {
+        serde_json::to_writer(&mut writer, &account)?;
 
         accounts_saved += 1;
 
@@ -127,7 +128,7 @@ fn backup_accounts() -> eyre::Result<()> {
             b",\n"
         })?;
         if accounts_saved % log_batch == 0 {
-            info!("Saved {}/{} accounts", &accounts_saved, &row_count)
+            info!("Saved {}/{} accounts", &accounts_saved, &row_count);
         }
     }
 
