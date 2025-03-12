@@ -12,16 +12,16 @@ use irys_types::{
 use price_cache_context::PriceCacheContext;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::pin::pin;
-use tokio::sync::{
-    mpsc::{self, UnboundedReceiver, UnboundedSender},
-    oneshot,
+use tokio::{
+    sync::{mpsc::UnboundedReceiver, oneshot},
+    task::JoinHandle,
 };
 
 /// Messages that the EMA service supports
 #[derive(Debug)]
 pub enum EmaServiceMessage {
     /// Return the current EMA that other components must use (eg pricing module)
-    GetCurrentEma {
+    GetCurrentEmaForPricing {
         response: oneshot::Sender<IrysTokenPrice>,
     },
     /// Returns the EMA irys price that must be used in the next EMA adjustment block
@@ -33,48 +33,8 @@ pub enum EmaServiceMessage {
     NewConfirmedBlock,
 }
 
-/// Sender handle for the EMA service
-#[derive(Debug, Clone)]
-pub struct EmaServiceHandle {
-    pub sender: UnboundedSender<EmaServiceMessage>,
-}
-
-impl EmaServiceHandle {
-    /// Spawn a new EMA service
-    pub fn spawn_service(
-        exec: &TaskExecutor,
-        block_tree_read_guard: BlockTreeReadGuard,
-        config: &Config,
-    ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let blocks_in_interval = config.price_adjustment_interval;
-        exec.spawn_critical_with_graceful_shutdown_signal("EMA Service", |shutdown| async move {
-            let price_ctx = PriceCacheContext::from_canonical_chain(
-                block_tree_read_guard.clone(),
-                blocks_in_interval,
-            )
-            .await
-            .expect("initial PriceCacheContext restoration failed");
-            let ema_service = EmaService {
-                shutdown,
-                msg_rx: rx,
-                inner: Inner {
-                    price_ctx,
-                    blocks_in_interval,
-                    block_tree_read_guard,
-                },
-            };
-            ema_service
-                .start()
-                .await
-                .expect("ema service encountered an irrecoverable error")
-        });
-        EmaServiceHandle { sender: tx }
-    }
-}
-
 #[derive(Debug)]
-struct EmaService {
+pub struct EmaService {
     shutdown: GracefulShutdown,
     msg_rx: UnboundedReceiver<EmaServiceMessage>,
     inner: Inner,
@@ -88,6 +48,37 @@ struct Inner {
 }
 
 impl EmaService {
+    /// Spawn a new EMA service
+    pub fn spawn_service(
+        exec: &TaskExecutor,
+        block_tree_read_guard: BlockTreeReadGuard,
+        rx: UnboundedReceiver<EmaServiceMessage>,
+        config: &Config,
+    ) -> JoinHandle<()> {
+        let blocks_in_interval = config.price_adjustment_interval;
+        exec.spawn_critical_with_graceful_shutdown_signal("EMA Service", |shutdown| async move {
+            let price_ctx = PriceCacheContext::from_canonical_chain(
+                block_tree_read_guard.clone(),
+                blocks_in_interval,
+            )
+            .await
+            .expect("initial PriceCacheContext restoration failed");
+            let ema_service = Self {
+                shutdown,
+                msg_rx: rx,
+                inner: Inner {
+                    price_ctx,
+                    blocks_in_interval,
+                    block_tree_read_guard,
+                },
+            };
+            ema_service
+                .start()
+                .await
+                .expect("ema service encountered an irrecoverable error")
+        })
+    }
+
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting EMA service");
         use futures::future::Either;
@@ -127,7 +118,7 @@ impl Inner {
     #[tracing::instrument(skip_all, err)]
     async fn handle_message(&mut self, msg: EmaServiceMessage) -> eyre::Result<()> {
         match msg {
-            EmaServiceMessage::GetCurrentEma { response } => {
+            EmaServiceMessage::GetCurrentEmaForPricing { response } => {
                 let _ = response.send(self.price_ctx.ema_price_to_use()).
                     inspect_err(|_| tracing::warn!("current EMA cannot be returned, sender has dropped its half of the channel"));
             }
@@ -163,7 +154,7 @@ impl Inner {
                     "computing new EMA"
                 );
 
-                let _ = response.send(Ok(new_ema));
+                let _ = response.send(new_ema);
             }
             EmaServiceMessage::NewConfirmedBlock => {
                 // Rebuild the entire data cache just like we do at startup.
@@ -271,16 +262,15 @@ mod price_cache_context {
 
         #[test_log::test(tokio::test)]
         #[rstest]
-        #[case(0, 9, 0, 0, 0)]
-        #[case(1, 9, 0, 0, 0)]
-        #[case(10, 19, 0, 9, 8)]
-        #[case(18, 19, 0, 9, 8)]
-        #[case(19, 29, 9, 19, 18)]
-        #[case(20, 29, 9, 19, 18)]
-        #[case(100, 109, 89, 99, 98)]
+        #[case(0, 0, 0, 0)]
+        #[case(1, 0, 0, 0)]
+        #[case(10, 0, 9, 8)]
+        #[case(18, 0, 9, 8)]
+        #[case(19, 9, 19, 18)]
+        #[case(20, 9, 19, 18)]
+        #[case(100, 89, 99, 98)]
         async fn test_valid_price_cache(
             #[case] height_latest_block: u64,
-            #[case] height_next_ema_adjustment: u64,
             #[case] height_two_ema_intervals_ago: u64,
             #[case] height_previous_ema: u64,
             #[case] height_previous_interval_predecessor: u64,
@@ -305,10 +295,6 @@ mod price_cache_context {
                 price_cache.block_two_adj_intervals_ago.height,
                 height_two_ema_intervals_ago
             );
-            assert_eq!(
-                price_cache.next_ema_adjustment_height,
-                height_next_ema_adjustment
-            );
             assert_eq!(price_cache.block_previous_ema.height, height_previous_ema);
             assert_eq!(
                 price_cache.block_previous_ema_predecessor.height,
@@ -328,6 +314,7 @@ mod tests {
     use rust_decimal::Decimal;
     use std::sync::{Arc, RwLock};
     use test_log::test;
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
     pub(crate) fn build_genesis_tree_with_n_blocks(
         blocks: u64,
@@ -391,7 +378,7 @@ mod tests {
         config: Config,
         task_manager: TaskManager,
         task_executor: TaskExecutor,
-        ema_handle: EmaServiceHandle,
+        ema_sender: UnboundedSender<EmaServiceMessage>,
         prices: Vec<IrysTokenPrice>,
     }
 
@@ -401,14 +388,15 @@ mod tests {
             assert_eq!(prices.len(), block_count as usize);
             let task_manager = TaskManager::new(tokio::runtime::Handle::current());
             let task_executor = task_manager.executor();
-            let service =
-                EmaServiceHandle::spawn_service(&task_executor, block_tree_guard.clone(), &config);
+            let (tx, rx) = unbounded_channel();
+            let _handle =
+                EmaService::spawn_service(&task_executor, block_tree_guard.clone(), rx, &config);
             Self {
                 guard: block_tree_guard,
                 config,
                 task_manager,
                 task_executor,
-                ema_handle: service,
+                ema_sender: tx,
                 prices,
             }
         }
@@ -443,15 +431,14 @@ mod tests {
 
             // action
             let (tx, rx) = tokio::sync::oneshot::channel();
-            ctx.ema_handle
-                .sender
-                .send(EmaServiceMessage::GetCurrentEma { response: tx })
+            ctx.ema_sender
+                .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
                 .unwrap();
             let response = rx.await.unwrap();
 
             // assert
             assert_eq!(response, desired_block_price);
-            assert!(!ctx.ema_handle.sender.is_closed());
+            assert!(!ctx.ema_sender.is_closed());
         }
     }
 
@@ -474,21 +461,20 @@ mod tests {
 
             // action
             let (tx, rx) = tokio::sync::oneshot::channel();
-            ctx.ema_handle
-                .sender
+            ctx.ema_sender
                 .send(EmaServiceMessage::GetEmaForNewBlock {
                     height_of_new_block: 9,
                     response: tx,
                 })
                 .unwrap();
-            let ema_response = rx.await.unwrap().unwrap();
+            let ema_response = rx.await.unwrap();
 
             // assert
             let prev_price = ctx.prices[0];
             let ema_computed = ctx.prices[0]
-                .calculate_ema(price_adjustment_interval, prev_price.to_ema())
+                .calculate_ema(price_adjustment_interval, prev_price)
                 .unwrap();
-            assert_eq!(ema_computed, ema_response.to_ema());
+            assert_eq!(ema_computed, ema_response);
         }
 
         #[test(tokio::test)]
@@ -514,21 +500,20 @@ mod tests {
 
             // action
             let (tx, rx) = tokio::sync::oneshot::channel();
-            ctx.ema_handle
-                .sender
+            ctx.ema_sender
                 .send(EmaServiceMessage::GetEmaForNewBlock {
                     height_of_new_block: block_count,
                     response: tx,
                 })
                 .unwrap();
-            let ema_response = rx.await.unwrap().unwrap();
+            let ema_response = rx.await.unwrap();
 
             // assert
             let prev_price = ctx.prices[prev_ema_idx];
             let ema_computed = ctx.prices[prev_ema_predecessor_idx]
-                .calculate_ema(price_adjustment_interval, prev_price.to_ema())
+                .calculate_ema(price_adjustment_interval, prev_price)
                 .unwrap();
-            assert_eq!(ema_computed, ema_response.to_ema());
+            assert_eq!(ema_computed, ema_response);
         }
 
         #[test(tokio::test)]
@@ -540,9 +525,9 @@ mod tests {
         #[case(15, 17)]
         #[case(15, 11)]
         #[case(15, 18)]
-        async fn nth_invalid_ema_block_requsets(
+        async fn nth_ema_block_requsets_non_adjustment_block(
             #[case] block_count: u64,
-            #[case] height_of_new_adjustment_block: u64,
+            #[case] height_of_new_block: u64,
         ) {
             // prepare
             let price_adjustment_interval = 10;
@@ -556,20 +541,16 @@ mod tests {
 
             // action
             let (tx, rx) = tokio::sync::oneshot::channel();
-            ctx.ema_handle
-                .sender
+            ctx.ema_sender
                 .send(EmaServiceMessage::GetEmaForNewBlock {
                     height_of_new_block,
                     response: tx,
                 })
                 .unwrap();
-            let ema_response = rx.await.unwrap();
+            let ema_response = rx.await;
 
             // assert
-            assert!(matches!(
-                ema_response,
-                Err(EmaCalculationError::HeightIsNotEmaAdjustmentBlock)
-            ));
+            assert!(ema_response.is_ok());
         }
     }
 
@@ -598,9 +579,8 @@ mod tests {
         // Attempt to send a message and ensure it fails
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let send_result = ctx
-            .ema_handle
-            .sender
-            .send(EmaServiceMessage::GetCurrentEma { response: tx });
+            .ema_sender
+            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx });
 
         // assert
         assert!(
@@ -608,7 +588,7 @@ mod tests {
             "Service should not accept new messages after shutdown"
         );
         assert!(
-            ctx.ema_handle.sender.is_closed(),
+            ctx.ema_sender.is_closed(),
             "Service sender should be closed"
         );
     }
@@ -654,10 +634,7 @@ mod tests {
         drop(tree);
 
         // Send a `NewConfirmedBlock` message
-        let send_result = ctx
-            .ema_handle
-            .sender
-            .send(EmaServiceMessage::NewConfirmedBlock);
+        let send_result = ctx.ema_sender.send(EmaServiceMessage::NewConfirmedBlock);
         assert!(
             send_result.is_ok(),
             "Service should accept new confirmed block messages"
@@ -665,9 +642,8 @@ mod tests {
 
         // Verify that the price cache is updated
         let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.ema_handle
-            .sender
-            .send(EmaServiceMessage::GetCurrentEma { response: tx })
+        ctx.ema_sender
+            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
         let response = rx.await.unwrap();
 

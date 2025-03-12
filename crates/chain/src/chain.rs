@@ -2,7 +2,8 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use alloy_eips::BlockNumberOrTag;
-use irys_actors::cache_service::ChunkCacheServiceHandle;
+use irys_actors::cache_service::ChunkCacheService;
+use irys_actors::ema_service::EmaService;
 use irys_actors::packing::PackingConfig;
 use irys_actors::peer_list_service::PeerListService;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
@@ -190,9 +191,8 @@ pub async fn start_irys_node(
 
                 check_db_version_and_run_migrations_if_needed(&reth_db, &irys_db).unwrap();
 
-                let (service_senders, service_receivers) = ServiceSenders::init();
-
-                ChunkCacheServiceHandle::spawn_service(service_senders.chunk_cache.clone(), service_receivers.chunk_cache, task_exec, irys_db.clone(), config.clone());
+                let (service_senders, receivers) = ServiceSenders::new();
+                let _handle = ChunkCacheService::spawn_service(&task_exec, irys_db.clone(), receivers.chunk_cache, config.clone());
 
                 let latest_block = latest_block_index
                     .map(|b| {
@@ -342,7 +342,6 @@ pub async fn start_irys_node(
                         .unwrap(),
                     );
                     storage_modules.push(arc_module.clone());
-                    // arc_module.pack_with_zeros();
                 }
 
 
@@ -364,6 +363,7 @@ pub async fn start_irys_node(
                     .send(GetBlockTreeGuardMessage)
                     .await
                     .unwrap();
+                let _handle = EmaService::spawn_service(&task_exec, block_tree_guard.clone(),  receivers.ema, &config);
 
                 let peer_list_service = PeerListService::new(irys_db.clone());
                 let peer_list_arbiter = Arbiter::new();
@@ -459,6 +459,7 @@ pub async fn start_irys_node(
                     vdf_steps_guard: vdf_steps_guard.clone(),
                     block_tree_guard: block_tree_guard.clone(),
                     price_oracle,
+                    service_senders: service_senders.clone(),
                 };
                 let block_producer_addr =
                     BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
@@ -591,7 +592,7 @@ pub async fn start_irys_node(
                     vdf_steps_guard: vdf_steps_guard.clone(),
                     vdf_config: vdf_config.clone(),
                     storage_config: storage_config.clone(),
-                    service_senders: service_senders.clone()
+                    service_senders 
                 });
 
                 run_server(ApiState {

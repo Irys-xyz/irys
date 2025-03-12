@@ -35,10 +35,11 @@ use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::BlockTreeReadGuard,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    ema_service::{EmaServiceHandle, EmaServiceMessage},
+    ema_service::EmaServiceMessage,
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    services::ServiceSenders,
 };
 
 /// Used to mock up a `BlockProducerActor`
@@ -60,7 +61,7 @@ pub struct BlockProducerActor {
     /// Tracks the global state of partition assignments on the protocol
     pub epoch_service: Addr<EpochServiceActor>,
     /// Tracks the global state of partition assignments on the protocol
-    pub ema_service: EmaServiceHandle,
+    pub service_senders: ServiceSenders,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
     /// Storage config
@@ -121,7 +122,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let vdf_steps = self.vdf_steps_guard.clone();
         let price_oracle = self.price_oracle.clone();
-        let ema_service = self.ema_service.clone();
+        let ema_service = self.service_senders.ema.clone();
 
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
@@ -296,7 +297,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let oracle_irys_price = price_oracle.current_price().await?;
             // fetch the ema price to use
             let (tx, rx) = tokio::sync::oneshot::channel();
-            ema_service.sender.send(EmaServiceMessage::GetEmaForNewBlock { response: tx, height_of_new_block: block_height })?;
+            ema_service.send(EmaServiceMessage::GetEmaForNewBlock { response: tx, height_of_new_block: block_height })?;
             let ema_irys_price = rx.await?;
 
             // build a new block header
