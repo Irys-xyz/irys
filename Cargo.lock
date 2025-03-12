@@ -4127,7 +4127,6 @@ dependencies = [
  "reth-node-core",
  "reth-tracing",
  "serde_json",
- "tokio",
  "toml",
  "tracing",
  "tracing-error",

@@ -24,15 +24,12 @@ pub struct IrysCli {
 pub enum Commands {
     #[command(name = "backup-accounts")]
     BackupAccounts {
-        // #[clap(short, long, default_value_t = false)]
-        // path: String,
         #[clap(last = true)]
         args: Vec<String>,
     },
 }
 
-#[tokio::main]
-async fn main() -> eyre::Result<()> {
+fn main() -> eyre::Result<()> {
     let subscriber = Registry::default();
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
