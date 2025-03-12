@@ -351,6 +351,7 @@ pub async fn start_irys_node(
                     &miner_address,
                     block_index_guard.clone(),
                     storage_config.clone(),
+                    service_senders.clone(),
                 );
                 let block_tree_arbiter = Arbiter::new();
                 SystemRegistry::set(BlockTreeService::start_in_arbiter(

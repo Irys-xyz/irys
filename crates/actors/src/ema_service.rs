@@ -27,7 +27,7 @@ pub enum EmaServiceMessage {
     /// Returns the EMA irys price that must be used in the next EMA adjustment block
     GetEmaForNewBlock {
         height_of_new_block: u64,
-        response: oneshot::Sender<IrysTokenPrice>,
+        response: oneshot::Sender<eyre::Result<IrysTokenPrice>>,
     },
     /// Supposted to be sent whenever Irys produces a new confirmed block. The EMA service will refrech its cache.
     NewConfirmedBlock,
@@ -132,13 +132,18 @@ impl Inner {
                 // 3. this is the price that will be used in the interval 39->49, which will be reported to other systems querying for EMA prices.
 
                 // the amount of blocks in between the 2 EMA calculation values
-                let blocks_in_between = self
-                    .price_ctx
-                    .block_previous_ema
-                    .height
-                    .saturating_sub(height_of_new_block);
+                let blocks_in_between = {
+                    // because the blocks heights start off from zero,
+                    // this is ensures correct calculatino during the first interval
+                    if self.price_ctx.block_previous_ema.height == 0 {
+                        height_of_new_block.saturating_add(1)
+                    } else {
+                        height_of_new_block
+                    }
+                }
+                .saturating_sub(self.price_ctx.block_previous_ema.height);
 
-                // calculate the new EMA
+                // calculate the new EMA using oracle price + ema price
                 let new_ema = self
                     .price_ctx
                     .block_previous_ema_predecessor
@@ -146,9 +151,10 @@ impl Inner {
                     .calculate_ema(
                         blocks_in_between,
                         self.price_ctx.block_previous_ema.ema_irys_price,
-                    )?;
+                    );
                 tracing::info!(
-                    new_ema = ?new_ema.token_to_decimal().unwrap(),
+                    ?new_ema,
+                    blocks_in_between,
                     prev_predecessor_height = ?self.price_ctx.block_previous_ema_predecessor.height,
                     prev_ema_height = ?self.price_ctx.block_previous_ema.height,
                     "computing new EMA"
@@ -318,25 +324,32 @@ mod tests {
 
     pub(crate) fn build_genesis_tree_with_n_blocks(
         blocks: u64,
-    ) -> (BlockTreeReadGuard, Vec<IrysTokenPrice>) {
+    ) -> (BlockTreeReadGuard, Vec<PriceInfo>) {
         let (mut blocks, prices) = build_tree(0, blocks);
         (genesis_tree(&mut blocks), prices)
     }
 
-    fn build_tree(init_height: u64, blocks: u64) -> (Vec<IrysBlockHeader>, Vec<IrysTokenPrice>) {
+    fn build_tree(init_height: u64, blocks: u64) -> (Vec<IrysBlockHeader>, Vec<PriceInfo>) {
         let blocks = (init_height..(blocks + init_height))
             .map(|height| {
-                let mut b = IrysBlockHeader::new_mock_header();
-                b.height = height;
+                let mut header = IrysBlockHeader::new_mock_header();
+                header.height = height;
                 // add a random constant to the price to differentiate it from the height
-                let price = IrysTokenPrice::token(Decimal::from(height + 5)).unwrap();
-                b.oracle_irys_price = price;
-                b
+                let rand = rand::random::<u8>() as u64;
+                let oracle_price = IrysTokenPrice::token(Decimal::from(height + rand)).unwrap();
+                let rand = rand::random::<u8>() as u64;
+                let price_ema = IrysTokenPrice::token(Decimal::from(height + rand)).unwrap();
+                header.oracle_irys_price = oracle_price;
+                header.ema_irys_price = price_ema;
+                header
             })
             .collect::<Vec<_>>();
         let prices = blocks
             .iter()
-            .map(|block| block.oracle_irys_price.clone())
+            .map(|block| PriceInfo {
+                oracle: block.oracle_irys_price.clone(),
+                ema: block.ema_irys_price.clone(),
+            })
             .collect::<Vec<_>>();
         (blocks, prices)
     }
@@ -379,7 +392,13 @@ mod tests {
         task_manager: TaskManager,
         task_executor: TaskExecutor,
         ema_sender: UnboundedSender<EmaServiceMessage>,
-        prices: Vec<IrysTokenPrice>,
+        prices: Vec<PriceInfo>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct PriceInfo {
+        oracle: IrysTokenPrice,
+        ema: IrysTokenPrice,
     }
 
     impl TestCtx {
@@ -401,45 +420,38 @@ mod tests {
             }
         }
     }
-    mod get_current_ema {
-        use super::*;
-        use rstest::rstest;
-        use test_log::test;
 
-        #[test(tokio::test)]
-        #[rstest]
-        #[case(1, 0)]
-        #[case(9, 0)]
-        #[case(19, 0)]
-        #[case(20, 9)] // use the 10th block price during 3rd EMA interval
-        #[case(29, 9)]
-        #[case(30, 19)]
-        #[timeout(std::time::Duration::from_millis(100))]
-        async fn test_when_on_genesis_block(
-            #[case] block_count: u64,
-            #[case] price_block_idx: usize,
-        ) {
-            // setup
-            let ctx = TestCtx::setup(
-                block_count,
-                Config {
-                    price_adjustment_interval: 10,
-                    ..Config::testnet()
-                },
-            );
-            let desired_block_price = ctx.prices[price_block_idx];
+    #[test(tokio::test)]
+    #[rstest]
+    #[case(1, 0)]
+    #[case(2, 0)]
+    #[case(9, 0)]
+    #[case(19, 0)]
+    #[case(20, 9)] // use the 10th block price during 3rd EMA interval
+    #[case(29, 9)]
+    #[case(30, 19)]
+    #[timeout(std::time::Duration::from_millis(100))]
+    async fn get_current_ema(#[case] block_count: u64, #[case] price_block_idx: usize) {
+        // setup
+        let ctx = TestCtx::setup(
+            block_count,
+            Config {
+                price_adjustment_interval: 10,
+                ..Config::testnet()
+            },
+        );
+        let desired_block_price = &ctx.prices[price_block_idx];
 
-            // action
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            ctx.ema_sender
-                .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
-                .unwrap();
-            let response = rx.await.unwrap();
+        // action
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        ctx.ema_sender
+            .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
+            .unwrap();
+        let response = rx.await.unwrap();
 
-            // assert
-            assert_eq!(response, desired_block_price);
-            assert!(!ctx.ema_sender.is_closed());
-        }
+        // assert
+        assert_eq!(response, desired_block_price.ema);
+        assert!(!ctx.ema_sender.is_closed());
     }
 
     mod get_ema_for_next_adjustment_period {
@@ -467,12 +479,13 @@ mod tests {
                     response: tx,
                 })
                 .unwrap();
-            let ema_response = rx.await.unwrap();
+            let ema_response = rx.await.unwrap().unwrap();
 
             // assert
-            let prev_price = ctx.prices[0];
+            let prev_price = ctx.prices[0].clone();
             let ema_computed = ctx.prices[0]
-                .calculate_ema(price_adjustment_interval, prev_price)
+                .oracle
+                .calculate_ema(price_adjustment_interval, prev_price.ema)
                 .unwrap();
             assert_eq!(ema_computed, ema_response);
         }
@@ -506,18 +519,20 @@ mod tests {
                     response: tx,
                 })
                 .unwrap();
-            let ema_response = rx.await.unwrap();
+            let ema_response = rx.await.unwrap().unwrap();
 
             // assert
-            let prev_price = ctx.prices[prev_ema_idx];
+            let prev_price = ctx.prices[prev_ema_idx].clone();
             let ema_computed = ctx.prices[prev_ema_predecessor_idx]
-                .calculate_ema(price_adjustment_interval, prev_price)
+                .oracle
+                .calculate_ema(price_adjustment_interval, prev_price.ema)
                 .unwrap();
             assert_eq!(ema_computed, ema_response);
         }
 
         #[test(tokio::test)]
         #[rstest]
+        #[case(1, 1)]
         #[case(1, 2)]
         #[case(1, 3)]
         #[case(1, 8)]
@@ -614,7 +629,7 @@ mod tests {
         // extract the final price that we expect.
         // in total there are 110 blocks once we add the new ones.
         // The EMA to use is the 100th block (idx 89 in the `new_blocks`).
-        let expected_final_ema_price = new_blocks[89].oracle_irys_price;
+        let expected_final_ema_price = new_blocks[89].ema_irys_price;
 
         // setup  -- add new blocks to the canonical chain post-initializatoin
         let mut tree = ctx.guard.write();
@@ -646,7 +661,6 @@ mod tests {
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })
             .unwrap();
         let response = rx.await.unwrap();
-
         assert_eq!(
             response, expected_final_ema_price,
             "Price cache should reset correctly"

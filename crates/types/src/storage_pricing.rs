@@ -30,7 +30,7 @@ const BPS_SCALE_NATIVE: u64 = 1_000_000;
 ///
 /// The actual scale is defined by the usage: pr
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Arbitrary, Default,
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Arbitrary, Default,
 )]
 pub struct Amount<T> {
     pub amount: U256,
@@ -396,11 +396,15 @@ impl Amount<(IrysPrice, Usd)> {
     }
 }
 
-/// Basic Display impl
 impl<T> core::fmt::Display for Amount<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Convert to string as integer.
-        write!(f, "<{:?}>: {}", self._t, self.amount)
+        write!(f, "{}", self.amount)
+    }
+}
+
+impl<T> Debug for Amount<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.amount)
     }
 }
 

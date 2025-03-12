@@ -298,7 +298,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // fetch the ema price to use
             let (tx, rx) = tokio::sync::oneshot::channel();
             ema_service.send(EmaServiceMessage::GetEmaForNewBlock { response: tx, height_of_new_block: block_height })?;
-            let ema_irys_price = rx.await?;
+            let ema_irys_price = rx.await??;
 
             // build a new block header
             let mut irys_block = IrysBlockHeader {

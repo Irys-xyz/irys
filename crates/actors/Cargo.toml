@@ -43,6 +43,7 @@ irys-types = { workspace = true, features = ["test-utils"] }
 irys-config = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true
 rstest.workspace = true
+rand.workspace = true
 tracing-subscriber.workspace = true
 
 [lints]
