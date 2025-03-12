@@ -146,8 +146,12 @@ pub struct IrysBlockHeader {
     /// Metadata about the verifiable delay function, used for block verification purposes
     pub vdf_limiter_info: VDFLimiterInfo,
 
-    /// $IRYS token price expressed in $USD
-    pub irys_price: IrysTokenPrice,
+    /// $IRYS token price expressed in $USD, returned from the oracle
+    pub oracle_irys_price: IrysTokenPrice,
+
+    /// $IRYS token price expressed in $USD, updated only on EMA recalculation blocks.
+    /// This is what the protocol uses for different pricing calculation purposes.
+    pub ema_irys_price: IrysTokenPrice,
 }
 
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
@@ -368,7 +372,7 @@ impl IrysBlockHeader {
             ],
             evm_block_hash: B256::ZERO,
             miner_address: Address::ZERO,
-            irys_price: Amount::token(dec!(1.0))
+            oracle_irys_price: Amount::token(dec!(1.0))
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
             ..Default::default()
         }
