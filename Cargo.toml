@@ -166,6 +166,7 @@ toml = "0.8"
 derive-syn-parse = "0"
 proc-macro2 = "1"
 quote = "1"
+semver = "1.0"
 syn = { version = "2", features = ["full"] }
 tracing = "0.1.0"
 tracing-error = "0.2"

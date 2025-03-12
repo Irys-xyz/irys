@@ -8,6 +8,7 @@ use crate::{
 use irys_types::{
     ingress::IngressProof, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, H256,
 };
+use irys_types::{Address, PeerListItem};
 use reth_codecs::Compact;
 use reth_db::{table::DupSort, tables, DatabaseError};
 use reth_db::{HasName, HasTableType, TableType, TableViewer};
@@ -74,9 +75,12 @@ macro_rules! impl_compression_for_compact {
 
 add_wrapper_struct!((IrysBlockHeader, CompactIrysBlockHeader));
 add_wrapper_struct!((IrysTransactionHeader, CompactTxHeader));
+add_wrapper_struct!((PeerListItem, CompactPeerListItem));
+
 impl_compression_for_compact!(
     CompactIrysBlockHeader,
     CompactTxHeader,
+    CompactPeerListItem,
     CachedDataRoot,
     CachedChunkIndexEntry,
     CachedChunk,
@@ -119,6 +123,12 @@ tables! {
 
     /// Maps a global offset to a cached chunk
     table ProgrammableDataCache<Key = GlobalChunkOffset, Value = CachedChunk>;
+
+    /// Tracks the peer list of known peers as well as their reputation score.
+    /// While the node maintains connections to a subset of these peers - the
+    /// ones with high reputation - the PeerListEntries contain all the peers
+    /// that the node is aware of and is periodically updated via peer discovery
+    table PeerListItems<Key = Address, Value = CompactPeerListItem>;
 
     /// Table to store various metadata, such as the current db schema version
     table Metadata<Key = MetadataKey, Value = Vec<u8>>;
