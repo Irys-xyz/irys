@@ -55,8 +55,6 @@ pub struct Config {
     /// the number of block a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
     pub anchor_expiry_depth: u8,
-    /// defines for how long the protocol should use the geneses token price for (expressed in epoch count)
-    pub genesis_price_valid_for_n_epochs: u8,
     /// defines the genesis price of the $IRYS, expressed in $USD
     #[serde(deserialize_with = "serde_utils::token_amount")]
     pub genesis_token_price: Amount<(IrysPrice, Usd)>,
@@ -133,7 +131,6 @@ impl Config {
             num_capacity_partitions: None,
             port: 8080,
             anchor_expiry_depth: 10,
-            genesis_price_valid_for_n_epochs: 2,
             genesis_token_price: Amount::token(rust_decimal_macros::dec!(1))
                 .expect("valid token amount"),
             token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
