@@ -101,7 +101,6 @@ impl IrysNodeCtx {
         // Shutting down reth node will propagate to the main actor thread eventually
         let _ = self.reth_shutdown_sender.send(()).await;
         let _ = self.reth_thread_handle.unwrap().join();
-        System::current().stop();
         debug!("Main actor thread and reth thread stopped");
     }
 }
@@ -390,6 +389,7 @@ pub async fn start_irys_node(
                     &peer_list_arbiter.handle(),
                     |_| peer_list_service,
                 ));
+                arbiters.push(peer_list_arbiter.into());
 
                 let mempool_service = MempoolService::new(
                     irys_db.clone(),
