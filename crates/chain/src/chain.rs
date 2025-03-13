@@ -100,6 +100,7 @@ impl IrysNodeCtx {
         // Shutting down reth node will propagate to the main actor thread eventually
         let _ = self.reth_shutdown_sender.send(()).await;
         let _ = self.reth_thread_handle.unwrap().join();
+        System::current().stop();
         debug!("Main actor thread and reth thread stopped");
     }
 }
