@@ -10,6 +10,13 @@ use std::sync::{Arc, PoisonError, RwLockReadGuard};
 /// DB wrapper forcibly disconnects the underlying database by taking the DB value out of its Option
 /// once all associated services have been terminated. This is not the best solution to the problem,
 /// but it was adopted after extensive analysis without a viable alternative.
+///
+/// If you wish to work on this a little bit more and solve this problem once and for all:
+/// - One option to find where the circular dependency is and break it is to implement
+///   `Drop` and `Clone` for the `RethDbWrapper` manually and see where it is cloned and dropped.
+///   This will give you a better understanding of where it is used, and then you can do the same
+///   for the structures that own `RethDbWrapper` to see whether or not they have any circular
+///   links to each other.
 #[derive(Clone, Debug)]
 pub struct RethDbWrapper {
     db: Arc<RwLock<Option<DatabaseEnv>>>,
