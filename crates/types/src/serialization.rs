@@ -3,7 +3,6 @@ use alloy_primitives::{bytes, Address};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
-use bytes::Buf;
 use eyre::{Error, OptionExt};
 use openssl::sha;
 use rand::RngCore;
@@ -111,7 +110,7 @@ impl Compact for U256 {
     }
 
     #[inline]
-    fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
         // Disambiguate and call the correct H256::from method
         let (v, remaining_buf) = <[u8; 32]>::from_compact(buf, len);
         // Fully qualify this call to avoid calling DecodeHash::from
