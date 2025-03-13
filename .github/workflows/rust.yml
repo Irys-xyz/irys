@@ -11,8 +11,6 @@ on:
   pull_request:
   merge_group:
   push:
-    branches:
-      - master
 
 env:
   CARGO_TERM_COLOR: always
