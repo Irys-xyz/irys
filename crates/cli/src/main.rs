@@ -23,8 +23,7 @@ pub struct IrysCli {
 #[derive(Debug, Subcommand, Clone)]
 pub enum Commands {
     #[command(name = "backup-accounts")]
-    BackupAccounts {
-    },
+    BackupAccounts {},
 }
 
 fn main() -> eyre::Result<()> {
