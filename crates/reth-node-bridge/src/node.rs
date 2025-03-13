@@ -136,7 +136,6 @@ pub async fn run_node<T: HasName + HasTableType>(
     tables: &[T],
     provider: IrysRethProvider,
     latest_block: u64,
-    consensus_engine_shutdown: tokio::sync::mpsc::Receiver<()>,
 ) -> eyre::Result<RethNodeExitHandle> {
     let mut os_args: Vec<String> = std::env::args().collect();
     let bp = os_args.remove(0);
@@ -300,7 +299,6 @@ pub async fn run_node<T: HasName + HasTableType>(
                     engine_tree_config,
                     irys_provider,
                     latest_block,
-                    consensus_engine_shutdown
                 );
                 builder.launch_with(launcher)
             })

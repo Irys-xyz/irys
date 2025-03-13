@@ -73,8 +73,6 @@ pub struct CustomEngineNodeLauncher {
     pub irys_provider: IrysRethProvider,
 
     pub latest_irys_block_height: u64,
-
-    pub consensus_engine_shutdown: tokio::sync::mpsc::Receiver<()>,
 }
 
 impl CustomEngineNodeLauncher {
@@ -85,14 +83,12 @@ impl CustomEngineNodeLauncher {
         engine_tree_config: TreeConfig,
         irys_provider: IrysRethProvider,
         latest_block: u64,
-        consensus_engine_shutdown: tokio::sync::mpsc::Receiver<()>,
     ) -> Self {
         Self {
             ctx: LaunchContext::new(task_executor, data_dir),
             engine_tree_config,
             irys_provider,
             latest_irys_block_height: latest_block,
-            consensus_engine_shutdown,
         }
     }
 }
@@ -121,7 +117,6 @@ where
             engine_tree_config,
             irys_provider,
             latest_irys_block_height,
-            mut consensus_engine_shutdown,
         } = self;
         let NodeBuilderWithComponents {
             adapter: NodeTypesAdapter { database },
@@ -477,18 +472,19 @@ where
         let chainspec = ctx.chain_spec();
         let (exit, _rx) = oneshot::channel();
         info!(target: "reth::cli", "Starting consensus engine");
-        ctx.task_executor().spawn_critical("consensus engine", async move {
-            if let Some(initial_target) = initial_target {
-                debug!(target: "reth::cli", %initial_target,  "start backfill sync");
-                eth_service.orchestrator_mut().start_backfill_sync(initial_target);
-            }
+        ctx.task_executor().spawn_critical_with_shutdown_signal("consensus engine", |shutdown| {
+            async move {
+                if let Some(initial_target) = initial_target {
+                    debug!(target: "reth::cli", %initial_target,  "start backfill sync");
+                    eth_service.orchestrator_mut().start_backfill_sync(initial_target);
+                }
 
-            let mut res = Ok(());
+                let mut res = Ok(());
 
-            // advance the chain and await payloads built locally to add into the engine api tree handler to prevent re-execution if that block is received as payload from the CL
-            loop {
-                tokio::select! {
-                    _shutdown = consensus_engine_shutdown.recv() => {
+                // advance the chain and await payloads built locally to add into the engine api tree handler to prevent re-execution if that block is received as payload from the CL
+                loop {
+                    tokio::select! {
+                    _shutdown = shutdown.clone() => {
                         debug!("Received shutdown signal for consensus engine, shutting down...");
                         break;
                     }
@@ -531,10 +527,11 @@ where
                         }
                     }
                 }
-            }
+                }
 
-            debug!("Consensus engine stopped");
-            let _ = exit.send(res);
+                debug!("Consensus engine stopped");
+                let _ = exit.send(res);
+            }
         });
 
         let full_node = FullNode {

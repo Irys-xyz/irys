@@ -201,8 +201,6 @@ pub async fn start_irys_node(
     let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
     let (main_actor_thread_shutdown_tx, mut main_actor_thread_shutdown_rx) =
         tokio::sync::mpsc::channel::<()>(1);
-    let (consensus_engine_shutdown_sender, consensus_engine_shutdown_receiver) =
-        tokio::sync::mpsc::channel::<()>(1);
 
     let actor_main_thread_handle = std::thread::Builder::new()
         .name("actor-main-thread".to_string())
@@ -686,9 +684,7 @@ pub async fn start_irys_node(
                             reth_handle_sender,
                             irys_provider.clone(),
                             latest_block_height,
-                            consensus_engine_shutdown_receiver,
                             main_actor_thread_shutdown_tx,
-                            consensus_engine_shutdown_sender,
                         ),
                         reth_shutdown_receiver,
                     ),
@@ -698,6 +694,7 @@ pub async fn start_irys_node(
             debug!("Waiting for the main actor thread to finish");
             actor_main_thread_handle.join().unwrap();
 
+            debug!("Shutting down the rest of the reth jobs");
             task_manager.graceful_shutdown();
 
             irys_storage::reth_provider::cleanup_provider(&irys_provider);
@@ -719,9 +716,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
     sender: oneshot::Sender<FullNode<RethNode, RethNodeAddOns>>,
     irys_provider: IrysRethProvider,
     latest_block: u64,
-    consensus_engine_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
     main_actor_thread_shutdown_sender: tokio::sync::mpsc::Sender<()>,
-    consensus_engine_shutdown_sender: tokio::sync::mpsc::Sender<()>,
 ) -> eyre::Result<NodeExitReason> {
     let node_handle = irys_reth_node_bridge::run_node(
         Arc::new(chainspec),
@@ -730,7 +725,6 @@ async fn start_reth_node<T: HasName + HasTableType>(
         tables,
         irys_provider,
         latest_block,
-        consensus_engine_shutdown_receiver,
     )
     .await?;
     debug!("Reth node started");
@@ -743,8 +737,8 @@ async fn start_reth_node<T: HasName + HasTableType>(
     debug!("Sending shutdown signal to main actor thread");
     main_actor_thread_shutdown_sender.try_send(()).unwrap();
 
-    debug!("Sending shutdown signal to consensus engine");
-    consensus_engine_shutdown_sender.try_send(()).unwrap();
+    // debug!("Sending shutdown signal to consensus engine");
+    // consensus_engine_shutdown_sender.try_send(()).unwrap();
 
     debug!("Stopping RPC servers...");
     let _ = &node_handle.node.rpc_server_handles.auth.clone().stop();
