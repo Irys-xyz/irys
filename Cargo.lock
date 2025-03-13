@@ -7763,7 +7763,6 @@ dependencies = [
  "shellexpand",
  "strum",
  "thiserror 1.0.69",
- "tokio",
  "toml",
  "tracing",
  "vergen",

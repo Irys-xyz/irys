@@ -45,7 +45,7 @@ use reth_rpc_engine_api::{capabilities::EngineCapabilities, EngineApi};
 use reth_tasks::TaskExecutor;
 use reth_tokio_util::EventSender;
 use reth_tracing::tracing::{debug, error, info, warn};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::{mpsc::unbounded_channel, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -136,11 +136,8 @@ where
             ..
         } = hooks;
 
-        let (reload_tx, reload_rx) = unbounded_channel();
-
         // TODO: fix this.
         let irys_ext = IrysExt {
-            reload: Arc::new(RwLock::new(reload_tx)),
             provider: irys_provider,
         };
 
@@ -470,7 +467,7 @@ where
             .into_built_payload_stream()
             .fuse();
         let chainspec = ctx.chain_spec();
-        let (exit, _rx) = oneshot::channel();
+        let (exit, rx) = oneshot::channel();
         info!(target: "reth::cli", "Starting consensus engine");
         ctx.task_executor().spawn_critical_with_shutdown_signal("consensus engine", |shutdown| {
             async move {
@@ -553,8 +550,7 @@ where
 
         let handle = NodeHandle {
             node_exit_future: NodeExitFuture::new(
-                // async { rx.await? },
-                reload_rx,
+                async { rx.await? },
                 full_node.config.debug.terminate,
             ),
             node: full_node,

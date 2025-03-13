@@ -48,7 +48,6 @@ use irys_types::{
 };
 use irys_types::{Config, DifficultyAdjustmentConfig, OracleConfig, PartitionChunkRange};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
-use reth::core::irys_ext::ReloadPayload;
 use reth::rpc::eth::EthApiServer as _;
 use reth::{
     builder::FullNode,
@@ -98,18 +97,7 @@ pub struct IrysNodeCtx {
 impl IrysNodeCtx {
     pub async fn stop(self) {
         // Shutting down reth node will propagate to the main actor thread eventually
-        let chain_spec_arc = self.reth_handle.chain_spec();
-        let chain_spec = (*chain_spec_arc).clone();
-
-        self.reth_handle
-            .irys_ext
-            .as_ref()
-            .unwrap()
-            .reload
-            .write()
-            .unwrap()
-            .send(ReloadPayload::ReloadConfig(chain_spec))
-            .unwrap();
+        self.reth_shutdown_sender.send(()).await.unwrap();
 
         self.reth_thread_handle.unwrap().join().unwrap();
 
@@ -207,7 +195,7 @@ pub async fn start_irys_node(
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
             let node_config = arc_config_copy.clone();
-            System::new().block_on(async move {
+            let reth_node_handle = System::new().block_on(async move {
                 let mut arbiters = Vec::new();
                 let irys_db_env = open_or_create_irys_consensus_data_db(
                     &arc_config.irys_consensus_data_dir(),
@@ -628,7 +616,7 @@ pub async fn start_irys_node(
                     mempool: mempool_addr,
                     chunk_provider: arc_chunk_provider.clone(),
                     db: irys_db,
-                    reth_provider: Some(reth_node),
+                    reth_provider: Some(reth_node.clone()),
                     block_tree: Some(block_tree_guard.clone()),
                     block_index: Some(block_index_guard.clone()),
                     config
@@ -658,8 +646,12 @@ pub async fn start_irys_node(
                 vdf_thread_handler.join().unwrap();
 
                 debug!("VDF thread finished");
+
+                reth_node
             });
             debug!("Main actor thread finished");
+
+            reth_node_handle
         })?;
 
     // run reth in it's own thread w/ it's own tokio runtime
@@ -672,7 +664,7 @@ pub async fn start_irys_node(
         .spawn(move || {
             let node_config = cloned_arc.clone();
 
-            tokio_runtime
+            let result = tokio_runtime
                 .block_on(run_to_completion_or_panic(
                     &mut task_manager,
                     run_until_ctrl_c_or_channel_message(
@@ -684,19 +676,23 @@ pub async fn start_irys_node(
                             reth_handle_sender,
                             irys_provider.clone(),
                             latest_block_height,
-                            main_actor_thread_shutdown_tx,
                         ),
                         reth_shutdown_receiver,
                     ),
                 ))
                 .unwrap();
 
+            debug!("Reth thread finished with result: {:?}", result);
+
+            debug!("Sending shutdown signal to main actor thread");
+            let _ = main_actor_thread_shutdown_tx.try_send(());
             debug!("Waiting for the main actor thread to finish");
-            actor_main_thread_handle.join().unwrap();
+            let reth_node_handle = actor_main_thread_handle.join().unwrap();
 
             debug!("Shutting down the rest of the reth jobs");
             task_manager.graceful_shutdown();
 
+            reth_node_handle.provider.database.db.close();
             irys_storage::reth_provider::cleanup_provider(&irys_provider);
 
             debug!("Reth thread finished");
@@ -716,7 +712,6 @@ async fn start_reth_node<T: HasName + HasTableType>(
     sender: oneshot::Sender<FullNode<RethNode, RethNodeAddOns>>,
     irys_provider: IrysRethProvider,
     latest_block: u64,
-    main_actor_thread_shutdown_sender: tokio::sync::mpsc::Sender<()>,
 ) -> eyre::Result<NodeExitReason> {
     let node_handle = irys_reth_node_bridge::run_node(
         Arc::new(chainspec),
@@ -732,21 +727,5 @@ async fn start_reth_node<T: HasName + HasTableType>(
         .send(node_handle.node.clone())
         .expect("unable to send reth node handle");
 
-    let exit_reason = node_handle.node_exit_future.await?;
-
-    debug!("Sending shutdown signal to main actor thread");
-    main_actor_thread_shutdown_sender.try_send(()).unwrap();
-
-    // debug!("Sending shutdown signal to consensus engine");
-    // consensus_engine_shutdown_sender.try_send(()).unwrap();
-
-    debug!("Stopping RPC servers...");
-    let _ = &node_handle.node.rpc_server_handles.auth.clone().stop();
-    let _ = &node_handle.node.rpc_server_handles.rpc.clone().stop();
-
-    debug!("Closing Reth DB connection");
-    node_handle.node.provider.database.db.close();
-
-    debug!("Reth node exited with reason: {:?}", exit_reason);
-    Ok(exit_reason)
+    node_handle.node_exit_future.await
 }
