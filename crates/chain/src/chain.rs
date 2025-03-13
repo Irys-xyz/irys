@@ -97,11 +97,8 @@ pub struct IrysNodeCtx {
 impl IrysNodeCtx {
     pub async fn stop(self) {
         // Shutting down reth node will propagate to the main actor thread eventually
-        self.reth_shutdown_sender.send(()).await.unwrap();
-
-        self.reth_thread_handle.unwrap().join().unwrap();
-
-        System::current().stop();
+        let _ = self.reth_shutdown_sender.send(()).await;
+        let _ = self.reth_thread_handle.unwrap().join();
         debug!("Main actor thread and reth thread stopped");
     }
 }
