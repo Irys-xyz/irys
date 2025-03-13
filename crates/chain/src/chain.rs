@@ -96,6 +96,7 @@ pub struct IrysNodeCtx {
 
 impl IrysNodeCtx {
     pub async fn stop(self) {
+        debug!("Sending shutdown signal to reth thread");
         // Shutting down reth node will propagate to the main actor thread eventually
         let _ = self.reth_shutdown_sender.send(()).await;
         let _ = self.reth_thread_handle.unwrap().join();
