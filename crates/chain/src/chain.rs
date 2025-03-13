@@ -622,23 +622,23 @@ pub async fn start_irys_node(
 
                 let server_handle = server.handle();
 
-                actix_rt::spawn(async move {
+                let server_stop_handle = actix_rt::spawn(async move {
                     let _ = main_actor_thread_shutdown_rx.recv().await;
                     info!("Main actor thread received shutdown signal");
 
                     debug!("Stopping API server");
                     server_handle.stop(true).await;
                     info!("API server stopped");
-
-                    debug!("Stopping actors");
-                    for arbiter in arbiters {
-                        arbiter.stop_and_join();
-                    }
-
-                    debug!("Actors stopped");
                 });
 
                 server.await.unwrap();
+                server_stop_handle.await.unwrap();
+
+                debug!("Stopping actors");
+                for arbiter in arbiters {
+                    arbiter.stop_and_join();
+                }
+                debug!("Actors stopped");
 
                 // Send shutdown signal
                 shutdown_tx.send(()).unwrap();
