@@ -663,8 +663,8 @@ pub async fn start_irys_node(
         .spawn(move || {
             let node_config = cloned_arc.clone();
 
-            let result = tokio_runtime
-                .block_on(run_to_completion_or_panic(
+            let run_reth_until_ctrl_c_or_signal = async || {
+                _ = run_to_completion_or_panic(
                     &mut task_manager,
                     run_until_ctrl_c_or_channel_message(
                         start_reth_node(
@@ -678,20 +678,23 @@ pub async fn start_irys_node(
                         ),
                         reth_shutdown_receiver,
                     ),
-                ))
-                .unwrap();
+                )
+                .await;
 
-            debug!("Reth thread finished with result: {:?}", result);
+                debug!("Sending shutdown signal to the main actor thread");
+                let _ = main_actor_thread_shutdown_tx.try_send(());
+                debug!("Waiting for the main actor thread to finish");
+                let reth_node_handle = actor_main_thread_handle.join().unwrap();
 
-            debug!("Sending shutdown signal to main actor thread");
-            let _ = main_actor_thread_shutdown_tx.try_send(());
-            debug!("Waiting for the main actor thread to finish");
-            let reth_node_handle = actor_main_thread_handle.join().unwrap();
+                reth_node_handle
+            };
 
-            debug!("Shutting down the rest of the reth jobs");
+            let reth_node = tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal());
+
+            debug!("Shutting down the rest of the reth jobs in case there are unfinished ones");
             task_manager.graceful_shutdown();
 
-            reth_node_handle.provider.database.db.close();
+            reth_node.provider.database.db.close();
             irys_storage::reth_provider::cleanup_provider(&irys_provider);
 
             debug!("Reth thread finished");
