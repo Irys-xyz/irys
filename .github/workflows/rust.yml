@@ -41,9 +41,8 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
-          # Disable automatic merge by using the triggering commit SHA
+          # Disable automatic merge by using the head ref if this is a pull_request event
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.sha }}
-
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -62,7 +61,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.sha }}
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -83,7 +82,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.sha }}
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -101,7 +100,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.sha }}
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -119,7 +118,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.sha }}
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -137,7 +136,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.sha }}
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
