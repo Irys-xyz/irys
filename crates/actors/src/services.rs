@@ -1,3 +1,4 @@
+use actix::Message;
 use core::ops::Deref;
 use std::sync::Arc;
 // should we be using crossbeam?
@@ -50,3 +51,8 @@ impl ServiceSendersInner {
         (senders, receivers)
     }
 }
+
+/// Stop the actor
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct Stop;

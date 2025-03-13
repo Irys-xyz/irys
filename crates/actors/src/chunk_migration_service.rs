@@ -15,6 +15,7 @@ use reth_db::Database;
 use std::sync::{Arc, RwLock};
 use tracing::error;
 
+use crate::services::Stop;
 use crate::{
     block_producer::BlockFinalizedMessage, cache_service::CacheServiceAction,
     services::ServiceSenders,
@@ -132,11 +133,6 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
         })
     }
 }
-
-/// Stop the actor
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
-pub struct Stop;
 
 impl Handler<Stop> for ChunkMigrationService {
     type Result = ();

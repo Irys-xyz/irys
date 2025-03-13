@@ -24,6 +24,7 @@ use crate::block_index_service::{
     BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage,
 };
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
+use crate::services::Stop;
 
 /// Allows for overriding of the consensus parameters for ledgers and partitions
 #[derive(Debug, Clone, Default)]
@@ -240,11 +241,6 @@ impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
         pa.get_assignment(msg.0)
     }
 }
-
-/// Stop the actor
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
-pub struct Stop;
 
 impl Handler<Stop> for EpochServiceActor {
     type Result = ();

@@ -11,6 +11,7 @@ use tracing::info;
 use irys_types::{block_production::Seed, Config, DatabaseProvider};
 
 use crate::block_index_service::BlockIndexReadGuard;
+use crate::services::Stop;
 
 #[derive(Debug, Default)]
 pub struct VdfService {
@@ -145,11 +146,6 @@ impl Handler<GetVdfStateMessage> for VdfService {
     }
 }
 
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
-pub struct Stop;
-
-// Handler for SeedMessage
 impl Handler<Stop> for VdfService {
     type Result = ();
 
