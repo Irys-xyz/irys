@@ -158,7 +158,10 @@ mod tests {
     use irys_types::{Address, H256List, IrysBlockHeader, StorageConfig, H256};
     use tracing::debug;
 
-    use crate::{block_index_service::{BlockIndexService, GetBlockIndexGuardMessage}, BlockFinalizedMessage};
+    use crate::{
+        block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
+        BlockFinalizedMessage,
+    };
 
     use super::*;
 
@@ -263,8 +266,7 @@ mod tests {
 
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
         new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = 0;
-    
-        
+
         let now = Instant::now();
         // index and store in db blocks
         let mut height = 0;
@@ -290,13 +292,11 @@ mod tests {
         }
         let elapsed = now.elapsed();
         println!("Indexed: {} blocks in {:.2?}", height, elapsed);
-        
+
         let now = Instant::now();
         let _ = VdfService::new(block_index_guard, database_provider, &testnet_config);
         let elapsed = now.elapsed();
-        
+
         println!("VdfService vdf steps initialization time: {:.2?}", elapsed);
-
     }
-
 }
