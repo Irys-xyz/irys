@@ -4,13 +4,13 @@ use std::{net::SocketAddr, sync::Arc};
 
 use actix::Addr;
 use actix_cors::Cors;
+use actix_web::dev::Server;
 use actix_web::{
     dev::HttpServiceFactory,
     error::InternalError,
     web::{self, JsonConfig},
     App, HttpResponse, HttpServer,
 };
-
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,
@@ -90,7 +90,7 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/version", web::post().to(post_version::post_version))
 }
 
-pub async fn run_server(app_state: ApiState) {
+pub async fn run_server(app_state: ApiState) -> Server {
     let port = app_state.config.port;
     info!(?port, "Starting API server");
 
@@ -115,8 +115,6 @@ pub async fn run_server(app_state: ApiState) {
     .bind(("0.0.0.0", port))
     .unwrap()
     .run()
-    .await
-    .unwrap();
 }
 
 //==============================================================================

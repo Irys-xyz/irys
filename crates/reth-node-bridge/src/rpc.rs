@@ -330,7 +330,7 @@ impl AccountStateExtApiServer for AccountStateExt {
     }
 
     fn add_genesis_block(&self, info: GenesisInfo) -> RpcResult<Genesis> {
-        crate::genesis::add_genesis_block(&self.provider, &self.irys_ext.clone().unwrap(), info)
+        crate::genesis::add_genesis_block(&self.provider, info)
     }
 
     fn test_apply_shadow(&self, parent: BlockId, shadow: ShadowTx) -> RpcResult<ShadowReceipt> {

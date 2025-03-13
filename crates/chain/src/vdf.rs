@@ -86,6 +86,7 @@ pub fn run_vdf(
             reset_seed = h;
         }
     }
+    debug!(?global_step_number, "VDF thread stopped");
 }
 
 #[cfg(test)]
