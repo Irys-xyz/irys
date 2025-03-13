@@ -291,7 +291,6 @@ mod tests {
 
     #[test]
     fn insert_and_get_tests() -> eyre::Result<()> {
-        //let path = tempdir().unwrap();
         let path = get_data_dir();
         println!("TempDir: {:?}", path);
 
