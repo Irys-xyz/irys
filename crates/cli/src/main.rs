@@ -24,8 +24,6 @@ pub struct IrysCli {
 pub enum Commands {
     #[command(name = "backup-accounts")]
     BackupAccounts {
-        #[clap(last = true)]
-        args: Vec<String>,
     },
 }
 
