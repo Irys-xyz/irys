@@ -43,6 +43,9 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          # Disable automatic merge by using the triggering commit SHA
+          ref: ${{ github.sha }}
+          merge_commit: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -61,6 +64,8 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          ref: ${{ github.sha }}
+          merge_commit: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -81,6 +86,8 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          ref: ${{ github.sha }}
+          merge_commit: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -98,6 +105,8 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          ref: ${{ github.sha }}
+          merge_commit: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -115,6 +124,8 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          ref: ${{ github.sha }}
+          merge_commit: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -132,6 +143,9 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          ref: ${{ github.sha }}
+          merge_commit: false
+
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
