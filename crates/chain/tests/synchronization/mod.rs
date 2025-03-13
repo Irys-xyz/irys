@@ -143,8 +143,12 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
     // Waiting a little for the block
     tokio::time::sleep(Duration::from_secs(1)).await;
 
+    debug!("Stopping node");
     node.stop().await;
+    // That shouldn't be necessary, but just in case
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
+    debug!("Restarting node");
     let restarted_node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
 
     let (latest_block_right_after_restart, earliest_block) = {
