@@ -42,7 +42,7 @@ jobs:
           submodules: true
           fetch-depth: 0
           # Disable automatic merge by using the triggering commit SHA
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
 
 
       - name: Setup repo
@@ -138,7 +138,6 @@ jobs:
           submodules: true
           fetch-depth: 0
           ref: ${{ github.sha }}
-
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
