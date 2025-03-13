@@ -633,7 +633,6 @@ pub async fn start_irys_node(
                     debug!("Stopping API server");
                     server_handle.stop(true).await;
                     info!("API server stopped");
-
                 });
 
                 server.await.unwrap();

@@ -18,7 +18,6 @@ use tracing::{debug, info};
 
 #[actix_web::test]
 async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
-
     let temp_dir = setup_tracing_and_temp_dir(Some("node_resume_test"), false);
     let mut testnet_config = Config::testnet();
     testnet_config.chunk_size = 32;
