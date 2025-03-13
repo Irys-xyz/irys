@@ -129,6 +129,9 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
     // check with request to `/v1/info`
     let client = awc::Client::default();
 
+    // Waiting for the server to start
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     let response = client
         .get(format!("{}/v1/info", http_url))
         .send()
@@ -161,11 +164,15 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
         // sleep(delay).await;
         // println!("slept");
         for attempt in 1..20 {
-            let mut response = client
+            let response = client
                 .get(format!("{}/v1/tx/{}", http_url, &id))
                 .send()
-                .await
-                .unwrap();
+                .await;
+
+            let Some(mut response) = response.ok() else {
+                sleep(delay).await;
+                continue;
+            };
 
             if response.status() == StatusCode::OK {
                 let result: IrysTransactionHeader = response.json().await.unwrap();
@@ -219,14 +226,18 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
         let delay = Duration::from_secs(1);
 
         for attempt in 1..20 {
-            let mut response = client
+            let response = client
                 .get(format!(
                     "{}/v1/tx/{}/local/data_start_offset",
                     http_url, &id
                 ))
                 .send()
-                .await
-                .unwrap();
+                .await;
+
+            let Some(mut response) = response.ok() else {
+                sleep(delay).await;
+                continue;
+            };
 
             if response.status() == StatusCode::OK {
                 let res: TxOffset = response.json().await.unwrap();
