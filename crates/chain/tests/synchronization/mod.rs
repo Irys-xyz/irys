@@ -145,7 +145,9 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
 
     debug!("Stopping node");
     node.stop().await;
+
     // That shouldn't be necessary, but just in case
+    debug!("Node stopped, waiting a little just in case");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     debug!("Restarting node");
