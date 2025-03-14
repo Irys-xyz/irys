@@ -5,7 +5,7 @@ use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
 use irys_types::Config;
 
-#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[test_log::test(tokio::test)]
 async fn serial_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<()> {
     // setup
     let price_adjustment_interval = 3;
@@ -40,7 +40,7 @@ async fn serial_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::R
     Ok(())
 }
 
-#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[test_log::test(tokio::test)]
 async fn serial_test_genesis_ema_price_updates_after_second_interval() -> eyre::Result<()> {
     // setup
     let price_adjustment_interval = 3;
