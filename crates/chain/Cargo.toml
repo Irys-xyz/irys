@@ -42,7 +42,6 @@ actix-http.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-semver.workspace = true
 
 alloy-network = { path = "../../ext/alloy/crates/network" }
 alloy-signer-local.workspace = true
