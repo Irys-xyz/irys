@@ -2,12 +2,8 @@ use crate::utils::mine_block;
 use irys_actors::ema_service::EmaServiceMessage;
 use irys_chain::{start_irys_node, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
-use irys_testing_utils::utils::{
-    setup_tracing_and_temp_dir, tempfile::TempDir, temporary_directory,
-};
-use irys_types::{irys::IrysSigner, Config};
-use reth_primitives::GenesisAccount;
-use rstest::rstest;
+use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
+use irys_types::Config;
 
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn serial_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<()> {
@@ -18,63 +14,72 @@ async fn serial_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::R
     // action
     // we start at 1 because the genesis block is already mined
     // let mut oracle_prices = vec![ctx.config.genesis_token_price];
-    for expected_height in 1..=(price_adjustment_interval * 2) {
+    for expected_height in 1..(price_adjustment_interval * 2) {
         let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
-        dbg!(&(
-            header.height,
-            header.oracle_irys_price,
-            header.ema_irys_price
-        ));
-        assert_eq!(header.height, expected_height);
-        // assert_eq!(
-        //     header.ema_irys_price, ctx.config.genesis_token_price,
-        //     "ema price must be constant for the first interval because it does not get recalculated"
-        // );
-        // oracle_prices.push(header.oracle_irys_price);
         let (tx, rx) = tokio::sync::oneshot::channel();
         ctx.node
             .service_senders
             .ema
             .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })?;
         let returnted_ema_price = rx.await?;
+
+        // assert each new block that we mine
+        assert_eq!(header.height, expected_height);
         assert_eq!(
             ctx.config.genesis_token_price, returnted_ema_price,
             "Genisis price not respected for the expected duration"
         );
         assert_ne!(
             ctx.config.genesis_token_price, header.oracle_irys_price,
-            "Expected new & unique oracle irys price"
+            "Expected the header to contain new & unique oracle irys price"
         );
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert_ne!(
+            ctx.config.genesis_token_price, header.ema_irys_price,
+            "Expected the header to contain new & unique EMA irys price"
+        );
     }
-    let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
-    // let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
-    // let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
-    // let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
+    Ok(())
+}
 
-    // assert
-    // dbg!(&oracle_prices);
-    // let expected_price = ctx
-    //     .config
-    //     .genesis_token_price
-    //     .calculate_ema(price_adjustment_interval, ctx.config.genesis_token_price)
-    //     .unwrap();
-    assert_eq!(header.height, 7);
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn serial_test_genesis_ema_price_updates_after_second_interval() -> eyre::Result<()> {
+    // setup
+    let price_adjustment_interval = 3;
+    let ctx = setup(price_adjustment_interval).await?;
+    // (oracle price, EMA price)
+    let mut registered_prices = vec![(
+        ctx.config.genesis_token_price,
+        ctx.config.genesis_token_price,
+    )];
+    // mine 6 blocks
+    for _expected_height in 1..(price_adjustment_interval * 2) {
+        let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
+        registered_prices.push((header.oracle_irys_price, header.ema_irys_price));
+    }
+
+    // action -- mine a new block. This pushes the system to use a new EMA rather than the genesis EMA
+    let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel();
     ctx.node
         .service_senders
         .ema
         .send(EmaServiceMessage::GetCurrentEmaForPricing { response: tx })?;
     let returnted_ema_price = rx.await?;
+
+    // assert
+    assert_eq!(
+        header.height, 6,
+        "expected the 7th block to be mined (height = 6)"
+    );
     assert_ne!(
         ctx.config.genesis_token_price, returnted_ema_price,
         "After the second interval we no longer use the genesis price"
     );
-    // assert_ne!(
-    //     header.ema_irys_price, ctx.config.genesis_token_price,
-    //     "after the first interval we start calculating the EMA price"
-    // );
+    assert_eq!(
+        registered_prices[2].1, returnted_ema_price,
+        "expected to use the EMA price registered in the 3rd block"
+    );
+
     Ok(())
 }
 
@@ -104,6 +109,3 @@ async fn setup(price_adjustment_interval: u64) -> eyre::Result<TestCtx> {
         temp_dir,
     })
 }
-
-// todo test each block has an adjusting oracle price
-// todo test ema price gets updated after epoch block is reached
