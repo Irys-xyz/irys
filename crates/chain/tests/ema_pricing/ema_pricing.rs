@@ -13,7 +13,6 @@ async fn serial_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::R
 
     // action
     // we start at 1 because the genesis block is already mined
-    // let mut oracle_prices = vec![ctx.config.genesis_token_price];
     for expected_height in 1..(price_adjustment_interval * 2) {
         let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel();
