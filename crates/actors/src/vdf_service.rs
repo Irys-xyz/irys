@@ -223,17 +223,7 @@ mod tests {
         };
 
         // Create a storage config for testing
-        let storage_config = StorageConfig {
-            chunk_size: testnet_config.chunk_size,
-            num_chunks_in_partition: testnet_config.num_chunks_in_partition,
-            num_chunks_in_recall_range: testnet_config.num_chunks_in_recall_range,
-            num_partitions_in_slot: testnet_config.num_partitions_per_slot,
-            miner_address: Address::random(),
-            min_writes_before_sync: testnet_config.num_writes_before_sync,
-            entropy_packing_iterations: testnet_config.entropy_packing_iterations,
-            chunk_migration_depth: testnet_config.chunk_migration_depth, // Testnet / single node config
-            chain_id: testnet_config.chain_id,
-        };
+        let storage_config = StorageConfig::new(&testnet_config);
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("create_state_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
