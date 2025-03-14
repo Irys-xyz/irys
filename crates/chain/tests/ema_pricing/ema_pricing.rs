@@ -37,6 +37,7 @@ async fn serial_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::R
             "Expected the header to contain new & unique EMA irys price"
         );
     }
+    ctx.node.stop().await;
     Ok(())
 }
 
@@ -79,6 +80,7 @@ async fn serial_test_genesis_ema_price_updates_after_second_interval() -> eyre::
         "expected to use the EMA price registered in the 3rd block"
     );
 
+    ctx.node.stop().await;
     Ok(())
 }
 
