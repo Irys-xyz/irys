@@ -1,8 +1,10 @@
 //! EMA service module. It is responsible for keeping track of Irys token price readjustment period.
 use crate::block_tree_service::BlockTreeReadGuard;
+use futures::future::Either;
 use irys_types::{
-    is_ema_recalculation_block, previous_ema_recalculation_block_height, Config, IrysBlockHeader,
-    IrysTokenPrice,
+    is_ema_recalculation_block, previous_ema_recalculation_block_height,
+    storage_pricing::{phantoms::Percentage, Amount},
+    Config, IrysBlockHeader, IrysTokenPrice,
 };
 use price_cache_context::PriceCacheContext;
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
@@ -23,10 +25,16 @@ pub enum EmaServiceMessage {
     GetEmaForNewBlock {
         height_of_new_block: u64,
         oracle_price: IrysTokenPrice,
-        response: oneshot::Sender<eyre::Result<IrysTokenPrice>>,
+        response: oneshot::Sender<eyre::Result<NewBlockEmaResponse>>,
     },
     /// Supposted to be sent whenever Irys produces a new confirmed block. The EMA service will refrech its cache.
     NewConfirmedBlock,
+}
+
+#[derive(Debug)]
+pub struct NewBlockEmaResponse {
+    pub range_adjusted_oracle_price: IrysTokenPrice,
+    pub ema: IrysTokenPrice,
 }
 
 #[derive(Debug)]
@@ -39,6 +47,7 @@ pub struct EmaService {
 #[derive(Debug)]
 struct Inner {
     blocks_in_interval: u64,
+    token_price_safe_range: Amount<Percentage>,
     block_tree_read_guard: BlockTreeReadGuard,
     price_ctx: PriceCacheContext,
 }
@@ -52,6 +61,7 @@ impl EmaService {
         config: &Config,
     ) -> JoinHandle<()> {
         let blocks_in_interval = config.price_adjustment_interval;
+        let token_price_safe_range = config.token_price_safe_range;
         exec.spawn_critical_with_graceful_shutdown_signal("EMA Service", |shutdown| async move {
             let price_ctx = PriceCacheContext::from_canonical_chain(
                 block_tree_read_guard.clone(),
@@ -64,6 +74,7 @@ impl EmaService {
                 msg_rx: rx,
                 inner: Inner {
                     price_ctx,
+                    token_price_safe_range,
                     blocks_in_interval,
                     block_tree_read_guard,
                 },
@@ -77,7 +88,6 @@ impl EmaService {
 
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting EMA service");
-        use futures::future::Either;
 
         let mut shutdown_future = pin!(self.shutdown);
         let shutdown_guard = loop {
@@ -123,15 +133,27 @@ impl Inner {
                 height_of_new_block,
                 oracle_price,
             } => {
+                // enforce the min & max acceptable price ranges on the oracle price
+                let oracle_price = bound_in_min_max_range(
+                    oracle_price,
+                    self.token_price_safe_range,
+                    self.price_ctx.block_previous_ema.ema_irys_price,
+                );
+
                 // the first 2 adjustment intervals have special handling where we calculate the
                 // EMA for each block using the value from the preceding one
                 let new_ema = if height_of_new_block <= (self.blocks_in_interval * 2) {
                     // calculate the new EMA using the current oracle price + ema price
-                    oracle_price.calculate_ema(
-                        // we use the full interval for calculations even if in reality it's only 1 block diff
-                        self.blocks_in_interval,
-                        self.price_ctx.block_previous.ema_irys_price,
-                    )
+                    oracle_price
+                        .calculate_ema(
+                            // we use the full interval for calculations even if in reality it's only 1 block diff
+                            self.blocks_in_interval,
+                            self.price_ctx.block_previous.ema_irys_price,
+                        )
+                        .unwrap_or_else(|err| {
+                            tracing::warn!(?err, "price overflow, using genesis EMA price");
+                            self.price_ctx.block_previous_ema.ema_irys_price
+                        })
                 } else {
                     // Now we have have generic handling.
                     //
@@ -151,7 +173,12 @@ impl Inner {
                             self.blocks_in_interval,
                             self.price_ctx.block_previous_ema.ema_irys_price,
                         )
+                        .unwrap_or_else(|err| {
+                            tracing::warn!(?err, "price overflow, using previous EMA price");
+                            self.price_ctx.block_previous_ema.ema_irys_price
+                        })
                 };
+
                 tracing::info!(
                     ?new_ema,
                     prev_predecessor_height = ?self.price_ctx.block_previous_ema_predecessor.height,
@@ -159,7 +186,10 @@ impl Inner {
                     "computing new EMA"
                 );
 
-                let _ = response.send(new_ema);
+                let _ = response.send(Ok(NewBlockEmaResponse {
+                    range_adjusted_oracle_price: oracle_price,
+                    ema: new_ema,
+                }));
             }
             EmaServiceMessage::NewConfirmedBlock => {
                 tracing::debug!("new confirmed block");
@@ -173,6 +203,32 @@ impl Inner {
         }
         Ok(())
     }
+}
+
+/// Cap the provided price value to fit within the max / min acceptable range.
+/// The range is defined by the `token_price_safe_range` percentile value.
+///
+/// Use the previous EMA as the base value.
+fn bound_in_min_max_range(
+    new_price: IrysTokenPrice,
+    safe_range: Amount<Percentage>,
+    base_price: IrysTokenPrice,
+) -> IrysTokenPrice {
+    let max_acceptable = base_price.add_multiplier(safe_range).unwrap_or(base_price);
+    let min_acceptable = base_price.sub_multiplier(safe_range).unwrap_or(base_price);
+    if new_price > max_acceptable {
+        tracing::warn!(
+            ?max_acceptable,
+            ?new_price,
+            "oracle price too high, capping"
+        );
+        return max_acceptable;
+    }
+    if new_price < min_acceptable {
+        tracing::warn!(?min_acceptable, ?new_price, "oracle price too low, capping");
+        return min_acceptable;
+    }
+    new_price
 }
 
 /// Utility module for that's responsible for extracting the desired blocks from the
@@ -357,7 +413,8 @@ mod tests {
 
     pub(crate) fn rand_price(height: u64) -> IrysTokenPrice {
         let rand = rand::random::<u8>() as u64;
-        let oracle_price = IrysTokenPrice::token(Decimal::from(height + rand)).unwrap();
+        let amount = Decimal::ONE_THOUSAND + Decimal::from(rand) + Decimal::from(height);
+        let oracle_price = IrysTokenPrice::token(amount).unwrap();
         oracle_price
     }
 
@@ -519,7 +576,7 @@ mod tests {
                     oracle_price: new_oracle_price,
                 })
                 .unwrap();
-            let ema_response = rx.await.unwrap().unwrap();
+            let ema_response = rx.await.unwrap().unwrap().ema;
 
             // assert
             let ema_computed = new_oracle_price
@@ -561,7 +618,7 @@ mod tests {
                     oracle_price: new_oracle_price,
                 })
                 .unwrap();
-            let ema_response = rx.await.unwrap().unwrap();
+            let ema_response = rx.await.unwrap().unwrap().ema;
 
             // assert
             let prev_price = ctx.prices[block_count as usize - 1].clone();
@@ -600,7 +657,7 @@ mod tests {
                     oracle_price: rand_price(block_count),
                 })
                 .unwrap();
-            let ema_response = rx.await.unwrap().unwrap();
+            let ema_response = rx.await.unwrap().unwrap().ema;
 
             // assert
             let prev_price = ctx.prices[prev_ema_idx].clone();

@@ -352,8 +352,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     steps,
                     ..Default::default()
                 },
-                oracle_irys_price,
-                ema_irys_price
+                oracle_irys_price: ema_irys_price.range_adjusted_oracle_price,
+                ema_irys_price: ema_irys_price.ema,
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
