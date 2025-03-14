@@ -174,10 +174,49 @@ impl IrysBlockHeader {
 
     /// Validates the block hash signature by:
     /// 1.) generating the prehash
-    /// 2.) recovering the sender address, and comparing it to the block header's miner_address (miner_address MUST be part of the prehash)
+    /// 2.) recovering the sender address, and comparing it to the block headers miner_address (miner_address MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> bool {
         self.signature
             .validate_signature(self.signature_hash(), self.miner_address)
+    }
+
+    // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
+    pub fn is_ema_recalculation_block(&self, blocks_in_price_adjustment_interval: u64) -> bool {
+        is_ema_recalculation_block(self.height, blocks_in_price_adjustment_interval)
+    }
+
+    /// Returns the height of the "previous" EMA recalculation block.
+    ///
+    /// - For the first two intervals (`height < 2 * blocks_in_price_adjustment_interval`), always return 0.
+    /// - Otherwise, return the largest multiple of `blocks_in_price_adjustment_interval` less than `height`.
+    ///   (If the current block is exactly on an interval boundary, step one interval back.)
+    pub fn previous_ema_recalculation_block_height(
+        &self,
+        blocks_in_price_adjustment_interval: u64,
+    ) -> u64 {
+        previous_ema_recalculation_block_height(self.height, blocks_in_price_adjustment_interval)
+    }
+}
+
+// treat any block whose height is a multiple of blocks_in_price_adjustment_interval
+pub fn is_ema_recalculation_block(height: u64, blocks_in_price_adjustment_interval: u64) -> bool {
+    // heights are zero indexed hence adding +1
+    (height + 1) % blocks_in_price_adjustment_interval == 0
+}
+
+/// Returns the height of the "previous" EMA recalculation block.
+pub fn previous_ema_recalculation_block_height(
+    height: u64,
+    blocks_in_price_adjustment_interval: u64,
+) -> u64 {
+    // heights are zero indexed hence adding +1
+    let remainder = (height + 1) % blocks_in_price_adjustment_interval;
+    if remainder == 0 {
+        // If the current block is on an interval boundary, go one interval back.
+        height.saturating_sub(blocks_in_price_adjustment_interval)
+    } else {
+        // Otherwise, drop the remainder.
+        height.saturating_sub(remainder)
     }
 }
 
@@ -344,6 +383,7 @@ mod tests {
     use alloy_primitives::Signature;
     use alloy_rlp::Decodable;
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rstest::rstest;
     use serde_json;
     use zerocopy::IntoBytes;
 
@@ -463,6 +503,64 @@ mod tests {
 
         // assert
         assert_eq!(derived_header, header);
+    }
+
+    #[rstest]
+    #[case(0, 0)]
+    #[case(1, 0)]
+    #[case(15, 9)]
+    #[case(19, 9)]
+    #[case(20, 19)]
+    #[case(21, 19)]
+    #[case(29, 19)]
+    #[case(30, 29)]
+    #[case(31, 29)]
+    #[case(39, 29)]
+    #[case(40, 39)]
+    #[case(41, 39)]
+    #[case(99, 89)]
+    #[case(100, 99)]
+    fn test_previous_ema_for_multiple_intervals(
+        #[case] height: u64,
+        #[case] expected_prev_ema: u64,
+    ) {
+        let interval = 10;
+        let header = IrysBlockHeader {
+            height,
+            ..Default::default()
+        };
+        let result = header.previous_ema_recalculation_block_height(interval);
+
+        assert_eq!(
+            result, expected_prev_ema,
+            "For height={height}, expected {expected_prev_ema} but got {result}"
+        );
+    }
+
+    #[rstest]
+    #[case(0, false)]
+    #[case(1, false)]
+    #[case(9, true)]
+    #[case(10, false)]
+    #[case(11, false)]
+    #[case(19, true)]
+    #[case(20, false)]
+    #[case(21, false)]
+    #[case(30, false)]
+    #[case(99, true)]
+    #[case(100, false)]
+    fn test_is_ema_recalculation_block(#[case] height: u64, #[case] expected_is_ema: bool) {
+        let interval = 10;
+        let header = IrysBlockHeader {
+            height,
+            ..Default::default()
+        };
+        let is_ema = header.is_ema_recalculation_block(interval);
+
+        assert_eq!(
+        is_ema, expected_is_ema,
+        "For height={height}, expected is_ema_recalculation_block={expected_is_ema} but got {is_ema}"
+    );
     }
 
     #[test]

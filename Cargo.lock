@@ -2237,9 +2237,9 @@ dependencies = [
 
 [[package]]
 name = "core_affinity"
-version = "0.8.1"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "622892f5635ce1fc38c8f16dfc938553ed64af482edb5e150bf4caedbfcb2304"
+checksum = "a034b3a7b624016c6e13f5df875747cc25f884156aad2abd12b6c46797971342"
 dependencies = [
  "libc",
  "num_cpus",
@@ -4010,7 +4010,11 @@ dependencies = [
  "openssl",
  "reth",
  "reth-db",
+ "rstest",
+ "rust_decimal",
  "tempfile",
+ "test-log",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -4026,6 +4030,7 @@ dependencies = [
  "actix-web",
  "awc",
  "base58",
+ "eyre",
  "irys-actors",
  "irys-config",
  "irys-database",
@@ -4034,6 +4039,7 @@ dependencies = [
  "irys-types",
  "reth",
  "reth-db",
+ "semver 1.0.24",
  "serde",
  "serde_json",
  "tracing",
@@ -4102,6 +4108,25 @@ dependencies = [
  "sha2 0.10.8",
  "test-fuzz",
  "tokio",
+ "toml",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "irys-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "eyre",
+ "irys-config",
+ "irys-database",
+ "irys-types",
+ "reth-node-core",
+ "reth-tracing",
+ "serde_json",
  "toml",
  "tracing",
  "tracing-error",
@@ -4336,6 +4361,7 @@ dependencies = [
  "build-print",
  "bytemuck",
  "bytes",
+ "chrono",
  "derive_more 2.0.1",
  "eyre",
  "fixed-hash",
@@ -4349,8 +4375,10 @@ dependencies = [
  "reth-db",
  "reth-db-api",
  "reth-primitives",
+ "rstest",
  "rust_decimal",
  "rust_decimal_macros",
+ "semver 1.0.24",
  "serde",
  "serde_json",
  "test-fuzz",
@@ -6299,6 +6327,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "relative-path"
+version = "1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
+
+[[package]]
 name = "rend"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7763,7 +7797,6 @@ dependencies = [
  "shellexpand",
  "strum",
  "thiserror 1.0.69",
- "tokio",
  "toml",
  "tracing",
  "vergen",
@@ -8836,6 +8869,36 @@ name = "route-recognizer"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "afab94fb28594581f62d981211a9a4d53cc8130bbcbbb89a0440d9b8e81a7746"
+
+[[package]]
+name = "rstest"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fc39292f8613e913f7df8fa892b8944ceb47c247b78e1b1ae2f09e019be789d"
+dependencies = [
+ "futures-timer",
+ "futures-util",
+ "rstest_macros",
+ "rustc_version 0.4.1",
+]
+
+[[package]]
+name = "rstest_macros"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f168d99749d307be9de54d23fd226628d99768225ef08f6ffb52e0182a27746"
+dependencies = [
+ "cfg-if",
+ "glob",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "relative-path",
+ "rustc_version 0.4.1",
+ "syn 2.0.90",
+ "unicode-ident",
+]
 
 [[package]]
 name = "ruint"

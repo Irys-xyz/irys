@@ -1,5 +1,5 @@
 use actix::SystemService;
-use actix::{Actor, Context, Handler, Message, MessageResponse};
+use actix::{Actor, ActorContext, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
 use irys_config::StorageSubmodulesConfig;
@@ -22,6 +22,7 @@ use tracing::{debug, error, trace, warn};
 
 use crate::block_index_service::BlockIndexReadGuard;
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
+use crate::services::Stop;
 
 /// Allows for overriding of the consensus parameters for ledgers and partitions
 #[derive(Debug, Clone, Default)]
@@ -238,6 +239,14 @@ impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
     ) -> Self::Result {
         let pa = self.partition_assignments.read().unwrap();
         pa.get_assignment(msg.0)
+    }
+}
+
+impl Handler<Stop> for EpochServiceActor {
+    type Result = ();
+
+    fn handle(&mut self, _msg: Stop, ctx: &mut Self::Context) {
+        ctx.stop();
     }
 }
 

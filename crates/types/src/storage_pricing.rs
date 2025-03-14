@@ -372,6 +372,44 @@ impl Amount<(IrysPrice, Usd)> {
         Ok(Amount::new(ema_value))
     }
 
+    pub fn to_ema(self) -> Amount<(Ema, Usd)> {
+        Amount::new(self.amount)
+    }
+
+    /// Add extra percentage on top of the existing price.
+    /// Percentage must be expressed using BPS_SCALE.
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
+        // total = amount * (1 + percentage) / SCALE
+        let one_plus = safe_add(BPS_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
+        Ok(Self::new(total))
+    }
+
+    /// Remove extra percentage on top of the existing price.
+    /// Percentage must be expressed using BPS_SCALE.
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn sub_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
+        // total = amount * (1 - percentage) / SCALE
+        let one_plus = safe_sub(BPS_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
+        Ok(Self::new(total))
+    }
+}
+
+impl Amount<(Ema, Usd)> {
+    pub fn to_irys_price(self) -> Amount<(IrysPrice, Usd)> {
+        Amount::new(self.amount)
+    }
+
     /// Add extra percentage on top of the existing price.
     /// Percentage must be expressed using BPS_SCALE.
     ///
