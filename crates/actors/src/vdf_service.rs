@@ -156,7 +156,6 @@ mod tests {
     use irys_storage::ii;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{Address, H256List, IrysBlockHeader, StorageConfig, H256};
-    
 
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
