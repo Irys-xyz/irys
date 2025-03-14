@@ -41,10 +41,6 @@ pub struct ChunkCacheService {
     pub shutdown: GracefulShutdown,
 }
 
-// TODO: improve this, store state in-memory (derived from DB state) to reduce db lookups
-// take into account other usage (i.e API/gossip) for cache expiry
-// partition expiries to prevent holding the write lock for too long
-// use a two-stage pass - read only find, and then a write-locked prune (with checks to make sure expiry hasn't been updated inbetween)
 impl ChunkCacheService {
     pub fn spawn_service(
         exec: &TaskExecutor,
