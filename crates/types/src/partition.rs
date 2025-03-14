@@ -29,7 +29,7 @@ pub struct PartitionAssignment {
     /// If assigned to a ledger, the ledger number
     pub ledger_id: Option<u32>,
     /// If assigned to a ledger, the index in the ledger
-    pub slot_index: Option<usize>,
+    pub slot_index: Option<u64>,
 }
 
 impl Default for PartitionAssignment {
