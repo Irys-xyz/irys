@@ -1,4 +1,6 @@
-use std::{ops::Deref, sync::Arc};
+use actix::Message;
+use core::ops::Deref;
+use std::sync::Arc;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::{cache_service::CacheServiceAction, ema_service::EmaServiceMessage};
@@ -53,3 +55,8 @@ impl ServiceSendersInner {
         (senders, receivers)
     }
 }
+
+/// Stop the actor
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct Stop;

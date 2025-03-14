@@ -42,7 +42,6 @@ actix-http.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-semver.workspace = true
 
 alloy-network = { path = "../../ext/alloy/crates/network" }
 alloy-signer-local.workspace = true
@@ -57,7 +56,10 @@ futures.workspace = true
 reth-tracing.workspace = true
 hex.workspace = true
 test-fuzz.workspace = true
-k256 = { version = "0.13", default-features = false, features = ["ecdsa", "serde"] }
+k256 = { version = "0.13", default-features = false, features = [
+    "ecdsa",
+    "serde",
+] }
 alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-provider.workspace = true
 core_affinity = "0.8.1"

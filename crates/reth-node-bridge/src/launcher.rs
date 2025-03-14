@@ -45,7 +45,7 @@ use reth_rpc_engine_api::{capabilities::EngineCapabilities, EngineApi};
 use reth_tasks::TaskExecutor;
 use reth_tokio_util::EventSender;
 use reth_tracing::tracing::{debug, error, info, warn};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::{mpsc::unbounded_channel, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -136,11 +136,8 @@ where
             ..
         } = hooks;
 
-        let (reload_tx, reload_rx) = unbounded_channel();
-
         // TODO: fix this.
         let irys_ext = IrysExt {
-            reload: Arc::new(RwLock::new(reload_tx)),
             provider: irys_provider,
         };
 
@@ -470,19 +467,24 @@ where
             .into_built_payload_stream()
             .fuse();
         let chainspec = ctx.chain_spec();
-        let (exit, _rx) = oneshot::channel();
+        let (exit, rx) = oneshot::channel();
         info!(target: "reth::cli", "Starting consensus engine");
-        ctx.task_executor().spawn_critical("consensus engine", async move {
-            if let Some(initial_target) = initial_target {
-                debug!(target: "reth::cli", %initial_target,  "start backfill sync");
-                eth_service.orchestrator_mut().start_backfill_sync(initial_target);
-            }
+        ctx.task_executor().spawn_critical_with_shutdown_signal("consensus engine", |shutdown| {
+            async move {
+                if let Some(initial_target) = initial_target {
+                    debug!(target: "reth::cli", %initial_target,  "start backfill sync");
+                    eth_service.orchestrator_mut().start_backfill_sync(initial_target);
+                }
 
-            let mut res = Ok(());
+                let mut res = Ok(());
 
-            // advance the chain and await payloads built locally to add into the engine api tree handler to prevent re-execution if that block is received as payload from the CL
-            loop {
-                tokio::select! {
+                // advance the chain and await payloads built locally to add into the engine api tree handler to prevent re-execution if that block is received as payload from the CL
+                loop {
+                    tokio::select! {
+                    _shutdown = shutdown.clone() => {
+                        debug!("Received shutdown signal for consensus engine, shutting down...");
+                        break;
+                    }
                     payload = built_payloads.select_next_some() => {
                         if let Some(executed_block) = payload.executed_block() {
                             debug!(target: "reth::cli", block=?executed_block.block().num_hash(),  "inserting built payload");
@@ -522,9 +524,11 @@ where
                         }
                     }
                 }
-            }
+                }
 
-            let _ = exit.send(res);
+                debug!("Consensus engine stopped");
+                let _ = exit.send(res);
+            }
         });
 
         let full_node = FullNode {
@@ -546,8 +550,7 @@ where
 
         let handle = NodeHandle {
             node_exit_future: NodeExitFuture::new(
-                // async { rx.await? },
-                reload_rx,
+                async { rx.await? },
                 full_node.config.debug.terminate,
             ),
             node: full_node,

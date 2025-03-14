@@ -24,7 +24,7 @@ use reth_node_api::{
 use reth_node_ethereum::{node::EthereumPayloadBuilder, EthEvmConfig, EthExecutorProvider};
 use reth_primitives::{Header, TransactionSigned};
 use revm::ContextPrecompile;
-use revm_primitives::StatefulPrecompile;
+use revm_primitives::{PrecompileError, PrecompileErrors, StatefulPrecompile};
 use std::sync::Arc;
 use tracing::info;
 
@@ -163,6 +163,22 @@ pub struct WrappedPrecompile {
 impl StatefulPrecompile for WrappedPrecompile {
     // wrapper so it calls it like a normal precompile
     fn call(&self, bytes: &Bytes, gas_price: u64, env: &Env) -> PrecompileResult {
+        let provider_guard = self
+            .precompile_state_provider
+            .provider
+            .read()
+            .map_err(|_| {
+                PrecompileErrors::Error(PrecompileError::Other(
+                    "Failed to acquire read lock on IrysRethProvider".to_owned(),
+                ))
+            })?;
+        let _provider =
+            provider_guard
+                .as_ref()
+                .ok_or(PrecompileErrors::Error(PrecompileError::Other(
+                    "IrysRethProvider not initialized".to_owned(),
+                )))?;
+        // Use the original provider since we just needed to verify it's initialized
         (self.precompile)(bytes, gas_price, env, &self.precompile_state_provider)
     }
 }

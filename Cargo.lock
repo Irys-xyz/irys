@@ -2237,9 +2237,9 @@ dependencies = [
 
 [[package]]
 name = "core_affinity"
-version = "0.8.1"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "622892f5635ce1fc38c8f16dfc938553ed64af482edb5e150bf4caedbfcb2304"
+checksum = "a034b3a7b624016c6e13f5df875747cc25f884156aad2abd12b6c46797971342"
 dependencies = [
  "libc",
  "num_cpus",
@@ -4014,7 +4014,6 @@ dependencies = [
  "rstest",
  "rust_decimal",
  "rust_decimal_macros",
- "semver 1.0.24",
  "tempfile",
  "test-log",
  "thiserror 1.0.69",
@@ -4108,12 +4107,30 @@ dependencies = [
  "reth-primitives",
  "reth-tracing",
  "rstest",
- "semver 1.0.24",
  "serde_json",
  "sha2 0.10.8",
  "test-fuzz",
  "test-log",
  "tokio",
+ "toml",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "irys-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "eyre",
+ "irys-config",
+ "irys-database",
+ "irys-types",
+ "reth-node-core",
+ "reth-tracing",
+ "serde_json",
  "toml",
  "tracing",
  "tracing-error",
@@ -7784,7 +7801,6 @@ dependencies = [
  "shellexpand",
  "strum",
  "thiserror 1.0.69",
- "tokio",
  "toml",
  "tracing",
  "vergen",
