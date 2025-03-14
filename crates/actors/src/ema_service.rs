@@ -151,8 +151,8 @@ impl Inner {
                             self.price_ctx.block_previous.ema_irys_price,
                         )
                         .unwrap_or_else(|err| {
-                            tracing::warn!(?err, "price overflow, using genesis EMA price");
-                            self.price_ctx.block_previous_ema.ema_irys_price
+                            tracing::warn!(?err, "price overflow, using previous block EMA price");
+                            self.price_ctx.block_previous.ema_irys_price
                         })
                 } else {
                     // Now we have have generic handling.
@@ -626,6 +626,65 @@ mod tests {
                 .calculate_ema(price_adjustment_interval, prev_price.ema)
                 .unwrap();
             assert_eq!(ema_computed, ema_response);
+        }
+
+        #[test(tokio::test)]
+        #[rstest]
+        // first interval uses genesis as base
+        #[case(5, 0)]
+        #[case(8, 0)]
+        #[case(9, 0)]
+        // second interval uses 1st intervals final EMA as price base
+        #[case(15, 9)]
+        #[case(19, 9)]
+        // third interval uses 2nd intervals final EMA as price base
+        #[case(20, 19)]
+        #[case(29, 19)]
+        #[case(28, 19)]
+        #[case(27, 19)]
+        async fn oracle_price_gets_capped(#[case] block_count: u64, #[case] prev_ema_idx: usize) {
+            // prepare
+            let price_adjustment_interval = 10;
+            let token_price_safe_range = Amount::percentage(dec!(0.1)).unwrap();
+            let ctx = TestCtx::setup(
+                block_count,
+                Config {
+                    price_adjustment_interval,
+                    token_price_safe_range, // 10%
+                    ..Config::testnet()
+                },
+            );
+            let prev_ema_price = ctx.prices[prev_ema_idx].clone().ema;
+            let math_ops: [Box<dyn Fn(Amount<Percentage>) -> IrysTokenPrice>; 2] = [
+                Box::new(|mul| prev_ema_price.add_multiplier(mul).unwrap()),
+                Box::new(|mul| prev_ema_price.sub_multiplier(mul).unwrap()),
+            ];
+
+            for math_op in math_ops {
+                // action
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let mul_outside_of_range = Amount::percentage(dec!(0.100001)).unwrap();
+                let oracle_price = math_op(mul_outside_of_range);
+                ctx.ema_sender
+                    .send(EmaServiceMessage::GetEmaForNewBlock {
+                        height_of_new_block: block_count,
+                        response: tx,
+                        oracle_price,
+                    })
+                    .unwrap();
+                let new_oracle_price = rx.await.unwrap().unwrap().range_adjusted_oracle_price;
+
+                // assert
+                assert_ne!(
+                    new_oracle_price, oracle_price,
+                    "the oracle price must differ"
+                );
+                let expected_capped_price = math_op(token_price_safe_range);
+                assert_eq!(
+                    expected_capped_price, new_oracle_price,
+                    "expect the price to get capped"
+                );
+            }
         }
 
         #[test(tokio::test)]
