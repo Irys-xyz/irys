@@ -21,7 +21,6 @@ actix-rt.workspace = true
 env_logger = "0.11"
 
 tokio.workspace = true
-tokio-stream.workspace = true
 reth-db.workspace = true
 irys-primitives.workspace = true
 eyre.workspace = true
@@ -35,7 +34,6 @@ irys-testing-utils.workspace = true
 base58.workspace = true
 futures.workspace = true
 rust_decimal.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }

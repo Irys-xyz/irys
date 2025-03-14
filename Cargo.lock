@@ -4016,9 +4016,7 @@ dependencies = [
  "rust_decimal_macros",
  "tempfile",
  "test-log",
- "thiserror 1.0.69",
  "tokio",
- "tokio-stream",
  "tracing",
  "tracing-subscriber",
 ]
