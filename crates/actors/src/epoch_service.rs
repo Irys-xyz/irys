@@ -986,7 +986,8 @@ mod tests {
             chain_id: 333,
         };
         let num_chunks_in_partition = storage_config.num_chunks_in_partition;
-        let _tmp_dir = setup_tracing_and_temp_dir(Some("add_slots_test"), false);
+        let tmp_dir = setup_tracing_and_temp_dir(Some("add_slots_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
 
         let config = EpochServiceConfig {
             capacity_scalar: 100,
@@ -996,7 +997,11 @@ mod tests {
         };
         let num_blocks_in_epoch = config.num_blocks_in_epoch;
 
-        let arc_config = Arc::new(IrysNodeConfig::default());
+        let arc_config = Arc::new(IrysNodeConfig {
+            base_directory: base_path.clone(),
+            ..IrysNodeConfig::default()
+        });
+
         let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
             BlockIndex::default()
                 .reset(&arc_config.clone())
