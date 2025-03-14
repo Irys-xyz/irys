@@ -111,7 +111,7 @@ impl EmaService {
 }
 
 impl Inner {
-    // #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err)]
     async fn handle_message(&mut self, msg: EmaServiceMessage) -> eyre::Result<()> {
         match msg {
             EmaServiceMessage::GetCurrentEmaForPricing { response } => {
@@ -125,7 +125,7 @@ impl Inner {
             } => {
                 // the first 2 adjustment intervals have special handling where we calculate the
                 // EMA for each block using the value from the preceding one
-                let new_ema = if (height_of_new_block) <= (self.blocks_in_interval * 2) {
+                let new_ema = if height_of_new_block <= (self.blocks_in_interval * 2) {
                     // calculate the new EMA using the current oracle price + ema price
                     oracle_price.calculate_ema(
                         // we use the full interval for calculations even if in reality it's only 1 block diff
