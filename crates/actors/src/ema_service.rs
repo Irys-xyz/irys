@@ -1,5 +1,5 @@
 //! EMA service module. It is responsible for keeping track of Irys token price readjustment period.
-use crate::block_tree_service::BlockTreeReadGuard;
+use crate::block_tree_service::{get_block, get_canonical_chain, BlockTreeReadGuard};
 use futures::future::Either;
 use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height,
@@ -21,6 +21,12 @@ pub enum EmaServiceMessage {
     GetCurrentEmaForPricing {
         response: oneshot::Sender<IrysTokenPrice>,
     },
+    /// Validate that the Oracle prices fall within the expected range
+    ValidateOraclePrice {
+        block_height: u64,
+        oracle_price: IrysTokenPrice,
+        response: oneshot::Sender<eyre::Result<PriceStatus>>,
+    },
     /// Returns the EMA irys price that must be used in the next EMA adjustment block
     GetEmaForNewBlock {
         height_of_new_block: u64,
@@ -29,6 +35,12 @@ pub enum EmaServiceMessage {
     },
     /// Supposted to be sent whenever Irys produces a new confirmed block. The EMA service will refrech its cache.
     NewConfirmedBlock,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PriceStatus {
+    Valid,
+    Invalid,
 }
 
 #[derive(Debug)]
@@ -121,12 +133,65 @@ impl EmaService {
 }
 
 impl Inner {
-    #[tracing::instrument(skip_all, err)]
+    // #[tracing::instrument(skip_all, err)]
     async fn handle_message(&mut self, msg: EmaServiceMessage) -> eyre::Result<()> {
         match msg {
             EmaServiceMessage::GetCurrentEmaForPricing { response } => {
                 let _ = response.send(self.price_ctx.ema_price_to_use()).
                     inspect_err(|_| tracing::warn!("current EMA cannot be returned, sender has dropped its half of the channel"));
+            }
+            EmaServiceMessage::ValidateOraclePrice {
+                block_height,
+                oracle_price,
+                response,
+            } => {
+                let last_ema_height =
+                    previous_ema_recalculation_block_height(block_height, self.blocks_in_interval);
+
+                // First, see if we already have the relevant block header in our local cache
+                let cached_header = [
+                    &self.price_ctx.block_previous_ema,
+                    &self.price_ctx.block_previous_ema_predecessor,
+                    &self.price_ctx.block_previous,
+                ]
+                .into_iter()
+                .find(|hdr| hdr.height == last_ema_height);
+
+                // If not found locally, fetch it from the canonical chain
+                let block_header = if let Some(cached_header) = cached_header {
+                    cached_header.clone()
+                } else {
+                    // Safely acquire the canonical chain
+                    let canonical_chain = get_canonical_chain(self.block_tree_read_guard.clone())
+                        .await?
+                        .0;
+                    let (_, latest_block_height, ..) =
+                        canonical_chain.last().expect("canonical chain is empty");
+
+                    // Attempt to find the needed block in the chain
+                    price_cache_context::fetch_block_with_height(
+                        last_ema_height,
+                        self.block_tree_read_guard.clone(),
+                        &canonical_chain,
+                        *latest_block_height,
+                    )
+                    .await?
+                };
+
+                // Now apply the safe-range check
+                let capped_oracle_price = bound_in_min_max_range(
+                    oracle_price,
+                    self.token_price_safe_range,
+                    self.price_ctx.block_previous_ema.ema_irys_price,
+                );
+
+                let price_status = if oracle_price == capped_oracle_price {
+                    PriceStatus::Valid
+                } else {
+                    PriceStatus::Invalid
+                };
+
+                let _ = response.send(Ok(price_status));
             }
             EmaServiceMessage::GetEmaForNewBlock {
                 response,
@@ -279,19 +344,13 @@ mod price_cache_context {
 
             // utility fn to fetch the block at a given height
             let fetch_block_with_height = async |height: u64| {
-                let canonical_len = canonical_chain.len();
-                let diff_from_latest_height = latest_block_height.saturating_sub(height) as usize;
-                let adjusted_index = canonical_len
-                    .saturating_sub(diff_from_latest_height)
-                    .saturating_sub(1); // -1 because heights are zero based
-                let (hash, new_height, ..) = canonical_chain.get(adjusted_index).unwrap();
-                assert_eq!(
-                    height, *new_height,
-                    "height mismatch in the canonical chain data"
-                );
-                get_block(block_tree_read_guard.clone(), *hash)
-                    .await
-                    .and_then(|block| block.ok_or_else(|| eyre::eyre!("block hash {hash:?} from canonical chain cannot be retrieved from the block index")))
+                fetch_block_with_height(
+                    height,
+                    block_tree_read_guard.clone(),
+                    &canonical_chain,
+                    *latest_block_height,
+                )
+                .await
             };
 
             // fetch the blocks concurrently
@@ -319,6 +378,32 @@ mod price_cache_context {
         pub(crate) fn ema_price_to_use(&self) -> IrysTokenPrice {
             self.block_two_adj_intervals_ago.ema_irys_price
         }
+    }
+
+    pub async fn fetch_block_with_height(
+        height: u64,
+        block_tree_read_guard: BlockTreeReadGuard,
+        canonical_chain: &[(
+            irys_types::H256,
+            u64,
+            Vec<irys_types::H256>,
+            Vec<irys_types::H256>,
+        )],
+        latest_block_height: u64,
+    ) -> Result<IrysBlockHeader, eyre::Error> {
+        let canonical_len = canonical_chain.len();
+        let diff_from_latest_height = latest_block_height.saturating_sub(height) as usize;
+        let adjusted_index = canonical_len
+            .saturating_sub(diff_from_latest_height)
+            .saturating_sub(1); // -1 because heights are zero based
+        let (hash, new_height, ..) = canonical_chain.get(adjusted_index).unwrap();
+        assert_eq!(
+            height, *new_height,
+            "height mismatch in the canonical chain data"
+        );
+        get_block(block_tree_read_guard, *hash)
+                .await
+                .and_then(|block| block.ok_or_else(|| eyre::eyre!("block hash {hash:?} from canonical chain cannot be retrieved from the block index")))
     }
 
     #[cfg(test)]

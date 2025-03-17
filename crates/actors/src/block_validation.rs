@@ -1,8 +1,11 @@
 use crate::{
-    block_index_service::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
+    block_index_service::BlockIndexReadGuard,
+    ema_service::{EmaServiceMessage, PriceStatus},
+    epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number,
 };
 use base58::ToBase58;
+use eyre::ensure;
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
@@ -26,11 +29,12 @@ pub async fn prevalidate_block(
     vdf_config: VDFStepsConfig,
     steps_guard: VdfStepsReadGuard,
     _miner_address: Address,
+    ema_serviece_sendr: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     debug!(
-        "Prevalidating block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "Prevalidating block",
     );
     if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
         return Err(eyre::eyre!(
@@ -41,26 +45,26 @@ pub async fn prevalidate_block(
     // Check prev_output (vdf)
     prev_output_is_valid(&block, &previous_block)?;
     debug!(
-        "prev_output_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "prev_output_is_valid",
     );
 
     // Check the difficulty
     difficulty_is_valid(&block, &previous_block, &difficulty_config)?;
 
     debug!(
-        "difficulty_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "difficulty_is_valid",
     );
 
     // Check the cumulative difficulty
     cumulative_difficulty_is_valid(&block, &previous_block)?;
     debug!(
-        "cumulative_difficulty_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "cumulative_difficulty_is_valid",
     );
 
     check_poa_data_expiration(&block.poa, &_partitions_guard)?;
@@ -69,27 +73,53 @@ pub async fn prevalidate_block(
     // Check the solution_hash
     solution_hash_is_valid(&block)?;
     debug!(
-        "solution_hash_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "solution_hash_is_valid",
     );
 
     // Recall range check
     recall_recall_range_is_valid(&block, &storage_config, &steps_guard)?;
     debug!(
-        "recall_recall_range_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "recall_recall_range_is_valid",
     );
 
     // We only check last_step_checkpoints during pre-validation
     last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config).await?;
     debug!(
-        "last_step_checkpoints_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "last_step_checkpoints_is_valid",
     );
 
+    // Check that the oracle price does not exceed the EMA pricing parameters
+    check_valid_oracle_price(&block, &ema_serviece_sendr).await?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "check_valid_oracle_price",
+    );
+
+    Ok(())
+}
+
+async fn check_valid_oracle_price(
+    block: &IrysBlockHeader,
+    ema_serviece_sendr: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+) -> eyre::Result<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    ema_serviece_sendr.send(EmaServiceMessage::ValidateOraclePrice {
+        block_height: block.height,
+        oracle_price: block.oracle_irys_price,
+        response: tx,
+    })?;
+    let response = rx.await??;
+    ensure!(
+        response == PriceStatus::Valid,
+        "Oracle price exceeds the defined bounds"
+    );
     Ok(())
 }
 

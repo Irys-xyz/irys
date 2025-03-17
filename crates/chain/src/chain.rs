@@ -446,6 +446,7 @@ pub async fn start_irys_node(
                     db: irys_db.clone(),
                     vdf_config: vdf_config.clone(),
                     vdf_steps_guard: vdf_steps_guard.clone(),
+                    service_senders: service_senders.clone(),
                 };
                 let block_discovery_arbiter = Arbiter::new();
                 let block_discovery_addr = BlockDiscoveryActor::start_in_arbiter(
