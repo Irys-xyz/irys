@@ -11,7 +11,6 @@ use reth_db::table::Table;
 use reth_db::transaction::{DbTx, DbTxMut};
 use reth_db::{DatabaseEnv, TableViewer, Tables};
 use reth_node_builder::NodeTypesWithDBAdapter;
-use reth_node_core::irys_ext::{IrysExt, ReloadPayload};
 use reth_node_ethereum::EthereumNode;
 use reth_provider::providers::BlockchainProvider2;
 use reth_provider::{ChainSpecProvider, StateProviderFactory, StaticFileProviderFactory};
@@ -49,7 +48,6 @@ pub struct GenesisInfo {
 
 pub fn add_genesis_block(
     provider: &BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
-    ext: &IrysExt,
     info: GenesisInfo,
 ) -> RpcResult<Genesis> {
     warn!("genesis reloading via reth RPC is deprecated");
@@ -186,34 +184,11 @@ pub fn add_genesis_block(
     // overwrite alloc
     chain.genesis.alloc = after_btree;
 
-    // trigger reload
-    // todo: redo this Arc<Mutex<...>> nonsense, ideally with a oneshot channel
-    // let v = self.irys_ext.0.lock().map_err(|e| {
-    //     ErrorObjectOwned::owned::<String>(
-    //         -32080,
-    //         "error locking reload channel",
-    //         Some(e.to_string()),
-    //     )
-    // })?;
-
-    let sender = ext.reload.write().map_err(|e| {
-        ErrorObjectOwned::owned::<String>(
-            -32080,
-            "error locking reload channel",
-            Some(e.to_string()),
-        )
-    })?;
-
     let hash = chain.genesis_hash();
     let header = serde_json::to_string(&chain.sealed_genesis_header())
         .expect("Unable to serialize genesis header");
     error!("Header: {}", &header);
     error!("Written genesis block (hash: {}), reloading...", &hash);
-
-    // WARNING: RACE CONDITION
-    // the reload operation doesn't wait for the response of this method/RPC call to finish, it *does* have a 500ms delay, but that might not be
-    // sufficient in certain conditions
-    let _res = sender.send(ReloadPayload::ReloadConfig(chain.clone()));
 
     Ok(chain.genesis)
 }

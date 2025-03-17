@@ -446,7 +446,30 @@ mod tests {
         let storage_config = StorageConfig::new(&testnet_config);
         let epoch_config = EpochServiceConfig::new(&testnet_config);
 
-        let epoch_service = EpochServiceActor::new(epoch_config.clone(), &testnet_config);
+        let mut config = IrysNodeConfig::new(&testnet_config);
+        config.base_directory = data_dir.path().to_path_buf();
+        let arc_config = Arc::new(config);
+
+        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
+            BlockIndex::default()
+                .reset(&arc_config.clone())
+                .unwrap()
+                .init(arc_config.clone())
+                .await
+                .unwrap(),
+        ));
+
+        let block_index_actor =
+            BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        SystemRegistry::set(block_index_actor.clone());
+
+        let block_index_guard = block_index_actor
+            .send(GetBlockIndexGuardMessage)
+            .await
+            .unwrap();
+
+        let epoch_service =
+            EpochServiceActor::new(epoch_config.clone(), &testnet_config, block_index_guard);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers
@@ -471,22 +494,6 @@ mod tests {
         let sub_slots = ledgers.get_slots(Ledger::Submit);
 
         let partition_hash = sub_slots[0].partitions[0];
-        let mut config = IrysNodeConfig::new(&testnet_config);
-        config.base_directory = data_dir.path().to_path_buf();
-        let arc_config = Arc::new(config);
-
-        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
-            BlockIndex::default()
-                .reset(&arc_config.clone())
-                .unwrap()
-                .init(arc_config.clone())
-                .await
-                .unwrap(),
-        ));
-
-        let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
-        SystemRegistry::set(block_index_actor.start());
-
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),
             all_txs: Arc::new(vec![]),

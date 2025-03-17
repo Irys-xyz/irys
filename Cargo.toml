@@ -17,6 +17,7 @@ members = [
   "crates/debug-utils",
   "xtask",
   "crates/price-oracle",
+  "crates/cli",
 ]
 resolver = "2"
 
@@ -59,13 +60,13 @@ alloy-core = { path = "./ext/alloy-core/crates/core" }
 alloy-eips = { path = "./ext/alloy/crates/eips", default-features = false }
 alloy-genesis = { path = "./ext/alloy/crates/genesis", default-features = false }
 alloy-primitives = { path = "./ext/alloy-core/crates/primitives", features = ["arbitrary"] }
-rand = "0.8.5"
+rand = "0.8"
 hex = "0.4"
-base64-url = "2.0.0"
+base64-url = "2"
 alloy-rlp = "0.3.4"
 alloy-rpc-types = { path = "./ext/alloy/crates/rpc-types" }
 alloy-rpc-types-engine = { path = "./ext/alloy/crates/rpc-types-engine", features = ["serde"] }
-
+clap = { version = "4", features = ["derive"] }
 alloy-rpc-types-trace = { path = "./ext/alloy/crates/rpc-types-trace" }
 reth-e2e-test-utils = { path = "./ext/reth/crates/e2e-test-utils" }
 alloy-serde = { path = "./ext/alloy/crates/serde", default-features = false }

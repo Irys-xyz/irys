@@ -9,8 +9,10 @@ use crate::{
     block_index_service::{BlockIndexReadGuard, BlockIndexService},
     block_producer::BlockConfirmedMessage,
     chunk_migration_service::ChunkMigrationService,
+    ema_service::EmaServiceMessage,
     mempool_service::MempoolService,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    services::ServiceSenders,
     validation_service::{RequestValidationMessage, ValidationService},
     BlockFinalizedMessage,
 };
@@ -71,7 +73,7 @@ impl Handler<GetBlockTreeGuardMessage> for BlockTreeService {
 //------------------------------------------------------------------------------
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BlockTreeService {
     db: Option<DatabaseProvider>,
     /// Block tree internal state
@@ -82,6 +84,14 @@ pub struct BlockTreeService {
     pub block_index_guard: Option<BlockIndexReadGuard>,
     /// Global storage config
     pub storage_config: StorageConfig,
+    /// Channels for communicating with the services
+    pub service_senders: ServiceSenders,
+}
+
+impl Default for BlockTreeService {
+    fn default() -> Self {
+        panic!("do not rely on the `default()` implementation of `BlockTreeService`")
+    }
 }
 
 impl Actor for BlockTreeService {
@@ -105,6 +115,7 @@ impl BlockTreeService {
         miner_address: &Address,
         block_index_guard: BlockIndexReadGuard,
         storage_config: StorageConfig,
+        service_senders: ServiceSenders,
     ) -> Self {
         let cache = BlockTreeCache::initialize_from_list(block_index, db.clone());
 
@@ -114,6 +125,7 @@ impl BlockTreeService {
             miner_address: *miner_address,
             block_index_guard: Some(block_index_guard),
             storage_config,
+            service_senders,
         }
     }
 
@@ -185,6 +197,10 @@ impl BlockTreeService {
         }
         let msg = BlockConfirmedMessage(confirmed_block.clone(), all_tx);
         MempoolService::from_registry().do_send(msg);
+        self.service_senders
+            .ema
+            .send(EmaServiceMessage::NewConfirmedBlock)
+            .expect("EMA service has unexpectedly become unreachable");
     }
 
     /// Checks if a block that is `chunk_migration_depth` blocks behind `arc_block`
