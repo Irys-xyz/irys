@@ -1,4 +1,5 @@
 use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _};
+pub use tempfile;
 use tempfile::TempDir;
 use tracing::debug;
 use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt, EnvFilter};

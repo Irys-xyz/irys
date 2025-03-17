@@ -3,7 +3,6 @@ use alloy_primitives::{bytes, Address};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
-use bytes::Buf;
 use eyre::{Error, OptionExt};
 use openssl::sha;
 use rand::RngCore;
@@ -107,19 +106,15 @@ impl Compact for U256 {
         // Create a temporary byte array for the big-endian representation of `self`
         let mut bytes = [0u8; 32];
         self.to_big_endian(&mut bytes);
-
-        // Write the bytes to the buffer
-        buf.put_slice(&bytes);
-
-        // Return the number of bytes written (32 bytes for a U256)
-        bytes.len()
+        bytes.to_compact(buf)
     }
 
     #[inline]
-    fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let res = Self::from_big_endian(&buf[..len]);
-        buf.advance(len);
-        (res, buf)
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        // Disambiguate and call the correct H256::from method
+        let (v, remaining_buf) = <[u8; 32]>::from_compact(buf, len);
+        // Fully qualify this call to avoid calling DecodeHash::from
+        (<U256 as From<[u8; 32]>>::from(v), remaining_buf)
     }
 }
 
@@ -759,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn test_u256_from_compact() {
+    fn test_u256_compact_round_trip() {
         // Create a U256 value and convert it to compact bytes
         let original_value = U256::from(123456789u64);
         let mut buf = BytesMut::with_capacity(32);

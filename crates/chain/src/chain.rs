@@ -4,7 +4,8 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use alloy_eips::BlockNumberOrTag;
-use irys_actors::cache_service::ChunkCacheServiceHandle;
+use irys_actors::cache_service::ChunkCacheService;
+use irys_actors::ema_service::EmaService;
 use irys_actors::packing::PackingConfig;
 use irys_actors::peer_list_service::PeerListService;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
@@ -17,8 +18,8 @@ use irys_actors::{
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
     epoch_service::{
-        EpochServiceActor, EpochServiceConfig, GetGenesisStorageModulesMessage,
-        GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
+        EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
+        GetPartitionAssignmentsGuardMessage,
     },
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
@@ -206,9 +207,8 @@ pub async fn start_irys_node(
 
                 check_db_version_and_run_migrations_if_needed(&reth_db, &irys_db).unwrap();
 
-                let (service_senders, service_receivers) = ServiceSenders::init();
-
-                ChunkCacheServiceHandle::spawn_service(service_senders.chunk_cache.clone(), service_receivers.chunk_cache, task_exec, irys_db.clone(), config.clone());
+                let (service_senders, receivers) = ServiceSenders::new();
+                let _handle = ChunkCacheService::spawn_service(&task_exec, irys_db.clone(), receivers.chunk_cache, config.clone());
 
                 let latest_block = latest_block_index
                     .map(|b| {
@@ -293,6 +293,11 @@ pub async fn start_irys_node(
                 SystemRegistry::set(block_index_actor.start());
                 let block_index_actor_addr = BlockIndexService::from_registry();
 
+                let block_index_guard = block_index_actor_addr
+                    .send(GetBlockIndexGuardMessage)
+                    .await
+                    .unwrap();
+
                 if at_genesis {
                     let msg = BlockFinalizedMessage {
                         block_header: arc_genesis.clone(),
@@ -316,8 +321,9 @@ pub async fn start_irys_node(
                     });
                 SystemRegistry::set(broadcast_mining_service.clone());
 
-                let mut epoch_service = EpochServiceActor::new(epoch_config, &config);
-                epoch_service.initialize(&irys_db).await;
+                let mut epoch_service = EpochServiceActor::new(epoch_config.clone(), &config, block_index_guard.clone());
+                // initialize the epoch service from block 1
+                let storage_module_infos = epoch_service.initialize(&irys_db, storage_module_config.clone()).await.expect("Failed to initialize epoch service");
                 let epoch_service_actor_addr = epoch_service.start();
 
                 // Retrieve ledger assignments
@@ -336,17 +342,6 @@ pub async fn start_irys_node(
                     .await
                     .unwrap();
 
-                let block_index_guard = block_index_actor_addr
-                    .send(GetBlockIndexGuardMessage)
-                    .await
-                    .unwrap();
-
-                // Get the genesis storage modules and their assigned partitions
-                let storage_module_infos = epoch_service_actor_addr
-                    .send(GetGenesisStorageModulesMessage(storage_module_config))
-                    .await
-                    .unwrap();
-
                 // Create a list of storage modules wrapping the storage files
                 for info in storage_module_infos {
                     let arc_module = Arc::new(
@@ -359,7 +354,6 @@ pub async fn start_irys_node(
                         .unwrap(),
                     );
                     storage_modules.push(arc_module.clone());
-                    // arc_module.pack_with_zeros();
                 }
 
 
@@ -369,6 +363,7 @@ pub async fn start_irys_node(
                     &miner_address,
                     block_index_guard.clone(),
                     storage_config.clone(),
+                    service_senders.clone(),
                 );
                 let block_tree_arbiter = Arbiter::new();
                 SystemRegistry::set(BlockTreeService::start_in_arbiter(
@@ -382,6 +377,7 @@ pub async fn start_irys_node(
                     .send(GetBlockTreeGuardMessage)
                     .await
                     .unwrap();
+                let _handle = EmaService::spawn_service(&task_exec, block_tree_guard.clone(),  receivers.ema, &config);
 
                 let peer_list_service = PeerListService::new(irys_db.clone());
                 let peer_list_arbiter = Arbiter::new();
@@ -480,7 +476,9 @@ pub async fn start_irys_node(
                     vdf_config: vdf_config.clone(),
                     vdf_steps_guard: vdf_steps_guard.clone(),
                     block_tree_guard: block_tree_guard.clone(),
+                    epoch_config: epoch_config.clone(),
                     price_oracle,
+                    service_senders: service_senders.clone(),
                 };
                 let block_producer_addr =
                     BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {

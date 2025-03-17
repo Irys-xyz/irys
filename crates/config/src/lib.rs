@@ -37,7 +37,7 @@ impl Default for IrysNodeConfig {
             .join(".irys");
 
         let testent_config = Config::testnet();
-        let chainspec_builder = IrysChainSpecBuilder::testnet();
+        let chainspec_builder = IrysChainSpecBuilder::from_config(&testent_config);
         Self {
             mining_signer: IrysSigner::random_signer(&testent_config),
             chainspec_builder,
@@ -62,7 +62,7 @@ impl IrysNodeConfig {
             base_directory: env::current_dir()
                 .expect("Unable to determine working dir, aborting")
                 .join(".irys"),
-            chainspec_builder: IrysChainSpecBuilder::testnet(),
+            chainspec_builder: IrysChainSpecBuilder::from_config(&config),
         }
     }
 

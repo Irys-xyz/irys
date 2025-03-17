@@ -3,7 +3,6 @@
 //! Core data types:
 //! - `Amount<(CostPerGb, Usd)>` - Cost in $USD of storing 1GB on irys (per single replica), data part of the config
 //! - `Amount<(IrysPrice, Usd)>` - Cost in $USD of a single $IRYS token, the data retrieved form oracles
-//! - `Amount<(Ema, Usd)>` - Exponential Moving Average for a single $IRYS token, the data to be stored in blocks
 //! - `Amount<(NetworkFee, Irys)>` - The cost in $IRYS that the user will have to pay to store his data on Irys
 
 use crate::U256;
@@ -31,7 +30,7 @@ const BPS_SCALE_NATIVE: u64 = 1_000_000;
 ///
 /// The actual scale is defined by the usage: pr
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Arbitrary, Default,
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Arbitrary, Default,
 )]
 pub struct Amount<T> {
     pub amount: U256,
@@ -174,10 +173,6 @@ pub mod phantoms {
     /// Currency denominator util type.
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct Irys;
-
-    /// Exponential Moving Average.
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
-    pub struct Ema;
 
     /// Decay rate to account for storage hardware getting cheaper.
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
@@ -339,8 +334,8 @@ impl Amount<(IrysPrice, Usd)> {
     pub fn calculate_ema(
         self,
         total_past_blocks: u64,
-        previous_ema: Amount<(Ema, Usd)>,
-    ) -> Result<Amount<(Ema, Usd)>> {
+        previous_ema: Amount<(IrysPrice, Usd)>,
+    ) -> Result<Amount<(IrysPrice, Usd)>> {
         // denominator = n+1
         let denom = U256::from(total_past_blocks)
             .checked_add(U256::one())
@@ -372,10 +367,6 @@ impl Amount<(IrysPrice, Usd)> {
         Ok(Amount::new(ema_value))
     }
 
-    pub fn to_ema(self) -> Amount<(Ema, Usd)> {
-        Amount::new(self.amount)
-    }
-
     /// Add extra percentage on top of the existing price.
     /// Percentage must be expressed using BPS_SCALE.
     ///
@@ -405,45 +396,15 @@ impl Amount<(IrysPrice, Usd)> {
     }
 }
 
-impl Amount<(Ema, Usd)> {
-    pub fn to_irys_price(self) -> Amount<(IrysPrice, Usd)> {
-        Amount::new(self.amount)
-    }
-
-    /// Add extra percentage on top of the existing price.
-    /// Percentage must be expressed using BPS_SCALE.
-    ///
-    /// # Errors
-    ///
-    /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
-    pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
-        // total = amount * (1 + percentage) / SCALE
-        let one_plus = safe_add(BPS_SCALE, percentage.amount)?;
-        let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
-        Ok(Self::new(total))
-    }
-
-    /// Remove extra percentage on top of the existing price.
-    /// Percentage must be expressed using BPS_SCALE.
-    ///
-    /// # Errors
-    ///
-    /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
-    pub fn sub_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
-        // total = amount * (1 - percentage) / SCALE
-        let one_plus = safe_sub(BPS_SCALE, percentage.amount)?;
-        let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
-        Ok(Self::new(total))
-    }
-}
-
-/// Basic Display impl
 impl<T> core::fmt::Display for Amount<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Convert to string as integer.
-        write!(f, "<{:?}>: {}", self._t, self.amount)
+        write!(f, "{}", self.amount)
+    }
+}
+
+impl<T> Debug for Amount<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.amount)
     }
 }
 

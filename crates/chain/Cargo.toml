@@ -69,6 +69,8 @@ awc = "3.5"
 irys-actors = { workspace = true, features = ["test-utils"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true
+test-log.workspace = true
+rstest.workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["alloy-sol-types", "alloy-contract"]

@@ -146,8 +146,12 @@ pub struct IrysBlockHeader {
     /// Metadata about the verifiable delay function, used for block verification purposes
     pub vdf_limiter_info: VDFLimiterInfo,
 
-    /// $IRYS token price expressed in $USD
-    pub irys_price: IrysTokenPrice,
+    /// $IRYS token price expressed in $USD, returned from the oracle
+    pub oracle_irys_price: IrysTokenPrice,
+
+    /// $IRYS token price expressed in $USD, updated only on EMA recalculation blocks.
+    /// This is what the protocol uses for different pricing calculation purposes.
+    pub ema_irys_price: IrysTokenPrice,
 }
 
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
@@ -368,7 +372,9 @@ impl IrysBlockHeader {
             ],
             evm_block_hash: B256::ZERO,
             miner_address: Address::ZERO,
-            irys_price: Amount::token(dec!(1.0))
+            oracle_irys_price: Amount::token(dec!(1.0))
+                .expect("dec!(1.0) must evaluate to a valid token amount"),
+            ema_irys_price: Amount::token(dec!(1.0))
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
             ..Default::default()
         }
@@ -410,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vdf_limiter_info_compact_round_trip() {
+    fn test_vdf_limiter_info_rlp_round_trip() {
         let data = VDFLimiterInfo {
             output: H256::random(),
             global_step_number: 42,
@@ -427,6 +433,29 @@ mod tests {
         let mut buffer = vec![];
         data.encode(&mut buffer);
         let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn test_vdf_limiter_info_compact_round_trip() {
+        let data = VDFLimiterInfo {
+            output: H256::random(),
+            global_step_number: 42,
+            seed: H256::random(),
+            next_seed: H256::random(),
+            prev_output: H256::random(),
+            last_step_checkpoints: H256List(vec![H256::random(), H256::random()]),
+            steps: H256List(vec![H256::random(), H256::random()]),
+            vdf_difficulty: Some(123),
+            next_vdf_difficulty: Some(321),
+        };
+
+        // action
+        let mut buffer = vec![];
+        data.to_compact(&mut buffer);
+        let (decoded, ..) = VDFLimiterInfo::from_compact(&mut buffer.as_slice(), buffer.len());
 
         // Assert
         assert_eq!(data, decoded);
