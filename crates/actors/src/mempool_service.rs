@@ -307,7 +307,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // Next validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
         let root_hash = chunk.data_root.0;
-        let target_offset = u128::from(chunk.byte_offset(self.storage_config.chunk_size));
+        let target_offset = u128::from(chunk.end_byte_offset(self.storage_config.chunk_size));
         let path_buff = &chunk.data_path;
 
         info!(
