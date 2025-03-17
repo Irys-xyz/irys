@@ -55,7 +55,7 @@ fn create_state(
         let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
         let tx = db.tx().unwrap();
 
-        let mut block = block_header_by_hash(&tx, &block_hash).unwrap().unwrap();
+        let mut block = block_header_by_hash(&tx, &block_hash, false).unwrap().unwrap();
         let global_step_number = block.vdf_limiter_info.global_step_number;
         let mut steps_remaining = capacity;
 
@@ -69,7 +69,7 @@ fn create_state(
                 }
             }
             // get the previous block
-            block = block_header_by_hash(&tx, &block.previous_block_hash)
+            block = block_header_by_hash(&tx, &block.previous_block_hash, false)
                 .unwrap()
                 .unwrap();
         }

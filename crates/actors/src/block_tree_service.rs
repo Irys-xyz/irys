@@ -137,7 +137,7 @@ impl BlockTreeService {
             .tx()
             .map_err(|e| eyre::eyre!("Failed to create transaction: {}", e))?;
 
-        let block_header = match block_header_by_hash(&tx, &block_hash) {
+        let block_header = match block_header_by_hash(&tx, &block_hash, false) {
             Ok(Some(header)) => header,
             Ok(None) => {
                 return Err(eyre::eyre!("No block header found for hash {}", block_hash));
@@ -559,7 +559,7 @@ impl BlockTreeCache {
 
         // Initialize cache with the start block
         let start_block_hash = block_index.get_item(start as usize).unwrap().block_hash;
-        let start_block = block_header_by_hash(&tx, &start_block_hash)
+        let start_block = block_header_by_hash(&tx, &start_block_hash, false)
             .unwrap()
             .unwrap();
         debug!(
@@ -575,7 +575,7 @@ impl BlockTreeCache {
                 .get_item(block_height as usize)
                 .unwrap()
                 .block_hash;
-            let block = block_header_by_hash(&tx, &block_hash).unwrap().unwrap();
+            let block = block_header_by_hash(&tx, &block_hash, false).unwrap().unwrap();
             let all_txs = Arc::new(Self::get_all_txs_for_block(&block, db.clone()).unwrap());
 
             cache

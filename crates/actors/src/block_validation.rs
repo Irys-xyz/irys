@@ -32,7 +32,13 @@ pub async fn prevalidate_block(
         &block.block_hash.0.to_base58(),
         &block.height
     );
-    if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
+
+    let poa_chunk: Vec<u8> = match &block.poa.chunk {
+        Some(chunk) => chunk.clone().into(),
+        None => return Err(eyre::eyre!("Missing PoA chunk to be pre validated"))
+    };
+
+    if block.chunk_hash != sha::sha256(&poa_chunk).into() {
         return Err(eyre::eyre!(
             "Invalid block: chunk hash distinct from PoA chunk hash"
         ));
@@ -327,7 +333,10 @@ pub fn poa_is_valid(
             config.chain_id,
         );
 
-        let mut poa_chunk: Vec<u8> = poa.chunk.clone().into();
+        let mut poa_chunk: Vec<u8> = match &poa.chunk {
+            Some(chunk) => chunk.clone().into(),
+            None => return Err(eyre::eyre!("Missing PoA chunk to be validated"))
+        };
         xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
 
         // Because all chunks are packed as config.chunk_size, if the proof chunk is
@@ -361,16 +370,19 @@ pub fn poa_is_valid(
             &mut entropy_chunk,
             config.chain_id,
         );
-
-        if entropy_chunk != poa.chunk.0 {
-            if poa.chunk.0.len() <= 32 {
-                debug!("Chunk PoA:{:?}", poa.chunk.0);
+        let poa_chunk: Vec<u8> = match &poa.chunk {
+            Some(chunk) => chunk.clone().into(),
+            None => return Err(eyre::eyre!("Missing PoA chunk to be validated"))
+        };
+        if entropy_chunk != poa_chunk {
+            if poa_chunk.len() <= 32 {
+                debug!("Chunk PoA:{:?}", poa_chunk);
                 debug!("Entropy  :{:?}", entropy_chunk);
             }
             return Err(eyre::eyre!(
                 "PoA capacity chunk mismatch {:?} /= {:?}",
                 entropy_chunk.first(),
-                poa.chunk.0.first()
+                poa_chunk.first()
             ));
         }
     }
@@ -640,7 +652,7 @@ mod tests {
         let poa = PoaData {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
-            chunk: Base64(poa_chunk.clone()),
+            chunk: Some(Base64(poa_chunk.clone())),
             ledger_id: Some(1),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 as u32,

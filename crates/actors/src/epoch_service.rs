@@ -287,7 +287,7 @@ impl EpochServiceActor {
             match block_height {
                 Some(b) => {
                     let block_header =
-                        database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash)
+                        database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash, false)
                             .unwrap()
                             .unwrap();
                     match self.perform_epoch_tasks(Arc::new(block_header)) {
@@ -344,7 +344,7 @@ impl EpochServiceActor {
         for i in 0..rg.num_blocks() {
             let item = rg.get_item(i as usize).unwrap();
             let block_hash = item.block_hash;
-            let block = block_header_by_hash(&tx, &block_hash).unwrap().unwrap();
+            let block = block_header_by_hash(&tx, &block_hash, false).unwrap().unwrap();
             debug!(
                 "index: {} height: {} hash: {}",
                 i,
