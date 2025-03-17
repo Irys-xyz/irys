@@ -4105,6 +4105,8 @@ dependencies = [
  "reth-primitives",
  "reth-tracing",
  "rstest",
+ "rust_decimal",
+ "rust_decimal_macros",
  "serde_json",
  "sha2 0.10.8",
  "test-fuzz",

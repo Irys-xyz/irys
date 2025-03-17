@@ -102,6 +102,14 @@ pub async fn prevalidate_block(
         "check_valid_oracle_price",
     );
 
+    // Check that the EMA has been correctly calculated
+    check_valid_ema_calculation(&block, &ema_serviece_sendr).await?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "check_valid_ema_calculation",
+    );
+
     Ok(())
 }
 
@@ -120,6 +128,22 @@ async fn check_valid_oracle_price(
         response == PriceStatus::Valid,
         "Oracle price exceeds the defined bounds"
     );
+    Ok(())
+}
+
+async fn check_valid_ema_calculation(
+    block: &IrysBlockHeader,
+    ema_serviece_sendr: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+) -> eyre::Result<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    ema_serviece_sendr.send(EmaServiceMessage::ValidateEmaPrice {
+        block_height: block.height,
+        ema_price: block.ema_irys_price,
+        oracle_price: block.oracle_irys_price,
+        response: tx,
+    })?;
+    let response = rx.await??;
+    ensure!(response == PriceStatus::Valid, "EMA price is invalid");
     Ok(())
 }
 

@@ -1,9 +1,13 @@
 use crate::utils::mine_block;
-use irys_actors::ema_service::EmaServiceMessage;
+use irys_actors::{
+    block_tree_service::{get_block, get_canonical_chain},
+    ema_service::EmaServiceMessage,
+};
 use irys_chain::{start_irys_node, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
-use irys_types::Config;
+use irys_types::{storage_pricing::Amount, Config, OracleConfig};
+use rust_decimal_macros::dec;
 
 #[test_log::test(tokio::test)]
 async fn serial_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<()> {
@@ -37,7 +41,7 @@ async fn serial_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::R
             "Expected the header to contain new & unique EMA irys price"
         );
     }
-    ctx.node.stop().await;
+
     Ok(())
 }
 
@@ -80,7 +84,40 @@ async fn serial_test_genesis_ema_price_updates_after_second_interval() -> eyre::
         "expected to use the EMA price registered in the 3rd block"
     );
 
-    ctx.node.stop().await;
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn serial_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
+    // setup
+    let price_adjustment_interval = 3;
+    let ctx = setup_with_config(Config {
+        price_adjustment_interval,
+        oracle_config: OracleConfig::Mock {
+            initial_price: Amount::token(dec!(1.0)).unwrap(),
+            percent_change: Amount::percentage(dec!(0.2)).unwrap(), // every block will increase price by 20%
+            // only change direction after 10 blocks
+            smoothing_interval: 10,
+        },
+        token_price_safe_range: Amount::percentage(dec!(0.1)).unwrap(), // 10% allowed diff from the previous EMA
+        ..Config::testnet()
+    })
+    .await?;
+
+    // mine 2 blocks
+    let (_header, _payload) = mine_block(&ctx.node).await?.unwrap();
+    let (_header, _payload) = mine_block(&ctx.node).await?.unwrap();
+
+    // assert that they've been added to the chain
+    let (chain, ..) = get_canonical_chain(ctx.node.block_tree_guard.clone())
+        .await
+        .unwrap();
+    assert_eq!(chain.len(), 3, "expected genesis + 2 new blocks");
+    let block = get_block(ctx.node.block_tree_guard, chain[2].0)
+        .await
+        .unwrap()
+        .unwrap();
+
     Ok(())
 }
 
@@ -95,11 +132,15 @@ struct TestCtx {
 }
 
 async fn setup(price_adjustment_interval: u64) -> eyre::Result<TestCtx> {
-    let temp_dir = temporary_directory(Some("test_ema"), false);
     let testnet_config = Config {
         price_adjustment_interval,
         ..Config::testnet()
     };
+    setup_with_config(testnet_config).await
+}
+
+async fn setup_with_config(testnet_config: Config) -> eyre::Result<TestCtx> {
+    let temp_dir = temporary_directory(Some("test_ema"), false);
     let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
     let storage_config = irys_types::StorageConfig::new(&testnet_config);
