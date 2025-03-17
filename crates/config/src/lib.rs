@@ -27,7 +27,7 @@ pub struct IrysNodeConfig {
     pub chainspec_builder: IrysChainSpecBuilder,
 }
 
-/// "sane" default configuration
+/// "standard" default configuration
 #[cfg(any(feature = "test-utils", test))]
 impl Default for IrysNodeConfig {
     fn default() -> Self {
