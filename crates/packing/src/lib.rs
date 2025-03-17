@@ -6,7 +6,7 @@ use irys_types::{
     partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk,
 };
 
-use irys_types::CHUNK_SIZE; // do not change where is used for CONFIG.chunk_size as this is hardcoded in C implementation
+use irys_types::CHUNK_SIZE; // CHUNK_SIZE is hardcoded in the C implementation and corresponds to CONFIG.chunk_size
 
 #[cfg(feature = "nvidia")]
 pub use irys_c::capacity_cuda;
@@ -156,7 +156,7 @@ pub fn capacity_pack_range_with_data_cuda_c(
     entropy_packing_iterations: u32,
     irys_chain_id: u64,
 ) {
-    let num_chunks: u32 = data.len() as u32 / CHUNK_SIZE as u32; // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
+    let num_chunks: u32 = data.len() as u32 / CHUNK_SIZE as u32; // CHUNK_SIZE is hardcoded in the C implementation and corresponds to CONFIG.chunk_size
     let mut entropy: Vec<u8> = Vec::with_capacity(data.len());
     capacity_pack_range_cuda_c(
         num_chunks,
@@ -388,7 +388,7 @@ mod tests {
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
         for _i in 0..num_chunks {
-            let mut chunk = [0u8; CHUNK_SIZE as usize]; // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
+            let mut chunk = [0u8; CHUNK_SIZE as usize]; // CHUNK_SIZE is hardcoded in the C implementation and corresponds to CONFIG.chunk_size
             rng.fill_bytes(&mut chunk);
             chunks.push(chunk.to_vec());
             chunks_rust.push(chunk.to_vec());
@@ -463,7 +463,7 @@ mod tests {
         rng.fill(&mut partition_hash);
 
         let num_chunks: usize = 512;
-        let mut chunks: Vec<u8> = Vec::with_capacity(num_chunks * CHUNK_SIZE as usize); // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
+        let mut chunks: Vec<u8> = Vec::with_capacity(num_chunks * CHUNK_SIZE as usize); // CHUNK_SIZE is hardcoded in the C implementation and corresponds to CONFIG.chunk_size
         let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
 
         for _i in 0..num_chunks {
