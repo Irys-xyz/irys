@@ -157,8 +157,19 @@ impl Handler<Stop> for VdfService {
 // Tests
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
+    use actix::SystemRegistry;
+    use irys_config::IrysNodeConfig;
+    use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized, Ledger};
     use irys_storage::ii;
-    use irys_types::{H256List, H256};
+    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_types::{H256List, IrysBlockHeader, StorageConfig, H256};
+
+    use crate::{
+        block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
+        BlockFinalizedMessage,
+    };
 
     use super::*;
 
@@ -208,5 +219,82 @@ mod tests {
             ]),
             get_all
         );
+    }
+
+    #[actix_rt::test]
+    #[ignore]
+    async fn test_create_state_performance() {
+        let testnet_config = Config {
+            num_chunks_in_partition: 51_872_000, // testnet.toml numbers
+            num_chunks_in_recall_range: 800,
+            ..Config::testnet()
+        };
+
+        // Create a storage config for testing
+        let storage_config = StorageConfig::new(&testnet_config);
+
+        let tmp_dir = setup_tracing_and_temp_dir(Some("create_state_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+
+        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+        let database_provider = DatabaseProvider(Arc::new(db));
+
+        let arc_config = Arc::new(IrysNodeConfig {
+            base_directory: base_path.clone(),
+            ..IrysNodeConfig::default()
+        });
+
+        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
+            BlockIndex::default()
+                .reset(&arc_config.clone())
+                .unwrap()
+                .init(arc_config.clone())
+                .await
+                .unwrap(),
+        ));
+
+        let block_index_actor =
+            BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        SystemRegistry::set(block_index_actor.clone());
+
+        let block_index_guard = block_index_actor
+            .send(GetBlockIndexGuardMessage)
+            .await
+            .unwrap();
+
+        let mut new_epoch_block = IrysBlockHeader::new_mock_header();
+        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = 0;
+
+        let now = Instant::now();
+        // index and store in db blocks
+        let mut height = 0;
+        let capacity = calc_capacity(&testnet_config) as u64;
+        while height <= capacity {
+            new_epoch_block.height = height;
+            new_epoch_block.previous_block_hash = new_epoch_block.block_hash;
+            new_epoch_block.block_hash = H256::random();
+
+            let msg = BlockFinalizedMessage {
+                block_header: Arc::new(new_epoch_block.clone()),
+                all_txs: Arc::new(vec![]),
+            };
+            match block_index_actor.send(msg).await {
+                Ok(_) => (), // debug!("block indexed"),
+                Err(err) => panic!("Failed to index block {:?}", err),
+            }
+
+            database_provider
+                .update_eyre(|tx| irys_database::insert_block_header(tx, &new_epoch_block))
+                .unwrap();
+            height += 1;
+        }
+        let elapsed = now.elapsed();
+        println!("Indexed: {} blocks in {:.2?}", height, elapsed);
+
+        let now = Instant::now();
+        let _ = VdfService::new(block_index_guard, database_provider, &testnet_config);
+        let elapsed = now.elapsed();
+
+        println!("VdfService vdf steps initialization time: {:.2?}", elapsed);
     }
 }
