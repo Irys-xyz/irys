@@ -16,7 +16,7 @@ pkg-config
 
 Local development commands:
 
-```
+```cli
 cargo xtask --help
 
 cargo xtask check
@@ -31,9 +31,8 @@ Testing code examples in comments
 
 ```cli
 cargo test --doc
-
-
 ```
+
 Testing Block Serialization
 
 ```cli
