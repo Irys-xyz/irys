@@ -2,9 +2,9 @@ use crate::utils::mine_block;
 use irys_actors::ema_service::EmaServiceMessage;
 use irys_chain::{start_irys_node, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
-use tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::Config;
+use tempfile::TempDir;
 
 #[test_log::test(tokio::test)]
 async fn serial_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<()> {
