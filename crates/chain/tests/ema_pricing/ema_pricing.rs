@@ -42,6 +42,7 @@ async fn serial_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::R
         );
     }
 
+    ctx.node.stop().await;
     Ok(())
 }
 
@@ -84,6 +85,7 @@ async fn serial_test_genesis_ema_price_updates_after_second_interval() -> eyre::
         "expected to use the EMA price registered in the 3rd block"
     );
 
+    ctx.node.stop().await;
     Ok(())
 }
 
@@ -115,7 +117,7 @@ async fn serial_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
         .await
         .unwrap();
     assert_eq!(chain.len(), 4, "expected genesis + 3 new blocks");
-    let genesis_block = get_block(ctx.node.block_tree_guard, chain[0].0)
+    let genesis_block = get_block(ctx.node.block_tree_guard.clone(), chain[0].0)
         .await
         .unwrap()
         .unwrap();
@@ -129,6 +131,7 @@ async fn serial_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
         price_prev = max_allowed_price;
     }
 
+    ctx.node.stop().await;
     Ok(())
 }
 
