@@ -35,7 +35,9 @@ pub async fn prevalidate_block(
 
     let poa_chunk: Vec<u8> = match &block.poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None => return Err(eyre::eyre!("Missing PoA chunk to be pre validated")),
+        None => 
+            // This should be impossible as block poa was generated in block_producer
+            return Err(eyre::eyre!("Missing PoA chunk to be pre validated")),
     };
 
     if block.chunk_hash != sha::sha256(&poa_chunk).into() {
@@ -268,6 +270,10 @@ pub fn poa_is_valid(
     miner_address: &Address,
 ) -> eyre::Result<()> {
     debug!("PoA validating mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_address, poa.partition_chunk_offset, poa.partition_hash, config.entropy_packing_iterations, config.chunk_size);
+    let mut poa_chunk: Vec<u8> = match &poa.chunk {
+        Some(chunk) => chunk.clone().into(),
+        None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
+    };
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_id)) =
         (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_id)
@@ -333,10 +339,6 @@ pub fn poa_is_valid(
             config.chain_id,
         );
 
-        let mut poa_chunk: Vec<u8> = match &poa.chunk {
-            Some(chunk) => chunk.clone().into(),
-            None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
-        };
         xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
 
         // Because all chunks are packed as config.chunk_size, if the proof chunk is
@@ -370,10 +372,6 @@ pub fn poa_is_valid(
             &mut entropy_chunk,
             config.chain_id,
         );
-        let poa_chunk: Vec<u8> = match &poa.chunk {
-            Some(chunk) => chunk.clone().into(),
-            None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
-        };
         if entropy_chunk != poa_chunk {
             if poa_chunk.len() <= 32 {
                 debug!("Chunk PoA:{:?}", poa_chunk);

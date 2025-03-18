@@ -11,7 +11,7 @@ use crate::tables::{
 use crate::metadata::MetadataKey;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionId, PeerListItem, PoaData, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
+    IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
 };
 use reth_db::cursor::DbDupCursorRO;
 
@@ -71,13 +71,8 @@ pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre:
     if let Some(chunk) = &block.poa.chunk {
         tx.put::<IrysPoAChunks>(block.block_hash, chunk.clone().into())?;
     };
-    let block_without_chunk = IrysBlockHeader {
-        poa: PoaData {
-            chunk: None,
-            ..block.poa.clone()
-        },
-        ..block.clone()
-    };
+    let mut block_without_chunk = block.clone();
+    block_without_chunk.poa.chunk = None;
     tx.put::<IrysBlockHeaders>(block.block_hash, block_without_chunk.into())?;
     Ok(())
 }
@@ -92,13 +87,10 @@ pub fn block_header_by_hash<T: DbTx>(
         .map(IrysBlockHeader::from);
 
     if include_chunk {
-        match block {
-            Some(ref mut b) => {
-                b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(|c| c.into())
-            }
-            None => (),
+        if let Some(ref mut b) = block {
+            b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
         }
-    };
+    }
 
     Ok(block)
 }
