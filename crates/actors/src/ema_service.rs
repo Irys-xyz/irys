@@ -228,8 +228,9 @@ impl Inner {
     ) -> Result<PriceStatus, eyre::Error> {
         // rebuild a new price context from historical data
         //
-        // TODO: WE CAN ONLY VALIDATE BLOCKS THAT HAVE BEEN PRODUCED
-        // WITHIN THE RANGE THAT THE BLOCK TREE GUARD KEEPS THEM iN THE CANONICAL CHAIN!
+        // TODO: CANONICAL CHAIN HAS IT'S OWN CACHE CLEANUP STRATEGY;
+        // IF THE BLOCK IS NOT AVAILABLE IN THE CACHE THEN WE CANNOT VALIDATE IT.
+        // ADD LOGIC TO READ IT FROM THE DB IN THAT CASE?
         let temp_price_context = PriceCacheContext::from_canonical_chain_subset(
             self.block_tree_read_guard.clone(),
             self.blocks_in_interval,
@@ -313,7 +314,7 @@ impl Inner {
 /// Cap the provided price value to fit within the max / min acceptable range.
 /// The range is defined by the `token_price_safe_range` percentile value.
 ///
-/// Use the previous EMA as the base value.
+/// Use the previous blocks oracle price as the base value.
 #[tracing::instrument]
 fn bound_in_min_max_range(
     desired_price: IrysTokenPrice,
@@ -344,7 +345,7 @@ fn bound_in_min_max_range(
 /// Utility module for that's responsible for extracting the desired blocks from the
 /// `BlockTree` to properly report prices & calculate new interval values
 mod price_cache_context {
-    use eyre::ensure;
+    use eyre::{ensure, OptionExt};
     use futures::try_join;
     use irys_types::block_height_to_use_for_price;
 
@@ -370,8 +371,9 @@ mod price_cache_context {
         ) -> eyre::Result<Self> {
             // Rebuild the entire data cache just like we do at startup.
             let canonical_chain = get_canonical_chain(block_tree_read_guard.clone()).await?.0;
-            let (_latest_block_hash, latest_block_height, ..) =
-                canonical_chain.last().expect("canonical chain is empty");
+            let (_latest_block_hash, latest_block_height, ..) = canonical_chain
+                .last()
+                .ok_or_eyre("canonical chain is empty")?;
             ensure!(
                 *latest_block_height >= max_height,
                 "the provided max height exceeds the one registered in the canonical chain"
@@ -381,7 +383,10 @@ mod price_cache_context {
                 .len()
                 .saturating_sub(diff_from_latest_height as usize);
             let canonical_chain_subset = &canonical_chain[..new_len];
-            let last_item = &canonical_chain_subset.last().unwrap().1;
+            let last_item = &canonical_chain_subset
+                .last()
+                .ok_or_eyre("chain subset is empty")?
+                .1;
             ensure!(
                 max_height == *last_item,
                 "height mismatch in the canonical chain data"
