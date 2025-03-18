@@ -575,7 +575,9 @@ impl BlockTreeCache {
                 .get_item(block_height as usize)
                 .unwrap()
                 .block_hash;
-            let block = block_header_by_hash(&tx, &block_hash, false).unwrap().unwrap();
+            let block = block_header_by_hash(&tx, &block_hash, false)
+                .unwrap()
+                .unwrap();
             let all_txs = Arc::new(Self::get_all_txs_for_block(&block, db.clone()).unwrap());
 
             cache

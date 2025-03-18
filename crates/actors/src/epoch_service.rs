@@ -344,7 +344,9 @@ impl EpochServiceActor {
         for i in 0..rg.num_blocks() {
             let item = rg.get_item(i as usize).unwrap();
             let block_hash = item.block_hash;
-            let block = block_header_by_hash(&tx, &block_hash, false).unwrap().unwrap();
+            let block = block_header_by_hash(&tx, &block_hash, false)
+                .unwrap()
+                .unwrap();
             debug!(
                 "index: {} height: {} hash: {}",
                 i,

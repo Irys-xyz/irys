@@ -4,12 +4,14 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysPoAChunks, IrysTxHeaders, Metadata, PeerListItems
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysPoAChunks,
+    IrysTxHeaders, Metadata, PeerListItems,
 };
 
 use crate::metadata::MetadataKey;
 use irys_types::{
-    Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, IrysTransactionId, PeerListItem, PoaData, TxChunkOffset, UnpackedChunk, MEGABYTE, U256
+    Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
+    IrysTransactionId, PeerListItem, PoaData, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
 };
 use reth_db::cursor::DbDupCursorRO;
 
@@ -83,7 +85,7 @@ pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre:
 pub fn block_header_by_hash<T: DbTx>(
     tx: &T,
     block_hash: &BlockHash,
-    include_chunk: bool
+    include_chunk: bool,
 ) -> eyre::Result<Option<IrysBlockHeader>> {
     let mut block = tx
         .get::<IrysBlockHeaders>(*block_hash)?
@@ -91,9 +93,10 @@ pub fn block_header_by_hash<T: DbTx>(
 
     if include_chunk {
         match block {
-            Some(ref mut b) => 
-                b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(|c| c.into()),
-            None => ()
+            Some(ref mut b) => {
+                b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(|c| c.into())
+            }
+            None => (),
         }
     };
 
@@ -332,7 +335,9 @@ mod tests {
 
         // Read a Block
         let result = db.view_eyre(|tx| block_header_by_hash(tx, &block_header.block_hash, true))?;
-        let result2 = db.view_eyre(|tx| block_header_by_hash(tx, &block_header.block_hash, false))?.unwrap();
+        let result2 = db
+            .view_eyre(|tx| block_header_by_hash(tx, &block_header.block_hash, false))?
+            .unwrap();
 
         assert_eq!(result, Some(block_header.clone()));
 

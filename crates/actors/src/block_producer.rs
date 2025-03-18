@@ -278,7 +278,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .await?
                 .and_then(|pa| pa.ledger_id);
 
-            let poa_chunk = Base64(solution.chunk); 
+            let poa_chunk = Base64(solution.chunk);
             let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
             let poa = PoaData {
                 tx_path: solution.tx_path.map(Base64),

@@ -35,7 +35,7 @@ pub async fn prevalidate_block(
 
     let poa_chunk: Vec<u8> = match &block.poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None => return Err(eyre::eyre!("Missing PoA chunk to be pre validated"))
+        None => return Err(eyre::eyre!("Missing PoA chunk to be pre validated")),
     };
 
     if block.chunk_hash != sha::sha256(&poa_chunk).into() {
@@ -335,7 +335,7 @@ pub fn poa_is_valid(
 
         let mut poa_chunk: Vec<u8> = match &poa.chunk {
             Some(chunk) => chunk.clone().into(),
-            None => return Err(eyre::eyre!("Missing PoA chunk to be validated"))
+            None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
         };
         xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
 
@@ -372,7 +372,7 @@ pub fn poa_is_valid(
         );
         let poa_chunk: Vec<u8> = match &poa.chunk {
             Some(chunk) => chunk.clone().into(),
-            None => return Err(eyre::eyre!("Missing PoA chunk to be validated"))
+            None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
         };
         if entropy_chunk != poa_chunk {
             if poa_chunk.len() <= 32 {
