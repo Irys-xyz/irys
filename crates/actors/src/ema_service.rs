@@ -175,8 +175,8 @@ impl Inner {
 
                 tracing::info!(
                     ?new_ema,
-                    prev_predecessor_height = ?self.price_ctx.block_previous_ema_predecessor.height,
-                    prev_ema_height = ?self.price_ctx.block_previous_ema.height,
+                    prev_predecessor_height = ?self.price_ctx.block_latest_ema_predecessor.height,
+                    prev_ema_height = ?self.price_ctx.block_latest_ema.height,
                     "computing new EMA"
                 );
 
@@ -221,7 +221,7 @@ impl Inner {
         let oracle_price = bound_in_min_max_range(
             oracle_price,
             self.token_price_safe_range,
-            self.price_ctx.block_previous_ema.ema_irys_price,
+            self.price_ctx.block_latest_ema.ema_irys_price,
         );
         let new_ema = if block_height <= (self.blocks_in_interval * 2) {
             let previous_block = block_height.saturating_sub(1);
@@ -249,15 +249,15 @@ impl Inner {
 
             // calculate the new EMA using historical oracle price + ema price
             temp_price_context
-                .block_previous_ema_predecessor
+                .block_latest_ema_predecessor
                 .oracle_irys_price
                 .calculate_ema(
                     self.blocks_in_interval,
-                    temp_price_context.block_previous_ema.ema_irys_price,
+                    temp_price_context.block_latest_ema.ema_irys_price,
                 )
                 .unwrap_or_else(|err| {
                     tracing::warn!(?err, "price overflow, using previous EMA price");
-                    temp_price_context.block_previous_ema.ema_irys_price
+                    temp_price_context.block_latest_ema.ema_irys_price
                 })
         };
         let status = if ema_price == new_ema {
@@ -278,7 +278,7 @@ impl Inner {
         let oracle_price = bound_in_min_max_range(
             oracle_price,
             self.token_price_safe_range,
-            self.price_ctx.block_previous_ema.ema_irys_price,
+            self.price_ctx.block_latest_ema.ema_irys_price,
         );
 
         // the first 2 adjustment intervals have special handling where we calculate the
@@ -308,15 +308,15 @@ impl Inner {
 
             // calculate the new EMA using historical oracle price + ema price
             self.price_ctx
-                .block_previous_ema_predecessor
+                .block_latest_ema_predecessor
                 .oracle_irys_price
                 .calculate_ema(
                     self.blocks_in_interval,
-                    self.price_ctx.block_previous_ema.ema_irys_price,
+                    self.price_ctx.block_latest_ema.ema_irys_price,
                 )
                 .unwrap_or_else(|err| {
                     tracing::warn!(?err, "price overflow, using previous EMA price");
-                    self.price_ctx.block_previous_ema.ema_irys_price
+                    self.price_ctx.block_latest_ema.ema_irys_price
                 })
         };
         (oracle_price, new_ema)
@@ -352,8 +352,8 @@ impl Inner {
         desired_height: u64,
     ) -> Result<IrysBlockHeader, eyre::Error> {
         let cached_header = [
-            &self.price_ctx.block_previous_ema,
-            &self.price_ctx.block_previous_ema_predecessor,
+            &self.price_ctx.block_latest_ema,
+            &self.price_ctx.block_latest_ema_predecessor,
             &self.price_ctx.block_previous,
         ]
         .into_iter()
@@ -414,6 +414,7 @@ fn bound_in_min_max_range(
 mod price_cache_context {
     use eyre::ensure;
     use futures::try_join;
+    use irys_types::block_height_to_use_for_price;
 
     use crate::block_tree_service::{get_block, get_canonical_chain};
 
@@ -421,9 +422,10 @@ mod price_cache_context {
 
     #[derive(Debug)]
     pub(super) struct PriceCacheContext {
-        pub(super) block_previous_ema: IrysBlockHeader,
-        pub(super) block_previous_ema_predecessor: IrysBlockHeader,
-        pub(super) block_two_adj_intervals_ago: IrysBlockHeader,
+        pub(super) block_latest_ema: IrysBlockHeader,
+        pub(super) block_latest_ema_predecessor: IrysBlockHeader,
+        pub(super) block_ema_two_adj_intervals_ago: IrysBlockHeader,
+        pub(super) block_for_pricing: IrysBlockHeader,
         pub(super) block_previous: IrysBlockHeader,
     }
 
@@ -491,21 +493,25 @@ mod price_cache_context {
                 Vec<irys_types::H256>,
             )],
         ) -> eyre::Result<Self> {
-            // Derive indexes
-            let height_previous_ema_block = if is_ema_recalculation_block(
+            let height_pricing_block = block_height_to_use_for_price(
+                latest_block_height,
+                blocks_in_price_adjustment_interval,
+            );
+            let height_latest_ema_block = if is_ema_recalculation_block(
                 latest_block_height,
                 blocks_in_price_adjustment_interval,
             ) {
                 latest_block_height
             } else {
+                // Derive indexes
                 previous_ema_recalculation_block_height(
                     latest_block_height,
                     blocks_in_price_adjustment_interval,
                 )
             };
-            let height_previous_interval_predecessor = height_previous_ema_block.saturating_sub(1);
-            let height_two_intervals_ago = previous_ema_recalculation_block_height(
-                height_previous_ema_block,
+            let height_latest_ema_interval_predecessor = height_latest_ema_block.saturating_sub(1);
+            let height_ema_two_adj_intervals_ago = previous_ema_recalculation_block_height(
+                height_latest_ema_block,
                 blocks_in_price_adjustment_interval,
             );
 
@@ -522,28 +528,31 @@ mod price_cache_context {
 
             // fetch the blocks concurrently
             let (
-                block_previous_interval,
-                block_previous_interval_predecessor,
-                block_two_price_intervals_ago,
+                block_latest_ema,
+                block_latest_ema_predecessor,
+                block_ema_two_adj_intervals_ago,
                 block_previous,
+                block_for_pricing,
             ) = try_join!(
-                fetch_block_with_height(height_previous_ema_block),
-                fetch_block_with_height(height_previous_interval_predecessor),
-                fetch_block_with_height(height_two_intervals_ago),
-                fetch_block_with_height(latest_block_height)
+                fetch_block_with_height(height_latest_ema_block),
+                fetch_block_with_height(height_latest_ema_interval_predecessor),
+                fetch_block_with_height(height_ema_two_adj_intervals_ago),
+                fetch_block_with_height(latest_block_height),
+                fetch_block_with_height(height_pricing_block)
             )?;
 
             // Return an updated price cache
             Ok(Self {
-                block_previous_ema: block_previous_interval,
-                block_previous_ema_predecessor: block_previous_interval_predecessor,
-                block_two_adj_intervals_ago: block_two_price_intervals_ago,
+                block_latest_ema,
+                block_latest_ema_predecessor,
+                block_ema_two_adj_intervals_ago,
                 block_previous,
+                block_for_pricing,
             })
         }
 
         pub(crate) fn ema_price_to_use(&self) -> IrysTokenPrice {
-            self.block_two_adj_intervals_ago.ema_irys_price
+            self.block_ema_two_adj_intervals_ago.ema_irys_price
         }
     }
 
@@ -584,17 +593,19 @@ mod price_cache_context {
         #[test_log::test(tokio::test)]
         #[rstest]
         #[case(0, 0, 0, 0)]
-        #[case(1, 0, 0, 0)]
-        #[case(10, 0, 9, 8)]
-        #[case(18, 0, 9, 8)]
-        #[case(19, 9, 19, 18)]
-        #[case(20, 9, 19, 18)]
-        #[case(100, 89, 99, 98)]
+        #[case(1, 0, 1, 0)]
+        #[case(10, 0, 10, 9)]
+        #[case(18, 0, 18, 17)]
+        #[case(19, 0, 19, 18)]
+        #[case(20, 18, 19, 18)]
+        #[case(85, 69, 79, 78)]
+        #[case(90, 79, 89, 88)]
+        #[case(99, 79, 99, 98)]
         async fn test_valid_price_cache(
             #[case] height_latest_block: u64,
-            #[case] height_two_ema_intervals_ago: u64,
-            #[case] height_previous_ema: u64,
-            #[case] height_previous_interval_predecessor: u64,
+            #[case] height_for_pricing: u64,
+            #[case] height_current_ema: u64,
+            #[case] height_current_ema_predecessor: u64,
         ) {
             // setup
             let interval = 10;
@@ -613,13 +624,13 @@ mod price_cache_context {
 
             // assert
             assert_eq!(
-                price_cache.block_two_adj_intervals_ago.height,
-                height_two_ema_intervals_ago
+                price_cache.block_for_pricing.height, height_for_pricing,
+                "invalid ema 2 intervals ago"
             );
-            assert_eq!(price_cache.block_previous_ema.height, height_previous_ema);
+            assert_eq!(price_cache.block_latest_ema.height, height_current_ema);
             assert_eq!(
-                price_cache.block_previous_ema_predecessor.height,
-                height_previous_interval_predecessor
+                price_cache.block_latest_ema_predecessor.height,
+                height_current_ema_predecessor
             );
         }
 
@@ -634,43 +645,48 @@ mod price_cache_context {
             /// which can validate that it correctly slices the canonical chain.
             #[test_log::test(tokio::test)]
             #[rstest]
-            #[case(20, 19, 19, 18, 9)] // from_canonical_chain_subset same as full
-            #[case(20, 15, 9, 8, 0)] // smaller max_height
-            #[case(30, 25, 19, 18, 9)] // mid-range cutoff
-            #[case(30, 28, 19, 18, 9)] // mid-range cutoff
-            #[case(30, 29, 19, 18, 9)] // mid-range cutoff
+            #[case(15, 10, 10, 9, 0)]
+            #[case(19, 19, 19, 18, 0)]
+            #[case(20, 20, 19, 18, 9)]
+            #[case(20, 15, 15, 14, 0)]
+            #[case(30, 25, 19, 18, 9)]
+            #[case(30, 28, 19, 18, 9)]
+            #[case(40, 38, 29, 28, 19)]
+            #[case(70, 65, 59, 58, 49)]
             async fn test_from_canonical_chain_subset(
-                // todo left off here, do these variables make sense?
-                #[case] chain_length: u64,
-                #[case] max_height: u64,
-                #[case] exp_prev_ema: u64,
-                #[case] exp_prev_ema_pred: u64,
-                #[case] exp_two_intervals: u64,
+                #[case] height_chain_max: u64,
+                #[case] height_chain_subset_max: u64,
+                #[case] height_exp_latest_ema: u64,
+                #[case] height_exp_latest_ema_pred: u64,
+                #[case] height_exp_pricing: u64,
             ) {
                 // Setup
                 let blocks_in_interval = 10;
-                let mut blocks = (0..chain_length)
+                let mut blocks = (0..=height_chain_max)
                     .map(|height| IrysBlockHeader {
                         height,
                         ..IrysBlockHeader::new_mock_header()
                     })
                     .collect::<Vec<_>>();
-                assert_eq!(blocks.len(), chain_length as usize);
+                assert_eq!(blocks.len(), (height_chain_max + 1) as usize);
                 let block_tree_guard = genesis_tree(&mut blocks);
 
                 // Action
                 let ctx = PriceCacheContext::from_canonical_chain_subset(
                     block_tree_guard,
                     blocks_in_interval,
-                    max_height,
+                    height_chain_subset_max,
                 )
                 .await
                 .unwrap();
 
                 // Assert
-                assert_eq!(ctx.block_previous_ema.height, exp_prev_ema);
-                assert_eq!(ctx.block_previous_ema_predecessor.height, exp_prev_ema_pred);
-                assert_eq!(ctx.block_two_adj_intervals_ago.height, exp_two_intervals);
+                assert_eq!(ctx.block_latest_ema.height, height_exp_latest_ema);
+                assert_eq!(
+                    ctx.block_latest_ema_predecessor.height,
+                    height_exp_latest_ema_pred
+                );
+                assert_eq!(ctx.block_for_pricing.height, height_exp_pricing);
             }
         }
     }
