@@ -139,7 +139,6 @@ async fn check_valid_ema_calculation(
     ema_serviece_sendr.send(EmaServiceMessage::ValidateEmaPrice {
         block_height: block.height,
         ema_price: block.ema_irys_price,
-        oracle_price: block.oracle_irys_price,
         response: tx,
     })?;
     let response = rx.await??;

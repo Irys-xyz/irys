@@ -31,7 +31,6 @@ pub enum EmaServiceMessage {
     ValidateEmaPrice {
         block_height: u64,
         ema_price: IrysTokenPrice,
-        oracle_price: IrysTokenPrice,
         response: oneshot::Sender<eyre::Result<PriceStatus>>,
     },
     /// Returns the EMA irys price that must be used in the next EMA adjustment block
@@ -144,8 +143,8 @@ impl Inner {
     async fn handle_message(&mut self, msg: EmaServiceMessage) -> eyre::Result<()> {
         match msg {
             EmaServiceMessage::GetCurrentEmaForPricing { response } => {
-                let _ = response.send(self.price_ctx.ema_price_to_use()).
-                    inspect_err(|_| tracing::warn!("current EMA cannot be returned, sender has dropped its half of the channel"));
+                let _ = response.send(self.price_ctx.block_for_pricing.ema_irys_price)
+                    .inspect_err(|_| tracing::warn!("current EMA cannot be returned, sender has dropped its half of the channel"));
             }
             EmaServiceMessage::ValidateOraclePrice {
                 block_height,
@@ -165,13 +164,20 @@ impl Inner {
             } => {
                 if height_of_new_block != self.price_ctx.block_previous.height.saturating_add(1) {
                     let _ = response.send(Err(eyre::eyre!(
-                        "EMA Service has not yet been updated! Is the block producer skipping block heights?"
+                        "EMA Service has not yet been updated with the latest canonical chain! Is the block producer skipping block heights?"
                     )));
                     return Ok(());
                 }
 
-                let (oracle_price, new_ema) =
-                    self.get_ema_for_new_block(height_of_new_block, oracle_price);
+                // enforce the min & max acceptable price ranges on the oracle price
+                let oracle_price = bound_in_min_max_range(
+                    oracle_price,
+                    self.token_price_safe_range,
+                    self.price_ctx.block_latest_ema.ema_irys_price,
+                );
+                let new_ema = self
+                    .price_ctx
+                    .get_ema_for_new_block(self.blocks_in_interval);
 
                 tracing::info!(
                     ?new_ema,
@@ -198,12 +204,9 @@ impl Inner {
             EmaServiceMessage::ValidateEmaPrice {
                 block_height,
                 ema_price,
-                oracle_price,
                 response,
             } => {
-                let status = self
-                    .valid_ema_price(block_height, ema_price, oracle_price)
-                    .await?;
+                let status = self.valid_ema_price(block_height, ema_price).await?;
 
                 let _ = response.send(Ok(status));
             }
@@ -216,50 +219,23 @@ impl Inner {
         &self,
         block_height: u64,
         ema_price: IrysTokenPrice,
-        oracle_price: IrysTokenPrice,
     ) -> Result<PriceStatus, eyre::Error> {
-        let oracle_price = bound_in_min_max_range(
-            oracle_price,
-            self.token_price_safe_range,
-            self.price_ctx.block_latest_ema.ema_irys_price,
-        );
-        let new_ema = if block_height <= (self.blocks_in_interval * 2) {
-            let previous_block = block_height.saturating_sub(1);
-            let previous_block = self.fetch_block_using_local_cache(previous_block).await?;
+        // rebuild a new price context from historical data
+        //
+        // TODO: WE CAN ONLY VALIDATE BLOCKS THAT HAVE BEEN PRODUCED
+        // WITHIN THE RANGE THAT THE BLOCK TREE GUARD KEEPS THEM iN THE CANONICAL CHAIN!
+        let temp_price_context = PriceCacheContext::from_canonical_chain_subset(
+            self.block_tree_read_guard.clone(),
+            self.blocks_in_interval,
+            // subtract 1 because we want to simulate the price for *before* the block was mined
+            block_height.saturating_sub(1),
+        )
+        .await?;
 
-            oracle_price
-                .calculate_ema(
-                    // we use the full interval for calculations even if in reality it's only 1 block diff
-                    self.blocks_in_interval,
-                    previous_block.ema_irys_price,
-                )
-                .unwrap_or_else(|err| {
-                    tracing::warn!(?err, "price overflow, using previous block EMA price");
-                    previous_block.ema_irys_price
-                })
-        } else {
-            // rebuild a new price context from historical data
-            // TODO: WE CAN ONLY VALIDATE BLOCKS THAT HAVE BEEN PRODUCED WITHIN THE RANGE THAT THE BLOCK TREE GUARD KEEPS THEM!
-            let temp_price_context = PriceCacheContext::from_canonical_chain_subset(
-                self.block_tree_read_guard.clone(),
-                self.blocks_in_interval,
-                block_height,
-            )
-            .await?;
+        // calculate the new EMA using historical oracle price + ema price
+        let new_ema = temp_price_context.get_ema_for_new_block(self.blocks_in_interval);
 
-            // calculate the new EMA using historical oracle price + ema price
-            temp_price_context
-                .block_latest_ema_predecessor
-                .oracle_irys_price
-                .calculate_ema(
-                    self.blocks_in_interval,
-                    temp_price_context.block_latest_ema.ema_irys_price,
-                )
-                .unwrap_or_else(|err| {
-                    tracing::warn!(?err, "price overflow, using previous EMA price");
-                    temp_price_context.block_latest_ema.ema_irys_price
-                })
-        };
+        // check if the prices match
         let status = if ema_price == new_ema {
             PriceStatus::Valid
         } else {
@@ -269,70 +245,16 @@ impl Inner {
     }
 
     #[tracing::instrument(skip_all)]
-    fn get_ema_for_new_block(
-        &self,
-        height_of_new_block: u64,
-        oracle_price: IrysTokenPrice,
-    ) -> (IrysTokenPrice, IrysTokenPrice) {
-        // enforce the min & max acceptable price ranges on the oracle price
-        let oracle_price = bound_in_min_max_range(
-            oracle_price,
-            self.token_price_safe_range,
-            self.price_ctx.block_latest_ema.ema_irys_price,
-        );
-
-        // the first 2 adjustment intervals have special handling where we calculate the
-        // EMA for each block using the value from the preceding one
-        let new_ema = if height_of_new_block <= (self.blocks_in_interval * 2) {
-            // calculate the new EMA using the current oracle price + ema price
-            oracle_price
-                .calculate_ema(
-                    // we use the full interval for calculations even if in reality it's only 1 block diff
-                    self.blocks_in_interval,
-                    self.price_ctx.block_previous.ema_irys_price,
-                )
-                .unwrap_or_else(|err| {
-                    tracing::warn!(?err, "price overflow, using previous block EMA price");
-                    self.price_ctx.block_previous.ema_irys_price
-                })
-        } else {
-            // Now we have have generic handling.
-            //
-            // example EMA calculation on block 29:
-            // 1. take the registered Irys price in block 18 (non EMA block)
-            //    and the stored irys price in block 19 (EMA block).
-            // 2. using these values compute EMA for block 29. In this case
-            //    the *n* (number of block prices) would be 10 (E29.height - E19.height).
-            // 3. this is the price that will be used in the interval 39->49,
-            //    which will be reported to other systems querying for EMA prices.
-
-            // calculate the new EMA using historical oracle price + ema price
-            self.price_ctx
-                .block_latest_ema_predecessor
-                .oracle_irys_price
-                .calculate_ema(
-                    self.blocks_in_interval,
-                    self.price_ctx.block_latest_ema.ema_irys_price,
-                )
-                .unwrap_or_else(|err| {
-                    tracing::warn!(?err, "price overflow, using previous EMA price");
-                    self.price_ctx.block_latest_ema.ema_irys_price
-                })
-        };
-        (oracle_price, new_ema)
-    }
-
-    #[tracing::instrument(skip_all)]
     async fn validate_oracle_price(
         &self,
         block_height: u64,
         oracle_price: IrysTokenPrice,
     ) -> Result<PriceStatus, eyre::Error> {
-        // determine the last base EMA height
+        // Get the previous block
         let prev_block = block_height.saturating_sub(1);
         let prev_block = self.fetch_block_using_local_cache(prev_block).await?;
 
-        // check if the ema price is indeed valid
+        // check if the oracle price is valid
         let capped_oracle_price = bound_in_min_max_range(
             oracle_price,
             self.token_price_safe_range,
@@ -424,7 +346,6 @@ mod price_cache_context {
     pub(super) struct PriceCacheContext {
         pub(super) block_latest_ema: IrysBlockHeader,
         pub(super) block_latest_ema_predecessor: IrysBlockHeader,
-        pub(super) block_ema_two_adj_intervals_ago: IrysBlockHeader,
         pub(super) block_for_pricing: IrysBlockHeader,
         pub(super) block_previous: IrysBlockHeader,
     }
@@ -510,10 +431,6 @@ mod price_cache_context {
                 )
             };
             let height_latest_ema_interval_predecessor = height_latest_ema_block.saturating_sub(1);
-            let height_ema_two_adj_intervals_ago = previous_ema_recalculation_block_height(
-                height_latest_ema_block,
-                blocks_in_price_adjustment_interval,
-            );
 
             // utility fn to fetch the block at a given height
             let fetch_block_with_height = async |height: u64| {
@@ -527,32 +444,52 @@ mod price_cache_context {
             };
 
             // fetch the blocks concurrently
-            let (
-                block_latest_ema,
-                block_latest_ema_predecessor,
-                block_ema_two_adj_intervals_ago,
-                block_previous,
-                block_for_pricing,
-            ) = try_join!(
-                fetch_block_with_height(height_latest_ema_block),
-                fetch_block_with_height(height_latest_ema_interval_predecessor),
-                fetch_block_with_height(height_ema_two_adj_intervals_ago),
-                fetch_block_with_height(latest_block_height),
-                fetch_block_with_height(height_pricing_block)
-            )?;
+            let (block_latest_ema, block_latest_ema_predecessor, block_previous, block_for_pricing) =
+                try_join!(
+                    fetch_block_with_height(height_latest_ema_block),
+                    fetch_block_with_height(height_latest_ema_interval_predecessor),
+                    fetch_block_with_height(latest_block_height),
+                    fetch_block_with_height(height_pricing_block)
+                )?;
 
             // Return an updated price cache
             Ok(Self {
                 block_latest_ema,
                 block_latest_ema_predecessor,
-                block_ema_two_adj_intervals_ago,
                 block_previous,
                 block_for_pricing,
             })
         }
 
-        pub(crate) fn ema_price_to_use(&self) -> IrysTokenPrice {
-            self.block_ema_two_adj_intervals_ago.ema_irys_price
+        #[tracing::instrument(skip_all)]
+        pub(crate) fn get_ema_for_new_block(&self, blocks_in_interval: u64) -> IrysTokenPrice {
+            // the first 2 adjustment intervals have special handling where we calculate the
+            // EMA for each block using the value from the preceding one.
+            //
+            // But the generic case:
+            // example EMA calculation on block 29:
+            // 1. take the registered Oracle Irys price in block 18
+            //    and the stored EMA Irys price in block 19.
+            // 2. using these values compute EMA for block 29. In this case
+            //    the *n* (number of block prices) would be 10 (E29.height - E19.height).
+            // 3. this is the price that will be used in the interval 39->49,
+            //    which will be reported to other systems querying for EMA prices.
+
+            // calculate the new EMA using historical oracle price + ema price
+            let new_ema = self
+                .block_latest_ema_predecessor
+                .oracle_irys_price
+                .calculate_ema(
+                    // note: we calculate the EMA for each block, but we don't calculate relative intervals between them
+                    blocks_in_interval,
+                    self.block_latest_ema.ema_irys_price,
+                )
+                .unwrap_or_else(|err| {
+                    tracing::warn!(?err, "price overflow, using previous EMA price");
+                    self.block_latest_ema.ema_irys_price
+                });
+
+            new_ema
         }
     }
 
@@ -825,7 +762,6 @@ mod tests {
             &self,
             block_height: u64,
             ema_price: IrysTokenPrice,
-            oracle_price: IrysTokenPrice,
         ) -> eyre::Result<PriceStatus> {
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.ema_sender
@@ -833,7 +769,6 @@ mod tests {
                     response: tx,
                     block_height,
                     ema_price,
-                    oracle_price,
                 })
                 .unwrap();
             rx.await.unwrap()
