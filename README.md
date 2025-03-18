@@ -27,6 +27,13 @@ cargo xtask typos
 
 ## Testing
 
+Testing code examples in comments
+
+```cli
+cargo test --doc
+
+
+```
 Testing Block Serialization
 
 ```cli
