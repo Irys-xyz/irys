@@ -35,7 +35,7 @@ pub enum EmaServiceMessage {
         response: oneshot::Sender<eyre::Result<PriceStatus>>,
     },
     /// Returns the EMA irys price that must be used in the next EMA adjustment block
-    GetEmaForNewBlock {
+    GetPriceDataForNewBlock {
         height_of_new_block: u64,
         oracle_price: IrysTokenPrice,
         response: oneshot::Sender<eyre::Result<NewBlockEmaResponse>>,
@@ -147,18 +147,7 @@ impl Inner {
                 let _ = response.send(self.price_ctx.block_for_pricing.ema_irys_price)
                     .inspect_err(|_| tracing::warn!("current EMA cannot be returned, sender has dropped its half of the channel"));
             }
-            EmaServiceMessage::ValidateOraclePrice {
-                block_height,
-                oracle_price,
-                response,
-            } => {
-                let price_status = self
-                    .validate_oracle_price(block_height, oracle_price)
-                    .await?;
-
-                let _ = response.send(Ok(price_status));
-            }
-            EmaServiceMessage::GetEmaForNewBlock {
+            EmaServiceMessage::GetPriceDataForNewBlock {
                 response,
                 height_of_new_block,
                 oracle_price,
@@ -171,24 +160,25 @@ impl Inner {
                 }
 
                 // enforce the min & max acceptable price ranges on the oracle price
-                let oracle_price = bound_in_min_max_range(
+                let capped_oracle_price = bound_in_min_max_range(
                     oracle_price,
                     self.token_price_safe_range,
-                    self.price_ctx.block_latest_ema.ema_irys_price,
+                    self.price_ctx.block_previous.oracle_irys_price,
                 );
                 let new_ema = self
                     .price_ctx
-                    .get_ema_for_new_block(self.blocks_in_interval, oracle_price);
+                    .get_ema_for_new_block(self.blocks_in_interval, capped_oracle_price);
 
                 tracing::info!(
                     ?new_ema,
+                    ?capped_oracle_price,
                     prev_predecessor_height = ?self.price_ctx.block_latest_ema_predecessor.height,
                     prev_ema_height = ?self.price_ctx.block_latest_ema.height,
                     "computing new EMA"
                 );
 
                 let _ = response.send(Ok(NewBlockEmaResponse {
-                    range_adjusted_oracle_price: oracle_price,
+                    range_adjusted_oracle_price: capped_oracle_price,
                     ema: new_ema,
                 }));
             }
@@ -201,6 +191,17 @@ impl Inner {
                     self.blocks_in_interval,
                 )
                 .await?;
+            }
+            EmaServiceMessage::ValidateOraclePrice {
+                block_height,
+                oracle_price,
+                response,
+            } => {
+                let price_status = self
+                    .validate_oracle_price(block_height, oracle_price)
+                    .await?;
+
+                let _ = response.send(Ok(price_status));
             }
             EmaServiceMessage::ValidateEmaPrice {
                 block_height,
@@ -264,7 +265,7 @@ impl Inner {
         let capped_oracle_price = bound_in_min_max_range(
             oracle_price,
             self.token_price_safe_range,
-            prev_block.ema_irys_price,
+            prev_block.oracle_irys_price,
         );
         let price_status = if oracle_price == capped_oracle_price {
             PriceStatus::Valid
@@ -757,14 +758,14 @@ mod tests {
             }
         }
 
-        async fn get_ema_for_new_block(
+        async fn get_prices_for_new_block(
             &self,
             height_of_new_block: u64,
             new_oracle_price: IrysTokenPrice,
         ) -> eyre::Result<NewBlockEmaResponse> {
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.ema_sender
-                .send(EmaServiceMessage::GetEmaForNewBlock {
+                .send(EmaServiceMessage::GetPriceDataForNewBlock {
                     height_of_new_block,
                     response: tx,
                     oracle_price: new_oracle_price,
@@ -848,7 +849,6 @@ mod tests {
             },
         );
         let desired_block_price = &ctx.prices[price_block_idx];
-        dbg!(&ctx.prices);
 
         // action
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -893,7 +893,7 @@ mod tests {
 
             // action - get EMA for new block
             let ema_response = ctx
-                .get_ema_for_new_block(1, new_oracle_price)
+                .get_prices_for_new_block(1, new_oracle_price)
                 .await
                 .unwrap()
                 .ema;
@@ -928,12 +928,12 @@ mod tests {
                     ..Config::testnet()
                 },
             );
-            let new_oracle_price = rand_price(10);
+            let new_oracle_price = rand_price(max_height);
 
             // action
             let (tx, rx) = tokio::sync::oneshot::channel();
             ctx.ema_sender
-                .send(EmaServiceMessage::GetEmaForNewBlock {
+                .send(EmaServiceMessage::GetPriceDataForNewBlock {
                     height_of_new_block: max_height + 1,
                     response: tx,
                     oracle_price: new_oracle_price,
@@ -954,6 +954,8 @@ mod tests {
         #[case(5)]
         #[case(8)]
         #[case(9)]
+        #[case(20)]
+        #[case(30)]
         #[case(15)]
         #[case(19)]
         #[case(20)]
@@ -973,23 +975,26 @@ mod tests {
                 },
             );
             let price_oracle_latest = ctx.prices.last().unwrap().clone().oracle;
-            let math_ops: [Box<dyn Fn(Amount<Percentage>) -> IrysTokenPrice>; 2] = [
-                Box::new(|mul| price_oracle_latest.add_multiplier(mul).unwrap()),
-                Box::new(|mul| price_oracle_latest.sub_multiplier(mul).unwrap()),
+            let mul_outside_of_range = Amount::percentage(dec!(0.101)).unwrap();
+            let oracle_prices: &[IrysTokenPrice] = &[
+                price_oracle_latest
+                    .add_multiplier(mul_outside_of_range)
+                    .unwrap(),
+                price_oracle_latest
+                    .sub_multiplier(mul_outside_of_range)
+                    .unwrap(),
             ];
 
-            for math_op in math_ops {
+            for oracle_price in oracle_prices {
                 // action
-                let mul_outside_of_range = Amount::percentage(dec!(0.101)).unwrap();
-                let oracle_price = math_op(mul_outside_of_range);
                 let new_block_height = max_height + 1;
                 let capped_oracle_price = ctx
-                    .get_ema_for_new_block(new_block_height, oracle_price)
+                    .get_prices_for_new_block(new_block_height, oracle_price.clone())
                     .await
                     .unwrap()
                     .range_adjusted_oracle_price;
                 let price_status_original = ctx
-                    .validate_oracle_price(new_block_height, oracle_price)
+                    .validate_oracle_price(new_block_height, oracle_price.clone())
                     .await
                     .unwrap();
                 let price_status_capped = ctx
@@ -999,7 +1004,7 @@ mod tests {
 
                 // assert
                 assert_ne!(
-                    capped_oracle_price, oracle_price,
+                    &capped_oracle_price, oracle_price,
                     "the oracle price must differ"
                 );
                 assert_eq!(price_status_original, PriceStatus::Invalid);
@@ -1009,9 +1014,9 @@ mod tests {
 
         #[test(tokio::test)]
         #[rstest]
-        #[case(29, 19, 18)]
-        #[case(39, 29, 28)]
-        #[case(169, 159, 158)]
+        #[case(28, 19, 18)]
+        #[case(38, 29, 28)]
+        #[case(168, 159, 158)]
         async fn nth_adjustment_period(
             #[case] max_height: u64,
             #[case] prev_ema_height: usize,
@@ -1028,11 +1033,19 @@ mod tests {
             );
 
             // action
-            let ema_response = ctx
-                .get_ema_for_new_block(max_height + 1, rand_price(max_height))
+            let new_block_height = max_height + 1;
+            let response = ctx
+                .get_prices_for_new_block(new_block_height, rand_price(max_height))
                 .await
-                .unwrap()
-                .ema;
+                .unwrap();
+            let price_status_original = ctx
+                .validate_ema_price(
+                    new_block_height,
+                    response.ema,
+                    response.range_adjusted_oracle_price,
+                )
+                .await
+                .unwrap();
 
             // assert
             let prev_price = ctx.prices[prev_ema_height].clone();
@@ -1040,27 +1053,29 @@ mod tests {
                 .oracle
                 .calculate_ema(price_adjustment_interval, prev_price.ema)
                 .unwrap();
-            assert_eq!(ema_computed, ema_response);
+            assert!(is_ema_recalculation_block(
+                new_block_height,
+                price_adjustment_interval
+            ));
+            assert_eq!(ema_computed, response.ema);
+            assert_eq!(price_status_original, PriceStatus::Valid);
         }
 
         #[test(tokio::test)]
         #[rstest]
         #[case(1, 1)]
-        #[case(1, 2)]
         #[case(1, 3)]
         #[case(1, 8)]
-        #[case(15, 16)]
         #[case(15, 17)]
-        #[case(15, 11)]
         #[case(15, 18)]
-        async fn nth_ema_block_requsets_non_adjustment_block(
-            #[case] block_count: u64,
+        async fn invalid_block_height_requested(
+            #[case] max_block_height: u64,
             #[case] height_of_new_block: u64,
         ) {
             // prepare
             let price_adjustment_interval = 10;
             let ctx = TestCtx::setup(
-                block_count,
+                max_block_height,
                 Config {
                     price_adjustment_interval,
                     ..Config::testnet()
@@ -1068,19 +1083,13 @@ mod tests {
             );
 
             // action
-            let oracle_price = rand_price(block_count);
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            ctx.ema_sender
-                .send(EmaServiceMessage::GetEmaForNewBlock {
-                    height_of_new_block,
-                    response: tx,
-                    oracle_price,
-                })
-                .unwrap();
-            let ema_response = rx.await;
+            let oracle_price = rand_price(max_block_height);
+            let res = ctx
+                .get_prices_for_new_block(height_of_new_block, oracle_price)
+                .await;
 
             // assert
-            assert!(ema_response.is_ok());
+            assert!(res.is_err(), "a block height that big should be rejected");
         }
     }
 

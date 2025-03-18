@@ -91,6 +91,7 @@ async fn serial_test_genesis_ema_price_updates_after_second_interval() -> eyre::
 async fn serial_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
     // setup
     let price_adjustment_interval = 3;
+    let token_price_safe_range = Amount::percentage(dec!(0.1)).unwrap();
     let ctx = setup_with_config(Config {
         price_adjustment_interval,
         oracle_config: OracleConfig::Mock {
@@ -99,24 +100,34 @@ async fn serial_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
             // only change direction after 10 blocks
             smoothing_interval: 10,
         },
-        token_price_safe_range: Amount::percentage(dec!(0.1)).unwrap(), // 10% allowed diff from the previous EMA
+        token_price_safe_range: token_price_safe_range.clone(), // 10% allowed diff from the previous oracle
         ..Config::testnet()
     })
     .await?;
 
     // mine 2 blocks
-    let (_header, _payload) = mine_block(&ctx.node).await?.unwrap();
-    let (_header, _payload) = mine_block(&ctx.node).await?.unwrap();
+    let (header_1, _payload) = mine_block(&ctx.node).await?.unwrap();
+    let (header_2, _payload) = mine_block(&ctx.node).await?.unwrap();
+    let (header_3, _payload) = mine_block(&ctx.node).await?.unwrap();
 
-    // assert that they've been added to the chain
+    // assert that all of the prices are the max allowed ones (guaranteed by the mock oracle reporting inflated values)
     let (chain, ..) = get_canonical_chain(ctx.node.block_tree_guard.clone())
         .await
         .unwrap();
-    assert_eq!(chain.len(), 3, "expected genesis + 2 new blocks");
-    let block = get_block(ctx.node.block_tree_guard, chain[2].0)
+    assert_eq!(chain.len(), 4, "expected genesis + 3 new blocks");
+    let genesis_block = get_block(ctx.node.block_tree_guard, chain[0].0)
         .await
         .unwrap()
         .unwrap();
+    let mut price_prev = genesis_block.oracle_irys_price;
+    for block in [header_1, header_2, header_3] {
+        let max_allowed_price = price_prev.add_multiplier(token_price_safe_range).unwrap();
+        assert_eq!(
+            max_allowed_price, block.oracle_irys_price,
+            "the registered price should be the max allowed one"
+        );
+        price_prev = max_allowed_price;
+    }
 
     Ok(())
 }
