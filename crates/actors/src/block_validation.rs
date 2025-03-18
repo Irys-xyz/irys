@@ -35,9 +35,11 @@ pub async fn prevalidate_block(
 
     let poa_chunk: Vec<u8> = match &block.poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None => 
-            // This should be impossible as block poa was generated in block_producer
-            return Err(eyre::eyre!("Missing PoA chunk to be pre validated")),
+        None =>
+        // This should be impossible as block poa was generated in block_producer
+        {
+            return Err(eyre::eyre!("Missing PoA chunk to be pre validated"))
+        }
     };
 
     if block.chunk_hash != sha::sha256(&poa_chunk).into() {
