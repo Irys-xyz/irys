@@ -31,6 +31,7 @@ pub enum EmaServiceMessage {
     ValidateEmaPrice {
         block_height: u64,
         ema_price: IrysTokenPrice,
+        oracle_price: IrysTokenPrice,
         response: oneshot::Sender<eyre::Result<PriceStatus>>,
     },
     /// Returns the EMA irys price that must be used in the next EMA adjustment block
@@ -177,7 +178,7 @@ impl Inner {
                 );
                 let new_ema = self
                     .price_ctx
-                    .get_ema_for_new_block(self.blocks_in_interval);
+                    .get_ema_for_new_block(self.blocks_in_interval, oracle_price);
 
                 tracing::info!(
                     ?new_ema,
@@ -204,9 +205,12 @@ impl Inner {
             EmaServiceMessage::ValidateEmaPrice {
                 block_height,
                 ema_price,
+                oracle_price,
                 response,
             } => {
-                let status = self.valid_ema_price(block_height, ema_price).await?;
+                let status = self
+                    .valid_ema_price(block_height, ema_price, oracle_price)
+                    .await?;
 
                 let _ = response.send(Ok(status));
             }
@@ -219,6 +223,7 @@ impl Inner {
         &self,
         block_height: u64,
         ema_price: IrysTokenPrice,
+        oracle_price: IrysTokenPrice,
     ) -> Result<PriceStatus, eyre::Error> {
         // rebuild a new price context from historical data
         //
@@ -233,7 +238,8 @@ impl Inner {
         .await?;
 
         // calculate the new EMA using historical oracle price + ema price
-        let new_ema = temp_price_context.get_ema_for_new_block(self.blocks_in_interval);
+        let new_ema =
+            temp_price_context.get_ema_for_new_block(self.blocks_in_interval, oracle_price);
 
         // check if the prices match
         let status = if ema_price == new_ema {
@@ -315,7 +321,6 @@ fn bound_in_min_max_range(
 ) -> IrysTokenPrice {
     let max_acceptable = base_price.add_multiplier(safe_range).unwrap_or(base_price);
     let min_acceptable = base_price.sub_multiplier(safe_range).unwrap_or(base_price);
-    tracing::warn!(?new_price, ?min_acceptable, ?max_acceptable, "herer5");
     if new_price > max_acceptable {
         tracing::warn!(
             ?max_acceptable,
@@ -462,7 +467,16 @@ mod price_cache_context {
         }
 
         #[tracing::instrument(skip_all)]
-        pub(crate) fn get_ema_for_new_block(&self, blocks_in_interval: u64) -> IrysTokenPrice {
+        pub(crate) fn get_ema_for_new_block(
+            &self,
+            blocks_in_interval: u64,
+            oracle_price: IrysTokenPrice,
+        ) -> IrysTokenPrice {
+            let oracle_price_to_use = if self.block_previous.height < (blocks_in_interval * 2) {
+                oracle_price
+            } else {
+                self.block_latest_ema_predecessor.oracle_irys_price
+            };
             // the first 2 adjustment intervals have special handling where we calculate the
             // EMA for each block using the value from the preceding one.
             //
@@ -476,9 +490,7 @@ mod price_cache_context {
             //    which will be reported to other systems querying for EMA prices.
 
             // calculate the new EMA using historical oracle price + ema price
-            let new_ema = self
-                .block_latest_ema_predecessor
-                .oracle_irys_price
+            let new_ema = oracle_price_to_use
                 .calculate_ema(
                     // note: we calculate the EMA for each block, but we don't calculate relative intervals between them
                     blocks_in_interval,
@@ -534,7 +546,7 @@ mod price_cache_context {
         #[case(10, 0, 10, 9)]
         #[case(18, 0, 18, 17)]
         #[case(19, 0, 19, 18)]
-        #[case(20, 18, 19, 18)]
+        #[case(20, 9, 19, 18)]
         #[case(85, 69, 79, 78)]
         #[case(90, 79, 89, 88)]
         #[case(99, 79, 99, 98)]
@@ -642,14 +654,15 @@ mod tests {
     use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
     pub(crate) fn build_genesis_tree_with_n_blocks(
-        blocks: u64,
+        max_block_height: u64,
     ) -> (BlockTreeReadGuard, Vec<PriceInfo>) {
-        let (mut blocks, prices) = build_tree(0, blocks);
+        let (mut blocks, prices) = build_tree(0, max_block_height);
+        assert_eq!(blocks.last().unwrap().height, max_block_height);
         (genesis_tree(&mut blocks), prices)
     }
 
-    fn build_tree(init_height: u64, blocks: u64) -> (Vec<IrysBlockHeader>, Vec<PriceInfo>) {
-        let blocks = (init_height..(blocks + init_height))
+    fn build_tree(init_height: u64, max_height: u64) -> (Vec<IrysBlockHeader>, Vec<PriceInfo>) {
+        let blocks = (init_height..(max_height + init_height).saturating_add(1))
             .map(|height| {
                 let mut header = IrysBlockHeader::new_mock_header();
                 header.height = height;
@@ -724,9 +737,8 @@ mod tests {
     }
 
     impl TestCtx {
-        fn setup(block_count: u64, config: Config) -> Self {
-            let (block_tree_guard, prices) = build_genesis_tree_with_n_blocks(block_count);
-            assert_eq!(prices.len(), block_count as usize);
+        fn setup(max_block_height: u64, config: Config) -> Self {
+            let (block_tree_guard, prices) = build_genesis_tree_with_n_blocks(max_block_height);
             let task_manager = TaskManager::new(tokio::runtime::Handle::current());
             let task_executor = task_manager.executor();
             let (tx, rx) = unbounded_channel();
@@ -762,6 +774,7 @@ mod tests {
             &self,
             block_height: u64,
             ema_price: IrysTokenPrice,
+            oracle_price: IrysTokenPrice,
         ) -> eyre::Result<PriceStatus> {
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.ema_sender
@@ -769,6 +782,7 @@ mod tests {
                     response: tx,
                     block_height,
                     ema_price,
+                    oracle_price,
                 })
                 .unwrap();
             rx.await.unwrap()
@@ -821,16 +835,17 @@ mod tests {
     #[case(29, 9)]
     #[case(30, 19)]
     #[timeout(std::time::Duration::from_millis(100))]
-    async fn get_current_ema(#[case] block_count: u64, #[case] price_block_idx: usize) {
+    async fn get_current_ema(#[case] max_block_height: u64, #[case] price_block_idx: usize) {
         // setup
         let ctx = TestCtx::setup(
-            block_count,
+            max_block_height,
             Config {
                 price_adjustment_interval: 10,
                 ..Config::testnet()
             },
         );
         let desired_block_price = &ctx.prices[price_block_idx];
+        dbg!(&ctx.prices);
 
         // action
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -850,7 +865,7 @@ mod tests {
         use rust_decimal_macros::dec;
         use test_log::test;
 
-        // #[test(tokio::test)]
+        #[test(tokio::test)]
         async fn first_block() {
             // prepare
             let price_adjustment_interval = 10;
