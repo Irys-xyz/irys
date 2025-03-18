@@ -2,7 +2,8 @@ use crate::utils::mine_block;
 use irys_actors::ema_service::EmaServiceMessage;
 use irys_chain::{start_irys_node, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
-use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
+use tempfile::TempDir;
+use irys_testing_utils::utils::temporary_directory;
 use irys_types::Config;
 
 #[test_log::test(tokio::test)]
