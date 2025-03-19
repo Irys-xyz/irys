@@ -118,7 +118,6 @@ impl IrysNodeCtx {
     }
 }
 
-#[deprecated = "use the IrysNode struct (located at the bottom of the file)"]
 pub async fn start_irys_node(
     node_config: IrysNodeConfig,
     storage_config: StorageConfig,
