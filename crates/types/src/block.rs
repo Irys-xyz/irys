@@ -204,8 +204,27 @@ impl IrysBlockHeader {
 
 // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
 pub fn is_ema_recalculation_block(height: u64, blocks_in_price_adjustment_interval: u64) -> bool {
-    // heights are zero indexed hence adding +1
-    (height + 1) % blocks_in_price_adjustment_interval == 0
+    // the first 2 adjustment intervals have special handling where we calculate the
+    // EMA for each block using the value from the preceding one
+    if height < (blocks_in_price_adjustment_interval * 2) {
+        true
+    } else {
+        (height.saturating_add(1)) % blocks_in_price_adjustment_interval == 0
+    }
+}
+
+pub fn block_height_to_use_for_price(height: u64, blocks_in_price_adjustment_interval: u64) -> u64 {
+    // we need to use the genesis price
+    if height < (blocks_in_price_adjustment_interval * 2) {
+        0
+    } else {
+        // we need to use the price from 2 intervals ago
+        let prev_ema_height =
+            prev_ema_ignore_genesis_rules(height, blocks_in_price_adjustment_interval);
+
+        // the preceding ema
+        prev_ema_ignore_genesis_rules(prev_ema_height, blocks_in_price_adjustment_interval)
+    }
 }
 
 /// Returns the height of the "previous" EMA recalculation block.
@@ -213,6 +232,18 @@ pub fn previous_ema_recalculation_block_height(
     height: u64,
     blocks_in_price_adjustment_interval: u64,
 ) -> u64 {
+    // the first 2 adjustment intervals have special handling where we calculate the
+    // EMA for each block using the value from the preceding one
+    if height < (blocks_in_price_adjustment_interval * 2) {
+        return height.saturating_sub(1);
+    }
+
+    // After the first 2 adjustment intervals we start calculating the EMA
+    // only using the last EMA block
+    prev_ema_ignore_genesis_rules(height, blocks_in_price_adjustment_interval)
+}
+
+fn prev_ema_ignore_genesis_rules(height: u64, blocks_in_price_adjustment_interval: u64) -> u64 {
     // heights are zero indexed hence adding +1
     let remainder = (height + 1) % blocks_in_price_adjustment_interval;
     if remainder == 0 {
@@ -537,8 +568,8 @@ mod tests {
     #[rstest]
     #[case(0, 0)]
     #[case(1, 0)]
-    #[case(15, 9)]
-    #[case(19, 9)]
+    #[case(15, 14)]
+    #[case(19, 18)]
     #[case(20, 19)]
     #[case(21, 19)]
     #[case(29, 19)]
@@ -567,11 +598,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, false)]
-    #[case(1, false)]
+    #[case(0, true)]
+    #[case(1, true)]
     #[case(9, true)]
-    #[case(10, false)]
-    #[case(11, false)]
+    #[case(10, true)]
+    #[case(11, true)]
     #[case(19, true)]
     #[case(20, false)]
     #[case(21, false)]
