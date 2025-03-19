@@ -740,3 +740,151 @@ async fn start_reth_node<T: HasName + HasTableType>(
 
     node_handle.node_exit_future.await
 }
+
+/// Builder pattern for configuring and bootstrapping an Irys blockchain node.
+pub struct NodeBuilder {
+    config: Config,
+    irys_node_config: IrysNodeConfig,
+    storage_config: StorageConfig,
+    is_genesis: bool,
+}
+
+impl NodeBuilder {
+    /// Creates a new node builder instance.
+    pub fn new(config: Config, is_genesis: bool) -> Self {
+        let storage_config = StorageConfig::new(&config);
+        let irys_node_config = IrysNodeConfig::new(&config);
+
+        NodeBuilder {
+            config,
+            irys_node_config,
+            storage_config,
+            is_genesis,
+        }
+    }
+
+    /// Checks if local blockchain data exists.
+    fn blockchain_data_exists(&self) -> bool {
+        let base_dir = &self.irys_node_config.base_directory;
+        fs::metadata(base_dir).is_ok()
+    }
+
+    /// Initializes the node (genesis or non-genesis).
+    pub async fn build(self) -> eyre::Result<IrysNodeCtx> {
+        info!("Starting Irys Node...");
+
+        let data_exists = self.blockchain_data_exists();
+        // let ctx = if !data_exists && self.is_genesis {
+        //     // create the genesis block
+        //     self.bootstrap_genesis().await
+        //  } else {
+        //      self.init_base_components().await
+        //  }
+
+        // // start the node in normal mode
+        // self.start_non_genesis().await
+        todo!()
+    }
+
+    /// Bootstraps the genesis node.
+    async fn bootstrap_genesis(&self) -> eyre::Result<IrysNodeCtx> {
+        info!("Initializing genesis storage...");
+        // Delete the .irys folder if we are not persisting data on restart
+        let base_dir = self.irys_node_config.instance_directory();
+        if fs::exists(&base_dir).unwrap_or(false) {
+            // remove existing data directory as storage modules are packed with a different miner_signer generated next
+            info!("Removing .irys folder {:?}", &base_dir);
+            fs::remove_dir_all(&base_dir).expect("Unable to remove .irys folder");
+        }
+
+        // init storage module config
+        let storage_module_config = StorageSubmodulesConfig::load(base_dir.clone()).unwrap();
+        eyre::ensure!(
+            PACKING_TYPE != PackingType::CPU && self.storage_config.chunk_size != CHUNK_SIZE,
+            "GPU packing only supports chunk size {}!",
+            CHUNK_SIZE
+        );
+
+        // init reth chainspec
+        let (reth_chainspec, mut irys_genesis) = self.irys_node_config.chainspec_builder.build();
+        // TODO: Hard coding 3 for storage module count isn't great here,
+        // eventually we'll want to relate this to the genesis config
+        irys_genesis.diff =
+            calculate_initial_difficulty(&difficulty_adjustment_config, &storage_config, 3)
+                .unwrap();
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        irys_genesis.timestamp = now.as_millis();
+        irys_genesis.last_diff_timestamp = irys_genesis.timestamp;
+
+        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
+            let idx = BlockIndex::default();
+            let i = idx.init(arc_config.clone()).await.unwrap();
+
+            at_genesis = i.get_item(0).is_none();
+            if at_genesis {
+                debug!("At genesis!")
+            } else {
+                debug!("Not at genesis!")
+            }
+            latest_block_index = i.get_latest_item().cloned();
+            latest_block_height = i.latest_height();
+            debug!(
+                "Requesting prune until block height {}",
+                &latest_block_height
+            );
+
+            i
+        }));
+        todo!()
+    }
+
+    /// Bootstraps a non-genesis node.
+    async fn init_components(&self) -> eyre::Result<IrysNodeCtx> {
+        info!(?self.irys_node_config.base_directory, "Loading existing blockchain state");
+        // Delete the .irys folder if we are not persisting data on restart
+        let base_dir = self.irys_node_config.instance_directory();
+
+        // init storage module config
+        let storage_module_config = StorageSubmodulesConfig::load(base_dir.clone()).unwrap();
+        eyre::ensure!(
+            PACKING_TYPE != PackingType::CPU && self.storage_config.chunk_size != CHUNK_SIZE,
+            "GPU packing only supports chunk size {}!",
+            CHUNK_SIZE
+        );
+
+        // init reth chainspec
+        let (reth_chainspec, _irys_genesis) = self.irys_node_config.chainspec_builder.build();
+        todo!()
+    }
+
+    /// Synchronizes blockchain data from network peers.
+    async fn sync_from_peers(&self) -> eyre::Result<()> {
+        info!("Discovering peers...");
+        // TODO: Implement P2P discovery and sync logic
+
+        info!("Fetching latest blocks...");
+        // TODO: Download and validate blocks
+
+        info!("Sync complete.");
+        Ok(())
+    }
+
+    /// Initializes the VDF service for the genesis node.
+    async fn initialize_vdf(&self, genesis_block: &H256) -> eyre::Result<VdfStepsReadGuard> {
+        info!("Starting VDF service...");
+        todo!()
+    }
+
+    /// Initializes the VDF service for a non-genesis node.
+    async fn initialize_vdf_from_latest(&self) -> eyre::Result<VdfStepsReadGuard> {
+        info!("Loading VDF state...");
+        todo!()
+    }
+
+    /// Initializes the Reth provider for Ethereum-compatible operations.
+    async fn initialize_reth_provider(&self) -> eyre::Result<RethNodeProvider> {
+        info!("Starting Reth node...");
+        todo!()
+    }
+}
