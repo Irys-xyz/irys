@@ -28,8 +28,6 @@ async fn main() -> eyre::Result<()> {
     // start the node
     tracing::info!("starting the node");
     let handle = start(config).await?;
-    handle.actor_addresses.start_mining()?;
-    std::thread::park();
 
     Ok(())
 }
