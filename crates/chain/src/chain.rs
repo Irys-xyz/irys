@@ -71,13 +71,6 @@ use tokio::{
 };
 use tracing::{debug, error, info};
 
-pub async fn start(config: Config) -> eyre::Result<IrysNodeCtx> {
-    let irys_node_config = IrysNodeConfig::new(&config);
-    let storage_config = StorageConfig::new(&config);
-
-    start_irys_node(irys_node_config, storage_config, config).await
-}
-
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
     pub reth_handle: RethNodeProvider,
@@ -105,7 +98,13 @@ impl IrysNodeCtx {
         debug!("Main actor thread and reth thread stopped");
     }
 
-    pub async fn sync_state_from_peers(&self) -> eyre::Result<()> {
+    pub fn start_mining(&self) -> eyre::Result<()> {
+        // start processing new blocks
+        self.actor_addresses.start_mining()?;
+        Ok(())
+    }
+
+    async fn sync_state_from_peers(&self) -> eyre::Result<()> {
         info!("Discovering peers...");
         tracing::warn!("not yet implemented");
 
@@ -117,6 +116,7 @@ impl IrysNodeCtx {
     }
 }
 
+#[deprecated = "use the IrysNode struct (located at the bottom of the file)"]
 pub async fn start_irys_node(
     node_config: IrysNodeConfig,
     storage_config: StorageConfig,
@@ -753,20 +753,20 @@ async fn start_reth_node<T: HasName + HasTableType>(
 }
 
 /// Builder pattern for configuring and bootstrapping an Irys blockchain node.
-pub struct NodeBuilder {
-    config: Config,
-    irys_node_config: IrysNodeConfig,
-    storage_config: StorageConfig,
-    is_genesis: bool,
+pub struct IrysNode {
+    pub config: Config,
+    pub irys_node_config: IrysNodeConfig,
+    pub storage_config: StorageConfig,
+    pub is_genesis: bool,
 }
 
-impl NodeBuilder {
+impl IrysNode {
     /// Creates a new node builder instance.
     pub fn new(config: Config, is_genesis: bool) -> Self {
         let storage_config = StorageConfig::new(&config);
         let irys_node_config = IrysNodeConfig::new(&config);
 
-        NodeBuilder {
+        IrysNode {
             config,
             irys_node_config,
             storage_config,
@@ -777,11 +777,16 @@ impl NodeBuilder {
     /// Checks if local blockchain data exists.
     fn blockchain_data_exists(&self) -> bool {
         let base_dir = &self.irys_node_config.base_directory;
-        fs::metadata(base_dir).is_ok()
+        match fs::read_dir(base_dir) {
+            // Are there any entries?
+            Ok(mut entries) => entries.next().is_some(),
+            // no entries in the directory
+            Err(_) => false,
+        }
     }
 
     /// Initializes the node (genesis or non-genesis).
-    pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
+    pub async fn init(self) -> eyre::Result<IrysNodeCtx> {
         info!("Starting Irys Node...");
 
         let data_exists = self.blockchain_data_exists();
@@ -796,8 +801,6 @@ impl NodeBuilder {
             }
         };
 
-        // start processing new blocks
-        ctx.actor_addresses.start_mining()?;
         Ok(ctx)
     }
 

@@ -1,7 +1,6 @@
 use crate::utils::mine_block;
 use irys_actors::ema_service::EmaServiceMessage;
-use irys_chain::{start_irys_node, IrysNodeCtx};
-use irys_config::IrysNodeConfig;
+use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
 use irys_types::Config;
 
@@ -96,16 +95,14 @@ struct TestCtx {
 
 async fn setup(price_adjustment_interval: u64) -> eyre::Result<TestCtx> {
     let temp_dir = temporary_directory(Some("test_ema"), false);
-    let testnet_config = Config {
+    let config = Config {
         price_adjustment_interval,
+        base_directory: temp_dir.path().to_path_buf(),
         ..Config::testnet()
     };
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
+    let node = IrysNode::new(config.clone(), true).init().await?;
     Ok(TestCtx {
-        config: testnet_config,
+        config,
         node,
         temp_dir,
     })

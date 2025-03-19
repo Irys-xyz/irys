@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use irys_chain::chain::start;
+use irys_chain::IrysNode;
 use irys_types::Config;
 use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
 use tracing_error::ErrorLayer;
@@ -13,21 +13,25 @@ async fn main() -> eyre::Result<()> {
     color_eyre::install().expect("color eyre could not be installed");
 
     // load the config
-    let config_file = std::env::var("CONFIG")
+    let config = std::env::var("CONFIG")
         .unwrap_or_else(|_| "config.toml".to_owned())
         .parse::<PathBuf>()
         .expect("invalid file path");
-
-    let config = std::fs::read_to_string(config_file)
+    let config = std::fs::read_to_string(config)
         .map(|config_file| toml::from_str::<Config>(&config_file).expect("invalid config file"))
         .unwrap_or_else(|_err| {
             tracing::warn!("config file not provided, defaulting to testnet config");
             Config::testnet()
         });
 
+    // check env var to see if we are starting up in Genesis mode
+    let is_genesis = std::env::var("GENESIS").map(|_| true).unwrap_or(false);
+
     // start the node
     tracing::info!("starting the node");
-    let handle = start(config).await?;
+    let handle = IrysNode::new(config, is_genesis).init().await?;
+    handle.start_mining()?;
+    std::thread::park();
 
     Ok(())
 }
