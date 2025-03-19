@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::utils::mine_block;
 use irys_actors::{
     block_tree_service::{get_block, get_canonical_chain},
@@ -64,6 +66,7 @@ async fn serial_test_genesis_ema_price_updates_after_second_interval() -> eyre::
 
     // action -- mine a new block. This pushes the system to use a new EMA rather than the genesis EMA
     let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
     let (tx, rx) = tokio::sync::oneshot::channel();
     ctx.node
         .service_senders
@@ -107,7 +110,7 @@ async fn serial_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
     })
     .await?;
 
-    // mine 2 blocks
+    // mine 3 blocks
     let (header_1, _payload) = mine_block(&ctx.node).await?.unwrap();
     let (header_2, _payload) = mine_block(&ctx.node).await?.unwrap();
     let (header_3, _payload) = mine_block(&ctx.node).await?.unwrap();
