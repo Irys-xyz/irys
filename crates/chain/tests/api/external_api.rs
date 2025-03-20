@@ -26,6 +26,7 @@ use irys_database::{
     BlockIndex, Initialized, Ledger,
 };
 use irys_reth_node_bridge::node::{RethNode, RethNodeAddOns, RethNodeProvider};
+use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
@@ -50,6 +51,9 @@ async fn external_api() -> eyre::Result<()> {
     let mut node_config = IrysNodeConfig::default();
     node_config.base_directory = temp_dir.path().to_path_buf();
     let arc_config = Arc::new(node_config);
+
+    let irys_db_env =
+        open_or_create_irys_consensus_data_db(&arc_config.irys_consensus_data_dir()).unwrap();
 
     let testnet_config = Config::testnet();
     let storage_config = StorageConfig::new(&testnet_config);
