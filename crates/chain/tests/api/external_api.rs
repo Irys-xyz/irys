@@ -151,11 +151,7 @@ async fn external_api() -> eyre::Result<()> {
             .unwrap(),
     ));
 
-    let chunk_provider = ChunkProvider::new(
-        storage_config.clone(),
-        storage_modules.clone(),
-        arc_db.clone(),
-    );
+    let chunk_provider = ChunkProvider::new(storage_config.clone(), storage_modules.clone());
 
     let app_state = ApiState {
         reth_provider: None,
