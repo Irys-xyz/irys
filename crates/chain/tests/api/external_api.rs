@@ -13,7 +13,9 @@ use irys_actors::{
 use actix::prelude::*;
 use dev::SystemRegistry;
 use irys_actors::{
-    block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
+    block_producer::BlockFinalizedMessage,
+    block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
+    chunk_migration_service::ChunkMigrationService,
     mempool_service::GetBestMempoolTxs,
 };
 use irys_api_server::{run_server, ApiState};
@@ -23,16 +25,19 @@ use irys_database::{
     tables::{IngressProofs, IrysTables},
     BlockIndex, Initialized, Ledger,
 };
+use irys_reth_node_bridge::node::{RethNode, RethNodeAddOns, RethNodeProvider};
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    app_state::DatabaseProvider, partition::*, partition_chunk_offset_ii, Address, Base64, Config,
-    H256List, IrysBlockHeader, PartitionChunkOffset, PoaData, Signature, StorageConfig,
-    TransactionLedger, VDFLimiterInfo, H256, U256,
+    app_state::DatabaseProvider, partition::*, partition_chunk_offset_ii,
+    vdf_config::VDFStepsConfig, Address, Base64, Config, H256List, IrysBlockHeader,
+    PartitionChunkOffset, PoaData, Signature, StorageConfig, TransactionLedger, VDFLimiterInfo,
+    H256, U256,
 };
 use reth::{revm::primitives::B256, tasks::TaskManager};
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
+use tokio::sync::oneshot::{self};
 use tokio::{task, time::sleep};
 use tracing::info;
 
