@@ -50,7 +50,7 @@ async fn external_api() -> eyre::Result<()> {
 
     let mut node_config = IrysNodeConfig::default();
     node_config.base_directory = temp_dir.path().to_path_buf();
-    let arc_config = Arc::new(node_config);
+    let arc_config = Arc::new(node_config.clone());
 
     let irys_db_env =
         open_or_create_irys_consensus_data_db(&arc_config.irys_consensus_data_dir()).unwrap();
