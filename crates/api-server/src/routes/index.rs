@@ -13,6 +13,7 @@ struct NodeInfo {
     pub chain_id: u64,
     pub height: u64,
     pub block_hash: H256,
+    pub block_index_height: u64,
     pub blocks: u64,
 }
 
@@ -24,6 +25,7 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         chain_id: state.config.chain_id,
         height: 0,
         block_hash: H256::zero(),
+        block_index_height: 0,
         blocks: 0,
     };
     HttpResponse::Ok().body(serde_json::to_string_pretty(&node_info).unwrap())
