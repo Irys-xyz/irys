@@ -1,13 +1,9 @@
-//! chunk migration tests
-use std::time::Duration;
-
+//! endpoint tests
+use actix_web::HttpMessage;
 use irys_chain::{start_irys_node, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
-use irys_testing_utils::utils::{
-    setup_tracing_and_temp_dir, tempfile::TempDir, temporary_directory,
-};
-use irys_types::{Config, StorageConfig};
-use tokio::time::sleep;
+use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
+use irys_types::Config;
 use tracing::info;
 
 #[actix::test]
@@ -17,7 +13,7 @@ async fn external_api() -> eyre::Result<()> {
     let address = "http://127.0.0.1:8080";
     let client = awc::Client::default();
 
-    let response = client
+    let mut response = client
         .get(format!("{}/v1/info", address))
         .send()
         .await
@@ -26,12 +22,22 @@ async fn external_api() -> eyre::Result<()> {
     assert_eq!(response.status(), 200);
     info!("HTTP server started");
 
+    // confirm we are recieving the correct content type
+    assert_eq!(response.content_type(), "application/json");
+
+    use irys_api_server::routes::index::NodeInfo;
+
+    // deserialize the response into NodeInfo struct
+    let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
+
+    assert_eq!(json_response.block_index_height, 0);
+
     Ok(())
 }
 
 struct TestCtx {
-    config: Config,
-    node: IrysNodeCtx,
+    _config: Config,
+    _node: IrysNodeCtx,
     #[expect(
         dead_code,
         reason = "to prevent drop() being called and cleaning up resources"
@@ -54,8 +60,8 @@ async fn setup_with_config(testnet_config: Config) -> eyre::Result<TestCtx> {
     let storage_config = irys_types::StorageConfig::new(&testnet_config);
     let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     Ok(TestCtx {
-        config: testnet_config,
-        node,
+        _config: testnet_config,
+        _node: node,
         temp_dir,
     })
 }
