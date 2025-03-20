@@ -156,6 +156,7 @@ async fn external_api() -> eyre::Result<()> {
         db: arc_db.clone(),
         mempool: mempool_addr.clone(),
         chunk_provider: Arc::new(chunk_provider),
+        config: testnet_config,
     };
 
     // spawn server in a separate thread
