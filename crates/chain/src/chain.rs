@@ -46,11 +46,14 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
+use irys_types::block_production::Seed;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
     StorageConfig, CHUNK_SIZE, H256,
 };
-use irys_types::{Config, DifficultyAdjustmentConfig, OracleConfig, PartitionChunkRange};
+use irys_types::{
+    Config, DifficultyAdjustmentConfig, IrysBlockHeader, OracleConfig, PartitionChunkRange,
+};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::rpc::eth::EthApiServer as _;
 use reth::{
@@ -808,7 +811,7 @@ impl IrysNode {
 
     /// Initializes the node (genesis or non-genesis).
     pub async fn init(self) -> eyre::Result<IrysNodeCtx> {
-        info!(miner_address = ?self.irys_node_config.mining_signer.address(), "Starting Irys Node");
+        info!(miner_address = ?self.config.miner_address(), "Starting Irys Node");
 
         let data_exists = self.blockchain_data_exists();
         let ctx = match (data_exists, self.is_genesis) {
@@ -825,11 +828,18 @@ impl IrysNode {
         Ok(ctx)
     }
 
-    async fn create_base_components(&self) -> eyre::Result<(IrysNodeCtx, Server, JoinHandle<()>)> {
-        let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
-
+    async fn init_services(
+        &self,
+        reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
+        vdf_sthutodwn_receiver: std::sync::mpsc::Receiver<()>,
+        reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
+        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+        latest_block: Arc<IrysBlockHeader>,
+        seed: Seed,
+        global_step_number: u64,
+    ) -> eyre::Result<(IrysNodeCtx, Server, JoinHandle<()>)> {
         let node_config = Arc::new(self.irys_node_config.clone());
-        let mut task_manager = TaskManager::new(tokio::runtime::Handle::current().clone());
+        let task_manager = TaskManager::new(tokio::runtime::Handle::current().clone());
         let task_exec = task_manager.executor();
 
         // init Irys DB
@@ -837,26 +847,7 @@ impl IrysNode {
             open_or_create_irys_consensus_data_db(&node_config.irys_consensus_data_dir())?;
         let irys_db = DatabaseProvider(Arc::new(irys_db_env));
 
-        // init the block index component (todo: on genesis we need a different flow)
-        let block_index = BlockIndex::new().init(node_config.clone()).await.unwrap();
-        let latest_block_index = block_index
-            .get_latest_item()
-            .cloned()
-            .expect("the block index must have at least one entry");
-        let latest_block_height = block_index.latest_height();
-        let block_index = Arc::new(RwLock::new(block_index));
-        let latest_block = Arc::new(
-            database::block_header_by_hash(&irys_db.tx().unwrap(), &latest_block_index.block_hash)
-                .unwrap()
-                .unwrap(),
-        );
-
         // shutdown channels
-        let (reth_handle_sender, reth_handle_receiver) =
-            oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
-        let (irys_node_handle_sender, irys_node_handle_receiver) =
-            oneshot::channel::<IrysNodeCtx>();
-
         let mut arbiters = Vec::new();
         let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await?));
 
@@ -888,7 +879,7 @@ impl IrysNode {
                 confirmed_hash: Some(BlockHashType::Evm(latest_block.evm_block_hash)),
                 finalized_hash: None,
             })
-            .await?;
+            .await??;
 
         // start block index service
         let block_index_service =
@@ -919,8 +910,8 @@ impl IrysNode {
             .initialize(&irys_db, self.storage_submodule_config.clone())
             .await?;
         let epoch_service_actor = epoch_service.start();
-        // Retrieve ledger assignments
-        let ledgers_guard = epoch_service_actor.send(GetLedgersGuardMessage).await?;
+
+        // Retrieve Partition assignment
         let partition_assignments_guard = epoch_service_actor
             .send(GetPartitionAssignmentsGuardMessage)
             .await?;
@@ -1005,7 +996,6 @@ impl IrysNode {
         let vdf_service = vdf_service_actor.start();
         SystemRegistry::set(vdf_service.clone());
         let vdf_steps_guard = vdf_service.send(GetVdfStateMessage).await?;
-        let (global_step_number, seed) = vdf_steps_guard.read().get_last_step_and_seed();
 
         // spawn the validation service
         let validation_service = ValidationService::new(
@@ -1130,11 +1120,6 @@ impl IrysNode {
             .await?;
 
         // set up the vdf thread
-        let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
-        let seed = seed
-            .expect("the value to be present in non-genesis flows")
-            .0;
         let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
         let vdf_thread_handler = std::thread::spawn({
             let vdf_config = self.vdf_config.clone();
@@ -1149,13 +1134,15 @@ impl IrysNode {
                     }
                 }
 
+                // TODO: these channels are unused
+                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
                 run_vdf(
                     vdf_config,
                     global_step_number,
-                    seed,
+                    seed.0,
                     vdf_reset_seed,
                     new_seed_rx,
-                    shutdown_rx,
+                    vdf_sthutodwn_receiver,
                     broadcast_mining_actor.clone(),
                     vdf_service.clone(),
                     atomic_global_step_number.clone(),
