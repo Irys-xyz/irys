@@ -5,9 +5,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use {
-    irys_actors::block_index_service::BlockIndexService,
-    irys_actors::mempool_service::MempoolService,
+use irys_actors::{
+    block_index_service::BlockIndexService, mempool_service::MempoolService,
+    services::ServiceSenders,
 };
 
 use actix::prelude::*;
@@ -55,6 +55,7 @@ async fn external_api() -> eyre::Result<()> {
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1,
         chunk_migration_depth: 1, // Testnet / single node config
+        chain_id: 333,            //FIXME should this be a specific chain id?
     };
     let _chunk_size = storage_config.chunk_size;
 
@@ -298,12 +299,14 @@ async fn external_api() -> eyre::Result<()> {
 
     block_index_addr.do_send(block_finalized_message.clone());
 
+    let (service_senders, receivers) = ServiceSenders::new();
     // Send the block finalized message
     let chunk_migration_service = ChunkMigrationService::new(
         block_index.clone(),
         storage_config.clone(),
         storage_modules.clone(),
         arc_db.clone(),
+        service_senders.clone(),
     );
     SystemRegistry::set(chunk_migration_service.start());
     let block_finalized_message = BlockFinalizedMessage {
