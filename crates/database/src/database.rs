@@ -4,8 +4,7 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysTxHeaders, Metadata,
-    PeerListItems,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysBlockHeadersByHeight, IrysTxHeaders, Metadata, PeerListItems
 };
 
 use crate::metadata::MetadataKey;
@@ -68,6 +67,7 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: HasName + HasTableType>(
 
 /// Inserts a [`IrysBlockHeader`] into [`IrysBlockHeaders`]
 pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre::Result<()> {
+    tx.put::<IrysBlockHeadersByHeight>(block.height, block.block_hash)?;
     Ok(tx.put::<IrysBlockHeaders>(block.block_hash, block.clone().into())?)
 }
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
@@ -77,6 +77,18 @@ pub fn block_header_by_hash<T: DbTx>(
 ) -> eyre::Result<Option<IrysBlockHeader>> {
     Ok(tx
         .get::<IrysBlockHeaders>(*block_hash)?
+        .map(IrysBlockHeader::from))
+}
+
+/// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
+pub fn block_header_by_height<T: DbTx>(
+    tx: &T,
+    block_height: u64,
+) -> eyre::Result<Option<IrysBlockHeader>> {
+    Ok(tx.get::<IrysBlockHeadersByHeight>(block_height)?
+        .map(|block_hash| block_header_by_hash(tx, &block_hash))
+        .transpose()?
+        .flatten()
         .map(IrysBlockHeader::from))
 }
 

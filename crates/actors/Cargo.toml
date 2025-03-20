@@ -34,6 +34,7 @@ irys-testing-utils.workspace = true
 base58.workspace = true
 futures.workspace = true
 rust_decimal.workspace = true
+rayon = "1.8.0"
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }

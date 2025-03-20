@@ -4009,6 +4009,7 @@ dependencies = [
  "nodit",
  "openssl",
  "rand",
+ "rayon",
  "reth",
  "reth-db",
  "rstest",
