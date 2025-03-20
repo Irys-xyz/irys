@@ -13,7 +13,7 @@ use tokio::time::{sleep, Duration};
 use tracing::info;
 
 #[actix::test]
-async fn external_api() -> eyre::Result<()> {
+async fn serial_external_api() -> eyre::Result<()> {
     let ctx = setup().await?;
 
     let address = "http://127.0.0.1:8080";
