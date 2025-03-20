@@ -34,6 +34,7 @@ use irys_types::{
     PartitionChunkOffset, PoaData, Signature, StorageConfig, TransactionLedger, VDFLimiterInfo,
     H256, U256,
 };
+use reth::builder::FullNode;
 use reth::{revm::primitives::B256, tasks::TaskManager};
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
@@ -127,6 +128,20 @@ async fn external_api() -> eyre::Result<()> {
     let task_manager = TaskManager::current();
     let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
     let arc_db = DatabaseProvider(Arc::new(db));
+
+    let (reth_handle_sender, reth_handle_receiver) =
+        oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
+
+    let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
+    let reth_db = reth_node.provider.database.db.clone();
+    let irys_db = DatabaseProvider(Arc::new(irys_db_env));
+    let vdf_config = VDFStepsConfig::new(&testnet_config);
+
+    let block_tree_service = BlockTreeService::from_registry();
+    let block_tree_guard = block_tree_service
+        .send(GetBlockTreeGuardMessage)
+        .await
+        .unwrap();
 
     // Create an instance of the mempool actor
     let mempool_service = MempoolService::new(
