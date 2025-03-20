@@ -28,7 +28,7 @@ async fn external_api() -> eyre::Result<()> {
     assert_eq!(response.status(), 200);
     info!("HTTP server started");
 
-    // confirm we are recieving the correct content type
+    // confirm we are receiving the correct content type
     assert_eq!(response.content_type(), "application/json");
 
     // deserialize the response into NodeInfo struct
