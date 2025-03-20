@@ -130,11 +130,14 @@ async fn external_api() -> eyre::Result<()> {
 
     // Create an instance of the mempool actor
     let mempool_service = MempoolService::new(
-        arc_db.clone(),
-        task_manager.executor(),
-        arc_config.mining_signer.clone(),
+        irys_db.clone(),
+        reth_db.clone(),
+        reth_node.task_executor.clone(),
+        node_config.mining_signer.clone(),
         storage_config.clone(),
         storage_modules.clone(),
+        block_tree_guard.clone(),
+        &testnet_config,
     );
     SystemRegistry::set(mempool_service.start());
     let mempool_addr = MempoolService::from_registry();
