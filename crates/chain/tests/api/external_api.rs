@@ -46,7 +46,7 @@ use tracing::info;
 #[actix::test]
 async fn external_api() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("external_api"), false);
-
+    info!("tracing enabled");
     let mut node_config = IrysNodeConfig::default();
     node_config.base_directory = temp_dir.path().to_path_buf();
     let arc_config = Arc::new(node_config.clone());
@@ -129,24 +129,32 @@ async fn external_api() -> eyre::Result<()> {
         arc_module.pack_with_zeros();
     }
 
+    info!("task manager");
     let task_manager = TaskManager::current();
     let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
     let arc_db = DatabaseProvider(Arc::new(db));
+    info!("db opened/created");
 
     let (reth_handle_sender, reth_handle_receiver) =
         oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
 
+    info!("setup start: reth node");
     let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
+    info!("setup start: reth_db");
     let reth_db = reth_node.provider.database.db.clone();
+    info!("setup start: irys_db");
     let irys_db = DatabaseProvider(Arc::new(irys_db_env));
+    info!("setup start: vdf_config");
     let vdf_config = VDFStepsConfig::new(&testnet_config);
 
+    info!("setup: block tree service");
     let block_tree_service = BlockTreeService::from_registry();
     let block_tree_guard = block_tree_service
         .send(GetBlockTreeGuardMessage)
         .await
         .unwrap();
 
+    info!("creating: mempool service");
     // Create an instance of the mempool actor
     let mempool_service = MempoolService::new(
         irys_db.clone(),
@@ -170,6 +178,7 @@ async fn external_api() -> eyre::Result<()> {
             .unwrap(),
     ));
 
+    info!("creating: chunk provider");
     let chunk_provider = ChunkProvider::new(storage_config.clone(), storage_modules.clone());
 
     let app_state = ApiState {
@@ -183,6 +192,7 @@ async fn external_api() -> eyre::Result<()> {
     };
 
     // spawn server in a separate thread
+    info!("spawn server in new thread");
     task::spawn(run_server(app_state));
 
     let address = "http://127.0.0.1:8080";
