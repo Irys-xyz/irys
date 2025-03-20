@@ -38,6 +38,8 @@ async fn external_api() -> eyre::Result<()> {
 
     // advance one block
     let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
+    // advance one block, finalizing the previous block
+    let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
 
     let mock_header = IrysTransactionHeader {
         id: H256::from([255u8; 32]),
@@ -60,7 +62,8 @@ async fn external_api() -> eyre::Result<()> {
         all_txs: Arc::new(vec![mock_header]),
     };
 
-    sleep(Duration::from_millis(5000)).await;
+    //FIXME: magic number could be a constant e.g. 3 blocks worth of time?
+    sleep(Duration::from_millis(10000)).await;
 
     let _ = ctx
         .node
@@ -77,7 +80,7 @@ async fn external_api() -> eyre::Result<()> {
     // deserialize the response into NodeInfo struct
     let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
 
-    // check the api endpoint again
+    // check the api endpoint again, and it should now show 1 block in the index
     assert_eq!(json_response.block_index_height, 1);
 
     Ok(())
