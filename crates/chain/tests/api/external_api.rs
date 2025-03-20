@@ -37,7 +37,7 @@ async fn external_api() -> eyre::Result<()> {
     assert_eq!(json_response.block_index_height, 0);
 
     // advance one block
-    let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
+    let (_header, _payload) = mine_block(&ctx.node).await?.unwrap();
     // advance one block, finalizing the previous block
     let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
 
