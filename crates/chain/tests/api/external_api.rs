@@ -55,7 +55,8 @@ async fn external_api() -> eyre::Result<()> {
         open_or_create_irys_consensus_data_db(&arc_config.irys_consensus_data_dir()).unwrap();
 
     let testnet_config = Config::testnet();
-    let storage_config = StorageConfig::new(&testnet_config);
+    let mut storage_config = StorageConfig::new(&testnet_config);
+    storage_config.num_chunks_in_partition = 6;
 
     let _chunk_size = storage_config.chunk_size;
 
