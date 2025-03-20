@@ -5,6 +5,7 @@ use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use actix_web::dev::Server;
 use alloy_eips::BlockNumberOrTag;
+use futures::FutureExt;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
 use irys_actors::cache_service::ChunkCacheService;
 use irys_actors::ema_service::EmaService;
@@ -63,6 +64,9 @@ use reth::{
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::thread::JoinHandle;
 use std::{
@@ -765,6 +769,7 @@ pub struct IrysNode {
     pub irys_node_config: IrysNodeConfig,
     pub storage_config: StorageConfig,
     pub is_genesis: bool,
+    pub data_exists: bool,
     pub vdf_config: VDFStepsConfig,
     pub epoch_config: EpochServiceConfig,
     pub storage_submodule_config: StorageSubmodulesConfig,
@@ -777,15 +782,19 @@ impl IrysNode {
     pub fn new(config: Config, is_genesis: bool) -> Self {
         let storage_config = StorageConfig::new(&config);
         let irys_node_config = IrysNodeConfig::new(&config);
+        let data_exists = Self::blockchain_data_exists(&irys_node_config.base_directory);
         let vdf_config = VDFStepsConfig::new(&config);
         let epoch_config = EpochServiceConfig::new(&config);
-        let storage_submodule_config =
-            StorageSubmodulesConfig::load(irys_node_config.instance_directory().clone()).unwrap();
         let difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
         let packing_config = PackingConfig::new(&config);
 
+        // this populates the bas directory
+        let storage_submodule_config =
+            StorageSubmodulesConfig::load(irys_node_config.instance_directory().clone()).unwrap();
+
         IrysNode {
             config,
+            data_exists,
             irys_node_config,
             storage_config,
             is_genesis,
@@ -798,15 +807,13 @@ impl IrysNode {
     }
 
     /// Checks if local blockchain data exists.
-    fn blockchain_data_exists(&self) -> bool {
-        false
-        // let base_dir = &self.irys_node_config.base_directory;
-        // match fs::read_dir(base_dir) {
-        //     // Are there any entries?
-        //     Ok(mut entries) => entries.next().is_some(),
-        //     // no entries in the directory
-        //     Err(_) => false,
-        // }
+    fn blockchain_data_exists(base_dir: &PathBuf) -> bool {
+        match fs::read_dir(base_dir) {
+            // Are there any entries?
+            Ok(mut entries) => entries.next().is_some(),
+            // no entries in the directory
+            Err(_) => false,
+        }
     }
 
     /// Initializes the node (genesis or non-genesis).
@@ -819,8 +826,8 @@ impl IrysNode {
             oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
         let (chain_spec, irys_genesis) = self.create_genesis_header()?;
 
-        let data_exists = self.blockchain_data_exists();
-        let ctx = match (data_exists, self.is_genesis) {
+        let irys_provider = irys_storage::reth_provider::create_provider();
+        let ctx = match (self.data_exists, self.is_genesis) {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
             (false, true) => {
                 // bootstrap genesis
@@ -831,8 +838,17 @@ impl IrysNode {
                 let seed = irys_genesis.vdf_limiter_info.seed;
                 let global_step_number = 0;
 
+                // start reth
+                let reth_thread = self.init_reth(
+                    reth_shutdown_receiver,
+                    reth_handle_sender,
+                    irys_provider.clone(),
+                    chain_spec,
+                    latest_block_height,
+                )?;
+
                 // init the services
-                let (irys_node, actix_server, vdf_thread, irys_provider) = self
+                let (irys_node, actix_server, vdf_thread) = self
                     .init_services(
                         reth_shutdown_sender,
                         vdf_sthutodwn_receiver,
@@ -841,18 +857,9 @@ impl IrysNode {
                         irys_genesis,
                         seed,
                         global_step_number,
+                        irys_provider.clone(),
                     )
                     .await?;
-
-                // start reth
-                let reth = self.init_reth(
-                    reth_shutdown_receiver,
-                    reth_handle_sender,
-                    Arc::new(RwLock::new(Some(irys_provider))),
-                    node_config.clone(),
-                    chain_spec,
-                    latest_block_height,
-                );
 
                 // start cleanup threads
                 // return ctx
@@ -887,7 +894,7 @@ impl IrysNode {
         Ok((reth_chain_spec, irys_genesis))
     }
 
-    async fn init_reth(
+    fn init_reth(
         &self,
         reth_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
         // vdf_sthutodwn_sender: std::sync::mpsc::Sender<()>,
@@ -896,32 +903,44 @@ impl IrysNode {
         irys_provider: IrysRethProvider,
         // server: Server,
         // arbiters: Vec<Arbiter>,
-        node_config: Arc<IrysNodeConfig>,
         reth_chainspec: ChainSpec,
         latest_block_height: u64,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<JoinHandle<()>> {
         let node_config = Arc::new(self.irys_node_config.clone());
-        let run_reth_until_ctrl_c_or_signal = async || {
-            let mut task_manager = TaskManager::new(tokio::runtime::Handle::current());
-            let exec = task_manager.executor();
+        let reth_thread_handler = std::thread::Builder::new()
+            .name("reth-thread".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let handle = tokio_runtime.handle().clone();
+                let run_reth_until_ctrl_c_or_signal = async || {
+                    let mut task_manager = TaskManager::new(handle);
+                    let exec = task_manager.executor();
 
-            _ = run_to_completion_or_panic(
-                &mut task_manager,
-                run_until_ctrl_c_or_channel_message(
-                    start_reth_node(
-                        exec,
-                        reth_chainspec,
-                        node_config,
-                        IrysTables::ALL,
-                        reth_handle_sender,
-                        irys_provider.clone(),
-                        latest_block_height,
-                    ),
-                    reth_shutdown_receiver,
-                ),
-            )
-            .await;
-        };
+                    _ = run_to_completion_or_panic(
+                        &mut task_manager,
+                        run_until_ctrl_c_or_channel_message(
+                            start_reth_node(
+                                exec,
+                                reth_chainspec,
+                                node_config,
+                                IrysTables::ALL,
+                                reth_handle_sender,
+                                irys_provider.clone(),
+                                latest_block_height,
+                            ),
+                            reth_shutdown_receiver,
+                        ),
+                    )
+                    .await;
+                };
+                tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal());
+            })?;
+
+        return Ok(reth_thread_handler);
 
         // let reth_node = run_reth_until_ctrl_c_or_signal().await;
         // let (main_actor_thread_shutdown_tx, mut main_actor_thread_shutdown_rx) =
@@ -966,7 +985,6 @@ impl IrysNode {
         // debug!("Reth thread finished");
 
         // Ok(run_reth_until_ctrl_c_or_signal)
-        todo!()
     }
 
     async fn init_services(
@@ -978,7 +996,9 @@ impl IrysNode {
         latest_block: Arc<IrysBlockHeader>,
         seed: H256,
         global_step_number: u64,
-    ) -> eyre::Result<(IrysNodeCtx, Server, JoinHandle<()>, IrysRethProviderInner)> {
+        irys_provider: IrysRethProvider,
+    ) -> eyre::Result<(IrysNodeCtx, Server, JoinHandle<()>)> {
+        let actix_system = System::new();
         let node_config = Arc::new(self.irys_node_config.clone());
         let task_manager = TaskManager::new(tokio::runtime::Handle::current().clone());
         let task_exec = task_manager.executor();
@@ -987,14 +1007,16 @@ impl IrysNode {
         let irys_db_env =
             open_or_create_irys_consensus_data_db(&node_config.irys_consensus_data_dir())?;
         let irys_db = DatabaseProvider(Arc::new(irys_db_env));
+        debug!("Irys DB initiailsed");
 
-        // shutdown channels
+        // final arbiters
         let mut arbiters = Vec::new();
-        let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await?));
 
         // initialize the databases
+        let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await?));
         let reth_db = reth_node.provider.database.db.clone();
         check_db_version_and_run_migrations_if_needed(&reth_db, &irys_db)?;
+        debug!("Reth DB initiailsed");
 
         // start services
         let (service_senders, receivers) = ServiceSenders::new();
@@ -1004,6 +1026,7 @@ impl IrysNode {
             receivers.chunk_cache,
             self.config.clone(),
         );
+        debug!("Chunk cache initiailsed");
 
         // start reth service
         let reth_service = RethServiceActor::new(reth_node.clone(), irys_db.clone());
@@ -1012,6 +1035,7 @@ impl IrysNode {
             RethServiceActor::start_in_arbiter(&reth_arbiter.handle(), |_| reth_service);
         SystemRegistry::set(reth_service_actor.clone());
         arbiters.push(reth_arbiter);
+        debug!("Reth Service Actor initiailsed");
 
         // update reth service about the latest block data it must use
         reth_service_actor
@@ -1021,6 +1045,7 @@ impl IrysNode {
                 finalized_hash: None,
             })
             .await??;
+        debug!("Reth Service Actor updated about fork choice");
 
         // start block index service
         let block_index_service =
@@ -1330,11 +1355,17 @@ impl IrysNode {
             config: self.config.clone(),
         })
         .await;
-        let irys_provider = IrysRethProviderInner {
-            chunk_provider: chunk_provider.clone(),
-        };
 
-        Ok((irys_node_ctx, server, vdf_thread_handler, irys_provider))
+        // this OnceLock is due to the cyclic chain between Reth & the Irys node, where the IrysRethProvider requires both
+        // this is "safe", as the OnceLock is always set before this start function returns
+        let mut w = irys_provider
+            .write()
+            .map_err(|_| eyre::eyre!("lock poisoned"))?;
+        *w = Some(IrysRethProviderInner {
+            chunk_provider: chunk_provider.clone(),
+        });
+
+        Ok((irys_node_ctx, server, vdf_thread_handler))
     }
 
     /// Bootstraps the genesis node.
