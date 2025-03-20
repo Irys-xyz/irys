@@ -34,6 +34,8 @@ impl Default for ProtocolVersion {
 ///
 /// # Examples
 /// ```
+/// use irys_types::build_user_agent;
+///
 /// let ua = build_user_agent("my-node", "1.2.0");
 /// assert_eq!(ua, "my-node/1.2.0 (linux/x86_64)");
 ///
@@ -55,6 +57,8 @@ pub fn build_user_agent(name: &str, version: &str) -> String {
 ///
 /// # Examples
 /// ```
+/// use irys_types::parse_user_agent;
+///
 /// let (name, version, os, arch) = parse_user_agent("my-node/1.2.0 (linux/x86_64)").unwrap();
 /// assert_eq!(name, "my-node");
 /// assert_eq!(version, "1.2.0");
