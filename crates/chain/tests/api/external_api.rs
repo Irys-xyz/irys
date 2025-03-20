@@ -1,4 +1,5 @@
 //! endpoint tests
+use crate::utils::mine_block;
 use actix_web::HttpMessage;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{start_irys_node, IrysNodeCtx};
@@ -9,7 +10,7 @@ use tracing::info;
 
 #[actix::test]
 async fn external_api() -> eyre::Result<()> {
-    let _ctx = setup().await?;
+    let ctx = setup().await?;
 
     let address = "http://127.0.0.1:8080";
     let client = awc::Client::default();
@@ -31,12 +32,27 @@ async fn external_api() -> eyre::Result<()> {
 
     assert_eq!(json_response.block_index_height, 0);
 
+    // advance one block
+    let (_header, _payload) = mine_block(&ctx.node).await?.unwrap();
+
+    let mut response = client
+        .get(format!("{}/v1/info", address))
+        .send()
+        .await
+        .unwrap();
+
+    // deserialize the response into NodeInfo struct
+    let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
+
+    // check the api endpoint again
+    assert_eq!(json_response.block_index_height, 1);
+
     Ok(())
 }
 
 struct TestCtx {
     _config: Config,
-    _node: IrysNodeCtx,
+    node: IrysNodeCtx,
     #[expect(
         dead_code,
         reason = "to prevent drop() being called and cleaning up resources"
@@ -60,7 +76,7 @@ async fn setup_with_config(testnet_config: Config) -> eyre::Result<TestCtx> {
     let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     Ok(TestCtx {
         _config: testnet_config,
-        _node: node,
+        node,
         temp_dir,
     })
 }
