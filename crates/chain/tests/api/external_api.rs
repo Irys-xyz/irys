@@ -1,11 +1,15 @@
 //! endpoint tests
+use std::sync::Arc;
+
 use crate::utils::mine_block;
 use actix_web::HttpMessage;
+use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{start_irys_node, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
-use irys_types::Config;
+use irys_types::{Address, Config, IrysTransactionHeader, Signature, H256};
+use tokio::time::{sleep, Duration};
 use tracing::info;
 
 #[actix::test]
@@ -33,7 +37,36 @@ async fn external_api() -> eyre::Result<()> {
     assert_eq!(json_response.block_index_height, 0);
 
     // advance one block
-    let (_header, _payload) = mine_block(&ctx.node).await?.unwrap();
+    let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
+
+    let mock_header = IrysTransactionHeader {
+        id: H256::from([255u8; 32]),
+        anchor: H256::from([1u8; 32]),
+        signer: Address::default(),
+        data_root: H256::from([3u8; 32]),
+        data_size: 1024,
+        term_fee: 100,
+        perm_fee: Some(200),
+        ledger_id: 1,
+        bundle_format: None,
+        chain_id: ctx.config.chain_id,
+        version: 0,
+        ingress_proofs: None,
+        signature: Signature::test_signature().into(),
+    };
+
+    let block_finalized_message = BlockFinalizedMessage {
+        block_header: header,
+        all_txs: Arc::new(vec![mock_header]),
+    };
+
+    sleep(Duration::from_millis(5000)).await;
+
+    let _ = ctx
+        .node
+        .actor_addresses
+        .block_index
+        .send(block_finalized_message);
 
     let mut response = client
         .get(format!("{}/v1/info", address))
@@ -51,7 +84,7 @@ async fn external_api() -> eyre::Result<()> {
 }
 
 struct TestCtx {
-    _config: Config,
+    config: Config,
     node: IrysNodeCtx,
     #[expect(
         dead_code,
@@ -75,7 +108,7 @@ async fn setup_with_config(testnet_config: Config) -> eyre::Result<TestCtx> {
     let storage_config = irys_types::StorageConfig::new(&testnet_config);
     let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     Ok(TestCtx {
-        _config: testnet_config,
+        config: testnet_config,
         node,
         temp_dir,
     })
