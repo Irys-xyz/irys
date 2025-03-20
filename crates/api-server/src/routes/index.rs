@@ -18,6 +18,12 @@ struct NodeInfo {
 }
 
 pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
+    let block_index_height = state
+        .block_index
+        .as_ref()
+        .expect("block index")
+        .read()
+        .latest_height();
     // TODO: populate this response struct with real values
     let node_info = NodeInfo {
         version: "0.0.1".into(),
@@ -25,7 +31,7 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         chain_id: state.config.chain_id,
         height: 0,
         block_hash: H256::zero(),
-        block_index_height: 0,
+        block_index_height,
         blocks: 0,
     };
     HttpResponse::Ok().body(serde_json::to_string_pretty(&node_info).unwrap())
