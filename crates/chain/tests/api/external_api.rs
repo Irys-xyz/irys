@@ -26,7 +26,7 @@ use irys_database::{
 use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    app_state::DatabaseProvider, partition::*, Address, Base64, H256List, IrysBlockHeader,
+    app_state::DatabaseProvider, partition::*, Address, Base64, Config, H256List, IrysBlockHeader,
     PartitionChunkOffset, PoaData, Signature, StorageConfig, TransactionLedger, VDFLimiterInfo,
     H256, U256,
 };
@@ -45,18 +45,9 @@ async fn external_api() -> eyre::Result<()> {
     node_config.base_directory = temp_dir.path().to_path_buf();
     let arc_config = Arc::new(node_config);
 
-    // Create a storage config for testing
-    let storage_config = StorageConfig {
-        chunk_size: 32,
-        num_chunks_in_partition: 6,
-        num_chunks_in_recall_range: 2,
-        num_partitions_in_slot: 1,
-        miner_address: Address::random(),
-        min_writes_before_sync: 1,
-        entropy_packing_iterations: 1,
-        chunk_migration_depth: 1, // Testnet / single node config
-        chain_id: 333,            //FIXME should this be a specific chain id?
-    };
+    let testnet_config = Config::testnet();
+    let storage_config = StorageConfig::new(&testnet_config);
+
     let _chunk_size = storage_config.chunk_size;
 
     // Create StorageModules for testing
