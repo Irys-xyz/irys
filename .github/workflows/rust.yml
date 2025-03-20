@@ -126,6 +126,9 @@ jobs:
       - name: cargo doc
         run: cargo xtask doc -- --all-features
 
+      - name: cargo test docs
+        run: RUST_LOG=debug cargo test --doc
+
   cargo-unused-deps:
     name: cargo unused-deps
     runs-on: self-hosted

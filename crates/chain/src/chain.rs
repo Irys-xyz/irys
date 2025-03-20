@@ -4,6 +4,7 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::{Actor, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use alloy_eips::BlockNumberOrTag;
+use irys_actors::block_tree_service::BlockTreeReadGuard;
 use irys_actors::cache_service::ChunkCacheService;
 use irys_actors::ema_service::EmaService;
 use irys_actors::packing::PackingConfig;
@@ -86,6 +87,7 @@ pub struct IrysNodeCtx {
     pub config: Arc<IrysNodeConfig>,
     pub chunk_provider: Arc<ChunkProvider>,
     pub block_index_guard: BlockIndexReadGuard,
+    pub block_tree_guard: BlockTreeReadGuard,
     pub vdf_steps_guard: VdfStepsReadGuard,
     pub vdf_config: VDFStepsConfig,
     pub storage_config: StorageConfig,
@@ -446,6 +448,7 @@ pub async fn start_irys_node(
                     db: irys_db.clone(),
                     vdf_config: vdf_config.clone(),
                     vdf_steps_guard: vdf_steps_guard.clone(),
+                    service_senders: service_senders.clone(),
                 };
                 let block_discovery_arbiter = Arbiter::new();
                 let block_discovery_addr = BlockDiscoveryActor::start_in_arbiter(
@@ -613,6 +616,7 @@ pub async fn start_irys_node(
                     service_senders: service_senders.clone(),
                     reth_shutdown_sender,
                     reth_thread_handle: None,
+                    block_tree_guard: block_tree_guard.clone(),
                 });
 
                 let server = run_server(ApiState {
