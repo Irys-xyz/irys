@@ -1,5 +1,6 @@
 //! endpoint tests
 use actix_web::HttpMessage;
+use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{start_irys_node, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
@@ -24,8 +25,6 @@ async fn external_api() -> eyre::Result<()> {
 
     // confirm we are recieving the correct content type
     assert_eq!(response.content_type(), "application/json");
-
-    use irys_api_server::routes::index::NodeInfo;
 
     // deserialize the response into NodeInfo struct
     let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
