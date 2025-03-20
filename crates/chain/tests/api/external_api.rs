@@ -255,54 +255,7 @@ async fn external_api() -> eyre::Result<()> {
     }
 
     // Create a block from the tx
-    let irys_block = IrysBlockHeader {
-        diff: U256::from(1000),
-        cumulative_diff: U256::from(5000),
-        last_diff_timestamp: 1622543200,
-        solution_hash: H256::zero(),
-        previous_solution_hash: H256::zero(),
-        last_epoch_hash: H256::random(),
-        chunk_hash: H256::zero(),
-        height,
-        block_hash: H256::zero(),
-        previous_block_hash: H256::zero(),
-        previous_cumulative_diff: U256::from(4000),
-        poa: PoaData {
-            tx_path: None,
-            data_path: None,
-            chunk: Base64::from_str("").unwrap(),
-            ledger_id: None,
-            partition_chunk_offset: 0,
-            partition_hash: PartitionHash::zero(),
-            recall_chunk_index: 0,
-        },
-        reward_address: Address::ZERO,
-        miner_address: Address::ZERO,
-        signature: Signature::test_signature().into(),
-        timestamp: now.as_millis(),
-        ledgers: vec![
-            // Permanent Publish Ledger
-            TransactionLedger {
-                ledger_id: Ledger::Publish.into(),
-                tx_root: H256::zero(),
-                tx_ids: H256List(Vec::new()),
-                max_chunk_offset: 0,
-                expires: None,
-                proofs: None,
-            },
-            // Term Submit Ledger
-            TransactionLedger {
-                ledger_id: Ledger::Submit.into(),
-                tx_root: TransactionLedger::merklize_tx_root(&tx_headers).0,
-                tx_ids: H256List(data_tx_ids.clone()),
-                max_chunk_offset: 0,
-                expires: Some(1622543200),
-                proofs: None,
-            },
-        ],
-        evm_block_hash: B256::ZERO,
-        vdf_limiter_info: VDFLimiterInfo::default(),
-    };
+    let irys_block = IrysBlockHeader::new_mock_header();
 
     // Send the block confirmed message
     let block = Arc::new(irys_block);
