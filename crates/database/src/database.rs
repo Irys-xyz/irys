@@ -4,7 +4,8 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysBlockHeadersByHeight, IrysTxHeaders, Metadata, PeerListItems
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysBlockHeadersByHeight,
+    IrysTxHeaders, Metadata, PeerListItems,
 };
 
 use crate::metadata::MetadataKey;
@@ -85,7 +86,8 @@ pub fn block_header_by_height<T: DbTx>(
     tx: &T,
     block_height: u64,
 ) -> eyre::Result<Option<IrysBlockHeader>> {
-    Ok(tx.get::<IrysBlockHeadersByHeight>(block_height)?
+    Ok(tx
+        .get::<IrysBlockHeadersByHeight>(block_height)?
         .map(|block_hash| block_header_by_hash(tx, &block_hash))
         .transpose()?
         .flatten()

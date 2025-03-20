@@ -1,5 +1,5 @@
 use actix::prelude::*;
-use irys_database::{block_header_by_height, block_header_by_hash};
+use irys_database::{block_header_by_hash, block_header_by_height};
 use irys_vdf::vdf_state::{AtomicVdfState, VdfState, VdfStepsReadGuard};
 use rayon::prelude::*;
 use reth_db::Database;
@@ -9,9 +9,9 @@ use std::{
 };
 use tracing::info;
 
-use irys_types::{block_production::Seed, Config, DatabaseProvider, IrysBlockHeader};
 use crate::block_index_service::BlockIndexReadGuard;
 use crate::services::Stop;
+use irys_types::{block_production::Seed, Config, DatabaseProvider, IrysBlockHeader};
 
 #[derive(Debug, Default)]
 pub struct VdfService {
@@ -104,15 +104,19 @@ fn create_state_parallel(
 
     let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
     let mut global_step_number: u64 = 0;
-    let n = 50;  // number of block headers read in parallel
+    let n = 50; // number of block headers read in parallel
 
     while steps_remaining > 0 && height > 0 {
         // get in parallel n blocks
         info!("reading from {} to {}", height.saturating_sub(n), height);
         let blocks: Vec<IrysBlockHeader> = (height.saturating_sub(n)..height)
-        .into_par_iter()
-        .map(|h| db.view_eyre(|tx| block_header_by_height(tx, h)).unwrap().unwrap())
-        .collect();
+            .into_par_iter()
+            .map(|h| {
+                db.view_eyre(|tx| block_header_by_height(tx, h))
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
 
         'outer: for block in blocks.iter().rev() {
             if global_step_number == 0 {
@@ -340,14 +344,22 @@ mod tests {
         println!("Indexed: {} blocks in {:.2?}", height, elapsed);
 
         let now = Instant::now();
-        let vdf_state = create_state(block_index_guard.clone(), database_provider.clone(), &testnet_config);
+        let vdf_state = create_state(
+            block_index_guard.clone(),
+            database_provider.clone(),
+            &testnet_config,
+        );
         let elapsed = now.elapsed();
-        println!("VdfService vdf steps initialization time: {:.2?}", elapsed);        
+        println!("VdfService vdf steps initialization time: {:.2?}", elapsed);
 
         let now = Instant::now();
-        let vdf_state_parallel = create_state_parallel(block_index_guard, database_provider, &testnet_config);
+        let vdf_state_parallel =
+            create_state_parallel(block_index_guard, database_provider, &testnet_config);
         let elapsed = now.elapsed();
-        println!("VdfService vdf steps initialization time in parallel: {:.2?}", elapsed);        
+        println!(
+            "VdfService vdf steps initialization time in parallel: {:.2?}",
+            elapsed
+        );
 
         assert_eq!(vdf_state.max_seeds_num, vdf_state_parallel.max_seeds_num);
         assert_eq!(vdf_state.global_step, vdf_state_parallel.global_step);
