@@ -43,7 +43,6 @@ use tokio::sync::oneshot::{self};
 use tokio::{task, time::sleep};
 use tracing::info;
 
-#[ignore]
 #[actix::test]
 async fn external_api() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("external_api"), false);
