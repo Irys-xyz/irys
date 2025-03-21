@@ -3,19 +3,19 @@ use actix_web::{http::header::ContentType, web, HttpResponse};
 use irys_database::BlockIndexItem;
 
 #[derive(serde::Deserialize)]
-pub struct BlockIndexApiPath {
+pub struct BlockIndexQuery {
     height: usize,
     limit: usize,
 }
 
 pub async fn block_index_route(
     state: web::Data<ApiState>,
-    path: web::Path<BlockIndexApiPath>,
+    query: web::Query<BlockIndexQuery>,
 ) -> HttpResponse {
     let block_index = state.block_index.clone().expect("block index");
 
-    let limit = path.limit;
-    let height = path.height;
+    let limit = query.limit;
+    let height = query.height;
 
     let read = block_index.read();
     let requested_blocks: Vec<&BlockIndexItem> = read

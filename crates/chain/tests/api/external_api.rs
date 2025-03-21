@@ -33,7 +33,7 @@ async fn block_index_endpoint_request(
     limit: u64,
 ) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
     client_request(&format!(
-        "{}{}/{}/{}",
+        "{}{}?height={}&limit={}",
         &address, "/v1/block_index", &height, &limit
     ))
     .await
