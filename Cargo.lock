@@ -4109,6 +4109,7 @@ dependencies = [
  "rust_decimal_macros",
  "serde_json",
  "sha2 0.10.8",
+ "tempfile",
  "test-fuzz",
  "test-log",
  "tokio",

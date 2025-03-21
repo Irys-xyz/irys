@@ -213,7 +213,7 @@ impl Handler<TxIngressMessage> for MempoolService {
             "unable to get canonical chain from block tree".to_owned(),
         ))?;
 
-        match irys_database::block_header_by_hash(read_tx, &tx.anchor) {
+        match irys_database::block_header_by_hash(read_tx, &tx.anchor, false) {
             // note: we use addition here as it's safer
             Ok(Some(hdr)) if hdr.height + self.anchor_expiry_depth >= *latest_height => {
                 debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id);

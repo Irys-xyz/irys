@@ -109,6 +109,7 @@ pub async fn run_server(app_state: ApiState) -> Server {
                     }),
             )
             .service(routes())
+            //FIXME this default route is not behind a api version, should it be before 1.0 release?
             .route("/", web::get().to(index::info_route))
             .wrap(Cors::permissive())
     })

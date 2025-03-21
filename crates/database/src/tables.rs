@@ -8,7 +8,7 @@ use crate::{
 use irys_types::{
     ingress::IngressProof, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, H256,
 };
-use irys_types::{Address, PeerListItem};
+use irys_types::{Address, Base64, PeerListItem};
 use reth_codecs::Compact;
 use reth_db::{table::DupSort, tables, DatabaseError};
 use reth_db::{HasName, HasTableType, TableType, TableViewer};
@@ -76,6 +76,7 @@ macro_rules! impl_compression_for_compact {
 add_wrapper_struct!((IrysBlockHeader, CompactIrysBlockHeader));
 add_wrapper_struct!((IrysTransactionHeader, CompactTxHeader));
 add_wrapper_struct!((PeerListItem, CompactPeerListItem));
+add_wrapper_struct!((Base64, CompactBase64));
 
 impl_compression_for_compact!(
     CompactIrysBlockHeader,
@@ -89,13 +90,17 @@ impl_compression_for_compact!(
     PartitionHashes,
     RelativeStartOffsets,
     DataRootLRUEntry,
-    GlobalChunkOffset
+    GlobalChunkOffset,
+    CompactBase64
 );
 
 tables! {
     IrysTables;
     /// Stores the header hashes belonging to the canonical chain.
     table IrysBlockHeaders<Key = H256, Value = CompactIrysBlockHeader>;
+
+    /// Stores PoA chunks
+    table IrysPoAChunks<Key = H256, Value = CompactBase64>;
 
     /// Stores the tx header headers that have been confirmed
     table IrysTxHeaders<Key = H256, Value = CompactTxHeader>;
