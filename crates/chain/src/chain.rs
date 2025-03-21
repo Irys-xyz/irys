@@ -5,7 +5,6 @@ use actix::{Actor, Addr, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use actix_web::dev::Server;
 use alloy_eips::BlockNumberOrTag;
-use futures::FutureExt;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
 use irys_actors::cache_service::ChunkCacheService;
 use irys_actors::ema_service::EmaService;
@@ -64,9 +63,7 @@ use reth::{
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::thread::JoinHandle;
 use std::{
@@ -822,9 +819,12 @@ impl IrysNode {
         info!(miner_address = ?self.config.miner_address(), "Starting Irys Node");
 
         let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
+        let (main_actor_thread_shutdown_tx, mut main_actor_thread_shutdown_rx) =
+            tokio::sync::mpsc::channel::<()>(1);
         let (vdf_sthutodwn_sender, vdf_sthutodwn_receiver) = mpsc::channel();
         let (reth_handle_sender, reth_handle_receiver) =
             oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
+        let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
         let (chain_spec, irys_genesis) = self.create_genesis_header()?;
 
         let irys_provider = irys_storage::reth_provider::create_provider();
@@ -834,20 +834,7 @@ impl IrysNode {
                 // bootstrap genesis
                 let node_config = Arc::new(self.irys_node_config.clone());
                 let block_index = BlockIndex::new().init(node_config.clone()).await?;
-                let latest_block_height = irys_genesis.height;
                 let block_index = Arc::new(RwLock::new(block_index));
-
-                // start reth
-                let reth_thread = self.init_reth(
-                    reth_shutdown_receiver,
-                    reth_handle_sender,
-                    irys_provider.clone(),
-                    chain_spec,
-                    latest_block_height,
-                )?;
-                let irys_db = init_irys_db(&node_config)?;
-                irys_db.update_eyre(|tx| irys_database::insert_block_header(tx, &irys_genesis))?;
-                drop(irys_db);
 
                 // init the services
                 let actor_main_thread_handle = std::thread::Builder::new()
@@ -855,50 +842,90 @@ impl IrysNode {
                     .stack_size(32 * 1024 * 1024)
                     .spawn({
                         let node = (*self).clone();
+                        let irys_provider = irys_provider.clone();
+                        let irys_genesis = irys_genesis.clone();
                         move || {
-                            System::new().block_on({
-                                async move {
-                                    // start block index service, we need to preconfigure the initial finalized block
-                                    let block_index_service_actor =
-                                        node.init_block_index_service(&block_index);
-                                    let msg = BlockFinalizedMessage {
-                                        block_header: irys_genesis.clone(),
-                                        all_txs: Arc::new(vec![]),
-                                    };
-                                    block_index_service_actor
-                                        .send(msg)
-                                        .await
-                                        .expect("to send the genesis finalization msg")
-                                        .expect(
-                                            "block index to accept the genesis finalization block",
-                                        );
+                            System::new().block_on(async move {
+                                let task_manager =
+                                    TaskManager::new(tokio::runtime::Handle::current().clone());
+                                let task_exec = task_manager.executor();
+                                let block_index_service_actor = genesis_initialization(
+                                    &irys_genesis,
+                                    node_config,
+                                    &block_index,
+                                    &node,
+                                )
+                                .await;
 
-                                    // start the rest of the services
-                                    let (irys_node, actix_server, vdf_thread) = node
-                                        .init_services(
-                                            reth_shutdown_sender,
-                                            vdf_sthutodwn_receiver,
-                                            reth_handle_receiver,
-                                            block_index,
-                                            irys_genesis.clone(),
-                                            irys_provider.clone(),
-                                            block_index_service_actor,
-                                        )
-                                        .await
-                                        .expect("init services failure");
+                                // start the rest of the services
+                                let (irys_node, actix_server, vdf_thread, arbiters, reth_node) =
+                                    node.init_services(
+                                        reth_shutdown_sender,
+                                        vdf_sthutodwn_receiver,
+                                        reth_handle_receiver,
+                                        block_index,
+                                        irys_genesis.clone(),
+                                        irys_provider.clone(),
+                                        block_index_service_actor,
+                                        &task_exec,
+                                    )
+                                    .await
+                                    .expect("init services failure");
+                                irys_node_ctx_tx
+                                    .send(irys_node)
+                                    .expect("to be able to send the node");
 
-                                    // await on actix web server
-                                    actix_server.await.unwrap();
+                                // await on actix web server
+                                let server_handle = actix_server.handle();
+
+                                let server_stop_handle = actix_rt::spawn(async move {
+                                    let _ = main_actor_thread_shutdown_rx.recv().await;
+                                    info!("Main actor thread received shutdown signal");
+
+                                    debug!("Stopping API server");
+                                    server_handle.stop(true).await;
+                                    info!("API server stopped");
+                                });
+
+                                actix_server.await.unwrap();
+                                server_stop_handle.await.unwrap();
+
+                                debug!("Stopping actors");
+                                debug!("Stopping actors");
+                                for arbiter in arbiters {
+                                    arbiter.stop();
+                                    let _ = arbiter.join();
                                 }
-                            });
-                        }
-                    })?
-                    .join()
-                    .unwrap();
+                                debug!("Actors stopped");
+                                debug!("Actors stopped");
 
-                // start cleanup threads
-                // return ctx
-                todo!()
+                                // Send shutdown signal
+                                vdf_sthutodwn_sender.send(()).unwrap();
+
+                                debug!("Waiting for VDF thread to finish");
+                                // Wait for vdf thread to finish & save steps
+                                vdf_thread.join().unwrap();
+
+                                debug!("VDF thread finished");
+                                reth_node
+                            })
+                        }
+                    })?;
+
+                // start reth
+                let reth_thread = self.init_reth(
+                    reth_shutdown_receiver,
+                    main_actor_thread_shutdown_tx,
+                    reth_handle_sender,
+                    actor_main_thread_handle,
+                    irys_provider.clone(),
+                    chain_spec,
+                    irys_genesis.height,
+                )?;
+
+                let mut ctx = irys_node_ctx_rx.await.expect("to receive the node ctx");
+                ctx.reth_thread_handle = Some(reth_thread.into());
+                ctx
             }
             // non genesis -- sync state from peers
             (true, false) | (false, false) => {
@@ -932,12 +959,10 @@ impl IrysNode {
     fn init_reth(
         &self,
         reth_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
-        // vdf_sthutodwn_sender: std::sync::mpsc::Sender<()>,
+        main_actor_thread_shutdown_tx: tokio::sync::mpsc::Sender<()>,
         reth_handle_sender: oneshot::Sender<FullNode<RethNode, RethNodeAddOns>>,
-        // vdf_thread_handle: JoinHandle<()>,
+        actor_main_thread_handle: JoinHandle<RethNodeProvider>,
         irys_provider: IrysRethProvider,
-        // server: Server,
-        // arbiters: Vec<Arbiter>,
         reth_chainspec: ChainSpec,
         latest_block_height: u64,
     ) -> eyre::Result<JoinHandle<()>> {
@@ -949,14 +974,15 @@ impl IrysNode {
                 let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
-                    .unwrap();
+                    .expect("to be able to start a new runetime");
                 let handle = tokio_runtime.handle().clone();
+                let mut task_manager = TaskManager::new(handle);
+                let exec = task_manager.executor();
                 let run_reth_until_ctrl_c_or_signal = async || {
-                    let mut task_manager = TaskManager::new(handle);
-                    let exec = task_manager.executor();
-
                     _ = run_to_completion_or_panic(
                         &mut task_manager,
+                        // todo we can simplify things if we use `irys_reth_node_bridge::run_node` directly
+                        //      Then we can drop the channel
                         run_until_ctrl_c_or_channel_message(
                             start_reth_node(
                                 exec,
@@ -971,55 +997,29 @@ impl IrysNode {
                         ),
                     )
                     .await;
+                    debug!("Sending shutdown signal to the main actor thread");
+                    let _ = main_actor_thread_shutdown_tx.try_send(());
+
+                    debug!("Waiting for the main actor thread to finish");
+                    let reth_node_handle = actor_main_thread_handle
+                        .join()
+                        .expect("to successfully join the actor thread handle");
+
+                    reth_node_handle
                 };
-                tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal());
+
+                let reth_node = tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal());
+
+                debug!("Shutting down the rest of the reth jobs in case there are unfinished ones");
+                task_manager.graceful_shutdown();
+
+                reth_node.provider.database.db.close();
+                irys_storage::reth_provider::cleanup_provider(&irys_provider);
+
+                debug!("Reth thread finished");
             })?;
 
         return Ok(reth_thread_handler);
-
-        // let reth_node = run_reth_until_ctrl_c_or_signal().await;
-        // let (main_actor_thread_shutdown_tx, mut main_actor_thread_shutdown_rx) =
-        //     tokio::sync::mpsc::channel::<()>(1);
-        // debug!("Sending shutdown signal to the main actor thread");
-        // let server_handle = server.handle();
-        // let server_stop_handle = actix_rt::spawn(async move {
-        //     let _ = main_actor_thread_shutdown_rx.recv().await;
-        //     info!("Main actor thread received shutdown signal");
-
-        //     debug!("Stopping API server");
-        //     server_handle.stop(true).await;
-        //     info!("API server stopped");
-        // });
-
-        // debug!("Waiting for the main actor thread to finish");
-        // server.await.unwrap();
-        // server_stop_handle.await.unwrap();
-
-        // debug!("Stopping actors");
-        // for arbiter in arbiters {
-        //     arbiter.stop();
-        //     let _ = arbiter.join();
-        // }
-        // debug!("Actors stopped");
-
-        // // Send shutdown signal to VDF
-        // vdf_sthutodwn_sender.send(()).unwrap();
-
-        // debug!("Waiting for VDF thread to finish");
-        // // Wait for vdf thread to finish & save steps
-        // vdf_thread_handle.join().unwrap();
-
-        // reth_node_handle
-
-        // debug!("Shutting down the rest of the reth jobs in case there are unfinished ones");
-        // task_manager.graceful_shutdown();
-
-        // reth_node.provider.database.db.close();
-        // irys_storage::reth_provider::cleanup_provider(&irys_provider);
-
-        // debug!("Reth thread finished");
-
-        // Ok(run_reth_until_ctrl_c_or_signal)
     }
 
     async fn init_services(
@@ -1031,12 +1031,17 @@ impl IrysNode {
         latest_block: Arc<IrysBlockHeader>,
         irys_provider: IrysRethProvider,
         block_index_service_actor: Addr<BlockIndexService>,
-    ) -> eyre::Result<(IrysNodeCtx, Server, JoinHandle<()>)> {
+        task_exec: &TaskExecutor,
+    ) -> eyre::Result<(
+        IrysNodeCtx,
+        Server,
+        JoinHandle<()>,
+        Vec<Arbiter>,
+        RethNodeProvider,
+    )> {
         let seed = latest_block.vdf_limiter_info.seed;
         let global_step_number = latest_block.vdf_limiter_info.global_step_number;
         let node_config = Arc::new(self.irys_node_config.clone());
-        let task_manager = TaskManager::new(tokio::runtime::Handle::current().clone());
-        let task_exec = task_manager.executor();
 
         // init Irys DB
         let irys_db = init_irys_db(&node_config)?;
@@ -1176,7 +1181,7 @@ impl IrysNode {
         // set up storage modules
         let part_actors = self.init_partition_mining_actor(
             &irys_db,
-            arbiters,
+            &mut arbiters,
             &storage_modules,
             &vdf_steps_guard,
             &block_producer_addr,
@@ -1202,17 +1207,15 @@ impl IrysNode {
         let chunk_provider = self.init_chunk_provider(storage_modules);
 
         // set up IrysNodeCtx
-        let actor_addresses = ActorAddresses {
-            partitions: part_actors,
-            block_producer: block_producer_addr,
-            packing: packing_actor_addr,
-            mempool: mempool_service.clone(),
-            block_index: block_index_service_actor,
-            epoch_service: epoch_service_actor,
-        };
-
         let irys_node_ctx = IrysNodeCtx {
-            actor_addresses: actor_addresses.clone(),
+            actor_addresses: ActorAddresses {
+                partitions: part_actors,
+                block_producer: block_producer_addr,
+                packing: packing_actor_addr,
+                mempool: mempool_service.clone(),
+                block_index: block_index_service_actor,
+                epoch_service: epoch_service_actor,
+            },
             reth_handle: reth_node.clone(),
             db: irys_db.clone(),
             config: node_config.clone(),
@@ -1246,7 +1249,13 @@ impl IrysNode {
             chunk_provider: chunk_provider.clone(),
         });
 
-        Ok((irys_node_ctx, server, vdf_thread_handler))
+        Ok((
+            irys_node_ctx,
+            server,
+            vdf_thread_handler,
+            arbiters,
+            reth_node,
+        ))
     }
 
     fn init_chunk_provider(&self, storage_modules: Vec<Arc<StorageModule>>) -> Arc<ChunkProvider> {
@@ -1301,7 +1310,7 @@ impl IrysNode {
     fn init_partition_mining_actor(
         &self,
         irys_db: &DatabaseProvider,
-        mut arbiters: Vec<Arbiter>,
+        arbiters: &mut Vec<Arbiter>,
         storage_modules: &Vec<Arc<StorageModule>>,
         vdf_steps_guard: &VdfStepsReadGuard,
         block_producer_addr: &actix::Addr<BlockProducerActor>,
@@ -2754,6 +2763,33 @@ impl IrysNode {
         node.reth_thread_handle = Some(reth_thread_handler.into());
         Ok(node)
     }
+}
+
+async fn genesis_initialization(
+    irys_genesis: &Arc<IrysBlockHeader>,
+    node_config: Arc<IrysNodeConfig>,
+    block_index: &Arc<RwLock<BlockIndex<Initialized>>>,
+    node: &IrysNode,
+) -> Addr<BlockIndexService> {
+    // write the genesis block to the irys db
+    let irys_db = init_irys_db(&node_config).expect("could not open irys db");
+    irys_db
+        .update_eyre(|tx| irys_database::insert_block_header(tx, irys_genesis))
+        .expect("genesis db data could not be written");
+    drop(irys_db);
+
+    // start block index service, we need to preconfigure the initial finalized block
+    let block_index_service_actor = node.init_block_index_service(block_index);
+    let msg = BlockFinalizedMessage {
+        block_header: irys_genesis.clone(),
+        all_txs: Arc::new(vec![]),
+    };
+    block_index_service_actor
+        .send(msg)
+        .await
+        .expect("to send the genesis finalization msg")
+        .expect("block index to accept the genesis finalization block");
+    block_index_service_actor
 }
 
 fn init_peer_list_service(irys_db: &DatabaseProvider, arbiters: &mut Vec<Arbiter>) {
