@@ -71,11 +71,12 @@ use std::{
     sync::{mpsc, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::runtime::Runtime;
 use tokio::{
     runtime::Handle,
     sync::oneshot::{self},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -834,6 +835,12 @@ impl IrysNode {
             }
         };
 
+        // all async tasks will be run on a new tokio runtime
+        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let task_manager = TaskManager::new(tokio_runtime.handle().clone());
+
         // Common node startup logic (common for genesis and peer mode nodes)
         // There are a lot of cross dependencies between reth and irys components, the channels mediate the comms
         let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
@@ -856,6 +863,7 @@ impl IrysNode {
             reth_handle_receiver,
             irys_node_ctx_tx,
             &irys_provider,
+            task_manager.executor(),
         )?;
 
         // await the latest height to be reported
@@ -870,6 +878,8 @@ impl IrysNode {
             irys_provider.clone(),
             chain_spec,
             latest_height,
+            task_manager,
+            tokio_runtime,
         )?;
 
         let mut ctx = irys_node_ctx_rx.await?;
@@ -918,6 +928,7 @@ impl IrysNode {
         reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
         irys_node_ctx_tx: oneshot::Sender<IrysNodeCtx>,
         irys_provider: &Arc<RwLock<Option<IrysRethProviderInner>>>,
+        task_exec: TaskExecutor,
     ) -> Result<JoinHandle<RethNodeProvider>, eyre::Error> {
         let actor_main_thread_handle = std::thread::Builder::new()
             .name("actor-main-thread".to_string())
@@ -927,11 +938,6 @@ impl IrysNode {
                 let irys_provider = irys_provider.clone();
                 move || {
                     System::new().block_on(async move {
-                        // setup the task manager
-                        let task_manager =
-                            TaskManager::new(tokio::runtime::Handle::current().clone());
-                        let task_exec = task_manager.executor();
-
                         // read the latest block info
                         let node_config = Arc::new(node.irys_node_config.clone());
                         let (latest_block_height, block_index, latest_block) =
@@ -1025,18 +1031,14 @@ impl IrysNode {
         irys_provider: IrysRethProvider,
         reth_chainspec: ChainSpec,
         latest_block_height: u64,
+        mut task_manager: TaskManager,
+        tokio_runtime: Runtime,
     ) -> eyre::Result<JoinHandle<()>> {
         let node_config = Arc::new(self.irys_node_config.clone());
         let reth_thread_handler = std::thread::Builder::new()
             .name("reth-thread".to_string())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
-                let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("to be able to start a new runetime");
-                let handle = tokio_runtime.handle().clone();
-                let mut task_manager = TaskManager::new(handle);
                 let exec = task_manager.executor();
                 let run_reth_until_ctrl_c_or_signal = async || {
                     _ = run_to_completion_or_panic(
