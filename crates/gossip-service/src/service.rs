@@ -29,28 +29,45 @@ pub struct GossipServiceHandle {
 
 #[derive(Debug)]
 pub struct ServiceHandleWithShutdownSignal<T> {
-    pub handle: tokio::task::JoinHandle<T>,
-    pub shutdown_signal: oneshot::Sender<()>,
+    pub handle: Option<tokio::task::JoinHandle<T>>,
+    pub result: Option<T>,
+    pub shutdown_signal: mpsc::Sender<()>,
 }
 
 impl<T> ServiceHandleWithShutdownSignal<T> {
     pub fn spawn<F, Fut>(f: F) -> Self
     where
-        F: FnOnce(oneshot::Receiver<()>) -> Fut + Send + 'static,
+        F: FnOnce(mpsc::Receiver<()>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (shutdown_signal, shutdown_rx) = oneshot::channel();
+        let (shutdown_signal, shutdown_rx) = mpsc::channel(1);
         let handle = tokio::spawn(f(shutdown_rx));
         Self {
-            handle,
+            handle: Some(handle),
+            result: None,
             shutdown_signal,
         }
     }
 
-    pub async fn stop(self) -> Result<T, tokio::task::JoinError> {
+    pub async fn stop(&mut self) -> Result<&Option<T>, tokio::task::JoinError> {
         let _ = self.shutdown_signal.send(());
-        self.handle.await
+        self.wait_for_exit().await
+    }
+
+    /// Waits for the task to exit or returns the result if it has already exited
+    pub async fn wait_for_exit(&mut self) -> Result<&Option<T>, tokio::task::JoinError> {
+        let handle = self.handle.take();
+        match handle {
+            Some(h) => {
+                match h.await {
+                    Ok(result) => { self.result = Some(result); },
+                    Err(e) => { return Err(e); }
+                }
+            },
+            None => { return Ok(&self.result) }
+        }
+        Ok(&self.result)
     }
 }
 
@@ -106,7 +123,7 @@ impl GossipService {
         )
     }
 
-    pub async fn run(mut self) -> GossipResult<GossipServiceHandle> {
+    pub async fn run(mut self) -> GossipResult<ServiceHandleWithShutdownSignal<()>> {
         let server = self
             .server
             .take()
@@ -114,15 +131,17 @@ impl GossipService {
         let server = server.run(&self.server_address, self.server_port)?;
         let server_handle = server.handle();
 
-        let mut broadcast_message_rx = self
-            .broadcast_message_rx
-            .take()
-            .ok_or(GossipError::Internal("Broadcast message receiver already taken".to_string()))?;
+        let mut broadcast_message_rx =
+            self.broadcast_message_rx
+                .take()
+                .ok_or(GossipError::Internal(
+                    "Broadcast message receiver already taken".to_string(),
+                ))?;
 
         let service = Arc::new(self);
 
         let service_handle_for_cleanup = service.clone();
-        let cleanup_handle = ServiceHandleWithShutdownSignal::spawn(
+        let mut cleanup_handle = ServiceHandleWithShutdownSignal::spawn(
             move |mut shutdown_rx| async move {
                 let mut interval = time::interval(CACHE_CLEANUP_INTERVAL);
 
@@ -131,54 +150,65 @@ impl GossipService {
                         _ = interval.tick() => {
                             if let Err(e) = service_handle_for_cleanup.cache.cleanup(CACHE_ENTRY_TTL) {
                                 tracing::error!("Failed to clean up cache: {}", e);
+                                return Err(GossipError::Internal(e.to_string()));
                             }
                         }
-                        _ = &mut shutdown_rx => {
-                            break;
+                        _ = shutdown_rx.recv() => {
+                            return Ok(());
                         }
                     }
                 }
             },
         );
 
-        let broadcast_message_handle = ServiceHandleWithShutdownSignal::spawn(move |shutdown_rx| {
-            async move {
-                while let Some((source_ip, data)) = broadcast_message_rx.recv().await {
-                    if let Err(e) = service.broadcast_data(source_ip, &data).await {
-                        tracing::error!("Failed to broadcast data: {}", e);
+        let mut broadcast_message_handle = ServiceHandleWithShutdownSignal::spawn(
+            move |mut shutdown_rx| {
+                async move {
+                    loop {
+                        tokio::select! {
+                            maybe_message = broadcast_message_rx.recv() => {
+                                match maybe_message {
+                                    Some((source_ip, data)) => {
+                                        if let Err(e) = service.broadcast_data(source_ip, &data).await {
+                                            tracing::error!("Failed to broadcast data: {}", e);
+                                                    return Err(GossipError::Internal(e.to_string()));
+                                        }
+                                    },
+                                    None => return Ok(()), // channel closed
+                                }
+                            },
+                            _ = shutdown_rx.recv() => {
+                                return Ok(());
+                            }
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
 
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let gossip_service_handle =
+            ServiceHandleWithShutdownSignal::spawn(move |mut shutdown_rx| async move {
+                    tokio::select! {
+                        heh = shutdown_rx.recv() => {
 
-        let service_task_handle = tokio::spawn(async move {
-            let _ = tokio::select! {
-                result = server => {
-                    result.map_err(|e| GossipError::Internal(e.to_string()))
-                }
-                // result = cleanup_handle => {
-                //     result.map_err(|e| GossipError::Internal(e.to_string()))
-                // }
-                // result = message_handle => {
-                //     result.map_err(|e| GossipError::Internal(e.to_string()))
-                // }
-                _ = shutdown_rx => {
-                    tracing::info!("Stopping gossip service");
-                    Ok(())
-                }
-            };
+                        }
+                        heh = broadcast_message_handle.wait_for_exit() => {
 
-            server_handle.stop(true).await;
-            let _ = cleanup_handle.stop().await;
-            let _ = broadcast_message_handle.stop().await;
-        });
+                        }
+                        heh2 = cleanup_handle.wait_for_exit() => {
 
-        Ok(GossipServiceHandle {
-            task_handle: service_task_handle,
-            service_shutdown_tx: shutdown_tx,
-        })
+                        }
+                        heh3 = server => {
+
+                        }
+                    }
+
+                server_handle.stop(true).await;
+                let _ = broadcast_message_handle.stop().await;
+                let _ = cleanup_handle.stop().await;
+            });
+
+        Ok(gossip_service_handle)
     }
 
     async fn broadcast_data(&self, source_ip: SocketAddr, data: &GossipData) -> GossipResult<()> {
