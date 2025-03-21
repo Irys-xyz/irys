@@ -12,18 +12,23 @@ use irys_types::{Address, Config, IrysTransactionHeader, Signature, H256};
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
+async fn client_request(url: &str) -> awc::ClientResponse<awc::BoxedSocket> {
+    let client = awc::Client::default();
+
+    client.get(url).send().await.expect("client request")
+}
+
+async fn info_endpoint_request(address: &str) -> awc::ClientResponse<awc::BoxedSocket> {
+    client_request(&format!("{}{}", &address, "/v1/info")).await
+}
+
 #[actix::test]
 async fn serial_external_api() -> eyre::Result<()> {
     let ctx = setup().await?;
 
     let address = "http://127.0.0.1:8080";
-    let client = awc::Client::default();
 
-    let mut response = client
-        .get(format!("{}/v1/info", address))
-        .send()
-        .await
-        .unwrap();
+    let mut response = info_endpoint_request(&address).await;
 
     assert_eq!(response.status(), 200);
     info!("HTTP server started");
@@ -71,11 +76,7 @@ async fn serial_external_api() -> eyre::Result<()> {
         .block_index
         .send(block_finalized_message);
 
-    let mut response = client
-        .get(format!("{}/v1/info", address))
-        .send()
-        .await
-        .unwrap();
+    let mut response = info_endpoint_request(&address).await;
 
     // deserialize the response into NodeInfo struct
     let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
