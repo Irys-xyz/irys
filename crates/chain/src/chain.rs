@@ -214,7 +214,7 @@ pub async fn start_irys_node(
 
                 let latest_block = latest_block_index
                     .map(|b| {
-                        database::block_header_by_hash(&irys_db.tx().unwrap(), &b.block_hash)
+                        database::block_header_by_hash(&irys_db.tx().unwrap(), &b.block_hash, false)
                             .unwrap()
                             .unwrap()
                     })

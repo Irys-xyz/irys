@@ -4,7 +4,7 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysBlockHeadersByHeight,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysBlockHeadersByHeight, IrysPoAChunks,
     IrysTxHeaders, Metadata, PeerListItems,
 };
 
@@ -69,26 +69,42 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: HasName + HasTableType>(
 /// Inserts a [`IrysBlockHeader`] into [`IrysBlockHeaders`]
 pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre::Result<()> {
     tx.put::<IrysBlockHeadersByHeight>(block.height, block.block_hash)?;
-    Ok(tx.put::<IrysBlockHeaders>(block.block_hash, block.clone().into())?)
+    if let Some(chunk) = &block.poa.chunk {
+        tx.put::<IrysPoAChunks>(block.block_hash, chunk.clone().into())?;
+    };
+    let mut block_without_chunk = block.clone();
+    block_without_chunk.poa.chunk = None;
+    tx.put::<IrysBlockHeaders>(block.block_hash, block_without_chunk.into())?;
+    Ok(())
 }
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
 pub fn block_header_by_hash<T: DbTx>(
     tx: &T,
     block_hash: &BlockHash,
+    include_chunk: bool,
 ) -> eyre::Result<Option<IrysBlockHeader>> {
-    Ok(tx
+    let mut block = tx
         .get::<IrysBlockHeaders>(*block_hash)?
-        .map(IrysBlockHeader::from))
+        .map(IrysBlockHeader::from);
+
+    if include_chunk {
+        if let Some(ref mut b) = block {
+            b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
+        }
+    }
+
+    Ok(block)
 }
 
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
 pub fn block_header_by_height<T: DbTx>(
     tx: &T,
     block_height: u64,
+    include_chunk: bool,
 ) -> eyre::Result<Option<IrysBlockHeader>> {
     Ok(tx
         .get::<IrysBlockHeadersByHeight>(block_height)?
-        .map(|block_hash| block_header_by_hash(tx, &block_hash))
+        .map(|block_hash| block_header_by_hash(tx, &block_hash, include_chunk))
         .transpose()?
         .flatten()
         .map(IrysBlockHeader::from))
@@ -325,9 +341,16 @@ mod tests {
         let _ = db.update(|tx| insert_block_header(tx, &block_header))?;
 
         // Read a Block
-        let result = db.view_eyre(|tx| block_header_by_hash(tx, &block_header.block_hash))?;
-        assert_eq!(result, Some(block_header));
+        let result = db.view_eyre(|tx| block_header_by_hash(tx, &block_header.block_hash, true))?;
+        let result2 = db
+            .view_eyre(|tx| block_header_by_hash(tx, &block_header.block_hash, false))?
+            .unwrap();
 
+        assert_eq!(result, Some(block_header.clone()));
+
+        // check block is retrieved without its chunk
+        block_header.poa.chunk = None;
+        assert_eq!(result2, block_header);
         Ok(())
     }
 

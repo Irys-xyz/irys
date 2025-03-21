@@ -7,9 +7,10 @@ use irys_actors::{
 };
 use irys_chain::{start_irys_node, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
-use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
+use irys_testing_utils::utils::temporary_directory;
 use irys_types::{storage_pricing::Amount, Config, OracleConfig};
 use rust_decimal_macros::dec;
+use tempfile::TempDir;
 
 #[test_log::test(tokio::test)]
 async fn serial_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<()> {

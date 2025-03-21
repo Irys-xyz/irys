@@ -55,7 +55,9 @@ fn create_state(
         let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
         let tx = db.tx().unwrap();
 
-        let mut block = block_header_by_hash(&tx, &block_hash).unwrap().unwrap();
+        let mut block = block_header_by_hash(&tx, &block_hash, false)
+            .unwrap()
+            .unwrap();
         let global_step_number = block.vdf_limiter_info.global_step_number;
         let mut steps_remaining = capacity;
 
@@ -69,7 +71,7 @@ fn create_state(
                 }
             }
             // get the previous block
-            block = block_header_by_hash(&tx, &block.previous_block_hash)
+            block = block_header_by_hash(&tx, &block.previous_block_hash, false)
                 .unwrap()
                 .unwrap();
         }
@@ -113,7 +115,7 @@ fn create_state_parallel(
         let blocks: Vec<IrysBlockHeader> = (height.saturating_sub(n)..height)
             .into_par_iter()
             .map(|h| {
-                db.view_eyre(|tx| block_header_by_height(tx, h))
+                db.view_eyre(|tx| block_header_by_height(tx, h, false))
                     .unwrap()
                     .unwrap()
             })
