@@ -1,7 +1,7 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
 use crate::vdf::run_vdf;
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, System, SystemRegistry};
+use actix::{Actor, Addr, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use actix_web::dev::Server;
 use alloy_eips::BlockNumberOrTag;
@@ -834,10 +834,8 @@ impl IrysNode {
                 // bootstrap genesis
                 let node_config = Arc::new(self.irys_node_config.clone());
                 let block_index = BlockIndex::new().init(node_config.clone()).await?;
-                let latest_block_height = 0;
+                let latest_block_height = irys_genesis.height;
                 let block_index = Arc::new(RwLock::new(block_index));
-                let seed = irys_genesis.vdf_limiter_info.seed;
-                let global_step_number = 0;
 
                 // start reth
                 let reth_thread = self.init_reth(
@@ -847,9 +845,11 @@ impl IrysNode {
                     chain_spec,
                     latest_block_height,
                 )?;
+                let irys_db = init_irys_db(&node_config)?;
+                irys_db.update_eyre(|tx| irys_database::insert_block_header(tx, &irys_genesis))?;
+                drop(irys_db);
 
                 // init the services
-
                 let actor_main_thread_handle = std::thread::Builder::new()
                     .name("actor-main-thread".to_string())
                     .stack_size(32 * 1024 * 1024)
@@ -858,24 +858,43 @@ impl IrysNode {
                         move || {
                             System::new().block_on({
                                 async move {
+                                    // start block index service, we need to preconfigure the initial finalized block
+                                    let block_index_service_actor =
+                                        node.init_block_index_service(&block_index);
+                                    let msg = BlockFinalizedMessage {
+                                        block_header: irys_genesis.clone(),
+                                        all_txs: Arc::new(vec![]),
+                                    };
+                                    block_index_service_actor
+                                        .send(msg)
+                                        .await
+                                        .expect("to send the genesis finalization msg")
+                                        .expect(
+                                            "block index to accept the genesis finalization block",
+                                        );
+
+                                    // start the rest of the services
                                     let (irys_node, actix_server, vdf_thread) = node
                                         .init_services(
                                             reth_shutdown_sender,
                                             vdf_sthutodwn_receiver,
                                             reth_handle_receiver,
                                             block_index,
-                                            irys_genesis,
-                                            seed,
-                                            global_step_number,
+                                            irys_genesis.clone(),
                                             irys_provider.clone(),
+                                            block_index_service_actor,
                                         )
                                         .await
                                         .expect("init services failure");
+
+                                    // await on actix web server
+                                    actix_server.await.unwrap();
                                 }
                             });
                         }
                     })?
-                    .join();
+                    .join()
+                    .unwrap();
 
                 // start cleanup threads
                 // return ctx
@@ -1010,10 +1029,11 @@ impl IrysNode {
         reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         latest_block: Arc<IrysBlockHeader>,
-        seed: H256,
-        global_step_number: u64,
         irys_provider: IrysRethProvider,
+        block_index_service_actor: Addr<BlockIndexService>,
     ) -> eyre::Result<(IrysNodeCtx, Server, JoinHandle<()>)> {
+        let seed = latest_block.vdf_limiter_info.seed;
+        let global_step_number = latest_block.vdf_limiter_info.global_step_number;
         let node_config = Arc::new(self.irys_node_config.clone());
         let task_manager = TaskManager::new(tokio::runtime::Handle::current().clone());
         let task_exec = task_manager.executor();
@@ -1052,8 +1072,6 @@ impl IrysNode {
             .await??;
         debug!("Reth Service Actor updated about fork choice");
 
-        // start block index service
-        let block_index_service_actor = self.init_block_index_service(&block_index);
         let block_index_guard = block_index_service_actor
             .send(GetBlockIndexGuardMessage)
             .await?;
@@ -2782,7 +2800,7 @@ async fn init_reth_db(
     Ok((reth_node, reth_db))
 }
 
-fn init_irys_db(node_config: &Arc<IrysNodeConfig>) -> Result<DatabaseProvider, eyre::Error> {
+fn init_irys_db(node_config: &IrysNodeConfig) -> Result<DatabaseProvider, eyre::Error> {
     let irys_db_env =
         open_or_create_irys_consensus_data_db(&node_config.irys_consensus_data_dir())?;
     let irys_db = DatabaseProvider(Arc::new(irys_db_env));
