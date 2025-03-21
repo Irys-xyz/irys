@@ -92,6 +92,7 @@ fn create_state(
     }
 }
 
+#[allow(dead_code)]
 fn create_state_parallel(
     block_index: BlockIndexReadGuard,
     db: DatabaseProvider,
@@ -274,7 +275,7 @@ mod tests {
     }
 
     #[actix_rt::test]
-    //#[ignore]
+    #[ignore]
     async fn test_create_state_performance() {
         let testnet_config = Config {
             num_chunks_in_partition: 51_872_000, // testnet.toml numbers
