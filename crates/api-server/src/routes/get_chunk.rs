@@ -1,5 +1,6 @@
 use crate::ApiState;
 use actix_web::{
+    http::header::ContentType,
     web::{self},
     HttpResponse,
 };
@@ -27,7 +28,9 @@ pub async fn get_chunk_by_ledger_offset(
         .chunk_provider
         .get_chunk_by_ledger_offset(ledger, path.ledger_offset.into())
     {
-        Ok(Some(chunk)) => Ok(HttpResponse::Ok().json(ChunkFormat::Packed(chunk))),
+        Ok(Some(chunk)) => Ok(HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .json(ChunkFormat::Packed(chunk))),
         Ok(None) => Ok(HttpResponse::NotFound().body("Chunk not found")),
         Err(e) => {
             Ok(HttpResponse::InternalServerError().body(format!("Error retrieving chunk: {}", e)))
@@ -55,7 +58,9 @@ pub async fn get_chunk_by_data_root_offset(
         .chunk_provider
         .get_chunk_by_data_root(ledger, path.data_root, path.offset.into())
     {
-        Ok(Some(chunk)) => Ok(HttpResponse::Ok().json(chunk)),
+        Ok(Some(chunk)) => Ok(HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .json(chunk)),
         Ok(None) => Ok(HttpResponse::NotFound().body("Chunk not found")),
         Err(e) => {
             Ok(HttpResponse::InternalServerError().body(format!("Error retrieving chunk: {}", e)))
