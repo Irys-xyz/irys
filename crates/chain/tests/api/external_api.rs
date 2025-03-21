@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use crate::utils::mine_block;
-use actix_web::HttpMessage;
+use actix_web::{http::header::ContentType, HttpMessage};
 use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{start_irys_node, IrysNodeCtx};
