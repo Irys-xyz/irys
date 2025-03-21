@@ -151,7 +151,9 @@ impl BlockIndexService {
             if index.num_blocks() == 0 && block.height == 0 {
                 (0, sub_chunks_added)
             } else {
-                let prev_block = index.get_item((block.height - 1) as usize).unwrap();
+                let prev_block = index
+                    .get_item((block.height.saturating_sub(1)) as usize)
+                    .unwrap();
                 (
                     prev_block.ledgers[Ledger::Publish].max_chunk_offset + pub_chunks_added,
                     prev_block.ledgers[Ledger::Submit].max_chunk_offset + sub_chunks_added,

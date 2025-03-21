@@ -59,9 +59,7 @@ impl IrysNodeConfig {
         Self {
             mining_signer: IrysSigner::from_config(&config),
             instance_number: None,
-            base_directory: env::current_dir()
-                .expect("Unable to determine working dir, aborting")
-                .join(".irys"),
+            base_directory: config.base_directory.clone(),
             chainspec_builder: IrysChainSpecBuilder::from_config(&config),
         }
     }

@@ -6,5 +6,6 @@ pub mod integration;
 pub mod multi_node;
 pub mod programmable_data;
 pub mod promotion;
+pub mod startup;
 pub mod synchronization;
 pub mod utils;

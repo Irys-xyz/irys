@@ -1,3 +1,5 @@
+use std::{env, path::PathBuf};
+
 use alloy_primitives::Address;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -71,6 +73,15 @@ pub struct Config {
     pub gpu_packing_batch_size: u32,
     /// Irys price oracle
     pub oracle_config: OracleConfig,
+    /// The base directory where to look for artifact data
+    #[serde(default = "default_irys_path")]
+    pub base_directory: PathBuf,
+}
+
+fn default_irys_path() -> PathBuf {
+    env::current_dir()
+        .expect("Unable to determine working dir, aborting")
+        .join(".irys")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +157,7 @@ impl Config {
                     .expect("valid percentage"),
                 smoothing_interval: 15,
             },
+            base_directory: default_irys_path(),
         }
     }
 }
@@ -264,6 +276,7 @@ mod tests {
             cpu_packing_concurrency = 4
             gpu_packing_batch_size = 1024   
             cache_clean_lag = 2
+            base_directory = "~/.irys"
 
             [oracle_config]
             type = "mock"
