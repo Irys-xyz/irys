@@ -26,11 +26,53 @@ async fn info_endpoint_request(
     client_request(&format!("{}{}", &address, "/v1/info")).await
 }
 
+async fn chunk_endpoint_request(
+    address: &str,
+) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
+    client_request(&format!("{}{}", &address, "/v1/chunk/ledger/0/0")).await
+}
+
+async fn network_config_endpoint_request(
+    address: &str,
+) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
+    client_request(&format!("{}{}", &address, "/v1/network/config")).await
+}
+
+async fn peer_list_endpoint_request(
+    address: &str,
+) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
+    client_request(&format!("{}{}", &address, "/v1/peer_list")).await
+}
+
+async fn version_endpoint_request(
+    address: &str,
+) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
+    client_request(&format!("{}{}", &address, "/v1/version")).await
+}
+
 #[actix::test]
 async fn serial_external_api() -> eyre::Result<()> {
-    let ctx = setup().await?;
+    let ctx = setup().await?; // start api service
 
     let address = "http://127.0.0.1:8080";
+
+    // FIXME: Test to be updated with future endpoint work
+    let mut _response = chunk_endpoint_request(&address).await;
+    //assert_eq!(_response.status(), 200);
+    //assert_eq!(_response.content_type(), ContentType::json());
+
+    let mut _response = network_config_endpoint_request(&address).await;
+    assert_eq!(_response.status(), 200);
+    assert_eq!(_response.content_type(), ContentType::json());
+
+    let mut _response = peer_list_endpoint_request(&address).await;
+    assert_eq!(_response.status(), 200);
+    assert_eq!(_response.content_type(), ContentType::json());
+
+    // FIXME: Test to be updated with future endpoint work
+    let mut _response = version_endpoint_request(&address).await;
+    //assert_eq!(response.status(), 200);
+    //assert_eq!(response.content_type(), ContentType::json());
 
     let mut response = info_endpoint_request(&address).await;
 
@@ -38,7 +80,7 @@ async fn serial_external_api() -> eyre::Result<()> {
     info!("HTTP server started");
 
     // confirm we are receiving the correct content type
-    assert_eq!(response.content_type(), "application/json");
+    assert_eq!(response.content_type(), ContentType::json());
 
     // deserialize the response into NodeInfo struct
     let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
