@@ -825,32 +825,7 @@ impl IrysNode {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
             (false, true) => {
                 // special handilng for genesis node
-                std::thread::Builder::new()
-                    .name("genesis init system".to_string())
-                    .stack_size(32 * 1024 * 1024)
-                    .spawn({
-                        let node = (*self).clone();
-                        let irys_genesis = irys_genesis.clone();
-                        move || {
-                            System::new().block_on(async move {
-                                // bootstrap genesis
-                                let node_config = Arc::new(node.irys_node_config.clone());
-                                let block_index = BlockIndex::new()
-                                    .init(node_config.clone())
-                                    .await
-                                    .expect("to init block index");
-                                let block_index = Arc::new(RwLock::new(block_index));
-                                let _block_index_service_actor = genesis_initialization(
-                                    &irys_genesis,
-                                    node_config,
-                                    &block_index,
-                                    &node,
-                                )
-                                .await;
-                                // optionally spawn other services to set them up
-                            });
-                        }
-                    })?
+                self.init_genesis_thread(irys_genesis)?
                     .join()
                     .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
             }
@@ -860,8 +835,9 @@ impl IrysNode {
         };
 
         // Common node startup logic (common for genesis and peer mode nodes)
+        // There are a lot of cross dependencies between reth and irys components, the channels mediate the comms
         let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
-        let (main_actor_thread_shutdown_tx, mut main_actor_thread_shutdown_rx) =
+        let (main_actor_thread_shutdown_tx, main_actor_thread_shutdown_rx) =
             tokio::sync::mpsc::channel::<()>(1);
         let (vdf_sthutodwn_sender, vdf_sthutodwn_receiver) = mpsc::channel();
         let (reth_handle_sender, reth_handle_receiver) =
@@ -871,6 +847,77 @@ impl IrysNode {
         let irys_provider = irys_storage::reth_provider::create_provider();
 
         // init the services
+        let actor_main_thread_handle = self.init_services_thread(
+            latest_block_height_tx,
+            reth_shutdown_sender,
+            main_actor_thread_shutdown_rx,
+            vdf_sthutodwn_sender,
+            vdf_sthutodwn_receiver,
+            reth_handle_receiver,
+            irys_node_ctx_tx,
+            &irys_provider,
+        )?;
+
+        // await the latest height to be reported
+        let latest_height = latest_block_height_rx.await?;
+
+        // start reth
+        let reth_thread = self.init_reth_thread(
+            reth_shutdown_receiver,
+            main_actor_thread_shutdown_tx,
+            reth_handle_sender,
+            actor_main_thread_handle,
+            irys_provider.clone(),
+            chain_spec,
+            latest_height,
+        )?;
+
+        let mut ctx = irys_node_ctx_rx.await.expect("to receive the node ctx");
+        ctx.reth_thread_handle = Some(reth_thread.into());
+
+        Ok(ctx)
+    }
+
+    fn init_genesis_thread(
+        &self,
+        irys_genesis: Arc<IrysBlockHeader>,
+    ) -> Result<JoinHandle<()>, eyre::Error> {
+        let handle = std::thread::Builder::new()
+            .name("genesis init system".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn({
+                let node = (*self).clone();
+                let irys_genesis = irys_genesis.clone();
+                move || {
+                    System::new().block_on(async move {
+                        // bootstrap genesis
+                        let node_config = Arc::new(node.irys_node_config.clone());
+                        let block_index = BlockIndex::new()
+                            .init(node_config.clone())
+                            .await
+                            .expect("to init block index");
+                        let block_index = Arc::new(RwLock::new(block_index));
+                        let _block_index_service_actor =
+                            genesis_initialization(&irys_genesis, node_config, &block_index, &node)
+                                .await;
+                        // optionally spawn other services to set up the base state
+                    });
+                }
+            })?;
+        Ok(handle)
+    }
+
+    fn init_services_thread(
+        &self,
+        latest_block_height_tx: oneshot::Sender<u64>,
+        reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
+        mut main_actor_thread_shutdown_rx: tokio::sync::mpsc::Receiver<()>,
+        vdf_sthutodwn_sender: mpsc::Sender<()>,
+        vdf_sthutodwn_receiver: mpsc::Receiver<()>,
+        reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
+        irys_node_ctx_tx: oneshot::Sender<IrysNodeCtx>,
+        irys_provider: &Arc<RwLock<Option<IrysRethProviderInner>>>,
+    ) -> Result<JoinHandle<RethNodeProvider>, eyre::Error> {
         let actor_main_thread_handle = std::thread::Builder::new()
             .name("actor-main-thread".to_string())
             .stack_size(32 * 1024 * 1024)
@@ -886,29 +933,11 @@ impl IrysNode {
 
                         // read the latest block info
                         let node_config = Arc::new(node.irys_node_config.clone());
-                        let block_index = BlockIndex::new()
-                            .init(node_config.clone())
-                            .await
-                            .expect("to init block index");
-                        let latest_block_index = block_index
-                            .get_latest_item()
-                            .cloned()
-                            .expect("the block index must have at least one entry");
-                        let latest_block_height = block_index.latest_height();
+                        let (latest_block_height, block_index, latest_block) =
+                            read_latest_block_data(node_config).await;
                         latest_block_height_tx
                             .send(latest_block_height)
                             .expect("to be able to send the latest block height");
-                        let block_index = Arc::new(RwLock::new(block_index));
-                        let irys_db = init_irys_db(&node_config).expect("could not open irys db");
-                        let latest_block = Arc::new(
-                            database::block_header_by_hash(
-                                &irys_db.tx().unwrap(),
-                                &latest_block_index.block_hash,
-                            )
-                            .unwrap()
-                            .unwrap(),
-                        );
-                        drop(irys_db);
                         let block_index_service_actor = node.init_block_index_service(&block_index);
 
                         // start the rest of the services
@@ -965,25 +994,7 @@ impl IrysNode {
                     })
                 }
             })?;
-
-        // await the latest height to be reported
-        let latest_height = latest_block_height_rx.await?;
-
-        // start reth
-        let reth_thread = self.init_reth(
-            reth_shutdown_receiver,
-            main_actor_thread_shutdown_tx,
-            reth_handle_sender,
-            actor_main_thread_handle,
-            irys_provider.clone(),
-            chain_spec,
-            latest_height,
-        )?;
-
-        let mut ctx = irys_node_ctx_rx.await.expect("to receive the node ctx");
-        ctx.reth_thread_handle = Some(reth_thread.into());
-
-        Ok(ctx)
+        Ok(actor_main_thread_handle)
     }
 
     fn create_genesis_header(&self) -> Result<(ChainSpec, Arc<IrysBlockHeader>), eyre::Error> {
@@ -1004,7 +1015,7 @@ impl IrysNode {
         Ok((reth_chain_spec, irys_genesis))
     }
 
-    fn init_reth(
+    fn init_reth_thread(
         &self,
         reth_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
         main_actor_thread_shutdown_tx: tokio::sync::mpsc::Sender<()>,
@@ -1661,6 +1672,33 @@ impl IrysNode {
         SystemRegistry::set(block_index_service_actor.clone());
         block_index_service_actor
     }
+}
+
+async fn read_latest_block_data(
+    node_config: Arc<IrysNodeConfig>,
+) -> (
+    u64,
+    Arc<RwLock<BlockIndex<Initialized>>>,
+    Arc<IrysBlockHeader>,
+) {
+    let block_index = BlockIndex::new()
+        .init(node_config.clone())
+        .await
+        .expect("to init block index");
+    let latest_block_index = block_index
+        .get_latest_item()
+        .cloned()
+        .expect("the block index must have at least one entry");
+    let latest_block_height = block_index.latest_height();
+    let block_index = Arc::new(RwLock::new(block_index));
+    let irys_db = init_irys_db(&node_config).expect("could not open irys db");
+    let latest_block = Arc::new(
+        database::block_header_by_hash(&irys_db.tx().unwrap(), &latest_block_index.block_hash)
+            .unwrap()
+            .unwrap(),
+    );
+    drop(irys_db);
+    (latest_block_height, block_index, latest_block)
 }
 
 async fn genesis_initialization(
