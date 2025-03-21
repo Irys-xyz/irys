@@ -4,8 +4,8 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysBlockHeadersByHeight, IrysPoAChunks,
-    IrysTxHeaders, Metadata, PeerListItems,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysBlockHeadersByHeight,
+    IrysPoAChunks, IrysTxHeaders, Metadata, PeerListItems,
 };
 
 use crate::metadata::MetadataKey;
