@@ -21,6 +21,8 @@ const MAX_PEERS_PER_BROADCAST: usize = 5;
 const CACHE_CLEANUP_INTERVAL: Duration = ONE_HOUR;
 const CACHE_ENTRY_TTL: Duration = TWO_HOURS;
 
+type TaskExecutionResult = Result<Option<GossipResult<()>>, tokio::task::JoinError>;
+
 #[derive(Debug)]
 pub struct GossipServiceHandle {
     task_handle: tokio::task::JoinHandle<()>,
@@ -50,24 +52,29 @@ impl<T> ServiceHandleWithShutdownSignal<T> {
         }
     }
 
-    pub async fn stop(&mut self) -> Result<&Option<T>, tokio::task::JoinError> {
+    /// Stops the task, joins it and returns the result
+    pub async fn stop(mut self) -> Result<Option<T>, tokio::task::JoinError> {
         let _ = self.shutdown_signal.send(());
-        self.wait_for_exit().await
+        self.wait_for_exit().await?;
+        Ok(self.result)
     }
 
-    /// Waits for the task to exit or returns the result if it has already exited
-    pub async fn wait_for_exit(&mut self) -> Result<&Option<T>, tokio::task::JoinError> {
+    /// Waits for the task to exit or immediately returns if the task has already exited. To get
+    ///  the execution result, call [ServiceHandleWithShutdownSignal::stop].
+    pub async fn wait_for_exit(&mut self) -> Result<(), tokio::task::JoinError> {
         let handle = self.handle.take();
         match handle {
-            Some(h) => {
-                match h.await {
-                    Ok(result) => { self.result = Some(result); },
-                    Err(e) => { return Err(e); }
+            Some(h) => match h.await {
+                Ok(result) => {
+                    self.result = Some(result);
+                    Ok(())
+                }
+                Err(e) => {
+                    Err(e)
                 }
             },
-            None => { return Ok(&self.result) }
+            None => Ok(()),
         }
-        Ok(&self.result)
     }
 }
 
@@ -123,7 +130,7 @@ impl GossipService {
         )
     }
 
-    pub async fn run(mut self) -> GossipResult<ServiceHandleWithShutdownSignal<()>> {
+    pub async fn run(mut self) -> GossipResult<ServiceHandleWithShutdownSignal<GossipResult<()>>> {
         let server = self
             .server
             .take()
@@ -188,24 +195,34 @@ impl GossipService {
 
         let gossip_service_handle =
             ServiceHandleWithShutdownSignal::spawn(move |mut shutdown_rx| async move {
-                    tokio::select! {
-                        heh = shutdown_rx.recv() => {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => { }
+                    _ = broadcast_message_handle.wait_for_exit() => {}
+                    _ = cleanup_handle.wait_for_exit() => {}
+                    _ = server => {}
+                };
 
-                        }
-                        heh = broadcast_message_handle.wait_for_exit() => {
-
-                        }
-                        heh2 = cleanup_handle.wait_for_exit() => {
-
-                        }
-                        heh3 = server => {
-
-                        }
-                    }
+                let mut errors: Vec<GossipError> = vec![];
 
                 server_handle.stop(true).await;
-                let _ = broadcast_message_handle.stop().await;
-                let _ = cleanup_handle.stop().await;
+
+                let mut handle_result = |res: TaskExecutionResult| {
+                    match res {
+                        Ok(maybe_response) => {
+                            maybe_response.map(|r| r.map_err(|e| errors.push(e)));
+                        }
+                        Err(e) => errors.push(GossipError::Internal(e.to_string())),
+                    }
+                };
+
+                handle_result(broadcast_message_handle.stop().await);
+                handle_result(cleanup_handle.stop().await);
+
+                if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(GossipError::Internal(format!("{:?}", errors)))
+                }
             });
 
         Ok(gossip_service_handle)
