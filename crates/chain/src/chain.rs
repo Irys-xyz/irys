@@ -1696,9 +1696,13 @@ async fn read_latest_block_data(
     let block_index = Arc::new(RwLock::new(block_index));
     let irys_db = init_irys_db(&node_config).expect("could not open irys db");
     let latest_block = Arc::new(
-        database::block_header_by_hash(&irys_db.tx().unwrap(), &latest_block_index.block_hash)
-            .unwrap()
-            .unwrap(),
+        database::block_header_by_hash(
+            &irys_db.tx().unwrap(),
+            &latest_block_index.block_hash,
+            false,
+        )
+        .unwrap()
+        .unwrap(),
     );
     drop(irys_db);
     (latest_block_height, block_index, latest_block)
