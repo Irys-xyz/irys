@@ -207,7 +207,7 @@ pub struct BlockBounds {
 
 /// A [`BlockIndexItem`] contains a vec of [`LedgerIndexItem`]s which store the size
 /// and and the `tx_root` of the ledger in that block.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct LedgerIndexItem {
     /// Size in bytes of the ledger
     pub max_chunk_offset: u64, // 8 bytes
@@ -256,7 +256,7 @@ impl IndexMut<Ledger> for Vec<LedgerIndexItem> {
 /// Core metadata of the [`BlockIndex`] this struct tracks the ledger size and
 /// tx root for each ledger per block. Enabling lookups to that find the `tx_root`
 /// for a ledger at a particular byte offset in the ledger.
-#[derive(Debug, Clone, Default, PartialEq, Eq, MessageResponse)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, MessageResponse, serde::Serialize)]
 pub struct BlockIndexItem {
     /// The hash of the block
     pub block_hash: H256, // 32 bytes
