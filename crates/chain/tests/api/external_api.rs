@@ -12,13 +12,17 @@ use irys_types::{Address, Config, IrysTransactionHeader, Signature, H256};
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
-async fn client_request(url: &str) -> awc::ClientResponse<awc::BoxedSocket> {
+async fn client_request(
+    url: &str,
+) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
     let client = awc::Client::default();
 
     client.get(url).send().await.expect("client request")
 }
 
-async fn info_endpoint_request(address: &str) -> awc::ClientResponse<awc::BoxedSocket> {
+async fn info_endpoint_request(
+    address: &str,
+) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
     client_request(&format!("{}{}", &address, "/v1/info")).await
 }
 
