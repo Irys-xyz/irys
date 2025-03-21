@@ -10,7 +10,7 @@ use irys_types::{DatabaseProvider};
 use rand::seq::IteratorRandom;
 use std::net::SocketAddr;
 use std::{sync::Arc, time::Duration};
-use actix::{Actor, Addr, Handler, dev::ToEnvelope};
+use actix::{Actor, Addr, Handler, Context};
 use tokio::{
     sync::{mpsc, oneshot},
     time,
@@ -99,9 +99,7 @@ pub struct GossipService<TMempoolService>
 where
     TMempoolService: Handler<TxIngressMessage>
     + Handler<ChunkIngressMessage>
-    + Actor<Context = TMempoolService>
-    + ToEnvelope<TMempoolService, ChunkIngressMessage>
-    + ToEnvelope<TMempoolService, TxIngressMessage>
+    + Actor<Context = Context<TMempoolService>>
 {
     server: Option<GossipServer>,
     server_address: String,
@@ -117,9 +115,7 @@ impl<TMempoolService> GossipService<TMempoolService>
 where
     TMempoolService: Handler<TxIngressMessage>
     + Handler<ChunkIngressMessage>
-    + Actor<Context = TMempoolService>
-    + ToEnvelope<TMempoolService, ChunkIngressMessage>
-    + ToEnvelope<TMempoolService, TxIngressMessage>
+    + Actor<Context = Context<TMempoolService>>
 {
     pub fn new(
         server_address: impl Into<String>,
