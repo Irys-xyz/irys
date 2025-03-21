@@ -1,5 +1,6 @@
 name: Rust Checks
 
+
 permissions:
   contents: read
 
