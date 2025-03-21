@@ -1,0 +1,27 @@
+[package]
+name = "gossip-service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Internal dependencies
+irys-types = { path = "../types" }
+irys-primitives = { path = "../primitives" }
+irys-config = { path = "../config" }
+irys-database = { path = "../database" }
+# Please take a look at the note for pub use section in the api-server's lib.rs file
+irys-api-server.workspace = true
+# Other dependencies
+actix-web = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = "0.1"
+rand = "0.8"
+reqwest = { version = "0.11", features = ["json"] }
+
+[lints]
+workspace = true
