@@ -1,6 +1,5 @@
 use crate::Compact;
 use arbitrary::Arbitrary;
-use bytes::BufMut;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};

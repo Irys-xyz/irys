@@ -14,6 +14,7 @@ use crate::{
     PeerListProvider,
 };
 
+#[derive(Debug)]
 pub struct GossipServer {
     cache: Arc<GossipCache>,
     message_tx: mpsc::Sender<(SocketAddr, GossipData)>,

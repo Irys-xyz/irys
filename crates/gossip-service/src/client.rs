@@ -2,6 +2,7 @@ use crate::types::{GossipData, GossipError, GossipResult};
 use irys_database::tables::CompactPeerListItem;
 use std::time::Duration;
 
+#[derive(Debug)]
 pub struct GossipClient {
     client: reqwest::Client,
     timeout: Duration,

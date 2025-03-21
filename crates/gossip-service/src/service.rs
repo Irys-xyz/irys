@@ -5,7 +5,6 @@ use crate::{
     types::{GossipData, GossipError, GossipResult},
     PeerListProvider,
 };
-use actix_web::dev::ServerHandle;
 use irys_database::tables::CompactPeerListItem;
 use irys_types::DatabaseProvider;
 use rand::seq::IteratorRandom;
@@ -22,11 +21,13 @@ const MAX_PEERS_PER_BROADCAST: usize = 5;
 const CACHE_CLEANUP_INTERVAL: Duration = ONE_HOUR;
 const CACHE_ENTRY_TTL: Duration = TWO_HOURS;
 
+#[derive(Debug)]
 pub struct GossipServiceHandle {
     task_handle: tokio::task::JoinHandle<()>,
     service_shutdown_tx: oneshot::Sender<()>,
 }
 
+#[derive(Debug)]
 pub struct ServiceHandleWithShutdownSignal<T> {
     pub handle: tokio::task::JoinHandle<T>,
     pub shutdown_signal: oneshot::Sender<()>,
@@ -65,17 +66,15 @@ impl GossipServiceHandle {
     }
 }
 
+#[derive(Debug)]
 pub struct GossipService {
     server: Option<GossipServer>,
     server_address: String,
     server_port: u16,
-    server_handle: Option<ServerHandle>,
     client: GossipClient,
     cache: Arc<GossipCache>,
     peer_list: PeerListProvider,
-    message_rx: mpsc::Receiver<(SocketAddr, GossipData)>,
-    shutdown_rx: oneshot::Receiver<()>,
-    shutdown_tx: oneshot::Sender<()>,
+    broadcast_message_rx: Option<mpsc::Receiver<(SocketAddr, GossipData)>>,
 }
 
 impl GossipService {
@@ -93,20 +92,15 @@ impl GossipService {
         let server = GossipServer::new(cache.clone(), message_tx.clone(), peer_list.clone());
         let client = GossipClient::new(client_timeout);
 
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
         (
             Self {
                 server: Some(server),
                 server_address,
                 server_port,
-                server_handle: None,
                 client,
                 cache,
                 peer_list,
-                message_rx,
-                shutdown_rx,
-                shutdown_tx,
+                broadcast_message_rx: Some(message_rx),
             },
             message_tx,
         )
@@ -120,11 +114,16 @@ impl GossipService {
         let server = server.run(&self.server_address, self.server_port)?;
         let server_handle = server.handle();
 
+        let mut broadcast_message_rx = self
+            .broadcast_message_rx
+            .take()
+            .ok_or(GossipError::Internal("Broadcast message receiver already taken".to_string()))?;
+
         let service = Arc::new(self);
 
         let service_handle_for_cleanup = service.clone();
         let cleanup_handle = ServiceHandleWithShutdownSignal::spawn(
-            move |shutdown_rx| async move {
+            move |mut shutdown_rx| async move {
                 let mut interval = time::interval(CACHE_CLEANUP_INTERVAL);
 
                 loop {
@@ -134,7 +133,7 @@ impl GossipService {
                                 tracing::error!("Failed to clean up cache: {}", e);
                             }
                         }
-                        _ = shutdown_rx => {
+                        _ = &mut shutdown_rx => {
                             break;
                         }
                     }
@@ -142,12 +141,20 @@ impl GossipService {
             },
         );
 
-        // let message_handle = tokio::spawn(self.process_messages());
+        let broadcast_message_handle = ServiceHandleWithShutdownSignal::spawn(move |shutdown_rx| {
+            async move {
+                while let Some((source_ip, data)) = broadcast_message_rx.recv().await {
+                    if let Err(e) = service.broadcast_data(source_ip, &data).await {
+                        tracing::error!("Failed to broadcast data: {}", e);
+                    }
+                }
+            }
+        });
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let service_task_handle = tokio::spawn(async move {
-            let res: GossipResult<()> = tokio::select! {
+            let _ = tokio::select! {
                 result = server => {
                     result.map_err(|e| GossipError::Internal(e.to_string()))
                 }
@@ -165,7 +172,7 @@ impl GossipService {
 
             server_handle.stop(true).await;
             let _ = cleanup_handle.stop().await;
-            // let _ = message_handle.stop().await;
+            let _ = broadcast_message_handle.stop().await;
         });
 
         Ok(GossipServiceHandle {
@@ -174,30 +181,7 @@ impl GossipService {
         })
     }
 
-    async fn run_cache_cleanup(self) -> GossipResult<()> {
-        let mut interval = time::interval(CACHE_CLEANUP_INTERVAL);
-
-        loop {
-            interval.tick().await;
-            if let Err(e) = self.cache.cleanup(CACHE_ENTRY_TTL) {
-                tracing::error!("Failed to clean up cache: {}", e);
-            }
-        }
-    }
-
-    async fn process_messages(mut self) -> GossipResult<()> {
-        while let Some((source_ip, data)) = self.message_rx.recv().await {
-            if let Err(e) = self.broadcast_data(source_ip, &data).await {
-                tracing::error!("Failed to broadcast data: {}", e);
-            }
-        }
-
-        Ok(())
-    }
-
     async fn broadcast_data(&self, source_ip: SocketAddr, data: &GossipData) -> GossipResult<()> {
-        let mut rng = rand::thread_rng();
-
         // Get all active peers except the source
         let peers: Vec<CompactPeerListItem> = self
             .peer_list
@@ -218,7 +202,7 @@ impl GossipService {
         // Select random subset of peers
         let selected_peers: Vec<&CompactPeerListItem> = peers
             .iter()
-            .choose_multiple(&mut rng, MAX_PEERS_PER_BROADCAST);
+            .choose_multiple(&mut rand::thread_rng(), MAX_PEERS_PER_BROADCAST);
 
         // Send data to selected peers
         for peer in selected_peers {
