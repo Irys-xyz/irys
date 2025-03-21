@@ -67,11 +67,12 @@ impl UnpackedChunk {
         hash_sha256(data_path).unwrap().into()
     }
 
-    /// a Chunk's tx relative byte offset
+    /// a Chunk's tx relative end byte offset
     /// due to legacy weirdness, the offset is of the end of the chunk, not the start
     /// i.e for the first chunk, the offset is chunk_size instead of 0
-    pub fn byte_offset(&self, chunk_size: u64) -> u64 {
-        let last_index = self.data_size.div_ceil(chunk_size);
+    pub fn end_byte_offset(&self, chunk_size: u64) -> u64 {
+        // magic: -1 to get a 0-based index
+        let last_index = self.data_size.div_ceil(chunk_size) - 1;
         if self.tx_offset.0 as u64 == last_index {
             self.data_size
         } else {
