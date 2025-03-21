@@ -1,35 +1,30 @@
-use std::{net::IpAddr, sync::Arc};
-
+use actix_web::dev::Server;
 use actix_web::{
     middleware,
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
-use actix_web::dev::Server;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::{
     cache::GossipCache,
-    types::{GossipData, GossipError, GossipResult, PeerInfo},
+    types::{GossipData, GossipError, GossipResult},
+    PeerListProvider,
 };
 
 pub struct GossipServer {
     cache: Arc<GossipCache>,
-    message_tx: mpsc::Sender<(IpAddr, GossipData)>,
-    peer_list: Arc<dyn PeerList>,
-}
-
-#[async_trait::async_trait]
-pub trait PeerList: Send + Sync {
-    async fn is_peer_allowed(&self, ip: &IpAddr) -> bool;
-    async fn get_peer_info(&self, ip: &IpAddr) -> Option<PeerInfo>;
+    message_tx: mpsc::Sender<(SocketAddr, GossipData)>,
+    peer_list: PeerListProvider,
 }
 
 impl GossipServer {
     pub fn new(
         cache: Arc<GossipCache>,
-        message_tx: mpsc::Sender<(IpAddr, GossipData)>,
-        peer_list: Arc<dyn PeerList>,
+        message_tx: mpsc::Sender<(SocketAddr, GossipData)>,
+        peer_list: PeerListProvider,
     ) -> Self {
         Self {
             cache,
@@ -62,24 +57,36 @@ async fn handle_gossip_data(
     data: web::Json<GossipData>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let peer_ip = match req.peer_addr() {
-        Some(addr) => addr.ip(),
+    let peer_address = match req.peer_addr() {
+        Some(addr) => addr,
         None => return HttpResponse::BadRequest().finish(),
     };
 
     // Check if peer is allowed
-    if !server.peer_list.is_peer_allowed(&peer_ip).await {
-        return HttpResponse::Forbidden().finish();
+    match server.peer_list.is_peer_allowed(&peer_address) {
+        Ok(is_peer_allowed) => {
+            if !is_peer_allowed {
+                return HttpResponse::Forbidden().finish();
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to check if peer is allowed: {}", e);
+            return HttpResponse::InternalServerError().finish();
+        }
     }
 
     // Record that this peer has seen this data
-    if let Err(e) = server.cache.record_seen(peer_ip, &data) {
+    if let Err(e) = server.cache.record_seen(peer_address, &data) {
         tracing::error!("Failed to record data in cache: {}", e);
         return HttpResponse::InternalServerError().finish();
     }
 
     // Forward the data to the message bus
-    if let Err(e) = server.message_tx.send((peer_ip, data.into_inner())).await {
+    if let Err(e) = server
+        .message_tx
+        .send((peer_address, data.into_inner()))
+        .await
+    {
         tracing::error!("Failed to forward data to message bus: {}", e);
         return HttpResponse::InternalServerError().finish();
     }
@@ -91,13 +98,16 @@ async fn handle_health_check(
     server: Data<Arc<GossipServer>>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    let peer_ip = match req.peer_addr() {
-        Some(addr) => addr.ip(),
+    let peer_addr = match req.peer_addr() {
+        Some(addr) => addr,
         None => return HttpResponse::BadRequest().finish(),
     };
 
-    match server.peer_list.get_peer_info(&peer_ip).await {
-        Some(info) => HttpResponse::Ok().json(info),
-        None => HttpResponse::NotFound().finish(),
+    match server.peer_list.get_peer_info(&peer_addr) {
+        Ok(info) => match info {
+            Some(info) => HttpResponse::Ok().json(info),
+            None => HttpResponse::NotFound().finish(),
+        },
+        Err(_) => HttpResponse::InternalServerError().finish(),
     }
-} 
+}

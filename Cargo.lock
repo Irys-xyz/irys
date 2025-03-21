@@ -3273,7 +3273,7 @@ name = "gossip-service"
 version = "0.1.0"
 dependencies = [
  "actix-web",
- "async-trait",
+ "eyre",
  "futures",
  "irys-api-server",
  "irys-config",

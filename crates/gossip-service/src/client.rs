@@ -1,6 +1,6 @@
+use crate::types::{GossipData, GossipError, GossipResult};
+use irys_database::tables::CompactPeerListItem;
 use std::time::Duration;
-
-use crate::types::{GossipData, GossipError, GossipResult, PeerInfo};
 
 pub struct GossipClient {
     client: reqwest::Client,
@@ -16,12 +16,16 @@ impl GossipClient {
     }
 
     /// Send gossip data to a peer
-    pub async fn send_data(&self, peer: &PeerInfo, data: &GossipData) -> GossipResult<()> {
+    pub async fn send_data(
+        &self,
+        peer: &CompactPeerListItem,
+        data: &GossipData,
+    ) -> GossipResult<()> {
         if !peer.is_online {
             return Err(GossipError::InvalidPeer("Peer is offline".into()));
         }
 
-        let url = format!("http://{}:{}/gossip/data", peer.ip, peer.port);
+        let url = format!("http://{}/gossip/data", peer.address);
 
         self.client
             .post(&url)
@@ -35,8 +39,11 @@ impl GossipClient {
     }
 
     /// Check the health of a peer
-    pub async fn check_health(&self, peer: &PeerInfo) -> GossipResult<PeerInfo> {
-        let url = format!("http://{}:{}/gossip/health", peer.ip, peer.port);
+    pub async fn check_health(
+        &self,
+        peer: &CompactPeerListItem,
+    ) -> GossipResult<CompactPeerListItem> {
+        let url = format!("http://{}/gossip/health", peer.address);
 
         let response = self
             .client
@@ -58,4 +65,4 @@ impl GossipClient {
             .await
             .map_err(|e| GossipError::Network(e.to_string()))
     }
-} 
+}

@@ -1,24 +1,61 @@
 use crate::Compact;
 use arbitrary::Arbitrary;
+use bytes::BufMut;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Arbitrary, PartialEq)]
+pub struct PeerScore(u16);
+
+impl PeerScore {
+    pub const MIN: u16 = 0;
+    pub const MAX: u16 = 100;
+    pub const INITIAL: u16 = 50;
+    pub const ACTIVE_THRESHOLD: u16 = 20;
+
+    pub fn new(score: u16) -> Self {
+        Self(score.clamp(Self::MIN, Self::MAX))
+    }
+
+    pub fn increase(&mut self) {
+        self.0 = (self.0 + 1).min(Self::MAX);
+    }
+
+    pub fn decrease_offline(&mut self) {
+        self.0 = self.0.saturating_sub(3);
+    }
+
+    pub fn decrease_bogus_data(&mut self) {
+        self.0 = self.0.saturating_sub(5);
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.0 >= Self::ACTIVE_THRESHOLD
+    }
+
+    pub fn get(&self) -> u16 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Arbitrary)]
 pub struct PeerListItem {
-    pub reputation_score: u16,
+    pub reputation_score: PeerScore,
     pub response_time: u16,
     pub address: SocketAddr,
     pub last_seen: u64,
+    pub is_online: bool,
 }
 
 impl Default for PeerListItem {
     fn default() -> Self {
         Self {
-            reputation_score: 0,
+            reputation_score: PeerScore(0),
             response_time: 0,
             address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
             last_seen: Utc::now().timestamp_millis() as u64,
+            is_online: false,
         }
     }
 }
@@ -36,7 +73,7 @@ impl Compact for PeerListItem {
         let mut size = 0;
 
         // Encode reputation_score
-        buf.put_u16(self.reputation_score);
+        buf.put_u16(self.reputation_score.0);
         size += 2;
 
         // Encode response_time
@@ -63,6 +100,9 @@ impl Compact for PeerListItem {
         buf.put_u64(self.last_seen);
         size += 8;
 
+        buf.put_u8(if self.is_online { 1 } else { 0 });
+        size += 1;
+
         size
     }
 
@@ -71,7 +111,7 @@ impl Compact for PeerListItem {
             return (Self::default(), &[]);
         }
 
-        let reputation_score = u16::from_be_bytes(buf[0..2].try_into().unwrap());
+        let reputation_score = PeerScore(u16::from_be_bytes(buf[0..2].try_into().unwrap()));
         let response_time = u16::from_be_bytes(buf[2..4].try_into().unwrap());
 
         if buf.len() < 5 {
@@ -81,6 +121,7 @@ impl Compact for PeerListItem {
                     response_time,
                     address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                     last_seen: 0,
+                    is_online: false,
                 },
                 &[],
             );
@@ -127,12 +168,19 @@ impl Compact for PeerListItem {
 
         let total_consumed = consumed + 8;
 
+        let is_online = if buf.len() >= total_consumed + 1 {
+            buf[total_consumed] == 1
+        } else {
+            false
+        };
+
         (
             Self {
                 reputation_score,
                 response_time,
                 address,
                 last_seen,
+                is_online,
             },
             &buf[total_consumed.min(buf.len())..],
         )
