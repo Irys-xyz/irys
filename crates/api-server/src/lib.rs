@@ -21,8 +21,8 @@ use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config};
 use reth_db::Database;
 use routes::{
-    block, get_chunk, index, network_config, peer_list, post_chunk, post_version, price,
-    proxy::proxy, tx,
+    block, block_index, get_chunk, index, network_config, peer_list, post_chunk, post_version,
+    price, proxy::proxy, tx,
 };
 use tracing::{debug, info};
 
@@ -64,6 +64,10 @@ impl ApiState {
 pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
         .route("/block/{block_tag}", web::get().to(block::get_block))
+        .route(
+            "/block/index/",
+            web::post().to(block_index::block_index_route),
+        )
         .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route(
             "/chunk/data_root/{ledger_id}/{data_root}/{offset}",
