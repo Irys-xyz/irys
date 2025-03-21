@@ -63,13 +63,8 @@ impl ApiState {
 
 pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
-        .route("/execution-rpc", web::to(proxy))
-        .route("/info", web::get().to(index::info_route))
-        .route(
-            "/network/config",
-            web::get().to(network_config::get_network_config),
-        )
         .route("/block/{block_tag}", web::get().to(block::get_block))
+        .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route(
             "/chunk/data_root/{ledger_id}/{data_root}/{offset}",
             web::get().to(get_chunk::get_chunk_by_data_root_offset),
@@ -78,15 +73,20 @@ pub fn routes() -> impl HttpServiceFactory {
             "/chunk/ledger/{ledger_id}/{ledger_offset}",
             web::get().to(get_chunk::get_chunk_by_ledger_offset),
         )
-        .route("/chunk", web::post().to(post_chunk::post_chunk))
+        .route("/execution-rpc", web::to(proxy))
+        .route("/info", web::get().to(index::info_route))
+        .route(
+            "/network/config",
+            web::get().to(network_config::get_network_config),
+        )
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
+        .route("/price/{ledger}/{size}", web::get().to(price::get_price))
+        .route("/tx", web::post().to(tx::post_tx))
         .route("/tx/{tx_id}", web::get().to(tx::get_tx_header_api))
         .route(
             "/tx/{tx_id}/local/data_start_offset",
             web::get().to(tx::get_tx_local_start_offset),
         )
-        .route("/tx", web::post().to(tx::post_tx))
-        .route("/price/{ledger}/{size}", web::get().to(price::get_price))
         .route("/version", web::post().to(post_version::post_version))
 }
 
