@@ -26,7 +26,7 @@ sol!(
 ```
   
 
-### Foudry Documentation
+### Foundry Documentation
 
 https://book.getfoundry.sh/
 
