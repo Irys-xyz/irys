@@ -6,7 +6,7 @@ use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> eyre::Result<()> {
     // init logging
     init_tracing().expect("initializing tracing should work");
@@ -31,17 +31,20 @@ async fn main() -> eyre::Result<()> {
     tracing::info!("starting the node");
     let handle = IrysNode::new(config, is_genesis).init().await?;
     handle.start_mining()?;
-    std::thread::park();
+
+    // wait for the node to be shut down
+    tokio::task::spawn_blocking(|| {
+        handle.reth_thread_handle.unwrap().join().unwrap();
+    })
+    .await?;
 
     Ok(())
 }
 
 fn init_tracing() -> eyre::Result<()> {
     let subscriber = Registry::default();
-    let filter = EnvFilter::new("info")
-        .add_directive("actix_web=info".parse()?)
-        .add_directive("actix=info".parse()?)
-        .add_directive(EnvFilter::from_default_env().to_string().parse()?);
+    let filter =
+        EnvFilter::new("info").add_directive(EnvFilter::from_default_env().to_string().parse()?);
 
     let output_layer = tracing_subscriber::fmt::layer()
         .with_line_number(true)

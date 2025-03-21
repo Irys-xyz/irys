@@ -75,7 +75,7 @@ use tokio::{
     runtime::Handle,
     sync::oneshot::{self},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -872,7 +872,7 @@ impl IrysNode {
             latest_height,
         )?;
 
-        let mut ctx = irys_node_ctx_rx.await.expect("to receive the node ctx");
+        let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
         ctx.sync_state_from_peers().await?;
 
@@ -1076,7 +1076,7 @@ impl IrysNode {
                 reth_node.provider.database.db.close();
                 irys_storage::reth_provider::cleanup_provider(&irys_provider);
 
-                debug!("Reth thread finished");
+                info!("Reth thread finished");
             })?;
 
         return Ok(reth_thread_handler);
@@ -1397,9 +1397,6 @@ impl IrysNode {
             part_actors.push(partition_mining_actor);
             arbiters.push(part_arbiter);
         }
-        // TODO: do we need this?
-        // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
-        // tokio::task::yield_now().await;
 
         // request packing for uninitialized ranges
         for sm in storage_modules {
