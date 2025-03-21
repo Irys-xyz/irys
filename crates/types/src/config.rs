@@ -58,7 +58,7 @@ pub struct Config {
     /// defines the genesis price of the $IRYS, expressed in $USD
     #[serde(deserialize_with = "serde_utils::token_amount")]
     pub genesis_token_price: Amount<(IrysPrice, Usd)>,
-    /// defines the range of how much can the token fluctuate since the last EMA price for it to be accepted
+    /// defines the range of how much can Oracle token price fluctuate between subsequent blocks
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub token_price_safe_range: Amount<Percentage>,
     /// Defines how frequently the Irys EMA price should be adjusted

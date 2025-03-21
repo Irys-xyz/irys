@@ -302,7 +302,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let oracle_irys_price = price_oracle.current_price().await?;
             // fetch the ema price to use
             let (tx, rx) = tokio::sync::oneshot::channel();
-            ema_service.send(EmaServiceMessage::GetEmaForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
+            ema_service.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
             let ema_irys_price = rx.await??;
 
             // build a new block header
@@ -353,8 +353,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     steps,
                     ..Default::default()
                 },
-                oracle_irys_price,
-                ema_irys_price
+                oracle_irys_price: ema_irys_price.range_adjusted_oracle_price,
+                ema_irys_price: ema_irys_price.ema,
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node

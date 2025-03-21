@@ -1,6 +1,7 @@
 use crate::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeService,
     block_validation::prevalidate_block, epoch_service::PartitionAssignmentsReadGuard,
+    services::ServiceSenders,
 };
 use actix::prelude::*;
 use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
@@ -30,6 +31,8 @@ pub struct BlockDiscoveryActor {
     pub vdf_config: VDFStepsConfig,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
+    /// Service Senders
+    pub service_senders: ServiceSenders,
 }
 
 /// When a block is discovered, either produced locally or received from
@@ -60,6 +63,7 @@ impl BlockDiscoveryActor {
         db: DatabaseProvider,
         vdf_config: VDFStepsConfig,
         vdf_steps_guard: VdfStepsReadGuard,
+        service_senders: ServiceSenders,
     ) -> Self {
         Self {
             block_index_guard,
@@ -69,6 +73,7 @@ impl BlockDiscoveryActor {
             db,
             vdf_config,
             vdf_steps_guard,
+            service_senders,
         }
     }
 }
@@ -183,6 +188,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let vdf_config = self.vdf_config.clone();
         let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();
+        let ema_service_sender = self.service_senders.ema.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
 
         info!(height = ?new_block_header.height,
@@ -206,6 +212,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     vdf_config,
                     vdf_steps_guard,
                     block_header_clone.miner_address, // Use clone in validation
+                    ema_service_sender,
                 )
             });
 
