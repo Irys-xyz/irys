@@ -874,6 +874,7 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await.expect("to receive the node ctx");
         ctx.reth_thread_handle = Some(reth_thread.into());
+        ctx.sync_state_from_peers().await?;
 
         Ok(ctx)
     }
