@@ -7,6 +7,7 @@ use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{start_irys_node, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
+use irys_database::BlockIndexItem;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
 use irys_types::{Address, Config, IrysTransactionHeader, Signature, H256};
 use tokio::time::{sleep, Duration};
@@ -24,6 +25,18 @@ async fn info_endpoint_request(
     address: &str,
 ) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
     client_request(&format!("{}{}", &address, "/v1/info")).await
+}
+
+async fn block_index_endpoint_request(
+    address: &str,
+    height: u64,
+    limit: u64,
+) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
+    client_request(&format!(
+        "{}{}/{}/{}",
+        &address, "/v1/block_index", &height, &limit
+    ))
+    .await
 }
 
 async fn chunk_endpoint_request(
@@ -129,6 +142,19 @@ async fn serial_external_api() -> eyre::Result<()> {
 
     // check the api endpoint again, and it should now show 1 block in the index
     assert_eq!(json_response.block_index_height, 1);
+
+    // tests should check total number of json objects returned are equal to the number requested.
+    // Ideally should also check that the expected fields of those objects are present.
+    for limit in 0..2 {
+        for height in 0..2 {
+            let mut response = block_index_endpoint_request(&address, height, limit).await;
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.content_type(), ContentType::json().to_string());
+            let json_response: Vec<BlockIndexItem> =
+                response.json().await.expect("valid BlockIndexItem");
+            assert_eq!(json_response.len() as u64, limit);
+        }
+    }
 
     Ok(())
 }
