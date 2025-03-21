@@ -1101,8 +1101,6 @@ impl IrysNode {
         Vec<Arbiter>,
         RethNodeProvider,
     )> {
-        let seed = latest_block.vdf_limiter_info.seed;
-        let global_step_number = latest_block.vdf_limiter_info.global_step_number;
         let node_config = Arc::new(self.irys_node_config.clone());
 
         // init Irys DB
@@ -1235,6 +1233,11 @@ impl IrysNode {
             block_discovery,
             price_oracle,
         );
+
+        let (global_step_number, seed) = vdf_steps_guard.read().get_last_step_and_seed();
+        let seed = seed
+            .map(|x| x.0)
+            .unwrap_or(latest_block.vdf_limiter_info.seed);
 
         // set up packing actor
         let (atomic_global_step_number, packing_actor_addr) =
