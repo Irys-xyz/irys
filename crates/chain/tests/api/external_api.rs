@@ -63,11 +63,11 @@ async fn serial_external_api() -> eyre::Result<()> {
 
     let mut _response = network_config_endpoint_request(&address).await;
     assert_eq!(_response.status(), 200);
-    assert_eq!(_response.content_type(), ContentType::json());
+    assert_eq!(_response.content_type(), ContentType::json().to_string());
 
     let mut _response = peer_list_endpoint_request(&address).await;
     assert_eq!(_response.status(), 200);
-    assert_eq!(_response.content_type(), ContentType::json());
+    assert_eq!(_response.content_type(), ContentType::json().to_string());
 
     // FIXME: Test to be updated with future endpoint work
     let mut _response = version_endpoint_request(&address).await;
@@ -80,7 +80,7 @@ async fn serial_external_api() -> eyre::Result<()> {
     info!("HTTP server started");
 
     // confirm we are receiving the correct content type
-    assert_eq!(response.content_type(), ContentType::json());
+    assert_eq!(response.content_type(), ContentType::json().to_string());
 
     // deserialize the response into NodeInfo struct
     let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
