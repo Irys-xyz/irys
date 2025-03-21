@@ -22,6 +22,12 @@ futures = { workspace = true }
 eyre.workspace = true
 rand = "0.8"
 reqwest = { version = "0.11", features = ["json"] }
+irys-actors.workspace = true
+actix.workspace = true
+
+[dev-dependencies]
+irys-testing-utils.workspace = true
+irys-storage.workspace = true
 
 [lints]
 workspace = true

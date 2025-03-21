@@ -1,7 +1,7 @@
 use irys_database::reth_db::Database;
 use irys_database::tables::{CompactPeerListItem, PeerListItems};
-use irys_database::walk_all;
-use irys_types::DatabaseProvider;
+use irys_database::{insert_peer_list_item, walk_all};
+use irys_types::{Address, DatabaseProvider, PeerListItem};
 use std::net::SocketAddr;
 
 #[derive(Debug, Clone)]
@@ -47,5 +47,9 @@ impl PeerListProvider {
             .iter()
             .find(|peer_list_item| peer_list_item.address == *peer)
             .cloned())
+    }
+
+    pub fn add_peer(&self, mining_address: &Address, peer: &PeerListItem) -> eyre::Result<()> {
+        self.db.update(|tx| insert_peer_list_item(tx, mining_address, peer))?
     }
 }

@@ -6,13 +6,17 @@ use crate::{
     PeerListProvider,
 };
 use irys_database::tables::CompactPeerListItem;
-use irys_types::DatabaseProvider;
+use irys_types::{DatabaseProvider};
 use rand::seq::IteratorRandom;
 use std::net::SocketAddr;
 use std::{sync::Arc, time::Duration};
+use actix::{Actor, Addr, Handler, dev::ToEnvelope};
 use tokio::{
     sync::{mpsc, oneshot},
     time,
+};
+use irys_actors::{
+    mempool_service::{ChunkIngressMessage, TxIngressMessage},
 };
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
@@ -91,7 +95,14 @@ impl GossipServiceHandle {
 }
 
 #[derive(Debug)]
-pub struct GossipService {
+pub struct GossipService<TMempoolService>
+where
+    TMempoolService: Handler<TxIngressMessage>
+    + Handler<ChunkIngressMessage>
+    + Actor<Context = TMempoolService>
+    + ToEnvelope<TMempoolService, ChunkIngressMessage>
+    + ToEnvelope<TMempoolService, TxIngressMessage>
+{
     server: Option<GossipServer>,
     server_address: String,
     server_port: u16,
@@ -99,15 +110,27 @@ pub struct GossipService {
     cache: Arc<GossipCache>,
     peer_list: PeerListProvider,
     broadcast_message_rx: Option<mpsc::Receiver<(SocketAddr, GossipData)>>,
+    pub mempool: Addr<TMempoolService>,
 }
 
-impl GossipService {
+impl<TMempoolService> GossipService<TMempoolService>
+where
+    TMempoolService: Handler<TxIngressMessage>
+    + Handler<ChunkIngressMessage>
+    + Actor<Context = TMempoolService>
+    + ToEnvelope<TMempoolService, ChunkIngressMessage>
+    + ToEnvelope<TMempoolService, TxIngressMessage>
+{
     pub fn new(
-        server_address: String,
+        server_address: impl Into<String>,
         server_port: u16,
         client_timeout: Duration,
         db: DatabaseProvider,
-    ) -> (Self, mpsc::Sender<(SocketAddr, GossipData)>) {
+        mempool: Addr<TMempoolService>,
+    ) -> (
+        Self,
+        mpsc::Sender<(SocketAddr, GossipData)>,
+    ) {
         let cache = Arc::new(GossipCache::new());
         let (message_tx, message_rx) = mpsc::channel(1000);
 
@@ -119,12 +142,13 @@ impl GossipService {
         (
             Self {
                 server: Some(server),
-                server_address,
+                server_address: server_address.into(),
                 server_port,
                 client,
                 cache,
                 peer_list,
                 broadcast_message_rx: Some(message_rx),
+                mempool,
             },
             message_tx,
         )
@@ -176,9 +200,47 @@ impl GossipService {
                             maybe_message = broadcast_message_rx.recv() => {
                                 match maybe_message {
                                     Some((source_ip, data)) => {
-                                        if let Err(e) = service.broadcast_data(source_ip, &data).await {
-                                            tracing::error!("Failed to broadcast data: {}", e);
-                                                    return Err(GossipError::Internal(e.to_string()));
+                                        match data {
+                                            GossipData::Transaction(tx) => {
+                                                match service.mempool.send(TxIngressMessage(tx.clone())).await {
+                                                    Ok(message_result) => {
+                                                        match message_result {
+                                                            Ok(_) => {
+                                                                // Success, rebroadcast
+                                                                let _ = service.broadcast_data(source_ip, &GossipData::Transaction(tx)).await;
+                                                            }
+                                                            Err(_e) => {
+                                                                // Bogus transaction, decrease source reputation
+                                                                //  Maybe there's an error to tell us that the tx is already in the mempool?
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::error!("Failed to send transaction to mempool: {}", e);
+                                                        return Err(GossipError::Internal(e.to_string()));
+                                                    }
+                                                }
+                                            }
+                                            GossipData::Chunk(chunk) => {
+                                                match service.mempool.send(ChunkIngressMessage(chunk.clone())).await {
+                                                    Ok(message_result) => {
+                                                        match message_result {
+                                                            Ok(_) => {
+                                                                // Success, rebroadcast
+                                                                let _ = service.broadcast_data(source_ip, &GossipData::Chunk(chunk)).await;
+                                                            }
+                                                            Err(_e) => {
+                                                                // Bogus chunk, decrease source reputation
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::error!("Failed to send chunk to mempool: {}", e);
+                                                        return Err(GossipError::Internal(e.to_string()));
+                                                    }
+                                                }
+                                            }
+                                            GossipData::Block(_block) => {}
                                         }
                                     },
                                     None => return Ok(()), // channel closed
@@ -200,7 +262,7 @@ impl GossipService {
                     _ = broadcast_message_handle.wait_for_exit() => {}
                     _ = cleanup_handle.wait_for_exit() => {}
                     _ = server => {}
-                };
+                }
 
                 let mut errors: Vec<GossipError> = vec![];
 

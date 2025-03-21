@@ -3272,13 +3272,17 @@ dependencies = [
 name = "gossip-service"
 version = "0.1.0"
 dependencies = [
+ "actix",
  "actix-web",
  "eyre",
  "futures",
+ "irys-actors",
  "irys-api-server",
  "irys-config",
  "irys-database",
  "irys-primitives",
+ "irys-storage",
+ "irys-testing-utils",
  "irys-types",
  "rand",
  "reqwest 0.11.27",
