@@ -65,8 +65,8 @@ pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
         .route("/block/{block_tag}", web::get().to(block::get_block))
         .route(
-            "/block/index/",
-            web::post().to(block_index::block_index_route),
+            "/block_index",
+            web::get().to(block_index::block_index_route),
         )
         .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route(
