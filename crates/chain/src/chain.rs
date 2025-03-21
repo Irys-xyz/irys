@@ -764,6 +764,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
 }
 
 /// Builder pattern for configuring and bootstrapping an Irys blockchain node.
+#[derive(Clone)]
 pub struct IrysNode {
     pub config: Config,
     pub irys_node_config: IrysNodeConfig,
@@ -848,18 +849,33 @@ impl IrysNode {
                 )?;
 
                 // init the services
-                let (irys_node, actix_server, vdf_thread) = self
-                    .init_services(
-                        reth_shutdown_sender,
-                        vdf_sthutodwn_receiver,
-                        reth_handle_receiver,
-                        block_index,
-                        irys_genesis,
-                        seed,
-                        global_step_number,
-                        irys_provider.clone(),
-                    )
-                    .await?;
+
+                let actor_main_thread_handle = std::thread::Builder::new()
+                    .name("actor-main-thread".to_string())
+                    .stack_size(32 * 1024 * 1024)
+                    .spawn({
+                        let node = (*self).clone();
+                        move || {
+                            System::new().block_on({
+                                async move {
+                                    let (irys_node, actix_server, vdf_thread) = node
+                                        .init_services(
+                                            reth_shutdown_sender,
+                                            vdf_sthutodwn_receiver,
+                                            reth_handle_receiver,
+                                            block_index,
+                                            irys_genesis,
+                                            seed,
+                                            global_step_number,
+                                            irys_provider.clone(),
+                                        )
+                                        .await
+                                        .expect("init services failure");
+                                }
+                            });
+                        }
+                    })?
+                    .join();
 
                 // start cleanup threads
                 // return ctx
@@ -998,24 +1014,18 @@ impl IrysNode {
         global_step_number: u64,
         irys_provider: IrysRethProvider,
     ) -> eyre::Result<(IrysNodeCtx, Server, JoinHandle<()>)> {
-        let actix_system = System::new();
         let node_config = Arc::new(self.irys_node_config.clone());
         let task_manager = TaskManager::new(tokio::runtime::Handle::current().clone());
         let task_exec = task_manager.executor();
 
         // init Irys DB
-        let irys_db_env =
-            open_or_create_irys_consensus_data_db(&node_config.irys_consensus_data_dir())?;
-        let irys_db = DatabaseProvider(Arc::new(irys_db_env));
-        debug!("Irys DB initiailsed");
+        let irys_db = init_irys_db(&node_config)?;
 
         // final arbiters
         let mut arbiters = Vec::new();
 
         // initialize the databases
-        let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await?));
-        let reth_db = reth_node.provider.database.db.clone();
-        check_db_version_and_run_migrations_if_needed(&reth_db, &irys_db)?;
+        let (reth_node, reth_db) = init_reth_db(reth_handle_receiver, &irys_db).await?;
         debug!("Reth DB initiailsed");
 
         // start services
@@ -1029,12 +1039,7 @@ impl IrysNode {
         debug!("Chunk cache initiailsed");
 
         // start reth service
-        let reth_service = RethServiceActor::new(reth_node.clone(), irys_db.clone());
-        let reth_arbiter = Arbiter::new();
-        let reth_service_actor =
-            RethServiceActor::start_in_arbiter(&reth_arbiter.handle(), |_| reth_service);
-        SystemRegistry::set(reth_service_actor.clone());
-        arbiters.push(reth_arbiter);
+        let reth_service_actor = init_reth_service(&irys_db, &mut arbiters, &reth_node);
         debug!("Reth Service Actor initiailsed");
 
         // update reth service about the latest block data it must use
@@ -1048,69 +1053,33 @@ impl IrysNode {
         debug!("Reth Service Actor updated about fork choice");
 
         // start block index service
-        let block_index_service =
-            BlockIndexService::new(block_index.clone(), self.storage_config.clone());
-        let block_index_service_actor = block_index_service.start();
-        SystemRegistry::set(block_index_service_actor.clone());
-
+        let block_index_service_actor = self.init_block_index_service(&block_index);
         let block_index_guard = block_index_service_actor
             .send(GetBlockIndexGuardMessage)
             .await?;
 
         // start the broadcast mimning service
-        let broadcast_arbiter = Arbiter::new();
-        let broadcast_mining_actor =
-            BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
-                BroadcastMiningService::default()
-            });
-        SystemRegistry::set(broadcast_mining_actor.clone());
-        arbiters.push(broadcast_arbiter);
+        let broadcast_mining_actor = init_broadcaster_service(&mut arbiters);
 
         // start the epoch service
-        let mut epoch_service = EpochServiceActor::new(
-            self.epoch_config.clone(),
-            &self.config,
-            block_index_guard.clone(),
-        );
-        let storage_module_infos = epoch_service
-            .initialize(&irys_db, self.storage_submodule_config.clone())
+        let (storage_module_infos, epoch_service_actor) = self
+            .init_epoch_service(&irys_db, &block_index_guard)
             .await?;
-        let epoch_service_actor = epoch_service.start();
 
         // Retrieve Partition assignment
         let partition_assignments_guard = epoch_service_actor
             .send(GetPartitionAssignmentsGuardMessage)
             .await?;
-        let mut storage_modules = Vec::new();
-        for info in storage_module_infos {
-            let arc_module = Arc::new(
-                StorageModule::new(
-                    &self.irys_node_config.storage_module_dir(),
-                    &info,
-                    self.storage_config.clone(),
-                )
-                // TODO: remove this unwrap
-                .unwrap(),
-            );
-            storage_modules.push(arc_module.clone());
-        }
+        let storage_modules = self.init_storage_modules(storage_module_infos);
 
         // start the block tree service
-        let block_tree_service = BlockTreeService::new(
-            irys_db.clone(),
-            block_index.clone(),
-            &self.config.miner_address(),
-            block_index_guard.clone(),
-            self.storage_config.clone(),
-            service_senders.clone(),
+        let block_tree_service = self.init_block_tree_service(
+            &block_index,
+            &irys_db,
+            &mut arbiters,
+            &service_senders,
+            &block_index_guard,
         );
-        let block_tree_arbiter = Arbiter::new();
-        let block_tree_service =
-            BlockTreeService::start_in_arbiter(&block_tree_arbiter.handle(), |_| {
-                block_tree_service
-            });
-        SystemRegistry::set(block_tree_service.clone());
-        arbiters.push(block_tree_arbiter.into());
         let block_tree_guard = block_tree_service.send(GetBlockTreeGuardMessage).await?;
 
         // Spawn EMA service
@@ -1122,203 +1091,97 @@ impl IrysNode {
         );
 
         // Spawn peer list service
-        let peer_list_arbiter = Arbiter::new();
-        let peer_list_service = PeerListService::new(irys_db.clone());
-        let peer_list_service =
-            PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
-        SystemRegistry::set(peer_list_service);
-        arbiters.push(peer_list_arbiter.into());
+        init_peer_list_service(&irys_db, &mut arbiters);
 
         // Spawn the mempool service
-        let mempool_service = MempoolService::new(
-            irys_db.clone(),
-            reth_db.clone(),
-            reth_node.task_executor.clone(),
-            node_config.mining_signer.clone(),
-            self.storage_config.clone(),
-            storage_modules.clone(),
-            block_tree_guard.clone(),
-            &self.config,
+        let mempool_service = self.init_mempools_service(
+            &node_config,
+            &irys_db,
+            &mut arbiters,
+            &reth_node,
+            reth_db,
+            &storage_modules,
+            &block_tree_guard,
         );
-        let mempool_arbiter = Arbiter::new();
-        let mempool_service =
-            MempoolService::start_in_arbiter(&mempool_arbiter.handle(), |_| mempool_service);
-        SystemRegistry::set(mempool_service.clone());
-        arbiters.push(mempool_arbiter.into());
 
         // spawn the chunk migration service
-        let chunk_migration_service = ChunkMigrationService::new(
-            block_index.clone(),
-            self.storage_config.clone(),
-            storage_modules.clone(),
-            irys_db.clone(),
-            service_senders.clone(),
+        self.init_chunk_migration_service(
+            block_index,
+            &irys_db,
+            &service_senders,
+            &storage_modules,
         );
-        SystemRegistry::set(chunk_migration_service.start());
 
         // spawn the vdf service
-        let vdf_service_actor =
-            VdfService::new(block_index_guard.clone(), irys_db.clone(), &self.config);
-        let vdf_service = vdf_service_actor.start();
-        SystemRegistry::set(vdf_service.clone());
+        let vdf_service = self.init_vdf_service(&irys_db, &block_index_guard);
         let vdf_steps_guard = vdf_service.send(GetVdfStateMessage).await?;
 
         // spawn the validation service
-        let validation_service = ValidationService::new(
-            block_index_guard.clone(),
-            partition_assignments_guard.clone(),
-            vdf_steps_guard.clone(),
-            self.storage_config.clone(),
-            self.vdf_config.clone(),
+        self.init_validation_service(
+            &mut arbiters,
+            &block_index_guard,
+            &partition_assignments_guard,
+            &vdf_steps_guard,
         );
-        let validation_arbiter = Arbiter::new();
-        let validation_service =
-            ValidationService::start_in_arbiter(&validation_arbiter.handle(), |_| {
-                validation_service
-            });
-        SystemRegistry::set(validation_service);
-        arbiters.push(validation_arbiter.into());
 
         // spawn block discovery
-        let block_discovery_actor = BlockDiscoveryActor {
-            block_index_guard: block_index_guard.clone(),
-            partition_assignments_guard: partition_assignments_guard.clone(),
-            storage_config: self.storage_config.clone(),
-            difficulty_config: self.difficulty_adjustment_config.clone(),
-            db: irys_db.clone(),
-            vdf_config: self.vdf_config.clone(),
-            vdf_steps_guard: vdf_steps_guard.clone(),
-            service_senders: service_senders.clone(),
-        };
-        let block_discovery_arbiter = Arbiter::new();
-        let block_discovery =
-            BlockDiscoveryActor::start_in_arbiter(&block_discovery_arbiter.handle(), |_| {
-                block_discovery_actor
-            });
-        arbiters.push(block_discovery_arbiter.into());
+        let block_discovery = self.init_block_discovery_service(
+            &irys_db,
+            &mut arbiters,
+            &service_senders,
+            &block_index_guard,
+            partition_assignments_guard,
+            &vdf_steps_guard,
+        );
 
         // set up the price oracle
-        let price_oracle = match self.config.oracle_config {
-            OracleConfig::Mock {
-                initial_price,
-                percent_change,
-                smoothing_interval,
-            } => IrysPriceOracle::MockOracle(MockOracle::new(
-                initial_price,
-                percent_change,
-                smoothing_interval,
-            )),
-            // note: depending on the oracle, it may require spawning an async background service.
-        };
-        let price_oracle = Arc::new(price_oracle);
+        let price_oracle = self.init_price_oracle();
 
         // set up the block producer
-        let block_producer_arbiter = Arbiter::new();
-        let block_producer_actor = BlockProducerActor {
-            db: irys_db.clone(),
-            mempool_addr: mempool_service.clone(),
-            block_discovery_addr: block_discovery,
-            epoch_service: epoch_service_actor.clone(),
-            reth_provider: reth_node.clone(),
-            storage_config: self.storage_config.clone(),
-            difficulty_config: self.difficulty_adjustment_config.clone(),
-            vdf_config: self.vdf_config.clone(),
-            vdf_steps_guard: vdf_steps_guard.clone(),
-            block_tree_guard: block_tree_guard.clone(),
-            epoch_config: self.epoch_config.clone(),
+        let block_producer_addr = self.init_block_producer(
+            &irys_db,
+            &mut arbiters,
+            &reth_node,
+            &service_senders,
+            &epoch_service_actor,
+            &block_tree_guard,
+            &mempool_service,
+            &vdf_steps_guard,
+            block_discovery,
             price_oracle,
-            service_senders: service_senders.clone(),
-        };
-        let block_producer_addr =
-            BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
-                block_producer_actor
-            });
-        arbiters.push(block_producer_arbiter.into());
+        );
 
         // set up packing actor
-        let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
-        let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
-        let packing_actor_addr = PackingActor::new(
-            Handle::current(),
-            reth_node.task_executor.clone(),
-            sm_ids,
-            self.packing_config.clone(),
-        )
-        .start();
+        let (atomic_global_step_number, packing_actor_addr) =
+            self.init_packing_actor(global_step_number, &reth_node, &storage_modules);
 
         // set up storage modules
-        let mut part_actors = Vec::new();
-        for sm in &storage_modules {
-            let partition_mining_actor = PartitionMiningActor::new(
-                self.config.miner_address(),
-                irys_db.clone(),
-                block_producer_addr.clone().recipient(),
-                packing_actor_addr.clone().recipient(),
-                sm.clone(),
-                false, // do not start mining automatically
-                vdf_steps_guard.clone(),
-                atomic_global_step_number.clone(),
-            );
-            let part_arbiter = Arbiter::new();
-            let partition_mining_actor =
-                PartitionMiningActor::start_in_arbiter(&part_arbiter.handle(), |_| {
-                    partition_mining_actor
-                });
-            part_actors.push(partition_mining_actor);
-            arbiters.push(part_arbiter);
-        }
-        // TODO: do we need this?
-        // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
-        // tokio::task::yield_now().await;
-
-        // request packing for uninitialized ranges
-        for sm in &storage_modules {
-            let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
-            for interval in uninitialized {
-                packing_actor_addr.do_send(PackingRequest {
-                    storage_module: sm.clone(),
-                    chunk_range: PartitionChunkRange(interval),
-                });
-            }
-        }
+        let part_actors = self.init_partition_mining_actor(
+            &irys_db,
+            arbiters,
+            &storage_modules,
+            &vdf_steps_guard,
+            &block_producer_addr,
+            &atomic_global_step_number,
+            &packing_actor_addr,
+        );
         broadcast_mining_actor
             .send(BroadcastDifficultyUpdate(latest_block.clone()))
             .await?;
 
         // set up the vdf thread
-        let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
-        let vdf_thread_handler = std::thread::spawn({
-            let vdf_config = self.vdf_config.clone();
-            move || {
-                // Setup core affinity
-                let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
-                for core in core_ids {
-                    let success = core_affinity::set_for_current(core);
-                    if success {
-                        info!("VDF thread pinned to core {:?}", core);
-                        break;
-                    }
-                }
+        let vdf_thread_handler = self.init_vdf_thread(
+            vdf_sthutodwn_receiver,
+            latest_block,
+            seed,
+            global_step_number,
+            broadcast_mining_actor,
+            vdf_service,
+            atomic_global_step_number,
+        );
 
-                // TODO: these channels are unused
-                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
-                run_vdf(
-                    vdf_config,
-                    global_step_number,
-                    seed,
-                    vdf_reset_seed,
-                    new_seed_rx,
-                    vdf_sthutodwn_receiver,
-                    broadcast_mining_actor.clone(),
-                    vdf_service.clone(),
-                    atomic_global_step_number.clone(),
-                )
-            }
-        });
         // set up chunk provider
-        let chunk_provider =
-            ChunkProvider::new(self.storage_config.clone(), storage_modules.clone());
-        let chunk_provider = Arc::new(chunk_provider);
+        let chunk_provider = self.init_chunk_provider(storage_modules);
 
         // set up IrysNodeCtx
         let actor_addresses = ActorAddresses {
@@ -1366,6 +1229,362 @@ impl IrysNode {
         });
 
         Ok((irys_node_ctx, server, vdf_thread_handler))
+    }
+
+    fn init_chunk_provider(&self, storage_modules: Vec<Arc<StorageModule>>) -> Arc<ChunkProvider> {
+        let chunk_provider =
+            ChunkProvider::new(self.storage_config.clone(), storage_modules.clone());
+        let chunk_provider = Arc::new(chunk_provider);
+        chunk_provider
+    }
+
+    fn init_vdf_thread(
+        &self,
+        vdf_sthutodwn_receiver: mpsc::Receiver<()>,
+        latest_block: Arc<IrysBlockHeader>,
+        seed: H256,
+        global_step_number: u64,
+        broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
+        vdf_service: actix::Addr<VdfService>,
+        atomic_global_step_number: Arc<AtomicU64>,
+    ) -> JoinHandle<()> {
+        let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
+        let vdf_thread_handler = std::thread::spawn({
+            let vdf_config = self.vdf_config.clone();
+            move || {
+                // Setup core affinity
+                let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
+                for core in core_ids {
+                    let success = core_affinity::set_for_current(core);
+                    if success {
+                        info!("VDF thread pinned to core {:?}", core);
+                        break;
+                    }
+                }
+
+                // TODO: these channels are unused
+                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
+                run_vdf(
+                    vdf_config,
+                    global_step_number,
+                    seed,
+                    vdf_reset_seed,
+                    new_seed_rx,
+                    vdf_sthutodwn_receiver,
+                    broadcast_mining_actor.clone(),
+                    vdf_service.clone(),
+                    atomic_global_step_number.clone(),
+                )
+            }
+        });
+        vdf_thread_handler
+    }
+
+    fn init_partition_mining_actor(
+        &self,
+        irys_db: &DatabaseProvider,
+        mut arbiters: Vec<Arbiter>,
+        storage_modules: &Vec<Arc<StorageModule>>,
+        vdf_steps_guard: &VdfStepsReadGuard,
+        block_producer_addr: &actix::Addr<BlockProducerActor>,
+        atomic_global_step_number: &Arc<AtomicU64>,
+        packing_actor_addr: &actix::Addr<PackingActor>,
+    ) -> Vec<actix::Addr<PartitionMiningActor>> {
+        let mut part_actors = Vec::new();
+        for sm in storage_modules {
+            let partition_mining_actor = PartitionMiningActor::new(
+                self.config.miner_address(),
+                irys_db.clone(),
+                block_producer_addr.clone().recipient(),
+                packing_actor_addr.clone().recipient(),
+                sm.clone(),
+                false, // do not start mining automatically
+                vdf_steps_guard.clone(),
+                atomic_global_step_number.clone(),
+            );
+            let part_arbiter = Arbiter::new();
+            let partition_mining_actor =
+                PartitionMiningActor::start_in_arbiter(&part_arbiter.handle(), |_| {
+                    partition_mining_actor
+                });
+            part_actors.push(partition_mining_actor);
+            arbiters.push(part_arbiter);
+        }
+        // TODO: do we need this?
+        // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
+        // tokio::task::yield_now().await;
+
+        // request packing for uninitialized ranges
+        for sm in storage_modules {
+            let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
+            for interval in uninitialized {
+                packing_actor_addr.do_send(PackingRequest {
+                    storage_module: sm.clone(),
+                    chunk_range: PartitionChunkRange(interval),
+                });
+            }
+        }
+        part_actors
+    }
+
+    fn init_packing_actor(
+        &self,
+        global_step_number: u64,
+        reth_node: &RethNodeProvider,
+        storage_modules: &Vec<Arc<StorageModule>>,
+    ) -> (Arc<AtomicU64>, actix::Addr<PackingActor>) {
+        let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
+        let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
+        let packing_actor_addr = PackingActor::new(
+            Handle::current(),
+            reth_node.task_executor.clone(),
+            sm_ids,
+            self.packing_config.clone(),
+        )
+        .start();
+        (atomic_global_step_number, packing_actor_addr)
+    }
+
+    fn init_block_producer(
+        &self,
+        irys_db: &DatabaseProvider,
+        arbiters: &mut Vec<Arbiter>,
+        reth_node: &RethNodeProvider,
+        service_senders: &ServiceSenders,
+        epoch_service_actor: &actix::Addr<EpochServiceActor>,
+        block_tree_guard: &BlockTreeReadGuard,
+        mempool_service: &actix::Addr<MempoolService>,
+        vdf_steps_guard: &VdfStepsReadGuard,
+        block_discovery: actix::Addr<BlockDiscoveryActor>,
+        price_oracle: Arc<IrysPriceOracle>,
+    ) -> actix::Addr<BlockProducerActor> {
+        let block_producer_arbiter = Arbiter::new();
+        let block_producer_actor = BlockProducerActor {
+            db: irys_db.clone(),
+            mempool_addr: mempool_service.clone(),
+            block_discovery_addr: block_discovery,
+            epoch_service: epoch_service_actor.clone(),
+            reth_provider: reth_node.clone(),
+            storage_config: self.storage_config.clone(),
+            difficulty_config: self.difficulty_adjustment_config.clone(),
+            vdf_config: self.vdf_config.clone(),
+            vdf_steps_guard: vdf_steps_guard.clone(),
+            block_tree_guard: block_tree_guard.clone(),
+            epoch_config: self.epoch_config.clone(),
+            price_oracle,
+            service_senders: service_senders.clone(),
+        };
+        let block_producer_addr =
+            BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
+                block_producer_actor
+            });
+        arbiters.push(block_producer_arbiter.into());
+        block_producer_addr
+    }
+
+    fn init_price_oracle(&self) -> Arc<IrysPriceOracle> {
+        let price_oracle = match self.config.oracle_config {
+            OracleConfig::Mock {
+                initial_price,
+                percent_change,
+                smoothing_interval,
+            } => IrysPriceOracle::MockOracle(MockOracle::new(
+                initial_price,
+                percent_change,
+                smoothing_interval,
+            )),
+            // note: depending on the oracle, it may require spawning an async background service.
+        };
+        let price_oracle = Arc::new(price_oracle);
+        price_oracle
+    }
+
+    fn init_block_discovery_service(
+        &self,
+        irys_db: &DatabaseProvider,
+        arbiters: &mut Vec<Arbiter>,
+        service_senders: &ServiceSenders,
+        block_index_guard: &BlockIndexReadGuard,
+        partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
+        vdf_steps_guard: &VdfStepsReadGuard,
+    ) -> actix::Addr<BlockDiscoveryActor> {
+        let block_discovery_actor = BlockDiscoveryActor {
+            block_index_guard: block_index_guard.clone(),
+            partition_assignments_guard: partition_assignments_guard.clone(),
+            storage_config: self.storage_config.clone(),
+            difficulty_config: self.difficulty_adjustment_config.clone(),
+            db: irys_db.clone(),
+            vdf_config: self.vdf_config.clone(),
+            vdf_steps_guard: vdf_steps_guard.clone(),
+            service_senders: service_senders.clone(),
+        };
+        let block_discovery_arbiter = Arbiter::new();
+        let block_discovery =
+            BlockDiscoveryActor::start_in_arbiter(&block_discovery_arbiter.handle(), |_| {
+                block_discovery_actor
+            });
+        arbiters.push(block_discovery_arbiter.into());
+        block_discovery
+    }
+
+    fn init_validation_service(
+        &self,
+        arbiters: &mut Vec<Arbiter>,
+        block_index_guard: &BlockIndexReadGuard,
+        partition_assignments_guard: &irys_actors::epoch_service::PartitionAssignmentsReadGuard,
+        vdf_steps_guard: &VdfStepsReadGuard,
+    ) {
+        let validation_service = ValidationService::new(
+            block_index_guard.clone(),
+            partition_assignments_guard.clone(),
+            vdf_steps_guard.clone(),
+            self.storage_config.clone(),
+            self.vdf_config.clone(),
+        );
+        let validation_arbiter = Arbiter::new();
+        let validation_service =
+            ValidationService::start_in_arbiter(&validation_arbiter.handle(), |_| {
+                validation_service
+            });
+        SystemRegistry::set(validation_service);
+        arbiters.push(validation_arbiter.into());
+    }
+
+    fn init_vdf_service(
+        &self,
+        irys_db: &DatabaseProvider,
+        block_index_guard: &BlockIndexReadGuard,
+    ) -> actix::Addr<VdfService> {
+        let vdf_service_actor =
+            VdfService::new(block_index_guard.clone(), irys_db.clone(), &self.config);
+        let vdf_service = vdf_service_actor.start();
+        SystemRegistry::set(vdf_service.clone());
+        vdf_service
+    }
+
+    fn init_chunk_migration_service(
+        &self,
+        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+        irys_db: &DatabaseProvider,
+        service_senders: &ServiceSenders,
+        storage_modules: &Vec<Arc<StorageModule>>,
+    ) {
+        let chunk_migration_service = ChunkMigrationService::new(
+            block_index.clone(),
+            self.storage_config.clone(),
+            storage_modules.clone(),
+            irys_db.clone(),
+            service_senders.clone(),
+        );
+        SystemRegistry::set(chunk_migration_service.start());
+    }
+
+    fn init_mempools_service(
+        &self,
+        node_config: &Arc<IrysNodeConfig>,
+        irys_db: &DatabaseProvider,
+        arbiters: &mut Vec<Arbiter>,
+        reth_node: &RethNodeProvider,
+        reth_db: irys_database::db::RethDbWrapper,
+        storage_modules: &Vec<Arc<StorageModule>>,
+        block_tree_guard: &BlockTreeReadGuard,
+    ) -> actix::Addr<MempoolService> {
+        let mempool_service = MempoolService::new(
+            irys_db.clone(),
+            reth_db.clone(),
+            reth_node.task_executor.clone(),
+            node_config.mining_signer.clone(),
+            self.storage_config.clone(),
+            storage_modules.clone(),
+            block_tree_guard.clone(),
+            &self.config,
+        );
+        let mempool_arbiter = Arbiter::new();
+        let mempool_service =
+            MempoolService::start_in_arbiter(&mempool_arbiter.handle(), |_| mempool_service);
+        SystemRegistry::set(mempool_service.clone());
+        arbiters.push(mempool_arbiter.into());
+        mempool_service
+    }
+
+    fn init_block_tree_service(
+        &self,
+        block_index: &Arc<RwLock<BlockIndex<Initialized>>>,
+        irys_db: &DatabaseProvider,
+        arbiters: &mut Vec<Arbiter>,
+        service_senders: &ServiceSenders,
+        block_index_guard: &BlockIndexReadGuard,
+    ) -> actix::Addr<BlockTreeService> {
+        let block_tree_service = BlockTreeService::new(
+            irys_db.clone(),
+            block_index.clone(),
+            &self.config.miner_address(),
+            block_index_guard.clone(),
+            self.storage_config.clone(),
+            service_senders.clone(),
+        );
+        let block_tree_arbiter = Arbiter::new();
+        let block_tree_service =
+            BlockTreeService::start_in_arbiter(&block_tree_arbiter.handle(), |_| {
+                block_tree_service
+            });
+        SystemRegistry::set(block_tree_service.clone());
+        arbiters.push(block_tree_arbiter.into());
+        block_tree_service
+    }
+
+    fn init_storage_modules(
+        &self,
+        storage_module_infos: Vec<irys_storage::StorageModuleInfo>,
+    ) -> Vec<Arc<StorageModule>> {
+        let mut storage_modules = Vec::new();
+        for info in storage_module_infos {
+            let arc_module = Arc::new(
+                StorageModule::new(
+                    &self.irys_node_config.storage_module_dir(),
+                    &info,
+                    self.storage_config.clone(),
+                )
+                // TODO: remove this unwrap
+                .unwrap(),
+            );
+            storage_modules.push(arc_module.clone());
+        }
+        storage_modules
+    }
+
+    async fn init_epoch_service(
+        &self,
+        irys_db: &DatabaseProvider,
+        block_index_guard: &BlockIndexReadGuard,
+    ) -> Result<
+        (
+            Vec<irys_storage::StorageModuleInfo>,
+            actix::Addr<EpochServiceActor>,
+        ),
+        eyre::Error,
+    > {
+        let mut epoch_service = EpochServiceActor::new(
+            self.epoch_config.clone(),
+            &self.config,
+            block_index_guard.clone(),
+        );
+        let storage_module_infos = epoch_service
+            .initialize(irys_db, self.storage_submodule_config.clone())
+            .await?;
+        let epoch_service_actor = epoch_service.start();
+        Ok((storage_module_infos, epoch_service_actor))
+    }
+
+    fn init_block_index_service(
+        &self,
+        block_index: &Arc<RwLock<BlockIndex<Initialized>>>,
+    ) -> actix::Addr<BlockIndexService> {
+        let block_index_service =
+            BlockIndexService::new(block_index.clone(), self.storage_config.clone());
+        let block_index_service_actor = block_index_service.start();
+        SystemRegistry::set(block_index_service_actor.clone());
+        block_index_service_actor
     }
 
     /// Bootstraps the genesis node.
@@ -2517,4 +2736,56 @@ impl IrysNode {
         node.reth_thread_handle = Some(reth_thread_handler.into());
         Ok(node)
     }
+}
+
+fn init_peer_list_service(irys_db: &DatabaseProvider, arbiters: &mut Vec<Arbiter>) {
+    let peer_list_arbiter = Arbiter::new();
+    let peer_list_service = PeerListService::new(irys_db.clone());
+    let peer_list_service =
+        PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
+    SystemRegistry::set(peer_list_service);
+    arbiters.push(peer_list_arbiter.into());
+}
+
+fn init_broadcaster_service(arbiters: &mut Vec<Arbiter>) -> actix::Addr<BroadcastMiningService> {
+    let broadcast_arbiter = Arbiter::new();
+    let broadcast_mining_actor =
+        BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
+            BroadcastMiningService::default()
+        });
+    SystemRegistry::set(broadcast_mining_actor.clone());
+    arbiters.push(broadcast_arbiter);
+    broadcast_mining_actor
+}
+
+fn init_reth_service(
+    irys_db: &DatabaseProvider,
+    arbiters: &mut Vec<Arbiter>,
+    reth_node: &RethNodeProvider,
+) -> actix::Addr<RethServiceActor> {
+    let reth_service = RethServiceActor::new(reth_node.clone(), irys_db.clone());
+    let reth_arbiter = Arbiter::new();
+    let reth_service_actor =
+        RethServiceActor::start_in_arbiter(&reth_arbiter.handle(), |_| reth_service);
+    SystemRegistry::set(reth_service_actor.clone());
+    arbiters.push(reth_arbiter);
+    reth_service_actor
+}
+
+async fn init_reth_db(
+    reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
+    irys_db: &DatabaseProvider,
+) -> Result<(RethNodeProvider, irys_database::db::RethDbWrapper), eyre::Error> {
+    let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await?));
+    let reth_db = reth_node.provider.database.db.clone();
+    check_db_version_and_run_migrations_if_needed(&reth_db, irys_db)?;
+    Ok((reth_node, reth_db))
+}
+
+fn init_irys_db(node_config: &Arc<IrysNodeConfig>) -> Result<DatabaseProvider, eyre::Error> {
+    let irys_db_env =
+        open_or_create_irys_consensus_data_db(&node_config.irys_consensus_data_dir())?;
+    let irys_db = DatabaseProvider(Arc::new(irys_db_env));
+    debug!("Irys DB initiailsed");
+    Ok(irys_db)
 }
