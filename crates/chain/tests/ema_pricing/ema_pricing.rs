@@ -8,7 +8,8 @@ use irys_actors::{
 use irys_chain::{start_irys_node, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::Config;
+use irys_types::{storage_pricing::Amount, Config, OracleConfig};
+use rust_decimal_macros::dec;
 use tempfile::TempDir;
 
 #[test_log::test(tokio::test)]
