@@ -1,3 +1,41 @@
+//! # Storage Abstraction Layers
+//!
+//! ```text
+//! +------------------+
+//! |       Node       |
+//! |  +------------+  |  +--------------------------+
+//! |  | Partition1 |<----| Storage Module A         |<--+ Submodule i
+//! |  +------------+  |  +--------------------------+
+//! |                  |
+//! |  +------------+  |  +--------------------------+
+//! |  | Partition2 |<----| Storage Module B         |<--+ Submodule i
+//! |  +------------+  |  |                          |<--+ Submodule ii
+//! |                  |  +--------------------------+
+//! |                  |
+//! |  +------------+  |  +--------------------------+
+//! |  | unpledged  |<----| Storage Module C         |<--+ Submodule i
+//! |  +------------+  |  |                          |<--+ Submodule ii
+//! |                  |  |                          |<--+ Submodule iii
+//! |                  |  +--------------------------+
+//! +------------------+
+//! ```
+//!
+//! ## Node Level of Abstraction
+//! - Node operates only on partitions, identified by partition_hash
+//! - Each partition contains CONFIG.num_chunks_in_partition chunks
+//! - Partition hashes map to Ledger slots, or the capacity partitions list in the epoch_service
+//!
+//! ## Storage Module Level of Abstraction
+//! - Storage modules manage reading/writing of chunks for an entire partition
+//! - Storage modules can span multiple physical drives via submodules
+//! - Typical deployment: Single 16TB HDD submodule per partition (and storage module)
+//! - Alternative setup: Multiple smaller drives (e.g., 4x 4TB) as submodules to the storage module
+//!
+//! ## Submodule Level of Abstraction
+//! - Submodules are owned and managed exclusively by Storage Modules
+//! - Invisible to rest of the node
+//! - Storage Module handles mapping of partition chunk offsets to appropriate submodule
+
 use base58::ToBase58;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, Context, OptionExt, Result};
@@ -32,43 +70,6 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 use tracing::{debug, error, info};
-
-// Layers of abstraction
-//
-// +------------------+
-// |       Node       |
-// |  +------------+  |  +--------------------------+
-// |  | Partition1 |<----| Storage Module A         |<--+ Submodule i
-// |  +------------+  |  +--------------------------+
-// |                  |
-// |  +------------+  |  +--------------------------+
-// |  | Partition2 |<----| Storage Module B         |<--+ Submodule i
-// |  +------------+  |  |                          |<--+ Submodule ii
-// |                  |  +--------------------------+
-// |                  |
-// |  +------------+  |  +--------------------------+
-// |  | unpledged  |<----| Storage Module C         |<--+ Submodule i
-// |  +------------+  |  |                          |<--+ Submodule ii
-// |                  |  |                          |<--+ Submodule iii
-// |                  |  +--------------------------+
-// +------------------+
-//
-// Node Level:
-// - Node operates only on partitions, identified by partition_hash
-// - Each partition contains CONFIG.num_chunks_in_partition chunks
-// - Partition hashes map to Ledger slots, or capacity partitions lis in the epoch_service
-//
-// Storage Module Level:
-// - Manages reading/writing of chunks (0..CONFIG.num_chunks_in_partition) for a partition
-// - Can operate across multiple physical drives via submodules
-// - Typical deployment: Single 16TB HDD submodule per partition
-// - Alternative setup: Multiple smaller drives (e.g. 4x 4TB) as submodules
-//
-// Submodule Level:
-// - Owned and managed exclusively by Storage Modules
-// - Invisible to rest of application
-// - Storage Module handles chunk offset mapping to appropriate submodule
-//
 
 type SubmodulePath = PathBuf;
 
@@ -448,6 +449,26 @@ impl StorageModule {
         Ok(())
     }
 
+    /// Persists partition interval data to individual submodules.
+    ///
+    /// # Overview
+    /// While the parent StorageModule maintains a global view of all partition intervals
+    /// across its submodules, each submodule records its own localized view. This function:
+    ///
+    /// 1. Takes the global intervals from the StorageModule
+    /// 2. For each submodule, extracts only the interval portions relevant to that submodule
+    /// 3. Writes the filtered intervals to an `intervals.json` file in each submodule's directory
+    ///
+    /// # Parameters
+    /// * `intervals` - Reference to the global StorageIntervals containing all chunk mappings
+    /// * `submodules` - Map of submodule intervals to their respective submodule instances
+    ///
+    /// # Returns
+    /// * `eyre::Result<()>` - Success or error during the write operation
+    ///
+    /// # Note
+    /// If a submodule has no intervals after filtering, a default `Uninitialized` interval
+    /// is created spanning the submodule's entire range to ensure consistency.
     fn write_intervals_to_submodules(
         intervals: &Arc<RwLock<StorageIntervals>>,
         submodules: &SubmoduleMap,
@@ -481,6 +502,25 @@ impl StorageModule {
         Ok(())
     }
 
+    /// Reconstructs the global StorageIntervals by loading and merging interval data from all submodules.
+    ///
+    /// # Overview
+    /// This function rebuilds a complete view of all chunk storage intervals by:
+    ///
+    /// 1. Creating an empty global intervals container
+    /// 2. Reading each submodule's `intervals.json` file
+    /// 3. Merging all submodule intervals into the global container
+    ///
+    /// # Parameters
+    /// * `submodules` - Map containing all storage submodules
+    ///
+    /// # Returns
+    /// * `StorageIntervals` - A complete, merged map of all intervals across all submodules
+    ///
+    /// # Panics
+    /// * If unable to lock a submodule's intervals file mutex
+    /// * If reading a submodule's intervals file fails
+    /// * If interval insertion into the global map fails due to overlapping intervals
     fn load_intervals_from_submodules(submodules: &SubmoduleMap) -> StorageIntervals {
         let mut global_intervals = StorageIntervals::new();
         for (_, submodule) in submodules.iter() {
