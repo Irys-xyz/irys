@@ -1,15 +1,15 @@
-use core::fmt;
-use std::ops::{Add, Deref, DerefMut};
-
-use crate::{string_u64, LedgerChunkOffset};
+use crate::{
+    address_base58_stringify, hash_sha256, option_address_base58_stringify,
+    partition::PartitionHash, string_u64, Base64, LedgerChunkOffset, PartitionChunkOffset, H256,
+};
 use alloy_primitives::Address;
 use arbitrary::Arbitrary;
+use core::fmt;
 use derive_more::{Add, From, Into};
 use eyre::eyre;
 use reth_codecs::Compact;
 use serde::{Deserialize, Serialize};
-
-use crate::{hash_sha256, partition::PartitionHash, Base64, PartitionChunkOffset, H256};
+use std::ops::{Add, Deref, DerefMut};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 // tag is to produce better JSON serialization, it flattens { "Packed": {...}} to {type: "packed", ... }
@@ -99,6 +99,7 @@ pub struct PackedChunk {
     /// last chunk in the transaction
     pub bytes: Base64,
     /// the Address used to pack this chunk
+    #[serde(default, with = "address_base58_stringify")]
     pub packing_address: Address,
     /// the partition relative chunk offset
     pub partition_offset: PartitionChunkOffset,
@@ -129,6 +130,7 @@ pub struct PartialChunk {
     /// the partition relative chunk offset
     pub partition_relative_offset: Option<PartitionChunkOffset>,
     /// the Address used to pack this chunk
+    #[serde(with = "option_address_base58_stringify")]
     pub packing_address: Option<Address>,
     // Index of the chunk in the transaction starting with 0
     pub tx_offset: Option<TxChunkOffset>,
