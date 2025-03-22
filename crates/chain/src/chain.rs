@@ -906,7 +906,7 @@ impl IrysNode {
                         let block_index = BlockIndex::new()
                             .init(node_config.clone())
                             .await
-                            .expect("to init block index");
+                            .expect("initializing a new block index should be doable");
                         let block_index = Arc::new(RwLock::new(block_index));
                         let _block_index_service_actor =
                             genesis_initialization(&irys_genesis, node_config, &block_index, &node)
@@ -960,10 +960,10 @@ impl IrysNode {
                                 &task_exec,
                             )
                             .await
-                            .expect("init services failure");
+                            .expect("initializng services should not fail");
                         irys_node_ctx_tx
                             .send(irys_node)
-                            .expect("to be able to send the node");
+                            .expect("irys node ctx sender should not be dropped. Is the reth node thread down?");
 
                         // await on actix web server
                         let server_handle = actix_server.handle();
@@ -1345,7 +1345,8 @@ impl IrysNode {
             let vdf_config = self.vdf_config.clone();
             move || {
                 // Setup core affinity
-                let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
+                let core_ids =
+                    core_affinity::get_core_ids().expect("Getting core IDs should not fail");
                 for core in core_ids {
                     let success = core_affinity::set_for_current(core);
                     if success {

@@ -16,7 +16,7 @@ async fn main() -> eyre::Result<()> {
     let config = std::env::var("CONFIG")
         .unwrap_or_else(|_| "config.toml".to_owned())
         .parse::<PathBuf>()
-        .expect("invalid file path");
+        .expect("file path to be valid");
     let config = std::fs::read_to_string(config)
         .map(|config_file| toml::from_str::<Config>(&config_file).expect("invalid config file"))
         .unwrap_or_else(|_err| {
