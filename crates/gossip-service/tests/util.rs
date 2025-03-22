@@ -1,5 +1,5 @@
 use actix::{Actor, Handler, Context};
-use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
+use irys_actors::mempool_service::{ChunkIngressError, ChunkIngressMessage, TxIngressError, TxIngressMessage};
 
 pub struct MempoolStub {
     pub txs: Vec<TxIngressMessage>,
@@ -20,17 +20,21 @@ impl Actor for MempoolStub {
 }
 
 impl Handler<TxIngressMessage> for MempoolStub {
-    type Result = ();
+    type Result = Result<(), TxIngressError>;
 
-    fn handle(&mut self, msg: TxIngressMessage, _: &mut Self::Context) {
+    fn handle(&mut self, msg: TxIngressMessage, _: &mut Self::Context) -> Self::Result {
         self.txs.push(msg);
+
+        Ok(())
     }
 }
 
 impl Handler<ChunkIngressMessage> for MempoolStub {
-    type Result = ();
+    type Result = Result<(), ChunkIngressError>;
 
-    fn handle(&mut self, msg: ChunkIngressMessage, _: &mut Self::Context) {
+    fn handle(&mut self, msg: ChunkIngressMessage, _: &mut Self::Context) -> Self::Result {
         self.chunks.push(msg);
+
+        Ok(())
     }
 }
