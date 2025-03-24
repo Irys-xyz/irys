@@ -54,7 +54,7 @@ pub struct UnpackedChunk {
     /// Raw bytes to be stored, should be CHUNK_SIZE in length unless it is the
     /// last chunk in the transaction
     pub bytes: Base64,
-    // Index of the chunk in the transaction starting with 0
+    /// Index of the chunk in the transaction starting with 0
     pub tx_offset: TxChunkOffset,
 }
 
