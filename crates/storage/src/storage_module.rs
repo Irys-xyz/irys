@@ -550,27 +550,48 @@ impl StorageModule {
         chunk_range: Interval<PartitionChunkOffset>,
     ) -> eyre::Result<ChunkMap> {
         let mut chunk_map = ChunkMap::new();
+
         // Query overlapping intervals from storage map
         let intervals = self.intervals.read().unwrap();
-        let iter = intervals.overlapping(chunk_range);
-        // Clip overlapped intervals to requested range and read chunks
-        for (interval, chunk_type) in iter {
-            if *chunk_type == ChunkType::Uninitialized {
-                continue;
-            }
 
+        // Process each overlapping interval
+        for (interval, interval_chunk_type) in intervals.overlapping(chunk_range) {
             // Get intersection with requested range
             let start = *chunk_range.start().max(interval.start());
             let end = *chunk_range.end().min(interval.end());
 
-            // Read chunks in clipped range
+            // Process each chunk in the clipped range
             for chunk_offset in start..=end {
                 let partition_chunk_offset = PartitionChunkOffset::from(chunk_offset);
 
-                let bytes = self.read_chunk_internal(partition_chunk_offset)?;
-                chunk_map.insert(partition_chunk_offset, (bytes, chunk_type.clone()));
+                // Check for pending writes first
+                let pending_chunk = {
+                    let pending = self.pending_writes.read().unwrap();
+                    pending
+                        .get(&partition_chunk_offset)
+                        .map(|(bytes, chunk_type)| (bytes.clone(), chunk_type.clone()))
+                };
+
+                // Use pending chunk if available, otherwise use storage based on chunk type
+                match (pending_chunk, interval_chunk_type) {
+                    // Case 1: We have a pending chunk - use it regardless of interval_chunk_type
+                    (Some(chunk_data), _) => {
+                        chunk_map.insert(partition_chunk_offset, chunk_data);
+                    }
+
+                    // Case 2: No pending chunk, uninitialized interval_chunk_type - skip
+                    (None, ChunkType::Uninitialized) => continue,
+
+                    // Case 3: No pending chunk, Data or Entropy interval_chunk_type - read from storage
+                    (None, _) => {
+                        let bytes = self.read_chunk_internal(partition_chunk_offset)?;
+                        chunk_map
+                            .insert(partition_chunk_offset, (bytes, interval_chunk_type.clone()));
+                    }
+                }
             }
         }
+
         Ok(chunk_map)
     }
 
@@ -630,7 +651,6 @@ impl StorageModule {
         bytes: Vec<u8>,
         chunk_type: ChunkType,
     ) {
-        // Add the chunk to pending writes
         let mut pending = self.pending_writes.write().unwrap();
         pending.insert(chunk_offset, (bytes, chunk_type));
     }
@@ -714,63 +734,69 @@ impl StorageModule {
         }
     }
 
-    /// Gets the list of partition-relative offsets where a chunk should be written (and verifying packing at those offsets)
-    ///
-    /// # Overview
-    /// This function determines the valid write locations for a chunk based on:
-    /// 1. Finding all potential starting offsets for the chunk's data root
-    /// 2. Calculating the actual offset by adding the chunk's transaction offset
-    /// 3. Validating the entropy at each offset using the Entropy Check
-    ///
-    /// # Entropy Check
-    /// The function only returns write offsets where the existing chunk data is specifically `ChunkType::Entropy`.
-    ///
-    /// This ensures unpacked data chunks are only written to packed entropy locations that:
-    /// - Have been allocated for storage
-    /// - Are in an unwritten state (containing packed chunk entropy)
-    /// - Have not been previously filled with unpacked chunk data
-    ///
-    /// # Parameters
-    /// * `chunk` - The unpacked chunk data to be written
-    ///
-    /// # Returns
-    /// * `eyre::Result<Vec<PartitionChunkOffset>>` - List of valid offsets where the chunk may be written
-    ///
-    /// # Errors
-    /// * Returns an error if the chunk's data root is not found in the storage module
-    pub fn get_write_offsets(
-        &self,
-        chunk: &UnpackedChunk,
-    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
-        let start_offsets = self.collect_start_offsets(chunk.data_root)?;
-
-        if start_offsets.0.len() == 0 {
-            return Err(eyre::eyre!("Chunks data_root not found in storage module"));
-        }
-
-        let mut write_offsets = vec![];
-        for start_offset in start_offsets.0 {
-            let partition_offset =
-                PartitionChunkOffset::from(start_offset + (*chunk.tx_offset as i32));
-            {
-                // read the metadata in a block so the read guard expires quickly
-                let intervals = self.intervals.read().unwrap();
-                let chunk_state = intervals.get_at_point(partition_offset);
-                if chunk_state.is_some_and(|s| *s == ChunkType::Entropy) {
-                    write_offsets.push(partition_offset)
-                }
-            };
-        }
-
-        Ok(write_offsets)
-    }
-
     /// Writes chunk data and its data_path to relevant storage locations
     pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> eyre::Result<()> {
         let data_path = &chunk.data_path.0;
         let data_path_hash = UnpackedChunk::hash_data_path(data_path);
 
-        for partition_offset in self.get_write_offsets(chunk)? {
+        // Get all the places this chunks data_root starts in the partition
+        let start_offsets = self.collect_start_offsets(chunk.data_root)?;
+
+        if start_offsets.0.is_empty() {
+            return Err(eyre::eyre!("Chunks data_root not found in storage module"));
+        }
+
+        // Lists for both types of offsets to process
+        let mut writeable_offsets = vec![];
+        let mut pending_offsets = vec![];
+
+        // Scan all potential locations and categorize them
+        for start_offset in start_offsets.0 {
+            let partition_offset =
+                PartitionChunkOffset::from(start_offset + (*chunk.tx_offset as i32));
+
+            // Check if there's an entropy chunk in the intervals map at this location and collect if present
+            let intervals = self.intervals.read().unwrap();
+            if intervals
+                .get_at_point(partition_offset)
+                .is_some_and(|s| *s == ChunkType::Entropy)
+            {
+                writeable_offsets.push(partition_offset);
+                continue;
+            }
+
+            // Check and collect offsets with pending entropy chunks
+            let pending = self.pending_writes.read().unwrap();
+            if pending
+                .get(&partition_offset)
+                .map_or(false, |(_, chunk_type)| *chunk_type == ChunkType::Entropy)
+            {
+                pending_offsets.push(partition_offset);
+            }
+        }
+
+        // Process chunk offsets with entropy in pending writes list
+        for partition_offset in pending_offsets {
+            let mut pending = self.pending_writes.write().unwrap();
+
+            match pending.get(&partition_offset) {
+                Some((entropy_bytes, ChunkType::Entropy)) => {
+                    // Pack the data with entropy and update pending
+                    let packed_data = packing_xor_vec_u8(entropy_bytes.clone(), &chunk.bytes.0);
+                    // Update the existing pending Entropy write to be a Data write
+                    pending.insert(partition_offset, (packed_data, ChunkType::Data));
+                    self.add_data_path_to_index(
+                        data_path_hash,
+                        data_path.clone(),
+                        partition_offset,
+                    )?;
+                }
+                _ => continue,
+            }
+        }
+
+        // Process all locations with entropy on disk in storage module
+        for partition_offset in writeable_offsets {
             // read entropy from the storage module
             let entropy = self.read_chunk_internal(partition_offset)?;
 
