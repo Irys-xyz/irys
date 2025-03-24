@@ -134,7 +134,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let (latest_block_hash, prev_block_height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
             info!(?latest_block_hash, ?prev_block_height, "Starting block production, previous block");
 
-            let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash)) {
+            let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash, false)) {
                 Ok(Some(header)) => Ok(header),
                     Ok(None) =>
                     Err(eyre!("No block header found for hash {} ({})", latest_block_hash, prev_block_height + 1)),
@@ -144,7 +144,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // Retrieve the previous block header and hash
 
             let prev_block_hash = block_item.block_hash;
-            let prev_block_header: IrysBlockHeader = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash)) {
+            let prev_block_header: IrysBlockHeader = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false)) {
                 Ok(Some(header)) => Ok(header),
                 Ok(None) =>
                     Err(eyre!("No block header found for block {} ({}) ", prev_block_hash.0.to_base58(), prev_block_height)),
@@ -278,11 +278,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .await?
                 .and_then(|pa| pa.ledger_id);
 
-
+            let poa_chunk = Base64(solution.chunk);
+            let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
             let poa = PoaData {
                 tx_path: solution.tx_path.map(Base64),
                 data_path: solution.data_path.map(Base64),
-                chunk: Base64(solution.chunk),
+                chunk: Some(poa_chunk),
                 recall_chunk_index: solution.recall_chunk_index,
                 ledger_id,
                 partition_chunk_offset: solution.chunk_offset,
@@ -314,7 +315,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 solution_hash: solution.solution_hash,
                 previous_solution_hash: H256::zero(),
                 last_epoch_hash: H256::random(),
-                chunk_hash: H256(sha::sha256(&poa.chunk.0)),
+                chunk_hash: poa_chunk_hash,
                 previous_block_hash: prev_block_hash,
                 previous_cumulative_diff: prev_block_header.cumulative_diff,
                 poa,

@@ -88,7 +88,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         let previous_block_header = match self
             .db
-            .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash))
+            .view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false))
         {
             Ok(Some(header)) => header,
             other => {

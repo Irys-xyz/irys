@@ -5,8 +5,7 @@ use irys_actors::{
     block_tree_service::{get_block, get_canonical_chain},
     ema_service::EmaServiceMessage,
 };
-use irys_chain::{start_irys_node, IrysNodeCtx};
-use irys_config::IrysNodeConfig;
+use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
 use irys_types::{storage_pricing::Amount, Config, OracleConfig};
 use rust_decimal_macros::dec;
@@ -156,14 +155,12 @@ async fn setup(price_adjustment_interval: u64) -> eyre::Result<TestCtx> {
     setup_with_config(testnet_config).await
 }
 
-async fn setup_with_config(testnet_config: Config) -> eyre::Result<TestCtx> {
+async fn setup_with_config(mut config: Config) -> eyre::Result<TestCtx> {
     let temp_dir = temporary_directory(Some("test_ema"), false);
-    let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
+    let node = IrysNode::new(config.clone(), true).init().await?;
     Ok(TestCtx {
-        config: testnet_config,
+        config,
         node,
         temp_dir,
     })
