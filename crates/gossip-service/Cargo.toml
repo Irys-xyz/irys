@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Internal dependencies
-irys-types = { path = "../types" }
+irys-types = { path = "../types", features = ["test-utils"] }
 irys-primitives = { path = "../primitives" }
 irys-config = { path = "../config" }
 irys-database = { path = "../database" }
@@ -24,6 +24,7 @@ rand = "0.8"
 reqwest = { version = "0.11", features = ["json"] }
 irys-actors.workspace = true
 actix.workspace = true
+awc = "3.5.1"
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
