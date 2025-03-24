@@ -1269,9 +1269,7 @@ pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::R
 mod tests {
     use super::*;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{
-        chunk, ledger_chunk_offset_ii, partition_chunk_offset_ii, TxChunkOffset, H256,
-    };
+    use irys_types::{ledger_chunk_offset_ii, partition_chunk_offset_ii, TxChunkOffset, H256};
     use nodit::interval::ii;
 
     #[test]
