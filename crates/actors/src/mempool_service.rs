@@ -375,7 +375,11 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         for sm in &self.storage_modules {
-            if !sm.get_write_offsets(&chunk).unwrap_or(vec![]).is_empty() {
+            if !sm
+                .get_writeable_offsets(&chunk)
+                .unwrap_or_default()
+                .is_empty()
+            {
                 info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
                 sm.write_data_chunk(&chunk)
                     .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()))?;
