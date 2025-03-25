@@ -4,6 +4,7 @@ use crate::{
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
+use reth_primitives::irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 
 pub type IrysTransactionId = H256;
@@ -169,6 +170,75 @@ pub type TxPath = Vec<u8>;
 /// sha256(tx_path)
 pub type TxPathHash = H256;
 
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    Serialize,
+    Default,
+    Deserialize,
+    PartialEq,
+    Arbitrary,
+    Compact,
+    RlpEncodable,
+    RlpDecodable,
+)]
+#[rlp(trailing)]
+/// Stores deserialized fields from a JSON formatted commitment transaction.
+#[serde(rename_all = "camelCase", default)]
+pub struct CommitmentTransaction {
+    // NOTE: both rlp skip AND rlp default must be present in order for field skipping to work
+    #[rlp(skip)]
+    #[rlp(default)]
+    /// A SHA-256 hash of the transaction signature.
+    pub id: H256,
+
+    /// block_hash of a recent (last 50) blocks or the a recent transaction id
+    /// from the signer. Multiple transactions can share the same anchor.
+    pub anchor: H256,
+
+    /// The ecdsa/secp256k1 public key of the transaction signer
+    #[serde(default, with = "address_base58_stringify")]
+    pub signer: Address,
+
+    /// The type of commitment Stake/UnStake Pledge/UnPledge
+    pub commitment_type: CommitmentType,
+
+    /// The transaction's version
+    pub version: u8,
+
+    /// EVM chain ID - used to prevent cross-chain replays
+    #[serde(with = "string_u64")]
+    pub chain_id: u64,
+
+    /// Transaction signature bytes
+    #[rlp(skip)]
+    #[rlp(default)]
+    pub signature: IrysSignature,
+}
+
+impl CommitmentTransaction {
+    /// Rely on RLP encoding for signing
+    pub fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
+        self.encode(out)
+    }
+
+    pub fn signature_hash(&self) -> [u8; 32] {
+        let mut bytes = Vec::new();
+        self.encode_for_signing(&mut bytes);
+
+        keccak256(&bytes).0
+    }
+
+    /// Validates the transaction signature by:
+    /// 1.) generating the prehash (signature_hash)
+    /// 2.) recovering the sender address, and comparing it to the tx's sender (sender MUST be part of the prehash)
+    pub fn is_signature_valid(&self) -> bool {
+        self.signature
+            .validate_signature(self.signature_hash(), self.signer)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,13 +268,32 @@ mod tests {
     }
 
     #[test]
+    fn test_commitment_transaction_rlp_round_trip() {
+        // setup
+        let config = Config::testnet();
+        let mut header = mock_commitment_tx(&config);
+
+        // action
+        let mut buffer = vec![];
+        header.encode(&mut buffer);
+        let decoded = CommitmentTransaction::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        // zero out the id and signature, those do not get encoded
+        header.id = H256::zero();
+        header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        assert_eq!(header, decoded);
+    }
+
+    #[test]
     fn test_irys_transaction_header_serde() {
         // Create a sample IrysTransactionHeader
         let config = Config::testnet();
         let original_header = mock_header(&config);
 
         // Serialize the IrysTransactionHeader to JSON
-        let serialized = serde_json::to_string(&original_header).expect("Failed to serialize");
+        let serialized =
+            serde_json::to_string_pretty(&original_header).expect("Failed to serialize");
 
         println!("{}", &serialized);
         // Deserialize the JSON back to IrysTransactionHeader
@@ -213,6 +302,24 @@ mod tests {
 
         // Ensure the deserialized struct matches the original
         assert_eq!(original_header, deserialized);
+    }
+
+    #[test]
+    fn test_commitment_transaction_serde() {
+        // Create a sample commitment tx
+        let config = Config::testnet();
+        let original_tx = mock_commitment_tx(&config);
+
+        // Serialize the commitment tx to JSON
+        let serialized = serde_json::to_string_pretty(&original_tx).expect("Failed to serialize");
+
+        println!("{}", &serialized);
+        // Deserialize the JSON back to a commitment tx
+        let deserialized: CommitmentTransaction =
+            serde_json::from_str(&serialized).expect("Failed to deserialize");
+
+        // Ensure the deserialized tx matches the original
+        assert_eq!(original_tx, deserialized);
     }
 
     #[test]
@@ -241,6 +348,32 @@ mod tests {
         assert!(signed_tx.header.is_signature_valid());
     }
 
+    #[test]
+    fn test_commitment_tx_encode_and_signing() {
+        // setup
+        let config = Config::testnet();
+        let original_tx = mock_commitment_tx(&config);
+        let mut sig_data = Vec::new();
+        original_tx.encode(&mut sig_data);
+        let dec = CommitmentTransaction::decode(&mut sig_data.as_slice()).unwrap();
+
+        // action
+        let signer = IrysSigner {
+            signer: SigningKey::random(&mut rand::thread_rng()),
+            chain_id: config.chain_id,
+            chunk_size: config.chunk_size as usize,
+        };
+
+        let signed_tx = signer.sign_commitment(original_tx.clone()).unwrap();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&signed_tx).expect("Failed to serialize")
+        );
+
+        assert!(signed_tx.is_signature_valid());
+    }
+
     fn mock_header(config: &Config) -> IrysTransactionHeader {
         let original_header = IrysTransactionHeader {
             id: H256::from([255u8; 32]),
@@ -255,6 +388,19 @@ mod tests {
             chain_id: config.chain_id,
             version: 0,
             ingress_proofs: None,
+            signature: Signature::test_signature().into(),
+        };
+        original_header
+    }
+
+    fn mock_commitment_tx(config: &Config) -> CommitmentTransaction {
+        let original_header = CommitmentTransaction {
+            id: H256::from([255u8; 32]),
+            anchor: H256::from([1u8; 32]),
+            signer: Address::default(),
+            commitment_type: CommitmentType::Stake,
+            version: 0,
+            chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
         };
         original_header
