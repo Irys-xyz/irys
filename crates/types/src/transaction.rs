@@ -355,7 +355,7 @@ mod tests {
         let original_tx = mock_commitment_tx(&config);
         let mut sig_data = Vec::new();
         original_tx.encode(&mut sig_data);
-        let dec = CommitmentTransaction::decode(&mut sig_data.as_slice()).unwrap();
+        let _dec = CommitmentTransaction::decode(&mut sig_data.as_slice()).unwrap();
 
         // action
         let signer = IrysSigner {
