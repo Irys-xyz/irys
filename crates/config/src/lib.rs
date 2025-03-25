@@ -38,6 +38,7 @@ impl Default for IrysNodeConfig {
 
         let testent_config = Config::testnet();
         let chainspec_builder = IrysChainSpecBuilder::from_config(&testent_config);
+        let chainspec_builder = IrysChainSpecBuilder::from_config(&testent_config);
         Self {
             mining_signer: IrysSigner::random_signer(&testent_config),
             chainspec_builder,

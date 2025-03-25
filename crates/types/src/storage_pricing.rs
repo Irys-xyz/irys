@@ -1,4 +1,5 @@
 //! A utility module for calculating network fees, costs for storing different amounts of data, and EMA for blocks.
+//! A utility module for calculating network fees, costs for storing different amounts of data, and EMA for blocks.
 //!
 //! Core data types:
 //! - `Amount<(CostPerGb, Usd)>` - Cost in $USD of storing 1GB on irys (per single replica), data part of the config
