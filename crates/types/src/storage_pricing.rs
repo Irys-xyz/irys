@@ -1,4 +1,5 @@
 //! A utility module for calculating network fees, costs for storing different amounts of data, and EMA for blocks.
+//! A utility module for calculating network fees, costs for storing different amounts of data, and EMA for blocks.
 //!
 //! Core data types:
 //! - `Amount<(CostPerGb, Usd)>` - Cost in $USD of storing 1GB on irys (per single replica), data part of the config
@@ -21,7 +22,7 @@ pub const TOKEN_SCALE: U256 = U256([TOKEN_SCALE_NATIVE, 0, 0, 0]);
 const TOKEN_SCALE_NATIVE: u64 = 1_000_000_000_000_000_000u64;
 
 /// Basis points scale representation.
-/// 100% - 1_000_000 as little endian number.
+/// 100% - `1_000_000` as little endian number.
 /// Used by percentage representations.
 pub const BPS_SCALE: U256 = U256([BPS_SCALE_NATIVE, 0, 0, 0]);
 const BPS_SCALE_NATIVE: u64 = 1_000_000;
@@ -53,7 +54,7 @@ impl<T: std::fmt::Debug> Decodable for Amount<T> {
     #[tracing::instrument(err)]
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let res = U256::decode(buf)?;
-        Ok(Amount::new(res))
+        Ok(Self::new(res))
     }
 }
 
@@ -68,7 +69,7 @@ impl<T> Compact for Amount<T> {
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
         let (instance, buf) = U256::from_compact(buf, len);
         (
-            Amount {
+            Self {
                 amount: instance,
                 _t: PhantomData,
             },
@@ -243,7 +244,7 @@ impl Amount<(CostPerGb, Usd)> {
     pub fn replica_count(self, count: u64) -> Result<Self> {
         let count_u256 = U256::from(count);
         let total = safe_mul(self.amount, count_u256)?;
-        Ok(Amount {
+        Ok(Self {
             amount: total,
             _t: PhantomData,
         })
@@ -334,8 +335,8 @@ impl Amount<(IrysPrice, Usd)> {
     pub fn calculate_ema(
         self,
         total_past_blocks: u64,
-        previous_ema: Amount<(IrysPrice, Usd)>,
-    ) -> Result<Amount<(IrysPrice, Usd)>> {
+        previous_ema: Self,
+    ) -> Result<Self> {
         // denominator = n+1
         let denom = U256::from(total_past_blocks)
             .checked_add(U256::one())
@@ -364,7 +365,7 @@ impl Amount<(IrysPrice, Usd)> {
         // sum
         let ema_value = safe_add(scaled_current, scaled_last)?;
 
-        Ok(Amount::new(ema_value))
+        Ok(Self::new(ema_value))
     }
 
     /// Add extra percentage on top of the existing price.
@@ -409,7 +410,7 @@ impl<T> Debug for Amount<T> {
 }
 
 /// Example exponentiation by squaring for basis points:
-/// (base_bps / 10000)^exp, returning a result scaled by 10000.
+/// (`base_bps` / 10000)^exp, returning a result scaled by 10000.
 fn basis_pow(mut base_bps: U256, mut exp: u64) -> Result<U256> {
     // Start with 1 in basis point scale.
     let mut result = BPS_SCALE;

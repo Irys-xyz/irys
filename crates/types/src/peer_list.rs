@@ -26,7 +26,7 @@ impl Default for PeerListItem {
 /// This may seem a little heavy handed to implement Compact for the entire
 /// struct but it has the advantage of being better able to handle migrations
 /// in the future. New fields can be appended to the end of the compact buffer
-/// and the from_compact can populate new fields with defaults if the buffer
+/// and the `from_compact` can populate new fields with defaults if the buffer
 /// length is from a previous smaller version of the struct.
 impl Compact for PeerListItem {
     fn to_compact<B>(&self, buf: &mut B) -> usize

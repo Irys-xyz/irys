@@ -38,6 +38,7 @@ impl Default for IrysNodeConfig {
 
         let testent_config = Config::testnet();
         let chainspec_builder = IrysChainSpecBuilder::from_config(&testent_config);
+        let chainspec_builder = IrysChainSpecBuilder::from_config(&testent_config);
         Self {
             mining_signer: IrysSigner::random_signer(&testent_config),
             chainspec_builder,
@@ -57,15 +58,15 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
 impl IrysNodeConfig {
     pub fn new(config: &config::Config) -> Self {
         Self {
-            mining_signer: IrysSigner::from_config(&config),
+            mining_signer: IrysSigner::from_config(config),
             instance_number: None,
             base_directory: config.base_directory.clone(),
-            chainspec_builder: IrysChainSpecBuilder::from_config(&config),
+            chainspec_builder: IrysChainSpecBuilder::from_config(config),
         }
     }
 
     /// get the instance-specific directory path
-    /// this will return the base directory if instance_number is not `Some`
+    /// this will return the base directory if `instance_number` is not `Some`
     pub fn instance_directory(&self) -> PathBuf {
         self.instance_number
             .map_or(self.base_directory.clone(), |i| {
@@ -144,14 +145,12 @@ impl StorageSubmodulesConfig {
         let config: Self = toml::from_str(&contents)?;
 
         let submodule_count = config.submodule_paths.len();
-        if submodule_count < 3 {
             // Eventually this should be based off the genesis config, but
             // hard coded for now to help debug config / env issues.
-            panic!(
+        assert!((submodule_count >= 3), 
                 "Insufficient submodules: found {}, but minimum of 3 required in .irys_submodules.toml for chain initialization",
                 submodule_count
             );
-        }
 
         Ok(config)
     }
@@ -178,14 +177,14 @@ impl StorageSubmodulesConfig {
             });
 
         // Try HOME directory config in deployed environments
-        if is_deployed {
-            if config_path_home.exists() {
+        if is_deployed 
+            && config_path_home.exists() {
                 // Remove the .irys directory config so there's no confusion
                 if config_path_local.exists() {
                     fs::remove_file(config_path_local).expect("able to delete file");
                 }
                 tracing::info!("Loading config from {:?}", config_path_home);
-                let config = StorageSubmodulesConfig::from_toml(config_path_home).unwrap();
+                let config = Self::from_toml(config_path_home).unwrap();
 
                 // Create symlinks for each submodule if user provides paths
                 let submodule_paths = &config.submodule_paths;
@@ -203,24 +202,20 @@ impl StorageSubmodulesConfig {
                         debug_assert!(dest.exists());
 
                         #[cfg(unix)]
-                        std::os::unix::fs::symlink(&dest, &sm_path).expect("to create symlink");
+                        std::os::unix::fs::symlink(dest, &sm_path).expect("to create symlink");
                         #[cfg(windows)]
                         std::os::windows::fs::symlink_dir(&dest, &sm_path)
                             .expect("to create symlink");
                     }
                 }
-
                 return Ok(config);
-            }
         }
 
         // Try .irys directory config in dev/local environment
-        if config_path_local.exists() {
-            return StorageSubmodulesConfig::from_toml(config_path_local);
-        } else {
+        if !config_path_local.exists() {
             // Create default config with hardcoded paths in dev if none exists
             tracing::info!("Creating default config at {:?}", config_path_local);
-            let config = StorageSubmodulesConfig {
+            let config = Self {
                 is_using_hardcoded_paths: true,
                 submodule_paths: vec![
                     Path::new(&instance_dir).join("storage_modules/submodule_0"),
@@ -240,9 +235,9 @@ impl StorageSubmodulesConfig {
             for path in &config.submodule_paths {
                 fs::create_dir_all(path).expect("to create submodule dir");
             }
-
-            // Load the config to verify it parses
-            StorageSubmodulesConfig::from_toml(config_path_local)
         }
+
+        // Load the config to verify it parses
+        Self::from_toml(config_path_local)
     }
 }

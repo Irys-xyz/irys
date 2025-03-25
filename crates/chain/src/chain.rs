@@ -235,7 +235,7 @@ pub async fn start_irys_node(
                             .unwrap()
                     })
                     .map(Arc::new)
-                    .unwrap_or(arc_genesis.clone());
+                    .unwrap_or_else(|| arc_genesis.clone());
 
                 // Initialize the epoch_service actor to handle partition ledger assignments
                 let epoch_config = EpochServiceConfig::new(&config);
@@ -509,7 +509,7 @@ pub async fn start_irys_node(
 
                 let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
 
-                let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
+                let sm_ids = storage_modules.iter().map(|s| (s).id).collect();
 
                 let packing_actor_addr = PackingActor::new(
                     Handle::current(),
@@ -597,7 +597,7 @@ pub async fn start_irys_node(
                         shutdown_rx,
                         broadcast_mining_service.clone(),
                         vdf_service.clone(),
-                        atomic_global_step_number.clone(),
+                        atomic_global_step_number,
                     )
                 });
 

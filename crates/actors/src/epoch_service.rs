@@ -79,7 +79,7 @@ impl PartitionAssignments {
         self.data_partitions
             .get(&partition_hash)
             .copied()
-            .or(self.capacity_partitions.get(&partition_hash).copied())
+            .or_else(|| self.capacity_partitions.get(&partition_hash).copied())
     }
 }
 
@@ -760,14 +760,14 @@ impl EpochServiceActor {
         // Add initial capacity partition config
         let start_idx = module_infos.len();
 
-        for i in start_idx..sm_paths.len() {
+        for (i, v) in sm_paths.iter().enumerate().skip(start_idx) {
             let cap_part = cap_parts.pop_front().unwrap();
             let sm_info = StorageModuleInfo {
                 id: i,
                 partition_assignment: Some(*pa.capacity_partitions.get(&cap_part).unwrap()),
                 submodules: vec![(
                     partition_chunk_offset_ie!(0, num_part_chunks),
-                    sm_paths[i].clone(),
+                    v.clone()
                 )],
             };
             module_infos.push(sm_info);

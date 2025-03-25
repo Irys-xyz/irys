@@ -18,7 +18,7 @@ pub struct StorageConfig {
     pub num_partitions_in_slot: u64,
     /// Local mining address
     pub miner_address: Address,
-    /// Number of writes before a StorageModule syncs to disk
+    /// Number of writes before a `StorageModule` syncs to disk
     pub min_writes_before_sync: u64,
     /// Number of sha256 iterations required to pack a chunk
     pub entropy_packing_iterations: u32,
@@ -46,7 +46,7 @@ impl StorageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Public variant of StorageConfig, containing network-wide parameters
+/// Public variant of `StorageConfig`, containing network-wide parameters
 /// Primarily used for testing clients, so we don't have to manually sync parameters
 /// note: chain ID is not included for now as that's still a constant
 /// once we parameterize that we'll put it in here.
@@ -78,7 +78,7 @@ impl From<StorageConfig> for PublicStorageConfig {
             entropy_packing_iterations,
             ..
         } = value;
-        PublicStorageConfig {
+        Self {
             chunk_size,
             num_chunks_in_partition,
             num_chunks_in_recall_range,

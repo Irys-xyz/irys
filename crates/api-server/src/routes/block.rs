@@ -30,7 +30,7 @@ pub async fn get_block(
                 err: String::from("block tree error"),
             })?;
             let guard = block_tree_guard.read();
-            guard.tip.clone()
+            guard.tip
         }
         BlockParam::BlockHeight(height) => 'outer: {
             let block_tree_guard = state.block_tree.clone().ok_or(ApiError::Internal {
@@ -47,7 +47,7 @@ pub async fn get_block(
                         false => None,
                     });
             if let Some(hash) = in_block_tree {
-                break 'outer hash.clone();
+                break 'outer *hash;
             }
             // get from block index
             let block_index_guard = state.block_index.clone().ok_or(ApiError::Internal {
@@ -135,7 +135,6 @@ fn get_block_by_hash(
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-
 pub struct CombinedBlockHeader {
     #[serde(flatten)]
     pub irys: IrysBlockHeader,
@@ -144,7 +143,6 @@ pub struct CombinedBlockHeader {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-
 pub struct ExecutionHeader {
     #[serde(flatten)]
     pub header: Header,

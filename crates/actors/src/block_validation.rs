@@ -204,24 +204,23 @@ pub fn difficulty_is_valid(
     }
 }
 
-/// Checks PoA data chunk data solution partitions has not expired
+/// Checks `PoA` data chunk data solution partitions has not expired
 pub fn check_poa_data_expiration(
     poa: &PoaData,
     partitions_guard: &PartitionAssignmentsReadGuard,
 ) -> eyre::Result<()> {
     // if is a data chunk
-    if poa.data_path.is_some() && poa.tx_path.is_some() && poa.ledger_id.is_some() {
-        if partitions_guard
+    if poa.data_path.is_some() && poa.tx_path.is_some() && poa.ledger_id.is_some() 
+        && !partitions_guard
             .read()
             .data_partitions
-            .get(&poa.partition_hash)
-            .is_none()
+            .contains_key(&poa.partition_hash)
         {
             return Err(eyre::eyre!(
                 "Invalid data PoA, partition hash is not a data partition, it may have expired"
-            ));
-        }
-    };
+            ))
+        
+    }
     Ok(())
 }
 

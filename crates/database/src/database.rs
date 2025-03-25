@@ -258,7 +258,7 @@ pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U2
     Ok(tx
         .get::<PlainAccountState>(address)?
         .map(|a| U256::from_little_endian(a.balance.as_le_slice()))
-        .unwrap_or(U256::from(0)))
+        .unwrap_or_else(|| U256::from(0)))
 }
 
 pub fn insert_peer_list_item<T: DbTxMut>(
@@ -266,7 +266,7 @@ pub fn insert_peer_list_item<T: DbTxMut>(
     mining_address: &Address,
     peer_list_entry: &PeerListItem,
 ) -> eyre::Result<()> {
-    Ok(tx.put::<PeerListItems>(mining_address.clone(), peer_list_entry.clone().into())?)
+    Ok(tx.put::<PeerListItems>(*mining_address, peer_list_entry.clone().into())?)
 }
 
 pub fn walk_all<T: Table, TX: DbTx>(

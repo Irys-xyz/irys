@@ -140,8 +140,7 @@ impl BlockIndex<Initialized> {
     /// For a given byte offset in a ledger, what block was responsible for adding
     /// that byte to the data ledger?
     pub fn get_block_bounds(&self, ledger: Ledger, chunk_offset: u64) -> BlockBounds {
-        let mut block_bounds: BlockBounds = Default::default();
-        block_bounds.ledger = ledger;
+        let mut block_bounds = BlockBounds {ledger, ..Default::default()};
 
         let result = self.get_block_index_item(ledger, chunk_offset);
         if let Ok((block_height, found_item)) = result {
@@ -172,8 +171,7 @@ impl BlockIndex<Initialized> {
         // an exact match. We are looking for the position of the closest element
         // so we ignore the Result enum values and extract the pos return val.
         let index = match result {
-            Ok(pos) => pos,
-            Err(pos) => pos,
+            Err(pos) | Ok(pos) => pos,
         };
 
         Ok((index, &self.items[index]))
@@ -286,11 +284,11 @@ impl BlockIndexItem {
 
     // Deserialize bytes to BlockIndexItem
     fn from_bytes(bytes: &[u8]) -> Self {
-        let mut item = Self::default();
-
-        // Read fixed fields
-        item.block_hash = H256::from_slice(&bytes[0..32]);
-        item.num_ledgers = bytes[32];
+        let mut item = Self {
+            block_hash: H256::from_slice(&bytes[0..32]),
+            num_ledgers : bytes[32],
+            ..Default::default()
+        };
 
         // Read ledger items
         let num_ledgers = item.num_ledgers as usize;
@@ -353,6 +351,8 @@ fn load_index_from_file(config: &IrysNodeConfig) -> io::Result<Vec<BlockIndexIte
         .read(true)
         .write(true)
         .create(true)
+        // the one that fixes the test
+        .truncate(false) // do we want to truncate here, or append if it exists?
         .open(path)?;
 
     // Determine the file size

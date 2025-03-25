@@ -1,6 +1,7 @@
 use reth_db::DatabaseEnv;
 use std::{ops::Deref, sync::Arc};
 
+#[derive(Debug)]
 pub struct AppState {}
 
 #[derive(Debug, Clone)]

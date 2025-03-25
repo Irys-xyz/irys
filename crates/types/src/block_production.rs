@@ -5,16 +5,16 @@ use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct Seed(pub H256);
 
 impl Seed {
-    pub fn into_inner(self) -> H256 {
+    pub const fn into_inner(self) -> H256 {
         self.0
     }
 }
 
-#[derive(Message, Debug, Clone, PartialEq, Default)]
+#[derive(Message, Debug, Clone, Eq, PartialEq, Default)]
 #[rtype(result = "Option<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>")]
 pub struct SolutionContext {
     pub partition_hash: PartitionHash,

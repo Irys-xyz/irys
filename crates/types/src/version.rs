@@ -43,7 +43,7 @@ impl Default for ProtocolVersion {
 /// //assert_eq!(ua, "irys-p2p/0.1.0 (macos/aarch64)");
 /// ```
 ///
-/// The OS and architecture are automatically detected using std::env::consts.
+/// The OS and architecture are automatically detected using `std::env::consts`.
 pub fn build_user_agent(name: &str, version: &str) -> String {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -141,7 +141,7 @@ impl Default for VersionRequest {
     }
 }
 
-/// Example serialized JSON AcceptedResponse:
+/// Example serialized JSON `AcceptedResponse`:
 /// ```json
 /// {
 ///   "status": "accepted",         // comes from PeerResponse Enum
@@ -182,7 +182,7 @@ impl Default for AcceptedResponse {
     }
 }
 
-/// Example serialized JSON RejectedResponse:
+/// Example serialized JSON `RejectedResponse`:
 /// ```json
 /// {
 ///   "status":"rejected",                // comes from PeerResponse Enum
