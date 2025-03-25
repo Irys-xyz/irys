@@ -657,7 +657,7 @@ pub async fn start_irys_node(
                     block_tree_guard: block_tree_guard.clone(),
                     config: Arc::new(config.clone())
                 });
-                
+
                 let server = run_server(ApiState {
                     mempool: mempool_addr,
                     chunk_provider: arc_chunk_provider.clone(),
