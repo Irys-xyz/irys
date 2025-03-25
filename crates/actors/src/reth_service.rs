@@ -50,7 +50,7 @@ impl RethServiceActor {
         let evm_head_hash = match head_hash {
             BlockHashType::Irys(irys_hash) => {
                 let irys_header =
-                    db.view_eyre(|tx| database::block_header_by_hash(tx, &irys_hash))?;
+                    db.view_eyre(|tx| database::block_header_by_hash(tx, &irys_hash, false))?;
                 let h = irys_header.ok_or_else(||eyre!("Missing irys block {} in DB!", &irys_hash))?;
 
                 debug!("EVM block {} is height {}", &h.evm_block_hash, &h.height);
@@ -63,7 +63,7 @@ impl RethServiceActor {
             Some(confirmed_hash) => Some(match confirmed_hash {
                 BlockHashType::Irys(irys_hash) => {
                     let irys_header =
-                        db.view_eyre(|tx| database::block_header_by_hash(tx, &irys_hash))?;
+                        db.view_eyre(|tx| database::block_header_by_hash(tx, &irys_hash, false))?;
                     let h = irys_header.ok_or_else(||eyre!("Missing irys block {} in DB!", &irys_hash))?;
 
                     debug!("EVM block {} is height {}", &h.evm_block_hash, &h.height);
@@ -78,7 +78,7 @@ impl RethServiceActor {
             Some(finalized_hash) => Some(match finalized_hash {
                 BlockHashType::Irys(irys_hash) => {
                     let irys_header =
-                        db.view_eyre(|tx| database::block_header_by_hash(tx, &irys_hash))?;
+                        db.view_eyre(|tx| database::block_header_by_hash(tx, &irys_hash, false))?;
                     let h = irys_header.ok_or_else(||eyre!("Missing irys block {} in DB!", &irys_hash))?;
 
                     debug!("EVM block {} is height {}", &h.evm_block_hash, &h.height);

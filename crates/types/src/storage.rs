@@ -477,12 +477,12 @@ pub enum ChunkState {
 /// # Examples
 /// ```
 /// use nodit::interval::ii;
-/// use irys_types::storage::{PartitionChunkRange, split_interval};
-/// let interval = PartitionChunkRange(ii(0, 4));
+/// use irys_types::storage::{PartitionChunkRange, PartitionChunkOffset, split_interval};
+/// let interval = PartitionChunkRange(ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4)));
 /// let splits = split_interval(&interval, 3).unwrap();
 /// assert_eq!(splits.len(), 2);
-/// assert_eq!(splits[0], PartitionChunkRange(ii(0, 2)));
-/// assert_eq!(splits[1], PartitionChunkRange(ii(3, 4)));
+/// assert_eq!(splits[0], PartitionChunkRange(ii(PartitionChunkOffset::from(0), PartitionChunkOffset::from(2))));
+/// assert_eq!(splits[1], PartitionChunkRange(ii(PartitionChunkOffset::from(3), PartitionChunkOffset::from(4))));
 /// ```
 pub fn split_interval(
     interval: &PartitionChunkRange,

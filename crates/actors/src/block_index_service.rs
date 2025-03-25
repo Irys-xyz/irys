@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
     time::Duration,
 };
-use tracing::error;
+use tracing::{error, info};
 
 //==============================================================================
 // BlockIndexReadGuard
@@ -151,7 +151,9 @@ impl BlockIndexService {
             if index.num_blocks() == 0 && block.height == 0 {
                 (0, sub_chunks_added)
             } else {
-                let prev_block = index.get_item((block.height - 1) as usize).unwrap();
+                let prev_block = index
+                    .get_item((block.height.saturating_sub(1)) as usize)
+                    .unwrap();
                 (
                     prev_block.ledgers[Ledger::Publish].max_chunk_offset + pub_chunks_added,
                     prev_block.ledgers[Ledger::Submit].max_chunk_offset + sub_chunks_added,
@@ -192,7 +194,7 @@ impl BlockIndexService {
 
         if self.num_blocks % 10 == 0 {
             let mut prev_entry: Option<&BlockLogEntry> = None;
-            println!("block_height, block_time(ms), difficulty");
+            info!("block_height, block_time(ms), difficulty");
             for entry in &self.block_log {
                 let duration = if let Some(pe) = prev_entry {
                     if entry.timestamp >= pe.timestamp {
@@ -203,7 +205,7 @@ impl BlockIndexService {
                 } else {
                     Duration::from_millis(0)
                 };
-                println!("{}, {:?}, {}", entry.height, duration, entry.difficulty);
+                info!("{}, {:?}, {}", entry.height, duration, entry.difficulty);
                 prev_entry = Some(entry);
             }
         }

@@ -119,7 +119,7 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
 
     let db_irys_block = &node
         .db
-        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
         .unwrap();
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
@@ -166,7 +166,7 @@ async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()>
         // check irys DB for built block
         let db_irys_block = &node
             .db
-            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
             .unwrap();
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
         // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
@@ -213,7 +213,7 @@ async fn serial_mine_ten_blocks() -> eyre::Result<()> {
         // check irys DB for built block
         let db_irys_block = &node
             .db
-            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
             .unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
@@ -262,7 +262,7 @@ async fn serial_test_basic_blockprod() -> eyre::Result<()> {
     // check irys DB for built block
     let db_irys_block = &node
         .db
-        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
         .unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
@@ -425,7 +425,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // check irys DB for built block
     let db_irys_block = &node
         .db
-        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
         .unwrap();
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());

@@ -9,7 +9,7 @@ openssl.workspace = true
 nodit.workspace = true
 eyre.workspace = true
 serde.workspace = true
-irys-types.workspace = true
+irys-types = { workspace = true, features = ["test-utils"] }
 rand.workspace = true
 tracing.workspace = true
 serde_json.workspace = true

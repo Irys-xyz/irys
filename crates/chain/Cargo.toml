@@ -42,6 +42,7 @@ actix-http.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tempfile.workspace = true
 
 alloy-network = { path = "../../ext/alloy/crates/network" }
 alloy-signer-local.workspace = true
@@ -66,6 +67,10 @@ awc = "3.5"
 irys-actors = { workspace = true, features = ["test-utils"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true
+test-log.workspace = true
+rstest.workspace = true
+rust_decimal.workspace = true
+rust_decimal_macros.workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["alloy-sol-types", "alloy-contract"]

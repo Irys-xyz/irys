@@ -152,15 +152,19 @@ mod tests {
     use alloy_primitives::Address;
     use k256::ecdsa::SigningKey;
 
+    // spellchecker:off
+
     const DEV_PRIVATE_KEY: &str =
         "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
     // from the JS Client - `txSigningParity`
-    const SIG_HEX: &str = "0x40619e8f16ac2feaa7a525a1f16ad3a7ac952038caba1fe347aed0fa722bfe3d5e2b5cb648a3407c197b762e5aec63dae48a86988550a19b472ae989372d5d041b";
+    const SIG_HEX: &str = "0x090fc65dab8667ab4d8fd0989a6a8faebd7a73d9e9d7c7b705e84904b84b839052eb0a266525e1f8cb6811669e6dc459997da4dc2d4c6002483b77442af58ea91c";
     // BS58 (JSON, hence the escaped quotes) encoded signature
     const SIG_BS58: &str =
-        "\"6gXBVhqKMqZdgZC5wbaKa1brL6PWQmP4nYfpSoHubhUG29WzawKkoZxeEugX6Wj8rrGuB3tVutmjhfremFB6z5x3U\"";
+        "\"oP2QpwKkSS6JB3mSBKQh5ULmp1fZHQdjmPApCRcPn32YFK1iMCi12TpEJnmP1njRT5SsNgEewZb3umjraoxcDTv3\"";
+
+    // spellchecker:on
 
     #[test]
     fn signature_signing_serialization() -> eyre::Result<()> {

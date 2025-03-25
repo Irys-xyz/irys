@@ -1,8 +1,7 @@
 use eyre::OptionExt;
 use irys_database::Ledger;
 use irys_types::{
-    ChunkFormat, DataRoot, DatabaseProvider, LedgerChunkOffset, PackedChunk, StorageConfig,
-    TxChunkOffset,
+    ChunkFormat, DataRoot, LedgerChunkOffset, PackedChunk, StorageConfig, TxChunkOffset,
 };
 use std::sync::Arc;
 
@@ -18,8 +17,6 @@ pub struct ChunkProvider {
     pub storage_config: StorageConfig,
     /// Collection of storage modules for distributing chunk data
     pub storage_modules: Vec<Arc<StorageModule>>,
-    /// Persistent database for storing chunk metadata and indices
-    pub db: DatabaseProvider,
 }
 
 impl ChunkProvider {
@@ -27,12 +24,10 @@ impl ChunkProvider {
     pub const fn new(
         storage_config: StorageConfig,
         storage_modules: Vec<Arc<StorageModule>>,
-        db: DatabaseProvider,
     ) -> Self {
         Self {
             storage_config,
             storage_modules,
-            db,
         }
     }
 
@@ -145,7 +140,6 @@ mod tests {
     use crate::StorageModuleInfo;
 
     use super::*;
-    use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
@@ -175,8 +169,6 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
-        let arc_db = DatabaseProvider(Arc::new(db));
 
         // Override the default StorageModule config for testing
         let config = StorageConfig::new(&testnet_config);
@@ -232,8 +224,7 @@ mod tests {
         }
         storage_module.sync_pending_chunks()?;
 
-        let chunk_provider =
-            ChunkProvider::new(config.clone(), vec![Arc::new(storage_module)], arc_db);
+        let chunk_provider = ChunkProvider::new(config.clone(), vec![Arc::new(storage_module)]);
 
         for original_chunk in unpacked_chunks {
             let chunk = chunk_provider

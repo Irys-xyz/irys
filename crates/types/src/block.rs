@@ -146,8 +146,12 @@ pub struct IrysBlockHeader {
     /// Metadata about the verifiable delay function, used for block verification purposes
     pub vdf_limiter_info: VDFLimiterInfo,
 
-    /// $IRYS token price expressed in $USD
-    pub irys_price: IrysTokenPrice,
+    /// $IRYS token price expressed in $USD, returned from the oracle
+    pub oracle_irys_price: IrysTokenPrice,
+
+    /// $IRYS token price expressed in $USD, updated only on EMA recalculation blocks.
+    /// This is what the protocol uses for different pricing calculation purposes.
+    pub ema_irys_price: IrysTokenPrice,
 }
 
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
@@ -174,10 +178,80 @@ impl IrysBlockHeader {
 
     /// Validates the block hash signature by:
     /// 1.) generating the prehash
-    /// 2.) recovering the sender address, and comparing it to the block header's `miner_address` (`miner_address` MUST be part of the prehash)
+    /// 2.) recovering the sender address, and comparing it to the block headers `miner_address` (`miner_address` MUST be part of the prehash)
     pub fn is_signature_valid(&self) -> bool {
         self.signature
             .validate_signature(self.signature_hash(), self.miner_address)
+    }
+
+    // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
+    pub const fn is_ema_recalculation_block(&self, blocks_in_price_adjustment_interval: u64) -> bool {
+        is_ema_recalculation_block(self.height, blocks_in_price_adjustment_interval)
+    }
+
+    /// Returns the height of the "previous" EMA recalculation block.
+    ///
+    /// - For the first two intervals (`height < 2 * blocks_in_price_adjustment_interval`), always return 0.
+    /// - Otherwise, return the largest multiple of `blocks_in_price_adjustment_interval` less than `height`.
+    ///   (If the current block is exactly on an interval boundary, step one interval back.)
+    pub const fn previous_ema_recalculation_block_height(
+        &self,
+        blocks_in_price_adjustment_interval: u64,
+    ) -> u64 {
+        previous_ema_recalculation_block_height(self.height, blocks_in_price_adjustment_interval)
+    }
+}
+
+// treat any block whose height is a multiple of blocks_in_price_adjustment_interval
+pub const fn is_ema_recalculation_block(height: u64, blocks_in_price_adjustment_interval: u64) -> bool {
+    // the first 2 adjustment intervals have special handling where we calculate the
+    // EMA for each block using the value from the preceding one
+    if height < (blocks_in_price_adjustment_interval * 2) {
+        true
+    } else {
+        (height.saturating_add(1)) % blocks_in_price_adjustment_interval == 0
+    }
+}
+
+pub const fn block_height_to_use_for_price(height: u64, blocks_in_price_adjustment_interval: u64) -> u64 {
+    // we need to use the genesis price
+    if height < (blocks_in_price_adjustment_interval * 2) {
+        0
+    } else {
+        // we need to use the price from 2 intervals ago
+        let prev_ema_height =
+            prev_ema_ignore_genesis_rules(height, blocks_in_price_adjustment_interval);
+
+        // the preceding ema
+        prev_ema_ignore_genesis_rules(prev_ema_height, blocks_in_price_adjustment_interval)
+    }
+}
+
+/// Returns the height of the "previous" EMA recalculation block.
+pub const fn previous_ema_recalculation_block_height(
+    height: u64,
+    blocks_in_price_adjustment_interval: u64,
+) -> u64 {
+    // the first 2 adjustment intervals have special handling where we calculate the
+    // EMA for each block using the value from the preceding one
+    if height < (blocks_in_price_adjustment_interval * 2) {
+        return height.saturating_sub(1);
+    }
+
+    // After the first 2 adjustment intervals we start calculating the EMA
+    // only using the last EMA block
+    prev_ema_ignore_genesis_rules(height, blocks_in_price_adjustment_interval)
+}
+
+const fn prev_ema_ignore_genesis_rules(height: u64, blocks_in_price_adjustment_interval: u64) -> u64 {
+    // heights are zero indexed hence adding +1
+    let remainder = (height + 1) % blocks_in_price_adjustment_interval;
+    if remainder == 0 {
+        // If the current block is on an interval boundary, go one interval back.
+        height.saturating_sub(blocks_in_price_adjustment_interval)
+    } else {
+        // Otherwise, drop the remainder.
+        height.saturating_sub(remainder)
     }
 }
 
@@ -201,7 +275,7 @@ pub struct PoaData {
     pub recall_chunk_index: u32,
     pub partition_chunk_offset: u32,
     pub partition_hash: PartitionHash,
-    pub chunk: Base64,
+    pub chunk: Option<Base64>,
     pub ledger_id: Option<u32>,
     pub tx_path: Option<Base64>,
     pub data_path: Option<Base64>,
@@ -298,7 +372,7 @@ impl IrysBlockHeader {
             poa: PoaData {
                 tx_path: None,
                 data_path: None,
-                chunk: Base64::from_str("").unwrap(),
+                chunk: Some(Base64::from_str("").unwrap()),
                 partition_hash: PartitionHash::zero(),
                 partition_chunk_offset: 0,
                 recall_chunk_index: 0,
@@ -329,7 +403,9 @@ impl IrysBlockHeader {
             ],
             evm_block_hash: B256::ZERO,
             miner_address: Address::ZERO,
-            irys_price: Amount::token(dec!(1.0))
+            oracle_irys_price: Amount::token(dec!(1.0))
+                .expect("dec!(1.0) must evaluate to a valid token amount"),
+            ema_irys_price: Amount::token(dec!(1.0))
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
             ..Default::default()
         }
@@ -344,6 +420,7 @@ mod tests {
     use alloy_primitives::Signature;
     use alloy_rlp::Decodable;
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rstest::rstest;
     use serde_json;
     use zerocopy::IntoBytes;
 
@@ -354,10 +431,33 @@ mod tests {
             recall_chunk_index: 123,
             partition_chunk_offset: 321,
             partition_hash: H256::random(),
-            chunk: Base64(vec![42; 16]),
+            chunk: Some(Base64(vec![42; 16])),
             ledger_id: Some(44),
             tx_path: None,
             data_path: Some(Base64(vec![13; 16])),
+        };
+
+        // action
+        let mut buffer = vec![];
+        data.encode(&mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn test_vdf_limiter_info_rlp_round_trip() {
+        let data = VDFLimiterInfo {
+            output: H256::random(),
+            global_step_number: 42,
+            seed: H256::random(),
+            next_seed: H256::random(),
+            prev_output: H256::random(),
+            last_step_checkpoints: H256List(vec![H256::random(), H256::random()]),
+            steps: H256List(vec![H256::random(), H256::random()]),
+            vdf_difficulty: Some(123),
+            next_vdf_difficulty: Some(321),
         };
 
         // action
@@ -385,8 +485,8 @@ mod tests {
 
         // action
         let mut buffer = vec![];
-        data.encode(&mut buffer);
-        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+        data.to_compact(&mut buffer);
+        let (decoded, ..) = VDFLimiterInfo::from_compact(&mut buffer.as_slice(), buffer.len());
 
         // Assert
         assert_eq!(data, decoded);
@@ -463,6 +563,64 @@ mod tests {
 
         // assert
         assert_eq!(derived_header, header);
+    }
+
+    #[rstest]
+    #[case(0, 0)]
+    #[case(1, 0)]
+    #[case(15, 14)]
+    #[case(19, 18)]
+    #[case(20, 19)]
+    #[case(21, 19)]
+    #[case(29, 19)]
+    #[case(30, 29)]
+    #[case(31, 29)]
+    #[case(39, 29)]
+    #[case(40, 39)]
+    #[case(41, 39)]
+    #[case(99, 89)]
+    #[case(100, 99)]
+    fn test_previous_ema_for_multiple_intervals(
+        #[case] height: u64,
+        #[case] expected_prev_ema: u64,
+    ) {
+        let interval = 10;
+        let header = IrysBlockHeader {
+            height,
+            ..Default::default()
+        };
+        let result = header.previous_ema_recalculation_block_height(interval);
+
+        assert_eq!(
+            result, expected_prev_ema,
+            "For height={height}, expected {expected_prev_ema} but got {result}"
+        );
+    }
+
+    #[rstest]
+    #[case(0, true)]
+    #[case(1, true)]
+    #[case(9, true)]
+    #[case(10, true)]
+    #[case(11, true)]
+    #[case(19, true)]
+    #[case(20, false)]
+    #[case(21, false)]
+    #[case(30, false)]
+    #[case(99, true)]
+    #[case(100, false)]
+    fn test_is_ema_recalculation_block(#[case] height: u64, #[case] expected_is_ema: bool) {
+        let interval = 10;
+        let header = IrysBlockHeader {
+            height,
+            ..Default::default()
+        };
+        let is_ema = header.is_ema_recalculation_block(interval);
+
+        assert_eq!(
+        is_ema, expected_is_ema,
+        "For height={height}, expected is_ema_recalculation_block={expected_is_ema} but got {is_ema}"
+    );
     }
 
     #[test]

@@ -9,8 +9,10 @@ use crate::{
     block_index_service::{BlockIndexReadGuard, BlockIndexService},
     block_producer::BlockConfirmedMessage,
     chunk_migration_service::ChunkMigrationService,
+    ema_service::EmaServiceMessage,
     mempool_service::MempoolService,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    services::ServiceSenders,
     validation_service::{RequestValidationMessage, ValidationService},
     BlockFinalizedMessage,
 };
@@ -45,6 +47,12 @@ impl BlockTreeReadGuard {
     pub fn read(&self) -> RwLockReadGuard<'_, BlockTreeCache> {
         self.block_tree_cache.read().unwrap()
     }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    /// Accessor method to get a write guard for the `block_tree` cache
+    pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, BlockTreeCache> {
+        self.block_tree_cache.write().unwrap()
+    }
 }
 
 /// Retrieve a read only reference to the `block_tree`'s cache
@@ -65,7 +73,7 @@ impl Handler<GetBlockTreeGuardMessage> for BlockTreeService {
 //------------------------------------------------------------------------------
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BlockTreeService {
     db: Option<DatabaseProvider>,
     /// Block tree internal state
@@ -76,6 +84,14 @@ pub struct BlockTreeService {
     pub block_index_guard: Option<BlockIndexReadGuard>,
     /// Global storage config
     pub storage_config: StorageConfig,
+    /// Channels for communicating with the services
+    pub service_senders: ServiceSenders,
+}
+
+impl Default for BlockTreeService {
+    fn default() -> Self {
+        panic!("do not rely on the `default()` implementation of `BlockTreeService`")
+    }
 }
 
 impl Actor for BlockTreeService {
@@ -99,6 +115,7 @@ impl BlockTreeService {
         miner_address: &Address,
         block_index_guard: BlockIndexReadGuard,
         storage_config: StorageConfig,
+        service_senders: ServiceSenders,
     ) -> Self {
         let cache = BlockTreeCache::initialize_from_list(block_index, db.clone());
 
@@ -108,6 +125,7 @@ impl BlockTreeService {
             miner_address: *miner_address,
             block_index_guard: Some(block_index_guard),
             storage_config,
+            service_senders,
         }
     }
 
@@ -119,7 +137,7 @@ impl BlockTreeService {
             .tx()
             .map_err(|e| eyre::eyre!("Failed to create transaction: {}", e))?;
 
-        let block_header = match block_header_by_hash(&tx, &block_hash) {
+        let block_header = match block_header_by_hash(&tx, &block_hash, false) {
             Ok(Some(header)) => header,
             Ok(None) => {
                 return Err(eyre::eyre!("No block header found for hash {}", block_hash));
@@ -179,6 +197,10 @@ impl BlockTreeService {
         }
         let msg = BlockConfirmedMessage(confirmed_block.clone(), all_tx);
         MempoolService::from_registry().do_send(msg);
+        self.service_senders
+            .ema
+            .send(EmaServiceMessage::NewConfirmedBlock)
+            .expect("EMA service has unexpectedly become unreachable");
     }
 
     /// Checks if a block that is `chunk_migration_depth` blocks behind `arc_block`
@@ -351,7 +373,13 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
                 let all_tx = block_entry.all_tx.clone();
 
                 // Now do mutable operations
-                if cache.mark_tip(&block_hash).is_ok() {
+                let mark_tip = cache.mark_tip(&block_hash);
+                let _ = RethServiceActor::from_registry().try_send(ForkChoiceUpdateMessage {
+                    head_hash: BlockHashType::Irys(block_hash),
+                    confirmed_hash: None,
+                    finalized_hash: None,
+                });
+                if mark_tip.is_ok() {
                     self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
                 }
 
@@ -531,7 +559,7 @@ impl BlockTreeCache {
 
         // Initialize cache with the start block
         let start_block_hash = block_index.get_item(start as usize).unwrap().block_hash;
-        let start_block = block_header_by_hash(&tx, &start_block_hash)
+        let start_block = block_header_by_hash(&tx, &start_block_hash, false)
             .unwrap()
             .unwrap();
         debug!(
@@ -547,7 +575,9 @@ impl BlockTreeCache {
                 .get_item(block_height as usize)
                 .unwrap()
                 .block_hash;
-            let block = block_header_by_hash(&tx, &block_hash).unwrap().unwrap();
+            let block = block_header_by_hash(&tx, &block_hash, false)
+                .unwrap()
+                .unwrap();
             let all_txs = Arc::new(Self::get_all_txs_for_block(&block, db.clone()).unwrap());
 
             cache
@@ -557,6 +587,13 @@ impl BlockTreeCache {
 
         let tip_hash = block_index.get_latest_item().unwrap().block_hash;
         cache.mark_tip(&tip_hash).unwrap();
+        RethServiceActor::from_registry()
+            .try_send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Irys(tip_hash),
+                confirmed_hash: None,
+                finalized_hash: None,
+            })
+            .expect("could not send message to `RethServiceActor`");
         cache
     }
 
@@ -602,7 +639,7 @@ impl BlockTreeCache {
         Ok(all_txs)
     }
 
-    fn add_common(
+    pub fn add_common(
         &mut self,
         hash: BlockHash,
         block: &IrysBlockHeader,
@@ -664,6 +701,7 @@ impl BlockTreeCache {
             self.blocks.get(&hash).map(|b| b.chain_state.clone()),
             Some(ChainState::Onchain)
         ) {
+            debug!(?hash, "already part of the main chian state");
             return Ok(());
         }
         self.add_common(
@@ -782,17 +820,24 @@ impl BlockTreeCache {
             .unwrap_or_else(||(U256::zero(), BlockHash::default()))
     }
 
+    /// Returns: cache of longest chain: (block/tx pairs, count of non-onchain blocks)
+    /// 0th element -- genesis block
+    /// last element -- the latest block
     #[must_use]
     pub fn get_canonical_chain(&self) -> (Vec<ChainCacheEntry>, usize) {
         self.longest_chain_cache.clone()
     }
 
     fn update_longest_chain_cache(&mut self) {
-        let mut pairs = Vec::new();
+        let pairs = {
+            self.longest_chain_cache.0.clear();
+            &mut self.longest_chain_cache.0
+        };
         let mut not_onchain_count = 0;
 
         let mut current = self.max_cumulative_difficulty.1;
         let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
+        tracing::debug!(latest_cache_tip =? current, "updating canonical chain cache");
 
         while let Some(entry) = self.blocks.get(&current) {
             match &entry.chain_state {
@@ -840,7 +885,7 @@ impl BlockTreeCache {
         }
 
         pairs.reverse();
-        self.longest_chain_cache = (pairs, not_onchain_count);
+        self.longest_chain_cache.1 = not_onchain_count;
     }
 
     /// Helper to mark off-chain blocks in a set
@@ -917,14 +962,6 @@ impl BlockTreeCache {
             block_hash.0.to_base58(),
             block.height
         );
-
-        RethServiceActor::from_registry()
-            .try_send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Irys(*block_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            })
-            .map_err(|e| eyre::eyre!("Error sending FCU to reth service - {}", &e))?;
 
         Ok(old_tip != *block_hash)
     }
@@ -1170,6 +1207,29 @@ impl BlockTreeCache {
     pub fn is_known_solution_hash(&self, solution_hash: &H256) -> bool {
         self.solutions.contains_key(solution_hash)
     }
+}
+
+/// Returns the canonical chain where the first item in the Vec is the oldest block
+/// Implementation detail: utilises `tokio::task::spawn_blocking`
+pub async fn get_canonical_chain(
+    tree: BlockTreeReadGuard,
+) -> eyre::Result<(Vec<(H256, u64, Vec<H256>, Vec<H256>)>, usize)> {
+    let canonical_chain =
+        tokio::task::spawn_blocking(move || tree.read().get_canonical_chain()).await?;
+    Ok(canonical_chain)
+}
+
+/// Returns the block from the block tree at a given block hash
+/// Implementation detail: utilises `tokio::task::spawn_blocking`
+pub async fn get_block(
+    block_tree_read_guard: BlockTreeReadGuard,
+    block_hash: H256,
+) -> eyre::Result<Option<IrysBlockHeader>> {
+    let res = tokio::task::spawn_blocking(move || {
+        block_tree_read_guard.read().get_block(&block_hash).cloned()
+    })
+    .await?;
+    Ok(res)
 }
 
 #[cfg(test)]

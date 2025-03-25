@@ -1,24 +1,29 @@
 pub mod error;
 pub mod routes;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use actix::Addr;
 use actix_cors::Cors;
+use actix_web::dev::Server;
 use actix_web::{
     dev::HttpServiceFactory,
     error::InternalError,
     web::{self, JsonConfig},
     App, HttpResponse, HttpServer,
 };
-
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,
 };
+use irys_database::{tables::PeerListItems, walk_all};
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config};
-use routes::{block, get_chunk, index, network_config, post_chunk, price, proxy::proxy, tx};
+use reth_db::Database;
+use routes::{
+    block, block_index, get_chunk, index, network_config, peer_list, post_chunk, post_version,
+    price, proxy::proxy, tx,
+};
 use tracing::{debug, info};
 
 #[derive(Clone)]
@@ -34,15 +39,36 @@ pub struct ApiState {
     pub block_index: Option<BlockIndexReadGuard>,
 }
 
+impl ApiState {
+    pub fn get_known_peers(&self) -> eyre::Result<Vec<SocketAddr>> {
+        // Attempt to create a read transaction
+        let read_tx = self
+            .db
+            .tx()
+            .map_err(|e| eyre::eyre!("Database error: {}", e))?;
+
+        // Fetch peer list items
+        let peer_list_items =
+            walk_all::<PeerListItems, _>(&read_tx).map_err(|e| eyre::eyre!("Read error: {}", e))?;
+
+        // Extract IP addresses and Port (SocketAddr) into a Vec<String>
+        let ips: Vec<SocketAddr> = peer_list_items
+            .iter()
+            .map(|(_miner_addr, entry)| entry.address)
+            .collect();
+
+        Ok(ips)
+    }
+}
+
 pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
-        .route("/execution-rpc", web::to(proxy))
-        .route("/info", web::get().to(index::info_route))
-        .route(
-            "/network/config",
-            web::get().to(network_config::get_network_config),
-        )
         .route("/block/{block_tag}", web::get().to(block::get_block))
+        .route(
+            "/block_index",
+            web::get().to(block_index::block_index_route),
+        )
+        .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route(
             "/chunk/data_root/{ledger_id}/{data_root}/{offset}",
             web::get().to(get_chunk::get_chunk_by_data_root_offset),
@@ -51,17 +77,24 @@ pub fn routes() -> impl HttpServiceFactory {
             "/chunk/ledger/{ledger_id}/{ledger_offset}",
             web::get().to(get_chunk::get_chunk_by_ledger_offset),
         )
-        .route("/chunk", web::post().to(post_chunk::post_chunk))
+        .route("/execution-rpc", web::to(proxy))
+        .route("/info", web::get().to(index::info_route))
+        .route(
+            "/network/config",
+            web::get().to(network_config::get_network_config),
+        )
+        .route("/peer_list", web::get().to(peer_list::peer_list_route))
+        .route("/price/{ledger}/{size}", web::get().to(price::get_price))
+        .route("/tx", web::post().to(tx::post_tx))
         .route("/tx/{tx_id}", web::get().to(tx::get_tx_header_api))
         .route(
             "/tx/{tx_id}/local/data_start_offset",
             web::get().to(tx::get_tx_local_start_offset),
         )
-        .route("/tx", web::post().to(tx::post_tx))
-        .route("/price/{ledger}/{size}", web::get().to(price::get_price))
+        .route("/version", web::post().to(post_version::post_version))
 }
 
-pub async fn run_server(app_state: ApiState) {
+pub async fn run_server(app_state: ApiState) -> Server {
     let port = app_state.config.port;
     info!(?port, "Starting API server");
 
@@ -80,14 +113,13 @@ pub async fn run_server(app_state: ApiState) {
                     }),
             )
             .service(routes())
+            //FIXME this default route is not behind a api version, should it be before 1.0 release?
             .route("/", web::get().to(index::info_route))
             .wrap(Cors::permissive())
     })
     .bind(("0.0.0.0", port))
     .unwrap()
     .run()
-    .await
-    .unwrap();
 }
 
 //==============================================================================

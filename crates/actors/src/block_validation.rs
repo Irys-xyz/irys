@@ -1,8 +1,11 @@
 use crate::{
-    block_index_service::BlockIndexReadGuard, epoch_service::PartitionAssignmentsReadGuard,
+    block_index_service::BlockIndexReadGuard,
+    ema_service::{EmaServiceMessage, PriceStatus},
+    epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number,
 };
 use base58::ToBase58;
+use eyre::ensure;
 use irys_database::Ledger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
@@ -26,13 +29,24 @@ pub async fn prevalidate_block(
     vdf_config: VDFStepsConfig,
     steps_guard: VdfStepsReadGuard,
     _miner_address: Address,
+    ema_serviece_sendr: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     debug!(
-        "Prevalidating block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "Prevalidating block",
     );
-    if block.chunk_hash != sha::sha256(&block.poa.chunk.0).into() {
+
+    let poa_chunk: Vec<u8> = match &block.poa.chunk {
+        Some(chunk) => chunk.clone().into(),
+        None =>
+        // This should be impossible as block poa was generated in block_producer
+        {
+            return Err(eyre::eyre!("Missing PoA chunk to be pre validated"))
+        }
+    };
+
+    if block.chunk_hash != sha::sha256(&poa_chunk).into() {
         return Err(eyre::eyre!(
             "Invalid block: chunk hash distinct from PoA chunk hash"
         ));
@@ -41,26 +55,26 @@ pub async fn prevalidate_block(
     // Check prev_output (vdf)
     prev_output_is_valid(&block, &previous_block)?;
     debug!(
-        "prev_output_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "prev_output_is_valid",
     );
 
     // Check the difficulty
     difficulty_is_valid(&block, &previous_block, &difficulty_config)?;
 
     debug!(
-        "difficulty_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "difficulty_is_valid",
     );
 
     // Check the cumulative difficulty
     cumulative_difficulty_is_valid(&block, &previous_block)?;
     debug!(
-        "cumulative_difficulty_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "cumulative_difficulty_is_valid",
     );
 
     check_poa_data_expiration(&block.poa, &_partitions_guard)?;
@@ -69,27 +83,77 @@ pub async fn prevalidate_block(
     // Check the solution_hash
     solution_hash_is_valid(&block)?;
     debug!(
-        "solution_hash_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "solution_hash_is_valid",
     );
 
     // Recall range check
     recall_recall_range_is_valid(&block, &storage_config, &steps_guard)?;
     debug!(
-        "recall_recall_range_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "recall_recall_range_is_valid",
     );
 
     // We only check last_step_checkpoints during pre-validation
     last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config).await?;
     debug!(
-        "last_step_checkpoints_is_valid for block {} ({})",
-        &block.block_hash.0.to_base58(),
-        &block.height
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "last_step_checkpoints_is_valid",
     );
 
+    // Check that the oracle price does not exceed the EMA pricing parameters
+    check_valid_oracle_price(&block, &ema_serviece_sendr).await?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "check_valid_oracle_price",
+    );
+
+    // Check that the EMA has been correctly calculated
+    check_valid_ema_calculation(&block, &ema_serviece_sendr).await?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "check_valid_ema_calculation",
+    );
+
+    Ok(())
+}
+
+async fn check_valid_oracle_price(
+    block: &IrysBlockHeader,
+    ema_serviece_sendr: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+) -> eyre::Result<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    ema_serviece_sendr.send(EmaServiceMessage::ValidateOraclePrice {
+        block_height: block.height,
+        oracle_price: block.oracle_irys_price,
+        response: tx,
+    })?;
+    let response = rx.await??;
+    ensure!(
+        response == PriceStatus::Valid,
+        "Oracle price exceeds the defined bounds"
+    );
+    Ok(())
+}
+
+async fn check_valid_ema_calculation(
+    block: &IrysBlockHeader,
+    ema_serviece_sendr: &tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
+) -> eyre::Result<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    ema_serviece_sendr.send(EmaServiceMessage::ValidateEmaPrice {
+        block_height: block.height,
+        ema_price: block.ema_irys_price,
+        oracle_price: block.oracle_irys_price,
+        response: tx,
+    })?;
+    let response = rx.await??;
+    ensure!(response == PriceStatus::Valid, "EMA price is invalid");
     Ok(())
 }
 
@@ -261,6 +325,10 @@ pub fn poa_is_valid(
     miner_address: &Address,
 ) -> eyre::Result<()> {
     debug!("PoA validating mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_address, poa.partition_chunk_offset, poa.partition_hash, config.entropy_packing_iterations, config.chunk_size);
+    let mut poa_chunk: Vec<u8> = match &poa.chunk {
+        Some(chunk) => chunk.clone().into(),
+        None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
+    };
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_id)) =
         (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_id)
@@ -326,7 +394,6 @@ pub fn poa_is_valid(
             config.chain_id,
         );
 
-        let mut poa_chunk: Vec<u8> = poa.chunk.clone().into();
         xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
 
         // Because all chunks are packed as config.chunk_size, if the proof chunk is
@@ -360,16 +427,15 @@ pub fn poa_is_valid(
             &mut entropy_chunk,
             config.chain_id,
         );
-
-        if entropy_chunk != poa.chunk.0 {
-            if poa.chunk.0.len() <= 32 {
-                debug!("Chunk PoA:{:?}", poa.chunk.0);
+        if entropy_chunk != poa_chunk {
+            if poa_chunk.len() <= 32 {
+                debug!("Chunk PoA:{:?}", poa_chunk);
                 debug!("Entropy  :{:?}", entropy_chunk);
             }
             return Err(eyre::eyre!(
                 "PoA capacity chunk mismatch {:?} /= {:?}",
                 entropy_chunk.first(),
-                poa.chunk.0.first()
+                poa_chunk.first()
             ));
         }
     }
@@ -445,7 +511,30 @@ mod tests {
         let storage_config = StorageConfig::new(&testnet_config);
         let epoch_config = EpochServiceConfig::new(&testnet_config);
 
-        let epoch_service = EpochServiceActor::new(epoch_config.clone(), &testnet_config);
+        let mut config = IrysNodeConfig::new(&testnet_config);
+        config.base_directory = data_dir.path().to_path_buf();
+        let arc_config = Arc::new(config);
+
+        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
+            BlockIndex::default()
+                .reset(&arc_config.clone())
+                .unwrap()
+                .init(arc_config.clone())
+                .await
+                .unwrap(),
+        ));
+
+        let block_index_actor =
+            BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        SystemRegistry::set(block_index_actor.clone());
+
+        let block_index_guard = block_index_actor
+            .send(GetBlockIndexGuardMessage)
+            .await
+            .unwrap();
+
+        let epoch_service =
+            EpochServiceActor::new(epoch_config.clone(), &testnet_config, block_index_guard);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers
@@ -470,22 +559,6 @@ mod tests {
         let sub_slots = ledgers.get_slots(Ledger::Submit);
 
         let partition_hash = sub_slots[0].partitions[0];
-        let mut config = IrysNodeConfig::new(&testnet_config);
-        config.base_directory = data_dir.path().to_path_buf();
-        let arc_config = Arc::new(config);
-
-        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
-            BlockIndex::default()
-                .reset(&arc_config.clone())
-                .unwrap()
-                .init(arc_config.clone())
-                .await
-                .unwrap(),
-        ));
-
-        let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config.clone());
-        SystemRegistry::set(block_index_actor.start());
-
         let msg = BlockFinalizedMessage {
             block_header: arc_genesis.clone(),
             all_txs: Arc::new(vec![]),
@@ -632,7 +705,7 @@ mod tests {
         let poa = PoaData {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
-            chunk: Base64(poa_chunk.clone()),
+            chunk: Some(Base64(poa_chunk.clone())),
             ledger_id: Some(1),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 as u32,

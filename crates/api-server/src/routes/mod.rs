@@ -1,8 +1,11 @@
 pub mod block;
+pub mod block_index;
 pub mod get_chunk;
 pub mod index;
 pub mod network_config;
+pub mod peer_list;
 pub mod post_chunk;
+pub mod post_version;
 pub mod price;
 pub mod proxy;
 pub mod tx;

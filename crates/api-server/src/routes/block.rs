@@ -80,7 +80,7 @@ fn get_block_by_hash(
 ) -> Result<Json<CombinedBlockHeader>, ApiError> {
     let irys_header = match state
         .db
-        .view_eyre(|tx| database::block_header_by_hash(tx, &block_hash))
+        .view_eyre(|tx| database::block_header_by_hash(tx, &block_hash, true))
     {
         Err(_error) => Err(ApiError::Internal {
             err: String::from("db error"),
