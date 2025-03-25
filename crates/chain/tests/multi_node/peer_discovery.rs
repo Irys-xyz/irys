@@ -61,6 +61,7 @@ async fn serial_peer_discovery() -> eyre::Result<()> {
 
     let app_state = ApiState {
         reth_provider: None,
+        reth_http_url: None,
         block_index: None,
         block_tree: None,
         db: node.db.clone(),

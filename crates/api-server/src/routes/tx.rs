@@ -189,6 +189,7 @@ pub struct TxOffset {
 
 //         let app_state = ApiState {
 //             reth_provider: None,
+//             reth_http_url: None,
 //             block_index: None,
 //             block_tree: None,
 //             db: DatabaseProvider(arc_db.clone()),
@@ -248,6 +249,7 @@ pub struct TxOffset {
 
 //         let app_state = ApiState {
 //             reth_provider: None,
+//             reth_http_url: None,
 //             block_index: None,
 //             block_tree: None,
 //             db: DatabaseProvider(db_arc.clone()),

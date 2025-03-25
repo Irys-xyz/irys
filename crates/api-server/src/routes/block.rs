@@ -244,6 +244,7 @@ impl FromStr for BlockParam {
 
 //         let app_state = ApiState {
 //             reth_provider: None,
+//             reth_http_url: None,
 //             block_index: None,
 //             block_tree: None,
 //             db: DatabaseProvider(db_arc.clone()),
@@ -300,6 +301,7 @@ impl FromStr for BlockParam {
 
 //         let app_state = ApiState {
 //             reth_provider: None,
+//             reth_http_url: None,
 //             block_index: None,
 //             block_tree: None,
 //             db: DatabaseProvider(db_arc.clone()),

@@ -35,6 +35,7 @@ pub struct ApiState {
     // TODO: slim this down to what we actually use - beware the types!
     // TODO: remove the Option<>
     pub reth_provider: Option<RethNodeProvider>,
+    pub reth_http_url: Option<String>,
     pub block_tree: Option<BlockTreeReadGuard>,
     pub block_index: Option<BlockIndexReadGuard>,
 }
@@ -190,6 +191,7 @@ pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
 //         mempool: mempool_addr,
 //         chunk_provider: Arc::new(chunk_provider),
 //         reth_provider: None,
+//         reth_http_url: None,
 //         block_tree: None,
 //         block_index: None,
 //     };

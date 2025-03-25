@@ -657,7 +657,7 @@ pub async fn start_irys_node(
                     block_tree_guard: block_tree_guard.clone(),
                     config: Arc::new(config.clone())
                 });
-
+                
                 let server = run_server(ApiState {
                     mempool: mempool_addr,
                     chunk_provider: arc_chunk_provider.clone(),
@@ -665,6 +665,7 @@ pub async fn start_irys_node(
                     reth_provider: Some(reth_node.clone()),
                     block_tree: Some(block_tree_guard.clone()),
                     block_index: Some(block_index_guard.clone()),
+                    reth_http_url: reth_node.rpc_server_handle().http_url(),
                     config: config.clone()
                 }, listener)
                 .await;
@@ -1353,6 +1354,7 @@ impl IrysNode {
                 block_tree: Some(block_tree_guard.clone()),
                 block_index: Some(block_index_guard.clone()),
                 config: self.config.clone(),
+                reth_http_url: reth_node.rpc_server_handle().http_url()
             },
             http_listener,
         )
