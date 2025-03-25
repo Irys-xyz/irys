@@ -1354,7 +1354,7 @@ impl IrysNode {
                 block_tree: Some(block_tree_guard.clone()),
                 block_index: Some(block_index_guard.clone()),
                 config: self.config.clone(),
-                reth_http_url: reth_node.rpc_server_handle().http_url()
+                reth_http_url: reth_node.rpc_server_handle().http_url(),
             },
             http_listener,
         )
