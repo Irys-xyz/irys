@@ -159,10 +159,15 @@ pub async fn start_irys_node(
     ))?;
     // if `config.port` == 0, the assigned port will be random (decided by the OS)
     // we re-assign the configuration with the actual port here.
-    config.port = listener
-        .local_addr()
-        .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?
-        .port();
+    let random_ports = if config.port == 0 {
+        config.port = listener
+            .local_addr()
+            .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?
+            .port();
+        true
+    } else {
+        false
+    };
 
     let (reth_handle_sender, reth_handle_receiver) =
         oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
@@ -722,6 +727,7 @@ pub async fn start_irys_node(
                             reth_handle_sender,
                             irys_provider.clone(),
                             latest_block_height,
+                            random_ports,
                         ),
                         reth_shutdown_receiver,
                     ),
@@ -761,6 +767,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
     sender: oneshot::Sender<FullNode<RethNode, RethNodeAddOns>>,
     irys_provider: IrysRethProvider,
     latest_block: u64,
+    random_ports: bool,
 ) -> eyre::Result<NodeExitReason> {
     let node_handle = irys_reth_node_bridge::run_node(
         Arc::new(chainspec),
@@ -769,6 +776,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
         tables,
         irys_provider,
         latest_block,
+        random_ports,
     )
     .await?;
     debug!("Reth node started");
@@ -866,10 +874,15 @@ impl IrysNode {
         ))?;
         // if `config.port` == 0, the assigned port will be random (decided by the OS)
         // we re-assign the configuration with the actual port here.
-        self.config.port = listener
-            .local_addr()
-            .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?
-            .port();
+        let random_ports = if self.config.port == 0 {
+            self.config.port = listener
+                .local_addr()
+                .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?
+                .port();
+            true
+        } else {
+            false
+        };
 
         // Common node startup logic (common for genesis and peer mode nodes)
         // There are a lot of cross dependencies between reth and irys components, the channels mediate the comms
@@ -911,6 +924,7 @@ impl IrysNode {
             latest_height,
             task_manager,
             tokio_runtime,
+            random_ports,
         )?;
 
         let mut ctx = irys_node_ctx_rx.await?;
@@ -1066,6 +1080,7 @@ impl IrysNode {
         latest_block_height: u64,
         mut task_manager: TaskManager,
         tokio_runtime: Runtime,
+        random_ports: bool,
     ) -> eyre::Result<JoinHandle<()>> {
         let node_config = Arc::new(self.irys_node_config.clone());
         let reth_thread_handler = std::thread::Builder::new()
@@ -1087,6 +1102,7 @@ impl IrysNode {
                                 reth_handle_sender,
                                 irys_provider.clone(),
                                 latest_block_height,
+                                random_ports,
                             ),
                             reth_shutdown_receiver,
                         ),

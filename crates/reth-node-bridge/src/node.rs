@@ -39,7 +39,7 @@ use reth_transaction_pool::{
     blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
     EthTransactionValidator, Pool, TransactionValidationTaskExecutor,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 // use crate::node_launcher::CustomNodeLauncher;
 
@@ -136,6 +136,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     tables: &[T],
     provider: IrysRethProvider,
     latest_block: u64,
+    random_ports: bool,
 ) -> eyre::Result<RethNodeExitHandle> {
     let mut os_args: Vec<String> = std::env::args().collect();
     let bp = os_args.remove(0);
@@ -143,8 +144,6 @@ pub async fn run_node<T: HasName + HasTableType>(
     let mut args = vec_of_strings![
         "node",
         "-vvvvv",
-        "--instance",
-        format!("{}", irys_config.instance_number.unwrap_or(1)),
         "--disable-discovery",
         "--http",
         "--http.api",
@@ -169,6 +168,17 @@ pub async fn run_node<T: HasName + HasTableType>(
             // "--chain",
             // ".reth/dev_genesis.json"
     ];
+
+    // `instance` is mutually exclusive with random ports
+    if random_ports {
+        args.push("--with-unused-ports".to_string());
+        if irys_config.instance_number.is_some() {
+            warn!("Reth instance numbers will not be used when port randomisation is enabled")
+        }
+    } else {
+        args.push("--instance".to_string());
+        args.push(format!("{}", irys_config.instance_number.unwrap_or(1)).to_string())
+    }
 
     args.insert(0, bp.to_string());
     info!("discarding os args: {:?}", os_args);
