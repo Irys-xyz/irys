@@ -216,7 +216,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     for _i in 1..10 {
         let poa_solution = capacity_chunk_solution(
-            node.config.mining_signer.address(),
+            node.node_config.mining_signer.address(),
             node.vdf_steps_guard.clone(),
             &node.vdf_config,
             &node.storage_config,

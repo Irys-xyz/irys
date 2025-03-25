@@ -252,7 +252,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         }
 
         let poa_solution = capacity_chunk_solution(
-            node.config.mining_signer.address(),
+            node.node_config.mining_signer.address(),
             node.vdf_steps_guard.clone(),
             &node.vdf_config,
             &node.storage_config,

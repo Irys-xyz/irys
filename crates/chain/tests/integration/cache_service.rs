@@ -195,7 +195,7 @@ async fn serial_test_cache_pruning() -> eyre::Result<()> {
     for i in 1..4 {
         info!("manually producing block {}", i);
         let poa_solution = capacity_chunk_solution(
-            node.config.mining_signer.address(),
+            node.node_config.mining_signer.address(),
             node.vdf_steps_guard.clone(),
             &node.vdf_config,
             &node.storage_config,

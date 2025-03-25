@@ -14,8 +14,8 @@ async fn serial_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
         base_directory: temp_dir.path().to_path_buf(),
         ..Config::testnet()
     };
-    let genesis_node = IrysNode::new(config.clone(), true);
-    let non_genesis_node = IrysNode::new(config.clone(), false);
+    let mut genesis_node = IrysNode::new(config.clone(), true);
+    let mut non_genesis_node = IrysNode::new(config.clone(), false);
 
     // action:
     // 1. start the genesis node;

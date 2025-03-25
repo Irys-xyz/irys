@@ -13,6 +13,7 @@ irys-types.workspace = true
 irys-config.workspace = true
 #
 
+socket2 = "0.5.8"
 awc = "3.5.1"
 base58.workspace = true
 reth.workspace = true
