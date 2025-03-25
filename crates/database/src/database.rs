@@ -4,14 +4,15 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysPoAChunks,
-    IrysTxHeaders, Metadata, PeerListItems,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysCommitments,
+    IrysPoAChunks, IrysTxHeaders, Metadata, PeerListItems,
 };
 
 use crate::metadata::MetadataKey;
 use irys_types::{
-    Address, BlockHash, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE, U256,
+    Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, IrysBlockHeader,
+    IrysTransactionHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
+    U256,
 };
 use reth_db::cursor::DbDupCursorRO;
 
@@ -108,6 +109,24 @@ pub fn tx_header_by_txid<T: DbTx>(
     Ok(tx
         .get::<IrysTxHeaders>(*txid)?
         .map(IrysTransactionHeader::from))
+}
+
+/// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
+pub fn insert_commitment_tx<T: DbTxMut>(
+    tx: &T,
+    commitment_tx: &CommitmentTransaction,
+) -> eyre::Result<()> {
+    Ok(tx.put::<IrysCommitments>(commitment_tx.id, commitment_tx.clone().into())?)
+}
+
+/// Gets a [`CommitmentTransaction`] by it's [`IrysTransactionId`]
+pub fn commitment_tx_by_txid<T: DbTx>(
+    tx: &T,
+    txid: &IrysTransactionId,
+) -> eyre::Result<Option<CommitmentTransaction>> {
+    Ok(tx
+        .get::<IrysCommitments>(*txid)?
+        .map(CommitmentTransaction::from))
 }
 
 /// Takes an [`IrysTransactionHeader`] and caches its `data_root` and tx.id in a
@@ -297,10 +316,13 @@ pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseE
 
 #[cfg(test)]
 mod tests {
-    use irys_types::{IrysBlockHeader, IrysTransactionHeader};
+    use irys_types::{CommitmentTransaction, IrysBlockHeader, IrysTransactionHeader, H256};
     use reth_db::Database;
 
-    use crate::{block_header_by_hash, config::get_data_dir, tables::IrysTables};
+    use crate::{
+        block_header_by_hash, commitment_tx_by_txid, config::get_data_dir, insert_commitment_tx,
+        tables::IrysTables,
+    };
 
     use super::{insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid};
 
@@ -318,6 +340,19 @@ mod tests {
         // Read a Tx
         let result = db.view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?;
         assert_eq!(result, Some(tx_header));
+
+        // Write a commitment tx
+        let commitment_tx = CommitmentTransaction {
+            // Override some defaults to insure deserialization is working
+            id: H256::from([10u8; 32]),
+            version: 1,
+            ..Default::default()
+        };
+        let _ = db.update(|tx| insert_commitment_tx(tx, &commitment_tx))?;
+
+        // Read a commitment tx
+        let result = db.view_eyre(|tx| commitment_tx_by_txid(tx, &commitment_tx.id))?;
+        assert_eq!(result, Some(commitment_tx));
 
         let mut block_header = IrysBlockHeader::new_mock_header();
         block_header.block_hash.0[0] = 1;
