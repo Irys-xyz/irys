@@ -140,7 +140,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     debug!("Stopping node");
-    let node_config = (*node.config).clone();
+    let node_config = (*node.node_config).clone();
     let storage_config = node.storage_config.clone();
     node.stop().await;
 

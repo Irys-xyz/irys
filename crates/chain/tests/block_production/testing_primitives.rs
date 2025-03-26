@@ -20,6 +20,7 @@ async fn test_wait_until_height() {
     wait_until_height(&node_ctx, height + steps, seconds).await;
     let height5 = get_height(&node_ctx);
     assert_eq!(height5, height + steps);
+    node_ctx.stop().await;
 }
 
 #[actix::test]
@@ -31,6 +32,7 @@ async fn test_mine() {
     mine(&node_ctx, blocks).await.unwrap();
     let next_height = get_height(&node_ctx);
     assert_eq!(next_height, height + blocks as u64);
+    node_ctx.stop().await;    
 }
 
 #[actix::test]
@@ -61,4 +63,5 @@ async fn test_mine_tx() {
     assert_eq!(next_height, height + 1 as u64);
     let tx_header = get_tx_header(&node_ctx, &tx.header.id).unwrap();
     assert_eq!(tx_header, tx.header);
+    node_ctx.stop().await;
 }
