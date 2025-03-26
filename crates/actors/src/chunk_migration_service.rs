@@ -8,8 +8,8 @@ use irys_database::{
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
     app_state::DatabaseProvider, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxChunkOffset,
-    UnpackedChunk, H256,
+    LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, StorageTransactionLedger,
+    TxChunkOffset, UnpackedChunk, H256,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
@@ -258,7 +258,7 @@ fn get_tx_path_pairs(
     ledger: Ledger,
     txs: &[IrysTransactionHeader],
 ) -> eyre::Result<Vec<((H256, Proof), (DataRoot, u64))>> {
-    let (tx_root, proofs) = TransactionLedger::merklize_tx_root(txs);
+    let (tx_root, proofs) = StorageTransactionLedger::merklize_tx_root(txs);
 
     if tx_root != block.ledgers[ledger].tx_root {
         return Err(eyre::eyre!("Invalid tx_root"));

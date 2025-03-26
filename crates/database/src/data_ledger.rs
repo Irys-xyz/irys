@@ -1,4 +1,4 @@
-use irys_types::{Compact, Config, TransactionLedger, H256};
+use irys_types::{Compact, Config, StorageTransactionLedger, H256};
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 /// Manages the global ledger state within the epoch service, tracking:
@@ -398,8 +398,8 @@ impl IndexMut<Ledger> for Ledgers {
     }
 }
 
-impl Index<Ledger> for Vec<TransactionLedger> {
-    type Output = TransactionLedger;
+impl Index<Ledger> for Vec<StorageTransactionLedger> {
+    type Output = StorageTransactionLedger;
 
     fn index(&self, ledger: Ledger) -> &Self::Output {
         self.iter()
@@ -408,7 +408,7 @@ impl Index<Ledger> for Vec<TransactionLedger> {
     }
 }
 
-impl IndexMut<Ledger> for Vec<TransactionLedger> {
+impl IndexMut<Ledger> for Vec<StorageTransactionLedger> {
     fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
         self.iter_mut()
             .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)

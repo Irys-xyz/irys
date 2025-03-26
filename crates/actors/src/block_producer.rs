@@ -20,8 +20,8 @@ use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
     Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
-    IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
-    H256, U256,
+    IrysTransactionHeader, PoaData, Signature, StorageTransactionLedger, TxIngressProof,
+    VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -323,20 +323,21 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 miner_address: solution.mining_address,
                 signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
+                system_ledgers: vec![],
                 ledgers: vec![
                     // Permanent Publish Ledger
-                    TransactionLedger {
+                    StorageTransactionLedger {
                         ledger_id: Ledger::Publish.into(),
-                        tx_root: TransactionLedger::merklize_tx_root(&publish_txs).0,
+                        tx_root: StorageTransactionLedger::merklize_tx_root(&publish_txs).0,
                         tx_ids: H256List(publish_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
                         max_chunk_offset: publish_max_chunk_offset,
                         expires: None,
                         proofs: opt_proofs,
                     },
                     // Term Submit Ledger
-                    TransactionLedger {
+                    StorageTransactionLedger {
                         ledger_id: Ledger::Submit.into(),
-                        tx_root: TransactionLedger::merklize_tx_root(&submit_txs).0,
+                        tx_root: StorageTransactionLedger::merklize_tx_root(&submit_txs).0,
                         tx_ids: H256List(submit_txids.clone()),
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),

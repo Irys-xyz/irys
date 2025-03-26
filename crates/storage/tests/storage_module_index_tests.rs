@@ -11,7 +11,7 @@ use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
     partition_chunk_offset_ie, partition_chunk_offset_ii, Base64, Config, IrysTransaction,
     IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset,
-    PartitionChunkRange, StorageConfig, TransactionLedger, TxChunkOffset, UnpackedChunk, H256,
+    PartitionChunkRange, StorageConfig, StorageTransactionLedger, TxChunkOffset, UnpackedChunk, H256,
 };
 use openssl::sha;
 use reth_db::Database;
@@ -147,7 +147,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tx_headers: Vec<IrysTransactionHeader> = txs.iter().map(|tx| tx.header.clone()).collect();
 
     // Create a tx_root (and paths) from the tx
-    let (_tx_root, proofs) = TransactionLedger::merklize_tx_root(&tx_headers);
+    let (_tx_root, proofs) = StorageTransactionLedger::merklize_tx_root(&tx_headers);
 
     // Assume this is the first block in the blockchain
     let proof = &proofs[0];

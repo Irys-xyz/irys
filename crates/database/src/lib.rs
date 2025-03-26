@@ -11,6 +11,7 @@ pub mod database;
 /// Data in the caches can be pending or in a block still subject to re-org so
 /// it is not suitable for mining.
 pub mod db_cache;
+pub mod system_ledger;
 
 pub mod db;
 /// Data in the indexes is confirmed data
@@ -25,6 +26,7 @@ pub mod tables;
 pub use block_index_data::*;
 pub use data_ledger::*;
 pub use database::*;
+pub use system_ledger::*;
 
 pub mod reth_db {
     pub use reth_db::*;

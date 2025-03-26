@@ -147,7 +147,7 @@ mod tests {
     use irys_types::{
         irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
         partition_chunk_offset_ie, Base64, Config, LedgerChunkRange, PartitionChunkOffset,
-        TransactionLedger, UnpackedChunk,
+        StorageTransactionLedger, UnpackedChunk,
     };
     use nodit::interval::{ie, ii};
     use rand::Rng as _;
@@ -189,7 +189,8 @@ mod tests {
 
         // fake the tx_path
         // Create a tx_root (and paths) from the tx
-        let (_tx_root, proofs) = TransactionLedger::merklize_tx_root(&vec![tx.header.clone()]);
+        let (_tx_root, proofs) =
+            StorageTransactionLedger::merklize_tx_root(&vec![tx.header.clone()]);
 
         let tx_path = proofs[0].proof.clone();
 

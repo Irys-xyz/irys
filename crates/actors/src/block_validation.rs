@@ -460,7 +460,7 @@ mod tests {
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
         irys::IrysSigner, partition::PartitionAssignment, Address, Base64, Config, H256List,
-        IrysTransaction, IrysTransactionHeader, Signature, TransactionLedger, H256, U256,
+        IrysTransaction, IrysTransactionHeader, Signature, StorageTransactionLedger, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -701,7 +701,7 @@ mod tests {
 
         let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
 
-        let (tx_root, tx_path) = TransactionLedger::merklize_tx_root(&tx_headers);
+        let (tx_root, tx_path) = StorageTransactionLedger::merklize_tx_root(&tx_headers);
 
         let poa = PoaData {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
@@ -727,7 +727,7 @@ mod tests {
             timestamp: 1000,
             ledgers: vec![
                 // Permanent Publish Ledger
-                TransactionLedger {
+                StorageTransactionLedger {
                     ledger_id: Ledger::Publish.into(),
                     tx_root: H256::zero(),
                     tx_ids: H256List(Vec::new()),
@@ -736,7 +736,7 @@ mod tests {
                     proofs: None,
                 },
                 // Term Submit Ledger
-                TransactionLedger {
+                StorageTransactionLedger {
                     ledger_id: Ledger::Submit.into(),
                     tx_root,
                     tx_ids: H256List(data_tx_ids.clone()),
