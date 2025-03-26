@@ -6,11 +6,11 @@ use base58::ToBase58;
 use eyre::Result;
 use irys_config::IrysNodeConfig;
 use irys_types::H256;
-use tracing::{error, info};
 use std::fs::{self, remove_file, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
+use tracing::{error, info};
 
 /// This struct represents the `Uninitialized` `block_index` type state.
 #[derive(Debug)]
@@ -336,8 +336,12 @@ fn append_item(item: &BlockIndexItem, config: &IrysNodeConfig) -> eyre::Result<(
         Ok(mut file) => {
             file.write_all(&item.to_bytes())?;
             Ok(())
-        },
-        Err(err) => Err(eyre::eyre!("While trying to open file :{:?} got error: {}", path, err))
+        }
+        Err(err) => Err(eyre::eyre!(
+            "While trying to open file :{:?} got error: {}",
+            path,
+            err
+        )),
     }
 }
 

@@ -4,11 +4,14 @@ use irys_types::{irys::IrysSigner, Config};
 use reth_primitives::GenesisAccount;
 use tracing::info;
 
-use crate::utils::{add_tx, get_height, get_tx_header, mine, mine_one, start_node, start_node_config, wait_until_height};
+use crate::utils::{
+    add_tx, get_height, get_tx_header, mine, mine_one, start_node, start_node_config,
+    wait_until_height,
+};
 
 #[actix::test]
 async fn test_wait_until_height() {
-    let (node_ctx, _tmp_dir) = start_node("test_wait_until_height").await;    
+    let (node_ctx, _tmp_dir) = start_node("test_wait_until_height").await;
     let height = get_height(&node_ctx);
     info!("height: {}", height);
     let steps = 2;
@@ -21,7 +24,7 @@ async fn test_wait_until_height() {
 
 #[actix::test]
 async fn test_mine() {
-    let (node_ctx, _tmp_dir) = start_node("test_mine").await;    
+    let (node_ctx, _tmp_dir) = start_node("test_mine").await;
     let height = get_height(&node_ctx);
     info!("height: {}", height);
     let blocks = 4;
@@ -30,21 +33,18 @@ async fn test_mine() {
     assert_eq!(next_height, height + blocks as u64);
 }
 
-
 #[actix::test]
 async fn test_mine_tx() {
     let testnet_config = Config::testnet();
     let mut node_config = IrysNodeConfig::new(&testnet_config);
     let account = IrysSigner::random_signer(&testnet_config);
-    node_config.extend_genesis_accounts(vec![
-        (
-            account.address(),
-            GenesisAccount {
-                balance: U256::from(1000),
-                ..Default::default()
-            },
-        ),
-    ]);
+    node_config.extend_genesis_accounts(vec![(
+        account.address(),
+        GenesisAccount {
+            balance: U256::from(1000),
+            ..Default::default()
+        },
+    )]);
 
     let (node_ctx, _tmp_dir) = start_node_config(
         "test_mine_tx",
@@ -62,4 +62,3 @@ async fn test_mine_tx() {
     let tx_header = get_tx_header(&node_ctx, &tx.header.id).unwrap();
     assert_eq!(tx_header, tx.header);
 }
-

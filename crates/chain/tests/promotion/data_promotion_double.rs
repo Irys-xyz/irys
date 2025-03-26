@@ -64,7 +64,12 @@ async fn serial_double_root_data_promotion_test() {
         ),
     ]);
     // This will create 3 storage modules, one for submit, one for publish, and one for capacity
-    let (node_context, _tmp_dir) =  start_node_config("serial_double_root_data_promotion_test", Some(testnet_config.clone()), Some(config)).await;
+    let (node_context, _tmp_dir) = start_node_config(
+        "serial_double_root_data_promotion_test",
+        Some(testnet_config.clone()),
+        Some(config),
+    )
+    .await;
 
     wait_for_packing(
         node_context.actor_addresses.packing.clone(),

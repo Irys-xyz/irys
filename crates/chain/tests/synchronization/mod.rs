@@ -23,7 +23,7 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
     let main_address = testnet_config.miner_address();
     let account1 = IrysSigner::random_signer(&testnet_config);
     let mut config = IrysNodeConfig::new(&testnet_config);
-    
+
     config.extend_genesis_accounts(vec![
         (
             main_address,
@@ -41,7 +41,12 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
         ),
     ]);
 
-    let (node, _tmp_dir) =  start_node_config("serial_data_promotion_test", Some(testnet_config.clone()), Some(config.clone())).await;
+    let (node, _tmp_dir) = start_node_config(
+        "serial_data_promotion_test",
+        Some(testnet_config.clone()),
+        Some(config.clone()),
+    )
+    .await;
 
     wait_for_packing(
         node.actor_addresses.packing.clone(),

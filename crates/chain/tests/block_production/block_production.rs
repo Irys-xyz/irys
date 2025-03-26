@@ -19,7 +19,9 @@ use reth_primitives::{
 use tokio::time::sleep;
 use tracing::info;
 
-use crate::utils::{add_tx, capacity_chunk_solution, start_node, start_node_config, wait_until_height, AddTxError};
+use crate::utils::{
+    add_tx, capacity_chunk_solution, start_node, start_node_config, wait_until_height, AddTxError,
+};
 /// Create a valid capacity PoA solution
 
 #[tokio::test]
@@ -54,7 +56,7 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
             },
         ),
     ]);
-    
+
     let (node, _) = start_node_config("test_blockprod", Some(testnet_config), Some(config)).await;
 
     let mut txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
@@ -63,12 +65,11 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
         match add_tx(&node, &a, data_bytes).await {
             Ok(tx) => {
                 txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
-            },
+            }
             Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
                 assert_eq!(a.address(), account1.address(), "account1 should fail");
-            },
-            Err(e) =>
-                panic!("unexpected error {:?}", e)
+            }
+            Err(e) => panic!("unexpected error {:?}", e),
         }
     }
 
@@ -121,7 +122,6 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
-
     let (node, _tmp_dir) = start_node("test_mine_ten_blocks_with_capacity_poa_solution").await;
     let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
 
@@ -280,7 +280,8 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     ]);
 
     let chain_id = testnet_config.chain_id;
-    let (node, _) =  start_node_config("test_serial_blockprod", Some(testnet_config), Some(config)).await;
+    let (node, _) =
+        start_node_config("test_serial_blockprod", Some(testnet_config), Some(config)).await;
     let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
     let miner_init_balance = reth_context
         .rpc
@@ -337,12 +338,15 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         match add_tx(&node, &a, data_bytes).await {
             Ok(tx) => {
                 irys_txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
-            },
+            }
             Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
-                assert_eq!(a.address(), account1.address(), "account1 should be unfunded");
-            },
-            Err(e) =>
-                panic!("unexpected error {:?}", e)
+                assert_eq!(
+                    a.address(),
+                    account1.address(),
+                    "account1 should be unfunded"
+                );
+            }
+            Err(e) => panic!("unexpected error {:?}", e),
         }
     }
 
@@ -362,7 +366,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .unwrap();
 
     for receipt in reth_exec_env.shadow_receipts {
-        if let Some(og_tx ) = irys_txs.get(&receipt.tx_id) {
+        if let Some(og_tx) = irys_txs.get(&receipt.tx_id) {
             assert_eq!(receipt.result, ShadowResult::Success)
         } else {
             assert_eq!(receipt.result, ShadowResult::OutOfFunds)

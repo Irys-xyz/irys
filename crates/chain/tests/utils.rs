@@ -170,38 +170,40 @@ pub async fn start_node(name: &str) -> (IrysNodeCtx, TempDir) {
 }
 
 /// need to return tmp_dir to prevent it from being dropped
-pub async fn start_node_config(name: &str, config: Option<Config>, node_config: Option<IrysNodeConfig>) -> (IrysNodeCtx, TempDir) {
+pub async fn start_node_config(
+    name: &str,
+    config: Option<Config>,
+    node_config: Option<IrysNodeConfig>,
+) -> (IrysNodeCtx, TempDir) {
     std::env::set_var("RUST_LOG", "debug");
     let temp_dir = setup_tracing_and_temp_dir(Some(name), false);
     let testnet_config = config.unwrap_or_else(|| Config::testnet());
     let storage_config = StorageConfig::new(&testnet_config);
     let mut config = node_config.unwrap_or_else(|| IrysNodeConfig::new(&testnet_config));
     config.base_directory = temp_dir.path().to_path_buf();
-    (start_irys_node(
-        config,
-        storage_config,
-        testnet_config.clone(),
+    (
+        start_irys_node(config, storage_config, testnet_config.clone())
+            .await
+            .unwrap(),
+        temp_dir,
     )
-    .await
-    .unwrap(),
-    temp_dir)
 }
 
-pub async fn wait_until_height(
-    node_ctx: &IrysNodeCtx,
-    target_height: u64,
-    max_seconds: usize,
-) {
+pub async fn wait_until_height(node_ctx: &IrysNodeCtx, target_height: u64, max_seconds: usize) {
     let mut retries = 0;
     let max_retries = max_seconds; // 1 second per retry
-    while node_ctx.block_index_guard.read().latest_height() < target_height && retries < max_retries {
-        sleep(Duration::from_secs(1)).await; 
-        retries += 1; 
+    while node_ctx.block_index_guard.read().latest_height() < target_height && retries < max_retries
+    {
+        sleep(Duration::from_secs(1)).await;
+        retries += 1;
     }
     if retries == max_retries {
         panic!("Failed to reach target height after {} retries", retries);
     } else {
-        info!("got block after {} seconds and {} retries", max_seconds, &retries);
+        info!(
+            "got block after {} seconds and {} retries",
+            max_seconds, &retries
+        );
     }
 }
 
@@ -209,20 +211,15 @@ pub fn get_height(node_ctx: &IrysNodeCtx) -> u64 {
     node_ctx.block_index_guard.read().latest_height()
 }
 
-pub async fn mine_one(
-    node_ctx: &IrysNodeCtx,
-) -> eyre::Result<()> {
+pub async fn mine_one(node_ctx: &IrysNodeCtx) -> eyre::Result<()> {
     mine(node_ctx, 1).await?;
     Ok(())
 }
 
-pub async fn mine(
-    node_ctx: &IrysNodeCtx,
-    num_blocks: usize,
-) -> eyre::Result<()> {
+pub async fn mine(node_ctx: &IrysNodeCtx, num_blocks: usize) -> eyre::Result<()> {
     let height = get_height(node_ctx);
     node_ctx.actor_addresses.set_mining(true)?;
-    wait_until_height(node_ctx, height + num_blocks as u64, 15*num_blocks).await;
+    wait_until_height(node_ctx, height + num_blocks as u64, 15 * num_blocks).await;
     node_ctx.actor_addresses.set_mining(false)?;
     Ok(())
 }
@@ -239,20 +236,22 @@ pub async fn add_tx(
     node_ctx: &IrysNodeCtx,
     account: &IrysSigner,
     data: Vec<u8>,
-) -> Result<IrysTransaction,AddTxError> {
-    let tx = account.create_transaction(data, None).map_err(AddTxError::CreateTx)?;
+) -> Result<IrysTransaction, AddTxError> {
+    let tx = account
+        .create_transaction(data, None)
+        .map_err(AddTxError::CreateTx)?;
     let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
 
-    match node_ctx.actor_addresses
+    match node_ctx
+        .actor_addresses
         .mempool
         .send(TxIngressMessage(tx.header.clone()))
-        .await {
-            Ok(Ok(())) => return Ok(tx),
-            Ok(Err(tx_error)) => 
-                return Err(AddTxError::TxIngress(tx_error)),
-            Err(e) => 
-                return Err(AddTxError::Mailbox(e))
-        };    
+        .await
+    {
+        Ok(Ok(())) => return Ok(tx),
+        Ok(Err(tx_error)) => return Err(AddTxError::TxIngress(tx_error)),
+        Err(e) => return Err(AddTxError::Mailbox(e)),
+    };
 }
 
 pub fn get_tx_header(node_ctx: &IrysNodeCtx, tx_id: &H256) -> eyre::Result<IrysTransactionHeader> {

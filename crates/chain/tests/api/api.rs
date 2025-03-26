@@ -50,17 +50,15 @@ async fn api_end_to_end_test(chunk_size: usize) {
     };
     let chain_id = testnet_config.chain_id;
     let mut node_config = IrysNodeConfig::new(&testnet_config);
-    
+
     let irys = IrysSigner::random_signer(&testnet_config);
-    node_config.extend_genesis_accounts(vec![
-        (
-            irys.address(),
-            GenesisAccount {
-                balance: U256::from(1000),
-                ..Default::default()
-            },
-        ),
-    ]);
+    node_config.extend_genesis_accounts(vec![(
+        irys.address(),
+        GenesisAccount {
+            balance: U256::from(1000),
+            ..Default::default()
+        },
+    )]);
 
     let (handle, _tmp_dir) = start_node_config(
         &format!("api_end_to_end_{}_test_", chunk_size),
@@ -104,7 +102,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     rand::thread_rng().fill(&mut data_bytes[..]);
 
     // Create a new Irys API instance & a signed transaction
-    
+
     let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
     let tx = irys.sign_transaction(tx).unwrap();
 
