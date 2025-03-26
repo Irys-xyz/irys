@@ -54,7 +54,6 @@ use irys_types::{
     Config, DifficultyAdjustmentConfig, IrysBlockHeader, OracleConfig, PartitionChunkRange,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
-use rand::seq::SliceRandom;
 use reth::rpc::eth::EthApiServer as _;
 use reth::{
     builder::FullNode,
@@ -640,7 +639,7 @@ pub async fn start_irys_node(
 
                 // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
                 let is_test = node_config.base_directory.parent().is_some_and(|p| p.ends_with(".tmp"));
-                
+
                 let vdf_thread_handler = std::thread::spawn(move || {
 
                     if !is_test {
@@ -655,7 +654,7 @@ pub async fn start_irys_node(
                             }
                         }
                     }
-                   
+
                     run_vdf(
                         vdf_config2,
                         global_step_number,
