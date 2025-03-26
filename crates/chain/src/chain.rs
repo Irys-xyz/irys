@@ -95,7 +95,7 @@ pub struct IrysNodeCtx {
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
-    _stop_guard: StopGuard
+    _stop_guard: StopGuard,
 }
 
 impl IrysNodeCtx {
@@ -136,11 +136,11 @@ impl StopGuard {
     fn new() -> Self {
         StopGuard(Arc::new(AtomicBool::new(false)))
     }
-    
+
     fn mark_stopped(&self) {
         self.0.store(true, Ordering::SeqCst);
     }
-    
+
     fn is_stopped(&self) -> bool {
         self.0.load(Ordering::SeqCst)
     }
@@ -1336,7 +1336,7 @@ impl IrysNode {
             reth_shutdown_sender,
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),
-            _stop_guard: StopGuard::new()
+            _stop_guard: StopGuard::new(),
         };
         let server = run_server(ApiState {
             mempool: mempool_service,
