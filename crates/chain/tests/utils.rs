@@ -127,7 +127,7 @@ pub async fn mine_blocks(node_ctx: &IrysNodeCtx, blocks: usize) -> eyre::Result<
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
     for _ in 0..blocks {
         let poa_solution = capacity_chunk_solution(
-            node_ctx.config.mining_signer.address(),
+            node_ctx.node_config.mining_signer.address(),
             vdf_steps_guard.clone(),
             vdf_config,
             storage_config,
@@ -150,7 +150,7 @@ pub async fn mine_block(
     let vdf_config = &node_ctx.vdf_config;
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
     let poa_solution = capacity_chunk_solution(
-        node_ctx.config.mining_signer.address(),
+        node_ctx.node_config.mining_signer.address(),
         vdf_steps_guard.clone(),
         vdf_config,
         storage_config,
@@ -276,7 +276,7 @@ where
 {
     loop {
         let poa_solution = capacity_chunk_solution(
-            node_ctx.config.mining_signer.address(),
+            node_ctx.node_config.mining_signer.address(),
             vdf_steps_guard.clone(),
             vdf_config,
             storage_config,

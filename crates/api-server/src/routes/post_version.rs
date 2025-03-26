@@ -2,6 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ApiState;
 use actix_web::{
+    http::header::ContentType,
     web::{self, Json},
     HttpResponse,
 };
@@ -86,5 +87,7 @@ pub async fn post_version(
         message: Some(format!("Welcome to the network {}", node_name)),
     });
 
-    Ok(HttpResponse::Ok().json(response))
+    Ok(HttpResponse::Ok()
+        .content_type(ContentType::json())
+        .json(response))
 }

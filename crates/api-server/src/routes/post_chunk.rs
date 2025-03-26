@@ -1,4 +1,5 @@
 use actix_web::{
+    http::header::ContentType,
     web::{self, Json},
     HttpResponse,
 };
@@ -60,5 +61,7 @@ pub async fn post_chunk(
     }
 
     // If everything succeeded, return an HTTP 200 OK response
-    Ok(HttpResponse::Ok().finish())
+    Ok(HttpResponse::Ok()
+        .content_type(ContentType::json())
+        .finish())
 }

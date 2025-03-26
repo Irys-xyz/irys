@@ -1,45 +1,50 @@
 use std::path::PathBuf;
 
-use irys_chain::chain::start;
+use irys_chain::IrysNode;
 use irys_types::Config;
 use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> eyre::Result<()> {
     // init logging
     init_tracing().expect("initializing tracing should work");
     color_eyre::install().expect("color eyre could not be installed");
 
     // load the config
-    let config_file = std::env::var("CONFIG")
+    let config = std::env::var("CONFIG")
         .unwrap_or_else(|_| "config.toml".to_owned())
         .parse::<PathBuf>()
-        .expect("invalid file path");
-
-    let config = std::fs::read_to_string(config_file)
+        .expect("file path to be valid");
+    let config = std::fs::read_to_string(config)
         .map(|config_file| toml::from_str::<Config>(&config_file).expect("invalid config file"))
         .unwrap_or_else(|_err| {
             tracing::warn!("config file not provided, defaulting to testnet config");
             Config::testnet()
         });
 
+    // check env var to see if we are starting up in Genesis mode
+    let is_genesis = std::env::var("GENESIS").map(|_| true).unwrap_or(false);
+
     // start the node
     tracing::info!("starting the node");
-    let handle = start(config).await?;
-    handle.actor_addresses.start_mining()?;
-    std::thread::park();
+    let handle = IrysNode::new(config, is_genesis).init().await?;
+    handle.start_mining()?;
+
+    // wait for the node to be shut down
+    tokio::task::spawn_blocking(|| {
+        handle.reth_thread_handle.unwrap().join().unwrap();
+    })
+    .await?;
 
     Ok(())
 }
 
 fn init_tracing() -> eyre::Result<()> {
     let subscriber = Registry::default();
-    let filter = EnvFilter::new("info")
-        .add_directive("actix_web=info".parse()?)
-        .add_directive("actix=info".parse()?)
-        .add_directive(EnvFilter::from_default_env().to_string().parse()?);
+    let filter =
+        EnvFilter::new("info").add_directive(EnvFilter::from_default_env().to_string().parse()?);
 
     let output_layer = tracing_subscriber::fmt::layer()
         .with_line_number(true)

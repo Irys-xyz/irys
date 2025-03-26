@@ -1,4 +1,4 @@
-//! A utility module for calculating netwokrk fees, costs for storing different amounts of data, and EMA for blocks.
+//! A utility module for calculating network fees, costs for storing different amounts of data, and EMA for blocks.
 //!
 //! Core data types:
 //! - `Amount<(CostPerGb, Usd)>` - Cost in $USD of storing 1GB on irys (per single replica), data part of the config
@@ -389,9 +389,9 @@ impl Amount<(IrysPrice, Usd)> {
     /// Whenever any of the math operations fail due to bounds checks.
     #[tracing::instrument(err)]
     pub fn sub_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
-        // total = amount * (1 - percentage) / SCALE
-        let one_plus = safe_sub(BPS_SCALE, percentage.amount)?;
-        let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
+        // total = (amount * (1 - percentage)) / BPS_SCALE
+        let one_minus = safe_sub(BPS_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_minus, BPS_SCALE)?;
         Ok(Self::new(total))
     }
 }
@@ -754,6 +754,84 @@ mod tests {
 
             let result = current_irys_price.calculate_ema(total_past_blocks, last_block_ema);
             assert!(result.is_err());
+        }
+    }
+
+    mod multipliers {
+        use super::*;
+        use eyre::Result;
+        use rust_decimal_macros::dec;
+
+        #[test]
+        fn test_add_multiplier_normal_case() -> Result<()> {
+            // Original amount = 100.0 usd
+            let original = Amount::<(IrysPrice, Usd)>::token(dec!(100.0))?;
+            // +10%
+            let ten_percent = Amount::<Percentage>::percentage(dec!(0.10))?;
+
+            // Action
+            let result = original.add_multiplier(ten_percent)?;
+
+            // Convert to decimal for comparison
+            let actual = result.token_to_decimal()?;
+            let expected = dec!(110.0); // 100 + 10%
+
+            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
+            Ok(())
+        }
+
+        #[test]
+        fn test_add_multiplier_zero_percent() -> Result<()> {
+            // Original amount = 42 usd
+            let original = Amount::<(IrysPrice, Usd)>::token(dec!(42.0))?;
+            let zero_percent = Amount::<Percentage>::percentage(dec!(0.0))?;
+
+            let result = original.add_multiplier(zero_percent)?;
+
+            let actual = result.token_to_decimal()?;
+            let expected = dec!(42.0);
+
+            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
+            Ok(())
+        }
+
+        #[test]
+        fn test_sub_multiplier_normal_case() -> Result<()> {
+            // Original amount = 100.0 usd
+            let original = Amount::<(IrysPrice, Usd)>::token(dec!(100.0))?;
+            // -5%
+            let five_percent = Amount::<Percentage>::percentage(dec!(0.05))?;
+
+            let result = original.sub_multiplier(five_percent)?;
+            let actual = result.token_to_decimal()?;
+            let expected = dec!(95.0);
+
+            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
+            Ok(())
+        }
+
+        #[test]
+        fn test_sub_multiplier_results_in_zero() -> Result<()> {
+            // If original is 0, sub X% remains 0
+            let original = Amount::<(IrysPrice, Usd)>::token(dec!(0.0))?;
+            let any_percent = Amount::<Percentage>::percentage(dec!(0.30))?; // 30%
+
+            let result = original.sub_multiplier(any_percent)?;
+            let actual = result.token_to_decimal()?;
+            let expected = dec!(0.0);
+
+            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
+            Ok(())
+        }
+
+        #[test]
+        fn test_sub_multiplier_above_100_percent_fails() {
+            // If the percentage is above 1.0 (100%), sub_multiplier should error out.
+            let original = Amount::<(IrysPrice, Usd)>::token(dec!(50.0)).unwrap();
+            let above_one = Amount::<Percentage>::percentage(dec!(1.10)).unwrap(); // 110%
+
+            let result = original.sub_multiplier(above_one);
+            assert!(result.is_err(), "Expected error for sub > 100%");
         }
     }
 }

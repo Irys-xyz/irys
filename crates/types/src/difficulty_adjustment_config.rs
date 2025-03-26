@@ -37,13 +37,14 @@ pub fn calculate_initial_difficulty(
     difficulty_config: &DifficultyAdjustmentConfig,
     storage_config: &StorageConfig,
     storage_module_count: u64,
-) -> Result<U256, &'static str> {
+) -> eyre::Result<U256> {
     let hashes_per_sec = storage_config.num_chunks_in_recall_range * storage_module_count;
     let block_time = difficulty_config.target_block_time;
 
-    if hashes_per_sec == 0 || block_time == 0 {
-        return Err("Input values cannot be zero");
-    }
+    eyre::ensure!(
+        !(hashes_per_sec == 0 || block_time == 0),
+        "Input values cannot be zero"
+    );
 
     let max_diff = U256::MAX;
     let block_hashrate = U256::from(hashes_per_sec) * U256::from(block_time);

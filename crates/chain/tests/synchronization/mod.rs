@@ -16,7 +16,7 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[actix_web::test]
-async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
+async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     let mut testnet_config = Config::testnet();
     testnet_config.chunk_size = 32;
 
@@ -54,7 +54,7 @@ async fn serial_should_resume_from_the_same_block() -> eyre::Result<()> {
     )
     .await?;
 
-    let http_url = "http://127.0.0.1:8080";
+    let http_url = format!("http://127.0.0.1:{}", node.config.port);
 
     // server should be running
     // check with request to `/v1/info`

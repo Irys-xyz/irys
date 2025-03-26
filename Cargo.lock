@@ -4042,6 +4042,7 @@ dependencies = [
  "semver 1.0.24",
  "serde",
  "serde_json",
+ "socket2 0.5.8",
  "tracing",
 ]
 
@@ -4105,8 +4106,11 @@ dependencies = [
  "reth-primitives",
  "reth-tracing",
  "rstest",
+ "rust_decimal",
+ "rust_decimal_macros",
  "serde_json",
  "sha2 0.10.8",
+ "tempfile",
  "test-fuzz",
  "test-log",
  "tokio",

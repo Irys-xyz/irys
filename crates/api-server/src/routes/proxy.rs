@@ -1,8 +1,10 @@
 use actix_web::{
-    web::{Data, Payload},
+    web::{self, Data, Payload},
     HttpRequest, HttpResponse,
 };
 use awc::Client;
+
+use crate::ApiState;
 
 #[derive(Debug)]
 pub enum ProxyError {
@@ -36,9 +38,12 @@ pub async fn proxy(
     req: HttpRequest,
     payload: Payload,
     client: Data<Client>,
+    state: web::Data<ApiState>,
 ) -> Result<HttpResponse, ProxyError> {
-    // TODO: make this configurable!
-    let target_uri = "http://localhost:8545";
+    let target_uri = state
+        .reth_http_url
+        .as_ref()
+        .ok_or(ProxyError::MethodNotAllowed)?;
 
     // Create a new client request
     let mut client_req = match *req.method() {
