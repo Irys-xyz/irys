@@ -95,6 +95,7 @@ pub struct IrysNodeCtx {
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
+    _stop_guard: StopGuard
 }
 
 impl IrysNodeCtx {
@@ -104,6 +105,7 @@ impl IrysNodeCtx {
         let _ = self.reth_shutdown_sender.send(()).await;
         let _ = self.reth_thread_handle.unwrap().join();
         debug!("Main actor thread and reth thread stopped");
+        self._stop_guard.mark_stopped();
     }
 
     pub fn start_mining(&self) -> eyre::Result<()> {
@@ -121,6 +123,41 @@ impl IrysNodeCtx {
 
         info!("Sync complete.");
         Ok(())
+    }
+}
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// Shared stop guard that can be cloned
+#[derive(Debug)]
+struct StopGuard(Arc<AtomicBool>);
+
+impl StopGuard {
+    fn new() -> Self {
+        StopGuard(Arc::new(AtomicBool::new(false)))
+    }
+    
+    fn mark_stopped(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+    
+    fn is_stopped(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for StopGuard {
+    fn drop(&mut self) {
+        // Only check if this is the last reference to the guard
+        if Arc::strong_count(&self.0) == 1 && !self.is_stopped() {
+            panic!("IrysNodeCtx must be stopped before all instances are dropped");
+        }
+    }
+}
+
+impl Clone for StopGuard {
+    fn clone(&self) -> Self {
+        StopGuard(Arc::clone(&self.0))
     }
 }
 
@@ -249,7 +286,7 @@ pub async fn start_irys_node(
                     &reth_arbiter.handle(),
                     |_| reth_service,
                 ));
-                arbiters.push(reth_arbiter.into());
+                arbiters.push(ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()));
 
                 debug!(
                     "JESSEDEBUG setting head to block {} ({})",
@@ -389,7 +426,7 @@ pub async fn start_irys_node(
                     |_| block_tree_service,
                 ));
                 let block_tree_service = BlockTreeService::from_registry();
-                arbiters.push(block_tree_arbiter.into());
+                arbiters.push(ArbiterHandle::new(block_tree_arbiter, "block_tree_arbiter".to_string()));
 
                 let block_tree_guard = block_tree_service
                     .send(GetBlockTreeGuardMessage)
@@ -403,7 +440,7 @@ pub async fn start_irys_node(
                     &peer_list_arbiter.handle(),
                     |_| peer_list_service,
                 ));
-                arbiters.push(peer_list_arbiter.into());
+                arbiters.push(ArbiterHandle::new(peer_list_arbiter, "peer_list_arbiter".to_string()));
 
                 let mempool_service = MempoolService::new(
                     irys_db.clone(),
@@ -421,7 +458,7 @@ pub async fn start_irys_node(
                     |_| mempool_service,
                 ));
                 let mempool_addr = MempoolService::from_registry();
-                arbiters.push(mempool_arbiter.into());
+                arbiters.push(ArbiterHandle::new(mempool_arbiter, "mempool_arbiter".to_string()));
 
                 let chunk_migration_service = ChunkMigrationService::new(
                     block_index.clone(),
@@ -451,7 +488,7 @@ pub async fn start_irys_node(
                     &validation_arbiter.handle(),
                     |_| validation_service,
                 ));
-                arbiters.push(validation_arbiter.into());
+                arbiters.push(ArbiterHandle::new(validation_arbiter, "validation_arbiter".to_string()));
 
                 let (global_step_number, seed) = vdf_steps_guard.read().get_last_step_and_seed();
                 info!("Starting at global step number: {}", global_step_number);
@@ -471,7 +508,7 @@ pub async fn start_irys_node(
                     &block_discovery_arbiter.handle(),
                     |_| block_discovery_actor,
                 );
-                arbiters.push(block_discovery_arbiter.into());
+                arbiters.push(ArbiterHandle::new(block_discovery_arbiter, "block_discovery_arbiter".to_string()));
 
                 // set up the price oracle
                 let price_oracle = match config.oracle_config {
@@ -503,7 +540,7 @@ pub async fn start_irys_node(
                     BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
                         block_producer_actor
                     });
-                arbiters.push(block_producer_arbiter.into());
+                arbiters.push(ArbiterHandle::new(block_producer_arbiter, "block_producer_arbiter".to_string()));
 
                 let mut part_actors = Vec::new();
 
@@ -535,7 +572,7 @@ pub async fn start_irys_node(
                         &part_arbiter.handle(),
                         |_| partition_mining_actor,
                     ));
-                    arbiters.push(ArbiterHandle::new(part_arbiter));
+                    arbiters.push(ArbiterHandle::new(part_arbiter, "part_arbiter".to_string()));
                 }
 
                 // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
@@ -598,7 +635,8 @@ pub async fn start_irys_node(
                         broadcast_mining_service.clone(),
                         vdf_service.clone(),
                         atomic_global_step_number.clone(),
-                    )
+                    );
+                    debug!("VDF thread exiting...")
                 });
 
                 let actor_addresses = ActorAddresses {
@@ -633,6 +671,7 @@ pub async fn start_irys_node(
                     reth_shutdown_sender,
                     reth_thread_handle: None,
                     block_tree_guard: block_tree_guard.clone(),
+                    _stop_guard: StopGuard::new()
                 });
 
                 let server = run_server(ApiState {
@@ -658,11 +697,18 @@ pub async fn start_irys_node(
                 });
 
                 server.await.unwrap();
+                info!("API server stopped");
                 server_stop_handle.await.unwrap();
 
                 debug!("Stopping actors");
                 for arbiter in arbiters {
+
+                    let name = arbiter.name.clone();
+                    debug!("stopping {}", &name);
+
                     arbiter.stop_and_join();
+                    debug!("stopped {}", &name);
+
                 }
                 debug!("Actors stopped");
 
@@ -674,11 +720,10 @@ pub async fn start_irys_node(
                 vdf_thread_handler.join().unwrap();
 
                 debug!("VDF thread finished");
-
                 reth_node
             });
             debug!("Main actor thread finished");
-
+           
             reth_node_handle
         })?;
 
@@ -981,12 +1026,10 @@ impl IrysNode {
                         server_stop_handle.await.unwrap();
 
                         debug!("Stopping actors");
-                        debug!("Stopping actors");
                         for arbiter in arbiters {
                             arbiter.stop();
                             let _ = arbiter.join();
                         }
-                        debug!("Actors stopped");
                         debug!("Actors stopped");
 
                         // Send shutdown signal
@@ -1293,6 +1336,7 @@ impl IrysNode {
             reth_shutdown_sender,
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),
+            _stop_guard: StopGuard::new()
         };
         let server = run_server(ApiState {
             mempool: mempool_service,
