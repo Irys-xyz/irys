@@ -5,8 +5,7 @@ use reth_primitives::GenesisAccount;
 use tracing::info;
 
 use crate::utils::{
-    add_tx, get_height, get_tx_header, mine, mine_one, start_node, start_node_config,
-    wait_until_height,
+    add_tx, get_block_height, get_height, get_tx_header, mine, mine_one, start_node, start_node_config, wait_until_height
 };
 
 #[actix::test]
@@ -32,6 +31,8 @@ async fn test_mine() {
     mine(&node_ctx, blocks).await.unwrap();
     let next_height = get_height(&node_ctx);
     assert_eq!(next_height, height + blocks as u64);
+    let block = get_block_height(&node_ctx, next_height, false).unwrap();
+    assert_eq!(block.height, next_height);
     node_ctx.stop().await;
 }
 

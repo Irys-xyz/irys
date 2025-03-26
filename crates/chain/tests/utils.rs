@@ -260,6 +260,27 @@ pub fn get_tx_header(node_ctx: &IrysNodeCtx, tx_id: &H256) -> eyre::Result<IrysT
     }
 }
 
+pub fn get_block_height(node_ctx: &IrysNodeCtx, height: u64, include_chunk: bool) -> eyre::Result<IrysBlockHeader> {
+    if let Some(block) = node_ctx
+        .block_index_guard
+        .read()
+        .get_item(height as usize) {
+
+        match &node_ctx
+            .db
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk))? {
+            Some(db_irys_block) => {
+                Ok(db_irys_block.clone())
+            }
+            None => {
+                Err(eyre::eyre!("Block at height {} not found", height))
+            }
+        }
+    } else {
+        Err(eyre::eyre!("Block item not found at height {}", height))
+    }
+}
+
 /// Waits for the provided future to resolve, and if it doesn't after `timeout_duration`,
 /// triggers the building/mining of a block, and then waits again.
 /// designed for use with calls that expect to be able to send and confirm a tx in a single exposed future
