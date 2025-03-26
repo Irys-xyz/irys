@@ -3,7 +3,7 @@ use irys_config::IrysNodeConfig;
 use irys_types::Config;
 
 #[actix_web::test]
-async fn serial_data_promotion_test() {
+async fn heavy_data_promotion_test() {
     use actix_web::{
         middleware::Logger,
         test::{self, call_service, TestRequest},

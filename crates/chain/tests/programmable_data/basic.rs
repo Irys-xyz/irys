@@ -43,7 +43,7 @@ const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db90
 const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
 #[actix_web::test]
-async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
+async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
     let mut testnet_config = Config::testnet();
     testnet_config.chunk_size = 32;

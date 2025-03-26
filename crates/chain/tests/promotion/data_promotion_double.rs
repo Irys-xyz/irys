@@ -8,7 +8,7 @@ use irys_types::Config;
 use tracing::debug;
 
 #[actix_web::test]
-async fn serial_double_root_data_promotion_test() {
+async fn heavy_double_root_data_promotion_test() {
     use std::time::Duration;
 
     use actix_web::{

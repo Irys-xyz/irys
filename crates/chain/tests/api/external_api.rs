@@ -64,7 +64,7 @@ async fn version_endpoint_request(
 }
 
 #[actix::test]
-async fn serial_external_api() -> eyre::Result<()> {
+async fn heavy_external_api() -> eyre::Result<()> {
     let ctx = setup().await?; // start api service
 
     let address = format!("http://127.0.0.1:{}", ctx.node.config.port);

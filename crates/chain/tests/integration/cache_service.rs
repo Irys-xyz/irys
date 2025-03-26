@@ -21,8 +21,8 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[actix_web::test]
-async fn serial_test_cache_pruning() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("serial_test_cache_pruning"), false);
+async fn heavy_test_cache_pruning() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("heavy_test_cache_pruning"), false);
     let mut testnet_config = Config::testnet();
     testnet_config.chunk_size = 32;
     testnet_config.chunk_migration_depth = 2;

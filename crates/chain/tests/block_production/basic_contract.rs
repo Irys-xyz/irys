@@ -22,7 +22,7 @@ sol!(
     "../../fixtures/contracts/out/IrysERC20.sol/IrysERC20.json"
 );
 #[tokio::test]
-async fn serial_test_erc20() -> eyre::Result<()> {
+async fn heavy_test_erc20() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_erc20"), false);
     let testnet_config = Config::testnet();
     let mut config = IrysNodeConfig::new(&testnet_config);
