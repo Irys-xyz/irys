@@ -1,17 +1,26 @@
+use actix::MailboxError;
+use eyre::Error;
 use futures::future::select;
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_actors::block_validation;
-use irys_chain::IrysNodeCtx;
+use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
+use irys_chain::{start_irys_node, IrysNodeCtx};
+use irys_config::IrysNodeConfig;
+use irys_database::tx_header_by_txid;
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_storage::ii;
+use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::utils::tempfile::TempDir;
+use irys_types::irys::IrysSigner;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, H256List, H256,
 };
-use irys_types::{Config, StorageConfig, TxChunkOffset, VDFStepsConfig};
+use irys_types::{Config, IrysTransactionHeader, StorageConfig, TxChunkOffset, VDFStepsConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
+use reth_primitives::irys_primitives::IrysTxId;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
@@ -154,6 +163,104 @@ pub async fn mine_block(
         .block_producer
         .send(SolutionFoundMessage(poa_solution.clone()))
         .await?
+}
+
+pub async fn start_node(name: &str) -> (IrysNodeCtx, TempDir) {
+    start_node_config(name, None, None).await
+}
+
+/// need to return tmp_dir to prevent it from being dropped
+pub async fn start_node_config(name: &str, config: Option<Config>, node_config: Option<IrysNodeConfig>) -> (IrysNodeCtx, TempDir) {
+    std::env::set_var("RUST_LOG", "debug");
+    let temp_dir = setup_tracing_and_temp_dir(Some(name), false);
+    let testnet_config = config.unwrap_or_else(|| Config::testnet());
+    let storage_config = StorageConfig::new(&testnet_config);
+    let mut config = node_config.unwrap_or_else(|| IrysNodeConfig::new(&testnet_config));
+    config.base_directory = temp_dir.path().to_path_buf();
+    (start_irys_node(
+        config,
+        storage_config,
+        testnet_config.clone(),
+    )
+    .await
+    .unwrap(),
+    temp_dir)
+}
+
+pub async fn wait_until_height(
+    node_ctx: &IrysNodeCtx,
+    target_height: u64,
+    max_seconds: usize,
+) {
+    let mut retries = 0;
+    let max_retries = max_seconds; // 1 second per retry
+    while node_ctx.block_index_guard.read().latest_height() < target_height && retries < max_retries {
+        sleep(Duration::from_secs(1)).await; 
+        retries += 1; 
+    }
+    if retries == max_retries {
+        panic!("Failed to reach target height after {} retries", retries);
+    } else {
+        info!("got block after {} seconds and {} retries", max_seconds, &retries);
+    }
+}
+
+pub fn get_height(node_ctx: &IrysNodeCtx) -> u64 {
+    node_ctx.block_index_guard.read().latest_height()
+}
+
+pub async fn mine_one(
+    node_ctx: &IrysNodeCtx,
+) -> eyre::Result<()> {
+    mine(node_ctx, 1).await?;
+    Ok(())
+}
+
+pub async fn mine(
+    node_ctx: &IrysNodeCtx,
+    num_blocks: usize,
+) -> eyre::Result<()> {
+    let height = get_height(node_ctx);
+    node_ctx.actor_addresses.set_mining(true)?;
+    wait_until_height(node_ctx, height + num_blocks as u64, 15*num_blocks).await;
+    node_ctx.actor_addresses.set_mining(false)?;
+    Ok(())
+}
+
+// Reasons tx could fail to be added to mempool
+#[derive(Debug)]
+pub enum AddTxError {
+    CreateTx(eyre::Report),
+    TxIngress(TxIngressError),
+    Mailbox(MailboxError),
+}
+
+pub async fn add_tx(
+    node_ctx: &IrysNodeCtx,
+    account: &IrysSigner,
+    data: Vec<u8>,
+) -> Result<IrysTransaction,AddTxError> {
+    let tx = account.create_transaction(data, None).map_err(AddTxError::CreateTx)?;
+    let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
+
+    match node_ctx.actor_addresses
+        .mempool
+        .send(TxIngressMessage(tx.header.clone()))
+        .await {
+            Ok(Ok(())) => return Ok(tx),
+            Ok(Err(tx_error)) => 
+                return Err(AddTxError::TxIngress(tx_error)),
+            Err(e) => 
+                return Err(AddTxError::Mailbox(e))
+        };    
+}
+
+pub fn get_tx_header(node_ctx: &IrysNodeCtx, tx_id: &H256) -> eyre::Result<IrysTransactionHeader> {
+    match node_ctx.db.view_eyre(|tx| tx_header_by_txid(tx, tx_id)) {
+        Ok(Some(tx_header)) => Ok(tx_header),
+        Ok(None) => Err(eyre::eyre!("No tx header found for txid {:?}", tx_id)),
+        Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
+    }
 }
 
 /// Waits for the provided future to resolve, and if it doesn't after `timeout_duration`,

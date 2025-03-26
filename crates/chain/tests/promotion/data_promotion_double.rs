@@ -1,6 +1,5 @@
-use crate::utils::{mine_blocks, post_chunk};
+use crate::utils::{mine_blocks, post_chunk, start_node_config};
 use awc::http::StatusCode;
-use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_database::Ledger;
 
@@ -22,7 +21,6 @@ async fn serial_double_root_data_promotion_test() {
     use irys_actors::packing::wait_for_packing;
     use irys_api_server::{routes, ApiState};
     use irys_database::{tables::IngressProofs, walk_all};
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset, StorageConfig,
     };
@@ -44,16 +42,11 @@ async fn serial_double_root_data_promotion_test() {
         chunk_migration_depth: 1, // Testnet / single node config
         ..Config::testnet()
     };
-    testnet_config.chunk_size = chunk_size;
 
-    let storage_config = StorageConfig::new(&testnet_config);
-
-    let temp_dir = setup_tracing_and_temp_dir(Some("double_root_data_promotion_test"), false);
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
     let signer = IrysSigner::random_signer(&testnet_config);
     let signer2 = IrysSigner::random_signer(&testnet_config);
 
+    let mut config = IrysNodeConfig::new(&testnet_config);
     config.extend_genesis_accounts(vec![
         (
             signer.address(),
@@ -70,15 +63,8 @@ async fn serial_double_root_data_promotion_test() {
             },
         ),
     ]);
-
     // This will create 3 storage modules, one for submit, one for publish, and one for capacity
-    let node_context = start_irys_node(
-        config.clone(),
-        storage_config.clone(),
-        testnet_config.clone(),
-    )
-    .await
-    .unwrap();
+    let (node_context, _tmp_dir) =  start_node_config("serial_double_root_data_promotion_test", Some(testnet_config.clone()), Some(config)).await;
 
     wait_for_packing(
         node_context.actor_addresses.packing.clone(),
@@ -343,7 +329,7 @@ async fn serial_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
@@ -353,7 +339,7 @@ async fn serial_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
@@ -363,7 +349,7 @@ async fn serial_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
@@ -551,7 +537,7 @@ async fn serial_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
@@ -561,7 +547,7 @@ async fn serial_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
@@ -571,7 +557,7 @@ async fn serial_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
