@@ -11,7 +11,7 @@ use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
-    Ledger,
+    DataLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
@@ -19,9 +19,9 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
-    Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
-    IrysTransactionHeader, PoaData, Signature, StorageTransactionLedger, TxIngressProof,
-    VDFLimiterInfo, H256, U256,
+    Base64, DataTransactionLedger, DifficultyAdjustmentConfig, H256List, IngressProofsList,
+    IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TxIngressProof, VDFLimiterInfo,
+    H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -232,7 +232,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // Publish Ledger Transactions
             let publish_chunks_added = calculate_chunks_added(&publish_txs, chunk_size);
-            let publish_max_chunk_offset =  prev_block_header.storage_ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
+            let publish_max_chunk_offset =  prev_block_header.data_ledgers[DataLedger::Publish].max_chunk_offset + publish_chunks_added;
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
             // Submit Ledger Transactions    
@@ -240,7 +240,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
 
             let submit_chunks_added = calculate_chunks_added(&submit_txs, chunk_size);
-            let submit_max_chunk_offset = prev_block_header.storage_ledgers[Ledger::Submit].max_chunk_offset + submit_chunks_added;
+            let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
 
             let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -324,20 +324,20 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
                 system_ledgers: vec![],
-                storage_ledgers: vec![
+                data_ledgers: vec![
                     // Permanent Publish Ledger
-                    StorageTransactionLedger {
-                        ledger_id: Ledger::Publish.into(),
-                        tx_root: StorageTransactionLedger::merklize_tx_root(&publish_txs).0,
+                    DataTransactionLedger {
+                        ledger_id: DataLedger::Publish.into(),
+                        tx_root: DataTransactionLedger::merklize_tx_root(&publish_txs).0,
                         tx_ids: H256List(publish_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
                         max_chunk_offset: publish_max_chunk_offset,
                         expires: None,
                         proofs: opt_proofs,
                     },
                     // Term Submit Ledger
-                    StorageTransactionLedger {
-                        ledger_id: Ledger::Submit.into(),
-                        tx_root: StorageTransactionLedger::merklize_tx_root(&submit_txs).0,
+                    DataTransactionLedger {
+                        ledger_id: DataLedger::Submit.into(),
+                        tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
                         tx_ids: H256List(submit_txids.clone()),
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),

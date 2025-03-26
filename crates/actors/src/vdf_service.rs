@@ -163,7 +163,7 @@ mod tests {
 
     use actix::SystemRegistry;
     use irys_config::IrysNodeConfig;
-    use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized, Ledger};
+    use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized, DataLedger};
     use irys_storage::ii;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{H256List, IrysBlockHeader, StorageConfig, H256};
@@ -265,7 +265,7 @@ mod tests {
             .unwrap();
 
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.storage_ledgers[Ledger::Submit].max_chunk_offset = 0;
+        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset = 0;
 
         let now = Instant::now();
         // index and store in db blocks

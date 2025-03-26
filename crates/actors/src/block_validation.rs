@@ -6,7 +6,7 @@ use crate::{
 };
 use base58::ToBase58;
 use eyre::ensure;
-use irys_database::Ledger;
+use irys_database::DataLedger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
 use irys_types::{
@@ -346,7 +346,7 @@ pub fn poa_is_valid(
             + poa.partition_chunk_offset as u64;
 
         // ledger data -> block
-        let ledger = Ledger::try_from(ledger_id).unwrap();
+        let ledger = DataLedger::try_from(ledger_id).unwrap();
 
         let bb = block_index_guard
             .read()
@@ -459,8 +459,9 @@ mod tests {
     use irys_database::{BlockIndex, Initialized};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, Config, H256List,
-        IrysTransaction, IrysTransactionHeader, Signature, StorageTransactionLedger, H256, U256,
+        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, Config,
+        DataTransactionLedger, H256List, IrysTransaction, IrysTransactionHeader, Signature, H256,
+        U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -557,7 +558,7 @@ mod tests {
         let ledgers = ledgers_guard.read();
         debug!("ledgers: {:?}", ledgers);
 
-        let sub_slots = ledgers.get_slots(Ledger::Submit);
+        let sub_slots = ledgers.get_slots(DataLedger::Submit);
 
         let partition_hash = sub_slots[0].partitions[0];
         let msg = BlockFinalizedMessage {
@@ -701,7 +702,7 @@ mod tests {
 
         let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
 
-        let (tx_root, tx_path) = StorageTransactionLedger::merklize_tx_root(&tx_headers);
+        let (tx_root, tx_path) = DataTransactionLedger::merklize_tx_root(&tx_headers);
 
         let poa = PoaData {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
@@ -725,10 +726,10 @@ mod tests {
             miner_address: context.miner_address,
             signature: Signature::test_signature().into(),
             timestamp: 1000,
-            storage_ledgers: vec![
+            data_ledgers: vec![
                 // Permanent Publish Ledger
-                StorageTransactionLedger {
-                    ledger_id: Ledger::Publish.into(),
+                DataTransactionLedger {
+                    ledger_id: DataLedger::Publish.into(),
                     tx_root: H256::zero(),
                     tx_ids: H256List(Vec::new()),
                     max_chunk_offset: 0,
@@ -736,8 +737,8 @@ mod tests {
                     proofs: None,
                 },
                 // Term Submit Ledger
-                StorageTransactionLedger {
-                    ledger_id: Ledger::Submit.into(),
+                DataTransactionLedger {
+                    ledger_id: DataLedger::Submit.into(),
                     tx_root,
                     tx_ids: H256List(data_tx_ids.clone()),
                     max_chunk_offset: 9,
@@ -785,7 +786,7 @@ mod tests {
         // ledger data -> block
         let bb = block_index_guard
             .read()
-            .get_block_bounds(Ledger::Submit, ledger_chunk_offset);
+            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset);
         info!("block bounds: {:?}", bb);
 
         assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");

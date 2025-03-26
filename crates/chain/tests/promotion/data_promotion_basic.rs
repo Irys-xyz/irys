@@ -15,7 +15,7 @@ async fn heavy_data_promotion_test() {
     use base58::ToBase58;
     use irys_actors::packing::wait_for_packing;
     use irys_api_server::{routes, ApiState};
-    use irys_database::Ledger;
+    use irys_database::DataLedger;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset, StorageConfig,

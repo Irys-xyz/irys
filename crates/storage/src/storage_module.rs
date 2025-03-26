@@ -46,7 +46,7 @@ use irys_database::{
         clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
         get_start_offsets_by_data_root, get_tx_path_by_offset, tables::RelativeStartOffsets,
     },
-    Ledger,
+    DataLedger,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_types::{
@@ -1168,7 +1168,7 @@ fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {
 /// Retrieves all the storage modules overlapped by a range in a given ledger
 pub fn get_overlapped_storage_modules(
     storage_modules: &[Arc<StorageModule>],
-    ledger: Ledger,
+    ledger: DataLedger,
     tx_chunk_range: &LedgerChunkRange,
 ) -> Vec<Arc<StorageModule>> {
     storage_modules
@@ -1190,7 +1190,7 @@ pub fn get_overlapped_storage_modules(
 /// a storage module that overlaps the offset
 pub fn get_storage_module_at_offset(
     storage_modules: &[Arc<StorageModule>],
-    ledger: Ledger,
+    ledger: DataLedger,
     chunk_offset: LedgerChunkOffset,
 ) -> Option<Arc<StorageModule>> {
     storage_modules

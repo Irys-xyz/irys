@@ -26,7 +26,7 @@ use actix_web::{
     test,
 };
 use awc::{body::MessageBody, http::StatusCode};
-use irys_database::{tables::IrysBlockHeaders, Ledger};
+use irys_database::{tables::IrysBlockHeaders, DataLedger};
 use irys_types::{
     Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
     UnpackedChunk,
@@ -237,7 +237,7 @@ pub async fn post_chunk<T, B>(
 /// Returns `Some(PackedChunk)` if found (HTTP 200), `None` otherwise.
 pub async fn get_chunk<T, B>(
     app: &T,
-    ledger: Ledger,
+    ledger: DataLedger,
     chunk_offset: LedgerChunkOffset,
 ) -> Option<PackedChunk>
 where
@@ -266,7 +266,7 @@ where
 /// Returns None if the transaction isn't found in any block.
 pub fn get_block_parent(
     txid: H256,
-    ledger: Ledger,
+    ledger: DataLedger,
     db: &DatabaseProvider,
 ) -> Option<IrysBlockHeader> {
     let read_tx = db
@@ -299,7 +299,7 @@ pub fn get_block_parent(
 
     // Loop tough all the blocks and find the one that contains the txid
     for block_header in block_headers.values() {
-        if block_header.storage_ledgers[ledger]
+        if block_header.data_ledgers[ledger]
             .tx_ids
             .0
             .contains(&txid)
@@ -323,7 +323,7 @@ pub async fn verify_published_chunk<T, B>(
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
     B: MessageBody,
 {
-    if let Some(packed_chunk) = get_chunk(&app, Ledger::Publish, chunk_offset).await {
+    if let Some(packed_chunk) = get_chunk(&app, DataLedger::Publish, chunk_offset).await {
         let unpacked_chunk = unpack(
             &packed_chunk,
             storage_config.entropy_packing_iterations,

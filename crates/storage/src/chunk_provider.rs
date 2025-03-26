@@ -1,5 +1,5 @@
 use eyre::OptionExt;
-use irys_database::Ledger;
+use irys_database::DataLedger;
 use irys_types::{
     ChunkFormat, DataRoot, LedgerChunkOffset, PackedChunk, StorageConfig, TxChunkOffset,
 };
@@ -34,7 +34,7 @@ impl ChunkProvider {
     /// Retrieves a chunk from a ledger
     pub fn get_chunk_by_ledger_offset(
         &self,
-        ledger: Ledger,
+        ledger: DataLedger,
         ledger_offset: LedgerChunkOffset,
     ) -> eyre::Result<Option<PackedChunk>> {
         // Get basic chunk info
@@ -46,7 +46,7 @@ impl ChunkProvider {
     /// Retrieves a chunk by [`DataRoot`]
     pub fn get_chunk_by_data_root(
         &self,
-        ledger: Ledger,
+        ledger: DataLedger,
         data_root: DataRoot,
         data_tx_offset: TxChunkOffset,
     ) -> eyre::Result<Option<ChunkFormat>> {
@@ -97,7 +97,7 @@ impl ChunkProvider {
 
     pub fn get_ledger_offsets_for_data_root(
         &self,
-        ledger: Ledger,
+        ledger: DataLedger,
         data_root: DataRoot,
     ) -> eyre::Result<Option<Vec<u64>>> {
         debug!(
@@ -146,8 +146,8 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-        partition_chunk_offset_ie, Base64, Config, LedgerChunkRange, PartitionChunkOffset,
-        StorageTransactionLedger, UnpackedChunk,
+        partition_chunk_offset_ie, Base64, Config, DataTransactionLedger, LedgerChunkRange,
+        PartitionChunkOffset, UnpackedChunk,
     };
     use nodit::interval::{ie, ii};
     use rand::Rng as _;
@@ -189,8 +189,7 @@ mod tests {
 
         // fake the tx_path
         // Create a tx_root (and paths) from the tx
-        let (_tx_root, proofs) =
-            StorageTransactionLedger::merklize_tx_root(&vec![tx.header.clone()]);
+        let (_tx_root, proofs) = DataTransactionLedger::merklize_tx_root(&vec![tx.header.clone()]);
 
         let tx_path = proofs[0].proof.clone();
 
@@ -231,7 +230,7 @@ mod tests {
 
         for original_chunk in unpacked_chunks {
             let chunk = chunk_provider
-                .get_chunk_by_data_root(Ledger::Publish, data_root, original_chunk.tx_offset)?
+                .get_chunk_by_data_root(DataLedger::Publish, data_root, original_chunk.tx_offset)?
                 .unwrap();
             // let chunk_size = config.chunk_size as usize;
             // let start = chunk_offset as usize * chunk_size;

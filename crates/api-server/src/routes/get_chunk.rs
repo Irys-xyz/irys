@@ -5,7 +5,7 @@ use actix_web::{
     HttpResponse,
 };
 
-use irys_database::Ledger;
+use irys_database::DataLedger;
 use irys_types::{ChunkFormat, H256};
 use serde::Deserialize;
 
@@ -19,7 +19,7 @@ pub async fn get_chunk_by_ledger_offset(
     state: web::Data<ApiState>,
     path: web::Path<LedgerChunkApiPath>,
 ) -> actix_web::Result<HttpResponse> {
-    let ledger = match Ledger::try_from(path.ledger_id) {
+    let ledger = match DataLedger::try_from(path.ledger_id) {
         Ok(l) => l,
         Err(e) => return Ok(HttpResponse::BadRequest().body(format!("Invalid ledger id: {}", e))),
     };
@@ -49,7 +49,7 @@ pub async fn get_chunk_by_data_root_offset(
     state: web::Data<ApiState>,
     path: web::Path<DataRootChunkApiPath>,
 ) -> actix_web::Result<HttpResponse> {
-    let ledger = match Ledger::try_from(path.ledger_id) {
+    let ledger = match DataLedger::try_from(path.ledger_id) {
         Ok(l) => l,
         Err(e) => return Ok(HttpResponse::BadRequest().body(format!("Invalid ledger id: {}", e))),
     };
