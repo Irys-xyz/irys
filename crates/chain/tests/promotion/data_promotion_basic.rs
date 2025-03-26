@@ -3,7 +3,7 @@ use irys_config::IrysNodeConfig;
 use irys_types::Config;
 
 #[actix_web::test]
-async fn serial_data_promotion_test() {
+async fn heavy_data_promotion_test() {
     use actix_web::{
         middleware::Logger,
         test::{self, call_service, TestRequest},
@@ -75,10 +75,11 @@ async fn serial_data_promotion_test() {
 
     let app_state = ApiState {
         reth_provider: None,
+        reth_http_url: None,
         block_index: None,
         block_tree: None,
         db: node_context.db.clone(),
-        mempool: node_context.actor_addresses.mempool,
+        mempool: node_context.actor_addresses.mempool.clone(),
         chunk_provider: node_context.chunk_provider.clone(),
         config: testnet_config,
     };
@@ -372,5 +373,5 @@ async fn serial_data_promotion_test() {
     )
     .await;
 
-    // println!("\n{:?}", unpacked_chunk);
+    node_context.stop().await;
 }

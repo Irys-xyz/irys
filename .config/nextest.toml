@@ -9,5 +9,5 @@ test-group = 'serial'
 
 # heavy tests
 [[profile.default.overrides]]
-filter = 'test(/^heavy/)'
-threads-required = 2
+filter = 'test(/.*heavy_.*/)'
+threads-required = 3

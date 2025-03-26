@@ -1,3 +1,5 @@
+use std::{env, path::PathBuf};
+
 use alloy_primitives::Address;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -51,6 +53,7 @@ pub struct Config {
     pub mining_key: k256::ecdsa::SigningKey,
     // TODO: enable this after fixing option in toml
     pub num_capacity_partitions: Option<u64>,
+    /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
     pub port: u16,
     /// the number of block a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
@@ -71,6 +74,15 @@ pub struct Config {
     pub gpu_packing_batch_size: u32,
     /// Irys price oracle
     pub oracle_config: OracleConfig,
+    /// The base directory where to look for artifact data
+    #[serde(default = "default_irys_path")]
+    pub base_directory: PathBuf,
+}
+
+fn default_irys_path() -> PathBuf {
+    env::current_dir()
+        .expect("Unable to determine working dir, aborting")
+        .join(".irys")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,7 +141,7 @@ impl Config {
             )
             .expect("valid key"),
             num_capacity_partitions: None,
-            port: 8080,
+            port: 0,
             anchor_expiry_depth: 10,
             genesis_token_price: Amount::token(rust_decimal_macros::dec!(1))
                 .expect("valid token amount"),
@@ -146,6 +158,7 @@ impl Config {
                     .expect("valid percentage"),
                 smoothing_interval: 15,
             },
+            base_directory: default_irys_path(),
         }
     }
 }
@@ -264,6 +277,7 @@ mod tests {
             cpu_packing_concurrency = 4
             gpu_packing_batch_size = 1024   
             cache_clean_lag = 2
+            base_directory = "~/.irys"
 
             [oracle_config]
             type = "mock"
