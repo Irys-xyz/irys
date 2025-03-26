@@ -725,7 +725,7 @@ mod tests {
             miner_address: context.miner_address,
             signature: Signature::test_signature().into(),
             timestamp: 1000,
-            ledgers: vec![
+            storage_ledgers: vec![
                 // Permanent Publish Ledger
                 StorageTransactionLedger {
                     ledger_id: Ledger::Publish.into(),

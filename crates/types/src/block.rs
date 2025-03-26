@@ -141,7 +141,7 @@ pub struct IrysBlockHeader {
     /// A list of storage transaction ledgers, one for each active data ledger
     /// Maintains the block->tx_root->data_root relationship for each block
     /// and ledger.
-    pub ledgers: Vec<StorageTransactionLedger>,
+    pub storage_ledgers: Vec<StorageTransactionLedger>,
 
     /// Evm block hash (32 bytes)
     pub evm_block_hash: B256,
@@ -410,7 +410,7 @@ impl IrysBlockHeader {
                 ledger_id: 0, // SystemLedger::Commitment
                 tx_ids: H256List(vec![H256::random(), H256::random()]),
             }],
-            ledgers: vec![
+            storage_ledgers: vec![
                 // Permanent Publish Ledger
                 StorageTransactionLedger {
                     ledger_id: 0, // Publish ledger_id
@@ -716,8 +716,8 @@ mod tests {
             |h: &mut IrysBlockHeader| h.reward_address.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.miner_address.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.timestamp.as_mut_bytes(),
-            |h: &mut IrysBlockHeader| h.ledgers[0].ledger_id.as_mut_bytes(),
-            |h: &mut IrysBlockHeader| h.ledgers[0].max_chunk_offset.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.storage_ledgers[0].ledger_id.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.storage_ledgers[0].max_chunk_offset.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.evm_block_hash.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.vdf_limiter_info.global_step_number.as_mut_bytes(),
         ];

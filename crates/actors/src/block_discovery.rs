@@ -111,7 +111,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         // to retrieve and validate them from the block producer.
         // TODO: in the future we'll retrieve the missing transactions from the block
         // producer and validate them.
-        let submit_txs = match new_block_header.ledgers[Ledger::Submit]
+        let submit_txs = match new_block_header.storage_ledgers[Ledger::Submit]
             .tx_ids
             .iter()
             .map(|txid| {
@@ -139,7 +139,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         // 3. Update the local tx headers index so include the ingress- proof.
         //    This keeps the transaction from getting re-promoted each block.
         //    (this last step performed in mempool after the block is confirmed)
-        let publish_txs = match new_block_header.ledgers[Ledger::Publish]
+        let publish_txs = match new_block_header.storage_ledgers[Ledger::Publish]
             .tx_ids
             .iter()
             .map(|txid| {
@@ -160,7 +160,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         };
 
         if !publish_txs.is_empty() {
-            let publish_proofs = match &new_block_header.ledgers[Ledger::Publish].proofs {
+            let publish_proofs = match &new_block_header.storage_ledgers[Ledger::Publish].proofs {
                 Some(proofs) => proofs,
                 None => {
                     return Box::pin(async move { Err(eyre::eyre!("Ingress proofs missing")) });

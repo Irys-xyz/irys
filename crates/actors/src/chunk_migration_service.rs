@@ -94,7 +94,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
         let service_senders = self.service_senders.clone().unwrap();
 
         // Extract transactions for each ledger
-        let submit_tx_count = block.ledgers[Ledger::Submit].tx_ids.len();
+        let submit_tx_count = block.storage_ledgers[Ledger::Submit].tx_ids.len();
         let submit_txs = all_txs[..submit_tx_count].to_vec();
         let publish_txs = all_txs[submit_tx_count..].to_vec();
         let block_height = block.height;
@@ -250,7 +250,7 @@ fn get_block_range(
 
     LedgerChunkRange(ii(
         LedgerChunkOffset::from(start_chunk_offset),
-        LedgerChunkOffset::from(block.ledgers[ledger].max_chunk_offset),
+        LedgerChunkOffset::from(block.storage_ledgers[ledger].max_chunk_offset),
     ))
 }
 fn get_tx_path_pairs(
@@ -260,7 +260,7 @@ fn get_tx_path_pairs(
 ) -> eyre::Result<Vec<((H256, Proof), (DataRoot, u64))>> {
     let (tx_root, proofs) = StorageTransactionLedger::merklize_tx_root(txs);
 
-    if tx_root != block.ledgers[ledger].tx_root {
+    if tx_root != block.storage_ledgers[ledger].tx_root {
         return Err(eyre::eyre!("Invalid tx_root"));
     }
 

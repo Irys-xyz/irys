@@ -133,7 +133,7 @@ impl BlockIndexService {
         let chunk_size = self.storage_config.chunk_size;
 
         // Extract just the transactions referenced in the submit ledger
-        let submit_tx_count = block.ledgers[Ledger::Submit].tx_ids.len();
+        let submit_tx_count = block.storage_ledgers[Ledger::Submit].tx_ids.len();
         let submit_txs = &all_txs[..submit_tx_count];
 
         // Extract just the transactions referenced in the publish ledger
@@ -166,11 +166,11 @@ impl BlockIndexService {
             ledgers: vec![
                 LedgerIndexItem {
                     max_chunk_offset: max_publish_chunks,
-                    tx_root: block.ledgers[Ledger::Publish].tx_root,
+                    tx_root: block.storage_ledgers[Ledger::Publish].tx_root,
                 },
                 LedgerIndexItem {
                     max_chunk_offset: max_submit_chunks,
-                    tx_root: block.ledgers[Ledger::Submit].tx_root,
+                    tx_root: block.storage_ledgers[Ledger::Submit].tx_root,
                 },
             ],
         };

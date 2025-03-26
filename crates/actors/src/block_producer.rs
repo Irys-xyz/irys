@@ -232,7 +232,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // Publish Ledger Transactions
             let publish_chunks_added = calculate_chunks_added(&publish_txs, chunk_size);
-            let publish_max_chunk_offset =  prev_block_header.ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
+            let publish_max_chunk_offset =  prev_block_header.storage_ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
             // Submit Ledger Transactions    
@@ -240,7 +240,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
 
             let submit_chunks_added = calculate_chunks_added(&submit_txs, chunk_size);
-            let submit_max_chunk_offset = prev_block_header.ledgers[Ledger::Submit].max_chunk_offset + submit_chunks_added;
+            let submit_max_chunk_offset = prev_block_header.storage_ledgers[Ledger::Submit].max_chunk_offset + submit_chunks_added;
 
             let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -324,7 +324,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
                 system_ledgers: vec![],
-                ledgers: vec![
+                storage_ledgers: vec![
                     // Permanent Publish Ledger
                     StorageTransactionLedger {
                         ledger_id: Ledger::Publish.into(),
