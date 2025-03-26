@@ -185,7 +185,7 @@ async fn serial_test_cache_pruning() -> eyre::Result<()> {
     .unwrap();
 
     // mine a couple blocks
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
     let (chunk_cache_count, _) = &node
         .db
         .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, testnet_config.chunk_size))?;
@@ -240,5 +240,8 @@ async fn serial_test_cache_pruning() -> eyre::Result<()> {
         .unwrap();
 
     assert_eq!(chunk_res.status(), StatusCode::OK);
+
+    node.stop().await;
+
     Ok(())
 }

@@ -156,6 +156,7 @@ async fn serial_external_api() -> eyre::Result<()> {
         }
     }
 
+    ctx.node.stop().await;
     Ok(())
 }
 

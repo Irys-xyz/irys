@@ -124,6 +124,7 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
+    node.stop().await;
     Ok(())
 }
 
@@ -172,6 +173,7 @@ async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()>
         // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
         sleep(Duration::from_millis(1500)).await;
     }
+    node.stop().await;
     Ok(())
 }
 
@@ -218,6 +220,7 @@ async fn serial_mine_ten_blocks() -> eyre::Result<()> {
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     }
+    node.stop().await;
     Ok(())
 }
 
