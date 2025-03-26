@@ -723,7 +723,7 @@ pub async fn start_irys_node(
                 reth_node
             });
             debug!("Main actor thread finished");
-           
+
             reth_node_handle
         })?;
 
