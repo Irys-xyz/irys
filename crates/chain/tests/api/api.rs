@@ -151,7 +151,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     }
     let id: String = tx.header.id.as_bytes().to_base58();
     let mut attempts = 1;
-    let max_attempts = 20;
+    let max_attempts = 40;
 
     let delay = Duration::from_secs(1);
 

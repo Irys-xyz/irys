@@ -10,12 +10,12 @@ use crate::utils::{
 };
 
 #[actix::test]
-async fn test_wait_until_height() {
+async fn heavy_test_wait_until_height() {
     let (node_ctx, _tmp_dir) = start_node("test_wait_until_height").await;
     let height = get_height(&node_ctx);
     info!("height: {}", height);
     let steps = 2;
-    let seconds = 20;
+    let seconds = 40;
     node_ctx.actor_addresses.set_mining(true).unwrap();
     wait_until_height(&node_ctx, height + steps, seconds).await;
     let height5 = get_height(&node_ctx);
@@ -24,7 +24,7 @@ async fn test_wait_until_height() {
 }
 
 #[actix::test]
-async fn test_mine() {
+async fn heavy_test_mine() {
     let (node_ctx, _tmp_dir) = start_node("test_mine").await;
     let height = get_height(&node_ctx);
     info!("height: {}", height);
@@ -38,7 +38,7 @@ async fn test_mine() {
 }
 
 #[actix::test]
-async fn test_mine_tx() {
+async fn heavy_test_mine_tx() {
     let testnet_config = Config::testnet();
     let mut node_config = IrysNodeConfig::new(&testnet_config);
     let account = IrysSigner::random_signer(&testnet_config);
