@@ -54,6 +54,7 @@ use irys_types::{
     Config, DifficultyAdjustmentConfig, IrysBlockHeader, OracleConfig, PartitionChunkRange,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
+use rand::seq::SliceRandom;
 use reth::rpc::eth::EthApiServer as _;
 use reth::{
     builder::FullNode,
@@ -639,7 +640,15 @@ pub async fn start_irys_node(
 
                 let vdf_thread_handler = std::thread::spawn(move || {
                     // Setup core affinity
-                    let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
+                    let mut core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
+                    
+                    if cfg!(test) {
+                        debug!("In test, checking for spare core...");
+                        // TODO: make this smart lol
+                        let mut rand = rand::thread_rng();
+                        core_ids.shuffle(&mut rand)
+                    }
+                    
                     for core in core_ids {
                         let success = core_affinity::set_for_current(core);
                         if success {
