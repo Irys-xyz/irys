@@ -11,3 +11,4 @@ test-group = 'serial'
 [[profile.default.overrides]]
 filter = 'test(/.*heavy_.*/)'
 threads-required = 3
+priority = 100
