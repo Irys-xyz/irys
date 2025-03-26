@@ -89,7 +89,7 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
         .unwrap();
 
     for receipt in reth_exec_env.shadow_receipts {
-        if let Some(og_tx) = txs.get(&receipt.tx_id) {
+        if let Some(_og_tx) = txs.get(&receipt.tx_id) {
             assert_eq!(receipt.result, ShadowResult::Success)
         } else {
             assert_eq!(receipt.result, ShadowResult::OutOfFunds)
@@ -366,7 +366,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .unwrap();
 
     for receipt in reth_exec_env.shadow_receipts {
-        if let Some(og_tx) = irys_txs.get(&receipt.tx_id) {
+        if let Some(_og_tx) = irys_txs.get(&receipt.tx_id) {
             assert_eq!(receipt.result, ShadowResult::Success)
         } else {
             assert_eq!(receipt.result, ShadowResult::OutOfFunds)

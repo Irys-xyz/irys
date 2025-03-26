@@ -10,7 +10,7 @@ use std::fs::{self, remove_file, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::error;
 
 /// This struct represents the `Uninitialized` `block_index` type state.
 #[derive(Debug)]

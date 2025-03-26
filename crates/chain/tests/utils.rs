@@ -1,5 +1,4 @@
 use actix::MailboxError;
-use eyre::Error;
 use futures::future::select;
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_actors::block_validation;
@@ -20,7 +19,6 @@ use irys_types::{Config, IrysTransactionHeader, StorageConfig, TxChunkOffset, VD
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
-use reth_primitives::irys_primitives::IrysTxId;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
