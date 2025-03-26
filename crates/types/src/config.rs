@@ -63,12 +63,15 @@ pub struct Config {
     /// defines the range of how much can the token fluctuate since the last EMA price for it to be accepted
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub token_price_safe_range: Amount<Percentage>,
+    /// Defines how frequently the Irys EMA price should be adjusted
+    pub price_adjustment_interval: u64,
     /// number of blocks cache cleaning will lag behind block finalization
     pub cache_clean_lag: u8,
     /// number of packing threads
     pub cpu_packing_concurrency: u16,
     /// GPU kernel batch size
     pub gpu_packing_batch_size: u32,
+    /// Irys price oracle
     pub oracle_config: OracleConfig,
 }
 
@@ -135,6 +138,7 @@ impl Config {
                 .expect("valid token amount"),
             token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
                 .expect("valid percentage"),
+            price_adjustment_interval: 10,
             cache_clean_lag: 2,
             cpu_packing_concurrency: 4,
             gpu_packing_batch_size: 1024,
@@ -259,6 +263,7 @@ mod tests {
             genesis_price_valid_for_n_epochs = 2
             genesis_token_price = "1.0"
             token_price_safe_range = "0.25"
+            price_adjustment_interval = 10
             cpu_packing_concurrency = 4
             gpu_packing_batch_size = 1024   
             cache_clean_lag = 2
@@ -268,7 +273,7 @@ mod tests {
             initial_price = "1"
             percent_change = "0.01"
             smoothing_interval = 15
-            "#;
+        "#;
 
         // Attempt to deserialize the TOML string into a Config
         let config: Config =
