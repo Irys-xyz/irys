@@ -141,7 +141,7 @@ impl Config {
             )
             .expect("valid key"),
             num_capacity_partitions: None,
-            port: 8080,
+            port: 0,
             anchor_expiry_depth: 10,
             genesis_token_price: Amount::token(rust_decimal_macros::dec!(1))
                 .expect("valid token amount"),
