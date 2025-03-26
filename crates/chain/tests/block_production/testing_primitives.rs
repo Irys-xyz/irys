@@ -5,7 +5,8 @@ use reth_primitives::GenesisAccount;
 use tracing::info;
 
 use crate::utils::{
-    add_tx, get_block_height, get_height, get_tx_header, mine, mine_one, start_node, start_node_config, wait_until_height
+    add_tx, get_block_height, get_height, get_tx_header, mine, mine_one, start_node,
+    start_node_config, wait_until_height,
 };
 
 #[actix::test]
