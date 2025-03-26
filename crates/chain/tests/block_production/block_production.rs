@@ -94,7 +94,6 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             assert_ne!(og_tx.header.signer, account1.address()); // account1 has no funds
         } else {
             assert_eq!(receipt.result, ShadowResult::OutOfFunds)
-            
         }
     }
 
@@ -373,7 +372,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     for receipt in reth_exec_env.shadow_receipts {
         if let Some(og_tx) = irys_txs.get(&receipt.tx_id) {
             assert_eq!(receipt.result, ShadowResult::Success);
-            assert_ne!(og_tx.header.signer, account1.address()); // account1 has no funds            
+            assert_ne!(og_tx.header.signer, account1.address()); // account1 has no funds
         } else {
             assert_eq!(receipt.result, ShadowResult::OutOfFunds);
         }

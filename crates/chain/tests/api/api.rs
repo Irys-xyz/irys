@@ -35,9 +35,7 @@ async fn heavy_api_end_to_end_test_256kb() {
 }
 
 async fn api_end_to_end_test(chunk_size: usize) {
-    use irys_types::{
-        irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, UnpackedChunk,
-    };
+    use irys_types::{irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, UnpackedChunk};
     use rand::Rng;
     use std::time::Duration;
     use tokio::time::sleep;

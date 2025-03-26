@@ -32,7 +32,7 @@ async fn test_mine() {
     mine(&node_ctx, blocks).await.unwrap();
     let next_height = get_height(&node_ctx);
     assert_eq!(next_height, height + blocks as u64);
-    node_ctx.stop().await;    
+    node_ctx.stop().await;
 }
 
 #[actix::test]

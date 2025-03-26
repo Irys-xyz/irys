@@ -21,9 +21,7 @@ async fn heavy_double_root_data_promotion_test() {
     use irys_actors::packing::wait_for_packing;
     use irys_api_server::{routes, ApiState};
     use irys_database::{tables::IngressProofs, walk_all};
-    use irys_types::{
-        irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset,
-    };
+    use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
     use reth_db::Database as _;
     use reth_primitives::GenesisAccount;
     use tokio::time::sleep;
