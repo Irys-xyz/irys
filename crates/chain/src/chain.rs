@@ -638,25 +638,24 @@ pub async fn start_irys_node(
                     "Starting VDF thread",
                 );
 
+                // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
+                let is_test = node_config.base_directory.parent().is_some_and(|p| p.ends_with(".tmp"));
+                
                 let vdf_thread_handler = std::thread::spawn(move || {
-                    // Setup core affinity
-                    let mut core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
-                    
-                    if node_config.base_directory.parent().is_some_and(|p| p.ends_with(".tmp")) {
-                        info!("In test, pinning to random core");
-                        // TODO: make this smart lol (co-ordinate with a common file in .tmp)
-                        let mut rand = rand::thread_rng();
-                        core_ids.shuffle(&mut rand)
-                    }
 
-                    for core in core_ids {
-                        let success = core_affinity::set_for_current(core);
-                        if success {
-                            info!("VDF thread pinned to core {:?}", core);
-                            break;
+                    if !is_test {
+                        // Setup core affinity in prod only (perf gain shouldn't matter for tests, and we don't want pinning overlap)
+                        let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
+
+                        for core in core_ids {
+                            let success = core_affinity::set_for_current(core);
+                            if success {
+                                info!("VDF thread pinned to core {:?}", core);
+                                break;
+                            }
                         }
                     }
-
+                   
                     run_vdf(
                         vdf_config2,
                         global_step_number,
