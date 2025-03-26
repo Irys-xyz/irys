@@ -66,7 +66,7 @@ use reth_db::{Database as _, HasName, HasTableType};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::thread::JoinHandle;
+use std::thread::{self, JoinHandle};
 use std::{
     fs,
     sync::{mpsc, Arc, RwLock},
@@ -155,7 +155,7 @@ impl StopGuard {
 impl Drop for StopGuard {
     fn drop(&mut self) {
         // Only check if this is the last reference to the guard
-        if Arc::strong_count(&self.0) == 1 && !self.is_stopped() {
+        if Arc::strong_count(&self.0) == 1 && !self.is_stopped() && !thread::panicking() {
             panic!("IrysNodeCtx must be stopped before all instances are dropped");
         }
     }
