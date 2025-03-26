@@ -1,6 +1,6 @@
 use crate::{calculate_chunks_added, BlockFinalizedMessage};
 use actix::prelude::*;
-use irys_database::{BlockIndex, BlockIndexItem, Initialized, DataLedger, LedgerIndexItem};
+use irys_database::{BlockIndex, BlockIndexItem, DataLedger, Initialized, LedgerIndexItem};
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
 use std::{
     sync::{Arc, RwLock, RwLockReadGuard},

@@ -163,7 +163,9 @@ mod tests {
 
     use actix::SystemRegistry;
     use irys_config::IrysNodeConfig;
-    use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized, DataLedger};
+    use irys_database::{
+        open_or_create_db, tables::IrysTables, BlockIndex, DataLedger, Initialized,
+    };
     use irys_storage::ii;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{H256List, IrysBlockHeader, StorageConfig, H256};

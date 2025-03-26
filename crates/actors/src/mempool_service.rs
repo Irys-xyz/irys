@@ -540,7 +540,12 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
                     })
                     .unwrap();
 
-                for (i, txid) in block.data_ledgers[DataLedger::Publish].tx_ids.0.iter().enumerate() {
+                for (i, txid) in block.data_ledgers[DataLedger::Publish]
+                    .tx_ids
+                    .0
+                    .iter()
+                    .enumerate()
+                {
                     // Retrieve the promoted transactions header
                     let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
                         Ok(Some(header)) => header,
@@ -556,7 +561,10 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
 
                     // TODO: In a single node world there is only one ingress proof
                     // per promoted tx, but in the future there will be multiple proofs.
-                    let proofs = block.data_ledgers[DataLedger::Publish].proofs.as_ref().unwrap();
+                    let proofs = block.data_ledgers[DataLedger::Publish]
+                        .proofs
+                        .as_ref()
+                        .unwrap();
                     let proof = proofs.0[i].clone();
                     tx_header.ingress_proofs = Some(proof);
 

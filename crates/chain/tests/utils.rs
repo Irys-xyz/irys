@@ -299,11 +299,7 @@ pub fn get_block_parent(
 
     // Loop tough all the blocks and find the one that contains the txid
     for block_header in block_headers.values() {
-        if block_header.data_ledgers[ledger]
-            .tx_ids
-            .0
-            .contains(&txid)
-        {
+        if block_header.data_ledgers[ledger].tx_ids.0.contains(&txid) {
             return Some(IrysBlockHeader::from(block_header.clone()));
         }
     }

@@ -622,7 +622,8 @@ impl EpochServiceActor {
         if let Some(mut assignment) = pa.data_partitions.remove(&partition_hash) {
             {
                 // Remove the partition hash from the slots state
-                let ledger: DataLedger = DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
+                let ledger: DataLedger =
+                    DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
                 let partition_hash = assignment.partition_hash;
                 let slot_index = assignment.slot_index.unwrap();
                 let mut write = self.ledgers.write().unwrap();
@@ -640,7 +641,12 @@ impl EpochServiceActor {
 
     /// Takes a capacity partition hash and updates its `PartitionAssignment`
     /// state to indicate it is part of a data ledger
-    fn assign_partition_to_slot(&self, partition_hash: H256, ledger: DataLedger, slot_index: usize) {
+    fn assign_partition_to_slot(
+        &self,
+        partition_hash: H256,
+        ledger: DataLedger,
+        slot_index: usize,
+    ) {
         debug!(
             "Assigning partition {} to slot {} of ledger {:?}",
             &partition_hash.0.to_base58(),
@@ -658,7 +664,11 @@ impl EpochServiceActor {
     /// For a given ledger indicated by `Ledger`, calculate the number of
     /// partition slots to add to the ledger based on remaining capacity
     /// and data ingress this epoch
-    fn calculate_additional_slots(&self, new_epoch_block: &IrysBlockHeader, ledger: DataLedger) -> u64 {
+    fn calculate_additional_slots(
+        &self,
+        new_epoch_block: &IrysBlockHeader,
+        ledger: DataLedger,
+    ) -> u64 {
         let num_slots: u64;
         {
             let ledgers = self.ledgers.read().unwrap();
@@ -1058,7 +1068,8 @@ mod tests {
         }
 
         new_epoch_block.height = num_blocks_in_epoch;
-        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
+        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset =
+            num_chunks_in_partition / 2;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
 
@@ -1281,7 +1292,9 @@ mod tests {
                 .read()
                 .data_partitions
                 .iter()
-                .find(|(_hash, assignment)| assignment.ledger_id == Some(DataLedger::Submit.get_id()))
+                .find(|(_hash, assignment)| {
+                    assignment.ledger_id == Some(DataLedger::Submit.get_id())
+                })
                 .map(|(hash, _)| hash.clone())
                 .expect("There should be a partition assigned to submit ledger");
 
@@ -1364,7 +1377,8 @@ mod tests {
 
         new_epoch_block.height =
             (testnet_config.submit_ledger_epoch_length + 1) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
-        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
+        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset =
+            num_chunks_in_partition / 2;
 
         let _ = epoch_service_actor
             .send(NewEpochMessage(new_epoch_block.into()))
@@ -1829,8 +1843,10 @@ mod tests {
         let total_epoch_messages = 6;
         let mut epoch_num = 1;
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition;
-        new_epoch_block.storage_ledgers[DataLedger::Publish].max_chunk_offset = num_chunks_in_partition;
+        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset =
+            num_chunks_in_partition;
+        new_epoch_block.storage_ledgers[DataLedger::Publish].max_chunk_offset =
+            num_chunks_in_partition;
 
         let mut height = 1;
         while epoch_num <= total_epoch_messages {

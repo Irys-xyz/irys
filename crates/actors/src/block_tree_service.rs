@@ -19,7 +19,7 @@ use crate::{
 use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::ensure;
-use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, Initialized, DataLedger};
+use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, DataLedger, Initialized};
 use irys_types::{
     Address, BlockHash, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
     IrysTransactionId, StorageConfig, H256, U256,
@@ -857,7 +857,10 @@ impl BlockTreeCache {
                         .tx_ids
                         .0
                         .clone();
-                    let submit_txs = entry.block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
+                    let submit_txs = entry.block.data_ledgers[DataLedger::Submit]
+                        .tx_ids
+                        .0
+                        .clone();
                     pairs.push((current, entry.block.height, publish_txs, submit_txs));
 
                     if blocks_to_collect == 0 {
@@ -872,7 +875,10 @@ impl BlockTreeCache {
                         .tx_ids
                         .0
                         .clone();
-                    let submit_txs = entry.block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
+                    let submit_txs = entry.block.data_ledgers[DataLedger::Submit]
+                        .tx_ids
+                        .0
+                        .clone();
                     pairs.push((current, entry.block.height, publish_txs, submit_txs));
                     not_onchain_count += 1;
 
