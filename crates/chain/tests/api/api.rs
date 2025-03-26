@@ -72,8 +72,8 @@ async fn api_end_to_end_test(chunk_size: usize) {
         reth_http_url: None,
         block_index: None,
         block_tree: None,
-        db: handle.db,
-        mempool: handle.actor_addresses.mempool,
+        db: handle.db.clone(),
+        mempool: handle.actor_addresses.mempool.clone(),
         chunk_provider: handle.chunk_provider.clone(),
         config: testnet_config.clone(),
     };
@@ -236,4 +236,6 @@ async fn api_end_to_end_test(chunk_size: usize) {
         "Chunk could not be retrieved after {} attempts",
         attempts
     );
+
+    handle.stop().await;
 }
