@@ -1,6 +1,7 @@
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, Config, IrysBlockHeader,
-    IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, H256,
+    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction,
+    Config, IrysBlockHeader, IrysSignature, IrysTransaction, IrysTransactionHeader, Signature,
+    H256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -92,6 +93,26 @@ impl IrysSigner {
         let id: [u8; 32] = keccak256(signature.as_bytes()).into();
         transaction.header.id = H256::from(id);
         Ok(transaction)
+    }
+
+    pub fn sign_commitment(
+        &self,
+        mut commitment: CommitmentTransaction,
+    ) -> Result<CommitmentTransaction> {
+        // Store the signer address
+        commitment.signer = Address::from_public_key(self.signer.verifying_key());
+
+        // Create the signature hash and sign it
+        let prehash = commitment.signature_hash();
+
+        let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
+
+        commitment.signature = IrysSignature::new(signature);
+
+        // Derive the txid by hashing the signature
+        let id: [u8; 32] = keccak256(signature.as_bytes()).into();
+        commitment.id = H256::from(id);
+        Ok(commitment)
     }
 
     pub fn sign_block_header(&self, block_header: &mut IrysBlockHeader) -> Result<()> {

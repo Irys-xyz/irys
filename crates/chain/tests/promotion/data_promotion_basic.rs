@@ -79,7 +79,7 @@ async fn serial_data_promotion_test() {
         block_index: None,
         block_tree: None,
         db: node_context.db.clone(),
-        mempool: node_context.actor_addresses.mempool,
+        mempool: node_context.actor_addresses.mempool.clone(),
         chunk_provider: node_context.chunk_provider.clone(),
         config: testnet_config,
     };
@@ -373,5 +373,5 @@ async fn serial_data_promotion_test() {
     )
     .await;
 
-    // println!("\n{:?}", unpacked_chunk);
+    node_context.stop().await;
 }

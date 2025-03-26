@@ -320,7 +320,7 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
 
     assert_eq!(&message, &stored_message);
 
-    let context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
 
     let latest = context
         .rpc
@@ -345,5 +345,6 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
 
     dbg!(latest, safe, finalized);
 
+    node.stop().await;
     Ok(())
 }

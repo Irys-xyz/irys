@@ -600,4 +600,6 @@ async fn serial_double_root_data_promotion_test() {
         .unwrap()
         .unwrap();
     assert_eq!(ingress_proofs.len(), 0);
+
+    node_context.stop().await;
 }

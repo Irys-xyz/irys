@@ -82,7 +82,7 @@ async fn serial_test_erc20() -> eyre::Result<()> {
         node.clone(),
         &mut transfer_receipt_fut,
         Duration::from_millis(2_000),
-        node.vdf_steps_guard,
+        node.vdf_steps_guard.clone(),
         &node.vdf_config,
         &node.storage_config,
     )
@@ -94,6 +94,6 @@ async fn serial_test_erc20() -> eyre::Result<()> {
 
     assert_eq!(addr1_balance, U256::from(10));
     assert_eq!(main_balance2, U256::from(10000000000000000000000 - 10_u128));
-
+    node.stop().await;
     Ok(())
 }

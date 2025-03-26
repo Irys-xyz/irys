@@ -65,7 +65,7 @@ async fn serial_peer_discovery() -> eyre::Result<()> {
         block_index: None,
         block_tree: None,
         db: node.db.clone(),
-        mempool: node.actor_addresses.mempool,
+        mempool: node.actor_addresses.mempool.clone(),
         chunk_provider: node.chunk_provider.clone(),
         config: test_config.clone(),
     };
@@ -221,5 +221,7 @@ async fn serial_peer_discovery() -> eyre::Result<()> {
         }),
         "Peer list missing expected addresses"
     );
+
+    node.stop().await;
     Ok(())
 }
