@@ -55,8 +55,8 @@ async fn serial_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
 
 #[tokio::test]
 #[should_panic(expected = "IrysNodeCtx must be stopped before all instances are dropped")]
-async fn serial_test_drop_guard() -> () {
-    let temp_dir = setup_tracing_and_temp_dir(Some("serial_test_drop_guard"), false);
+async fn serial_test_stop_guard() -> () {
+    let temp_dir = setup_tracing_and_temp_dir(Some("serial_test_stop_guard"), false);
 
     let testnet_config = Config::testnet();
     let mut config = IrysNodeConfig::new(&testnet_config);
