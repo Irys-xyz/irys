@@ -22,7 +22,7 @@ sol!(
     "../../fixtures/contracts/out/IrysERC20.sol/IrysERC20.json"
 );
 #[tokio::test]
-async fn serial_test_erc20() -> eyre::Result<()> {
+async fn heavy_test_erc20() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_erc20"), false);
     let testnet_config = Config::testnet();
     let mut config = IrysNodeConfig::new(&testnet_config);
@@ -56,7 +56,7 @@ async fn serial_test_erc20() -> eyre::Result<()> {
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(EthereumWallet::from(signer))
-        .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
+        .on_http(format!("http://127.0.0.1:{}/v1/execution-rpc", node.config.port).parse()?);
 
     let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.address()));
 
@@ -82,7 +82,7 @@ async fn serial_test_erc20() -> eyre::Result<()> {
         node.clone(),
         &mut transfer_receipt_fut,
         Duration::from_millis(2_000),
-        node.vdf_steps_guard,
+        node.vdf_steps_guard.clone(),
         &node.vdf_config,
         &node.storage_config,
     )
@@ -94,6 +94,6 @@ async fn serial_test_erc20() -> eyre::Result<()> {
 
     assert_eq!(addr1_balance, U256::from(10));
     assert_eq!(main_balance2, U256::from(10000000000000000000000 - 10_u128));
-
+    node.stop().await;
     Ok(())
 }

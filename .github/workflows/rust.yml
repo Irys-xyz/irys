@@ -33,7 +33,7 @@ jobs:
 
   cargo-test:
     name: cargo test
-    runs-on: self-hosted
+    runs-on: [self-hosted, test-runner]
     needs: gate
     timeout-minutes: 30
     steps:
@@ -125,6 +125,9 @@ jobs:
 
       - name: cargo doc
         run: cargo xtask doc -- --all-features
+
+      - name: cargo test docs
+        run: RUST_LOG=debug cargo test --doc
 
   cargo-unused-deps:
     name: cargo unused-deps

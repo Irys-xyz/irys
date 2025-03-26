@@ -21,8 +21,8 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[actix_web::test]
-async fn serial_test_cache_pruning() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("serial_test_cache_pruning"), false);
+async fn heavy_test_cache_pruning() -> eyre::Result<()> {
+    let temp_dir = setup_tracing_and_temp_dir(Some("heavy_test_cache_pruning"), false);
     let mut testnet_config = Config::testnet();
     testnet_config.chunk_size = 32;
     testnet_config.chunk_migration_depth = 2;
@@ -57,7 +57,7 @@ async fn serial_test_cache_pruning() -> eyre::Result<()> {
     )
     .await?;
 
-    let http_url = "http://127.0.0.1:8080";
+    let http_url = format!("http://127.0.0.1:{}", node.config.port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -185,7 +185,7 @@ async fn serial_test_cache_pruning() -> eyre::Result<()> {
     .unwrap();
 
     // mine a couple blocks
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
     let (chunk_cache_count, _) = &node
         .db
         .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, testnet_config.chunk_size))?;
@@ -195,7 +195,7 @@ async fn serial_test_cache_pruning() -> eyre::Result<()> {
     for i in 1..4 {
         info!("manually producing block {}", i);
         let poa_solution = capacity_chunk_solution(
-            node.config.mining_signer.address(),
+            node.node_config.mining_signer.address(),
             node.vdf_steps_guard.clone(),
             &node.vdf_config,
             &node.storage_config,
@@ -217,7 +217,7 @@ async fn serial_test_cache_pruning() -> eyre::Result<()> {
         // check irys DB for built block
         let db_irys_block = &node
             .db
-            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
             .unwrap();
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
         // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
@@ -240,5 +240,8 @@ async fn serial_test_cache_pruning() -> eyre::Result<()> {
         .unwrap();
 
     assert_eq!(chunk_res.status(), StatusCode::OK);
+
+    node.stop().await;
+
     Ok(())
 }
