@@ -13,6 +13,7 @@ use crate::{
     types::{GossipData, GossipError, GossipResult},
     PeerListProvider,
 };
+use crate::types::InternalGossipError;
 
 #[derive(Debug)]
 pub struct GossipServer {
@@ -48,7 +49,7 @@ impl GossipServer {
                 )
         })
         .bind((bind_address, port))
-        .map_err(|e| GossipError::Internal(e.to_string()))?
+        .map_err(|e| GossipError::Internal(InternalGossipError::Unknown(e.to_string())))?
         .run())
     }
 }
@@ -58,15 +59,21 @@ async fn handle_gossip_data(
     data: web::Json<GossipData>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse {
+    tracing::debug!("Gossip data received: {:?}", data);
     let peer_address = match req.peer_addr() {
         Some(addr) => addr,
-        None => return HttpResponse::BadRequest().finish(),
+        None => {
+            tracing::debug!("Failed to get peer address from gossip post request");
+            return HttpResponse::BadRequest().finish();
+        },
     };
 
+    tracing::debug!("Gossip origin address is {}", peer_address);
     // Check if peer is allowed
     match server.peer_list.is_peer_allowed(&peer_address) {
         Ok(is_peer_allowed) => {
             if !is_peer_allowed {
+                tracing::debug!("Peer address is not allowed");
                 return HttpResponse::Forbidden().finish();
             }
         }
@@ -92,6 +99,7 @@ async fn handle_gossip_data(
         return HttpResponse::InternalServerError().finish();
     }
 
+    tracing::debug!("Gossip data sent");
     HttpResponse::Ok().finish()
 }
 

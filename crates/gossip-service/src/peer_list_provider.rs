@@ -34,11 +34,14 @@ impl PeerListProvider {
         Ok(ips)
     }
 
+    /// As of March 2025, this function checks if a peer is allowed using its IP address.
+    /// This is a temporary solution until we have a more robust way of identifying peers.
     pub fn is_peer_allowed(&self, peer: &SocketAddr) -> eyre::Result<bool> {
         let known_peers = self.all_known_peers()?;
+        let peer_ip = peer.ip();
         Ok(known_peers
             .iter()
-            .any(|peer_list_item| peer_list_item.address == *peer))
+            .any(|peer_list_item| peer_list_item.address.ip() == peer_ip))
     }
 
     pub fn get_peer_info(&self, peer: &SocketAddr) -> eyre::Result<Option<CompactPeerListItem>> {
