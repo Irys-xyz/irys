@@ -642,13 +642,13 @@ pub async fn start_irys_node(
                     // Setup core affinity
                     let mut core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
                     
-                    if cfg!(test) {
-                        debug!("In test, checking for spare core...");
-                        // TODO: make this smart lol
+                    if node_config.base_directory.parent().is_some_and(|p| p.ends_with(".tmp")) {
+                        info!("In test, pinning to random core");
+                        // TODO: make this smart lol (co-ordinate with a common file in .tmp)
                         let mut rand = rand::thread_rng();
                         core_ids.shuffle(&mut rand)
                     }
-                    
+
                     for core in core_ids {
                         let success = core_affinity::set_for_current(core);
                         if success {
