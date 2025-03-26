@@ -15,7 +15,7 @@ use rand::seq::IteratorRandom;
 use std::net::SocketAddr;
 use std::{sync::Arc, time::Duration};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc},
     time,
 };
 
@@ -26,12 +26,6 @@ const CACHE_CLEANUP_INTERVAL: Duration = ONE_HOUR;
 const CACHE_ENTRY_TTL: Duration = TWO_HOURS;
 
 type TaskExecutionResult = Result<Option<GossipResult<()>>, tokio::task::JoinError>;
-
-#[derive(Debug)]
-pub struct GossipServiceHandle {
-    task_handle: tokio::task::JoinHandle<()>,
-    service_shutdown_tx: oneshot::Sender<()>,
-}
 
 #[derive(Debug)]
 pub struct ServiceHandleWithShutdownSignal<T> {
@@ -93,54 +87,39 @@ impl<T> ServiceHandleWithShutdownSignal<T> {
     }
 }
 
-impl GossipServiceHandle {
-    pub async fn stop(self) -> GossipResult<()> {
-        self.service_shutdown_tx
-            .send(())
-            .map_err(|e| GossipError::Internal(InternalGossipError::Unknown(format!("{e:?}"))))?;
-        self.task_handle
-            .await
-            .map_err(|e| GossipError::Internal(InternalGossipError::Unknown(e.to_string())))?;
-        Ok(())
-    }
-}
-
 #[derive(Debug)]
-pub struct GossipService<TMempoolService>
-where
-    TMempoolService: Handler<TxIngressMessage>
-        + Handler<ChunkIngressMessage>
-        + Actor<Context = Context<TMempoolService>>,
-{
+pub struct GossipService {
     server: Option<GossipServer>,
     server_address: String,
     server_port: u16,
     client: GossipClient,
     cache: Arc<GossipCache>,
     peer_list: PeerListProvider,
-    broadcast_message_rx: Option<mpsc::Receiver<(SocketAddr, GossipData)>>,
-    pub mempool: Addr<TMempoolService>,
+    untrusted_gossip_data_rx: Option<mpsc::Receiver<(SocketAddr, GossipData)>>,
+    trusted_gossip_data_rx: Option<mpsc::Receiver<GossipData>>,
 }
 
-impl<TMempoolService> GossipService<TMempoolService>
-where
-    TMempoolService: Handler<TxIngressMessage>
-        + Handler<ChunkIngressMessage>
-        + Actor<Context = Context<TMempoolService>>,
+impl GossipService
 {
+    /// Create a new gossip service. To run the service, use the [GossipService::run] method.
+    /// Also returns a channel to send trusted gossip data to the service. Trusted data should
+    /// be sent by the internal components of the system only after complete validation.
     pub fn new(
         server_address: impl Into<String>,
         server_port: u16,
         client_timeout: Duration,
         db: DatabaseProvider,
-        mempool: Addr<TMempoolService>,
-    ) -> (Self, mpsc::Sender<(SocketAddr, GossipData)>) {
+    ) -> (
+        Self,
+        mpsc::Sender<GossipData>
+    ) {
         let cache = Arc::new(GossipCache::new());
-        let (message_tx, message_rx) = mpsc::channel(1000);
+        let (untrusted_data_tx, untrusted_data_rx) = mpsc::channel(1000);
+        let (trusted_data_tx, trusted_data_rx) = mpsc::channel(1000);
 
         let peer_list = PeerListProvider::new(db);
 
-        let server = GossipServer::new(cache.clone(), message_tx.clone(), peer_list.clone());
+        let server = GossipServer::new(cache.clone(), untrusted_data_tx, peer_list.clone());
         let client = GossipClient::new(client_timeout);
 
         (
@@ -151,14 +130,16 @@ where
                 client,
                 cache,
                 peer_list,
-                broadcast_message_rx: Some(message_rx),
-                mempool,
+                untrusted_gossip_data_rx: Some(untrusted_data_rx),
+                trusted_gossip_data_rx: Some(trusted_data_rx),
             },
-            message_tx,
+            trusted_data_tx,
         )
     }
 
-    pub async fn run(mut self) -> GossipResult<ServiceHandleWithShutdownSignal<GossipResult<()>>> {
+    pub async fn run<TMemPoolService>(mut self, mempool: Addr<TMemPoolService>) -> GossipResult<ServiceHandleWithShutdownSignal<GossipResult<()>>>
+    where TMemPoolService: Handler<TxIngressMessage> + Handler<ChunkIngressMessage> + Actor<Context = Context<TMemPoolService>>
+    {
         tracing::debug!("Staring gossip service");
 
         let server = self.server.take().ok_or(GossipError::Internal(
@@ -167,12 +148,18 @@ where
         let server = server.run(&self.server_address, self.server_port)?;
         let server_handle = server.handle();
 
-        let mut broadcast_message_rx =
-            self.broadcast_message_rx
+        let mut untrusted_gossip_data_rx =
+            self.untrusted_gossip_data_rx
                 .take()
                 .ok_or(GossipError::Internal(
                     InternalGossipError::BroadcastReceiverShutdown,
                 ))?;
+
+        let mut trusted_gossip_data_rx = self.trusted_gossip_data_rx
+            .take()
+            .ok_or(GossipError::Internal(
+                InternalGossipError::BroadcastReceiverShutdown,
+            ))?;
 
         let service = Arc::new(self);
 
@@ -198,16 +185,18 @@ where
             },
         );
 
-        let mut broadcast_message_handle = ServiceHandleWithShutdownSignal::spawn(
-            Some("gossip broadcast"),
+        let service_handle_for_gossip_data_receiver = service.clone();
+        let mut gossip_data_receiver_handle = ServiceHandleWithShutdownSignal::spawn(
+            Some("gossip handler for untrusted data from other peers"),
             move |mut shutdown_rx| {
+                let service = service_handle_for_gossip_data_receiver;
                 async move {
                     loop {
                         tokio::select! {
-                            maybe_message = broadcast_message_rx.recv() => {
+                            maybe_message = untrusted_gossip_data_rx.recv() => {
                                 match maybe_message {
                                     Some((source_address, data)) => {
-                                       match handle_gossip_data_from_other_peer(source_address, data, service.clone()).await {
+                                       match handle_gossip_data_from_other_peer(source_address, data, service.clone(), mempool.clone()).await {
                                              Ok(()) => {}
                                              Err(e) => {
                                                 match e {
@@ -223,7 +212,7 @@ where
                                                     GossipError::Internal(internal) => {
                                                         tracing::error!("Internal gossip error: {:?}", internal);
                                                     }
-                                                    GossipError::InvalidData(data_error) => {
+                                                    GossipError::InvalidData(_data_error) => {
                                                         // Not a service error - most likely the
                                                         //  peer sent us bogus data
                                                     }
@@ -243,6 +232,33 @@ where
             },
         );
 
+        let mut broadcast_task_handle = ServiceHandleWithShutdownSignal::spawn(
+            Some("gossip broadcast"),
+            move |mut shutdown_rx| async move {
+                let service = service.clone();
+                loop {
+                    tokio::select! {
+                        maybe_data = trusted_gossip_data_rx.recv() => {
+                            match maybe_data {
+                                Some(data) => {
+                                    match service.broadcast_data(GossipSource::Internal, &data).await {
+                                        Ok(()) => {}
+                                        Err(e) => {
+                                            tracing::warn!("Failed to broadcast data: {}", e);
+                                        }
+                                    };
+                                },
+                                None => return Ok(()), // channel closed
+                            }
+                        },
+                        _ = shutdown_rx.recv() => {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        );
+
         let gossip_service_handle = ServiceHandleWithShutdownSignal::spawn(
             Some("gossip main"),
             move |mut shutdown_rx| async move {
@@ -251,14 +267,17 @@ where
                     _ = shutdown_rx.recv() => {
                         tracing::debug!("Gossip service shutdown signal received");
                     }
-                    res = broadcast_message_handle.wait_for_exit() => {
-                        tracing::debug!("Gossip broadcast exited because: {:?}", res);
+                    res = gossip_data_receiver_handle.wait_for_exit() => {
+                        tracing::debug!("Handler of gossip data from other peers exited because: {:?}", res);
                     }
                     cleanup_res = cleanup_handle.wait_for_exit() => {
                         tracing::debug!("Gossip cleanup exited because: {:?}", cleanup_res);
                     }
                     server_res = server => {
                         tracing::debug!("Gossip server exited because: {:?}", server_res);
+                    }
+                    broadcast_res = broadcast_task_handle.wait_for_exit() => {
+                        tracing::debug!("Gossip broadcast exited because: {:?}", broadcast_res);
                     }
                 }
 
@@ -277,8 +296,9 @@ where
                     ))),
                 };
 
-                handle_result(broadcast_message_handle.stop().await);
+                handle_result(gossip_data_receiver_handle.stop().await);
                 handle_result(cleanup_handle.stop().await);
+                handle_result(broadcast_task_handle.stop().await);
 
                 if errors.is_empty() {
                     Ok(())
@@ -369,7 +389,8 @@ impl GossipSource {
 async fn handle_gossip_data_from_other_peer<T>(
     source_address: SocketAddr,
     data: GossipData,
-    service: Arc<GossipService<T>>,
+    service: Arc<GossipService>,
+    mempool: Addr<T>,
 ) -> GossipResult<()>
 where
     T: Handler<TxIngressMessage> + Handler<ChunkIngressMessage> + Actor<Context = Context<T>>,
@@ -380,7 +401,7 @@ where
                 "Gossip transaction received from the internal message bus: {:?}",
                 tx
             );
-            match service.mempool.send(TxIngressMessage(tx.clone())).await {
+            match mempool.send(TxIngressMessage(tx.clone())).await {
                 Ok(message_result) => {
                     match message_result {
                         Ok(()) => {
@@ -441,8 +462,7 @@ where
             }
         }
         GossipData::Chunk(chunk) => {
-            match service
-                .mempool
+            match mempool
                 .send(ChunkIngressMessage(chunk.clone()))
                 .await
             {
