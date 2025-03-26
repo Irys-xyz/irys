@@ -9,7 +9,7 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
-use irys_types::{Config, DatabaseProvider, IrysTransaction, PeerListItem, PeerScore};
+use irys_types::{Base64, Config, DatabaseProvider, IrysTransaction, IrysTransactionHeader, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -43,6 +43,7 @@ impl Handler<TxIngressMessage> for MempoolStub {
         let tx = msg.0.clone();
         self.txs.write().unwrap().push(msg);
 
+        // Pretend that we've validated the tx and we're ready to gossip it
         let message_bus = self.internal_message_bus.clone();
         tokio::runtime::Handle::current().spawn(async move {
             message_bus.send(GossipData::Transaction(tx)).await.unwrap();
@@ -60,6 +61,7 @@ impl Handler<ChunkIngressMessage> for MempoolStub {
 
         self.chunks.write().unwrap().push(msg);
 
+        // Pretend that we've validated the chunk and we're ready to gossip it
         let message_bus = self.internal_message_bus.clone();
         tokio::runtime::Handle::current().spawn(async move {
             message_bus.send(GossipData::Chunk(chunk)).await.unwrap();
@@ -155,6 +157,16 @@ impl GossipServiceTestFixture {
             .add_peer(&other.mining_address, &peer)
             .unwrap();
     }
+
+    pub fn add_peer_with_reputation(&self, other: &GossipServiceTestFixture, score: PeerScore) {
+        let peer = PeerListItem {
+            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.port),
+            reputation_score: score,
+            is_online: true,
+            ..PeerListItem::default()
+        };
+        self.peer_list.add_peer(&other.mining_address, &peer).unwrap();
+    }
 }
 
 fn random_free_port() -> u16 {
@@ -173,4 +185,25 @@ pub fn generate_test_tx() -> IrysTransaction {
         .create_transaction(data_bytes.clone(), None)
         .unwrap();
     account1.sign_transaction(tx).unwrap()
+}
+
+pub fn create_test_chunks(tx: &IrysTransaction) -> Vec<UnpackedChunk> {
+    let mut chunks = Vec::new();
+    for chunk_node in tx.chunks.iter() {
+        let data_root = tx.header.data_root;
+        let data_size = tx.header.data_size;
+        let data_path = Base64(vec![1, 2, 3]);
+
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size,
+            data_path,
+            bytes: Base64(vec![1, 2, 3]),
+            tx_offset: TxChunkOffset::from(0),
+        };
+
+        chunks.push(chunk);
+    }
+
+    chunks
 }
