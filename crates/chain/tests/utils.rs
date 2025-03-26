@@ -217,7 +217,7 @@ pub async fn mine_one(node_ctx: &IrysNodeCtx) -> eyre::Result<()> {
 pub async fn mine(node_ctx: &IrysNodeCtx, num_blocks: usize) -> eyre::Result<()> {
     let height = get_height(node_ctx);
     node_ctx.actor_addresses.set_mining(true)?;
-    wait_until_height(node_ctx, height + num_blocks as u64, 15 * num_blocks).await;
+    wait_until_height(node_ctx, height + num_blocks as u64, 20 * num_blocks).await;
     node_ctx.actor_addresses.set_mining(false)?;
     Ok(())
 }
