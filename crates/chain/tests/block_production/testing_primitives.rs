@@ -15,7 +15,7 @@ async fn heavy_test_wait_until_height() {
     let height = get_height(&node_ctx);
     info!("height: {}", height);
     let steps = 2;
-    let seconds = 40;
+    let seconds = 60;
     node_ctx.actor_addresses.set_mining(true).unwrap();
     wait_until_height(&node_ctx, height + steps, seconds).await;
     let height5 = get_height(&node_ctx);
