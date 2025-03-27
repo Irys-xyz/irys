@@ -1049,7 +1049,7 @@ mod tests {
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset = 0;
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
 
         // index epoch previous blocks
         let mut height = 1;
@@ -1068,7 +1068,7 @@ mod tests {
         }
 
         new_epoch_block.height = num_blocks_in_epoch;
-        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset =
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
             num_chunks_in_partition / 2;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
@@ -1100,9 +1100,9 @@ mod tests {
         // Simulate a subsequent epoch block that adds multiple ledger slots
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
         new_epoch_block.height = num_blocks_in_epoch * 2;
-        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset =
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
             (num_chunks_in_partition as f64 * 2.5) as u64;
-        new_epoch_block.storage_ledgers[DataLedger::Publish as usize].max_chunk_offset =
+        new_epoch_block.data_ledgers[DataLedger::Publish as usize].max_chunk_offset =
             (num_chunks_in_partition as f64 * 0.75) as u64;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.into()), &mut ctx);
@@ -1357,7 +1357,7 @@ mod tests {
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset = 0;
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
 
         // index epoch previous blocks
         let mut height = 1;
@@ -1377,7 +1377,7 @@ mod tests {
 
         new_epoch_block.height =
             (testnet_config.submit_ledger_epoch_length + 1) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
-        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset =
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
             num_chunks_in_partition / 2;
 
         let _ = epoch_service_actor
@@ -1492,7 +1492,7 @@ mod tests {
             {
                 assert_eq!(
                     publish_assignment.ledger_id,
-                    Some(Ledger::Publish.get_id()),
+                    Some(DataLedger::Publish.get_id()),
                     "Should be assigned to publish ledger"
                 );
                 assert_eq!(
@@ -1511,7 +1511,7 @@ mod tests {
             {
                 assert_eq!(
                     submit_assignment.ledger_id,
-                    Some(Ledger::Submit.get_id()),
+                    Some(DataLedger::Submit.get_id()),
                     "Should be assigned to submit ledger"
                 );
                 assert_eq!(
@@ -1530,7 +1530,7 @@ mod tests {
             {
                 assert_eq!(
                     submit_assignment.ledger_id,
-                    Some(Ledger::Submit.get_id()),
+                    Some(DataLedger::Submit.get_id()),
                     "Should be assigned to submit ledger"
                 );
                 assert_eq!(
@@ -1680,7 +1680,7 @@ mod tests {
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset = 0;
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
 
         // index and store in db blocks
         let mut height = 1;
@@ -1689,7 +1689,7 @@ mod tests {
             new_epoch_block.block_hash = H256::random();
 
             if height == (testnet_config.submit_ledger_epoch_length + 1) * num_blocks_in_epoch {
-                new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset =
+                new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
                     num_chunks_in_partition / 2;
             }
 
@@ -1843,9 +1843,8 @@ mod tests {
         let total_epoch_messages = 6;
         let mut epoch_num = 1;
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset =
-            num_chunks_in_partition;
-        new_epoch_block.storage_ledgers[DataLedger::Publish].max_chunk_offset =
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition;
+        new_epoch_block.data_ledgers[DataLedger::Publish].max_chunk_offset =
             num_chunks_in_partition;
 
         let mut height = 1;
@@ -1887,7 +1886,7 @@ mod tests {
         {
             assert_eq!(
                 publish_assignment.ledger_id,
-                Some(Ledger::Publish.get_id()),
+                Some(DataLedger::Publish.get_id()),
                 "Should be assigned to publish ledger"
             );
             assert_eq!(
@@ -1915,7 +1914,7 @@ mod tests {
         {
             assert_eq!(
                 publish_assignment.ledger_id,
-                Some(Ledger::Publish.get_id()),
+                Some(DataLedger::Publish.get_id()),
                 "Should be assigned to publish ledger"
             );
             assert_eq!(
@@ -1943,7 +1942,7 @@ mod tests {
         {
             assert_eq!(
                 submit_assignment.ledger_id,
-                Some(Ledger::Publish.get_id()),
+                Some(DataLedger::Publish.get_id()),
                 "Should be assigned to publish ledger"
             );
             assert_eq!(
@@ -1971,7 +1970,7 @@ mod tests {
         {
             assert_eq!(
                 submit_assignment.ledger_id,
-                Some(Ledger::Submit.get_id()),
+                Some(DataLedger::Submit.get_id()),
                 "Should be assigned to submit ledger"
             );
             assert_eq!(

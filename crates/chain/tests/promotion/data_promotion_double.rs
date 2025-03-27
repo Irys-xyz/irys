@@ -325,7 +325,7 @@ async fn heavy_double_root_data_promotion_test() {
     //     println!("2:{}", block_tx2);
     // }
 
-    let txid_1 = block_tx1.storage_ledgers[DataLedger::Publish].tx_ids.0[0];
+    let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
     first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
@@ -533,7 +533,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     let first_tx_index: usize;
 
-    let txid_1 = block_tx1.storage_ledgers[DataLedger::Publish].tx_ids.0[0];
+    let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
     first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();

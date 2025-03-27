@@ -1291,12 +1291,12 @@ mod tests {
         // Adding `b1` again shouldn't change the state because it is confirmed
         // onchain
         let mut b1_test = b1.clone();
-        b1_test.storage_ledgers[DataLedger::Submit]
+        b1_test.data_ledgers[DataLedger::Submit]
             .tx_ids
             .push(H256::random());
         assert_matches!(cache.add_block(&b1_test, all_tx.clone()), Ok(_));
         assert_eq!(
-            cache.get_block(&b1.block_hash).unwrap().storage_ledgers[Ledger::Submit]
+            cache.get_block(&b1.block_hash).unwrap().data_ledgers[DataLedger::Submit]
                 .tx_ids
                 .len(),
             0
@@ -1305,7 +1305,7 @@ mod tests {
             cache
                 .get_by_solution_hash(&b1.solution_hash, &H256::random(), U256::one(), U256::one())
                 .unwrap()
-                .storage_ledgers[Ledger::Submit]
+                .data_ledgers[DataLedger::Submit]
                 .tx_ids
                 .len(),
             0
@@ -1334,17 +1334,17 @@ mod tests {
 
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
-        b2.storage_ledgers[DataLedger::Submit].tx_ids.push(txid);
+        b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
         assert_matches!(cache.add_block(&b2, all_tx.clone()), Ok(_));
         assert_eq!(
-            cache.get_block(&b2.block_hash).unwrap().storage_ledgers[Ledger::Submit].tx_ids[0],
+            cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
             txid
         );
         assert_eq!(
             cache
                 .get_by_solution_hash(&b2.solution_hash, &H256::random(), U256::one(), U256::one())
                 .unwrap()
-                .storage_ledgers[Ledger::Submit]
+                .data_ledgers[DataLedger::Submit]
                 .tx_ids[0],
             txid
         );
@@ -1352,7 +1352,7 @@ mod tests {
             cache
                 .get_by_solution_hash(&b2.solution_hash, &b1.block_hash, U256::one(), U256::one())
                 .unwrap()
-                .storage_ledgers[Ledger::Submit]
+                .data_ledgers[DataLedger::Submit]
                 .tx_ids[0],
             txid
         );

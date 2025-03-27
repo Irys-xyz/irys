@@ -267,7 +267,7 @@ mod tests {
             .unwrap();
 
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.storage_ledgers[DataLedger::Submit].max_chunk_offset = 0;
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
 
         let now = Instant::now();
         // index and store in db blocks
