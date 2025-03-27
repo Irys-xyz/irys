@@ -8,7 +8,7 @@ use crate::{
 use irys_types::{
     ingress::IngressProof, ChunkPathHash, DataRoot, IrysBlockHeader, IrysTransactionHeader, H256,
 };
-use irys_types::{Address, Base64, PeerListItem};
+use irys_types::{Address, Base64, CommitmentTransaction, PeerListItem};
 use reth_codecs::Compact;
 use reth_db::{table::DupSort, tables, DatabaseError};
 use reth_db::{HasName, HasTableType, TableType, TableViewer};
@@ -21,33 +21,33 @@ use std::fmt;
 #[macro_export]
 macro_rules! add_wrapper_struct {
 	($(($name:tt, $wrapper:tt)),+) => {
-			$(
-					/// Wrapper struct so it can use StructFlags from Compact, when used as pure table values.
-					#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Compact)]
-					#[derive(arbitrary::Arbitrary)] //#[add_arbitrary_tests(compact)]
-					pub struct $wrapper(pub $name);
+        $(
+            /// Wrapper struct so it can use StructFlags from Compact, when used as pure table values.
+            #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Compact)]
+            #[derive(arbitrary::Arbitrary)] //#[add_arbitrary_tests(compact)]
+            pub struct $wrapper(pub $name);
 
-					impl From<$name> for $wrapper {
-							fn from(value: $name) -> Self {
-									$wrapper(value)
-							}
-					}
+            impl From<$name> for $wrapper {
+                fn from(value: $name) -> Self {
+                    $wrapper(value)
+                }
+            }
 
-					impl From<$wrapper> for $name {
-							fn from(value: $wrapper) -> Self {
-									value.0
-							}
-					}
+            impl From<$wrapper> for $name {
+                fn from(value: $wrapper) -> Self {
+                    value.0
+                }
+            }
 
-					impl std::ops::Deref for $wrapper {
-							type Target = $name;
+            impl std::ops::Deref for $wrapper {
+                type Target = $name;
 
-							fn deref(&self) -> &Self::Target {
-									&self.0
-							}
-					}
+                fn deref(&self) -> &Self::Target {
+                        &self.0
+                }
+            }
 
-			)+
+        )+
 	};
 }
 
@@ -75,12 +75,14 @@ macro_rules! impl_compression_for_compact {
 
 add_wrapper_struct!((IrysBlockHeader, CompactIrysBlockHeader));
 add_wrapper_struct!((IrysTransactionHeader, CompactTxHeader));
+add_wrapper_struct!((CommitmentTransaction, CompactCommitment));
 add_wrapper_struct!((PeerListItem, CompactPeerListItem));
 add_wrapper_struct!((Base64, CompactBase64));
 
 impl_compression_for_compact!(
     CompactIrysBlockHeader,
     CompactTxHeader,
+    CompactCommitment,
     CompactPeerListItem,
     CachedDataRoot,
     CachedChunkIndexEntry,
@@ -107,6 +109,9 @@ tables! {
 
     /// Stores the tx header headers that have been confirmed
     table IrysTxHeaders<Key = H256, Value = CompactTxHeader>;
+
+    /// Stores commitment transactions
+    table IrysCommitments<Key = H256, Value = CompactCommitment>;
 
     /// Indexes the DataRoots currently in the cache
     table CachedDataRoots<Key = DataRoot, Value = CachedDataRoot>;

@@ -18,7 +18,7 @@ use tracing::info;
 
 #[ignore]
 #[actix_web::test]
-async fn serial_api_end_to_end_test_32b() {
+async fn heavy_api_end_to_end_test_32b() {
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await;
     } else {
@@ -28,7 +28,7 @@ async fn serial_api_end_to_end_test_32b() {
 
 #[ignore]
 #[actix_web::test]
-async fn serial_api_end_to_end_test_256kb() {
+async fn heavy_api_end_to_end_test_256kb() {
     api_end_to_end_test(256 * 1024).await;
 }
 
@@ -70,6 +70,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
     let app_state = ApiState {
         reth_provider: None,
+        reth_http_url: None,
         block_index: None,
         block_tree: None,
         db: handle.db,

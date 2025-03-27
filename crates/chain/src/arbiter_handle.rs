@@ -5,25 +5,22 @@ use std::thread::{self, JoinHandle};
 #[derive(Debug)]
 pub struct ArbiterHandle {
     inner: Arc<Mutex<Option<Arbiter>>>,
+    pub name: String,
 }
 
 impl Clone for ArbiterHandle {
     fn clone(&self) -> Self {
         Self {
+            name: self.name.clone(),
             inner: Arc::clone(&self.inner),
         }
     }
 }
 
-impl From<Arbiter> for ArbiterHandle {
-    fn from(arbiter: Arbiter) -> Self {
-        Self::new(arbiter)
-    }
-}
-
 impl ArbiterHandle {
-    pub fn new(value: Arbiter) -> Self {
+    pub fn new(value: Arbiter, name: String) -> Self {
         Self {
+            name,
             inner: Arc::new(Mutex::new(Some(value))),
         }
     }

@@ -100,7 +100,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
-        .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
+        .on_http(format!("http://127.0.0.1:{}/v1/execution-rpc", node.config.port).parse()?);
 
     let deploy_builder =
         IrysProgrammableDataBasic::deploy_builder(alloy_provider.clone()).gas(29506173);
@@ -126,7 +126,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         precompile_address
     );
 
-    let http_url = "http://127.0.0.1:8080";
+    let http_url = format!("http://127.0.0.1:{}", node.config.port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -216,7 +216,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     for _i in 1..10 {
         let poa_solution = capacity_chunk_solution(
-            node.config.mining_signer.address(),
+            node.node_config.mining_signer.address(),
             node.vdf_steps_guard.clone(),
             &node.vdf_config,
             &node.storage_config,

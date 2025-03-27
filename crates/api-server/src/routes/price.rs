@@ -3,7 +3,7 @@ use actix_web::{
     HttpResponse,
 };
 use irys_config::{PRICE_PER_CHUNK_5_EPOCH, PRICE_PER_CHUNK_PERM};
-use irys_database::Ledger;
+use irys_database::DataLedger;
 
 use crate::ApiState;
 
@@ -12,7 +12,7 @@ pub async fn get_price(
     state: web::Data<ApiState>,
 ) -> actix_web::Result<HttpResponse> {
     let size = path.1;
-    let ledger = Ledger::from_url(&path.0);
+    let ledger = DataLedger::from_url(&path.0);
 
     let num_of_chunks = if size < state.config.chunk_size {
         1u128
@@ -23,8 +23,8 @@ pub async fn get_price(
 
     if let Ok(l) = ledger {
         let final_price = match l {
-            Ledger::Publish => PRICE_PER_CHUNK_PERM,
-            Ledger::Submit => PRICE_PER_CHUNK_5_EPOCH,
+            DataLedger::Publish => PRICE_PER_CHUNK_PERM,
+            DataLedger::Submit => PRICE_PER_CHUNK_5_EPOCH,
         } * num_of_chunks;
 
         Ok(HttpResponse::Ok().body(final_price.to_string()))

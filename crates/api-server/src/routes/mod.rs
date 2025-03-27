@@ -1,4 +1,5 @@
 pub mod block;
+pub mod block_index;
 pub mod get_chunk;
 pub mod index;
 pub mod network_config;

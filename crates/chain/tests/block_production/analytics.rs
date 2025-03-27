@@ -84,7 +84,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     .await?;
     let _reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
 
-    let http_url = "http://127.0.0.1:8080";
+    let http_url = format!("http://127.0.0.1:{}", node.config.port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -132,7 +132,11 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             ProviderBuilder::new()
                 .with_recommended_fillers()
                 .wallet(EthereumWallet::from(signer))
-                .on_http("http://localhost:8080/v1/execution-rpc".parse().unwrap())
+                .on_http(
+                    format!("http://127.0.0.1:{}/v1/execution-rpc", node.config.port)
+                        .parse()
+                        .unwrap(),
+                )
         })
         .collect::<Vec<_>>();
 
@@ -252,7 +256,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         }
 
         let poa_solution = capacity_chunk_solution(
-            node.config.mining_signer.address(),
+            node.node_config.mining_signer.address(),
             node.vdf_steps_guard.clone(),
             &node.vdf_config,
             &node.storage_config,

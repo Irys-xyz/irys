@@ -43,7 +43,7 @@ const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db90
 const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
 #[actix_web::test]
-async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
+async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
     let mut testnet_config = Config::testnet();
     testnet_config.chunk_size = 32;
@@ -97,7 +97,7 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
-        .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
+        .on_http(format!("http://127.0.0.1:{}/v1/execution-rpc", node.config.port).parse()?);
 
     let deploy_builder =
         IrysProgrammableDataBasic::deploy_builder(alloy_provider.clone()).gas(29506173);
@@ -123,7 +123,7 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
         precompile_address
     );
 
-    let http_url = "http://127.0.0.1:8080";
+    let http_url = format!("http://127.0.0.1:{}", node.config.port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -320,7 +320,7 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
 
     assert_eq!(&message, &stored_message);
 
-    let context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
 
     let latest = context
         .rpc
@@ -345,5 +345,6 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
 
     dbg!(latest, safe, finalized);
 
+    node.stop().await;
     Ok(())
 }

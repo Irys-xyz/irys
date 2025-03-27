@@ -1,10 +1,11 @@
 use crate::ApiState;
 use actix_web::{
+    http::header::ContentType,
     web::{self},
     HttpResponse,
 };
 
-use irys_database::Ledger;
+use irys_database::DataLedger;
 use irys_types::{ChunkFormat, H256};
 use serde::Deserialize;
 
@@ -18,7 +19,7 @@ pub async fn get_chunk_by_ledger_offset(
     state: web::Data<ApiState>,
     path: web::Path<LedgerChunkApiPath>,
 ) -> actix_web::Result<HttpResponse> {
-    let ledger = match Ledger::try_from(path.ledger_id) {
+    let ledger = match DataLedger::try_from(path.ledger_id) {
         Ok(l) => l,
         Err(e) => return Ok(HttpResponse::BadRequest().body(format!("Invalid ledger id: {}", e))),
     };
@@ -27,7 +28,9 @@ pub async fn get_chunk_by_ledger_offset(
         .chunk_provider
         .get_chunk_by_ledger_offset(ledger, path.ledger_offset.into())
     {
-        Ok(Some(chunk)) => Ok(HttpResponse::Ok().json(ChunkFormat::Packed(chunk))),
+        Ok(Some(chunk)) => Ok(HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .json(ChunkFormat::Packed(chunk))),
         Ok(None) => Ok(HttpResponse::NotFound().body("Chunk not found")),
         Err(e) => {
             Ok(HttpResponse::InternalServerError().body(format!("Error retrieving chunk: {}", e)))
@@ -46,7 +49,7 @@ pub async fn get_chunk_by_data_root_offset(
     state: web::Data<ApiState>,
     path: web::Path<DataRootChunkApiPath>,
 ) -> actix_web::Result<HttpResponse> {
-    let ledger = match Ledger::try_from(path.ledger_id) {
+    let ledger = match DataLedger::try_from(path.ledger_id) {
         Ok(l) => l,
         Err(e) => return Ok(HttpResponse::BadRequest().body(format!("Invalid ledger id: {}", e))),
     };
@@ -55,7 +58,9 @@ pub async fn get_chunk_by_data_root_offset(
         .chunk_provider
         .get_chunk_by_data_root(ledger, path.data_root, path.offset.into())
     {
-        Ok(Some(chunk)) => Ok(HttpResponse::Ok().json(chunk)),
+        Ok(Some(chunk)) => Ok(HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .json(chunk)),
         Ok(None) => Ok(HttpResponse::NotFound().body("Chunk not found")),
         Err(e) => {
             Ok(HttpResponse::InternalServerError().body(format!("Error retrieving chunk: {}", e)))

@@ -405,7 +405,7 @@ impl EpochServiceActor {
             // Create a scope for the write lock to expire with
             {
                 let mut ledgers = self.ledgers.write().unwrap();
-                for ledger in Ledger::iter() {
+                for ledger in DataLedger::iter() {
                     debug!("Allocating 1 slot for {:?}", &ledger);
                     num_data_partitions += ledgers[ledger].allocate_slots(1);
                 }
@@ -454,7 +454,7 @@ impl EpochServiceActor {
     /// Loops though all the ledgers both perm and term, checking to see if any
     /// require additional ledger slots added to accommodate data ingress.
     fn allocate_additional_ledger_slots(&self, new_epoch_block: &IrysBlockHeader) {
-        for ledger in Ledger::iter() {
+        for ledger in DataLedger::iter() {
             let part_slots = self.calculate_additional_slots(new_epoch_block, ledger);
             {
                 let mut ledgers = self.ledgers.write().unwrap();
@@ -506,7 +506,7 @@ impl EpochServiceActor {
         let mut rng = SimpleRNG::new(seed);
 
         // Loop though all of the ledgers processing their slot needs
-        for ledger in Ledger::iter() {
+        for ledger in DataLedger::iter() {
             self.process_slot_needs(ledger, &mut capacity_partitions, &mut rng);
         }
     }
@@ -515,7 +515,7 @@ impl EpochServiceActor {
     /// as needed.
     pub fn process_slot_needs(
         &mut self,
-        ledger: Ledger,
+        ledger: DataLedger,
         capacity_partitions: &mut Vec<H256>,
         rng: &mut SimpleRNG,
     ) {
@@ -566,7 +566,7 @@ impl EpochServiceActor {
     /// data partitions and scaling factor
     fn get_num_capacity_partitions(num_data_partitions: u64, config: &EpochServiceConfig) -> u64 {
         // Every ledger needs at least one slot filled with data partitions
-        let min_count = Ledger::ALL.len() as u64 * config.storage_config.num_partitions_in_slot;
+        let min_count = DataLedger::ALL.len() as u64 * config.storage_config.num_partitions_in_slot;
         let base_count = std::cmp::max(num_data_partitions, min_count);
         let log_10 = (base_count as f64).log10();
         let trunc = truncate_to_3_decimals(log_10);
@@ -622,7 +622,8 @@ impl EpochServiceActor {
         if let Some(mut assignment) = pa.data_partitions.remove(&partition_hash) {
             {
                 // Remove the partition hash from the slots state
-                let ledger: Ledger = Ledger::try_from(assignment.ledger_id.unwrap()).unwrap();
+                let ledger: DataLedger =
+                    DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
                 let partition_hash = assignment.partition_hash;
                 let slot_index = assignment.slot_index.unwrap();
                 let mut write = self.ledgers.write().unwrap();
@@ -640,7 +641,12 @@ impl EpochServiceActor {
 
     /// Takes a capacity partition hash and updates its `PartitionAssignment`
     /// state to indicate it is part of a data ledger
-    fn assign_partition_to_slot(&self, partition_hash: H256, ledger: Ledger, slot_index: usize) {
+    fn assign_partition_to_slot(
+        &self,
+        partition_hash: H256,
+        ledger: DataLedger,
+        slot_index: usize,
+    ) {
         debug!(
             "Assigning partition {} to slot {} of ledger {:?}",
             &partition_hash.0.to_base58(),
@@ -658,7 +664,11 @@ impl EpochServiceActor {
     /// For a given ledger indicated by `Ledger`, calculate the number of
     /// partition slots to add to the ledger based on remaining capacity
     /// and data ingress this epoch
-    fn calculate_additional_slots(&self, new_epoch_block: &IrysBlockHeader, ledger: Ledger) -> u64 {
+    fn calculate_additional_slots(
+        &self,
+        new_epoch_block: &IrysBlockHeader,
+        ledger: DataLedger,
+    ) -> u64 {
         let num_slots: u64;
         {
             let ledgers = self.ledgers.read().unwrap();
@@ -667,7 +677,7 @@ impl EpochServiceActor {
         }
         let partition_chunk_count = self.config.storage_config.num_chunks_in_partition;
         let max_chunk_capacity = num_slots * partition_chunk_count;
-        let ledger_size = new_epoch_block.ledgers[ledger].max_chunk_offset;
+        let ledger_size = new_epoch_block.data_ledgers[ledger].max_chunk_offset;
 
         // Add capacity slots if ledger usage exceeds 50% of partition size from max capacity
         let add_capacity_threshold = max_chunk_capacity.saturating_sub(partition_chunk_count / 2);
@@ -718,7 +728,7 @@ impl EpochServiceActor {
         let sm_paths = storage_module_config.submodule_paths;
         // Configure publish ledger storage
         let mut module_infos = ledgers
-            .get_slots(Ledger::Publish)
+            .get_slots(DataLedger::Publish)
             .iter()
             .flat_map(|slot| &slot.partitions)
             .enumerate()
@@ -736,7 +746,7 @@ impl EpochServiceActor {
 
         // Configure submit ledger storage
         let submit_infos = ledgers
-            .get_slots(Ledger::Submit)
+            .get_slots(DataLedger::Submit)
             .iter()
             .flat_map(|slot| &slot.partitions)
             .enumerate()
@@ -858,12 +868,12 @@ mod tests {
         {
             // Verify the correct number of ledgers have been added
             let ledgers = epoch_service.ledgers.read().unwrap();
-            let expected_ledger_count = Ledger::ALL.len();
+            let expected_ledger_count = DataLedger::ALL.len();
             assert_eq!(ledgers.len(), expected_ledger_count);
 
             // Verify each ledger has one slot and the correct number of partitions
-            let pub_slots = ledgers.get_slots(Ledger::Publish);
-            let sub_slots = ledgers.get_slots(Ledger::Submit);
+            let pub_slots = ledgers.get_slots(DataLedger::Publish);
+            let sub_slots = ledgers.get_slots(DataLedger::Submit);
 
             assert_eq!(pub_slots.len(), 1);
             assert_eq!(sub_slots.len(), 1);
@@ -890,7 +900,7 @@ mod tests {
                         assignment,
                         &PartitionAssignment {
                             partition_hash,
-                            ledger_id: Some(Ledger::Publish.into()),
+                            ledger_id: Some(DataLedger::Publish.into()),
                             slot_index: Some(slot_idx),
                             miner_address,
                         }
@@ -915,7 +925,7 @@ mod tests {
                         assignment,
                         &PartitionAssignment {
                             partition_hash,
-                            ledger_id: Some(Ledger::Submit.into()),
+                            ledger_id: Some(DataLedger::Submit.into()),
                             slot_index: Some(slot_idx),
                             miner_address,
                         }
@@ -1039,7 +1049,7 @@ mod tests {
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = 0;
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
 
         // index epoch previous blocks
         let mut height = 1;
@@ -1058,15 +1068,16 @@ mod tests {
         }
 
         new_epoch_block.height = num_blocks_in_epoch;
-        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
+            num_chunks_in_partition / 2;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
 
         // Verify each ledger has one slot and the correct number of partitions
         {
             let ledgers = epoch_service.ledgers.read().unwrap();
-            let pub_slots = ledgers.get_slots(Ledger::Publish);
-            let sub_slots = ledgers.get_slots(Ledger::Submit);
+            let pub_slots = ledgers.get_slots(DataLedger::Publish);
+            let sub_slots = ledgers.get_slots(DataLedger::Submit);
             assert_eq!(pub_slots.len(), 1);
             assert_eq!(sub_slots.len(), 3); // TODO: check 1 expired, 2 new slots added
         }
@@ -1089,9 +1100,9 @@ mod tests {
         // Simulate a subsequent epoch block that adds multiple ledger slots
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
         new_epoch_block.height = num_blocks_in_epoch * 2;
-        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset =
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
             (num_chunks_in_partition as f64 * 2.5) as u64;
-        new_epoch_block.ledgers[Ledger::Publish as usize].max_chunk_offset =
+        new_epoch_block.data_ledgers[DataLedger::Publish as usize].max_chunk_offset =
             (num_chunks_in_partition as f64 * 0.75) as u64;
 
         let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.into()), &mut ctx);
@@ -1099,8 +1110,8 @@ mod tests {
         // Validate the correct number of ledgers slots were added to each ledger
         {
             let ledgers = epoch_service.ledgers.read().unwrap();
-            let pub_slots = ledgers.get_slots(Ledger::Publish);
-            let sub_slots = ledgers.get_slots(Ledger::Submit);
+            let pub_slots = ledgers.get_slots(DataLedger::Publish);
+            let sub_slots = ledgers.get_slots(DataLedger::Submit);
             assert_eq!(pub_slots.len(), 3);
             assert_eq!(sub_slots.len(), 7);
             println!("Ledger State: {:#?}", ledgers);
@@ -1281,7 +1292,9 @@ mod tests {
                 .read()
                 .data_partitions
                 .iter()
-                .find(|(_hash, assignment)| assignment.ledger_id == Some(Ledger::Submit.get_id()))
+                .find(|(_hash, assignment)| {
+                    assignment.ledger_id == Some(DataLedger::Submit.get_id())
+                })
                 .map(|(hash, _)| hash.clone())
                 .expect("There should be a partition assigned to submit ledger");
 
@@ -1294,8 +1307,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            let pub_slots = ledgers.read().get_slots(Ledger::Publish).clone();
-            let sub_slots = ledgers.read().get_slots(Ledger::Submit).clone();
+            let pub_slots = ledgers.read().get_slots(DataLedger::Publish).clone();
+            let sub_slots = ledgers.read().get_slots(DataLedger::Submit).clone();
             assert_eq!(pub_slots.len(), 1);
             assert_eq!(sub_slots.len(), 1);
 
@@ -1344,7 +1357,7 @@ mod tests {
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = 0;
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
 
         // index epoch previous blocks
         let mut height = 1;
@@ -1364,7 +1377,8 @@ mod tests {
 
         new_epoch_block.height =
             (testnet_config.submit_ledger_epoch_length + 1) * num_blocks_in_epoch; // next epoch block, next multiple of num_blocks_in epoch,
-        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
+            num_chunks_in_partition / 2;
 
         let _ = epoch_service_actor
             .send(NewEpochMessage(new_epoch_block.into()))
@@ -1402,8 +1416,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            let pub_slots = ledgers.read().get_slots(Ledger::Publish).clone();
-            let sub_slots = ledgers.read().get_slots(Ledger::Submit).clone();
+            let pub_slots = ledgers.read().get_slots(DataLedger::Publish).clone();
+            let sub_slots = ledgers.read().get_slots(DataLedger::Submit).clone();
             assert_eq!(
                 pub_slots.len(),
                 1,
@@ -1478,7 +1492,7 @@ mod tests {
             {
                 assert_eq!(
                     publish_assignment.ledger_id,
-                    Some(Ledger::Publish.get_id()),
+                    Some(DataLedger::Publish.get_id()),
                     "Should be assigned to publish ledger"
                 );
                 assert_eq!(
@@ -1497,7 +1511,7 @@ mod tests {
             {
                 assert_eq!(
                     submit_assignment.ledger_id,
-                    Some(Ledger::Submit.get_id()),
+                    Some(DataLedger::Submit.get_id()),
                     "Should be assigned to submit ledger"
                 );
                 assert_eq!(
@@ -1516,7 +1530,7 @@ mod tests {
             {
                 assert_eq!(
                     submit_assignment.ledger_id,
-                    Some(Ledger::Submit.get_id()),
+                    Some(DataLedger::Submit.get_id()),
                     "Should be assigned to submit ledger"
                 );
                 assert_eq!(
@@ -1666,7 +1680,7 @@ mod tests {
 
         // Now create a new epoch block & give the Submit ledger enough size to add a slot
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = 0;
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
 
         // index and store in db blocks
         let mut height = 1;
@@ -1675,7 +1689,7 @@ mod tests {
             new_epoch_block.block_hash = H256::random();
 
             if height == (testnet_config.submit_ledger_epoch_length + 1) * num_blocks_in_epoch {
-                new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset =
+                new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
                     num_chunks_in_partition / 2;
             }
 
@@ -1704,8 +1718,8 @@ mod tests {
         {
             let ledgers = epoch_service.ledgers.read().unwrap();
             debug!("{:#?}", ledgers);
-            let pub_slots = ledgers.get_slots(Ledger::Publish);
-            let sub_slots = ledgers.get_slots(Ledger::Submit);
+            let pub_slots = ledgers.get_slots(DataLedger::Publish);
+            let sub_slots = ledgers.get_slots(DataLedger::Submit);
             assert_eq!(pub_slots.len(), 1);
             assert_eq!(sub_slots.len(), 5); // TODO: check slot 2 expired, 3 new slots added
         }
@@ -1829,8 +1843,9 @@ mod tests {
         let total_epoch_messages = 6;
         let mut epoch_num = 1;
         let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-        new_epoch_block.ledgers[Ledger::Submit].max_chunk_offset = num_chunks_in_partition;
-        new_epoch_block.ledgers[Ledger::Publish].max_chunk_offset = num_chunks_in_partition;
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition;
+        new_epoch_block.data_ledgers[DataLedger::Publish].max_chunk_offset =
+            num_chunks_in_partition;
 
         let mut height = 1;
         while epoch_num <= total_epoch_messages {
@@ -1871,7 +1886,7 @@ mod tests {
         {
             assert_eq!(
                 publish_assignment.ledger_id,
-                Some(Ledger::Publish.get_id()),
+                Some(DataLedger::Publish.get_id()),
                 "Should be assigned to publish ledger"
             );
             assert_eq!(
@@ -1899,7 +1914,7 @@ mod tests {
         {
             assert_eq!(
                 publish_assignment.ledger_id,
-                Some(Ledger::Publish.get_id()),
+                Some(DataLedger::Publish.get_id()),
                 "Should be assigned to publish ledger"
             );
             assert_eq!(
@@ -1927,7 +1942,7 @@ mod tests {
         {
             assert_eq!(
                 submit_assignment.ledger_id,
-                Some(Ledger::Publish.get_id()),
+                Some(DataLedger::Publish.get_id()),
                 "Should be assigned to publish ledger"
             );
             assert_eq!(
@@ -1955,7 +1970,7 @@ mod tests {
         {
             assert_eq!(
                 submit_assignment.ledger_id,
-                Some(Ledger::Submit.get_id()),
+                Some(DataLedger::Submit.get_id()),
                 "Should be assigned to submit ledger"
             );
             assert_eq!(

@@ -25,7 +25,7 @@ use crate::utils::capacity_chunk_solution;
 /// Create a valid capacity PoA solution
 
 #[tokio::test]
-async fn serial_test_blockprod() -> eyre::Result<()> {
+async fn heavy_test_blockprod() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let testnet_config = Config::testnet();
@@ -80,8 +80,8 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
     }
 
     let poa_solution = capacity_chunk_solution(
-        node.config.mining_signer.address(),
-        node.vdf_steps_guard,
+        node.node_config.mining_signer.address(),
+        node.vdf_steps_guard.clone(),
         &node.vdf_config,
         &node.storage_config,
     )
@@ -103,7 +103,7 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
         }
     }
 
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
 
     //check reth for built block
     let reth_block = reth_context
@@ -124,11 +124,12 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
+    node.stop().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
+async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let testnet_config = Config::testnet();
     let mut config = IrysNodeConfig::new(&testnet_config);
@@ -136,12 +137,12 @@ async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()>
     let storage_config = irys_types::StorageConfig::new(&testnet_config);
     let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
 
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
         info!("manually producing block {}", i);
         let poa_solution = capacity_chunk_solution(
-            node.config.mining_signer.address(),
+            node.node_config.mining_signer.address(),
             node.vdf_steps_guard.clone(),
             &node.vdf_config,
             &node.storage_config,
@@ -172,11 +173,12 @@ async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()>
         // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
         sleep(Duration::from_millis(1500)).await;
     }
+    node.stop().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn serial_mine_ten_blocks() -> eyre::Result<()> {
+async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let testnet_config = Config::testnet();
     let mut config = IrysNodeConfig::new(&testnet_config);
@@ -185,7 +187,7 @@ async fn serial_mine_ten_blocks() -> eyre::Result<()> {
     let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     node.actor_addresses.start_mining()?;
 
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
         info!("waiting block {}", i);
@@ -218,11 +220,12 @@ async fn serial_mine_ten_blocks() -> eyre::Result<()> {
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     }
+    node.stop().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn serial_test_basic_blockprod() -> eyre::Result<()> {
+async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
 
     let testnet_config = Config::testnet();
@@ -233,8 +236,8 @@ async fn serial_test_basic_blockprod() -> eyre::Result<()> {
     let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
 
     let poa_solution = capacity_chunk_solution(
-        node.config.mining_signer.address(),
-        node.vdf_steps_guard,
+        node.node_config.mining_signer.address(),
+        node.vdf_steps_guard.clone(),
         &node.vdf_config,
         &node.storage_config,
     )
@@ -247,7 +250,7 @@ async fn serial_test_basic_blockprod() -> eyre::Result<()> {
         .await??
         .unwrap();
 
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
 
     //check reth for built block
     let reth_block = reth_context
@@ -265,12 +268,12 @@ async fn serial_test_basic_blockprod() -> eyre::Result<()> {
         .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
         .unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-
+    node.stop().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
+async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
     let testnet_config = Config {
         chunk_size: 32,
@@ -316,7 +319,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     ]);
 
     let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
     let miner_init_balance = reth_context
         .rpc
         .get_balance(mining_signer_addr, None)
@@ -382,8 +385,8 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     }
 
     let poa_solution = capacity_chunk_solution(
-        node.config.mining_signer.address(),
-        node.vdf_steps_guard,
+        node.node_config.mining_signer.address(),
+        node.vdf_steps_guard.clone(),
         &node.vdf_config,
         &node.storage_config,
     )
@@ -429,6 +432,6 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .unwrap();
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-
+    node.stop().await;
     Ok(())
 }

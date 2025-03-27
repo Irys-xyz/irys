@@ -1,6 +1,6 @@
 use crate::{calculate_chunks_added, BlockFinalizedMessage};
 use actix::prelude::*;
-use irys_database::{BlockIndex, BlockIndexItem, Initialized, Ledger, LedgerIndexItem};
+use irys_database::{BlockIndex, BlockIndexItem, DataLedger, Initialized, LedgerIndexItem};
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
 use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
@@ -133,7 +133,7 @@ impl BlockIndexService {
         let chunk_size = self.storage_config.chunk_size;
 
         // Extract just the transactions referenced in the submit ledger
-        let submit_tx_count = block.ledgers[Ledger::Submit].tx_ids.len();
+        let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
         let submit_txs = &all_txs[..submit_tx_count];
 
         // Extract just the transactions referenced in the publish ledger
@@ -151,10 +151,12 @@ impl BlockIndexService {
             if index.num_blocks() == 0 && block.height == 0 {
                 (0, sub_chunks_added)
             } else {
-                let prev_block = index.get_item((block.height - 1) as usize).unwrap();
+                let prev_block = index
+                    .get_item((block.height.saturating_sub(1)) as usize)
+                    .unwrap();
                 (
-                    prev_block.ledgers[Ledger::Publish].max_chunk_offset + pub_chunks_added,
-                    prev_block.ledgers[Ledger::Submit].max_chunk_offset + sub_chunks_added,
+                    prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
+                    prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
                 )
             };
 
@@ -164,11 +166,11 @@ impl BlockIndexService {
             ledgers: vec![
                 LedgerIndexItem {
                     max_chunk_offset: max_publish_chunks,
-                    tx_root: block.ledgers[Ledger::Publish].tx_root,
+                    tx_root: block.data_ledgers[DataLedger::Publish].tx_root,
                 },
                 LedgerIndexItem {
                     max_chunk_offset: max_submit_chunks,
-                    tx_root: block.ledgers[Ledger::Submit].tx_root,
+                    tx_root: block.data_ledgers[DataLedger::Submit].tx_root,
                 },
             ],
         };
