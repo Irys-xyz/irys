@@ -3,7 +3,6 @@ use futures::future::join_all;
 use irys_database::block_header_by_hash;
 use irys_vdf::vdf_state::{AtomicVdfState, VdfState, VdfStepsReadGuard};
 use rayon::prelude::*;
-use reth::rpc::api::eth::helpers::block;
 use reth_db::Database;
 use std::{
     collections::VecDeque,
