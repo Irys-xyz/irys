@@ -4,7 +4,7 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysCommitments, 
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysCommitments,
     IrysPoAChunks, IrysTxHeaders, Metadata, PeerListItems,
 };
 

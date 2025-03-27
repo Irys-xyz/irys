@@ -1,15 +1,15 @@
 use actix::prelude::*;
 use futures::future::join_all;
-use irys_database::{block_header_by_hash};
+use irys_database::block_header_by_hash;
 use irys_vdf::vdf_state::{AtomicVdfState, VdfState, VdfStepsReadGuard};
 use rayon::prelude::*;
 use reth::rpc::api::eth::helpers::block;
 use reth_db::Database;
-use tokio::task::{self, JoinHandle};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock},
 };
+use tokio::task::{self, JoinHandle};
 use tracing::info;
 
 use crate::block_index_service::BlockIndexReadGuard;
@@ -120,13 +120,17 @@ async fn create_state_parallel(
             let db = db.clone();
             let block_index = block_index.clone();
             let join = task::spawn_blocking(move || {
-                let block_hash = block_index.read().get_item(block.try_into().expect("usize overflow")).map(|item| item.block_hash).expect("Error getting block hash");
+                let block_hash = block_index
+                    .read()
+                    .get_item(block.try_into().expect("usize overflow"))
+                    .map(|item| item.block_hash)
+                    .expect("Error getting block hash");
                 db.view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))
-                .expect("Db error reading block header by hash")
-                .expect("Block hash not found")
+                    .expect("Db error reading block header by hash")
+                    .expect("Block hash not found")
             });
             blocks_handles.push(join);
-        };
+        }
 
         // Wait for all tasks to complete
         let results = join_all(blocks_handles).await;
