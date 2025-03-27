@@ -101,9 +101,6 @@ tables! {
     /// Stores the header hashes belonging to the canonical chain.
     table IrysBlockHeaders<Key = H256, Value = CompactIrysBlockHeader>;
 
-    /// Stores the header hashes belonging to the canonical chain, indexed by height.
-    table IrysBlockHeadersByHeight<Key = u64, Value = H256>;
-
     /// Stores PoA chunks
     table IrysPoAChunks<Key = H256, Value = CompactBase64>;
 

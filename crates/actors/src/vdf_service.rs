@@ -1,8 +1,11 @@
 use actix::prelude::*;
-use irys_database::{block_header_by_hash, block_header_by_height};
+use futures::future::join_all;
+use irys_database::{block_header_by_hash};
 use irys_vdf::vdf_state::{AtomicVdfState, VdfState, VdfStepsReadGuard};
 use rayon::prelude::*;
+use reth::rpc::api::eth::helpers::block;
 use reth_db::Database;
+use tokio::task::{self, JoinHandle};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock},
@@ -95,7 +98,7 @@ fn create_state(
 }
 
 #[allow(dead_code)]
-fn create_state_parallel(
+async fn create_state_parallel(
     block_index: BlockIndexReadGuard,
     db: DatabaseProvider,
     config: &Config,
@@ -112,16 +115,24 @@ fn create_state_parallel(
     while steps_remaining > 0 && height > 0 {
         // get in parallel n blocks
         info!("reading from {} to {}", height.saturating_sub(n), height);
-        let blocks: Vec<IrysBlockHeader> = (height.saturating_sub(n)..height)
-            .into_par_iter()
-            .map(|h| {
-                db.view_eyre(|tx| block_header_by_height(tx, h, false))
-                    .unwrap()
-                    .unwrap()
-            })
-            .collect();
+        let mut blocks_handles: Vec<JoinHandle<IrysBlockHeader>> = Vec::new();
+        for block in height.saturating_sub(n)..height {
+            let db = db.clone();
+            let block_index = block_index.clone();
+            let join = task::spawn_blocking(move || {
+                let block_hash = block_index.read().get_item(block.try_into().expect("usize overflow")).map(|item| item.block_hash).expect("Error getting block hash");
+                db.view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))
+                .expect("Db error reading block header by hash")
+                .expect("Block hash not found")
+            });
+            blocks_handles.push(join);
+        };
 
-        'outer: for block in blocks.iter().rev() {
+        // Wait for all tasks to complete
+        let results = join_all(blocks_handles).await;
+
+        'outer: for block in results.iter().rev() {
+            let block = block.as_ref().expect("Error getting block");
             if global_step_number == 0 {
                 global_step_number = block.vdf_limiter_info.global_step_number;
             }
@@ -279,7 +290,6 @@ mod tests {
     }
 
     #[actix_rt::test]
-    #[ignore]
     async fn test_create_state_performance() {
         let testnet_config = Config {
             num_chunks_in_partition: 51_872_000, // testnet.toml numbers
@@ -359,7 +369,7 @@ mod tests {
 
         let now = Instant::now();
         let vdf_state_parallel =
-            create_state_parallel(block_index_guard, database_provider, &testnet_config);
+            create_state_parallel(block_index_guard, database_provider, &testnet_config).await;
         let elapsed = now.elapsed();
         println!(
             "VdfService vdf steps initialization time in parallel: {:.2?}",
