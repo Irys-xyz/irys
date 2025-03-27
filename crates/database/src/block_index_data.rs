@@ -1,6 +1,6 @@
 //! Manages a list of `{block_hash, weave_size, tx_root}`entries, indexed by
 //! block height.
-use crate::data_ledger::Ledger;
+use crate::data_ledger::DataLedger;
 use actix::dev::MessageResponse;
 use base58::ToBase58;
 use eyre::Result;
@@ -141,7 +141,7 @@ impl BlockIndex<Initialized> {
 
     /// For a given byte offset in a ledger, what block was responsible for adding
     /// that byte to the data ledger?
-    pub fn get_block_bounds(&self, ledger: Ledger, chunk_offset: u64) -> BlockBounds {
+    pub fn get_block_bounds(&self, ledger: DataLedger, chunk_offset: u64) -> BlockBounds {
         let mut block_bounds: BlockBounds = Default::default();
         block_bounds.ledger = ledger;
 
@@ -159,7 +159,7 @@ impl BlockIndex<Initialized> {
 
     pub fn get_block_index_item(
         &self,
-        ledger: Ledger,
+        ledger: DataLedger,
         chunk_offset: u64,
     ) -> Result<(usize, &BlockIndexItem)> {
         let result = self.items.binary_search_by(|item| {
@@ -199,7 +199,7 @@ pub struct BlockBounds {
     /// Block height where these bounds apply
     pub height: u128,
     /// Target ledger (Publish or Submit)
-    pub ledger: Ledger,
+    pub ledger: DataLedger,
     /// First chunk offset included in this block (inclusive)
     pub start_chunk_offset: u64,
     /// Final chunk offset after processing block transactions
@@ -242,16 +242,16 @@ impl LedgerIndexItem {
     }
 }
 
-impl Index<Ledger> for Vec<LedgerIndexItem> {
+impl Index<DataLedger> for Vec<LedgerIndexItem> {
     type Output = LedgerIndexItem;
 
-    fn index(&self, ledger: Ledger) -> &Self::Output {
+    fn index(&self, ledger: DataLedger) -> &Self::Output {
         &self[ledger as usize]
     }
 }
 
-impl IndexMut<Ledger> for Vec<LedgerIndexItem> {
-    fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
+impl IndexMut<DataLedger> for Vec<LedgerIndexItem> {
+    fn index_mut(&mut self, ledger: DataLedger) -> &mut Self::Output {
         &mut self[ledger as usize]
     }
 }
@@ -403,7 +403,7 @@ mod tests {
     use super::BlockIndex;
     use crate::{
         block_index_data::{ensure_path_exists, save_block_index},
-        data_ledger::Ledger,
+        data_ledger::DataLedger,
         BlockBounds, BlockIndexItem, LedgerIndexItem,
     };
     use irys_config::IrysNodeConfig;
@@ -476,27 +476,27 @@ mod tests {
         assert_eq!(*block_index.get_item(1).unwrap(), block_items[1]);
         assert_eq!(*block_index.get_item(2).unwrap(), block_items[2]);
 
-        let block_bounds = block_index.get_block_bounds(Ledger::Publish, 150);
+        let block_bounds = block_index.get_block_bounds(DataLedger::Publish, 150);
         assert_eq!(
             block_bounds,
             BlockBounds {
                 height: 1,
-                ledger: Ledger::Publish,
+                ledger: DataLedger::Publish,
                 start_chunk_offset: 100,
                 end_chunk_offset: 200,
-                tx_root: block_items[1].ledgers[Ledger::Publish].tx_root
+                tx_root: block_items[1].ledgers[DataLedger::Publish].tx_root
             }
         );
 
-        let block_bounds = block_index.get_block_bounds(Ledger::Submit, 1000);
+        let block_bounds = block_index.get_block_bounds(DataLedger::Submit, 1000);
         assert_eq!(
             block_bounds,
             BlockBounds {
                 height: 1,
-                ledger: Ledger::Submit,
+                ledger: DataLedger::Submit,
                 start_chunk_offset: 1000,
                 end_chunk_offset: 2000,
-                tx_root: block_items[1].ledgers[Ledger::Submit].tx_root
+                tx_root: block_items[1].ledgers[DataLedger::Submit].tx_root
             }
         );
 

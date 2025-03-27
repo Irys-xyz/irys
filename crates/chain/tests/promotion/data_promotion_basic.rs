@@ -16,9 +16,11 @@ async fn heavy_data_promotion_test() {
     use base58::ToBase58;
     use irys_actors::packing::wait_for_packing;
     use irys_api_server::{routes, ApiState};
-    use irys_database::Ledger;
-
-    use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
+    use irys_database::DataLedger;
+    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_types::{
+        irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset, StorageConfig,
+    };
     use reth_primitives::GenesisAccount;
     use std::time::Duration;
     use tokio::time::sleep;
@@ -249,7 +251,7 @@ async fn heavy_data_promotion_test() {
     // wait for the first set of chunks chunk to appear in the publish ledger
     for _attempts in 1..20 {
         if let Some(_packed_chunk) =
-            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(0)).await
+            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(0)).await
         {
             println!("First set of chunks found!");
             break;
@@ -260,7 +262,7 @@ async fn heavy_data_promotion_test() {
     // wait for the second set of chunks to appear in the publish ledger
     for _attempts in 1..20 {
         if let Some(_packed_chunk) =
-            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(3)).await
+            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
         {
             println!("Second set of chunks found!");
             break;
@@ -269,29 +271,29 @@ async fn heavy_data_promotion_test() {
     }
 
     let db = &node_context.db.clone();
-    let block_tx1 = get_block_parent(txs[0].header.id, Ledger::Publish, db).unwrap();
-    let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
+    let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
+    let block_tx2 = get_block_parent(txs[2].header.id, DataLedger::Publish, db).unwrap();
 
     let first_tx_index: usize;
     let next_tx_index: usize;
 
     if block_tx1.block_hash == block_tx2.block_hash {
         // Extract the transaction order
-        let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-        let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[1];
+        let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
+        let txid_2 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[1];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
         println!("1:{}", block_tx1);
     } else if block_tx1.height > block_tx2.height {
-        let txid_1 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-        let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
+        let txid_1 = block_tx2.data_ledgers[DataLedger::Publish].tx_ids.0[0];
+        let txid_2 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
         println!("1:{}", block_tx2);
         println!("2:{}", block_tx1);
     } else {
-        let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-        let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
+        let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
+        let txid_2 = block_tx2.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
         println!("1:{}", block_tx1);

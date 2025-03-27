@@ -1,7 +1,7 @@
 use crate::utils::{mine_blocks, post_chunk, start_node_config};
 use awc::http::StatusCode;
 use irys_config::IrysNodeConfig;
-use irys_database::Ledger;
+use irys_database::DataLedger;
 
 use irys_types::Config;
 use tracing::debug;
@@ -265,7 +265,7 @@ async fn heavy_double_root_data_promotion_test() {
     // wait for the first set of chunks chunk to appear in the publish ledger
     for _attempts in 1..20 {
         if let Some(_packed_chunk) =
-            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(0)).await
+            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(0)).await
         {
             println!("First set of chunks found!");
             break;
@@ -276,7 +276,7 @@ async fn heavy_double_root_data_promotion_test() {
     // wait for the second set of chunks to appear in the publish ledger
     for _attempts in 1..20 {
         if let Some(_packed_chunk) =
-            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(3)).await
+            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
         {
             println!("Second set of chunks found!");
             break;
@@ -285,7 +285,7 @@ async fn heavy_double_root_data_promotion_test() {
     }
 
     let db = &node_context.db.clone();
-    let block_tx1 = get_block_parent(txs[0].header.id, Ledger::Publish, db).unwrap();
+    let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
     let first_tx_index: usize;
@@ -314,7 +314,7 @@ async fn heavy_double_root_data_promotion_test() {
     //     println!("2:{}", block_tx2);
     // }
 
-    let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
+    let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
     first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
@@ -508,7 +508,7 @@ async fn heavy_double_root_data_promotion_test() {
     // wait for the second set of chunks to appear in the publish ledger
     for _attempts in 1..20 {
         if let Some(_packed_chunk) =
-            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(3)).await
+            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
         {
             println!("Second set of chunks found!");
             break;
@@ -517,12 +517,12 @@ async fn heavy_double_root_data_promotion_test() {
     }
 
     let db = &node_context.db.clone();
-    let block_tx1 = get_block_parent(txs[0].header.id, Ledger::Publish, db).unwrap();
+    let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
     let first_tx_index: usize;
 
-    let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
+    let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
     first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();

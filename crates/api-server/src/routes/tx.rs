@@ -6,7 +6,7 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
-use irys_database::{database, Ledger};
+use irys_database::{database, DataLedger};
 use irys_types::{u64_stringify, IrysTransactionHeader, H256};
 use reth_db::Database;
 use serde::{Deserialize, Serialize};
@@ -99,7 +99,7 @@ pub async fn get_tx_local_start_offset(
     let tx_id: H256 = path.into_inner();
     info!("Get tx data metadata by tx_id: {}", tx_id);
     let tx_header = get_tx_header(&state, tx_id)?;
-    let ledger = Ledger::try_from(tx_header.ledger_id).unwrap();
+    let ledger = DataLedger::try_from(tx_header.ledger_id).unwrap();
 
     match state
         .chunk_provider

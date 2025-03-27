@@ -9,7 +9,7 @@ use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::db_cache::DataRootLRUEntry;
 use irys_database::tables::DataRootLRU;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
-use irys_database::{insert_tx_header, tx_header_by_txid, Ledger};
+use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
 use irys_types::{
@@ -375,7 +375,11 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         for sm in &self.storage_modules {
-            if !sm.get_write_offsets(&chunk).unwrap_or(vec![]).is_empty() {
+            if !sm
+                .get_writeable_offsets(&chunk)
+                .unwrap_or_default()
+                .is_empty()
+            {
                 info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
                 sm.write_data_chunk(&chunk)
                     .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()))?;
@@ -517,12 +521,12 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
             let block = &msg.0;
             let all_txs = &msg.1;
 
-            for txid in block.ledgers[Ledger::Submit].tx_ids.iter() {
+            for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
                 // Remove the submit tx from the pending valid_tx pool
                 self.valid_tx.remove(txid);
             }
 
-            let published_txids = &block.ledgers[Ledger::Publish].tx_ids.0;
+            let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
 
             // Loop though the promoted transactions and remove their ingress proofs
             // from the mempool. In the future on a multi node network we may keep
@@ -536,7 +540,12 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
                     })
                     .unwrap();
 
-                for (i, txid) in block.ledgers[Ledger::Publish].tx_ids.0.iter().enumerate() {
+                for (i, txid) in block.data_ledgers[DataLedger::Publish]
+                    .tx_ids
+                    .0
+                    .iter()
+                    .enumerate()
+                {
                     // Retrieve the promoted transactions header
                     let mut tx_header = match tx_header_by_txid(&mut_tx, txid) {
                         Ok(Some(header)) => header,
@@ -552,7 +561,10 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
 
                     // TODO: In a single node world there is only one ingress proof
                     // per promoted tx, but in the future there will be multiple proofs.
-                    let proofs = block.ledgers[Ledger::Publish].proofs.as_ref().unwrap();
+                    let proofs = block.data_ledgers[DataLedger::Publish]
+                        .proofs
+                        .as_ref()
+                        .unwrap();
                     let proof = proofs.0[i].clone();
                     tx_header.ingress_proofs = Some(proof);
 
