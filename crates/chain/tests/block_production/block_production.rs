@@ -20,10 +20,8 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    create_submit_data_tx, capacity_chunk_solution, get_block_by_height, start_node, start_node_config,
-    wait_until_height, AddTxError,
+    mine_block, start_node, AddTxError, IrysNodeTest
 };
-/// Create a valid capacity PoA solution
 
 #[tokio::test]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
@@ -58,12 +56,12 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         ),
     ]);
 
-    let (node, _) = start_node_config("test_blockprod", Some(testnet_config), Some(config)).await;
+    let irys_node = IrysNodeTest::new_with_config("test_blockprod", Some(testnet_config), Some(config)).await;
 
     let mut txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
     for a in [&account1, &account2, &account3] {
         let data_bytes = "Hello, world!".as_bytes().to_vec();
-        match create_submit_data_tx(&node, &a, data_bytes).await {
+        match irys_node.create_submit_data_tx(&a, data_bytes).await {
             Ok(tx) => {
                 txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
             }
@@ -74,20 +72,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         }
     }
 
-    let poa_solution = capacity_chunk_solution(
-        node.node_config.mining_signer.address(),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
-    )
-    .await;
-
-    let (block, reth_exec_env) = node
-        .actor_addresses
-        .block_producer
-        .send(SolutionFoundMessage(poa_solution))
-        .await??
-        .unwrap();
+    let (block, reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
 
     for receipt in reth_exec_env.shadow_receipts {
         if let Some(og_tx) = txs.get(&receipt.tx_id) {
@@ -98,7 +83,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         }
     }
 
-    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
+    let reth_context = RethNodeContext::new(irys_node.node_ctx.reth_handle.clone().into()).await?;
 
     //check reth for built block
     let reth_block = reth_context
@@ -112,14 +97,15 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 
     // check irys DB for built block
 
-    let db_irys_block = &node
+    let db_irys_block = &irys_node
+        .node_ctx
         .db
         .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
         .unwrap();
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
-    node.stop().await;
+    irys_node.stop().await;
     Ok(())
 }
 
@@ -130,18 +116,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 
     for i in 1..10 {
         info!("manually producing block {}", i);
-        let poa_solution = capacity_chunk_solution(
-            node.node_config.mining_signer.address(),
-            node.vdf_steps_guard.clone(),
-            &node.vdf_config,
-            &node.storage_config,
-        )
-        .await;
-        let fut = node
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()));
-        let (block, _reth_exec_env) = fut.await??.unwrap();
+        let (block, _reth_exec_env) = mine_block(&node).await?.unwrap();
 
         //check reth for built block
         let reth_block = reth_context
@@ -168,20 +143,20 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 
 #[tokio::test]
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
-    let (node, _tmp_dir) = start_node("test_mine_ten_blocks").await;
+    let node = IrysNodeTest::new("test_mine_ten_blocks").await;
 
-    node.actor_addresses.start_mining()?;
-    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
+    node.node_ctx.actor_addresses.start_mining()?;
+    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
-        wait_until_height(&node, i + 1, 60).await;
+        node.wait_until_height(i + 1, 60).await;
 
         //check reth for built block
         let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
         assert_eq!(i, reth_block.header.number);
         assert_eq!(i, reth_block.number);
 
-        let db_irys_block = get_block_by_height(&node, i as u64, false).unwrap();
+        let db_irys_block = node.get_block_by_height(i as u64, false).unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     }
@@ -191,22 +166,9 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
-    let (node, _tmp_dir) = start_node("test_blockprod").await;
+    let (node, _tmp_dir) = start_node("test_basic_blockprod").await;
 
-    let poa_solution = capacity_chunk_solution(
-        node.node_config.mining_signer.address(),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
-    )
-    .await;
-
-    let (block, _) = node
-        .actor_addresses
-        .block_producer
-        .send(SolutionFoundMessage(poa_solution))
-        .await??
-        .unwrap();
+    let (block, _ ) = mine_block(&node).await?.unwrap();
 
     let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
 
@@ -274,9 +236,8 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     ]);
 
     let chain_id = testnet_config.chain_id;
-    let (node, _) =
-        start_node_config("test_serial_blockprod", Some(testnet_config), Some(config)).await;
-    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
+    let node= IrysNodeTest::new_with_config("test_serial_blockprod", Some(testnet_config), Some(config)).await;
+    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
     let miner_init_balance = reth_context
         .rpc
         .get_balance(mining_signer_addr, None)
@@ -329,7 +290,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         evm_txs.insert(*tx_env.tx_hash(), tx_env.clone());
 
         let data_bytes = "Hello, world!".as_bytes().to_vec();
-        match create_submit_data_tx(&node, &a, data_bytes).await {
+        match node.create_submit_data_tx(&a, data_bytes).await {
             Ok(tx) => {
                 irys_txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
             }
@@ -344,20 +305,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         }
     }
 
-    let poa_solution = capacity_chunk_solution(
-        node.node_config.mining_signer.address(),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
-    )
-    .await;
-
-    let (block, reth_exec_env) = node
-        .actor_addresses
-        .block_producer
-        .send(SolutionFoundMessage(poa_solution))
-        .await??
-        .unwrap();
+    let (block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
 
     for receipt in reth_exec_env.shadow_receipts {
         if let Some(og_tx) = irys_txs.get(&receipt.tx_id) {
@@ -387,6 +335,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     );
     // check irys DB for built block
     let db_irys_block = &node
+        .node_ctx
         .db
         .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
         .unwrap();

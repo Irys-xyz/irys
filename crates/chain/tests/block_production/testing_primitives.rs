@@ -5,36 +5,35 @@ use reth_primitives::GenesisAccount;
 use tracing::info;
 
 use crate::utils::{
-    create_submit_data_tx, get_block_by_height, get_height, get_tx_header, mine_blocks, mine_block, start_node,
-    start_node_config, wait_until_height,
+    IrysNodeTest
 };
 
 #[actix::test]
 async fn heavy_test_wait_until_height() {
-    let (node_ctx, _tmp_dir) = start_node("test_wait_until_height").await;
-    let height = get_height(&node_ctx);
+    let irys_node = IrysNodeTest::new("test_wait_until_height").await;
+    let height = irys_node.get_height();
     info!("height: {}", height);
     let steps = 2;
     let seconds = 60;
-    node_ctx.actor_addresses.set_mining(true).unwrap();
-    wait_until_height(&node_ctx, height + steps, seconds).await;
-    let height5 = get_height(&node_ctx);
+    irys_node.node_ctx.actor_addresses.set_mining(true).unwrap();
+    irys_node.wait_until_height(height + steps, seconds).await;
+    let height5 = irys_node.get_height();
     assert_eq!(height5, height + steps);
-    node_ctx.stop().await;
+    irys_node.stop().await;
 }
 
 #[actix::test]
 async fn heavy_test_mine() {
-    let (node_ctx, _tmp_dir) = start_node("test_mine").await;
-    let height = get_height(&node_ctx);
+    let irys_node = IrysNodeTest::new("test_wait_until_height").await;
+    let height = irys_node.get_height();
     info!("height: {}", height);
     let blocks = 4;
-    mine_blocks(&node_ctx, blocks).await.unwrap();
-    let next_height = get_height(&node_ctx);
+    irys_node.mine_blocks(blocks).await.unwrap();
+    let next_height = irys_node.get_height();
     assert_eq!(next_height, height + blocks as u64);
-    let block = get_block_by_height(&node_ctx, next_height, false).unwrap();
+    let block = irys_node.get_block_by_height(next_height, false).unwrap();
     assert_eq!(block.height, next_height);
-    node_ctx.stop().await;
+    irys_node.stop().await;
 }
 
 #[actix::test]
@@ -50,20 +49,15 @@ async fn heavy_test_mine_tx() {
         },
     )]);
 
-    let (node_ctx, _tmp_dir) = start_node_config(
-        "test_mine_tx",
-        Some(testnet_config.clone()),
-        Some(node_config),
-    )
-    .await;
-    let height = get_height(&node_ctx);
+    let irys_node = IrysNodeTest::new_with_config("test_mine_tx", Some(testnet_config.clone()), Some(node_config)).await;
+    let height = irys_node.get_height();
     let data = "Hello, world!".as_bytes().to_vec();
     info!("height: {}", height);
-    let tx = create_submit_data_tx(&node_ctx, &account, data).await.unwrap();
-    mine_block(&node_ctx).await.unwrap();
-    let next_height = get_height(&node_ctx);
+    let tx = irys_node.create_submit_data_tx(&account, data).await.unwrap();
+    irys_node.mine_block().await.unwrap();
+    let next_height = irys_node.get_height();
     assert_eq!(next_height, height + 1 as u64);
-    let tx_header = get_tx_header(&node_ctx, &tx.header.id).unwrap();
+    let tx_header = irys_node.get_tx_header(&tx.header.id).unwrap();
     assert_eq!(tx_header, tx.header);
-    node_ctx.stop().await;
+    irys_node.stop().await;
 }
