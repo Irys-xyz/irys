@@ -345,7 +345,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 data_size: chunk_bytes.len() as u64,
                 data_path: Base64(proof.proof.clone()),
                 bytes: chunk_bytes,
-                tx_offset: TxChunkOffset::from(i.try_into().expect("Value exceeds u32::MAX")),
+                tx_offset: TxChunkOffset::from(
+                    TryInto::<u32>::try_into(i).expect("Value exceeds u32::MAX"),
+                ),
             };
 
             let _ = db.update_eyre(|tx| cache_chunk(tx, &chunk));
