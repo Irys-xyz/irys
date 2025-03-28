@@ -7,10 +7,11 @@ use crate::{
     PeerListProvider,
 };
 use actix::{Actor, Addr, Context, Handler};
+use irys_api_client::ApiClient;
 use irys_actors::mempool_service::{ChunkIngressError, TxIngressError};
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
 use irys_database::tables::CompactPeerListItem;
-use irys_types::DatabaseProvider;
+use irys_types::{DatabaseProvider, H256};
 use rand::seq::IteratorRandom;
 use std::net::SocketAddr;
 use std::{sync::Arc, time::Duration};
@@ -92,11 +93,11 @@ pub struct GossipService {
     server: Option<GossipServer>,
     server_address: String,
     server_port: u16,
-    client: GossipClient,
     cache: Arc<GossipCache>,
     peer_list: PeerListProvider,
     untrusted_gossip_data_rx: Option<mpsc::Receiver<(SocketAddr, GossipData)>>,
     trusted_gossip_data_rx: Option<mpsc::Receiver<GossipData>>,
+    client: GossipClient,
 }
 
 impl GossipService
@@ -137,7 +138,7 @@ impl GossipService
         )
     }
 
-    pub async fn run<TMemPoolService>(mut self, mempool: Addr<TMemPoolService>) -> GossipResult<ServiceHandleWithShutdownSignal<GossipResult<()>>>
+    pub async fn run<TMemPoolService>(mut self, mempool: Addr<TMemPoolService>, api_client: impl ApiClient + 'static) -> GossipResult<ServiceHandleWithShutdownSignal<GossipResult<()>>>
     where TMemPoolService: Handler<TxIngressMessage> + Handler<ChunkIngressMessage> + Actor<Context = Context<TMemPoolService>>
     {
         tracing::debug!("Staring gossip service");
@@ -196,7 +197,7 @@ impl GossipService
                             maybe_message = untrusted_gossip_data_rx.recv() => {
                                 match maybe_message {
                                     Some((source_address, data)) => {
-                                       match handle_gossip_data_from_other_peer(source_address, data, service.clone(), mempool.clone()).await {
+                                       match handle_gossip_data_from_other_peer(source_address, data, service.clone(), mempool.clone(), &api_client).await {
                                              Ok(()) => {}
                                              Err(e) => {
                                                 match e {
@@ -391,6 +392,7 @@ async fn handle_gossip_data_from_other_peer<T>(
     data: GossipData,
     service: Arc<GossipService>,
     mempool: Addr<T>,
+    api_client: &impl ApiClient,
 ) -> GossipResult<()>
 where
     T: Handler<TxIngressMessage> + Handler<ChunkIngressMessage> + Actor<Context = Context<T>>,
@@ -521,8 +523,101 @@ where
                 }
             }
         }
-        GossipData::Block(_block) => {
-            // TODO: implement
+        GossipData::Block(block) => {
+            tracing::debug!(
+                "Gossip block received from peer {}: {:?}",
+                source_address,
+                block.irys.block_hash
+            );
+
+            // Get all transaction IDs from the block
+            let tx_ids = block.irys.ledgers
+                .iter()
+                .flat_map(|ledger| ledger.tx_ids.0.clone())
+                .collect::<Vec<H256>>();
+
+            tracing::debug!("Txids in block: {:?}", tx_ids);
+
+            // Fetch missing transactions from the source peer
+            let missing_txs = api_client.get_transactions(source_address, &tx_ids).await.map_err(|e| {
+                tracing::error!("Failed to fetch transactions from peer {}: {}", source_address, e);
+                GossipError::Internal(InternalGossipError::Unknown(e.to_string()))
+            })?;
+
+            tracing::debug!("Recieved block, missing txs: {:?}", missing_txs);
+
+            // Process each transaction
+            for (tx_id, tx) in tx_ids.iter().zip(missing_txs.iter()) {
+                if let Some(tx) = tx {
+                    // Send transaction to mempool
+                    match mempool.send(TxIngressMessage(tx.clone())).await {
+                        Ok(message_result) => {
+                            match message_result {
+                                Ok(()) => {
+                                    // Success. Record in cache
+                                    service.cache.record_seen(
+                                        source_address,
+                                        &GossipData::Transaction(tx.clone()),
+                                    )?;
+                                }
+                                Err(e) => {
+                                    match e {
+                                        TxIngressError::Skipped => {
+                                            // Not an invalid transaction - just skipped
+                                            service.cache.record_seen(
+                                                source_address,
+                                                &GossipData::Transaction(tx.clone()),
+                                            )?;
+                                        }
+                                        TxIngressError::InvalidSignature => {
+                                            return Err(GossipError::InvalidData(
+                                                InvalidDataError::TransactionSignature,
+                                            ));
+                                        }
+                                        TxIngressError::Unfunded => {
+                                            return Err(GossipError::InvalidData(
+                                                InvalidDataError::TransactionUnfunded,
+                                            ));
+                                        }
+                                        TxIngressError::InvalidAnchor => {
+                                            return Err(GossipError::InvalidData(
+                                                InvalidDataError::TransactionAnchor,
+                                            ));
+                                        }
+                                        TxIngressError::DatabaseError => {
+                                            return Err(GossipError::Internal(
+                                                InternalGossipError::Database,
+                                            ));
+                                        }
+                                        TxIngressError::ServiceUninitialized => {
+                                            return Err(GossipError::Internal(
+                                                InternalGossipError::ServiceUninitialized,
+                                            ));
+                                        }
+                                        TxIngressError::Other(e) => {
+                                            return Err(GossipError::Internal(
+                                                InternalGossipError::Unknown(e),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to send transaction to mempool: {}", e);
+                            return Err(GossipError::Internal(InternalGossipError::Unknown(
+                                e.to_string(),
+                            )));
+                        }
+                    }
+                } else {
+                    tracing::warn!("Missing transaction {} in block from peer {}", tx_id, source_address);
+                    return Err(GossipError::InvalidData(InvalidDataError::InvalidBlock));
+                }
+            }
+
+            // Record block in cache
+            service.cache.record_seen(source_address, &GossipData::Block(block))?;
             Ok(())
         }
     }

@@ -7,28 +7,28 @@ edition = "2021"
 # Internal dependencies
 irys-types = { path = "../types", features = ["test-utils"] }
 irys-primitives = { path = "../primitives" }
-irys-config = { path = "../config" }
 irys-database = { path = "../database" }
 # Please take a look at the note for pub use section in the api-server's lib.rs file
+irys-api-client.workspace = true
 irys-api-server.workspace = true
 # Other dependencies
 actix-web = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-futures = { workspace = true }
 eyre.workspace = true
 rand = "0.8"
 reqwest = { version = "0.11", features = ["json"] }
 irys-actors.workspace = true
 actix.workspace = true
-awc = "3.5.1"
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
 irys-storage.workspace = true
+tokio-test = "0.4"
+mockall = "0.11"
+async-trait = "0.1"
 
 [lints]
 workspace = true

@@ -13,7 +13,7 @@ irys-types.workspace = true
 irys-config.workspace = true
 #
 
-awc = "3.5.1"
+awc.workspace = true
 base58.workspace = true
 reth.workspace = true
 reth-db.workspace = true

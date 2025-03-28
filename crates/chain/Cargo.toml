@@ -63,7 +63,7 @@ alloy-provider.workspace = true
 core_affinity = "0.8.1"
 
 [dev-dependencies]
-awc = "3.5"
+awc.workspace = true
 irys-actors = { workspace = true, features = ["test-utils"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true

@@ -19,6 +19,7 @@ members = [
   "crates/price-oracle",
   "crates/cli", 
   "crates/gossip-service",
+  "crates/api-client",
 ]
 resolver = "2"
 
@@ -36,6 +37,7 @@ irys-macros = { path = "./crates/macros" }
 irys-database = { path = "./crates/database" }
 irys-actors = { path = "./crates/actors" }
 irys-api-server = { path = "./crates/api-server" }
+irys-api-client = { path = "./crates/api-client" }
 irys-c = { path = "./crates/c" }
 irys-primitives = { path = "./crates/primitives" }
 irys-config = { path = "./crates/config" }
@@ -54,6 +56,7 @@ actix = "0.13.5"
 actix-rt = "2.10.0"
 actix-web = "4.9.0"
 actix-http = "3.9.0"
+awc = "3.5.1"
 base58 = "0.2.0"
 tokio-stream = "0.1"
 alloy-consensus = { path = "./ext/alloy/crates/consensus", default-features = false }

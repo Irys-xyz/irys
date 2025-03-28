@@ -1,7 +1,9 @@
 use crate::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
 use gossip_service::GossipData;
 use std::time::Duration;
-use irys_types::PeerScore;
+use irys_types::{H256List, PeerScore};
+use irys_api_server::CombinedBlockHeader;
+use irys_types::{TransactionLedger};
 
 #[actix_web::test]
 async fn should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
@@ -201,6 +203,91 @@ async fn should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     tokio::time::sleep(Duration::from_millis(3000)).await;
 
     service1_handle.stop().await?;
+
+    Ok(())
+}
+
+#[actix_web::test]
+async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
+    let mut fixture1 = GossipServiceTestFixture::new();
+    let mut fixture2 = GossipServiceTestFixture::new();
+
+    fixture1.add_peer(&fixture2);
+    fixture2.add_peer(&fixture1);
+
+    // Create a test block with transactions
+    let mut block = CombinedBlockHeader::default();
+    let mut ledger = TransactionLedger::default();
+    let tx1 = generate_test_tx().header;
+    let tx2 = generate_test_tx().header;
+    ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
+    println!("Added transactions to ledger: {:?}", ledger.tx_ids);
+    block.irys.ledgers.push(ledger);
+
+    // Set up the mock API client to return the transactions
+    fixture2.api_client.txs.insert(tx1.id, tx1.clone());
+    fixture2.api_client.txs.insert(tx2.id, tx2.clone());
+
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;
+
+    // Waiting a little for the service to initialize
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Send block from service 1 to service 2
+    gossip_service1_message_bus.send(GossipData::Block(block)).await.unwrap();
+
+    // Wait for service 2 to process the block and fetch transactions
+    tokio::time::sleep(Duration::from_millis(3000)).await;
+
+    // Check that service 2 received and processed the transactions
+    let service2_mempool_txs = fixture2.mempool_txs.read().unwrap();
+    assert_eq!(service2_mempool_txs.len(), 2);
+
+    service1_handle.stop().await?;
+    service2_handle.stop().await?;
+
+    Ok(())
+}
+
+#[actix_web::test]
+async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
+    let mut fixture1 = GossipServiceTestFixture::new();
+    let mut fixture2 = GossipServiceTestFixture::new();
+
+    fixture1.add_peer(&fixture2);
+    fixture2.add_peer(&fixture1);
+
+    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;
+
+    // Waiting a little for the service to initialize
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Create a test block with transactions
+    let mut block = CombinedBlockHeader::default();
+    let mut ledger = TransactionLedger::default();
+    let tx1 = generate_test_tx().header;
+    let tx2 = generate_test_tx().header;
+    ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
+    block.irys.ledgers.push(ledger);
+
+    // Set up the mock API client to return only one transaction
+    fixture2.api_client.txs.insert(tx1.id, tx1.clone());
+    // Don't add tx2 to expected transactions, so it will be missing
+
+    // Send block from service 1 to service 2
+    gossip_service1_message_bus.send(GossipData::Block(block)).await.unwrap();
+
+    // Wait for service 2 to process the block and attempt to fetch transactions
+    tokio::time::sleep(Duration::from_millis(3000)).await;
+
+    // Check that service 2 rejected the block due to missing transactions
+    let service2_mempool_txs = fixture2.mempool_txs.read().unwrap();
+    assert_eq!(service2_mempool_txs.len(), 0);
+
+    service1_handle.stop().await?;
+    service2_handle.stop().await?;
 
     Ok(())
 }

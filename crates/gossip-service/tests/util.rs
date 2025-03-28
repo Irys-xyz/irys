@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use actix::{Actor, Addr, Context, Handler};
 use gossip_service::service::ServiceHandleWithShutdownSignal;
 use gossip_service::{GossipData, GossipResult, GossipService, PeerListProvider};
@@ -9,11 +10,14 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, Config, DatabaseProvider, IrysTransaction, IrysTransactionHeader, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk};
+use irys_types::{Base64, Config, DatabaseProvider, IrysTransaction, IrysTransactionHeader, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk, H256};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use irys_api_client::{ApiClient};
+use eyre::Result;
+use tracing::debug;
 
 #[derive(Debug)]
 pub struct MempoolStub {
@@ -41,13 +45,19 @@ impl Handler<TxIngressMessage> for MempoolStub {
 
     fn handle(&mut self, msg: TxIngressMessage, _: &mut Self::Context) -> Self::Result {
         let tx = msg.0.clone();
-        self.txs.write().unwrap().push(msg);
 
-        // Pretend that we've validated the tx and we're ready to gossip it
-        let message_bus = self.internal_message_bus.clone();
-        tokio::runtime::Handle::current().spawn(async move {
-            message_bus.send(GossipData::Transaction(tx)).await.unwrap();
-        });
+        let already_exists = self.txs.read().unwrap().iter().any(|m| m.0 == msg.0);
+
+        if !already_exists {
+            self.txs.write().unwrap().push(msg);
+            // Pretend that we've validated the tx and we're ready to gossip it
+            let message_bus = self.internal_message_bus.clone();
+            tokio::runtime::Handle::current().spawn(async move {
+                message_bus.send(GossipData::Transaction(tx)).await.unwrap();
+            });
+        } else {
+            return Err(TxIngressError::Skipped);
+        }
 
         Ok(())
     }
@@ -71,6 +81,44 @@ impl Handler<ChunkIngressMessage> for MempoolStub {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct StubApiClient {
+    pub txs: HashMap<H256, IrysTransactionHeader>,
+}
+
+#[async_trait::async_trait]
+impl ApiClient for StubApiClient {
+    async fn get_transaction(&self, _peer: SocketAddr, tx_id: H256) -> Result<Option<IrysTransactionHeader>> {
+        println!("Fetching transaction {:?} from stub API client", tx_id);
+        println!("{:?}", self.txs.get(&tx_id));
+        Ok(self.txs.get(&tx_id).cloned())
+    }
+
+    async fn get_transactions(&self, peer: SocketAddr, tx_ids: &[H256]) -> Result<Vec<Option<IrysTransactionHeader>>> {
+        debug!("Fetching {} transactions from peer {}", tx_ids.len(), peer);
+        let mut results = Vec::with_capacity(tx_ids.len());
+
+        for &tx_id in tx_ids {
+            let result = self.get_transaction(peer, tx_id).await?;
+            results.push(result);
+        }
+
+        Ok(results)
+    }
+}
+
+impl StubApiClient {
+    pub fn new() -> Self {
+        Self {
+            txs: HashMap::new(),
+        }
+    }
+
+    pub fn add_transaction(&mut self, tx_id: H256, tx_header: IrysTransactionHeader) {
+        self.txs.insert(tx_id, tx_header);
+    }
+}
+
 #[derive(Debug)]
 pub struct GossipServiceTestFixture {
     pub temp_dir: TempDir,
@@ -81,6 +129,7 @@ pub struct GossipServiceTestFixture {
     pub mempool: Addr<MempoolStub>,
     pub mempool_txs: Arc<RwLock<Vec<TxIngressMessage>>>,
     pub mempool_chunks: Arc<RwLock<Vec<ChunkIngressMessage>>>,
+    pub api_client: StubApiClient,
 }
 
 impl GossipServiceTestFixture {
@@ -108,6 +157,7 @@ impl GossipServiceTestFixture {
             mempool: mempool_stub_addr,
             mempool_txs,
             mempool_chunks,
+            api_client: StubApiClient::new()
         }
     }
 
@@ -133,7 +183,9 @@ impl GossipServiceTestFixture {
         self.mempool_txs = mempool_txs;
         self.mempool_chunks = mempool_chunks;
 
-        let service_handle = gossip_service.run(mempool_stub_addr).await.unwrap();
+        let api_client = self.api_client.clone();
+
+        let service_handle = gossip_service.run(mempool_stub_addr, api_client).await.unwrap();
 
         (service_handle, internal_message_bus)
     }
@@ -189,7 +241,7 @@ pub fn generate_test_tx() -> IrysTransaction {
 
 pub fn create_test_chunks(tx: &IrysTransaction) -> Vec<UnpackedChunk> {
     let mut chunks = Vec::new();
-    for chunk_node in tx.chunks.iter() {
+    for _chunk_node in tx.chunks.iter() {
         let data_root = tx.header.data_root;
         let data_size = tx.header.data_size;
         let data_path = Base64(vec![1, 2, 3]);
