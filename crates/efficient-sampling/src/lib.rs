@@ -66,9 +66,8 @@ impl Ranges {
             let mut rng = SimpleRNG::new(rng_seed);
 
             let next_range_pos = (rng.next()
-                % TryInto::<u32>::try_into(self
-                    .last_range_pos)
-                    .expect("Value exceeds u32::MAX")) as usize; // usize (one word in current CPU architecture) to u32 is safe in 32bits of above architectures
+                % TryInto::<u32>::try_into(self.last_range_pos).expect("Value exceeds u32::MAX"))
+                as usize; // usize (one word in current CPU architecture) to u32 is safe in 32bits of above architectures
             let range = self.ranges[next_range_pos];
             self.ranges[next_range_pos] = self.ranges[self.last_range_pos]; // overwrite returned range with last one
             self.last_range_pos -= 1;
