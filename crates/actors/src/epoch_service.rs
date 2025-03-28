@@ -526,7 +526,10 @@ impl EpochServiceActor {
             let ledgers = self.ledgers.read().unwrap();
             slot_needs = ledgers.get_slot_needs(ledger);
         }
-        let mut capacity_count = capacity_partitions.len() as u32;
+        let mut capacity_count: u32 = capacity_partitions
+            .len()
+            .try_into()
+            .expect("Value exceeds u32::MAX");
 
         // Iterate over slots that need partitions and assign them
         for (slot_index, num_needed) in slot_needs {
@@ -721,7 +724,12 @@ impl EpochServiceActor {
         storage_module_config: StorageSubmodulesConfig,
     ) -> Vec<StorageModuleInfo> {
         let ledgers = self.ledgers.read().unwrap();
-        let num_part_chunks = self.config.storage_config.num_chunks_in_partition as u32;
+        let num_part_chunks: u32 = self
+            .config
+            .storage_config
+            .num_chunks_in_partition
+            .try_into()
+            .expect("Value exceeds u32::MAX");
 
         let pa = self.partition_assignments.read().unwrap();
 

@@ -65,7 +65,9 @@ impl Ranges {
             let rng_seed: u32 = u32::from_be_bytes(hasher.finish()[28..32].try_into().unwrap());
             let mut rng = SimpleRNG::new(rng_seed);
 
-            let next_range_pos = (rng.next() % self.last_range_pos as u32) as usize; // usize (one word in current CPU architecture) to u32 is safe in 32bits of above architectures
+            let next_range_pos = (rng.next()
+                % TryInto::<u32>::try_into(self.last_range_pos).expect("Value exceeds u32::MAX"))
+                as usize; // usize (one word in current CPU architecture) to u32 is safe in 32bits of above architectures
             let range = self.ranges[next_range_pos];
             self.ranges[next_range_pos] = self.ranges[self.last_range_pos]; // overwrite returned range with last one
             self.last_range_pos -= 1;
