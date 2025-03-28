@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use actix::{Actor, Addr, Context, Handler};
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
-use irys_gossip_service::{GossipData, GossipResult, GossipService, PeerListProvider};
+use irys_gossip_service::{GossipResult, GossipService, PeerListProvider};
 use irys_actors::mempool_service::{ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage};
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, Config, DatabaseProvider, IrysTransaction, IrysTransactionHeader, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk, H256};
+use irys_types::{Base64, Config, DatabaseProvider, GossipData, IrysTransaction, IrysTransactionHeader, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk, H256};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -178,7 +178,6 @@ impl GossipServiceTestFixture {
         let (gossip_service, internal_message_bus) = GossipService::new(
             "127.0.0.1",
             self.port,
-            Duration::from_millis(10000),
             self.db.clone(),
         );
 

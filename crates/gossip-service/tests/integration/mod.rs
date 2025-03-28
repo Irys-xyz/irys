@@ -1,7 +1,5 @@
 use crate::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
-use irys_gossip_service::GossipData;
-use irys_api_server::CombinedBlockHeader;
-use irys_types::{DataTransactionLedger, H256List, PeerScore};
+use irys_types::{CombinedBlockHeader, DataTransactionLedger, GossipData, H256List, PeerScore};
 use std::time::Duration;
 
 #[actix_web::test]
