@@ -645,7 +645,8 @@ where
 }
 
 async fn is_known_tx<T>(mempool: &Addr<T>, tx_id: H256) -> Result<bool, GossipError>
-where T: Handler<TxExistenceQuery> + Actor<Context = Context<T>>,
+where
+    T: Handler<TxExistenceQuery> + Actor<Context = Context<T>>,
 {
     mempool
         .send(TxExistenceQuery(tx_id))

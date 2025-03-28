@@ -1,20 +1,25 @@
-use std::collections::HashMap;
 use actix::{Actor, Addr, Context, Handler};
+use eyre::Result;
+use irys_actors::mempool_service::{
+    ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
+};
+use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
 use irys_gossip_service::{GossipResult, GossipService, PeerListProvider};
-use irys_actors::mempool_service::{ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage};
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, Config, DatabaseProvider, GossipData, IrysTransaction, IrysTransactionHeader, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk, H256};
+use irys_types::{
+    Base64, Config, DatabaseProvider, GossipData, IrysTransaction, IrysTransactionHeader,
+    PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk, H256,
+};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use irys_api_client::{ApiClient};
-use eyre::Result;
 use tracing::debug;
 
 #[derive(Debug)]
@@ -96,13 +101,21 @@ pub struct StubApiClient {
 
 #[async_trait::async_trait]
 impl ApiClient for StubApiClient {
-    async fn get_transaction(&self, _peer: SocketAddr, tx_id: H256) -> Result<Option<IrysTransactionHeader>> {
+    async fn get_transaction(
+        &self,
+        _peer: SocketAddr,
+        tx_id: H256,
+    ) -> Result<Option<IrysTransactionHeader>> {
         println!("Fetching transaction {:?} from stub API client", tx_id);
         println!("{:?}", self.txs.get(&tx_id));
         Ok(self.txs.get(&tx_id).cloned())
     }
 
-    async fn get_transactions(&self, peer: SocketAddr, tx_ids: &[H256]) -> Result<Vec<Option<IrysTransactionHeader>>> {
+    async fn get_transactions(
+        &self,
+        peer: SocketAddr,
+        tx_ids: &[H256],
+    ) -> Result<Vec<Option<IrysTransactionHeader>>> {
         debug!("Fetching {} transactions from peer {}", tx_ids.len(), peer);
         let mut results = Vec::with_capacity(tx_ids.len());
 
@@ -165,7 +178,7 @@ impl GossipServiceTestFixture {
             mempool: mempool_stub_addr,
             mempool_txs,
             mempool_chunks,
-            api_client: StubApiClient::new()
+            api_client: StubApiClient::new(),
         }
     }
 
@@ -175,11 +188,8 @@ impl GossipServiceTestFixture {
         ServiceHandleWithShutdownSignal<GossipResult<()>>,
         mpsc::Sender<GossipData>,
     ) {
-        let (gossip_service, internal_message_bus) = GossipService::new(
-            "127.0.0.1",
-            self.port,
-            self.db.clone(),
-        );
+        let (gossip_service, internal_message_bus) =
+            GossipService::new("127.0.0.1", self.port, self.db.clone());
 
         let mempool_stub = MempoolStub::new(internal_message_bus.clone());
         let mempool_txs = mempool_stub.txs.clone();
@@ -192,7 +202,10 @@ impl GossipServiceTestFixture {
 
         let api_client = self.api_client.clone();
 
-        let service_handle = gossip_service.run(mempool_stub_addr, api_client).await.unwrap();
+        let service_handle = gossip_service
+            .run(mempool_stub_addr, api_client)
+            .await
+            .unwrap();
 
         (service_handle, internal_message_bus)
     }
@@ -224,7 +237,9 @@ impl GossipServiceTestFixture {
             is_online: true,
             ..PeerListItem::default()
         };
-        self.peer_list.add_peer(&other.mining_address, &peer).unwrap();
+        self.peer_list
+            .add_peer(&other.mining_address, &peer)
+            .unwrap();
     }
 }
 

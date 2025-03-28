@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::{CombinedBlockHeader, IrysTransactionHeader, UnpackedChunk};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipData {

@@ -53,6 +53,7 @@ impl PeerListProvider {
     }
 
     pub fn add_peer(&self, mining_address: &Address, peer: &PeerListItem) -> eyre::Result<()> {
-        self.db.update(|tx| insert_peer_list_item(tx, mining_address, peer))?
+        self.db
+            .update(|tx| insert_peer_list_item(tx, mining_address, peer))?
     }
 }

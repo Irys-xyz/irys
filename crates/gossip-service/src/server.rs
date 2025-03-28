@@ -1,19 +1,19 @@
+use crate::types::InternalGossipError;
+use crate::{
+    cache::GossipCache,
+    types::{GossipError, GossipResult},
+    PeerListProvider,
+};
 use actix_web::dev::Server;
 use actix_web::{
     middleware,
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
+use irys_types::GossipData;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use irys_types::GossipData;
-use crate::{
-    cache::GossipCache,
-    types::{GossipError, GossipResult},
-    PeerListProvider,
-};
-use crate::types::InternalGossipError;
 
 #[derive(Debug)]
 pub struct GossipServer {
@@ -65,7 +65,7 @@ async fn handle_gossip_data(
         None => {
             tracing::debug!("Failed to get peer address from gossip post request");
             return HttpResponse::BadRequest().finish();
-        },
+        }
     };
 
     tracing::debug!("Gossip origin address is {}", peer_address);

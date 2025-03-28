@@ -13,8 +13,8 @@ use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
-    IrysTransactionHeader, H256, GossipData
+    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, GossipData,
+    IrysTransactionHeader, H256,
 };
 use irys_types::{Config, DataRoot, StorageConfig, U256};
 use reth::tasks::TaskExecutor;
@@ -276,7 +276,11 @@ impl Handler<TxIngressMessage> for MempoolService {
             Ok(())
         });
 
-        let _ = self.gossip_tx.as_ref().unwrap().send(GossipData::Transaction(tx.clone()));
+        let _ = self
+            .gossip_tx
+            .as_ref()
+            .unwrap()
+            .send(GossipData::Transaction(tx.clone()));
 
         Ok(())
     }
@@ -473,7 +477,11 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             });
         }
 
-        let _ = self.gossip_tx.as_ref().unwrap().send(GossipData::Chunk(chunk));
+        let _ = self
+            .gossip_tx
+            .as_ref()
+            .unwrap()
+            .send(GossipData::Chunk(chunk));
 
         Ok(())
     }
@@ -636,11 +644,16 @@ impl Handler<TxExistenceQuery> for MempoolService {
             return Ok(true);
         }
 
-        let read_tx = &self.irys_db.as_ref().ok_or(TxIngressError::ServiceUninitialized)?.tx().map_err(|_| TxIngressError::DatabaseError)?;
+        let read_tx = &self
+            .irys_db
+            .as_ref()
+            .ok_or(TxIngressError::ServiceUninitialized)?
+            .tx()
+            .map_err(|_| TxIngressError::DatabaseError)?;
 
         let txid = tx_msg.0;
-        let tx_header = tx_header_by_txid(read_tx, &txid)
-            .map_err(|_| TxIngressError::DatabaseError)?;
+        let tx_header =
+            tx_header_by_txid(read_tx, &txid).map_err(|_| TxIngressError::DatabaseError)?;
 
         Ok(tx_header.is_some())
     }

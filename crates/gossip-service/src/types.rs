@@ -1,5 +1,5 @@
-use thiserror::Error;
 use irys_actors::mempool_service::TxIngressError;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GossipError {
@@ -55,43 +55,23 @@ pub enum InternalGossipError {
     BroadcastReceiverShutdown,
 }
 
-pub(crate) fn tx_ingress_error_to_gossip_error(
-    error: TxIngressError,
-) -> Option<GossipError> {
+pub(crate) fn tx_ingress_error_to_gossip_error(error: TxIngressError) -> Option<GossipError> {
     match error {
-        TxIngressError::Skipped => {
-            None
-        }
-        TxIngressError::InvalidSignature => {
-            Some(GossipError::InvalidData(
-                InvalidDataError::TransactionSignature,
-            ))
-        }
-        TxIngressError::Unfunded => {
-            Some(GossipError::InvalidData(
-                InvalidDataError::TransactionUnfunded,
-            ))
-        }
-        TxIngressError::InvalidAnchor => {
-            Some(GossipError::InvalidData(
-                InvalidDataError::TransactionAnchor,
-            ))
-        }
-        TxIngressError::DatabaseError => {
-            Some(GossipError::Internal(
-                InternalGossipError::Database,
-            ))
-        }
-        TxIngressError::ServiceUninitialized => {
-            Some(GossipError::Internal(
-                InternalGossipError::ServiceUninitialized,
-            ))
-        }
-        TxIngressError::Other(e) => {
-            Some(GossipError::Internal(
-                InternalGossipError::Unknown(e),
-            ))
-        }
+        TxIngressError::Skipped => None,
+        TxIngressError::InvalidSignature => Some(GossipError::InvalidData(
+            InvalidDataError::TransactionSignature,
+        )),
+        TxIngressError::Unfunded => Some(GossipError::InvalidData(
+            InvalidDataError::TransactionUnfunded,
+        )),
+        TxIngressError::InvalidAnchor => Some(GossipError::InvalidData(
+            InvalidDataError::TransactionAnchor,
+        )),
+        TxIngressError::DatabaseError => Some(GossipError::Internal(InternalGossipError::Database)),
+        TxIngressError::ServiceUninitialized => Some(GossipError::Internal(
+            InternalGossipError::ServiceUninitialized,
+        )),
+        TxIngressError::Other(e) => Some(GossipError::Internal(InternalGossipError::Unknown(e))),
     }
 }
 

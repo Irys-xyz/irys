@@ -8,6 +8,7 @@ pub mod block_production;
 pub mod chunk;
 pub mod config;
 pub mod difficulty_adjustment_config;
+pub mod gossip;
 pub mod ingress;
 pub mod irys;
 mod merkle;
@@ -22,16 +23,15 @@ pub mod storage_pricing;
 pub mod transaction;
 pub mod vdf_config;
 pub mod version;
-pub mod gossip;
 
 pub use block::*;
 pub use config::*;
 pub use difficulty_adjustment_config::*;
+pub use gossip::*;
 pub use serialization::*;
 pub use signature::*;
 pub use storage::*;
 pub use transaction::*;
-pub use gossip::*;
 
 pub use alloy_primitives::{Address, Signature};
 pub use app_state::*;

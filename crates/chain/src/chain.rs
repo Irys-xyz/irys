@@ -30,11 +30,11 @@ use irys_actors::{
     vdf_service::{GetVdfStateMessage, VdfService},
     ActorAddresses, BlockFinalizedMessage,
 };
-use irys_gossip_service::{ServiceHandleWithShutdownSignal, GossipResult};
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
 use irys_database::migration::check_db_version_and_run_migrations_if_needed;
+use irys_gossip_service::{GossipResult, ServiceHandleWithShutdownSignal};
 use irys_packing::{PackingType, PACKING_TYPE};
 use irys_price_oracle::mock_oracle::MockOracle;
 use irys_price_oracle::IrysPriceOracle;
@@ -47,7 +47,10 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
-use irys_types::{app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, GossipData, StorageConfig, CHUNK_SIZE, H256};
+use irys_types::{
+    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
+    GossipData, StorageConfig, CHUNK_SIZE, H256,
+};
 use irys_types::{
     Config, DifficultyAdjustmentConfig, IrysBlockHeader, OracleConfig, PartitionChunkRange,
 };
@@ -1220,7 +1223,7 @@ impl IrysNode {
         JoinHandle<()>,
         Vec<Arbiter>,
         RethNodeProvider,
-        ServiceHandleWithShutdownSignal<GossipResult<()>>
+        ServiceHandleWithShutdownSignal<GossipResult<()>>,
     )> {
         let node_config = Arc::new(self.irys_node_config.clone());
 
@@ -1317,10 +1320,12 @@ impl IrysNode {
             gossip_tx,
         );
 
-        let gossip_service_handle = gossip_service.run(
-            mempool_service.clone(),
-            irys_api_client::IrysApiClient::new()
-        ).await?;
+        let gossip_service_handle = gossip_service
+            .run(
+                mempool_service.clone(),
+                irys_api_client::IrysApiClient::new(),
+            )
+            .await?;
 
         // spawn the chunk migration service
         self.init_chunk_migration_service(
@@ -1460,7 +1465,7 @@ impl IrysNode {
             vdf_thread_handler,
             arbiters,
             reth_node,
-            gossip_service_handle
+            gossip_service_handle,
         ))
     }
 

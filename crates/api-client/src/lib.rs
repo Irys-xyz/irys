@@ -1,6 +1,6 @@
-use reqwest::{Client, StatusCode};
 use eyre::Result;
 use irys_types::{IrysTransactionHeader, H256};
+use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
 use tracing::{debug, error};
@@ -9,10 +9,18 @@ use tracing::{debug, error};
 #[async_trait::async_trait]
 pub trait ApiClient: Send + Sync {
     /// Fetch a transaction header by its ID from a peer
-    async fn get_transaction(&self, peer: SocketAddr, tx_id: H256) -> Result<Option<IrysTransactionHeader>>;
-    
+    async fn get_transaction(
+        &self,
+        peer: SocketAddr,
+        tx_id: H256,
+    ) -> Result<Option<IrysTransactionHeader>>;
+
     /// Fetch multiple transaction headers by their IDs from a peer
-    async fn get_transactions(&self, peer: SocketAddr, tx_ids: &[H256]) -> Result<Vec<Option<IrysTransactionHeader>>>;
+    async fn get_transactions(
+        &self,
+        peer: SocketAddr,
+        tx_ids: &[H256],
+    ) -> Result<Vec<Option<IrysTransactionHeader>>>;
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
@@ -58,8 +66,15 @@ impl IrysApiClient {
             StatusCode::NOT_FOUND => Ok(None),
             _ => {
                 let error_text = response.text().await.unwrap_or_default();
-                error!("API request failed with status: {}, message: {}", status, error_text);
-                Err(eyre::eyre!("API request failed with status: {} - {}", status, error_text))
+                error!(
+                    "API request failed with status: {}, message: {}",
+                    status, error_text
+                );
+                Err(eyre::eyre!(
+                    "API request failed with status: {} - {}",
+                    status,
+                    error_text
+                ))
             }
         }
     }
@@ -67,21 +82,29 @@ impl IrysApiClient {
 
 #[async_trait::async_trait]
 impl ApiClient for IrysApiClient {
-    async fn get_transaction(&self, peer: SocketAddr, tx_id: H256) -> Result<Option<IrysTransactionHeader>> {
+    async fn get_transaction(
+        &self,
+        peer: SocketAddr,
+        tx_id: H256,
+    ) -> Result<Option<IrysTransactionHeader>> {
         debug!("Fetching transaction {} from peer {}", tx_id, peer);
         let path = format!("/tx/{}", tx_id);
         self.make_request(peer, "GET", &path, None::<&()>).await
     }
 
-    async fn get_transactions(&self, peer: SocketAddr, tx_ids: &[H256]) -> Result<Vec<Option<IrysTransactionHeader>>> {
+    async fn get_transactions(
+        &self,
+        peer: SocketAddr,
+        tx_ids: &[H256],
+    ) -> Result<Vec<Option<IrysTransactionHeader>>> {
         debug!("Fetching {} transactions from peer {}", tx_ids.len(), peer);
         let mut results = Vec::with_capacity(tx_ids.len());
-        
+
         for &tx_id in tx_ids {
             let result = self.get_transaction(peer, tx_id).await?;
             results.push(result);
         }
-        
+
         Ok(results)
     }
 }
@@ -99,18 +122,26 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ApiClient for MockApiClient {
-        async fn get_transaction(&self, _peer: SocketAddr, tx_id: H256) -> Result<Option<IrysTransactionHeader>> {
+        async fn get_transaction(
+            &self,
+            _peer: SocketAddr,
+            tx_id: H256,
+        ) -> Result<Option<IrysTransactionHeader>> {
             Ok(self.expected_transactions.get(&tx_id).cloned().flatten())
         }
 
-        async fn get_transactions(&self, peer: SocketAddr, tx_ids: &[H256]) -> Result<Vec<Option<IrysTransactionHeader>>> {
+        async fn get_transactions(
+            &self,
+            peer: SocketAddr,
+            tx_ids: &[H256],
+        ) -> Result<Vec<Option<IrysTransactionHeader>>> {
             let mut results = Vec::with_capacity(tx_ids.len());
-            
+
             for &tx_id in tx_ids {
                 let result = self.get_transaction(peer, tx_id).await?;
                 results.push(result);
             }
-            
+
             Ok(results)
         }
     }
@@ -120,9 +151,13 @@ mod tests {
         let mut mock = MockApiClient::default();
         let tx_id = H256::random();
         let tx_header = IrysTransactionHeader::default();
-        mock.expected_transactions.insert(tx_id, Some(tx_header.clone()));
+        mock.expected_transactions
+            .insert(tx_id, Some(tx_header.clone()));
 
-        let result = mock.get_transaction("127.0.0.1:8080".parse().unwrap(), tx_id).await.unwrap();
+        let result = mock
+            .get_transaction("127.0.0.1:8080".parse().unwrap(), tx_id)
+            .await
+            .unwrap();
         assert_eq!(result, Some(tx_header));
     }
 }
