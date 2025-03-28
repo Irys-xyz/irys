@@ -536,7 +536,7 @@ fn calculate_tx_ranges(
         num_chunks_in_tx = (num_chunks_in_tx as i64 + partition_start) as u64;
     }
 
-    let partition_start = partition_start
+    let partition_start: u32 = partition_start
         .max(0)
         .try_into()
         .expect("Value exceeds u32::MAX");
