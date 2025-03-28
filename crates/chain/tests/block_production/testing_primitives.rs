@@ -5,7 +5,7 @@ use reth_primitives::GenesisAccount;
 use tracing::info;
 
 use crate::utils::{
-    add_tx, get_block_height, get_height, get_tx_header, mine, mine_one, start_node,
+    create_submit_data_tx, get_block_by_height, get_height, get_tx_header, mine_blocks, mine_block, start_node,
     start_node_config, wait_until_height,
 };
 
@@ -29,10 +29,10 @@ async fn heavy_test_mine() {
     let height = get_height(&node_ctx);
     info!("height: {}", height);
     let blocks = 4;
-    mine(&node_ctx, blocks).await.unwrap();
+    mine_blocks(&node_ctx, blocks).await.unwrap();
     let next_height = get_height(&node_ctx);
     assert_eq!(next_height, height + blocks as u64);
-    let block = get_block_height(&node_ctx, next_height, false).unwrap();
+    let block = get_block_by_height(&node_ctx, next_height, false).unwrap();
     assert_eq!(block.height, next_height);
     node_ctx.stop().await;
 }
@@ -59,8 +59,8 @@ async fn heavy_test_mine_tx() {
     let height = get_height(&node_ctx);
     let data = "Hello, world!".as_bytes().to_vec();
     info!("height: {}", height);
-    let tx = add_tx(&node_ctx, &account, data).await.unwrap();
-    mine_one(&node_ctx).await.unwrap();
+    let tx = create_submit_data_tx(&node_ctx, &account, data).await.unwrap();
+    mine_block(&node_ctx).await.unwrap();
     let next_height = get_height(&node_ctx);
     assert_eq!(next_height, height + 1 as u64);
     let tx_header = get_tx_header(&node_ctx, &tx.header.id).unwrap();

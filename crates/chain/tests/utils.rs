@@ -209,12 +209,12 @@ pub fn get_height(node_ctx: &IrysNodeCtx) -> u64 {
     node_ctx.block_index_guard.read().latest_height()
 }
 
-pub async fn mine_one(node_ctx: &IrysNodeCtx) -> eyre::Result<()> {
-    mine(node_ctx, 1).await?;
+pub async fn mine_block(node_ctx: &IrysNodeCtx) -> eyre::Result<()> {
+    mine_blocks(node_ctx, 1).await?;
     Ok(())
 }
 
-pub async fn mine(node_ctx: &IrysNodeCtx, num_blocks: usize) -> eyre::Result<()> {
+pub async fn mine_blocks(node_ctx: &IrysNodeCtx, num_blocks: usize) -> eyre::Result<()> {
     let height = get_height(node_ctx);
     node_ctx.actor_addresses.set_mining(true)?;
     wait_until_height(node_ctx, height + num_blocks as u64, 60 * num_blocks).await;
@@ -230,7 +230,7 @@ pub enum AddTxError {
     Mailbox(MailboxError),
 }
 
-pub async fn add_tx(
+pub async fn create_submit_data_tx(
     node_ctx: &IrysNodeCtx,
     account: &IrysSigner,
     data: Vec<u8>,
@@ -260,7 +260,7 @@ pub fn get_tx_header(node_ctx: &IrysNodeCtx, tx_id: &H256) -> eyre::Result<IrysT
     }
 }
 
-pub fn get_block_height(
+pub fn get_block_by_height(
     node_ctx: &IrysNodeCtx,
     height: u64,
     include_chunk: bool,

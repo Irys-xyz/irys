@@ -20,7 +20,7 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    add_tx, capacity_chunk_solution, get_block_height, start_node, start_node_config,
+    create_submit_data_tx, capacity_chunk_solution, get_block_by_height, start_node, start_node_config,
     wait_until_height, AddTxError,
 };
 /// Create a valid capacity PoA solution
@@ -63,7 +63,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     let mut txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
     for a in [&account1, &account2, &account3] {
         let data_bytes = "Hello, world!".as_bytes().to_vec();
-        match add_tx(&node, &a, data_bytes).await {
+        match create_submit_data_tx(&node, &a, data_bytes).await {
             Ok(tx) => {
                 txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
             }
@@ -181,7 +181,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
         assert_eq!(i, reth_block.header.number);
         assert_eq!(i, reth_block.number);
 
-        let db_irys_block = get_block_height(&node, i as u64, false).unwrap();
+        let db_irys_block = get_block_by_height(&node, i as u64, false).unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     }
@@ -329,7 +329,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         evm_txs.insert(*tx_env.tx_hash(), tx_env.clone());
 
         let data_bytes = "Hello, world!".as_bytes().to_vec();
-        match add_tx(&node, &a, data_bytes).await {
+        match create_submit_data_tx(&node, &a, data_bytes).await {
             Ok(tx) => {
                 irys_txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
             }
