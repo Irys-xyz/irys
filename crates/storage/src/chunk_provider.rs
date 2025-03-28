@@ -219,7 +219,9 @@ mod tests {
                 data_size: data_size as u64,
                 data_path: data_path.clone(),
                 bytes: chunk_bytes.clone(),
-                tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
+                tx_offset: TxChunkOffset::from(
+                    TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+                ),
             };
             storage_module.write_data_chunk(&chunk)?;
             unpacked_chunks.push(chunk);
