@@ -309,7 +309,6 @@ pub async fn start_irys_node(
                     &reth_arbiter.handle(),
                     |_| reth_service,
                 ));
-                arbiters.push(ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()));
 
                 debug!(
                     "JESSEDEBUG setting head to block {} ({})",
@@ -449,7 +448,6 @@ pub async fn start_irys_node(
                     |_| block_tree_service,
                 ));
                 let block_tree_service = BlockTreeService::from_registry();
-                arbiters.push(ArbiterHandle::new(block_tree_arbiter, "block_tree_arbiter".to_string()));
 
                 let block_tree_guard = block_tree_service
                     .send(GetBlockTreeGuardMessage)
@@ -463,7 +461,6 @@ pub async fn start_irys_node(
                     &peer_list_arbiter.handle(),
                     |_| peer_list_service,
                 ));
-                arbiters.push(ArbiterHandle::new(peer_list_arbiter, "peer_list_arbiter".to_string()));
 
                 let mempool_service = MempoolService::new(
                     irys_db.clone(),
@@ -481,7 +478,6 @@ pub async fn start_irys_node(
                     |_| mempool_service,
                 ));
                 let mempool_addr = MempoolService::from_registry();
-                arbiters.push(ArbiterHandle::new(mempool_arbiter, "mempool_arbiter".to_string()));
 
                 let chunk_migration_service = ChunkMigrationService::new(
                     block_index.clone(),
@@ -511,7 +507,6 @@ pub async fn start_irys_node(
                     &validation_arbiter.handle(),
                     |_| validation_service,
                 ));
-                arbiters.push(ArbiterHandle::new(validation_arbiter, "validation_arbiter".to_string()));
 
                 let (global_step_number, seed) = vdf_steps_guard.read().get_last_step_and_seed();
                 info!("Starting at global step number: {}", global_step_number);
@@ -531,7 +526,6 @@ pub async fn start_irys_node(
                     &block_discovery_arbiter.handle(),
                     |_| block_discovery_actor,
                 );
-                arbiters.push(ArbiterHandle::new(block_discovery_arbiter, "block_discovery_arbiter".to_string()));
 
                 // set up the price oracle
                 let price_oracle = match config.oracle_config {
@@ -563,7 +557,6 @@ pub async fn start_irys_node(
                     BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
                         block_producer_actor
                     });
-                arbiters.push(ArbiterHandle::new(block_producer_arbiter, "block_producer_arbiter".to_string()));
 
                 let mut part_actors = Vec::new();
 
@@ -622,6 +615,17 @@ pub async fn start_irys_node(
                     .send(BroadcastDifficultyUpdate(latest_block.clone()))
                     .await
                     .unwrap();
+
+                let mut service_arbiters = Vec::new();
+                service_arbiters.push(ArbiterHandle::new(block_producer_arbiter, "block_producer_arbiter".to_string()));
+                service_arbiters.push(ArbiterHandle::new(block_discovery_arbiter, "block_discovery_arbiter".to_string()));
+                service_arbiters.push(ArbiterHandle::new(validation_arbiter, "validation_arbiter".to_string()));
+                service_arbiters.push(ArbiterHandle::new(block_tree_arbiter, "block_tree_arbiter".to_string()));
+                service_arbiters.push(ArbiterHandle::new(peer_list_arbiter, "peer_list_arbiter".to_string()));
+                service_arbiters.push(ArbiterHandle::new(mempool_arbiter, "mempool_arbiter".to_string()));
+                service_arbiters.push(ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()));
+                service_arbiters.append(&mut arbiters); // so services stop before "anonymous" actors i.e partition actors
+                arbiters = service_arbiters;
 
                 let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
                 let (shutdown_tx, shutdown_rx) = mpsc::channel();

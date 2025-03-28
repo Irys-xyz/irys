@@ -110,7 +110,7 @@ impl Config {
     pub fn testnet() -> Self {
         use k256::ecdsa::SigningKey;
 
-        const DEFAULT_BLOCK_TIME: u64 = 5;
+        const DEFAULT_BLOCK_TIME: u64 = 1;
 
         Config {
             block_time: DEFAULT_BLOCK_TIME,
