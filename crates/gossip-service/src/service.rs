@@ -548,26 +548,21 @@ where
                 .iter()
                 .flat_map(|ledger| ledger.tx_ids.0.clone())
             {
-                let tx_exists = mempool
-                    .send(TxExistenceQuery(tx_id.clone()))
-                    .await
-                    .map_err(GossipError::unknown)?
-                    .map_err(|e| {
-                        tx_ingress_error_to_gossip_error(e).unwrap_or(GossipError::unknown(
-                            "During handling block received no error where expected",
-                        ))
-                    })?;
-                if !tx_exists {
-                    missing_tx_ids.push(tx_id.clone());
+                if !is_known_tx(&mempool, tx_id).await? {
+                    missing_tx_ids.push(tx_id);
                 }
             }
 
-            let system_tx_ids = block
+            for system_tx_id in block
                 .irys
                 .system_ledgers
                 .iter()
                 .flat_map(|ledger| ledger.tx_ids.0.clone())
-                .collect::<Vec<H256>>();
+            {
+                if !is_known_tx(&mempool, system_tx_id).await? {
+                    missing_tx_ids.push(system_tx_id);
+                }
+            }
 
             // Fetch missing transactions from the source peer
             let missing_txs = api_client
@@ -581,8 +576,6 @@ where
                     );
                     GossipError::unknown(e)
                 })?;
-
-            tracing::debug!("Recieved block, missing txs: {:?}", missing_txs);
 
             // Process each transaction
             for (tx_id, tx) in data_tx_ids.iter().zip(missing_txs.iter()) {
@@ -649,4 +642,18 @@ where
             Ok(())
         }
     }
+}
+
+async fn is_known_tx<T>(mempool: &Addr<T>, tx_id: H256) -> Result<bool, GossipError>
+where T: Handler<TxExistenceQuery> + Actor<Context = Context<T>>,
+{
+    mempool
+        .send(TxExistenceQuery(tx_id))
+        .await
+        .map_err(GossipError::unknown)?
+        .map_err(|e| {
+            tx_ingress_error_to_gossip_error(e).unwrap_or(GossipError::unknown(
+                "Did not receive an error from mempool where an error was expected",
+            ))
+        })
 }
