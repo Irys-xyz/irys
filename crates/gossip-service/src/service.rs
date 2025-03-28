@@ -531,7 +531,7 @@ where
             );
 
             // Get all transaction IDs from the block
-            let tx_ids = block.irys.ledgers
+            let tx_ids = block.irys.data_ledgers
                 .iter()
                 .flat_map(|ledger| ledger.tx_ids.0.clone())
                 .collect::<Vec<H256>>();

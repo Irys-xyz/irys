@@ -1,9 +1,8 @@
 use crate::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
 use gossip_service::GossipData;
-use std::time::Duration;
-use irys_types::{H256List, PeerScore};
 use irys_api_server::CombinedBlockHeader;
-use irys_types::{TransactionLedger};
+use irys_types::{DataTransactionLedger, H256List, PeerScore};
+use std::time::Duration;
 
 #[actix_web::test]
 async fn should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
@@ -20,7 +19,6 @@ async fn should_broadcast_message_to_an_established_connection() -> eyre::Result
 
     // Waiting a little for the service to initialize
     tokio::time::sleep(Duration::from_millis(500)).await;
-
     let data = GossipData::Transaction(generate_test_tx().header);
 
     // Service 1 receives a message through the message bus from a system's component
@@ -50,7 +48,7 @@ async fn should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
         GossipServiceTestFixture::new(),
         GossipServiceTestFixture::new(),
     ];
-    
+
     // Connect all peers to each other
     for i in 0..fixtures.len() {
         for j in 0..fixtures.len() {
@@ -62,7 +60,7 @@ async fn should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
 
     let mut handles = vec![];
     let mut message_buses = vec![];
-    
+
     // Start all services
     for fixture in fixtures.iter_mut() {
         let (handle, bus) = fixture.run_service().await;
@@ -108,7 +106,10 @@ async fn should_not_resend_recently_seen_data() -> eyre::Result<()> {
 
     // Send same data multiple times
     for _ in 0..3 {
-        gossip_service1_message_bus.send(data.clone()).await.unwrap();
+        gossip_service1_message_bus
+            .send(data.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -140,7 +141,7 @@ async fn should_broadcast_chunk_data() -> eyre::Result<()> {
     // Create and send chunk data
     let chunks = create_test_chunks(&generate_test_tx());
     let data = GossipData::Chunk(chunks[0].clone());
-    
+
     gossip_service1_message_bus.send(data).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
@@ -196,7 +197,7 @@ async fn should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let data = GossipData::Transaction(generate_test_tx().header);
-    
+
     // Should not panic when peer is offline
     gossip_service1_message_bus.send(data).await.unwrap();
 
@@ -217,12 +218,12 @@ async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
 
     // Create a test block with transactions
     let mut block = CombinedBlockHeader::default();
-    let mut ledger = TransactionLedger::default();
+    let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
     ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
     println!("Added transactions to ledger: {:?}", ledger.tx_ids);
-    block.irys.ledgers.push(ledger);
+    block.irys.data_ledgers.push(ledger);
 
     // Set up the mock API client to return the transactions
     fixture2.api_client.txs.insert(tx1.id, tx1.clone());
@@ -235,7 +236,10 @@ async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Send block from service 1 to service 2
-    gossip_service1_message_bus.send(GossipData::Block(block)).await.unwrap();
+    gossip_service1_message_bus
+        .send(GossipData::Block(block))
+        .await
+        .unwrap();
 
     // Wait for service 2 to process the block and fetch transactions
     tokio::time::sleep(Duration::from_millis(3000)).await;
@@ -266,18 +270,21 @@ async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
 
     // Create a test block with transactions
     let mut block = CombinedBlockHeader::default();
-    let mut ledger = TransactionLedger::default();
+    let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
     ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
-    block.irys.ledgers.push(ledger);
+    block.irys.data_ledgers.push(ledger);
 
     // Set up the mock API client to return only one transaction
     fixture2.api_client.txs.insert(tx1.id, tx1.clone());
     // Don't add tx2 to expected transactions, so it will be missing
 
     // Send block from service 1 to service 2
-    gossip_service1_message_bus.send(GossipData::Block(block)).await.unwrap();
+    gossip_service1_message_bus
+        .send(GossipData::Block(block))
+        .await
+        .unwrap();
 
     // Wait for service 2 to process the block and attempt to fetch transactions
     tokio::time::sleep(Duration::from_millis(3000)).await;
