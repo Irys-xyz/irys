@@ -1,8 +1,8 @@
 use actix::prelude::*;
 use futures::future::join_all;
 use irys_database::block_header_by_hash;
+use irys_types::{block_production::Seed, Config, DatabaseProvider, IrysBlockHeader};
 use irys_vdf::vdf_state::{AtomicVdfState, VdfState, VdfStepsReadGuard};
-use rayon::prelude::*;
 use reth_db::Database;
 use std::{
     collections::VecDeque,
@@ -13,7 +13,6 @@ use tracing::info;
 
 use crate::block_index_service::BlockIndexReadGuard;
 use crate::services::Stop;
-use irys_types::{block_production::Seed, Config, DatabaseProvider, IrysBlockHeader};
 
 #[derive(Debug, Default)]
 pub struct VdfService {
