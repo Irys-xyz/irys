@@ -292,6 +292,7 @@ mod tests {
         );
     }
 
+    #[ignore = "benchmark test"]
     #[actix_rt::test]
     async fn test_create_state_performance() {
         let testnet_config = Config {
