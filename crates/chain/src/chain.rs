@@ -463,12 +463,9 @@ pub async fn start_irys_node(
                     |_| peer_list_service,
                 ));
 
-                // TODO: replace with values from config
-                let gossip_ip = "127.0.0.1";
-                let gossip_port = 1234;
                 let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
-                    gossip_ip,
-                    gossip_port,
+                    &config.gossip_service_bind_ip,
+                    config.gossip_service_port,
                     irys_db.clone(),
                 );
 
@@ -1187,7 +1184,7 @@ impl IrysNode {
                     debug!("Waiting for the main actor thread to finish");
                     let reth_node_handle = actor_main_thread_handle
                         .join()
-                        .expect("to successfully join the actor thread handle");
+                        .unwrap();
 
                     reth_node_handle
                 };
@@ -1300,11 +1297,9 @@ impl IrysNode {
         // Spawn peer list service
         init_peer_list_service(&irys_db, &mut arbiters);
 
-        let gossip_server_ip = "127.0.0.1";
-        let gossip_server_port = 1234;
         let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
-            gossip_server_ip,
-            gossip_server_port,
+            &self.config.gossip_service_bind_ip,
+            self.config.gossip_service_port,
             irys_db.clone(),
         );
 
