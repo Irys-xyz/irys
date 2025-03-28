@@ -14,6 +14,7 @@ use irys_types::TxChunkOffset;
 use irys_types::UnpackedChunk;
 use rand::Rng;
 
+use crate::utils::mine_block;
 use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
@@ -24,7 +25,6 @@ use reth::rpc::types::TransactionRequest;
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
 use tracing::{debug, info};
-use crate::utils::mine_block;
 
 // network simulation test for analytics
 #[ignore]

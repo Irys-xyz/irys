@@ -4,9 +4,7 @@ use irys_types::{irys::IrysSigner, Config};
 use reth_primitives::GenesisAccount;
 use tracing::info;
 
-use crate::utils::{
-    IrysNodeTest
-};
+use crate::utils::IrysNodeTest;
 
 #[actix::test]
 async fn heavy_test_wait_until_height() {
@@ -49,11 +47,19 @@ async fn heavy_test_mine_tx() {
         },
     )]);
 
-    let irys_node = IrysNodeTest::new_with_config("test_mine_tx", Some(testnet_config.clone()), Some(node_config)).await;
+    let irys_node = IrysNodeTest::new_with_config(
+        "test_mine_tx",
+        Some(testnet_config.clone()),
+        Some(node_config),
+    )
+    .await;
     let height = irys_node.get_height();
     let data = "Hello, world!".as_bytes().to_vec();
     info!("height: {}", height);
-    let tx = irys_node.create_submit_data_tx(&account, data).await.unwrap();
+    let tx = irys_node
+        .create_submit_data_tx(&account, data)
+        .await
+        .unwrap();
     irys_node.mine_block().await.unwrap();
     let next_height = irys_node.get_height();
     assert_eq!(next_height, height + 1 as u64);

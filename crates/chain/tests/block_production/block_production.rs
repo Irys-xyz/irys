@@ -5,7 +5,7 @@ use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
-use irys_actors::{mempool_service::TxIngressError};
+use irys_actors::mempool_service::TxIngressError;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
 use irys_types::{irys::IrysSigner, Config, IrysTransaction};
@@ -18,9 +18,7 @@ use reth_primitives::{
 use tokio::time::sleep;
 use tracing::info;
 
-use crate::utils::{
-    mine_block, AddTxError, IrysNodeTest
-};
+use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 
 #[tokio::test]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
@@ -55,7 +53,8 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         ),
     ]);
 
-    let irys_node = IrysNodeTest::new_with_config("test_blockprod", Some(testnet_config), Some(config)).await;
+    let irys_node =
+        IrysNodeTest::new_with_config("test_blockprod", Some(testnet_config), Some(config)).await;
 
     let mut txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
     for a in [&account1, &account2, &account3] {
@@ -95,7 +94,9 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     // assert_eq!(reth_block.number, block.height);
 
     // check irys DB for built block
-    let db_irys_block = irys_node.get_block_by_hash(&block.block_hash, false).unwrap();
+    let db_irys_block = irys_node
+        .get_block_by_hash(&block.block_hash, false)
+        .unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
     irys_node.stop().await;
@@ -158,7 +159,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::new("test_basic_blockprod").await;
 
-    let (block, _ ) = mine_block(&node.node_ctx).await?.unwrap();
+    let (block, _) = mine_block(&node.node_ctx).await?.unwrap();
 
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
@@ -223,7 +224,9 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     ]);
 
     let chain_id = testnet_config.chain_id;
-    let node= IrysNodeTest::new_with_config("test_serial_blockprod", Some(testnet_config), Some(config)).await;
+    let node =
+        IrysNodeTest::new_with_config("test_serial_blockprod", Some(testnet_config), Some(config))
+            .await;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
     let miner_init_balance = reth_context
         .rpc
