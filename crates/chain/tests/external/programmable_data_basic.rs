@@ -7,7 +7,6 @@ use alloy_sol_macro::sol;
 use base58::ToBase58;
 use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
-use irys_actors::SolutionFoundMessage;
 use irys_api_server::routes::tx::TxOffset;
 use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;

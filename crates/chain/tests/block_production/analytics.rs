@@ -24,7 +24,7 @@ use k256::ecdsa::SigningKey;
 use reth::rpc::types::TransactionRequest;
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::info;
 
 // network simulation test for analytics
 #[ignore]

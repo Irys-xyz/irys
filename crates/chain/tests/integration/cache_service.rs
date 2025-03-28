@@ -3,7 +3,6 @@ use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
-use irys_actors::SolutionFoundMessage;
 use irys_api_server::routes::tx::TxOffset;
 use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
