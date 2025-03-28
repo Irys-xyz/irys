@@ -30,6 +30,7 @@ use irys_actors::{
     vdf_service::{GetVdfStateMessage, VdfService},
     ActorAddresses, BlockFinalizedMessage,
 };
+use irys_gossip_service::{ServiceHandleWithShutdownSignal, GossipResult};
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
@@ -46,10 +47,7 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
-use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
-    StorageConfig, CHUNK_SIZE, H256,
-};
+use irys_types::{app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, GossipData, StorageConfig, CHUNK_SIZE, H256};
 use irys_types::{
     Config, DifficultyAdjustmentConfig, IrysBlockHeader, OracleConfig, PartitionChunkRange,
 };
@@ -462,6 +460,15 @@ pub async fn start_irys_node(
                     |_| peer_list_service,
                 ));
 
+                // TODO: replace with values from config
+                let gossip_ip = "127.0.0.1";
+                let gossip_port = 1234;
+                let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
+                    gossip_ip,
+                    gossip_port,
+                    irys_db.clone(),
+                );
+
                 let mempool_service = MempoolService::new(
                     irys_db.clone(),
                     reth_db.clone(),
@@ -471,6 +478,7 @@ pub async fn start_irys_node(
                     storage_modules.clone(),
                     block_tree_guard.clone(),
                     &config,
+                    gossip_tx,
                 );
                 let mempool_arbiter = Arbiter::new();
                 SystemRegistry::set(MempoolService::start_in_arbiter(
@@ -478,6 +486,8 @@ pub async fn start_irys_node(
                     |_| mempool_service,
                 ));
                 let mempool_addr = MempoolService::from_registry();
+
+                let gossip_service_handle = gossip_service.run(mempool_addr.clone(), irys_api_client::IrysApiClient::new()).await.unwrap();
 
                 let chunk_migration_service = ChunkMigrationService::new(
                     block_index.clone(),
@@ -690,6 +700,7 @@ pub async fn start_irys_node(
                 *irys_provider_1.write().unwrap() = Some(IrysRethProviderInner {
                     chunk_provider: arc_chunk_provider.clone(),
                 });
+
                 let _ = irys_node_handle_sender.send(IrysNodeCtx {
                     actor_addresses: actor_addresses.clone(),
                     reth_handle: reth_node.clone(),
@@ -734,6 +745,8 @@ pub async fn start_irys_node(
                 server.await.unwrap();
                 info!("API server stopped");
                 server_stop_handle.await.unwrap();
+
+                gossip_service_handle.stop().await.unwrap();
 
                 debug!("Stopping actors");
                 for arbiter in arbiters {
@@ -1051,7 +1064,7 @@ impl IrysNode {
                         let block_index_service_actor = node.init_block_index_service(&block_index);
 
                         // start the rest of the services
-                        let (irys_node, actix_server, vdf_thread, arbiters, reth_node) = node
+                        let (irys_node, actix_server, vdf_thread, arbiters, reth_node, gossip_service_handle) = node
                             .init_services(
                                 reth_shutdown_sender,
                                 vdf_shutdown_receiver,
@@ -1083,6 +1096,8 @@ impl IrysNode {
 
                         actix_server.await.unwrap();
                         server_stop_handle.await.unwrap();
+
+                        gossip_service_handle.stop().await.unwrap();
 
                         debug!("Stopping actors");
                         for arbiter in arbiters {
@@ -1205,6 +1220,7 @@ impl IrysNode {
         JoinHandle<()>,
         Vec<Arbiter>,
         RethNodeProvider,
+        ServiceHandleWithShutdownSignal<GossipResult<()>>
     )> {
         let node_config = Arc::new(self.irys_node_config.clone());
 
@@ -1281,6 +1297,14 @@ impl IrysNode {
         // Spawn peer list service
         init_peer_list_service(&irys_db, &mut arbiters);
 
+        let gossip_server_ip = "127.0.0.1";
+        let gossip_server_port = 1234;
+        let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
+            gossip_server_ip,
+            gossip_server_port,
+            irys_db.clone(),
+        );
+
         // Spawn the mempool service
         let mempool_service = self.init_mempools_service(
             &node_config,
@@ -1290,7 +1314,13 @@ impl IrysNode {
             reth_db,
             &storage_modules,
             &block_tree_guard,
+            gossip_tx,
         );
+
+        let gossip_service_handle = gossip_service.run(
+            mempool_service.clone(),
+            irys_api_client::IrysApiClient::new()
+        ).await?;
 
         // spawn the chunk migration service
         self.init_chunk_migration_service(
@@ -1430,6 +1460,7 @@ impl IrysNode {
             vdf_thread_handler,
             arbiters,
             reth_node,
+            gossip_service_handle
         ))
     }
 
@@ -1688,6 +1719,7 @@ impl IrysNode {
         reth_db: irys_database::db::RethDbWrapper,
         storage_modules: &Vec<Arc<StorageModule>>,
         block_tree_guard: &BlockTreeReadGuard,
+        gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> actix::Addr<MempoolService> {
         let mempool_service = MempoolService::new(
             irys_db.clone(),
@@ -1698,6 +1730,7 @@ impl IrysNode {
             storage_modules.clone(),
             block_tree_guard.clone(),
             &self.config,
+            gossip_tx,
         );
         let mempool_arbiter = Arbiter::new();
         let mempool_service =

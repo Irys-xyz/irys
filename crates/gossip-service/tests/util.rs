@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use actix::{Actor, Addr, Context, Handler};
-use gossip_service::service::ServiceHandleWithShutdownSignal;
-use gossip_service::{GossipData, GossipResult, GossipService, PeerListProvider};
+use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
+use irys_gossip_service::{GossipData, GossipResult, GossipService, PeerListProvider};
 use irys_actors::mempool_service::{ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage};
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;

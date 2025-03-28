@@ -14,7 +14,7 @@ use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
-    IrysTransactionHeader, H256,
+    IrysTransactionHeader, H256, GossipData
 };
 use irys_types::{Config, DataRoot, StorageConfig, U256};
 use reth::tasks::TaskExecutor;
@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, error, info, warn};
 /// The Mempool oversees pending transactions and validation of incoming tx.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MempoolService {
     irys_db: Option<DatabaseProvider>,
     reth_db: Option<RethDbWrapper>,
@@ -43,6 +43,7 @@ pub struct MempoolService {
     max_data_txs_per_block: u64,
     storage_modules: StorageModuleVec,
     block_tree_read_guard: Option<BlockTreeReadGuard>,
+    gossip_tx: Option<tokio::sync::mpsc::Sender<GossipData>>,
 }
 
 impl Actor for MempoolService {
@@ -66,6 +67,7 @@ impl MempoolService {
         storage_modules: StorageModuleVec,
         block_tree_read_guard: BlockTreeReadGuard,
         config: &Config,
+        gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         info!("service started");
         Self {
@@ -80,6 +82,7 @@ impl MempoolService {
             max_data_txs_per_block: config.max_data_txs_per_block,
             anchor_expiry_depth: config.anchor_expiry_depth.into(),
             block_tree_read_guard: Some(block_tree_read_guard),
+            gossip_tx: Some(gossip_tx),
         }
     }
 }
@@ -272,6 +275,8 @@ impl Handler<TxIngressMessage> for MempoolService {
             irys_database::insert_tx_header(db_tx, tx)?;
             Ok(())
         });
+
+        let _ = self.gossip_tx.as_ref().unwrap().send(GossipData::Transaction(tx.clone()));
 
         Ok(())
     }
@@ -468,6 +473,8 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             });
         }
 
+        let _ = self.gossip_tx.as_ref().unwrap().send(GossipData::Chunk(chunk));
+
         Ok(())
     }
 }
@@ -600,7 +607,7 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
     }
 }
 
-/// Message to check wether a transaction exists in the mempool or on disk
+/// Message to check whether a transaction exists in the mempool or on disk
 #[derive(Message, Debug)]
 #[rtype(result = "Result<bool, TxIngressError>")]
 pub struct TxExistenceQuery(pub H256);

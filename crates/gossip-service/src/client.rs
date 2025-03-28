@@ -1,6 +1,7 @@
-use crate::types::{GossipData, GossipError, GossipResult};
+use crate::types::{GossipError, GossipResult};
 use irys_database::tables::CompactPeerListItem;
 use std::time::Duration;
+use irys_types::GossipData;
 
 #[derive(Debug)]
 pub struct GossipClient {

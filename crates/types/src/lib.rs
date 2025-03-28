@@ -22,6 +22,7 @@ pub mod storage_pricing;
 pub mod transaction;
 pub mod vdf_config;
 pub mod version;
+pub mod gossip;
 
 pub use block::*;
 pub use config::*;
@@ -30,6 +31,7 @@ pub use serialization::*;
 pub use signature::*;
 pub use storage::*;
 pub use transaction::*;
+pub use gossip::*;
 
 pub use alloy_primitives::{Address, Signature};
 pub use app_state::*;

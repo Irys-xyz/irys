@@ -25,9 +25,6 @@ use routes::{
 use std::net::TcpListener;
 use std::{net::SocketAddr, sync::Arc};
 use tracing::{debug, info};
-// It is exported here, because moving it to types crate causes a circular dependency between
-//  reth and irys-database
-pub use routes::block::{CombinedBlockHeader, ExecutionHeader};
 
 #[derive(Clone)]
 pub struct ApiState {

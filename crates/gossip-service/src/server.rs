@@ -7,10 +7,10 @@ use actix_web::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-
+use irys_types::GossipData;
 use crate::{
     cache::GossipCache,
-    types::{GossipData, GossipError, GossipResult},
+    types::{GossipError, GossipResult},
     PeerListProvider,
 };
 use crate::types::InternalGossipError;

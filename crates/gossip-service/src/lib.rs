@@ -10,5 +10,6 @@ pub use client::GossipClient;
 pub use server::GossipServer;
 pub use service::GossipService;
 pub use peer_list_provider::PeerListProvider;
+pub use service::ServiceHandleWithShutdownSignal;
 
-pub use types::{GossipData, GossipError, GossipResult};
+pub use types::{GossipError, GossipResult};

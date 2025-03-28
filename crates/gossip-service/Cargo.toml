@@ -1,5 +1,5 @@
 [package]
-name = "gossip-service"
+name = "irys-gossip-service"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,9 +8,7 @@ edition = "2021"
 irys-types = { path = "../types", features = ["test-utils"] }
 irys-primitives = { path = "../primitives" }
 irys-database = { path = "../database" }
-# Please take a look at the note for pub use section in the api-server's lib.rs file
 irys-api-client.workspace = true
-irys-api-server.workspace = true
 # Other dependencies
 actix-web = { workspace = true }
 tokio = { workspace = true }

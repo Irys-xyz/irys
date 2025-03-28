@@ -3,7 +3,7 @@ use crate::{
     cache::GossipCache,
     client::GossipClient,
     server::GossipServer,
-    types::{tx_ingress_error_to_gossip_error, GossipData, GossipError, GossipResult},
+    types::{tx_ingress_error_to_gossip_error, GossipError, GossipResult},
     PeerListProvider,
 };
 use actix::{Actor, Addr, Context, Handler};
@@ -11,7 +11,7 @@ use irys_actors::mempool_service::{ChunkIngressError, TxExistenceQuery, TxIngres
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
 use irys_api_client::ApiClient;
 use irys_database::tables::CompactPeerListItem;
-use irys_types::{DatabaseProvider, H256};
+use irys_types::{DatabaseProvider, GossipData, H256};
 use rand::seq::IteratorRandom;
 use std::net::SocketAddr;
 use std::{sync::Arc, time::Duration};
@@ -104,7 +104,6 @@ impl GossipService {
     pub fn new(
         server_address: impl Into<String>,
         server_port: u16,
-        client_timeout: Duration,
         irys_db: DatabaseProvider,
     ) -> (Self, mpsc::Sender<GossipData>) {
         let cache = Arc::new(GossipCache::new());
@@ -113,6 +112,7 @@ impl GossipService {
 
         let peer_list = PeerListProvider::new(irys_db.clone());
 
+        let client_timeout = Duration::from_secs(5);
         let server = GossipServer::new(cache.clone(), untrusted_data_tx, peer_list.clone());
         let client = GossipClient::new(client_timeout);
 

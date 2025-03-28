@@ -1,6 +1,3 @@
-use irys_api_server::CombinedBlockHeader;
-use irys_types::{IrysTransactionHeader, UnpackedChunk};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use irys_actors::mempool_service::TxIngressError;
 
@@ -99,10 +96,3 @@ pub(crate) fn tx_ingress_error_to_gossip_error(
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum GossipData {
-    Chunk(UnpackedChunk),
-    Transaction(IrysTransactionHeader),
-    Block(CombinedBlockHeader),
-}

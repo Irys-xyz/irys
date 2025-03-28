@@ -1,5 +1,5 @@
-use crate::types::{GossipData, GossipError, GossipResult};
-use irys_types::{BlockHash, ChunkPathHash, H256};
+use crate::types::{GossipError, GossipResult};
+use irys_types::{BlockHash, ChunkPathHash, GossipData, H256};
 use std::net::SocketAddr;
 use std::ops::DerefMut;
 use std::{

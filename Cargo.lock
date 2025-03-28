@@ -3296,32 +3296,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gossip-service"
-version = "0.1.0"
-dependencies = [
- "actix",
- "actix-web",
- "async-trait",
- "eyre",
- "irys-actors",
- "irys-api-client",
- "irys-api-server",
- "irys-database",
- "irys-primitives",
- "irys-storage",
- "irys-testing-utils",
- "irys-types",
- "mockall",
- "rand",
- "reqwest 0.11.27",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "tokio-test",
- "tracing",
-]
-
-[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4204,9 +4178,11 @@ dependencies = [
  "futures",
  "hex",
  "irys-actors",
+ "irys-api-client",
  "irys-api-server",
  "irys-config",
  "irys-database",
+ "irys-gossip-service",
  "irys-packing",
  "irys-price-oracle",
  "irys-reth-node-bridge",
@@ -4304,6 +4280,31 @@ dependencies = [
  "eyre",
  "irys-types",
  "openssl",
+ "tracing",
+]
+
+[[package]]
+name = "irys-gossip-service"
+version = "0.1.0"
+dependencies = [
+ "actix",
+ "actix-web",
+ "async-trait",
+ "eyre",
+ "irys-actors",
+ "irys-api-client",
+ "irys-database",
+ "irys-primitives",
+ "irys-storage",
+ "irys-testing-utils",
+ "irys-types",
+ "mockall",
+ "rand",
+ "reqwest 0.11.27",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-test",
  "tracing",
 ]
 
