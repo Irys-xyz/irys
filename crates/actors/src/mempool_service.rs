@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, error, info, warn};
 /// The Mempool oversees pending transactions and validation of incoming tx.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct MempoolService {
     irys_db: Option<DatabaseProvider>,
     reth_db: Option<RethDbWrapper>,

@@ -4,16 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-actix-web = { workspace = true }
 reqwest = "0.12.15"
-eyre = { workspace = true }
-irys-types = { path = "../types" }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
+eyre.workspace = true
+irys-types.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 async-trait = "0.1"
-
-[dev-dependencies]
-tokio-test = "0.4"
-mockall = "0.11"

@@ -18,7 +18,6 @@ use irys_types::{
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::debug;
 

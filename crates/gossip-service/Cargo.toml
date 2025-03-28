@@ -12,7 +12,6 @@ irys-api-client.workspace = true
 # Other dependencies
 actix-web = { workspace = true }
 tokio = { workspace = true }
-serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 eyre.workspace = true
@@ -24,8 +23,6 @@ actix.workspace = true
 [dev-dependencies]
 irys-testing-utils.workspace = true
 irys-storage.workspace = true
-tokio-test = "0.4"
-mockall = "0.11"
 async-trait = "0.1"
 
 [lints]

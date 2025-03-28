@@ -112,7 +112,6 @@ impl ApiClient for IrysApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockall::predicate::*;
 
     /// Mock implementation of the API client for testing
     #[derive(Default)]
