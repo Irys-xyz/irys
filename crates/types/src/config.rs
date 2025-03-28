@@ -53,6 +53,7 @@ pub struct Config {
     pub mining_key: k256::ecdsa::SigningKey,
     // TODO: enable this after fixing option in toml
     pub num_capacity_partitions: Option<u64>,
+    /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
     pub port: u16,
     /// the number of block a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
@@ -109,7 +110,7 @@ impl Config {
     pub fn testnet() -> Self {
         use k256::ecdsa::SigningKey;
 
-        const DEFAULT_BLOCK_TIME: u64 = 5;
+        const DEFAULT_BLOCK_TIME: u64 = 1;
 
         Config {
             block_time: DEFAULT_BLOCK_TIME,
@@ -140,7 +141,7 @@ impl Config {
             )
             .expect("valid key"),
             num_capacity_partitions: None,
-            port: 8080,
+            port: 0,
             anchor_expiry_depth: 10,
             genesis_token_price: Amount::token(rust_decimal_macros::dec!(1))
                 .expect("valid token amount"),

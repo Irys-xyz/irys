@@ -1,7 +1,5 @@
 pub mod error;
 pub mod routes;
-use std::{net::SocketAddr, sync::Arc};
-
 use actix::Addr;
 use actix_cors::Cors;
 use actix_web::dev::Server;
@@ -24,6 +22,8 @@ use routes::{
     block, block_index, get_chunk, index, network_config, peer_list, post_chunk, post_version,
     price, proxy::proxy, tx,
 };
+use std::net::TcpListener;
+use std::{net::SocketAddr, sync::Arc};
 use tracing::{debug, info};
 // It is exported here, because moving it to types crate causes a circular dependency between
 //  reth and irys-database
@@ -38,6 +38,7 @@ pub struct ApiState {
     // TODO: slim this down to what we actually use - beware the types!
     // TODO: remove the Option<>
     pub reth_provider: Option<RethNodeProvider>,
+    pub reth_http_url: Option<String>,
     pub block_tree: Option<BlockTreeReadGuard>,
     pub block_index: Option<BlockIndexReadGuard>,
 }
@@ -97,7 +98,7 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/version", web::post().to(post_version::post_version))
 }
 
-pub async fn run_server(app_state: ApiState) -> Server {
+pub async fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     let port = app_state.config.port;
     info!(?port, "Starting API server");
 
@@ -120,9 +121,27 @@ pub async fn run_server(app_state: ApiState) -> Server {
             .route("/", web::get().to(index::info_route))
             .wrap(Cors::permissive())
     })
-    .bind(("0.0.0.0", port))
+    .listen(listener)
     .unwrap()
     .run()
+}
+
+// Adapted from /actix-web-4.9.0/src/server.rs create_listener
+// This is required as we need to access the TcpListener directly to figure out what port we've been assigned
+// if randomisation (requested port 0) is used.
+pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let backlog = 1024;
+    let domain = Domain::for_address(addr);
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    // need this so application restarts can pick back up the same port without suffering from time-wait
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    // clamp backlog to max u32 that fits in i32 range
+    let backlog = core::cmp::min(backlog, i32::MAX as u32) as i32;
+    socket.listen(backlog)?;
+    let listener = TcpListener::from(socket);
+    Ok(listener)
 }
 
 //==============================================================================
@@ -175,6 +194,7 @@ pub async fn run_server(app_state: ApiState) -> Server {
 //         mempool: mempool_addr,
 //         chunk_provider: Arc::new(chunk_provider),
 //         reth_provider: None,
+//         reth_http_url: None,
 //         block_tree: None,
 //         block_index: None,
 //     };

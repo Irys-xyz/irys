@@ -19,7 +19,7 @@ use crate::{
 use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::ensure;
-use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, Initialized, Ledger};
+use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, DataLedger, Initialized};
 use irys_types::{
     Address, BlockHash, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
     IrysTransactionId, StorageConfig, H256, U256,
@@ -149,8 +149,8 @@ impl BlockTreeService {
 
         // Get all the transactions for the finalized block, error if not found
         // TODO: Eventually abstract this for support of `n` ledgers
-        let submit_txs = get_ledger_tx_headers(&tx, &block_header, Ledger::Submit);
-        let publish_txs = get_ledger_tx_headers(&tx, &block_header, Ledger::Publish);
+        let submit_txs = get_ledger_tx_headers(&tx, &block_header, DataLedger::Submit);
+        let publish_txs = get_ledger_tx_headers(&tx, &block_header, DataLedger::Publish);
 
         let all_txs = {
             let mut combined = submit_txs.unwrap_or_default();
@@ -395,9 +395,9 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
 fn get_ledger_tx_headers<T: DbTx>(
     tx: &T,
     block_header: &IrysBlockHeader,
-    ledger: Ledger,
+    ledger: DataLedger,
 ) -> Option<Vec<IrysTransactionHeader>> {
-    match block_header.ledgers[ledger]
+    match block_header.data_ledgers[ledger]
         .tx_ids
         .iter()
         .map(|txid| {
@@ -522,8 +522,8 @@ impl BlockTreeCache {
             vec![(
                 block_hash,
                 height,
-                block.ledgers[Ledger::Publish].tx_ids.0.clone(), // Publish ledger txs
-                block.ledgers[Ledger::Submit].tx_ids.0.clone(),  // Submit ledger txs
+                block.data_ledgers[DataLedger::Publish].tx_ids.0.clone(), // Publish ledger txs
+                block.data_ledgers[DataLedger::Submit].tx_ids.0.clone(),  // Submit ledger txs
             )],
             0,
         );
@@ -602,7 +602,7 @@ impl BlockTreeCache {
         db: DatabaseProvider,
     ) -> Result<Vec<IrysTransactionHeader>, eyre::Report> {
         // Collect submit transactions
-        let submit_txs = block.ledgers[Ledger::Submit]
+        let submit_txs = block.data_ledgers[DataLedger::Submit]
             .tx_ids
             .iter()
             .map(|txid| {
@@ -618,7 +618,7 @@ impl BlockTreeCache {
             })?;
 
         // Collect publish transactions
-        let publish_txs = block.ledgers[Ledger::Publish]
+        let publish_txs = block.data_ledgers[DataLedger::Publish]
             .tx_ids
             .iter()
             .map(|txid| {
@@ -853,8 +853,14 @@ impl BlockTreeCache {
 
                 ChainState::Onchain => {
                     // Include OnChain blocks in pairs
-                    let publish_txs = entry.block.ledgers[Ledger::Publish].tx_ids.0.clone();
-                    let submit_txs = entry.block.ledgers[Ledger::Submit].tx_ids.0.clone();
+                    let publish_txs = entry.block.data_ledgers[DataLedger::Publish]
+                        .tx_ids
+                        .0
+                        .clone();
+                    let submit_txs = entry.block.data_ledgers[DataLedger::Submit]
+                        .tx_ids
+                        .0
+                        .clone();
                     pairs.push((current, entry.block.height, publish_txs, submit_txs));
 
                     if blocks_to_collect == 0 {
@@ -865,8 +871,14 @@ impl BlockTreeCache {
 
                 // For Validated or other NotOnchain states
                 ChainState::Validated(_) | ChainState::NotOnchain(_) => {
-                    let publish_txs = entry.block.ledgers[Ledger::Publish].tx_ids.0.clone();
-                    let submit_txs = entry.block.ledgers[Ledger::Submit].tx_ids.0.clone();
+                    let publish_txs = entry.block.data_ledgers[DataLedger::Publish]
+                        .tx_ids
+                        .0
+                        .clone();
+                    let submit_txs = entry.block.data_ledgers[DataLedger::Submit]
+                        .tx_ids
+                        .0
+                        .clone();
                     pairs.push((current, entry.block.height, publish_txs, submit_txs));
                     not_onchain_count += 1;
 
@@ -1237,7 +1249,7 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use eyre::ensure;
-    use irys_database::Ledger;
+    use irys_database::DataLedger;
 
     #[actix::test]
     async fn test_block_cache() {
@@ -1279,10 +1291,12 @@ mod tests {
         // Adding `b1` again shouldn't change the state because it is confirmed
         // onchain
         let mut b1_test = b1.clone();
-        b1_test.ledgers[Ledger::Submit].tx_ids.push(H256::random());
+        b1_test.data_ledgers[DataLedger::Submit]
+            .tx_ids
+            .push(H256::random());
         assert_matches!(cache.add_block(&b1_test, all_tx.clone()), Ok(_));
         assert_eq!(
-            cache.get_block(&b1.block_hash).unwrap().ledgers[Ledger::Submit]
+            cache.get_block(&b1.block_hash).unwrap().data_ledgers[DataLedger::Submit]
                 .tx_ids
                 .len(),
             0
@@ -1291,7 +1305,7 @@ mod tests {
             cache
                 .get_by_solution_hash(&b1.solution_hash, &H256::random(), U256::one(), U256::one())
                 .unwrap()
-                .ledgers[Ledger::Submit]
+                .data_ledgers[DataLedger::Submit]
                 .tx_ids
                 .len(),
             0
@@ -1320,17 +1334,17 @@ mod tests {
 
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
-        b2.ledgers[Ledger::Submit].tx_ids.push(txid);
+        b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
         assert_matches!(cache.add_block(&b2, all_tx.clone()), Ok(_));
         assert_eq!(
-            cache.get_block(&b2.block_hash).unwrap().ledgers[Ledger::Submit].tx_ids[0],
+            cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
             txid
         );
         assert_eq!(
             cache
                 .get_by_solution_hash(&b2.solution_hash, &H256::random(), U256::one(), U256::one())
                 .unwrap()
-                .ledgers[Ledger::Submit]
+                .data_ledgers[DataLedger::Submit]
                 .tx_ids[0],
             txid
         );
@@ -1338,7 +1352,7 @@ mod tests {
             cache
                 .get_by_solution_hash(&b2.solution_hash, &b1.block_hash, U256::one(), U256::one())
                 .unwrap()
-                .ledgers[Ledger::Submit]
+                .data_ledgers[DataLedger::Submit]
                 .tx_ids[0],
             txid
         );

@@ -4160,6 +4160,7 @@ dependencies = [
  "semver 1.0.24",
  "serde",
  "serde_json",
+ "socket2 0.5.8",
  "tracing",
 ]
 

@@ -64,10 +64,10 @@ async fn version_endpoint_request(
 }
 
 #[actix::test]
-async fn serial_external_api() -> eyre::Result<()> {
+async fn heavy_external_api() -> eyre::Result<()> {
     let ctx = setup().await?; // start api service
 
-    let address = "http://127.0.0.1:8080";
+    let address = format!("http://127.0.0.1:{}", ctx.node.config.port);
 
     // FIXME: Test to be updated with future endpoint work
     let mut _response = chunk_endpoint_request(&address).await;
@@ -156,6 +156,7 @@ async fn serial_external_api() -> eyre::Result<()> {
         }
     }
 
+    ctx.node.stop().await;
     Ok(())
 }
 

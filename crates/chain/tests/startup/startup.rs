@@ -1,12 +1,13 @@
 use crate::utils::mine_block;
 use irys_actors::block_tree_service::get_canonical_chain;
-use irys_chain::IrysNode;
-use irys_testing_utils::utils::temporary_directory;
+use irys_chain::{start_irys_node, IrysNode};
+use irys_config::IrysNodeConfig;
+use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
 use irys_types::Config;
 use std::time::Duration;
 
 #[test_log::test(tokio::test)]
-async fn serial_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
+async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
     // setup
     let temp_dir = temporary_directory(Some("test_startup"), false);
     let config = Config {
@@ -14,8 +15,8 @@ async fn serial_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
         base_directory: temp_dir.path().to_path_buf(),
         ..Config::testnet()
     };
-    let genesis_node = IrysNode::new(config.clone(), true);
-    let non_genesis_node = IrysNode::new(config.clone(), false);
+    let mut genesis_node = IrysNode::new(config.clone(), true);
+    let mut non_genesis_node = IrysNode::new(config.clone(), false);
 
     // action:
     // 1. start the genesis node;
@@ -50,4 +51,20 @@ async fn serial_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
 
     ctx.stop().await;
     Ok(())
+}
+
+#[tokio::test]
+#[should_panic(expected = "IrysNodeCtx must be stopped before all instances are dropped")]
+async fn heavy_test_stop_guard() -> () {
+    let temp_dir = setup_tracing_and_temp_dir(Some("heavy_test_stop_guard"), false);
+
+    let testnet_config = Config::testnet();
+    let mut config = IrysNodeConfig::new(&testnet_config);
+    config.base_directory = temp_dir.path().to_path_buf();
+
+    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let _node = start_irys_node(config, storage_config, testnet_config.clone())
+        .await
+        .unwrap();
+    ()
 }
