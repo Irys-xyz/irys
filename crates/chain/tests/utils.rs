@@ -231,6 +231,19 @@ impl IrysNodeTest {
         }
     }    
 
+    pub fn get_block_by_hash(
+        &self,
+        hash: &H256,
+        include_chunk: bool,
+    ) -> eyre::Result<IrysBlockHeader> {
+        match &self.node_ctx.db.view_eyre(|tx| {
+            irys_database::block_header_by_hash(tx, hash, include_chunk)
+        })? {
+            Some(db_irys_block) => Ok(db_irys_block.clone()),
+            None => Err(eyre::eyre!("Block with hash {} not found", hash)),
+        }
+    }    
+
     pub async fn stop(self) {
         self.node_ctx.stop().await;
     }

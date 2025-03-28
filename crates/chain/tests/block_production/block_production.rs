@@ -5,13 +5,12 @@ use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
-use irys_actors::{block_producer::SolutionFoundMessage, mempool_service::TxIngressError};
+use irys_actors::{mempool_service::TxIngressError};
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
 use irys_types::{irys::IrysSigner, Config, IrysTransaction};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
-use reth_db::Database;
 use reth_primitives::{
     irys_primitives::{IrysTxId, ShadowResult},
     GenesisAccount,
@@ -20,7 +19,7 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    mine_block, start_node, AddTxError, IrysNodeTest
+    mine_block, AddTxError, IrysNodeTest
 };
 
 #[tokio::test]
@@ -96,13 +95,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     // assert_eq!(reth_block.number, block.height);
 
     // check irys DB for built block
-
-    let db_irys_block = &irys_node
-        .node_ctx
-        .db
-        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
-        .unwrap();
-
+    let db_irys_block = irys_node.get_block_by_hash(&block.block_hash, false).unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
     irys_node.stop().await;
@@ -111,12 +104,12 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
-    let (node, _tmp_dir) = start_node("test_mine_ten_blocks_with_capacity_poa_solution").await;
-    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
+    let node = IrysNodeTest::new("test_mine_ten_blocks_with_capacity_poa_solution").await;
+    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
         info!("manually producing block {}", i);
-        let (block, _reth_exec_env) = mine_block(&node).await?.unwrap();
+        let (block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
 
         //check reth for built block
         let reth_block = reth_context
@@ -129,10 +122,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
         // assert_eq!(reth_block.number, block.height);
 
         // check irys DB for built block
-        let db_irys_block = &node
-            .db
-            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
-            .unwrap();
+        let db_irys_block = node.get_block_by_hash(&block.block_hash, false).unwrap();
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
         // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
         sleep(Duration::from_millis(1500)).await;
@@ -166,11 +156,11 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
-    let (node, _tmp_dir) = start_node("test_basic_blockprod").await;
+    let node = IrysNodeTest::new("test_basic_blockprod").await;
 
-    let (block, _ ) = mine_block(&node).await?.unwrap();
+    let (block, _ ) = mine_block(&node.node_ctx).await?.unwrap();
 
-    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
+    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     //check reth for built block
     let reth_block = reth_context
@@ -183,10 +173,7 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     // assert_eq!(reth_block.number, block.height);
 
     // check irys DB for built block
-    let db_irys_block = &node
-        .db
-        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
-        .unwrap();
+    let db_irys_block = node.get_block_by_hash(&block.block_hash, false).unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     node.stop().await;
     Ok(())
@@ -334,11 +321,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         miner_init_balance + U256::from(1)
     );
     // check irys DB for built block
-    let db_irys_block = &node
-        .node_ctx
-        .db
-        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
-        .unwrap();
+    let db_irys_block = node.get_block_by_hash(&block.block_hash, false).unwrap();
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     node.stop().await;
