@@ -600,6 +600,45 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
     }
 }
 
+/// Message to check wether a transaction exists in the mempool or on disk
+#[derive(Message, Debug)]
+#[rtype(result = "Result<bool, TxIngressError>")]
+pub struct TxExistenceQuery(pub H256);
+
+impl TxExistenceQuery {
+    #[must_use]
+    pub fn into_inner(self) -> H256 {
+        self.0
+    }
+}
+
+impl Handler<TxExistenceQuery> for MempoolService {
+    type Result = Result<bool, TxIngressError>;
+
+    fn handle(&mut self, tx_msg: TxExistenceQuery, _ctx: &mut Context<Self>) -> Self::Result {
+        if self.irys_db.is_none() {
+            return Err(TxIngressError::ServiceUninitialized);
+        }
+
+        if self.valid_tx.contains_key(&tx_msg.0) {
+            return Ok(true);
+        }
+
+        // Still has it, just invalid
+        if self.invalid_tx.contains(&tx_msg.0) {
+            return Ok(true);
+        }
+
+        let read_tx = &self.irys_db.as_ref().ok_or(TxIngressError::ServiceUninitialized)?.tx().map_err(|_| TxIngressError::DatabaseError)?;
+
+        let txid = tx_msg.0;
+        let tx_header = tx_header_by_txid(read_tx, &txid)
+            .map_err(|_| TxIngressError::DatabaseError)?;
+
+        Ok(tx_header.is_some())
+    }
+}
+
 /// Generates an ingress proof for a specific `data_root`
 /// pulls required data from all sources
 pub fn generate_ingress_proof(

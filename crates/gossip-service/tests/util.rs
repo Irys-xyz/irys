@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use actix::{Actor, Addr, Context, Handler};
 use gossip_service::service::ServiceHandleWithShutdownSignal;
 use gossip_service::{GossipData, GossipResult, GossipService, PeerListProvider};
-use irys_actors::mempool_service::{
-    ChunkIngressError, ChunkIngressMessage, TxIngressError, TxIngressMessage,
-};
+use irys_actors::mempool_service::{ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage};
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -78,6 +76,16 @@ impl Handler<ChunkIngressMessage> for MempoolStub {
         });
 
         Ok(())
+    }
+}
+
+impl Handler<TxExistenceQuery> for MempoolStub {
+    type Result = Result<bool, TxIngressError>;
+
+    fn handle(&mut self, msg: TxExistenceQuery, _: &mut Self::Context) -> Self::Result {
+        let tx_id = msg.0;
+        let exists = self.txs.read().unwrap().iter().any(|m| m.0.id == tx_id);
+        Ok(exists)
     }
 }
 

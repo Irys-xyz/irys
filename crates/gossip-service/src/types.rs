@@ -2,6 +2,7 @@ use irys_api_server::CombinedBlockHeader;
 use irys_types::{IrysTransactionHeader, UnpackedChunk};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use irys_actors::mempool_service::TxIngressError;
 
 #[derive(Debug, Error)]
 pub enum GossipError {
@@ -15,6 +16,12 @@ pub enum GossipError {
     Internal(InternalGossipError),
     #[error("Invalid data: {0}")]
     InvalidData(InvalidDataError),
+}
+
+impl GossipError {
+    pub fn unknown(e: impl ToString) -> Self {
+        GossipError::Internal(InternalGossipError::Unknown(e.to_string()))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -49,6 +56,46 @@ pub enum InternalGossipError {
     ServerAlreadyRunning,
     #[error("Broadcast receiver has been already shutdown")]
     BroadcastReceiverShutdown,
+}
+
+pub(crate) fn tx_ingress_error_to_gossip_error(
+    error: TxIngressError,
+) -> Option<GossipError> {
+    match error {
+        TxIngressError::Skipped => {
+            None
+        }
+        TxIngressError::InvalidSignature => {
+            Some(GossipError::InvalidData(
+                InvalidDataError::TransactionSignature,
+            ))
+        }
+        TxIngressError::Unfunded => {
+            Some(GossipError::InvalidData(
+                InvalidDataError::TransactionUnfunded,
+            ))
+        }
+        TxIngressError::InvalidAnchor => {
+            Some(GossipError::InvalidData(
+                InvalidDataError::TransactionAnchor,
+            ))
+        }
+        TxIngressError::DatabaseError => {
+            Some(GossipError::Internal(
+                InternalGossipError::Database,
+            ))
+        }
+        TxIngressError::ServiceUninitialized => {
+            Some(GossipError::Internal(
+                InternalGossipError::ServiceUninitialized,
+            ))
+        }
+        TxIngressError::Other(e) => {
+            Some(GossipError::Internal(
+                InternalGossipError::Unknown(e),
+            ))
+        }
+    }
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;
