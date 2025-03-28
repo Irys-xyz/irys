@@ -7,7 +7,6 @@ use alloy_sol_macro::sol;
 use base58::ToBase58;
 use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
-use irys_actors::SolutionFoundMessage;
 use irys_api_server::routes::tx::TxOffset;
 use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
@@ -22,7 +21,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use crate::utils::{capacity_chunk_solution, future_or_mine_on_timeout};
+use crate::utils::{future_or_mine_on_timeout, mine_blocks};
 
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
@@ -214,22 +213,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     .await?
     .unwrap();
 
-    for _i in 1..10 {
-        let poa_solution = capacity_chunk_solution(
-            node.node_config.mining_signer.address(),
-            node.vdf_steps_guard.clone(),
-            &node.vdf_config,
-            &node.storage_config,
-        )
-        .await;
-
-        let _ = node
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()))
-            .await?
-            .unwrap();
-    }
+    mine_blocks(&node, 10).await?;
 
     // sleep so the client has a chance to read the chunks
     sleep(Duration::from_millis(100_000)).await;

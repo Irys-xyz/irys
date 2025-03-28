@@ -14,7 +14,7 @@ use irys_types::TxChunkOffset;
 use irys_types::UnpackedChunk;
 use rand::Rng;
 
-use irys_actors::block_producer::SolutionFoundMessage;
+use crate::utils::mine_block;
 use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
@@ -24,9 +24,7 @@ use k256::ecdsa::SigningKey;
 use reth::rpc::types::TransactionRequest;
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
-use tracing::{debug, info};
-
-use crate::utils::capacity_chunk_solution;
+use tracing::info;
 
 // network simulation test for analytics
 #[ignore]
@@ -82,7 +80,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         testnet_config.clone(),
     )
     .await?;
-    let _reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let _reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
 
     let http_url = format!("http://127.0.0.1:{}", node.config.port);
 
@@ -255,25 +253,10 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             }
         }
 
-        let poa_solution = capacity_chunk_solution(
-            node.node_config.mining_signer.address(),
-            node.vdf_steps_guard.clone(),
-            &node.vdf_config,
-            &node.storage_config,
-        )
-        .await;
-
-        let (_block, _reth_exec_env) = node
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution))
-            .await?
-            .unwrap()
-            .unwrap();
+        mine_block(&node).await?;
         info!("Finished step {}", &i);
     }
 
-    debug!("JESSEDEBUG DONE");
     sleep(Duration::from_secs(u64::MAX)).await;
 
     Ok(())

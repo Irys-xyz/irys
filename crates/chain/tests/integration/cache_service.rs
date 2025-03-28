@@ -1,9 +1,8 @@
-use crate::utils::{capacity_chunk_solution, future_or_mine_on_timeout};
+use crate::utils::{future_or_mine_on_timeout, mine_block};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
-use irys_actors::SolutionFoundMessage;
 use irys_api_server::routes::tx::TxOffset;
 use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
@@ -194,18 +193,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
 
     for i in 1..4 {
         info!("manually producing block {}", i);
-        let poa_solution = capacity_chunk_solution(
-            node.node_config.mining_signer.address(),
-            node.vdf_steps_guard.clone(),
-            &node.vdf_config,
-            &node.storage_config,
-        )
-        .await;
-        let fut = node
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()));
-        let (block, _reth_exec_env) = fut.await??.unwrap();
+        let (block, _reth_exec_env) = mine_block(&node).await?.unwrap();
 
         //check reth for built block
         let reth_block = reth_context
