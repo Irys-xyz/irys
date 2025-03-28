@@ -96,7 +96,6 @@ impl BlockIndex<Uninitialized> {
         // Ensure the path exists
         let path = self.config.clone().unwrap().block_index_dir();
         fs::create_dir_all(&path)?;
-        println!("ensure_path_exists {}", path.display());
         Ok(())
     }
 }
