@@ -154,7 +154,7 @@ pub struct GossipServiceTestFixture {
 
 impl GossipServiceTestFixture {
     pub fn new() -> Self {
-        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf()).unwrap();
         let db = DatabaseProvider(Arc::new(db_env));

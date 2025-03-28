@@ -746,7 +746,7 @@ pub async fn start_irys_node(
                 info!("API server stopped");
                 server_stop_handle.await.unwrap();
 
-                gossip_service_handle.stop().await.unwrap();
+                gossip_service_handle.stop().await.unwrap().unwrap();
 
                 debug!("Stopping actors");
                 for arbiter in arbiters {
@@ -1097,7 +1097,7 @@ impl IrysNode {
                         actix_server.await.unwrap();
                         server_stop_handle.await.unwrap();
 
-                        gossip_service_handle.stop().await.unwrap();
+                        gossip_service_handle.stop().await.unwrap().unwrap();
 
                         debug!("Stopping actors");
                         for arbiter in arbiters {
@@ -1182,9 +1182,7 @@ impl IrysNode {
                     let _ = main_actor_thread_shutdown_tx.try_send(());
 
                     debug!("Waiting for the main actor thread to finish");
-                    let reth_node_handle = actor_main_thread_handle
-                        .join()
-                        .unwrap();
+                    let reth_node_handle = actor_main_thread_handle.join().unwrap();
 
                     reth_node_handle
                 };

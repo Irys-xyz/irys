@@ -23,12 +23,11 @@ const MAX_PEERS_PER_BROADCAST: usize = 5;
 const CACHE_CLEANUP_INTERVAL: Duration = ONE_HOUR;
 const CACHE_ENTRY_TTL: Duration = TWO_HOURS;
 
-type TaskExecutionResult = Result<Option<GossipResult<()>>, tokio::task::JoinError>;
+type TaskExecutionResult = Result<GossipResult<()>, tokio::task::JoinError>;
 
 #[derive(Debug)]
 pub struct ServiceHandleWithShutdownSignal<T> {
-    pub handle: Option<tokio::task::JoinHandle<T>>,
-    pub result: Option<T>,
+    pub handle: tokio::task::JoinHandle<T>,
     pub shutdown_tx: mpsc::Sender<()>,
     pub name: Option<String>,
 }
@@ -43,15 +42,14 @@ impl<T> ServiceHandleWithShutdownSignal<T> {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
         let handle = tokio::spawn(f(shutdown_rx));
         Self {
-            handle: Some(handle),
-            result: None,
+            handle,
             shutdown_tx,
             name: name.map(Into::into),
         }
     }
 
     /// Stops the task, joins it and returns the result
-    pub async fn stop(mut self) -> Result<Option<T>, tokio::task::JoinError> {
+    pub async fn stop(mut self) -> Result<T, tokio::task::JoinError> {
         let res = self.shutdown_tx.send(()).await;
 
         if let Err(e) = res {
@@ -62,26 +60,18 @@ impl<T> ServiceHandleWithShutdownSignal<T> {
             );
         }
 
-        self.wait_for_exit().await?;
+        let result = self.wait_for_exit().await?;
 
         tracing::debug!("Task \"{}\" stopped", self.name.as_deref().unwrap_or(""));
-        Ok(self.result)
+
+        Ok(result)
     }
 
     /// Waits for the task to exit or immediately returns if the task has already exited. To get
     ///  the execution result, call [ServiceHandleWithShutdownSignal::stop].
-    pub async fn wait_for_exit(&mut self) -> Result<(), tokio::task::JoinError> {
-        let handle = self.handle.take();
-        match handle {
-            Some(h) => match h.await {
-                Ok(result) => {
-                    self.result = Some(result);
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            },
-            None => Ok(()),
-        }
+    pub async fn wait_for_exit(&mut self) -> Result<T, tokio::task::JoinError> {
+        let handle = &mut self.handle;
+        handle.await
     }
 }
 
@@ -110,7 +100,7 @@ impl GossipService {
         let (untrusted_data_tx, untrusted_data_rx) = mpsc::channel(1000);
         let (trusted_data_tx, trusted_data_rx) = mpsc::channel(1000);
 
-        let peer_list = PeerListProvider::new(irys_db.clone());
+        let peer_list = PeerListProvider::new(irys_db);
 
         let client_timeout = Duration::from_secs(5);
         let server = GossipServer::new(cache.clone(), untrusted_data_tx, peer_list.clone());
@@ -181,10 +171,14 @@ impl GossipService {
                             }
                         }
                         _ = shutdown_rx.recv() => {
-                            return Ok(());
+                            break;
                         }
                     }
                 }
+
+                tracing::debug!("Cleanup task complete");
+
+                Ok(())
             },
         );
 
@@ -199,7 +193,7 @@ impl GossipService {
                             maybe_message = untrusted_gossip_data_rx.recv() => {
                                 match maybe_message {
                                     Some((source_address, data)) => {
-                                       match handle_gossip_data_from_other_peer(source_address, data, service.clone(), mempool.clone(), &api_client).await {
+                                       match handle_gossip_data_from_other_peer(source_address, data, &service, &mempool, &api_client).await {
                                              Ok(()) => {}
                                              Err(e) => {
                                                 match e {
@@ -223,14 +217,19 @@ impl GossipService {
                                              }
                                         };
                                     },
-                                    None => return Ok(()), // channel closed
+                                    None => break, // channel closed
                                 }
                             },
                             _ = shutdown_rx.recv() => {
-                                return Ok(());
+                                tracing::warn!("SHUT HEHEH");
+                                break;
                             }
                         }
                     }
+
+                    tracing::debug!("Gossip data receiver task complete");
+
+                    Ok(())
                 }
             },
         );
@@ -251,14 +250,18 @@ impl GossipService {
                                         }
                                     };
                                 },
-                                None => return Ok(()), // channel closed
+                                None => break, // channel closed
                             }
                         },
                         _ = shutdown_rx.recv() => {
-                            return Ok(());
+                            break;
                         }
                     }
                 }
+
+                tracing::debug!("Broadcast task complete");
+
+                Ok(())
             },
         );
 
@@ -271,16 +274,16 @@ impl GossipService {
                         tracing::debug!("Gossip service shutdown signal received");
                     }
                     res = gossip_data_receiver_handle.wait_for_exit() => {
-                        tracing::debug!("Handler of gossip data from other peers exited because: {:?}", res);
+                        tracing::warn!("Handler of gossip data from other peers exited because: {:?}", res);
                     }
                     cleanup_res = cleanup_handle.wait_for_exit() => {
-                        tracing::debug!("Gossip cleanup exited because: {:?}", cleanup_res);
+                        tracing::warn!("Gossip cleanup exited because: {:?}", cleanup_res);
                     }
                     server_res = server => {
-                        tracing::debug!("Gossip server exited because: {:?}", server_res);
+                        tracing::warn!("Gossip server exited because: {:?}", server_res);
                     }
                     broadcast_res = broadcast_task_handle.wait_for_exit() => {
-                        tracing::debug!("Gossip broadcast exited because: {:?}", broadcast_res);
+                        tracing::warn!("Gossip broadcast exited because: {:?}", broadcast_res);
                     }
                 }
 
@@ -288,22 +291,27 @@ impl GossipService {
                 let mut errors: Vec<GossipError> = vec![];
 
                 server_handle.stop(true).await;
-                tracing::debug!("Task \"gossip web server\" stopped");
+                tracing::debug!("Gossip listener stopped");
 
                 let mut handle_result = |res: TaskExecutionResult| match res {
-                    Ok(maybe_response) => {
-                        maybe_response.map(|r| r.map_err(|e| errors.push(e)));
-                    }
+                    Ok(r) => match r {
+                        Ok(()) => {}
+                        Err(e) => errors.push(e),
+                    },
                     Err(e) => errors.push(GossipError::Internal(InternalGossipError::Unknown(
                         e.to_string(),
                     ))),
                 };
 
+                tracing::info!("Stopping gossip data receiver");
                 handle_result(gossip_data_receiver_handle.stop().await);
+                tracing::info!("Stopping gossip cleanup");
                 handle_result(cleanup_handle.stop().await);
+                tracing::info!("Stopping gossip broadcast");
                 handle_result(broadcast_task_handle.stop().await);
 
                 if errors.is_empty() {
+                    tracing::info!("Gossip main task finished without errors");
                     Ok(())
                 } else {
                     Err(GossipError::Internal(InternalGossipError::Unknown(
@@ -392,8 +400,8 @@ impl GossipSource {
 async fn handle_gossip_data_from_other_peer<T>(
     source_address: SocketAddr,
     data: GossipData,
-    service: Arc<GossipService>,
-    mempool: Addr<T>,
+    service: &GossipService,
+    mempool: &Addr<T>,
     api_client: &impl ApiClient,
 ) -> GossipResult<()>
 where
