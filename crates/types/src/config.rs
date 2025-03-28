@@ -77,6 +77,10 @@ pub struct Config {
     /// The base directory where to look for artifact data
     #[serde(default = "default_irys_path")]
     pub base_directory: PathBuf,
+    /// The IP address of the gossip service
+    pub gossip_service_bind_ip: String,
+    /// The port of the gossip service
+    pub gossip_service_port: u16,
 }
 
 fn default_irys_path() -> PathBuf {
@@ -159,6 +163,8 @@ impl Config {
                 smoothing_interval: 15,
             },
             base_directory: default_irys_path(),
+            gossip_service_bind_ip: "127.0.0.1".into(),
+            gossip_service_port: 0,
         }
     }
 }

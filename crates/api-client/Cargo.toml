@@ -1,0 +1,13 @@
+[package]
+name = "irys-api-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest = "0.12.15"
+eyre.workspace = true
+irys-types.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+async-trait = "0.1"

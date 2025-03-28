@@ -11,8 +11,9 @@ use crate::{
     Compact, DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader,
     Proof, H256, U256,
 };
-use alloy_primitives::{keccak256, Address, B256};
+use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
+use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
@@ -439,6 +440,22 @@ impl IrysBlockHeader {
             ..Default::default()
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExecutionHeader {
+    #[serde(flatten)]
+    pub header: Header,
+    pub transactions: Vec<TxHash>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CombinedBlockHeader {
+    #[serde(flatten)]
+    pub irys: IrysBlockHeader,
+    pub execution: ExecutionHeader,
 }
 
 #[cfg(test)]
