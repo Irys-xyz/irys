@@ -149,7 +149,7 @@ impl IrysNodeTest {
         Self { node_ctx, temp_dir }
     }
 
-    pub async fn wait_until_height(&self, target_height: u64, max_seconds: usize) {
+    pub async fn wait_until_height(&self, target_height: u64, max_seconds: usize) -> eyre::Result<()>{
         let mut retries = 0;
         let max_retries = max_seconds; // 1 second per retry
         while self.node_ctx.block_index_guard.read().latest_height() < target_height
@@ -159,12 +159,13 @@ impl IrysNodeTest {
             retries += 1;
         }
         if retries == max_retries {
-            panic!("Failed to reach target height after {} retries", retries);
+            Err(eyre::eyre!("Failed to reach target height after {} retries", retries))
         } else {
             info!(
                 "got block after {} seconds and {} retries",
                 max_seconds, &retries
             );
+            Ok(())
         }
     }
 
@@ -173,8 +174,7 @@ impl IrysNodeTest {
     }
 
     pub async fn mine_block(&self) -> eyre::Result<()> {
-        self.mine_blocks(1).await?;
-        Ok(())
+        self.mine_blocks(1).await
     }
 
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
@@ -182,8 +182,7 @@ impl IrysNodeTest {
         self.node_ctx.actor_addresses.set_mining(true)?;
         self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await;
-        self.node_ctx.actor_addresses.set_mining(false)?;
-        Ok(())
+        self.node_ctx.actor_addresses.set_mining(false)
     }
 
     pub async fn create_submit_data_tx(
@@ -226,23 +225,21 @@ impl IrysNodeTest {
         height: u64,
         include_chunk: bool,
     ) -> eyre::Result<IrysBlockHeader> {
-        if let Some(block) = self
-            .node_ctx
+        self.node_ctx
             .block_index_guard
             .read()
             .get_item(height as usize)
-        {
-            match &self.node_ctx.db.view_eyre(|tx| {
-                irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk)
-            })? {
-                Some(db_irys_block) => Ok(db_irys_block.clone()),
-                None => Err(eyre::eyre!("Block at height {} not found", height)),
-            }
-        } else {
-            Err(eyre::eyre!("Block item not found at height {}", height))
-        }
+            .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
+            .and_then(|block| {
+                self.node_ctx
+                    .db
+                    .view_eyre(|tx| {
+                        irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk)
+                    })?
+                    .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
+                })
     }
-
+        
     pub fn get_block_by_hash(
         &self,
         hash: &H256,
