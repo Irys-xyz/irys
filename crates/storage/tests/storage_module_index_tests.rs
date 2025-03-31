@@ -239,8 +239,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // Tx:3 - Fill up the StorageModule leaving one empty chunk
     let tx_path = &proofs[2].proof;
     let data_root = tx_headers[2].data_root;
-    let bytes_in_tx =
-        proofs[2].offset as u64 - (*tx_ledger_range.end() * storage_config.chunk_size);
+    let offset = proofs[2].offset as u64;
+    let bytes_in_tx = (offset + 1) - (*(tx_ledger_range.end() + 1u64) * storage_config.chunk_size);
     let data_size = tx_headers[2].data_size;
     assert_eq!(bytes_in_tx, data_size);
     let start_chunk_offset = tx_ledger_range.end() + 1u64;
