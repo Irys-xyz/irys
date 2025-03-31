@@ -75,7 +75,7 @@ pub async fn capacity_chunk_solution(
     );
 
     let partition_hash = H256::zero();
-    let recall_range_idx: u64 = block_validation::get_recall_range(
+    let recall_range_idx = block_validation::get_recall_range(
         step_num,
         storage_config,
         &vdf_steps_guard,
@@ -103,8 +103,7 @@ pub async fn capacity_chunk_solution(
 
     SolutionContext {
         partition_hash,
-        chunk_offset: recall_range_idx
-            .try_into()
+        chunk_offset: TryInto::<u32>::try_into(recall_range_idx)
             .expect("Value exceeds u32::MAX")
             .saturating_mul(
                 storage_config
