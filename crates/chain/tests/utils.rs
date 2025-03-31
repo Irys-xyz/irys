@@ -103,6 +103,10 @@ pub async fn capacity_chunk_solution(
 
     SolutionContext {
         partition_hash,
+        // FIXME: SolutionContext should in future use PartitionChunkOffset::from()
+        // chunk_offset appears to be the end byte rather than the start byte that gets read
+        // therefore a saturating_mul is fine as it will read all data up to that point
+        // this is also a test util fn, and so less of a concern than a "domain logic" fn
         chunk_offset: TryInto::<u32>::try_into(recall_range_idx)
             .expect("Value exceeds u32::MAX")
             .saturating_mul(
