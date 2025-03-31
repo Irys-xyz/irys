@@ -424,27 +424,8 @@ impl EpochServiceActor {
             }
         }
 
-        // update partition slot/ledger assignments in storage module info
-        for sm in storage_module_info.iter_mut() {
-            let _ = sm
-                .partition_assignment
-                .map(|mut pa| {
-                    match self
-                        .partition_assignments
-                        .read()
-                        .map(|p| p.get_assignment(pa.partition_hash))
-                    {
-                        Ok(Some(pa2)) => {
-                            pa.ledger_id = pa2.ledger_id;
-                            pa.slot_index = pa2.slot_index;
-                            Ok(())
-                        }
-                        Ok(None) => Ok(()),
-                        Err(e) => Err(eyre::eyre!("Error reading partition assignments: {:?}", e)),
-                    }
-                })
-                .ok_or(eyre::eyre!("Error reading partition assignments"))?;
-        }
+        let storage_module_info =
+            self.map_storage_modules_to_partition_assignments(storage_module_config);
 
         Ok(storage_module_info)
     }
