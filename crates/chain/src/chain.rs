@@ -32,8 +32,8 @@ use irys_actors::{
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
-use irys_database::database;
 use irys_database::migration::check_db_version_and_run_migrations_if_needed;
+use irys_database::{database, get_genesis_commitments, insert_commitment_tx, SystemLedger};
 use irys_packing::{PackingType, PACKING_TYPE};
 use irys_price_oracle::mock_oracle::MockOracle;
 use irys_price_oracle::IrysPriceOracle;
@@ -46,12 +46,14 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
+
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
     StorageConfig, CHUNK_SIZE, H256,
 };
 use irys_types::{
-    Config, DifficultyAdjustmentConfig, IrysBlockHeader, OracleConfig, PartitionChunkRange,
+    Config, DifficultyAdjustmentConfig, H256List, IrysBlockHeader, OracleConfig,
+    PartitionChunkRange, SystemTransactionLedger,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::rpc::eth::EthApiServer as _;
@@ -844,7 +846,6 @@ async fn start_reth_node<T: HasName + HasTableType>(
 
     node_handle.node_exit_future.await
 }
-
 /// Builder pattern for configuring and bootstrapping an Irys blockchain node.
 #[derive(Clone)]
 pub struct IrysNode {
@@ -1110,7 +1111,8 @@ impl IrysNode {
     fn create_genesis_header(&self) -> Result<(ChainSpec, Arc<IrysBlockHeader>), eyre::Error> {
         let (reth_chain_spec, irys_genesis) = self.irys_node_config.chainspec_builder.build();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let irys_genesis = IrysBlockHeader {
+
+        let mut genesis_header = IrysBlockHeader {
             diff: calculate_initial_difficulty(
                 &self.difficulty_adjustment_config,
                 &self.storage_config,
@@ -1119,9 +1121,33 @@ impl IrysNode {
             )?,
             timestamp: now.as_millis(),
             last_diff_timestamp: now.as_millis(),
+            system_ledgers: vec![SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids: H256List::default(),
+            }],
             ..irys_genesis
         };
-        let irys_genesis = Arc::new(irys_genesis);
+        let commitments = get_genesis_commitments(&self.config);
+
+        //println!("{}", serde_json::to_string_pretty(&commitments).unwrap());
+
+        // Write these commitment transactions to the irys db so they are available during block validation
+        let db = init_irys_db(&self.irys_node_config).expect("to create an irys db connection");
+        let tx = db.tx_mut().expect("to create a mutable mdbx transaction");
+        for commitment in &commitments {
+            insert_commitment_tx(&tx, commitment).expect("inserting commitment tx should succeed");
+        }
+
+        // Add the commitment txids to the system ledger in the block header one by one
+        for commitment_id in commitments.iter().map(|commitment| commitment.id) {
+            // We know index 0 is the Commitment ledger because we just created it at that index
+            genesis_header.system_ledgers[0].tx_ids.push(commitment_id);
+        }
+
+        // println!("{}", serde_json::to_string_pretty(&genesis_header).unwrap());
+
+        let irys_genesis = Arc::new(genesis_header);
+
         Ok((reth_chain_spec, irys_genesis))
     }
 

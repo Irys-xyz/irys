@@ -160,6 +160,11 @@ pub struct IrysBlockHeader {
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
 
 impl IrysBlockHeader {
+    /// Returns true if the block is the genesis block, false otherwise
+    pub fn is_genesis(&self) -> bool {
+        self.height == 0
+    }
+
     /// Proxy method for `Encodable::encode`
     ///
     /// Packs all the header data into a byte buffer, using RLP encoding.

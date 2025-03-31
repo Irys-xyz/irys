@@ -178,6 +178,41 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         }
 
         //====================================
+        // Commitments ledger TX Validation
+        //------------------------------------
+        // TODO: validate genesis commitments
+        // if epoch_block.is_genesis() {
+        //     let genesis_stake = stake_commitments
+        //         .iter()
+        //         .find(|tx| tx.signer == epoch_block.miner_address);
+        //     if genesis_stake.is_none() {
+        //         // Genesis block must stake the genesis block producer
+        //     }
+        // }
+        // // Extract the Commitment ledger from the epoch block
+        // let commitments_ledger = epoch_block
+        //     .system_ledgers
+        //     .iter()
+        //     .find(|b| b.ledger_id == SystemLedger::Commitment)
+        //     .ok_or_else(|| eyre::eyre!("No Commitment ledger found in epoch block"))?;
+
+        // // Build an efficient lookup map of commitments by ID
+        // let mut commitment_map: HashMap<H256, &CommitmentTransaction> = HashMap::new();
+        // for commitment_tx in &commitments {
+        //     commitment_map.insert(commitment_tx.id, commitment_tx);
+        // }
+
+        // // Verify all ledger-referenced commitment transactions exist
+        // for tx_id in commitments_ledger.tx_ids.iter() {
+        //     if !commitment_map.contains_key(tx_id) {
+        //         return Err(eyre::eyre!(
+        //             "No commitment found for ledger tx_id {:?}",
+        //             tx_id
+        //         ));
+        //     }
+        // }
+
+        //====================================
         // Block header pre-validation
         //------------------------------------
         let block_index_guard = self.block_index_guard.clone();
