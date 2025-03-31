@@ -14,7 +14,7 @@ async fn heavy_test_wait_until_height() {
     let steps = 2;
     let seconds = 60;
     irys_node.node_ctx.actor_addresses.set_mining(true).unwrap();
-    irys_node.wait_until_height(height + steps, seconds).await;
+    irys_node.wait_until_height(height + steps, seconds).await.unwrap();
     let height5 = irys_node.get_height();
     assert_eq!(height5, height + steps);
     irys_node.stop().await;

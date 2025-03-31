@@ -188,7 +188,7 @@ impl IrysNodeTest {
         let height = self.get_height();
         self.node_ctx.actor_addresses.set_mining(true)?;
         self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
-            .await;
+            .await?;
         self.node_ctx.actor_addresses.set_mining(false)
     }
 

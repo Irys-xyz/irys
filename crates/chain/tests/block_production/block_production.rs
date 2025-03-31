@@ -140,7 +140,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
-        node.wait_until_height(i + 1, 60).await;
+        node.wait_until_height(i + 1, 60).await?;
 
         //check reth for built block
         let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
