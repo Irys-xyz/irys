@@ -149,7 +149,11 @@ impl IrysNodeTest {
         Self { node_ctx, temp_dir }
     }
 
-    pub async fn wait_until_height(&self, target_height: u64, max_seconds: usize) -> eyre::Result<()>{
+    pub async fn wait_until_height(
+        &self,
+        target_height: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<()> {
         let mut retries = 0;
         let max_retries = max_seconds; // 1 second per retry
         while self.node_ctx.block_index_guard.read().latest_height() < target_height
@@ -159,7 +163,10 @@ impl IrysNodeTest {
             retries += 1;
         }
         if retries == max_retries {
-            Err(eyre::eyre!("Failed to reach target height after {} retries", retries))
+            Err(eyre::eyre!(
+                "Failed to reach target height after {} retries",
+                retries
+            ))
         } else {
             info!(
                 "got block after {} seconds and {} retries",
@@ -237,9 +244,9 @@ impl IrysNodeTest {
                         irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk)
                     })?
                     .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
-                })
+            })
     }
-        
+
     pub fn get_block_by_hash(
         &self,
         hash: &H256,
