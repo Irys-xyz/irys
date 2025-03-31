@@ -487,18 +487,19 @@ mod tests {
         let database_provider = DatabaseProvider(Arc::new(db));
 
         let data_root = H256::random();
+        let data_size = chunk_size * chunk_count;
 
         let _ = storage_module.index_transaction_data(
             tx_path.to_vec(),
             data_root,
             LedgerChunkRange(ledger_chunk_offset_ie!(0, chunk_count)),
-            chunk_size,
+            data_size,
         );
 
         for tx_chunk_offset in 0..chunk_count {
             let chunk = UnpackedChunk {
                 data_root,
-                data_size: chunk_size,
+                data_size,
                 data_path: data_path.to_vec().into(),
                 bytes: chunk_data.to_vec().into(),
                 tx_offset: tx_chunk_offset.into(),
@@ -562,7 +563,7 @@ mod tests {
         );
 
         assert!(
-            solution.chunk_offset < chunk_count * 2,
+            solution.chunk_offset < chunk_count as u32 * 2,
             "Not expected offset"
         );
 
