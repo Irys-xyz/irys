@@ -81,7 +81,7 @@ pub async fn capacity_chunk_solution(
         &vdf_steps_guard,
         &partition_hash,
     )
-    .unwrap();
+    .expect("valid recall range");
 
     let mut entropy_chunk = Vec::<u8>::with_capacity(storage_config.chunk_size as usize);
     compute_entropy_chunk(
