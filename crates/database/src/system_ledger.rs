@@ -93,7 +93,6 @@ fn create_pledge_commitment_transaction(
 
     pledge_tx
 }
-
 /// Generates commitment transactions for genesis block
 ///
 /// Creates a stake commitment for the genesis block producer, followed by pledge
@@ -105,6 +104,11 @@ fn create_pledge_commitment_transaction(
 ///
 /// # Returns
 /// A vector of commitment transactions (one stake + multiple pledges)
+///
+/// # Note
+/// This function has the same configuration dependency as [`EpochServiceActor::map_storage_modules_to_partition_assignments`].
+/// When updating configuration related to StorageModule/submodule functionality, both functions
+/// will need corresponding updates.
 ///
 /// # Panics
 /// Panics if fewer than 3 storage submodules are configured, as this is below
@@ -140,6 +144,9 @@ pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
     // submodules for a single partition, but the config doesn't yet express this
     // many-to-one relationship. For testnet, each submodule path is treated as
     // a complete HDD capable of providing all storage for a StorageModule.
+    // Whe the configuration catches up to the StorageModule functionality,
+    // this method as well as [`epoch_serve::map_storage_modules_to_partition_assignments()`]
+    // will have to be updated.
     let mut anchor = stake_tx.id;
     for _i in 0..num_submodules {
         let pledge_tx = create_pledge_commitment_transaction(&signer, anchor);

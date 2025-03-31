@@ -997,6 +997,19 @@ impl EpochServiceActor {
         }
     }
 
+    /// Returns a vector of all partition assignments associated with the provided miner address.
+    ///
+    /// This function extracts assignments from both data and capacity partitions where
+    /// the miner_address matches the input. Data partition assignments are added first,
+    /// followed by capacity partition assignments. Within each category, the ordering is
+    /// determined by the underlying BTreeMap implementation which orders entries by their
+    /// partition hash keys, ensuring consistent and deterministic iteration order.
+    ///
+    /// # Arguments
+    /// * `miner_address` - The address of the miner to get assignments for
+    ///
+    /// # Returns
+    /// * `Vec<PartitionAssignment>` - A vector containing all matching partition assignments
     pub fn get_partition_assignments(&self, miner_address: Address) -> Vec<PartitionAssignment> {
         let mut assignments = Vec::new();
 
@@ -1025,8 +1038,27 @@ impl EpochServiceActor {
         assignments
     }
 
-    /// Get the local nodes storage module->partition assignments
-    /// has the same configuration gap as [`system_ledger::get_genesis_commitments()`]
+    /// Maps storage modules to partition assignments for the local node.
+    ///
+    /// This function creates [`StorageModuleInfo`] instances that link storage modules to specific
+    /// partition assignments. It processes assignments in the following priority order:
+    /// 1. Publish ledger partitions (first priority)
+    /// 2. Submit ledger partitions (second priority)
+    /// 3. Capacity partitions (used for remaining storage modules)
+    ///
+    /// The function respects the BTreeMap's deterministic ordering when processing assignments
+    /// within each category, ensuring consistent mapping across node restarts.
+    ///
+    /// # Note
+    /// This function has the same configuration dependency as [`system_ledger::get_genesis_commitments()`].
+    /// When updating configuration related to StorageModule/submodule functionality, both functions
+    /// will need corresponding updates.
+    ///
+    /// # Arguments
+    /// * `storage_module_config` - Configuration containing paths for storage submodules
+    ///
+    /// # Returns
+    /// * `Vec<StorageModuleInfo>` - Vector of storage module information with assigned partitions
     pub fn map_storage_modules_to_partition_assignments(
         &self,
         storage_module_config: StorageSubmodulesConfig,
