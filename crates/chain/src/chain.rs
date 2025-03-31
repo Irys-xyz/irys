@@ -102,6 +102,7 @@ pub struct IrysNodeCtx {
 
 impl IrysNodeCtx {
     pub async fn stop(self) {
+        let _ = self.actor_addresses.stop_mining();
         debug!("Sending shutdown signal to reth thread");
         // Shutting down reth node will propagate to the main actor thread eventually
         let _ = self.reth_shutdown_sender.send(()).await;
