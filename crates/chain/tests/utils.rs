@@ -1,14 +1,21 @@
+use actix::MailboxError;
 use futures::future::select;
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_actors::block_validation;
-use irys_chain::IrysNodeCtx;
+use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
+use irys_chain::{start_irys_node, IrysNodeCtx};
+use irys_config::IrysNodeConfig;
+use irys_database::tx_header_by_txid;
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_storage::ii;
+use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_testing_utils::utils::tempfile::TempDir;
+use irys_types::irys::IrysSigner;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, H256List, H256,
 };
-use irys_types::{Config, StorageConfig, TxChunkOffset, VDFStepsConfig};
+use irys_types::{Config, IrysTransactionHeader, StorageConfig, TxChunkOffset, VDFStepsConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
@@ -114,24 +121,179 @@ pub async fn capacity_chunk_solution(
     }
 }
 
-pub async fn mine_blocks(node_ctx: &IrysNodeCtx, blocks: usize) -> eyre::Result<()> {
-    let storage_config = &node_ctx.storage_config;
-    let vdf_config = &node_ctx.vdf_config;
-    let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    for _ in 0..blocks {
-        let poa_solution = capacity_chunk_solution(
-            node_ctx.node_config.mining_signer.address(),
-            vdf_steps_guard.clone(),
-            vdf_config,
-            storage_config,
-        )
-        .await;
-        let _ = node_ctx
+pub struct IrysNodeTest {
+    pub node_ctx: IrysNodeCtx,
+    pub temp_dir: TempDir,
+}
+
+// Reasons tx could fail to be added to mempool
+#[derive(Debug)]
+pub enum AddTxError {
+    CreateTx(eyre::Report),
+    TxIngress(TxIngressError),
+    Mailbox(MailboxError),
+}
+
+impl IrysNodeTest {
+    pub async fn new(name: &str) -> Self {
+        let (node_ctx, temp_dir) = start_node(name).await;
+        Self { node_ctx, temp_dir }
+    }
+
+    pub async fn new_with_config(
+        name: &str,
+        config: Option<Config>,
+        node_config: Option<IrysNodeConfig>,
+    ) -> Self {
+        let (node_ctx, temp_dir) = start_node_config(name, config, node_config).await;
+        Self { node_ctx, temp_dir }
+    }
+
+    pub async fn wait_until_height(
+        &self,
+        target_height: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<()> {
+        let mut retries = 0;
+        let max_retries = max_seconds; // 1 second per retry
+        while self.node_ctx.block_index_guard.read().latest_height() < target_height
+            && retries < max_retries
+        {
+            sleep(Duration::from_secs(1)).await;
+            retries += 1;
+        }
+        if retries == max_retries {
+            Err(eyre::eyre!(
+                "Failed to reach target height after {} retries",
+                retries
+            ))
+        } else {
+            info!(
+                "got block after {} seconds and {} retries",
+                max_seconds, &retries
+            );
+            Ok(())
+        }
+    }
+
+    pub fn get_height(&self) -> u64 {
+        self.node_ctx.block_index_guard.read().latest_height()
+    }
+
+    pub async fn mine_block(&self) -> eyre::Result<()> {
+        self.mine_blocks(1).await
+    }
+
+    pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
+        let height = self.get_height();
+        self.node_ctx.actor_addresses.set_mining(true)?;
+        self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
+            .await?;
+        self.node_ctx.actor_addresses.set_mining(false)
+    }
+
+    pub async fn create_submit_data_tx(
+        &self,
+        account: &IrysSigner,
+        data: Vec<u8>,
+    ) -> Result<IrysTransaction, AddTxError> {
+        let tx = account
+            .create_transaction(data, None)
+            .map_err(AddTxError::CreateTx)?;
+        let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
+
+        match self
+            .node_ctx
             .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()))
-            .await?
-            .unwrap();
+            .mempool
+            .send(TxIngressMessage(tx.header.clone()))
+            .await
+        {
+            Ok(Ok(())) => return Ok(tx),
+            Ok(Err(tx_error)) => return Err(AddTxError::TxIngress(tx_error)),
+            Err(e) => return Err(AddTxError::Mailbox(e)),
+        };
+    }
+
+    pub fn get_tx_header(&self, tx_id: &H256) -> eyre::Result<IrysTransactionHeader> {
+        match self
+            .node_ctx
+            .db
+            .view_eyre(|tx| tx_header_by_txid(tx, tx_id))
+        {
+            Ok(Some(tx_header)) => Ok(tx_header),
+            Ok(None) => Err(eyre::eyre!("No tx header found for txid {:?}", tx_id)),
+            Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
+        }
+    }
+
+    pub fn get_block_by_height(
+        &self,
+        height: u64,
+        include_chunk: bool,
+    ) -> eyre::Result<IrysBlockHeader> {
+        self.node_ctx
+            .block_index_guard
+            .read()
+            .get_item(height as usize)
+            .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
+            .and_then(|block| {
+                self.node_ctx
+                    .db
+                    .view_eyre(|tx| {
+                        irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk)
+                    })?
+                    .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
+            })
+    }
+
+    pub fn get_block_by_hash(
+        &self,
+        hash: &H256,
+        include_chunk: bool,
+    ) -> eyre::Result<IrysBlockHeader> {
+        match &self
+            .node_ctx
+            .db
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, hash, include_chunk))?
+        {
+            Some(db_irys_block) => Ok(db_irys_block.clone()),
+            None => Err(eyre::eyre!("Block with hash {} not found", hash)),
+        }
+    }
+
+    pub async fn stop(self) {
+        self.node_ctx.stop().await;
+    }
+}
+
+pub async fn start_node(name: &str) -> (IrysNodeCtx, TempDir) {
+    start_node_config(name, None, None).await
+}
+
+/// need to return tmp_dir to prevent it from being dropped
+pub async fn start_node_config(
+    name: &str,
+    config: Option<Config>,
+    node_config: Option<IrysNodeConfig>,
+) -> (IrysNodeCtx, TempDir) {
+    std::env::set_var("RUST_LOG", "debug");
+    let temp_dir = setup_tracing_and_temp_dir(Some(name), false);
+    let testnet_config = config.unwrap_or_else(|| Config::testnet());
+    let storage_config = StorageConfig::new(&testnet_config);
+    let mut config = node_config.unwrap_or_else(|| IrysNodeConfig::new(&testnet_config));
+    config.base_directory = temp_dir.path().to_path_buf();
+    (
+        start_irys_node(config, storage_config, testnet_config.clone())
+            .await
+            .unwrap(),
+        temp_dir,
+    )
+}
+
+pub async fn mine_blocks(node_ctx: &IrysNodeCtx, blocks: usize) -> eyre::Result<()> {
+    for _ in 0..blocks {
+        mine_block(node_ctx).await?.unwrap();
     }
     Ok(())
 }
