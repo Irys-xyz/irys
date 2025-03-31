@@ -11,6 +11,7 @@ use std::fs::{self, remove_file, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
+use tracing::error;
 
 /// This struct represents the `Uninitialized` `block_index` type state.
 #[derive(Debug)]
@@ -69,7 +70,7 @@ impl BlockIndex<Uninitialized> {
         // Try to load the block index from disk
         match load_index_from_file(&config_ref) {
             Ok(indexes) => self.items = indexes.into(),
-            Err(err) => println!("Error encountered\n {:?}", err),
+            Err(err) => error!("Error encountered\n {:?}", err),
         }
 
         // Return the "Initialized" state of the BlockIndex type
@@ -94,7 +95,7 @@ impl BlockIndex<Uninitialized> {
     fn ensure_path_exists(&self) -> eyre::Result<()> {
         // Ensure the path exists
         let path = self.config.clone().unwrap().block_index_dir();
-        fs::create_dir_all(path)?;
+        fs::create_dir_all(&path)?;
         Ok(())
     }
 }
@@ -329,11 +330,19 @@ fn ensure_path_exists(config: &IrysNodeConfig) -> eyre::Result<()> {
 }
 
 #[allow(dead_code)]
-fn append_item(item: &BlockIndexItem, config: &IrysNodeConfig) -> io::Result<()> {
+fn append_item(item: &BlockIndexItem, config: &IrysNodeConfig) -> eyre::Result<()> {
     let path = config.block_index_dir().join(FILE_NAME);
-    let mut file = OpenOptions::new().append(true).open(path)?;
-    file.write_all(&item.to_bytes())?;
-    Ok(())
+    match OpenOptions::new().append(true).open(&path) {
+        Ok(mut file) => {
+            file.write_all(&item.to_bytes())?;
+            Ok(())
+        }
+        Err(err) => Err(eyre::eyre!(
+            "While trying to open file :{:?} got error: {}",
+            path,
+            err
+        )),
+    }
 }
 
 #[allow(dead_code)]

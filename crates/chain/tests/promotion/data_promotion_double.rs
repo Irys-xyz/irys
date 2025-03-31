@@ -1,6 +1,5 @@
-use crate::utils::{mine_blocks, post_chunk};
+use crate::utils::{mine_blocks, post_chunk, start_node_config};
 use awc::http::StatusCode;
-use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_database::DataLedger;
 
@@ -22,10 +21,7 @@ async fn heavy_double_root_data_promotion_test() {
     use irys_actors::packing::wait_for_packing;
     use irys_api_server::{routes, ApiState};
     use irys_database::{tables::IngressProofs, walk_all};
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{
-        irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset, StorageConfig,
-    };
+    use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
     use reth_db::Database as _;
     use reth_primitives::GenesisAccount;
     use tokio::time::sleep;
@@ -34,7 +30,7 @@ async fn heavy_double_root_data_promotion_test() {
     use crate::utils::{get_block_parent, get_chunk, mine_block, verify_published_chunk};
 
     let chunk_size = 32; // 32 byte chunks
-    let mut testnet_config = Config {
+    let testnet_config = Config {
         chunk_size: chunk_size as u64,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
@@ -44,16 +40,11 @@ async fn heavy_double_root_data_promotion_test() {
         chunk_migration_depth: 1, // Testnet / single node config
         ..Config::testnet()
     };
-    testnet_config.chunk_size = chunk_size;
 
-    let storage_config = StorageConfig::new(&testnet_config);
-
-    let temp_dir = setup_tracing_and_temp_dir(Some("double_root_data_promotion_test"), false);
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
     let signer = IrysSigner::random_signer(&testnet_config);
     let signer2 = IrysSigner::random_signer(&testnet_config);
 
+    let mut config = IrysNodeConfig::new(&testnet_config);
     config.extend_genesis_accounts(vec![
         (
             signer.address(),
@@ -70,15 +61,13 @@ async fn heavy_double_root_data_promotion_test() {
             },
         ),
     ]);
-
     // This will create 3 storage modules, one for submit, one for publish, and one for capacity
-    let node_context = start_irys_node(
-        config.clone(),
-        storage_config.clone(),
-        testnet_config.clone(),
+    let (node_context, _tmp_dir) = start_node_config(
+        "serial_double_root_data_promotion_test",
+        Some(testnet_config.clone()),
+        Some(config),
     )
-    .await
-    .unwrap();
+    .await;
 
     wait_for_packing(
         node_context.actor_addresses.packing.clone(),
@@ -344,7 +333,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
@@ -354,7 +343,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
@@ -364,7 +353,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
@@ -552,7 +541,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
@@ -562,7 +551,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
@@ -572,7 +561,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node_context.storage_config,
     )
     .await;
 
