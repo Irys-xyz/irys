@@ -492,6 +492,7 @@ mod tests {
             tx_path.to_vec(),
             data_root,
             LedgerChunkRange(ledger_chunk_offset_ie!(0, chunk_count)),
+            chunk_size,
         );
 
         for tx_chunk_offset in 0..chunk_count {

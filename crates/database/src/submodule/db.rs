@@ -13,7 +13,8 @@ use crate::open_or_create_db;
 
 use super::tables::{
     ChunkDataPathByPathHash, ChunkOffsetsByPathHash, ChunkPathHashByOffset, ChunkPathHashes,
-    RelativeStartOffsets, StartOffsetsByDataRoot, SubmoduleTables, TxPathByTxPathHash,
+    DataSizeByDataRoot, RelativeStartOffsets, StartOffsetsByDataRoot, SubmoduleTables,
+    TxPathByTxPathHash,
 };
 
 /// Creates or opens a *submodule* MDBX database
@@ -175,6 +176,21 @@ pub fn add_start_offset_to_data_root_index<T: DbTxMut + DbTx>(
     }
     set_start_offsets_by_data_root(tx, data_root, offsets)?;
     Ok(())
+}
+
+pub fn get_data_size_by_data_root<T: DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+) -> eyre::Result<Option<u64>> {
+    Ok(tx.get::<DataSizeByDataRoot>(data_root)?)
+}
+
+pub fn set_data_size_for_data_root<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    data_size: u64,
+) -> eyre::Result<()> {
+    Ok(tx.put::<DataSizeByDataRoot>(data_root, data_size)?)
 }
 
 /// clear db

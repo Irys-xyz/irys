@@ -30,6 +30,9 @@ tables! {
     /// Maps a data root to the list of submodule-relative start offsets
     table StartOffsetsByDataRoot<Key = DataRoot, Value = RelativeStartOffsets>;
 
+    /// Maps a data root to it's data size (used for validation)
+    table DataSizeByDataRoot<Key = DataRoot, Value = u64>;
+
     /// Table to store various metadata, such as the current db schema version
     table Metadata<Key = MetadataKey, Value = Vec<u8>>;
 

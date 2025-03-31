@@ -168,6 +168,7 @@ fn process_ledger_transactions(
             tx_chunk_range,
             ledger,
             storage_modules,
+            data_size,
         )?;
 
         process_transaction_chunks(
@@ -277,13 +278,14 @@ fn update_storage_module_indexes(
     tx_chunk_range: LedgerChunkRange,
     ledger: DataLedger,
     storage_modules: &[Arc<StorageModule>],
+    data_size: u64,
 ) -> Result<(), ()> {
     let overlapped_modules =
         get_overlapped_storage_modules(storage_modules, ledger, &tx_chunk_range);
 
     for storage_module in overlapped_modules {
         storage_module
-            .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range)
+            .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range, data_size)
             .map_err(|e| {
                 error!(
                     "Failed to add tx path + data_root + start_offset to index: {}",

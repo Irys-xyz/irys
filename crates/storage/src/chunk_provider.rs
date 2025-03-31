@@ -204,6 +204,7 @@ mod tests {
             tx_path,
             data_root,
             LedgerChunkRange(chunk_range),
+            tx.header.data_size,
         );
 
         let mut unpacked_chunks = vec![];

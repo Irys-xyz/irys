@@ -44,7 +44,8 @@ use irys_database::{
         add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
         add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
         clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
-        get_start_offsets_by_data_root, get_tx_path_by_offset, tables::RelativeStartOffsets,
+        get_start_offsets_by_data_root, get_tx_path_by_offset, set_data_size_for_data_root,
+        tables::RelativeStartOffsets,
     },
     DataLedger,
 };
@@ -698,6 +699,7 @@ impl StorageModule {
         tx_path: TxPath,
         data_root: DataRoot,
         chunk_range: LedgerChunkRange,
+        data_size: u64,
     ) -> eyre::Result<()> {
         let storage_range = self.get_storage_module_range()?;
         let tx_path_hash = H256::from(hash_sha256(&tx_path).unwrap());
@@ -716,7 +718,7 @@ impl StorageModule {
             let _ = submodule.db.update(|tx| -> eyre::Result<()> {
                 // Because each submodule index receives a copy of the path, we need to clone it
                 add_full_tx_path(tx, tx_path_hash, tx_path.clone())?;
-
+                set_data_size_for_data_root(tx, data_root, data_size)?;
                 if let Some(range) = interval.intersection(&partition_overlap) {
                     // Add the tx_path_hash to every offset in the intersecting range
                     for offset in *range.start()..=*range.end() {
@@ -1709,7 +1711,7 @@ mod tests {
         let data_path = vec![4, 3, 2, 1];
         let tx_path = vec![5, 6, 7, 8];
         let data_root = H256::zero();
-
+        let data_size = chunk_data.len() as u64;
         // Pack the storage module
         storage_module.pack_with_zeros();
 
@@ -1717,11 +1719,12 @@ mod tests {
             tx_path,
             data_root,
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            data_size,
         );
 
         let chunk = UnpackedChunk {
             data_root: H256::zero(),
-            data_size: chunk_data.len() as u64,
+            data_size,
             data_path: data_path.clone().into(),
             bytes: chunk_data.into(),
             tx_offset: TxChunkOffset::from(0),
