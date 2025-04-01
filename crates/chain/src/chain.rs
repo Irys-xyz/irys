@@ -5,6 +5,7 @@ use actix::{Actor, Addr, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use actix_web::dev::Server;
 use alloy_eips::BlockNumberOrTag;
+use futures::future::join_all;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
 use irys_actors::cache_service::ChunkCacheService;
 use irys_actors::ema_service::EmaService;
@@ -76,8 +77,9 @@ use tokio::runtime::Runtime;
 use tokio::{
     runtime::Handle,
     sync::oneshot::{self},
+    sync::Mutex,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -117,12 +119,107 @@ impl IrysNodeCtx {
         Ok(())
     }
 
+    //TODO url paths as ENUMS? Could update external api tests too
     async fn sync_state_from_peers(&self) -> eyre::Result<()> {
+        let trusted_peers = vec!["127.0.0.1:1234"];
+        let client = awc::Client::default();
+
         info!("Discovering peers...");
-        tracing::warn!("not yet implemented");
+        //FIX ME - load the ip and port correctly
+        let mut peers = Arc::new(Mutex::new(trusted_peers.clone()));
+
+        let peer_list_requests = trusted_peers.iter().map(|peer| {
+            let client = client.clone();
+            let peers = peers.clone();
+            let url = format!("http://{}/peer_list", peer);
+
+            async move {
+                match client.get(url).send().await {
+                    Ok(mut response) => {
+                        if response.status().is_success() {
+                            match response.body().await {
+                                Ok(body) => {
+                                    info!("Got peers from {}: {:?}", peer, body);
+                                    if let Ok(new_peers) = String::from_utf8(body.to_vec()) {
+                                        let mut peers = peers.lock().await;
+                                        peers.extend(new_peers.lines().map(str::to_owned));
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Error reading body from {}: {}", peer, e);
+                                }
+                            }
+                        } else {
+                            warn!("Non-success from {}: {}", peer, response.status());
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Request to {} failed: {}", peer, e);
+                    }
+                }
+            }
+        });
+        join_all(peer_list_requests).await;
+        let peers = peers.lock().await;
+
+        info!("Downloading block index...");
+        let block_index_request = peers.first().map(|peer| {
+            let url = format!("http://{}/v1/block_index", peer);
+            let client = client.clone();
+
+            async move {
+                match client.get(url).send().await {
+                    Ok(mut response) => {
+                        if response.status().is_success() {
+                            match response.body().await {
+                                Ok(body) => {
+                                    info!("Got block_index from {}: {:?}", peer, body);
+                                }
+                                Err(e) => {
+                                    warn!("Error reading body from {}: {}", peer, e);
+                                }
+                            }
+                        } else {
+                            warn!("Non-success from {}: {}", peer, response.status());
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Request to {} failed: {}", peer, e);
+                    }
+                }
+            }
+        });
 
         info!("Fetching latest blocks...");
-        tracing::warn!("not yet implemented");
+        let block_requests = peers.iter().map(|peer| {
+            let url = format!("http://{}/v1/block/{}", peer, block_hash);
+            let client = client.clone();
+
+            async move {
+                match client.get(url).send().await {
+                    Ok(mut response) => {
+                        if response.status().is_success() {
+                            match response.body().await {
+                                Ok(body) => {
+                                    info!("Got blocks from {}: {:?}", peer, body);
+                                }
+                                Err(e) => {
+                                    warn!("Error reading body from {}: {}", peer, e);
+                                }
+                            }
+                        } else {
+                            warn!("Non-success from {}: {}", peer, response.status());
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Request to {} failed: {}", peer, e);
+                    }
+                }
+            }
+        });
+
+        info!("Fetching latest txns...");
+        // /v1//tx/{tx_id}
 
         info!("Sync complete.");
         Ok(())
