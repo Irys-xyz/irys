@@ -35,6 +35,7 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
 use irys_database::migration::check_db_version_and_run_migrations_if_needed;
+use irys_database::BlockIndexItem;
 use irys_packing::{PackingType, PACKING_TYPE};
 use irys_price_oracle::mock_oracle::MockOracle;
 use irys_price_oracle::IrysPriceOracle;
@@ -127,7 +128,7 @@ impl IrysNodeCtx {
 
         info!("Discovering peers...");
         //FIX ME - load the ip and port correctly
-        let mut peers = Arc::new(Mutex::new(trusted_peers.clone()));
+        let peers = Arc::new(Mutex::new(trusted_peers.clone()));
 
         let peer_list_requests = trusted_peers.iter().map(|peer| {
             let client = client.clone();
@@ -167,6 +168,9 @@ impl IrysNodeCtx {
         let peers = peers.lock().await;
 
         info!("Downloading block index...");
+        let block_index: Arc<tokio::sync::Mutex<Vec<BlockIndexItem>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let block_index_clone = block_index.clone();
         let block_index_request = peers.first().map(|peer| {
             let url = format!("http://{}/v1/block_index", peer);
             let client = client.clone();
@@ -175,9 +179,15 @@ impl IrysNodeCtx {
                 match client.get(url).send().await {
                     Ok(mut response) => {
                         if response.status().is_success() {
-                            match response.body().await {
-                                Ok(body) => {
-                                    info!("Got block_index from {}: {:?}", peer, body);
+                            match response.json::<Vec<BlockIndexItem>>().await {
+                                Ok(remote_block_index) => {
+                                    info!(
+                                        "Got block_index from {}: {:?}",
+                                        peer, remote_block_index
+                                    );
+                                    let mut index = block_index_clone.lock().await;
+                                    // overwrite entire block index
+                                    *index = remote_block_index;
                                 }
                                 Err(e) => {
                                     warn!("Error reading body from {}: {}", peer, e);
