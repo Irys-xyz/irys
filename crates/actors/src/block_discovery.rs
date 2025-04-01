@@ -4,7 +4,9 @@ use crate::{
     services::ServiceSenders,
 };
 use actix::prelude::*;
-use irys_database::{block_header_by_hash, tx_header_by_txid, DataLedger};
+use irys_database::{
+    block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
+};
 use irys_types::{
     DatabaseProvider, DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader,
     StorageConfig, VDFStepsConfig,
@@ -180,37 +182,44 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         //====================================
         // Commitments ledger TX Validation
         //------------------------------------
-        // TODO: validate genesis commitments
-        // if epoch_block.is_genesis() {
-        //     let genesis_stake = stake_commitments
-        //         .iter()
-        //         .find(|tx| tx.signer == epoch_block.miner_address);
-        //     if genesis_stake.is_none() {
-        //         // Genesis block must stake the genesis block producer
-        //     }
-        // }
-        // // Extract the Commitment ledger from the epoch block
-        // let commitments_ledger = epoch_block
-        //     .system_ledgers
-        //     .iter()
-        //     .find(|b| b.ledger_id == SystemLedger::Commitment)
-        //     .ok_or_else(|| eyre::eyre!("No Commitment ledger found in epoch block"))?;
+        // Extract the Commitment ledger from the epoch block
+        let commitments_ledger = new_block_header
+            .system_ledgers
+            .iter()
+            .find(|b| b.ledger_id == SystemLedger::Commitment);
 
-        // // Build an efficient lookup map of commitments by ID
-        // let mut commitment_map: HashMap<H256, &CommitmentTransaction> = HashMap::new();
-        // for commitment_tx in &commitments {
-        //     commitment_map.insert(commitment_tx.id, commitment_tx);
-        // }
+        // Validate commitments (if there are some)
+        if let Some(commitment_ledger) = commitments_ledger {
+            let _commitment_txs = match commitment_ledger
+                .tx_ids
+                .iter()
+                .map(|txid| {
+                    self.db
+                        .view_eyre(|tx| commitment_tx_by_txid(tx, txid))
+                        .and_then(|opt| {
+                            opt.ok_or_else(|| {
+                                eyre::eyre!("No commitment tx found for txid {:?}", txid)
+                            })
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(txs) => txs,
+                Err(e) => {
+                    return Box::pin(async move {
+                        Err(eyre::eyre!("Failed to collect commitment tx: {}", e))
+                    });
+                }
+            };
 
-        // // Verify all ledger-referenced commitment transactions exist
-        // for tx_id in commitments_ledger.tx_ids.iter() {
-        //     if !commitment_map.contains_key(tx_id) {
-        //         return Err(eyre::eyre!(
-        //             "No commitment found for ledger tx_id {:?}",
-        //             tx_id
-        //         ));
-        //     }
-        // }
+            // TODO: Non epoch blocks and epoch blocks treat the commitments ledger a little differently
+            // during the epoch, stake and pledge commitments accumulate waiting to be finalized when the
+            // next epoch starts. As a result these pending commitments during the epoch need to have
+            // their own CommitmentsState where pending pledges can be checked to see if they have an
+            // outstanding stake (check with epoch_service) or if they've posted a pending stake commitment.
+            //
+            // This work will be done next, for now commitments are only handled in the genesis block
+        }
 
         //====================================
         // Block header pre-validation
