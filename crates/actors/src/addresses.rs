@@ -1,6 +1,7 @@
 use actix::Addr;
 
 use crate::{
+    block_discovery::BlockDiscoveryActor,
     block_index_service::BlockIndexService,
     block_producer::BlockProducerActor,
     epoch_service::EpochServiceActor,
@@ -14,6 +15,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct ActorAddresses {
     pub partitions: Vec<Addr<PartitionMiningActor>>,
+    pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     pub block_producer: Addr<BlockProducerActor>,
     pub packing: Addr<PackingActor>,
     pub mempool: Addr<MempoolService>,

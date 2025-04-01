@@ -682,7 +682,7 @@ pub async fn start_irys_node(
                 let block_producer_actor = BlockProducerActor {
                     db: irys_db.clone(),
                     mempool_addr: mempool_addr.clone(),
-                    block_discovery_addr,
+                    block_discovery_addr: block_discovery_addr.clone(),
                     epoch_service: epoch_service_actor_addr.clone(),
                     reth_provider: reth_node.clone(),
                     storage_config: storage_config.clone(),
@@ -820,6 +820,7 @@ pub async fn start_irys_node(
                     packing: packing_actor_addr,
                     mempool: mempool_addr.clone(),
                     block_index: block_index_actor_addr,
+                    block_discovery_addr: block_discovery_addr,
                     epoch_service: epoch_service_actor_addr,
                 };
 
@@ -1476,7 +1477,7 @@ impl IrysNode {
             &block_tree_guard,
             &mempool_service,
             &vdf_steps_guard,
-            block_discovery,
+            block_discovery.clone(),
             price_oracle,
         );
 
@@ -1520,6 +1521,7 @@ impl IrysNode {
         let irys_node_ctx = IrysNodeCtx {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
+                block_discovery_addr: block_discovery,
                 block_producer: block_producer_addr,
                 packing: packing_actor_addr,
                 mempool: mempool_service.clone(),
