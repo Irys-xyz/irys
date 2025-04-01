@@ -31,6 +31,7 @@ use irys_actors::{
     vdf_service::{GetVdfStateMessage, VdfService},
     ActorAddresses, BlockFinalizedMessage,
 };
+use irys_api_server::routes::block::CombinedBlockHeader;
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
@@ -205,32 +206,39 @@ impl IrysNodeCtx {
         });
 
         info!("Fetching latest blocks...");
-        let block_requests = peers.iter().map(|peer| {
-            let url = format!("http://{}/v1/block/{}", peer, block_hash);
-            let client = client.clone();
+        let block_requests = block_index
+            .clone()
+            .lock()
+            .await
+            .iter()
+            .map(|block_index_item| {
+                //TODO spread requests across peers
+                let peer = peers.first().expect("expected non empty peers");
+                let url = format!("http://{}/v1/block/{}", peer, block_index_item.block_hash);
+                let client = client.clone();
 
-            async move {
-                match client.get(url).send().await {
-                    Ok(mut response) => {
-                        if response.status().is_success() {
-                            match response.body().await {
-                                Ok(body) => {
-                                    info!("Got blocks from {}: {:?}", peer, body);
+                async move {
+                    match client.get(url).send().await {
+                        Ok(mut response) => {
+                            if response.status().is_success() {
+                                match response.json::<Vec<CombinedBlockHeader>>().await {
+                                    Ok(block) => {
+                                        info!("Got block from {}: {:?}", peer, block);
+                                    }
+                                    Err(e) => {
+                                        warn!("Error reading body from {}: {}", peer, e);
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!("Error reading body from {}: {}", peer, e);
-                                }
+                            } else {
+                                warn!("Non-success from {}: {}", peer, response.status());
                             }
-                        } else {
-                            warn!("Non-success from {}: {}", peer, response.status());
+                        }
+                        Err(e) => {
+                            warn!("Request to {} failed: {}", peer, e);
                         }
                     }
-                    Err(e) => {
-                        warn!("Request to {} failed: {}", peer, e);
-                    }
                 }
-            }
-        });
+            });
 
         info!("Fetching latest txns...");
         // /v1//tx/{tx_id}
