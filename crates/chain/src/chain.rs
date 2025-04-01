@@ -104,6 +104,38 @@ pub struct IrysNodeCtx {
     _stop_guard: StopGuard,
 }
 
+async fn fetch_block_index(
+    peer: &SocketAddr,
+    client: &awc::Client,
+    block_index: Arc<Mutex<Vec<BlockIndexItem>>>,
+) {
+    let url = format!("http://{}/v1/block_index", peer);
+    let client = client.clone();
+
+    match client.get(url).send().await {
+        Ok(mut response) => {
+            if response.status().is_success() {
+                match response.json::<Vec<BlockIndexItem>>().await {
+                    Ok(remote_block_index) => {
+                        info!("Got block_index from {}: {:?}", peer, remote_block_index);
+                        let mut index = block_index.lock().await;
+                        // overwrite entire block index
+                        *index = remote_block_index;
+                    }
+                    Err(e) => {
+                        warn!("Error reading body from {}: {}", peer, e);
+                    }
+                }
+            } else {
+                warn!("Non-success from {}: {}", peer, response.status());
+            }
+        }
+        Err(e) => {
+            warn!("Request to {} failed: {}", peer, e);
+        }
+    }
+}
+
 impl IrysNodeCtx {
     pub async fn stop(self) {
         let _ = self.actor_addresses.stop_mining();
@@ -172,38 +204,12 @@ impl IrysNodeCtx {
         let block_index: Arc<tokio::sync::Mutex<Vec<BlockIndexItem>>> =
             Arc::new(Mutex::new(Vec::new()));
         let block_index_clone = block_index.clone();
-        let block_index_request = peers.first().map(|peer| {
-            let url = format!("http://{}/v1/block_index", peer);
-            let client = client.clone();
-
-            async move {
-                match client.get(url).send().await {
-                    Ok(mut response) => {
-                        if response.status().is_success() {
-                            match response.json::<Vec<BlockIndexItem>>().await {
-                                Ok(remote_block_index) => {
-                                    info!(
-                                        "Got block_index from {}: {:?}",
-                                        peer, remote_block_index
-                                    );
-                                    let mut index = block_index_clone.lock().await;
-                                    // overwrite entire block index
-                                    *index = remote_block_index;
-                                }
-                                Err(e) => {
-                                    warn!("Error reading body from {}: {}", peer, e);
-                                }
-                            }
-                        } else {
-                            warn!("Non-success from {}: {}", peer, response.status());
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Request to {} failed: {}", peer, e);
-                    }
-                }
-            }
-        });
+        let block_index_request = fetch_block_index(
+            peers.first().expect("at least one peer"),
+            &client,
+            block_index_clone,
+        )
+        .await;
 
         info!("Fetching latest blocks...");
         let block_requests = block_index
