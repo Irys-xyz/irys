@@ -104,6 +104,45 @@ pub struct IrysNodeCtx {
     _stop_guard: StopGuard,
 }
 
+//TODO spread requests across peers
+async fn fetch_blocks(
+    peer: &SocketAddr,
+    client: &awc::Client,
+    block_index: Arc<Mutex<Vec<BlockIndexItem>>>,
+) {
+    let _ = block_index
+        .clone()
+        .lock()
+        .await
+        .iter()
+        .map(|block_index_item| {
+            let url = format!("http://{}/v1/block/{}", peer, block_index_item.block_hash);
+            let client = client.clone();
+
+            async move {
+                match client.get(url).send().await {
+                    Ok(mut response) => {
+                        if response.status().is_success() {
+                            match response.json::<Vec<CombinedBlockHeader>>().await {
+                                Ok(block) => {
+                                    info!("Got block from {}: {:?}", peer, block);
+                                }
+                                Err(e) => {
+                                    warn!("Error reading body from {}: {}", peer, e);
+                                }
+                            }
+                        } else {
+                            warn!("Non-success from {}: {}", peer, response.status());
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Request to {} failed: {}", peer, e);
+                    }
+                }
+            }
+        });
+}
+
 async fn fetch_block_index(
     peer: &SocketAddr,
     client: &awc::Client,
@@ -212,39 +251,11 @@ impl IrysNodeCtx {
         .await;
 
         info!("Fetching latest blocks...");
-        let block_requests = block_index
-            .clone()
-            .lock()
-            .await
-            .iter()
-            .map(|block_index_item| {
-                //TODO spread requests across peers
-                let peer = peers.first().expect("expected non empty peers");
-                let url = format!("http://{}/v1/block/{}", peer, block_index_item.block_hash);
-                let client = client.clone();
-
-                async move {
-                    match client.get(url).send().await {
-                        Ok(mut response) => {
-                            if response.status().is_success() {
-                                match response.json::<Vec<CombinedBlockHeader>>().await {
-                                    Ok(block) => {
-                                        info!("Got block from {}: {:?}", peer, block);
-                                    }
-                                    Err(e) => {
-                                        warn!("Error reading body from {}: {}", peer, e);
-                                    }
-                                }
-                            } else {
-                                warn!("Non-success from {}: {}", peer, response.status());
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Request to {} failed: {}", peer, e);
-                        }
-                    }
-                }
-            });
+        let block_requests = fetch_blocks(
+            peers.first().expect("at least one peer"),
+            &client,
+            block_index.clone(),
+        );
 
         info!("Fetching latest txns...");
         // /v1//tx/{tx_id}
