@@ -124,7 +124,7 @@ impl IrysNodeCtx {
     //TODO url paths as ENUMS? Could update external api tests too
     async fn sync_state_from_peers(&self) -> eyre::Result<()> {
         let trusted_peers: Vec<SocketAddr> =
-            vec!["127.0.0.1:1234".parse().expect("valid SocketAddr from str")];
+            vec!["127.0.0.1:8080".parse().expect("valid SocketAddr from str")];
         let client = awc::Client::default();
 
         info!("Discovering peers...");
