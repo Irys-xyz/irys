@@ -173,6 +173,47 @@ async fn fetch_block_index(
     }
 }
 
+async fn fetch_peers(
+    peers: Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
+    client: &awc::Client,
+    trusted_peers: Vec<SocketAddr>,
+) {
+    trusted_peers.iter().map(|peer| {
+        let client = client.clone();
+        let peers = peers.clone();
+        let url = format!("http://{}/peer_list", peer);
+
+        async move {
+            match client.get(url).send().await {
+                Ok(mut response) => {
+                    if response.status().is_success() {
+                        match response.json::<Vec<SocketAddr>>().await {
+                            Ok(new_peers) => {
+                                info!(
+                                    "Got {} peers from {}: {:?}",
+                                    new_peers.len(),
+                                    peer,
+                                    new_peers
+                                );
+                                let mut peers = peers.lock().await;
+                                peers.extend(new_peers.into_iter());
+                            }
+                            Err(e) => {
+                                warn!("Error reading json body from {}: {}", peer, e);
+                            }
+                        }
+                    } else {
+                        warn!("Non-success from {}: {}", peer, response.status());
+                    }
+                }
+                Err(e) => {
+                    warn!("Request to {} failed: {}", peer, e);
+                }
+            }
+        }
+    });
+}
+
 impl IrysNodeCtx {
     pub async fn stop(self) {
         let _ = self.actor_addresses.stop_mining();
@@ -200,46 +241,12 @@ impl IrysNodeCtx {
         //FIX ME - load the ip and port correctly
         let peers = Arc::new(Mutex::new(trusted_peers.clone()));
 
-        let peer_list_requests = trusted_peers.iter().map(|peer| {
-            let client = client.clone();
-            let peers = peers.clone();
-            let url = format!("http://{}/peer_list", peer);
-
-            async move {
-                match client.get(url).send().await {
-                    Ok(mut response) => {
-                        if response.status().is_success() {
-                            match response.json::<Vec<SocketAddr>>().await {
-                                Ok(new_peers) => {
-                                    info!(
-                                        "Got {} peers from {}: {:?}",
-                                        new_peers.len(),
-                                        peer,
-                                        new_peers
-                                    );
-                                    let mut peers = peers.lock().await;
-                                    peers.extend(new_peers.into_iter());
-                                }
-                                Err(e) => {
-                                    warn!("Error reading json body from {}: {}", peer, e);
-                                }
-                            }
-                        } else {
-                            warn!("Non-success from {}: {}", peer, response.status());
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Request to {} failed: {}", peer, e);
-                    }
-                }
-            }
-        });
-        join_all(peer_list_requests).await;
-        let peers = peers.lock().await;
+        let peer_list_requests = fetch_peers(peers.clone(), &client, trusted_peers).await;
 
         info!("Downloading block index...");
         let block_index: Arc<tokio::sync::Mutex<Vec<BlockIndexItem>>> =
             Arc::new(Mutex::new(Vec::new()));
+        let peers = peers.lock().await;
         let block_index_request = fetch_block_index(
             peers.first().expect("at least one peer"),
             &client,
