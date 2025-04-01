@@ -51,6 +51,7 @@ actix.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 
+awc = "3.5"
 modular-bitfield.workspace = true
 reth-cli-runner.workspace = true
 futures.workspace = true
@@ -63,7 +64,6 @@ alloy-provider.workspace = true
 core_affinity = "0.8.1"
 
 [dev-dependencies]
-awc = "3.5"
 irys-actors = { workspace = true, features = ["test-utils"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true
