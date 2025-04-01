@@ -363,6 +363,7 @@ impl EpochServiceActor {
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
         let mut block_index = 0;
 
+        // Loop though all the epoch blocks, starting with genesis (block_index = 0)
         loop {
             let block_height = {
                 self.block_index_guard
@@ -382,11 +383,13 @@ impl EpochServiceActor {
                             block_index
                         ));
 
+                    // Get the commitments_ledger from the block
                     let commitments_ledger = block_header
                         .system_ledgers
                         .iter()
                         .find(|b| b.ledger_id == SystemLedger::Commitment);
 
+                    // Build a list of CommitmentTransactions from the commitments ledger txids
                     let mut commitments: Vec<CommitmentTransaction> = Vec::new();
                     if let Some(commitments_ledger) = commitments_ledger {
                         for commitment_txid in commitments_ledger.tx_ids.iter() {
@@ -403,6 +406,7 @@ impl EpochServiceActor {
                         }
                     }
 
+                    // Process epoch tasks with the block header and commitments
                     match self.perform_epoch_tasks(Arc::new(block_header), commitments) {
                         Ok(_) => debug!(?block_index, "Processed epoch block"),
                         Err(e) => {

@@ -460,8 +460,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-            // TODO: This really needs to be sent from the validation_service after pre-validation
-            // and the commitment transactions are verified as stored locally and valid
+            // TODO: This really needs to be sent from the block_discovery service 
+            // and the commitment transactions are pre-verified as stored locally and valid
             if block_height > 0 && block_height % blocks_in_epoch == 0 {
                 epoch_service_addr.do_send(NewEpochMessage{ epoch_block: block.clone(), commitments: Vec::new() });
             }
