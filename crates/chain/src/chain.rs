@@ -488,7 +488,7 @@ pub async fn start_irys_node(
                 ));
                 let mempool_addr = MempoolService::from_registry();
 
-                let gossip_service_handle = gossip_service.run(mempool_addr.clone(), irys_api_client::IrysApiClient::new()).await.unwrap();
+                let gossip_service_handle = gossip_service.run(mempool_addr.clone(), irys_api_client::IrysApiClient::new()).unwrap();
 
                 let chunk_migration_service = ChunkMigrationService::new(
                     block_index.clone(),
@@ -1319,8 +1319,7 @@ impl IrysNode {
             .run(
                 mempool_service.clone(),
                 irys_api_client::IrysApiClient::new(),
-            )
-            .await?;
+            )?;
 
         // spawn the chunk migration service
         self.init_chunk_migration_service(
