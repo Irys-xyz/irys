@@ -254,7 +254,8 @@ impl IrysNodeCtx {
             peers.first().expect("at least one peer"),
             &client,
             block_index.clone(),
-        );
+        )
+        .await;
 
         info!("Fetching latest txns...");
         // /v1//tx/{tx_id}
