@@ -435,6 +435,11 @@ pub async fn start_irys_node(
                     storage_modules.push(arc_module.clone());
                 }
 
+                let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
+                    &config.gossip_service_bind_ip,
+                    config.gossip_service_port,
+                    irys_db.clone(),
+                );
 
                 let block_tree_service = BlockTreeService::new(
                     irys_db.clone(),
@@ -443,6 +448,7 @@ pub async fn start_irys_node(
                     block_index_guard.clone(),
                     storage_config.clone(),
                     service_senders.clone(),
+                    gossip_tx.clone(),
                 );
                 let block_tree_arbiter = Arbiter::new();
                 SystemRegistry::set(BlockTreeService::start_in_arbiter(
@@ -463,12 +469,6 @@ pub async fn start_irys_node(
                     &peer_list_arbiter.handle(),
                     |_| peer_list_service,
                 ));
-
-                let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
-                    &config.gossip_service_bind_ip,
-                    config.gossip_service_port,
-                    irys_db.clone(),
-                );
 
                 let mempool_service = MempoolService::new(
                     irys_db.clone(),
@@ -1275,6 +1275,12 @@ impl IrysNode {
             .await?;
         let storage_modules = self.init_storage_modules(storage_module_infos);
 
+        let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
+            &self.config.gossip_service_bind_ip,
+            self.config.gossip_service_port,
+            irys_db.clone(),
+        );
+
         // start the block tree service
         let block_tree_service = self.init_block_tree_service(
             &block_index,
@@ -1282,6 +1288,7 @@ impl IrysNode {
             &mut arbiters,
             &service_senders,
             &block_index_guard,
+            gossip_tx.clone(),
         );
         let block_tree_guard = block_tree_service.send(GetBlockTreeGuardMessage).await?;
 
@@ -1295,12 +1302,6 @@ impl IrysNode {
 
         // Spawn peer list service
         init_peer_list_service(&irys_db, &mut arbiters);
-
-        let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
-            &self.config.gossip_service_bind_ip,
-            self.config.gossip_service_port,
-            irys_db.clone(),
-        );
 
         // Spawn the mempool service
         let mempool_service = self.init_mempools_service(
@@ -1746,6 +1747,7 @@ impl IrysNode {
         arbiters: &mut Vec<Arbiter>,
         service_senders: &ServiceSenders,
         block_index_guard: &BlockIndexReadGuard,
+        gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     ) -> actix::Addr<BlockTreeService> {
         let block_tree_service = BlockTreeService::new(
             irys_db.clone(),
@@ -1754,6 +1756,7 @@ impl IrysNode {
             block_index_guard.clone(),
             self.storage_config.clone(),
             service_senders.clone(),
+            gossip_sender,
         );
         let block_tree_arbiter = Arbiter::new();
         let block_tree_service =

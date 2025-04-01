@@ -20,11 +20,9 @@ use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::ensure;
 use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, DataLedger, Initialized};
-use irys_types::{
-    Address, BlockHash, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionId, StorageConfig, H256, U256,
-};
+use irys_types::{Address, BlockHash, DatabaseProvider, GossipData, IrysBlockHeader, IrysTransactionHeader, IrysTransactionId, StorageConfig, H256, U256};
 use reth_db::{transaction::DbTx, Database as _};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 //==============================================================================
@@ -86,6 +84,8 @@ pub struct BlockTreeService {
     pub storage_config: StorageConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
+    /// Sender to broadcast the data via a gossip
+    pub gossip_sender: mpsc::Sender<GossipData>,
 }
 
 impl Default for BlockTreeService {
@@ -116,6 +116,7 @@ impl BlockTreeService {
         block_index_guard: BlockIndexReadGuard,
         storage_config: StorageConfig,
         service_senders: ServiceSenders,
+        gossip_sender: mpsc::Sender<GossipData>,
     ) -> Self {
         let cache = BlockTreeCache::initialize_from_list(block_index, db.clone());
 
@@ -126,6 +127,7 @@ impl BlockTreeService {
             block_index_guard: Some(block_index_guard),
             storage_config,
             service_senders,
+            gossip_sender,
         }
     }
 
@@ -381,6 +383,8 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
                 });
                 if mark_tip.is_ok() {
                     self.notify_services_of_block_confirmation(block_hash, &arc_block, all_tx);
+                    // TODO: handle this better
+                    let _ = self.gossip_sender.send(GossipData::Block(arc_block.as_ref().clone()));
                 }
 
                 // Handle block finalization

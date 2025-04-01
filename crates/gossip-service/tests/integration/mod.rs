@@ -1,5 +1,5 @@
 use crate::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
-use irys_types::{CombinedBlockHeader, DataTransactionLedger, GossipData, H256List, PeerScore};
+use irys_types::{DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore};
 use std::time::Duration;
 
 #[actix_web::test]
@@ -32,8 +32,8 @@ async fn should_broadcast_message_to_an_established_connection() -> eyre::Result
     let service1_mempool_txs = gossip_service_test_fixture_1.mempool_txs.read().unwrap();
     assert_eq!(service1_mempool_txs.len(), 1);
 
-    service1_handle.stop().await?;
-    service2_handle.stop().await?;
+    service1_handle.stop().await??;
+    service2_handle.stop().await??;
 
     Ok(())
 }
@@ -81,7 +81,7 @@ async fn should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
     }
 
     for handle in handles {
-        handle.stop().await?;
+        handle.stop().await??;
     }
 
     Ok(())
@@ -117,8 +117,8 @@ async fn should_not_resend_recently_seen_data() -> eyre::Result<()> {
     let service2_mempool_txs = fixture2.mempool_txs.read().unwrap();
     assert_eq!(service2_mempool_txs.len(), 1);
 
-    service1_handle.stop().await?;
-    service2_handle.stop().await?;
+    service1_handle.stop().await??;
+    service2_handle.stop().await??;
 
     Ok(())
 }
@@ -147,8 +147,8 @@ async fn should_broadcast_chunk_data() -> eyre::Result<()> {
     let service2_chunks = fixture2.mempool_chunks.read().unwrap();
     assert_eq!(service2_chunks.len(), 1);
 
-    service1_handle.stop().await?;
-    service2_handle.stop().await?;
+    service1_handle.stop().await??;
+    service2_handle.stop().await??;
 
     Ok(())
 }
@@ -176,8 +176,8 @@ async fn should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()> {
     let service2_mempool_txs = fixture2.mempool_txs.read().unwrap();
     assert_eq!(service2_mempool_txs.len(), 0);
 
-    service1_handle.stop().await?;
-    service2_handle.stop().await?;
+    service1_handle.stop().await??;
+    service2_handle.stop().await??;
 
     Ok(())
 }
@@ -201,7 +201,7 @@ async fn should_handle_offline_peer_gracefully() -> eyre::Result<()> {
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
 
-    service1_handle.stop().await?;
+    service1_handle.stop().await??;
 
     Ok(())
 }
@@ -215,13 +215,13 @@ async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
     fixture2.add_peer(&fixture1);
 
     // Create a test block with transactions
-    let mut block = CombinedBlockHeader::default();
+    let mut block = IrysBlockHeader::default();
     let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
     ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
     println!("Added transactions to ledger: {:?}", ledger.tx_ids);
-    block.irys.data_ledgers.push(ledger);
+    block.data_ledgers.push(ledger);
 
     // Set up the mock API client to return the transactions
     fixture2.api_client.txs.insert(tx1.id, tx1.clone());
@@ -246,8 +246,8 @@ async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
     let service2_mempool_txs = fixture2.mempool_txs.read().unwrap();
     assert_eq!(service2_mempool_txs.len(), 2);
 
-    service1_handle.stop().await?;
-    service2_handle.stop().await?;
+    service1_handle.stop().await??;
+    service2_handle.stop().await??;
 
     Ok(())
 }
@@ -267,12 +267,12 @@ async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Create a test block with transactions
-    let mut block = CombinedBlockHeader::default();
+    let mut block = IrysBlockHeader::default();
     let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
     ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
-    block.irys.data_ledgers.push(ledger);
+    block.data_ledgers.push(ledger);
 
     // Set up the mock API client to return only one transaction
     fixture2.api_client.txs.insert(tx1.id, tx1.clone());
@@ -291,8 +291,8 @@ async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
     let service2_mempool_txs = fixture2.mempool_txs.read().unwrap();
     assert_eq!(service2_mempool_txs.len(), 0);
 
-    service1_handle.stop().await?;
-    service2_handle.stop().await?;
+    service1_handle.stop().await??;
+    service2_handle.stop().await??;
 
     Ok(())
 }

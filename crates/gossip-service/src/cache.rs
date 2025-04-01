@@ -42,12 +42,12 @@ impl GossipCache {
                 let peer_map = txs.entry(irys_transaction_header.id).or_default();
                 peer_map.insert(peer_ip, now);
             }
-            GossipData::Block(combined_block) => {
+            GossipData::Block(irys_block_header) => {
                 let mut blocks = self
                     .blocks
                     .write()
                     .map_err(|e| GossipError::Cache(e.to_string()))?;
-                let peer_map = blocks.entry(combined_block.irys.block_hash).or_default();
+                let peer_map = blocks.entry(irys_block_header.block_hash).or_default();
                 peer_map.insert(peer_ip, now);
             }
         }
@@ -92,7 +92,7 @@ impl GossipCache {
                     .read()
                     .map_err(|e| GossipError::Cache(e.to_string()))?;
                 blocks
-                    .get(&block.irys.block_hash)
+                    .get(&block.block_hash)
                     .and_then(|peer_map| peer_map.get(peer_ip))
                     .map(|&last_seen| now.duration_since(last_seen) <= within)
                     .unwrap_or(false)

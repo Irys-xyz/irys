@@ -4,6 +4,7 @@ pub mod peer_list_provider;
 pub mod server;
 pub mod service;
 pub mod types;
+mod server_data_handler;
 
 pub use cache::GossipCache;
 pub use client::GossipClient;

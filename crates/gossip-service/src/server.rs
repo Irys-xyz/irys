@@ -11,26 +11,42 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_types::GossipData;
-use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use actix::{Actor, Context, Handler};
+use irys_actors::mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngressMessage};
+use irys_api_client::ApiClient;
+use crate::server_data_handler::GossipServerDataHandler;
 
 #[derive(Debug)]
-pub struct GossipServer {
+pub struct GossipServer<M, A>
+where
+    M: Handler<TxIngressMessage>
+    + Handler<ChunkIngressMessage>
+    + Handler<TxExistenceQuery>
+    + Actor<Context = Context<M>>,
+    A: ApiClient + 'static,
+{
     cache: Arc<GossipCache>,
-    message_tx: mpsc::Sender<(SocketAddr, GossipData)>,
+    data_handler: GossipServerDataHandler<M, A>,
     peer_list: PeerListProvider,
 }
 
-impl GossipServer {
+impl<M, A> GossipServer<M, A>
+where
+    M: Handler<TxIngressMessage>
+    + Handler<ChunkIngressMessage>
+    + Handler<TxExistenceQuery>
+    + Actor<Context = Context<M>>,
+    A: ApiClient + 'static,
+{
     pub fn new(
         cache: Arc<GossipCache>,
-        message_tx: mpsc::Sender<(SocketAddr, GossipData)>,
+        gossip_server_data_handler: GossipServerDataHandler<M, A>,
         peer_list: PeerListProvider,
     ) -> Self {
         Self {
             cache,
-            message_tx,
+            data_handler: gossip_server_data_handler,
             peer_list,
         }
     }
@@ -44,8 +60,8 @@ impl GossipServer {
                 .wrap(middleware::Logger::default())
                 .service(
                     web::scope("/gossip")
-                        .route("/data", web::post().to(handle_gossip_data))
-                        .route("/health", web::get().to(handle_health_check)),
+                        .route("/data", web::post().to(handle_gossip_data::<M, A>))
+                        .route("/health", web::get().to(handle_health_check::<M, A>)),
                 )
         })
         .bind((bind_address, port))
@@ -54,11 +70,18 @@ impl GossipServer {
     }
 }
 
-async fn handle_gossip_data(
-    server: Data<Arc<GossipServer>>,
+async fn handle_gossip_data<M, A>(
+    server: Data<Arc<GossipServer<M, A>>>,
     data: web::Json<GossipData>,
     req: actix_web::HttpRequest,
-) -> HttpResponse {
+) -> HttpResponse
+where
+    M: Handler<TxIngressMessage>
+    + Handler<ChunkIngressMessage>
+    + Handler<TxExistenceQuery>
+    + Actor<Context = Context<M>>,
+    A: ApiClient,
+{
     tracing::debug!("Gossip data received: {:?}", data);
     let peer_address = match req.peer_addr() {
         Some(addr) => addr,
@@ -89,24 +112,57 @@ async fn handle_gossip_data(
         return HttpResponse::InternalServerError().finish();
     }
 
-    // Forward the data to the message bus
-    if let Err(e) = server
-        .message_tx
-        .send((peer_address, data.into_inner()))
-        .await
-    {
-        tracing::error!("Failed to forward data to message bus: {}", e);
-        return HttpResponse::InternalServerError().finish();
+    match data.0 {
+        GossipData::Chunk(unpacked_chunk) => {
+            tracing::debug!("Gossip data is a chunk");
+            if let Err(e) = server
+                .data_handler
+                .handle_chunk(unpacked_chunk, peer_address)
+                .await
+            {
+                tracing::error!("Failed to send chunk: {}", e);
+                return HttpResponse::InternalServerError().finish();
+            }
+        }
+        GossipData::Transaction(irys_transaction_header) => {
+            tracing::debug!("Gossip data is a transaction");
+            if let Err(e) = server
+                .data_handler
+                .handle_transaction(irys_transaction_header, peer_address)
+                .await
+            {
+                tracing::error!("Failed to send transaction: {}", e);
+                return HttpResponse::InternalServerError().finish();
+            }
+        }
+        GossipData::Block(irys_block_header) => {
+            tracing::debug!("Gossip data is a block");
+            if let Err(e) = server
+                .data_handler
+                .handle_block_header(irys_block_header, peer_address)
+                .await
+            {
+                tracing::error!("Failed to send block: {}", e);
+                return HttpResponse::InternalServerError().finish();
+            }
+        }
     }
 
-    tracing::debug!("Gossip data sent");
+    tracing::debug!("Gossip data handled");
     HttpResponse::Ok().finish()
 }
 
-async fn handle_health_check(
-    server: Data<Arc<GossipServer>>,
+async fn handle_health_check<M, A>(
+    server: Data<Arc<GossipServer<M, A>>>,
     req: actix_web::HttpRequest,
-) -> HttpResponse {
+) -> HttpResponse
+where
+    M: Handler<TxIngressMessage>
+    + Handler<ChunkIngressMessage>
+    + Handler<TxExistenceQuery>
+    + Actor<Context = Context<M>>,
+    A: ApiClient,
+{
     let peer_addr = match req.peer_addr() {
         Some(addr) => addr,
         None => return HttpResponse::BadRequest().finish(),

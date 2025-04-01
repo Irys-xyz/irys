@@ -35,8 +35,8 @@ pub enum InvalidDataError {
     ChinkInvalidDataHash,
     #[error("Invalid chunk size")]
     ChunkInvalidChunkSize,
-    #[error("Invalid block")]
-    InvalidBlock,
+    #[error("Invalid block: {0}")]
+    InvalidBlock(String),
 }
 
 #[derive(Debug, Error)]
