@@ -13,7 +13,7 @@ use std::{
 pub struct GossipCache {
     /// Maps data identifiers to a map of peer IPs and when they last saw the data
     chunks: Arc<RwLock<HashMap<ChunkPathHash, HashMap<SocketAddr, Instant>>>>,
-    transactions: Arc<RwLock<HashMap<H256, HashMap<SocketAddr, Instant>>>>,
+    transactions: Arc<RwLock<HashMap<IrysTransactionId, HashMap<SocketAddr, Instant>>>>,
     blocks: Arc<RwLock<HashMap<BlockHash, HashMap<SocketAddr, Instant>>>>,
 }
 
