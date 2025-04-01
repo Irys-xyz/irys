@@ -121,7 +121,8 @@ impl IrysNodeCtx {
 
     //TODO url paths as ENUMS? Could update external api tests too
     async fn sync_state_from_peers(&self) -> eyre::Result<()> {
-        let trusted_peers = vec!["127.0.0.1:1234"];
+        let trusted_peers: Vec<SocketAddr> =
+            vec!["127.0.0.1:1234".parse().expect("valid SocketAddr from str")];
         let client = awc::Client::default();
 
         info!("Discovering peers...");
@@ -137,16 +138,19 @@ impl IrysNodeCtx {
                 match client.get(url).send().await {
                     Ok(mut response) => {
                         if response.status().is_success() {
-                            match response.body().await {
-                                Ok(body) => {
-                                    info!("Got peers from {}: {:?}", peer, body);
-                                    if let Ok(new_peers) = String::from_utf8(body.to_vec()) {
-                                        let mut peers = peers.lock().await;
-                                        peers.extend(new_peers.lines().map(str::to_owned));
-                                    }
+                            match response.json::<Vec<SocketAddr>>().await {
+                                Ok(new_peers) => {
+                                    info!(
+                                        "Got {} peers from {}: {:?}",
+                                        new_peers.len(),
+                                        peer,
+                                        new_peers
+                                    );
+                                    let mut peers = peers.lock().await;
+                                    peers.extend(new_peers.into_iter());
                                 }
                                 Err(e) => {
-                                    warn!("Error reading body from {}: {}", peer, e);
+                                    warn!("Error reading json body from {}: {}", peer, e);
                                 }
                             }
                         } else {
