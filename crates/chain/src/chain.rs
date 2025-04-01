@@ -178,7 +178,7 @@ async fn fetch_peers(
     client: &awc::Client,
     trusted_peers: Vec<SocketAddr>,
 ) {
-    trusted_peers.iter().map(|peer| {
+    let _ = trusted_peers.iter().map(|peer| {
         let client = client.clone();
         let peers = peers.clone();
         let url = format!("http://{}/peer_list", peer);
