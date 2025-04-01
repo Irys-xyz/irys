@@ -16,7 +16,7 @@ pub enum GossipError {
 }
 
 impl GossipError {
-    pub fn unknown(error: impl ToString) -> Self {
+    pub fn unknown<T: ToString + ?Sized>(error: &T) -> Self {
         Self::Internal(InternalGossipError::Unknown(error.to_string()))
     }
 }
@@ -71,7 +71,9 @@ pub(crate) fn tx_ingress_error_to_gossip_error(error: TxIngressError) -> Option<
         TxIngressError::ServiceUninitialized => Some(GossipError::Internal(
             InternalGossipError::ServiceUninitialized,
         )),
-        TxIngressError::Other(e) => Some(GossipError::Internal(InternalGossipError::Unknown(e))),
+        TxIngressError::Other(error) => {
+            Some(GossipError::Internal(InternalGossipError::Unknown(error)))
+        }
     }
 }
 

@@ -46,8 +46,8 @@ where
                         self.cache
                             .record_seen(source_address, &GossipData::Chunk(chunk))
                     }
-                    Err(e) => {
-                        match e {
+                    Err(error) => {
+                        match error {
                             ChunkIngressError::UnknownTransaction => {
                                 // TODO:
                                 //  I suppose we have to ask the peer for transaction,
@@ -78,10 +78,10 @@ where
                     }
                 }
             }
-            Err(e) => {
-                tracing::error!("Failed to send transaction to mempool: {}", e);
+            Err(error) => {
+                tracing::error!("Failed to send transaction to mempool: {}", error);
                 Err(GossipError::Internal(InternalGossipError::Unknown(
-                    e.to_string(),
+                    error.to_string(),
                 )))
             }
         }
@@ -101,8 +101,8 @@ where
                         self.cache
                             .record_seen(source_address, &GossipData::Transaction(tx))
                     }
-                    Err(e) => {
-                        match e {
+                    Err(error) => {
+                        match error {
                             // ==== Not really errors
                             TxIngressError::Skipped => {
                                 // Not an invalid transaction - just skipped
@@ -135,17 +135,17 @@ where
                             TxIngressError::ServiceUninitialized => Err(GossipError::Internal(
                                 InternalGossipError::ServiceUninitialized,
                             )),
-                            TxIngressError::Other(e) => {
-                                Err(GossipError::Internal(InternalGossipError::Unknown(e)))
+                            TxIngressError::Other(error) => {
+                                Err(GossipError::Internal(InternalGossipError::Unknown(error)))
                             }
                         }
                     }
                 }
             }
-            Err(e) => {
-                tracing::error!("Failed to send transaction to mempool: {}", e);
+            Err(error) => {
+                tracing::error!("Failed to send transaction to mempool: {}", error);
                 Err(GossipError::Internal(InternalGossipError::Unknown(
-                    e.to_string(),
+                    error.to_string(),
                 )))
             }
         }
@@ -196,13 +196,13 @@ where
             .api_client
             .get_transactions(source_address, &missing_tx_ids)
             .await
-            .map_err(|e| {
+            .map_err(|error| {
                 tracing::error!(
                     "Failed to fetch transactions from peer {}: {}",
                     source_address,
-                    e
+                    error
                 );
-                GossipError::unknown(e)
+                GossipError::unknown(&error)
             })?;
 
         // Process each transaction
@@ -219,21 +219,21 @@ where
                                     &GossipData::Transaction(tx.clone()),
                                 )?;
                             }
-                            Err(e) => {
-                                match tx_ingress_error_to_gossip_error(e) {
+                            Err(error) => {
+                                match tx_ingress_error_to_gossip_error(error) {
                                     Some(GossipError::InvalidData(e)) => {
                                         // Invalid transaction, decrease source reputation
                                         return Err(GossipError::InvalidData(e));
                                     }
-                                    Some(GossipError::Internal(e)) => {
+                                    Some(GossipError::Internal(error)) => {
                                         // Internal error - log it
-                                        tracing::error!("Internal error: {:?}", e);
-                                        return Err(GossipError::Internal(e));
+                                        tracing::error!("Internal error: {:?}", error);
+                                        return Err(GossipError::Internal(error));
                                     }
-                                    Some(e) => {
+                                    Some(error) => {
                                         // Other error - log it
-                                        tracing::error!("Unexpected error when handling gossip transaction: {:?}", e);
-                                        return Err(e);
+                                        tracing::error!("Unexpected error when handling gossip transaction: {:?}", error);
+                                        return Err(error);
                                     }
                                     None => {
                                         // Not an invalid transaction - just skipped
@@ -246,10 +246,10 @@ where
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to send transaction to mempool: {}", e);
+                    Err(error) => {
+                        tracing::error!("Failed to send transaction to mempool: {}", error);
                         return Err(GossipError::Internal(InternalGossipError::Unknown(
-                            e.to_string(),
+                            error.to_string(),
                         )));
                     }
                 }
@@ -270,7 +270,7 @@ where
         self.mempool
             .send(TxExistenceQuery(tx_id))
             .await
-            .map_err(GossipError::unknown)?
+            .map_err(|error| GossipError::unknown(&error))?
             .map_err(|error| {
                 tx_ingress_error_to_gossip_error(error).unwrap_or_else(|| {
                     GossipError::unknown(

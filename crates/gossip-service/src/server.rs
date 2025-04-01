@@ -53,7 +53,7 @@ where
 
         Ok(HttpServer::new(move || {
             App::new()
-                .app_data(Data::new(server.clone()))
+                .app_data(Data::new(Arc::clone(&server)))
                 .wrap(middleware::Logger::default())
                 .service(
                     web::scope("/gossip")
@@ -64,18 +64,16 @@ where
                 )
         })
         .bind((bind_address, port))
-        .map_err(|e| GossipError::Internal(InternalGossipError::Unknown(e.to_string())))?
+        .map_err(|error| GossipError::Internal(InternalGossipError::Unknown(error.to_string())))?
         .run())
     }
 }
 
 fn check_peer(
     peer_list: &PeerListProvider,
-    req: actix_web::HttpRequest,
+    req: &actix_web::HttpRequest,
 ) -> Result<SocketAddr, HttpResponse> {
-    let peer_address = if let Some(addr) = req.peer_addr() {
-        addr
-    } else {
+    let Some(peer_address) = req.peer_addr() else {
         tracing::debug!("Failed to get peer address from gossip post request");
         return Err(HttpResponse::BadRequest().finish());
     };
@@ -109,13 +107,12 @@ where
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", irys_block_header_json);
-    let irys_block_header = irys_block_header_json.0;
-
-    let peer_address = match check_peer(&server.peer_list, req) {
-        Ok(addr) => addr,
-        Err(resp) => return resp,
+    let peer_address = match check_peer(&server.peer_list, &req) {
+        Ok(peer_address) => peer_address,
+        Err(error_response) => return error_response,
     };
 
+    let irys_block_header = irys_block_header_json.0;
     if let Err(e) = server
         .data_handler
         .handle_block_header(irys_block_header, peer_address)
@@ -141,9 +138,9 @@ where
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", irys_transaction_header_json);
-    let peer_address = match check_peer(&server.peer_list, req) {
-        Ok(addr) => addr,
-        Err(resp) => return resp,
+    let peer_address = match check_peer(&server.peer_list, &req) {
+        Ok(peer_address) => peer_address,
+        Err(error_response) => return error_response,
     };
 
     let irys_transaction_header = irys_transaction_header_json.0;
@@ -173,9 +170,9 @@ where
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", unpacked_chunk_json);
-    let peer_address = match check_peer(&server.peer_list, req) {
-        Ok(addr) => addr,
-        Err(resp) => return resp,
+    let peer_address = match check_peer(&server.peer_list, &req) {
+        Ok(peer_address) => peer_address,
+        Err(error_response) => return error_response,
     };
 
     let unpacked_chunk = unpacked_chunk_json.0;
@@ -202,9 +199,8 @@ where
         + Actor<Context = Context<M>>,
     A: ApiClient,
 {
-    let peer_addr = match req.peer_addr() {
-        Some(addr) => addr,
-        None => return HttpResponse::BadRequest().finish(),
+    let Some(peer_addr) = req.peer_addr() else {
+        return HttpResponse::BadRequest().finish();
     };
 
     match server.peer_list.get_peer_info(&peer_addr) {

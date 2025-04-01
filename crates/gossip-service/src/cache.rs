@@ -31,7 +31,7 @@ impl GossipCache {
                 let mut chunks = self
                     .chunks
                     .write()
-                    .map_err(|e| GossipError::Cache(e.to_string()))?;
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
                 let peer_map = chunks.entry(unpacked_chunk.chunk_path_hash()).or_default();
                 peer_map.insert(peer_ip, now);
             }
@@ -39,7 +39,7 @@ impl GossipCache {
                 let mut txs = self
                     .transactions
                     .write()
-                    .map_err(|e| GossipError::Cache(e.to_string()))?;
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
                 let peer_map = txs.entry(irys_transaction_header.id).or_default();
                 peer_map.insert(peer_ip, now);
             }
@@ -47,7 +47,7 @@ impl GossipCache {
                 let mut blocks = self
                     .blocks
                     .write()
-                    .map_err(|e| GossipError::Cache(e.to_string()))?;
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
                 let peer_map = blocks.entry(irys_block_header.block_hash).or_default();
                 peer_map.insert(peer_ip, now);
             }
@@ -70,7 +70,7 @@ impl GossipCache {
                 let chunks = self
                     .chunks
                     .read()
-                    .map_err(|e| GossipError::Cache(e.to_string()))?;
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
                 chunks
                     .get(&chunk_path_hash)
                     .and_then(|peer_map| peer_map.get(peer_ip))
@@ -80,7 +80,7 @@ impl GossipCache {
                 let txs = self
                     .transactions
                     .read()
-                    .map_err(|e| GossipError::Cache(e.to_string()))?;
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
                 txs.get(&transaction.id)
                     .and_then(|peer_map| peer_map.get(peer_ip))
                     .is_some_and(|&last_seen| now.duration_since(last_seen) <= within)
@@ -89,7 +89,7 @@ impl GossipCache {
                 let blocks = self
                     .blocks
                     .read()
-                    .map_err(|e| GossipError::Cache(e.to_string()))?;
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
                 blocks
                     .get(&block.block_hash)
                     .and_then(|peer_map| peer_map.get(peer_ip))
