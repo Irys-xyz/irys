@@ -317,7 +317,8 @@ impl StorageModule {
             .gaps_untrimmed(partition_chunk_offset_ii!(0, u32::MAX))
             .collect::<Vec<_>>();
         let expected = vec![partition_chunk_offset_ii!(
-            storage_config.num_chunks_in_partition as u32,
+            TryInto::<u32>::try_into(storage_config.num_chunks_in_partition)
+                .expect("Value exceeds u32::MAX"),
             u32::MAX
         )];
         if &gaps != &expected {
@@ -932,7 +933,7 @@ impl StorageModule {
                     data_root,
                     data_size,
                     path_buff,
-                    TxChunkOffset(chunk_offset.try_into().unwrap()),
+                    TxChunkOffset(chunk_offset.try_into().expect("Value exceeds u32::MAX")),
                 ))
             })?;
 

@@ -133,7 +133,9 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
+            tx_offset: TxChunkOffset::from(
+                TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+            ),
         };
 
         // Make a POST request with JSON payload
