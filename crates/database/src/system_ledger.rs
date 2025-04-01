@@ -144,7 +144,7 @@ pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
     // submodules for a single partition, but the config doesn't yet express this
     // many-to-one relationship. For testnet, each submodule path is treated as
     // a complete HDD capable of providing all storage for a StorageModule.
-    // Whe the configuration catches up to the StorageModule functionality,
+    // When the configuration catches up to the StorageModule functionality,
     // this method as well as [`epoch_serve::map_storage_modules_to_partition_assignments()`]
     // will have to be updated.
     let mut anchor = stake_tx.id;

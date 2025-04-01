@@ -697,7 +697,7 @@ impl EpochServiceActor {
         truncate_to_3_decimals(scaled).ceil() as u64
     }
 
-    /// Adds new capacity partition hashes to the protocols pool of active parition hashes. This
+    /// Adds new capacity partition hashes to the protocols pool of active partition hashes. This
     /// follows the process of sequentially hashing the previous partitions
     /// hash to compute the next partitions hash.
     fn add_capacity_partitions(&mut self, parts_to_add: u64) {
