@@ -1,4 +1,3 @@
-// I have absolutely no idea how to name this module to satisfy this lint
 #![allow(
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
