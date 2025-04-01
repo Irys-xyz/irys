@@ -1,3 +1,7 @@
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "I have no idea how to name this module to satisfy this lint"
+)]
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
@@ -48,6 +52,11 @@ where
         }
     }
 
+    /// Start the gossip server
+    ///
+    /// # Errors
+    ///
+    /// If the server fails to bind to the specified address and port, an error is returned.
     pub fn run(self, bind_address: &str, port: u16) -> GossipResult<Server> {
         let server = Arc::new(self);
 
@@ -87,8 +96,8 @@ fn check_peer(
                 Err(HttpResponse::Forbidden().finish())
             }
         }
-        Err(e) => {
-            tracing::error!("Failed to check if peer is allowed: {}", e);
+        Err(error) => {
+            tracing::error!("Failed to check if peer is allowed: {}", error);
             Err(HttpResponse::InternalServerError().finish())
         }
     }
@@ -113,12 +122,12 @@ where
     };
 
     let irys_block_header = irys_block_header_json.0;
-    if let Err(e) = server
+    if let Err(error) = server
         .data_handler
         .handle_block_header(irys_block_header, peer_address)
         .await
     {
-        tracing::error!("Failed to send block: {}", e);
+        tracing::error!("Failed to send block: {}", error);
         return HttpResponse::InternalServerError().finish();
     }
 
@@ -144,12 +153,12 @@ where
     };
 
     let irys_transaction_header = irys_transaction_header_json.0;
-    if let Err(e) = server
+    if let Err(error) = server
         .data_handler
         .handle_transaction(irys_transaction_header, peer_address)
         .await
     {
-        tracing::error!("Failed to send transaction: {}", e);
+        tracing::error!("Failed to send transaction: {}", error);
         return HttpResponse::InternalServerError().finish();
     }
 
@@ -176,12 +185,12 @@ where
     };
 
     let unpacked_chunk = unpacked_chunk_json.0;
-    if let Err(e) = server
+    if let Err(error) = server
         .data_handler
         .handle_chunk(unpacked_chunk, peer_address)
         .await
     {
-        tracing::error!("Failed to send chunk: {}", e);
+        tracing::error!("Failed to send chunk: {}", error);
         return HttpResponse::InternalServerError().finish();
     }
 

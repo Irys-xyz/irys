@@ -19,6 +19,7 @@ rand = "0.8"
 reqwest = { version = "0.11", features = ["json"] }
 irys-actors.workspace = true
 actix.workspace = true
+serde = { workspace = true }
 
 [dev-dependencies]
 irys-testing-utils.workspace = true

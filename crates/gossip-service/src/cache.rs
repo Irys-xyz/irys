@@ -1,3 +1,8 @@
+// I have absolutely no idea how to name this module to satisfy this lint
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "I have no idea how to name this module to satisfy this lint"
+)]
 use crate::types::{GossipError, GossipResult};
 use core::net::SocketAddr;
 use core::time::Duration;
@@ -24,6 +29,10 @@ impl GossipCache {
     }
 
     /// Record that a peer has seen some data
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the cache cannot be accessed.
     pub fn record_seen(&self, peer_ip: SocketAddr, data: &GossipData) -> GossipResult<()> {
         let now = Instant::now();
         match data {
@@ -56,6 +65,10 @@ impl GossipCache {
     }
 
     /// Check if a peer has seen some data within the given duration
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the cache cannot be accessed.
     pub fn has_seen(
         &self,
         peer_ip: &SocketAddr,
@@ -101,6 +114,10 @@ impl GossipCache {
     }
 
     /// Clean up old entries that are older than the given duration
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the cache cannot be accessed.
     pub fn cleanup(&self, older_than: Duration) -> GossipResult<()> {
         let now = Instant::now();
 
@@ -115,7 +132,7 @@ impl GossipCache {
             let mut chunks_guard = self
                 .chunks
                 .write()
-                .map_err(|e| GossipError::Cache(e.to_string()))?;
+                .map_err(|error| GossipError::Cache(error.to_string()))?;
             let chunks = &mut *chunks_guard;
             cleanup_chunks(chunks);
         };
@@ -124,7 +141,7 @@ impl GossipCache {
             let mut txs_guard = self
                 .transactions
                 .write()
-                .map_err(|e| GossipError::Cache(e.to_string()))?;
+                .map_err(|error| GossipError::Cache(error.to_string()))?;
             let txs = &mut *txs_guard;
             cleanup_chunks(txs);
         };
@@ -133,7 +150,7 @@ impl GossipCache {
             let mut blocks_guard = self
                 .blocks
                 .write()
-                .map_err(|e| GossipError::Cache(e.to_string()))?;
+                .map_err(|error| GossipError::Cache(error.to_string()))?;
             let blocks = &mut *blocks_guard;
             cleanup_chunks(blocks);
         };

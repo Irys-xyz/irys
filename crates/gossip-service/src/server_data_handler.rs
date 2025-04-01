@@ -221,9 +221,9 @@ where
                             }
                             Err(error) => {
                                 match tx_ingress_error_to_gossip_error(error) {
-                                    Some(GossipError::InvalidData(e)) => {
+                                    Some(GossipError::InvalidData(error)) => {
                                         // Invalid transaction, decrease source reputation
-                                        return Err(GossipError::InvalidData(e));
+                                        return Err(GossipError::InvalidData(error));
                                     }
                                     Some(GossipError::Internal(error)) => {
                                         // Internal error - log it

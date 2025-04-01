@@ -1,6 +1,11 @@
 // This rule is added here because otherwise clippy starts to throw warnings about using %
-//  at random macro uses in this file for whatever reason
-#![allow(clippy::integer_division_remainder_used)]
+//  at random macro uses in this file for whatever reason. The second one is because
+//  I have absolutely no idea how to name this module to satisfy this lint
+#![allow(
+    clippy::integer_division_remainder_used,
+    clippy::module_name_repetitions,
+    reason = "I don't know how to name it"
+)]
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
@@ -56,6 +61,10 @@ impl<T> ServiceHandleWithShutdownSignal<T> {
     }
 
     /// Stops the task, joins it and returns the result
+    ///
+    /// # Errors
+    ///
+    /// If the task panics, an error is returned.
     pub async fn stop(mut self) -> Result<T, tokio::task::JoinError> {
         let res = self.shutdown_tx.send(()).await;
 
@@ -76,6 +85,10 @@ impl<T> ServiceHandleWithShutdownSignal<T> {
 
     /// Waits for the task to exit or immediately returns if the task has already exited. To get
     ///  the execution result, call [`ServiceHandleWithShutdownSignal::stop`].
+    ///
+    /// # Errors
+    ///
+    /// If the task panics, an error is returned.
     pub async fn wait_for_exit(&mut self) -> Result<T, tokio::task::JoinError> {
         let handle = &mut self.handle;
         handle.await
@@ -122,6 +135,13 @@ impl GossipService {
         )
     }
 
+    /// Spawns all gossip tasks and returns a handle to the service. The service will run until
+    /// the stop method is called or the task is dropped.
+    ///
+    /// # Errors
+    ///
+    /// If the service fails to start, an error is returned. This can happen if the server fails to
+    /// bind to the address or if any of the tasks fails to spawn.
     pub fn run<M, A>(
         mut self,
         mempool: Addr<M>,

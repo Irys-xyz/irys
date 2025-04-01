@@ -1,7 +1,14 @@
+// I have absolutely no idea how to name this module to satisfy this lint
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "I have no idea how to name this module to satisfy this lint"
+)]
 use crate::types::{GossipError, GossipResult};
 use core::time::Duration;
 use irys_database::tables::CompactPeerListItem;
-use irys_types::{GossipData, IrysBlockHeader, IrysTransactionHeader, UnpackedChunk};
+use irys_types::GossipData;
+use reqwest::Response;
+use serde::Serialize;
 
 #[derive(Debug)]
 pub struct GossipClient {
@@ -18,89 +25,70 @@ impl GossipClient {
         }
     }
 
+    /// Send data to a peer
+    ///
+    /// # Errors
+    ///
+    /// If the peer is offline or the request fails, an error is returned.
     pub async fn send_data(
         &self,
         peer: &CompactPeerListItem,
         data: &GossipData,
     ) -> GossipResult<()> {
+        Self::check_if_peer_online(peer)?;
         match data {
-            GossipData::Chunk(unpacked_chunk) => self.send_chunk(peer, unpacked_chunk).await,
-            GossipData::Transaction(irys_transaction_header) => {
-                self.send_transaction(peer, irys_transaction_header).await
+            GossipData::Chunk(unpacked_chunk) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/chunk", peer.address),
+                    unpacked_chunk,
+                )
+                .await?;
             }
-            GossipData::Block(irys_block_header) => self.send_block(peer, irys_block_header).await,
-        }
+            GossipData::Transaction(irys_transaction_header) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/transaction", peer.address),
+                    irys_transaction_header,
+                )
+                .await?;
+            }
+            GossipData::Block(irys_block_header) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/block", peer.address),
+                    &irys_block_header,
+                )
+                .await?;
+            }
+        };
+
+        Ok(())
     }
 
-    /// Send gossip data to a peer
-    pub async fn send_transaction(
-        &self,
-        peer: &CompactPeerListItem,
-        data: &IrysTransactionHeader,
-    ) -> GossipResult<()> {
+    fn check_if_peer_online(peer: &CompactPeerListItem) -> GossipResult<()> {
         if !peer.is_online {
             return Err(GossipError::InvalidPeer("Peer is offline".into()));
         }
+        Ok(())
+    }
 
-        let url = format!("http://{}/gossip/transaction", peer.address);
-
+    async fn send_data_internal<T: Serialize + ?Sized>(
+        &self,
+        url: String,
+        data: &T,
+    ) -> Result<Response, GossipError> {
         self.client
             .post(&url)
             .timeout(self.timeout)
             .json(data)
             .send()
             .await
-            .map_err(|e| GossipError::Network(e.to_string()))?;
-
-        Ok(())
-    }
-
-    pub async fn send_chunk(
-        &self,
-        peer: &CompactPeerListItem,
-        data: &UnpackedChunk,
-    ) -> GossipResult<()> {
-        if !peer.is_online {
-            return Err(GossipError::InvalidPeer("Peer is offline".into()));
-        }
-
-        let url = format!("http://{}/gossip/chunk", peer.address);
-
-        self.client
-            .post(&url)
-            .timeout(self.timeout)
-            .json(data)
-            .send()
-            .await
-            .map_err(|e| GossipError::Network(e.to_string()))?;
-
-        Ok(())
-    }
-
-    /// Send a block to a peer
-    pub async fn send_block(
-        &self,
-        peer: &CompactPeerListItem,
-        data: &IrysBlockHeader,
-    ) -> GossipResult<()> {
-        if !peer.is_online {
-            return Err(GossipError::InvalidPeer("Peer is offline".into()));
-        }
-
-        let url = format!("http://{}/gossip/block", peer.address);
-
-        self.client
-            .post(&url)
-            .timeout(self.timeout)
-            .json(data)
-            .send()
-            .await
-            .map_err(|e| GossipError::Network(e.to_string()))?;
-
-        Ok(())
+            .map_err(|error| GossipError::Network(error.to_string()))
     }
 
     /// Check the health of a peer
+    ///
+    /// # Errors
+    ///
+    /// If the health check fails or the response is not valid JSON, an error is returned.
     pub async fn check_health(
         &self,
         peer: &CompactPeerListItem,
@@ -113,7 +101,7 @@ impl GossipClient {
             .timeout(self.timeout)
             .send()
             .await
-            .map_err(|e| GossipError::Network(e.to_string()))?;
+            .map_err(|error| GossipError::Network(error.to_string()))?;
 
         if !response.status().is_success() {
             return Err(GossipError::Network(format!(
@@ -125,6 +113,6 @@ impl GossipClient {
         response
             .json()
             .await
-            .map_err(|e| GossipError::Network(e.to_string()))
+            .map_err(|error| GossipError::Network(error.to_string()))
     }
 }
