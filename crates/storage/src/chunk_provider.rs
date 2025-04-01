@@ -40,7 +40,7 @@ impl ChunkProvider {
         // Get basic chunk info
         let module = get_storage_module_at_offset(&self.storage_modules, ledger, ledger_offset)
             .ok_or_eyre("No storage module contains this chunk")?;
-        module.generate_full_chunk(ledger_offset)
+        module.generate_full_chunk_ledger_offset(ledger_offset)
     }
 
     /// Retrieves a chunk by [`DataRoot`]
@@ -70,23 +70,20 @@ impl ChunkProvider {
             .collect::<Vec<_>>();
 
         for sm in sms {
-            let sm_range_start = sm.get_storage_module_range().unwrap().start();
             let start_offsets1 = sm.collect_start_offsets(data_root)?;
             let offsets = start_offsets1
                 .0
                 .iter()
-                .filter_map(|so| {
-                    checked_add_i32_u64(**so, *sm_range_start) // translate into ledger-relative space
-                    .map(|mapped_start| mapped_start + (*data_tx_offset as u64))
-                })
+                // .filter_map(|so| {
+                //     checked_add_i32_u64(**so, *sm_range_start) // translate into ledger-relative space
+                //     .map(|mapped_start| mapped_start + (*data_tx_offset as u64))
+                // })
+                .map(|mapped_start| *mapped_start + (*data_tx_offset as i32))
                 .collect::<Vec<_>>();
 
-            for ledger_relative_offset in offsets {
+            for part_relative_offset in offsets {
                 // try other offsets and sm's if we get an Error or a None
-                // TODO: if we keep this resolver, make generate_full_chunk more modular so we can pass in work we've already done (getting the ledger relative offset, etc)
-                if let Ok(Some(r)) =
-                    sm.generate_full_chunk(LedgerChunkOffset::from(ledger_relative_offset))
-                {
+                if let Ok(Some(r)) = sm.generate_full_chunk(part_relative_offset.into()) {
                     return Ok(Some(ChunkFormat::Packed(r)));
                 }
             }
@@ -119,7 +116,7 @@ impl ChunkProvider {
 
         // find a SM that contains this data root, return the start_offsets once we find it
         for sm in sms {
-            let sm_range_start = sm.get_storage_module_range().unwrap().start();
+            let sm_range_start = sm.get_storage_module_ledger_range().unwrap().start();
             let start_offsets = sm.collect_start_offsets(data_root)?;
             let mapped_offsets = start_offsets
                 .0
