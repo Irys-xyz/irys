@@ -5,6 +5,7 @@ use actix::{Actor, Addr, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use actix_web::dev::Server;
 use alloy_eips::BlockNumberOrTag;
+use base58::ToBase58;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
 use irys_actors::cache_service::ChunkCacheService;
 use irys_actors::ema_service::EmaService;
@@ -33,7 +34,9 @@ use irys_actors::{
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::migration::check_db_version_and_run_migrations_if_needed;
-use irys_database::{database, get_genesis_commitments, insert_commitment_tx, SystemLedger};
+use irys_database::{
+    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx, SystemLedger,
+};
 use irys_packing::{PackingType, PACKING_TYPE};
 use irys_price_oracle::mock_oracle::MockOracle;
 use irys_price_oracle::IrysPriceOracle;
@@ -216,6 +219,8 @@ pub async fn start_irys_node(
     let arc_node_config = Arc::new(node_config);
     let difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
 
+    let commitments = add_genesis_commitments(&mut irys_genesis, &config);
+
     // TODO: Hard coding 3 for storage module count isn't great here,
     // eventually we'll want to relate this to the genesis config
     irys_genesis.diff =
@@ -379,12 +384,25 @@ pub async fn start_irys_node(
                     .unwrap();
 
                 if at_genesis {
+                    irys_db
+                        .update_eyre(|tx| {
+                            commitments
+                                .iter()
+                                .map(|commitment| {
+                                    debug!("commitment: {}", commitment.id.0.to_base58());
+                                    insert_commitment_tx(tx, commitment)
+                                })
+                                .collect::<eyre::Result<()>>()
+                        })
+                        .expect("inserting commitment tx should succeed");
+                    
+                    irys_db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
+                    .unwrap();
+
                     let msg = BlockFinalizedMessage {
                         block_header: arc_genesis.clone(),
                         all_txs: Arc::new(vec![]),
                     };
-                    irys_db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
-                        .unwrap();
                     match block_index_actor_addr.send(msg).await {
                         Ok(_) => info!("Genesis block indexed"),
                         Err(_) => panic!("Failed to index genesis block"),

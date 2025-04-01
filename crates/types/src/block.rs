@@ -411,10 +411,7 @@ impl IrysBlockHeader {
             reward_address: Address::ZERO,
             signature: IrysSignature::new(alloy_signer::Signature::test_signature()),
             timestamp: now.as_millis(),
-            system_ledgers: vec![SystemTransactionLedger {
-                ledger_id: 0, // SystemLedger::Commitment
-                tx_ids: H256List(vec![H256::random(), H256::random()]),
-            }],
+            system_ledgers: vec![], // Many tests will fail if you add fake txids to this ledger
             data_ledgers: vec![
                 // Permanent Publish Ledger
                 DataTransactionLedger {

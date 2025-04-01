@@ -377,7 +377,10 @@ impl EpochServiceActor {
                     let tx = &db.tx().expect("to create readonly mdbx tx");
                     let block_header = block_header_by_hash(tx, &b.block_hash, false)
                         .unwrap()
-                        .unwrap();
+                        .expect(&format!(
+                            "to find the block header at height {}",
+                            block_index
+                        ));
 
                     let commitments_ledger = block_header
                         .system_ledgers
@@ -1143,8 +1146,8 @@ mod tests {
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_config::IrysNodeConfig;
     use irys_database::{
-        add_genesis_commitments, add_test_commitments, open_or_create_db, tables::IrysTables,
-        BlockIndex, Initialized,
+        add_genesis_commitments, add_test_commitments, insert_commitment_tx, open_or_create_db,
+        tables::IrysTables, BlockIndex, Initialized,
     };
     use irys_storage::{ie, StorageModule, StorageModuleVec};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -1995,6 +1998,26 @@ mod tests {
         genesis_block.height = 0;
         let pledge_count = config.num_capacity_partitions.unwrap_or(31) as u8;
         let commitments = add_test_commitments(&mut genesis_block, pledge_count, &testnet_config);
+        database_provider
+            .update_eyre(|tx| {
+                commitments
+                    .iter()
+                    .map(|commitment| insert_commitment_tx(tx, commitment))
+                    .collect::<eyre::Result<()>>()
+            })
+            .expect("inserting commitment tx should succeed");
+
+        database_provider
+            .update_eyre(|tx| irys_database::insert_block_header(tx, &genesis_block))
+            .unwrap();
+
+        // Get the genesis storage modules and their assigned partitions
+        let storage_module_infos = epoch_service
+            .initialize(&database_provider, storage_module_config.clone())
+            .await
+            .unwrap(); // epoch_service.handle(GetGenesisStorageModulesMessage(storage_module_config.clone()), &mut ctx);
+        debug!("{:#?}", storage_module_infos);
+
         genesis_block.block_hash = H256::from_slice(&[0; 32]);
         let _ = epoch_service.handle(
             NewEpochMessage {
@@ -2006,9 +2029,9 @@ mod tests {
 
         let pa_read_guard = epoch_service.handle(GetPartitionAssignmentsGuardMessage, &mut ctx);
 
-        database_provider
-            .update_eyre(|tx| irys_database::insert_block_header(tx, &genesis_block))
-            .unwrap();
+        // database_provider
+        //     .update_eyre(|tx| irys_database::insert_block_header(tx, &genesis_block))
+        //     .unwrap();
 
         let msg = BlockFinalizedMessage {
             block_header: Arc::new(genesis_block.clone()),
@@ -2018,13 +2041,6 @@ mod tests {
             Ok(_) => info!("Genesis block indexed"),
             Err(_) => panic!("Failed to index genesis block"),
         }
-
-        // Get the genesis storage modules and their assigned partitions
-        let storage_module_infos = epoch_service
-            .initialize(&database_provider, storage_module_config.clone())
-            .await
-            .unwrap(); // epoch_service.handle(GetGenesisStorageModulesMessage(storage_module_config.clone()), &mut ctx);
-        debug!("{:#?}", storage_module_infos);
 
         {
             let mut storage_modules: StorageModuleVec = Vec::new();
@@ -2125,6 +2141,16 @@ mod tests {
         // Capacity
 
         pa_read_guard.read().print_assignments();
+
+        let block_index_guard = block_index_actor
+            .send(GetBlockIndexGuardMessage)
+            .await
+            .unwrap();
+
+        debug!(
+            "num blocks in block_index: {}",
+            block_index_guard.read().num_blocks()
+        );
 
         // Get the genesis storage modules and their assigned partitions
         let mut epoch_service = EpochServiceActor::new(config, &testnet_config, block_index_guard);

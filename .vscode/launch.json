@@ -185,7 +185,7 @@
 		{
 			"type": "lldb",
 			"request": "launch",
-			"name": "Debug `partitions_assignment_determinism_test()`",
+			"name": "Debug `epoch_blocks_reinitialization_test`",
 			"env": {
 				"RUST_BACKTRACE": "1",
 				"RUST_LOG": "DEBUG"
@@ -203,7 +203,7 @@
 				}
 			},
 			"args": [
-				"epoch_service::tests::partitions_assignment_determinism_test",
+				"epoch_service::tests::epoch_blocks_reinitialization_test",
 				"--exact",
 				"--show-output"
 			],
