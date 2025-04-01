@@ -3,9 +3,7 @@ use actix::{Actor, ActorContext, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
 use irys_config::StorageSubmodulesConfig;
-use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, data_ledger::*, database, SystemLedger,
-};
+use irys_database::{block_header_by_hash, commitment_tx_by_txid, data_ledger::*, SystemLedger};
 use irys_primitives::CommitmentStatus;
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
@@ -364,7 +362,6 @@ impl EpochServiceActor {
         storage_module_config: StorageSubmodulesConfig,
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
         let mut block_index = 0;
-        let mut storage_module_info = Vec::new();
 
         loop {
             let block_height = {
@@ -378,7 +375,7 @@ impl EpochServiceActor {
             match block_height {
                 Some(b) => {
                     let tx = &db.tx().expect("to create readonly mdbx tx");
-                    let block_header = database::block_header_by_hash(tx, &b.block_hash, false)
+                    let block_header = block_header_by_hash(tx, &b.block_hash, false)
                         .unwrap()
                         .unwrap();
 
@@ -395,7 +392,10 @@ impl EpochServiceActor {
                             if let Some(commitment_tx) = commitment_tx {
                                 commitments.push(commitment_tx);
                             } else {
-                                // Commitment transaction must be present to process epoch block
+                                return Err(eyre::eyre!(
+                                    "Commitment missing in database {:?}",
+                                    commitment_txid.0.to_base58()
+                                ));
                             }
                         }
                     }
@@ -406,11 +406,6 @@ impl EpochServiceActor {
                             self.print_items(self.block_index_guard.clone(), db.clone());
                             return Err(eyre::eyre!("Error performing epoch tasks {:?}", e));
                         }
-                    }
-                    if block_index == 0 {
-                        storage_module_info = self.map_storage_modules_to_partition_assignments(
-                            storage_module_config.clone(),
-                        );
                     }
                     block_index += TryInto::<usize>::try_into(self.config.num_blocks_in_epoch)
                         .expect("Number of blocks in epoch is too large!");

@@ -52,8 +52,8 @@ use irys_types::{
     StorageConfig, CHUNK_SIZE, H256,
 };
 use irys_types::{
-    Config, DifficultyAdjustmentConfig, H256List, IrysBlockHeader, OracleConfig,
-    PartitionChunkRange, SystemTransactionLedger,
+    CommitmentTransaction, Config, DifficultyAdjustmentConfig, H256List, IrysBlockHeader,
+    OracleConfig, PartitionChunkRange, SystemTransactionLedger,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::rpc::eth::EthApiServer as _;
@@ -905,13 +905,13 @@ impl IrysNode {
         info!(miner_address = ?self.config.miner_address(), "Starting Irys Node");
 
         // figure out the init mode
-        let (chain_spec, irys_genesis) = self.create_genesis_header()?;
+        let (chain_spec, irys_genesis, commitments) = self.create_genesis_header()?;
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         match (self.data_exists, self.is_genesis) {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
             (false, true) => {
                 // special handilng for genesis node
-                self.init_genesis_thread(irys_genesis)?
+                self.init_genesis_thread(irys_genesis, commitments)?
                     .join()
                     .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
             }
@@ -996,6 +996,7 @@ impl IrysNode {
     fn init_genesis_thread(
         &self,
         irys_genesis: Arc<IrysBlockHeader>,
+        commitments: Vec<CommitmentTransaction>,
     ) -> Result<JoinHandle<()>, eyre::Error> {
         let handle = std::thread::Builder::new()
             .name("genesis init system".to_string())
@@ -1012,9 +1013,14 @@ impl IrysNode {
                             .await
                             .expect("initializing a new block index should be doable");
                         let block_index = Arc::new(RwLock::new(block_index));
-                        let _block_index_service_actor =
-                            genesis_initialization(&irys_genesis, node_config, &block_index, &node)
-                                .await;
+                        let _block_index_service_actor = genesis_initialization(
+                            &irys_genesis,
+                            commitments,
+                            node_config,
+                            &block_index,
+                            &node,
+                        )
+                        .await;
                         // optionally spawn other services to set up the base state
                     });
                 }
@@ -1108,7 +1114,9 @@ impl IrysNode {
         Ok(actor_main_thread_handle)
     }
 
-    fn create_genesis_header(&self) -> Result<(ChainSpec, Arc<IrysBlockHeader>), eyre::Error> {
+    fn create_genesis_header(
+        &self,
+    ) -> Result<(ChainSpec, Arc<IrysBlockHeader>, Vec<CommitmentTransaction>), eyre::Error> {
         let (reth_chain_spec, irys_genesis) = self.irys_node_config.chainspec_builder.build();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
@@ -1128,15 +1136,7 @@ impl IrysNode {
             ..irys_genesis
         };
         let commitments = get_genesis_commitments(&self.config);
-
         //println!("{}", serde_json::to_string_pretty(&commitments).unwrap());
-
-        // Write these commitment transactions to the irys db so they are available during block validation
-        let db = init_irys_db(&self.irys_node_config).expect("to create an irys db connection");
-        let tx = db.tx_mut().expect("to create a mutable mdbx transaction");
-        for commitment in &commitments {
-            insert_commitment_tx(&tx, commitment).expect("inserting commitment tx should succeed");
-        }
 
         // Add the commitment txids to the system ledger in the block header one by one
         for commitment_id in commitments.iter().map(|commitment| commitment.id) {
@@ -1148,7 +1148,7 @@ impl IrysNode {
 
         let irys_genesis = Arc::new(genesis_header);
 
-        Ok((reth_chain_spec, irys_genesis))
+        Ok((reth_chain_spec, irys_genesis, commitments))
     }
 
     fn init_reth_thread(
@@ -1848,6 +1848,7 @@ async fn read_latest_block_data(
 
 async fn genesis_initialization(
     irys_genesis: &Arc<IrysBlockHeader>,
+    commitments: Vec<CommitmentTransaction>,
     node_config: Arc<IrysNodeConfig>,
     block_index: &Arc<RwLock<BlockIndex<Initialized>>>,
     node: &IrysNode,
@@ -1857,6 +1858,19 @@ async fn genesis_initialization(
     irys_db
         .update_eyre(|tx| irys_database::insert_block_header(tx, irys_genesis))
         .expect("genesis db data could not be written");
+
+    // Add the commitments to the db
+    let tx = irys_db
+        .tx_mut()
+        .expect("to create a mutable mdbx transaction");
+    for commitment in &commitments {
+        insert_commitment_tx(&tx, commitment).expect("inserting commitment tx should succeed");
+    }
+    // Make sure the database transaction completes before dropping the db reference
+    tx.inner
+        .commit()
+        .expect("to commit the mdbx transaction to the db");
+
     drop(irys_db);
 
     // start block index service, we need to preconfigure the initial finalized block

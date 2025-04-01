@@ -208,6 +208,33 @@
 				"--show-output"
 			],
 			"cwd": "${workspaceFolder}"
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug `heavy_data_promotion_test`",
+			"env": {
+				"RUST_BACKTRACE": "1",
+				"RUST_LOG": "DEBUG"
+			},
+			"cargo": {
+				"args": [
+					"test",
+					"--package=irys-chain",
+					"--test=mod",
+					"--no-run"
+				],
+				"filter": {
+					"name": "mod",
+					"kind": "test"
+				}
+			},
+			"args": [
+				"promotion::data_promotion_basic::heavy_data_promotion_test",
+				"--exact",
+				"--show-output"
+			],
+			"cwd": "${workspaceFolder}"
 		}
 	]
 }
