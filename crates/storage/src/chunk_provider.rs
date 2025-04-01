@@ -74,10 +74,6 @@ impl ChunkProvider {
             let offsets = start_offsets1
                 .0
                 .iter()
-                // .filter_map(|so| {
-                //     checked_add_i32_u64(**so, *sm_range_start) // translate into ledger-relative space
-                //     .map(|mapped_start| mapped_start + (*data_tx_offset as u64))
-                // })
                 .map(|mapped_start| *mapped_start + (*data_tx_offset as i32))
                 .collect::<Vec<_>>();
 
@@ -230,15 +226,7 @@ mod tests {
             let chunk = chunk_provider
                 .get_chunk_by_data_root(DataLedger::Publish, data_root, original_chunk.tx_offset)?
                 .unwrap();
-            // let chunk_size = config.chunk_size as usize;
-            // let start = chunk_offset as usize * chunk_size;
             let packed_chunk = chunk.as_packed().unwrap();
-
-            // let unpacked_chunk = unpack(
-            //     &packed_chunk,
-            //     config.entropy_packing_iterations,
-            //     config.chunk_size.try_into().unwrap(),
-            // );
 
             let unpacked_data = unpack_with_entropy(
                 &packed_chunk,
