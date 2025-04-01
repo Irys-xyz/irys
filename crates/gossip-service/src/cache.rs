@@ -1,11 +1,11 @@
 use crate::types::{GossipError, GossipResult};
-use irys_types::{BlockHash, ChunkPathHash, GossipData, H256};
-use std::net::SocketAddr;
-use std::ops::DerefMut;
+use core::net::SocketAddr;
+use core::time::Duration;
+use irys_types::{BlockHash, ChunkPathHash, GossipData, IrysTransactionId, H256};
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 /// Tracks which peers have seen what data to avoid sending duplicates
@@ -18,6 +18,7 @@ pub struct GossipCache {
 }
 
 impl GossipCache {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -73,8 +74,7 @@ impl GossipCache {
                 chunks
                     .get(&chunk_path_hash)
                     .and_then(|peer_map| peer_map.get(peer_ip))
-                    .map(|&last_seen| now.duration_since(last_seen) <= within)
-                    .unwrap_or(false)
+                    .is_some_and(|&last_seen| now.duration_since(last_seen) <= within)
             }
             GossipData::Transaction(transaction) => {
                 let txs = self
@@ -83,8 +83,7 @@ impl GossipCache {
                     .map_err(|e| GossipError::Cache(e.to_string()))?;
                 txs.get(&transaction.id)
                     .and_then(|peer_map| peer_map.get(peer_ip))
-                    .map(|&last_seen| now.duration_since(last_seen) <= within)
-                    .unwrap_or(false)
+                    .is_some_and(|&last_seen| now.duration_since(last_seen) <= within)
             }
             GossipData::Block(block) => {
                 let blocks = self
@@ -94,8 +93,7 @@ impl GossipCache {
                 blocks
                     .get(&block.block_hash)
                     .and_then(|peer_map| peer_map.get(peer_ip))
-                    .map(|&last_seen| now.duration_since(last_seen) <= within)
-                    .unwrap_or(false)
+                    .is_some_and(|&last_seen| now.duration_since(last_seen) <= within)
             }
         };
 
@@ -118,27 +116,27 @@ impl GossipCache {
                 .chunks
                 .write()
                 .map_err(|e| GossipError::Cache(e.to_string()))?;
-            let mut chunks = chunks_guard.deref_mut();
-            cleanup_chunks(&mut chunks);
-        }
+            let chunks = &mut *chunks_guard;
+            cleanup_chunks(chunks);
+        };
 
         {
             let mut txs_guard = self
                 .transactions
                 .write()
                 .map_err(|e| GossipError::Cache(e.to_string()))?;
-            let mut txs = txs_guard.deref_mut();
-            cleanup_chunks(&mut txs);
-        }
+            let txs = &mut *txs_guard;
+            cleanup_chunks(txs);
+        };
 
         {
             let mut blocks_guard = self
                 .blocks
                 .write()
                 .map_err(|e| GossipError::Cache(e.to_string()))?;
-            let mut blocks = blocks_guard.deref_mut();
-            cleanup_chunks(&mut blocks);
-        }
+            let blocks = &mut *blocks_guard;
+            cleanup_chunks(blocks);
+        };
 
         Ok(())
     }

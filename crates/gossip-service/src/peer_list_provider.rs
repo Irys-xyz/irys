@@ -1,8 +1,8 @@
-use irys_database::reth_db::Database;
+use core::net::SocketAddr;
+use irys_database::reth_db::Database as _;
 use irys_database::tables::{CompactPeerListItem, PeerListItems};
 use irys_database::{insert_peer_list_item, walk_all};
 use irys_types::{Address, DatabaseProvider, PeerListItem};
-use std::net::SocketAddr;
 
 #[derive(Debug, Clone)]
 pub struct PeerListProvider {
@@ -10,7 +10,8 @@ pub struct PeerListProvider {
 }
 
 impl PeerListProvider {
-    pub fn new(db: DatabaseProvider) -> Self {
+    #[must_use]
+    pub const fn new(db: DatabaseProvider) -> Self {
         Self { db }
     }
 

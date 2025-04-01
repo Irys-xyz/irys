@@ -1,4 +1,5 @@
-use crate::types::{InternalGossipError};
+use crate::server_data_handler::GossipServerDataHandler;
+use crate::types::InternalGossipError;
 use crate::{
     cache::GossipCache,
     client::GossipClient,
@@ -7,16 +8,16 @@ use crate::{
     PeerListProvider,
 };
 use actix::{Actor, Addr, Context, Handler};
-use irys_actors::mempool_service::{TxExistenceQuery};
+use core::net::SocketAddr;
+use core::time::Duration;
+use irys_actors::mempool_service::TxExistenceQuery;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
 use irys_api_client::ApiClient;
 use irys_database::tables::CompactPeerListItem;
 use irys_types::{DatabaseProvider, GossipData};
-use rand::seq::IteratorRandom;
-use std::net::SocketAddr;
-use std::{sync::Arc, time::Duration};
+use rand::seq::IteratorRandom as _;
+use std::sync::Arc;
 use tokio::{sync::mpsc, time};
-use crate::server_data_handler::GossipServerDataHandler;
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -37,7 +38,7 @@ impl<T> ServiceHandleWithShutdownSignal<T> {
     pub fn spawn<F, Fut>(name: Option<impl Into<String>>, f: F) -> Self
     where
         F: FnOnce(mpsc::Receiver<()>) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = T> + Send + 'static,
+        Fut: core::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
@@ -69,7 +70,7 @@ impl<T> ServiceHandleWithShutdownSignal<T> {
     }
 
     /// Waits for the task to exit or immediately returns if the task has already exited. To get
-    ///  the execution result, call [ServiceHandleWithShutdownSignal::stop].
+    ///  the execution result, call [`ServiceHandleWithShutdownSignal::stop`].
     pub async fn wait_for_exit(&mut self) -> Result<T, tokio::task::JoinError> {
         let handle = &mut self.handle;
         handle.await
@@ -87,7 +88,7 @@ pub struct GossipService {
 }
 
 impl GossipService {
-    /// Create a new gossip service. To run the service, use the [GossipService::run] method.
+    /// Create a new gossip service. To run the service, use the [`GossipService::run`] method.
     /// Also returns a channel to send trusted gossip data to the service. Trusted data should
     /// be sent by the internal components of the system only after complete validation.
     pub fn new(
@@ -116,7 +117,7 @@ impl GossipService {
         )
     }
 
-    pub async fn run<TMemPoolService>(
+    pub fn run<TMemPoolService>(
         mut self,
         mempool: Addr<TMemPoolService>,
         api_client: impl ApiClient + 'static,
@@ -134,7 +135,7 @@ impl GossipService {
             api_client,
             cache: self.cache.clone(),
         };
-        let server = GossipServer::new(self.cache.clone(), server_data_handler, self.peer_list.clone());
+        let server = GossipServer::new(server_data_handler, self.peer_list.clone());
 
         let server = server.run(&self.server_address, self.server_port)?;
         let server_handle = server.handle();
@@ -250,7 +251,7 @@ impl GossipService {
                     Ok(())
                 } else {
                     Err(GossipError::Internal(InternalGossipError::Unknown(
-                        format!("{:?}", errors),
+                        format!("{errors:?}"),
                     )))
                 }
             },
@@ -317,12 +318,14 @@ pub enum GossipSource {
 }
 
 impl GossipSource {
-    pub fn from_ip(ip: SocketAddr) -> Self {
-        GossipSource::External(ip)
+    #[must_use]
+    pub const fn from_ip(ip: SocketAddr) -> Self {
+        Self::External(ip)
     }
 
-    pub fn is_internal(&self) -> bool {
-        matches!(self, GossipSource::Internal)
+    #[must_use]
+    pub const fn is_internal(&self) -> bool {
+        matches!(self, Self::Internal)
     }
 }
 

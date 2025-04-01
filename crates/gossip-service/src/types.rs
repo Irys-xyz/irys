@@ -16,8 +16,8 @@ pub enum GossipError {
 }
 
 impl GossipError {
-    pub fn unknown(e: impl ToString) -> Self {
-        GossipError::Internal(InternalGossipError::Unknown(e.to_string()))
+    pub fn unknown(error: impl ToString) -> Self {
+        Self::Internal(InternalGossipError::Unknown(error.to_string()))
     }
 }
 

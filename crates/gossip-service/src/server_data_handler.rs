@@ -1,13 +1,15 @@
-use std::net::SocketAddr;
+use crate::types::{tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError};
 use crate::{GossipCache, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
-use irys_actors::mempool_service::{ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage};
+use core::net::SocketAddr;
+use irys_actors::mempool_service::{
+    ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
+};
 use irys_api_client::ApiClient;
-use std::sync::Arc;
 use irys_types::{GossipData, IrysBlockHeader, IrysTransactionHeader, UnpackedChunk, H256};
-use crate::types::{tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError};
+use std::sync::Arc;
 
-/// Handles data received by the GossipServer
+/// Handles data received by the `GossipServer`
 #[derive(Debug)]
 pub struct GossipServerDataHandler<M, A>
 where
@@ -25,20 +27,24 @@ where
 impl<M, A> GossipServerDataHandler<M, A>
 where
     M: Handler<TxIngressMessage>
-    + Handler<ChunkIngressMessage>
-    + Handler<TxExistenceQuery>
-    + Actor<Context = Context<M>>,
+        + Handler<ChunkIngressMessage>
+        + Handler<TxExistenceQuery>
+        + Actor<Context = Context<M>>,
     A: ApiClient,
 {
-    pub(crate) async fn handle_chunk(&self, chunk: UnpackedChunk, source_address: SocketAddr) -> GossipResult<()>
-    {
+    pub(crate) async fn handle_chunk(
+        &self,
+        chunk: UnpackedChunk,
+        source_address: SocketAddr,
+    ) -> GossipResult<()> {
         match self.mempool.send(ChunkIngressMessage(chunk.clone())).await {
             Ok(message_result) => {
                 match message_result {
                     Ok(()) => {
                         // Success. Mempool will send the tx data to the internal mempool,
                         //  but we still need to update the cache with the source address.
-                        self.cache.record_seen(source_address, &GossipData::Chunk(chunk))
+                        self.cache
+                            .record_seen(source_address, &GossipData::Chunk(chunk))
                     }
                     Err(e) => {
                         match e {
@@ -52,25 +58,19 @@ where
                             ChunkIngressError::InvalidProof => Err(GossipError::InvalidData(
                                 InvalidDataError::ChunkInvalidProof,
                             )),
-                            ChunkIngressError::InvalidDataHash => {
-                                Err(GossipError::InvalidData(
-                                    InvalidDataError::ChinkInvalidDataHash,
-                                ))
-                            }
-                            ChunkIngressError::InvalidChunkSize => {
-                                Err(GossipError::InvalidData(
-                                    InvalidDataError::ChunkInvalidChunkSize,
-                                ))
-                            }
+                            ChunkIngressError::InvalidDataHash => Err(GossipError::InvalidData(
+                                InvalidDataError::ChinkInvalidDataHash,
+                            )),
+                            ChunkIngressError::InvalidChunkSize => Err(GossipError::InvalidData(
+                                InvalidDataError::ChunkInvalidChunkSize,
+                            )),
                             // ===== Internal errors
                             ChunkIngressError::DatabaseError => {
                                 Err(GossipError::Internal(InternalGossipError::Database))
                             }
-                            ChunkIngressError::ServiceUninitialized => {
-                                Err(GossipError::Internal(
-                                    InternalGossipError::ServiceUninitialized,
-                                ))
-                            }
+                            ChunkIngressError::ServiceUninitialized => Err(GossipError::Internal(
+                                InternalGossipError::ServiceUninitialized,
+                            )),
                             ChunkIngressError::Other(other) => {
                                 Err(GossipError::Internal(InternalGossipError::Unknown(other)))
                             }
@@ -87,7 +87,11 @@ where
         }
     }
 
-    pub(crate) async fn handle_transaction(&self, tx: IrysTransactionHeader, source_address: SocketAddr) -> GossipResult<()> {
+    pub(crate) async fn handle_transaction(
+        &self,
+        tx: IrysTransactionHeader,
+        source_address: SocketAddr,
+    ) -> GossipResult<()> {
         match self.mempool.send(TxIngressMessage(tx.clone())).await {
             Ok(message_result) => {
                 match message_result {
@@ -147,13 +151,16 @@ where
         }
     }
 
-    pub(crate) async fn handle_block_header(&self, irys_block_header: IrysBlockHeader, source_address: SocketAddr) -> GossipResult<()> where
-    {
+    pub(crate) async fn handle_block_header(
+        &self,
+        irys_block_header: IrysBlockHeader,
+        source_address: SocketAddr,
+    ) -> GossipResult<()> where {
         tracing::debug!(
-                "Gossip block received from peer {}: {:?}",
-                source_address,
-                irys_block_header.block_hash
-            );
+            "Gossip block received from peer {}: {:?}",
+            source_address,
+            irys_block_header.block_hash
+        );
 
         // Get all transaction IDs from the block
         let data_tx_ids = irys_block_header
@@ -185,15 +192,16 @@ where
         }
 
         // Fetch missing transactions from the source peer
-        let missing_txs = self.api_client
+        let missing_txs = self
+            .api_client
             .get_transactions(source_address, &missing_tx_ids)
             .await
             .map_err(|e| {
                 tracing::error!(
-                        "Failed to fetch transactions from peer {}: {}",
-                        source_address,
-                        e
-                    );
+                    "Failed to fetch transactions from peer {}: {}",
+                    source_address,
+                    e
+                );
                 GossipError::unknown(e)
             })?;
 
@@ -247,9 +255,7 @@ where
                 }
             } else {
                 return Err(GossipError::InvalidData(InvalidDataError::InvalidBlock(
-                    format!(                        "Missing transaction {} in block from peer {}",
-                                                    tx_id,
-                                                    source_address)
+                    format!("Missing transaction {tx_id} in block from peer {source_address}"),
                 )));
             }
         }
@@ -260,16 +266,17 @@ where
         Ok(())
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, GossipError>
-    {
+    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
         self.mempool
             .send(TxExistenceQuery(tx_id))
             .await
             .map_err(GossipError::unknown)?
-            .map_err(|e| {
-                tx_ingress_error_to_gossip_error(e).unwrap_or(GossipError::unknown(
-                    "Did not receive an error from mempool where an error was expected",
-                ))
+            .map_err(|error| {
+                tx_ingress_error_to_gossip_error(error).unwrap_or_else(|| {
+                    GossipError::unknown(
+                        "Did not receive an error from mempool where an error was expected",
+                    )
+                })
             })
     }
 }
