@@ -395,7 +395,6 @@ pub async fn start_irys_node(
                                 .collect::<eyre::Result<()>>()
                         })
                         .expect("inserting commitment tx should succeed");
-                    
                     irys_db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
                     .unwrap();
 
