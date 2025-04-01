@@ -16,9 +16,11 @@ tables! {
     /// Maps a partition relative offset to a chunk's path hashes
     /// note: mdbx keys are always sorted, so range queries work :)
     /// TODO: use custom Compact impl for Vec<u8> so we don't have problems
-    table ChunkPathHashByOffset<Key = PartitionChunkOffset, Value = ChunkPathHashes>;
+    /// Also change/split this to leverage key-sorting to only store a single tx_path_hash entry/data_root
+    table ChunkPathHashesByOffset<Key = PartitionChunkOffset, Value = ChunkPathHashes>;
 
     /// Maps a chunk's data path hash to the full data path
+    /// TODO: change how we store these to reduce duplication (use dupsort + tree traversal indicies)
     table ChunkDataPathByPathHash<Key = ChunkPathHash, Value = ChunkDataPath>;
 
     /// Maps a tx path hash to the full tx path
@@ -83,17 +85,17 @@ mod tests {
         };
 
         write_tx
-            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(1), path_hashes.clone())?;
+            .put::<ChunkPathHashesByOffset>(PartitionChunkOffset::from(1), path_hashes.clone())?;
         write_tx
-            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(100), path_hashes.clone())?;
+            .put::<ChunkPathHashesByOffset>(PartitionChunkOffset::from(100), path_hashes.clone())?;
         write_tx
-            .put::<ChunkPathHashByOffset>(PartitionChunkOffset::from(0), path_hashes.clone())?;
+            .put::<ChunkPathHashesByOffset>(PartitionChunkOffset::from(0), path_hashes.clone())?;
 
         write_tx.commit()?;
 
         let read_tx = db.tx()?;
 
-        let mut read_cursor = read_tx.cursor_read::<ChunkPathHashByOffset>()?;
+        let mut read_cursor = read_tx.cursor_read::<ChunkPathHashesByOffset>()?;
 
         let walker = read_cursor.walk(None)?;
 
