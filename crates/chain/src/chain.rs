@@ -242,11 +242,10 @@ impl IrysNodeCtx {
         info!("Downloading block index...");
         let block_index: Arc<tokio::sync::Mutex<Vec<BlockIndexItem>>> =
             Arc::new(Mutex::new(Vec::new()));
-        let block_index_clone = block_index.clone();
         let block_index_request = fetch_block_index(
             peers.first().expect("at least one peer"),
             &client,
-            block_index_clone,
+            block_index.clone(),
         )
         .await;
 
