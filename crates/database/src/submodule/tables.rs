@@ -20,7 +20,7 @@ tables! {
     table ChunkPathHashesByOffset<Key = PartitionChunkOffset, Value = ChunkPathHashes>;
 
     /// Maps a chunk's data path hash to the full data path
-    /// TODO: change how we store these to reduce duplication (use dupsort + tree traversal indicies)
+    /// TODO: change how we store these to reduce duplication (use dupsort + tree traversal indices)
     table ChunkDataPathByPathHash<Key = ChunkPathHash, Value = ChunkDataPath>;
 
     /// Maps a tx path hash to the full tx path
