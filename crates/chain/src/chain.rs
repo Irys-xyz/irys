@@ -117,7 +117,6 @@ async fn fetch_blocks(
         .iter()
         .map(|block_index_item| {
             let url = format!("http://{}/v1/block/{}", peer, block_index_item.block_hash);
-            let client = client.clone();
 
             async move {
                 match client.get(url).send().await {
@@ -149,7 +148,6 @@ async fn fetch_block_index(
     block_index: Arc<Mutex<Vec<BlockIndexItem>>>,
 ) {
     let url = format!("http://{}/v1/block_index", peer);
-    let client = client.clone();
 
     match client.get(url).send().await {
         Ok(mut response) => {
