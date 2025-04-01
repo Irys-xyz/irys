@@ -53,6 +53,7 @@ actix = "0.13.5"
 actix-rt = "2.10.0"
 actix-web = "4.9.0"
 actix-http = "3.9.0"
+awc = "3.5.1"
 base58 = "0.2.0"
 tokio-stream = "0.1"
 alloy-consensus = { path = "./ext/alloy/crates/consensus", default-features = false }

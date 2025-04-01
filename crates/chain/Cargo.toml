@@ -51,7 +51,7 @@ actix.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 
-awc = "3.5"
+awc.workspace = true
 modular-bitfield.workspace = true
 reth-cli-runner.workspace = true
 futures.workspace = true

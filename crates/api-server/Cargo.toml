@@ -14,7 +14,7 @@ irys-config.workspace = true
 #
 
 socket2 = "0.5.8"
-awc = "3.5.1"
+awc.workspace = true
 base58.workspace = true
 reth.workspace = true
 reth-db.workspace = true
