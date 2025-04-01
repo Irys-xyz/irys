@@ -645,7 +645,10 @@ impl EpochServiceActor {
             let ledgers = self.ledgers.read().unwrap();
             slot_needs = ledgers.get_slot_needs(ledger);
         }
-        let mut capacity_count = capacity_partitions.len() as u32;
+        let mut capacity_count: u32 = capacity_partitions
+            .len()
+            .try_into()
+            .expect("Value exceeds u32::MAX");
 
         // Iterate over slots that need partitions and assign them
         for (slot_index, num_needed) in slot_needs {

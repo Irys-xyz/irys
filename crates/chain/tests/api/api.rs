@@ -1,8 +1,9 @@
 // todo delete the whole module. the tests are ignored anyway. They can be restored in the future
 
 use actix_http::StatusCode;
+use alloy_core::primitives::U256;
+use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_chain::start_irys_node;
 use irys_config::IrysNodeConfig;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 
@@ -14,9 +15,11 @@ use actix_web::{
 };
 use base58::ToBase58;
 use irys_types::{Config, TxChunkOffset};
+use reth_primitives::GenesisAccount;
 use tracing::info;
 
-#[ignore]
+use crate::utils::start_node_config;
+
 #[actix_web::test]
 async fn heavy_api_end_to_end_test_32b() {
     if PACKING_TYPE == PackingType::CPU {
@@ -26,46 +29,42 @@ async fn heavy_api_end_to_end_test_32b() {
     }
 }
 
-#[ignore]
 #[actix_web::test]
 async fn heavy_api_end_to_end_test_256kb() {
     api_end_to_end_test(256 * 1024).await;
 }
 
 async fn api_end_to_end_test(chunk_size: usize) {
-    use irys_types::{
-        irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, StorageConfig, UnpackedChunk,
-    };
+    use irys_types::{irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, UnpackedChunk};
     use rand::Rng;
     use std::time::Duration;
     use tokio::time::sleep;
     use tracing::{debug, info};
+    let entropy_packing_iterations = 1_000;
     let testnet_config = Config {
         chunk_size: chunk_size.try_into().unwrap(),
+        entropy_packing_iterations,
         ..Config::testnet()
     };
-    let miner_signer = IrysSigner::from_config(&testnet_config);
+    let chain_id = testnet_config.chain_id;
+    let mut node_config = IrysNodeConfig::new(&testnet_config);
 
-    let storage_config = StorageConfig {
-        chunk_size: chunk_size as u64,
-        num_chunks_in_partition: 10,
-        num_chunks_in_recall_range: 2,
-        num_partitions_in_slot: 1,
-        miner_address: miner_signer.address(),
-        min_writes_before_sync: 1,
-        entropy_packing_iterations: 1_000,
-        chunk_migration_depth: 1, // Testnet / single node config
-        chain_id: testnet_config.chain_id,
-    };
-    let entropy_packing_iterations = storage_config.entropy_packing_iterations;
+    let irys = IrysSigner::random_signer(&testnet_config);
+    node_config.extend_genesis_accounts(vec![(
+        irys.address(),
+        GenesisAccount {
+            balance: U256::from(1000),
+            ..Default::default()
+        },
+    )]);
 
-    let handle = start_irys_node(
-        IrysNodeConfig::new(&testnet_config),
-        storage_config,
-        testnet_config.clone(),
+    let (handle, _tmp_dir) = start_node_config(
+        &format!("api_end_to_end_{}_test_", chunk_size),
+        Some(testnet_config.clone()),
+        Some(node_config),
     )
-    .await
-    .unwrap();
+    .await;
+
     handle.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
@@ -73,8 +72,8 @@ async fn api_end_to_end_test(chunk_size: usize) {
         reth_http_url: None,
         block_index: None,
         block_tree: None,
-        db: handle.db,
-        mempool: handle.actor_addresses.mempool,
+        db: handle.db.clone(),
+        mempool: handle.actor_addresses.mempool.clone(),
         chunk_provider: handle.chunk_provider.clone(),
         config: testnet_config.clone(),
     };
@@ -89,13 +88,20 @@ async fn api_end_to_end_test(chunk_size: usize) {
     )
     .await;
 
+    wait_for_packing(
+        handle.actor_addresses.packing.clone(),
+        Some(Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+
     // Create 2.5 chunks worth of data *  fill the data with random bytes
     let data_size = chunk_size * 2_usize;
     let mut data_bytes = vec![0u8; data_size];
     rand::thread_rng().fill(&mut data_bytes[..]);
 
     // Create a new Irys API instance & a signed transaction
-    let irys = IrysSigner::random_signer(&testnet_config);
+
     let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
     let tx = irys.sign_transaction(tx).unwrap();
 
@@ -128,7 +134,9 @@ async fn api_end_to_end_test(chunk_size: usize) {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: TxChunkOffset::from(index as u32),
+            tx_offset: TxChunkOffset::from(
+                TryInto::<u32>::try_into(index).expect("Value exceeds u32::MAX"),
+            ),
         };
 
         // Make a POST request with JSON payload
@@ -145,7 +153,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     }
     let id: String = tx.header.id.as_bytes().to_base58();
     let mut attempts = 1;
-    let max_attempts = 20;
+    let max_attempts = 40;
 
     let delay = Duration::from_secs(1);
 
@@ -200,7 +208,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
                 &packed_chunk,
                 entropy_packing_iterations,
                 chunk_size,
-                testnet_config.chain_id,
+                chain_id,
             );
             assert_eq!(
                 unpacked_chunk.bytes.0,
@@ -230,4 +238,6 @@ async fn api_end_to_end_test(chunk_size: usize) {
         "Chunk could not be retrieved after {} attempts",
         attempts
     );
+
+    handle.stop().await;
 }
