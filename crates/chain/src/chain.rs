@@ -5,7 +5,6 @@ use actix::{Actor, Addr, System, SystemRegistry};
 use actix::{Arbiter, SystemService};
 use actix_web::dev::Server;
 use alloy_eips::BlockNumberOrTag;
-use futures::future::join_all;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
 use irys_actors::cache_service::ChunkCacheService;
 use irys_actors::ema_service::EmaService;
