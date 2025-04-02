@@ -190,7 +190,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         // Validate commitments (if there are some)
         if let Some(commitment_ledger) = commitments_ledger {
-            let read_tx = self.db.tx()?;
+            let read_tx = self.db.tx().expect("to create a database read tx");
             let _commitment_txs = commitment_ledger
                 .tx_ids
                 .iter()
@@ -200,11 +200,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    Box::pin(
-                        async move { Err(eyre::eyre!("Failed to collect commitment tx: {}", e)) },
-                    )
-                })?;
+                .expect("to be able to retrieve all of the commitment tx headers locally");
 
             // TODO: Non epoch blocks and epoch blocks treat the commitments ledger a little differently
             // during the epoch, stake and pledge commitments accumulate waiting to be finalized when the

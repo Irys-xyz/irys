@@ -87,6 +87,7 @@ impl PartitionAssignments {
             .or(self.capacity_partitions.get(&partition_hash).copied())
     }
 
+    // TODO: convert to Display impl for PartitionAssignments
     pub fn print_assignments(&self) {
         debug!(
             "Partition Assignments ({}):",
@@ -838,7 +839,7 @@ impl EpochServiceActor {
             match commitment_tx.commitment_type {
                 irys_primitives::CommitmentType::Stake => stake_commitments.push(commitment_tx),
                 irys_primitives::CommitmentType::Pledge => pledge_commitments.push(commitment_tx),
-                _ => {} // Ignore any other commitment types
+                _ => unimplemented!(),
             }
         }
 
