@@ -1386,12 +1386,11 @@ impl IrysNode {
             gossip_tx.clone(),
         );
 
-        let gossip_service_handle = gossip_service
-            .run(
-                mempool_service.clone(),
-                block_discovery.clone(),
-                irys_api_client::IrysApiClient::new(),
-            )?;
+        let gossip_service_handle = gossip_service.run(
+            mempool_service.clone(),
+            block_discovery.clone(),
+            irys_api_client::IrysApiClient::new(),
+        )?;
 
         // set up the price oracle
         let price_oracle = self.init_price_oracle();
@@ -1679,7 +1678,7 @@ impl IrysNode {
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
-        gossip_sender: tokio::sync::mpsc::Sender<GossipData>
+        gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     ) -> actix::Addr<BlockDiscoveryActor> {
         let block_discovery_actor = BlockDiscoveryActor {
             block_index_guard: block_index_guard.clone(),
@@ -1690,7 +1689,7 @@ impl IrysNode {
             vdf_config: self.vdf_config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
-            gossip_sender
+            gossip_sender,
         };
         let block_discovery_arbiter = Arbiter::new();
         let block_discovery =

@@ -1,10 +1,10 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use crate::Arbitrary;
 use alloy_primitives::Address;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::Arbitrary;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status")]

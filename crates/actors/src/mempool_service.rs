@@ -283,9 +283,7 @@ impl Handler<TxIngressMessage> for MempoolService {
         let gossip_data = GossipData::Transaction(tx.clone());
 
         let _ = tokio::task::spawn(async move {
-            if let Err(error) = gossip_sender
-                .unwrap()
-                .send(gossip_data).await {
+            if let Err(error) = gossip_sender.unwrap().send(gossip_data).await {
                 tracing::error!("Failed to send gossip data: {:?}", error);
             }
         });
@@ -503,9 +501,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         let gossip_data = GossipData::Chunk(chunk);
 
         let _ = tokio::task::spawn(async move {
-            if let Err(error) = gossip_sender
-                .unwrap()
-                .send(gossip_data).await {
+            if let Err(error) = gossip_sender.unwrap().send(gossip_data).await {
                 tracing::error!("Failed to send gossip data: {:?}", error);
             }
         });

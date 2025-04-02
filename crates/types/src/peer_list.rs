@@ -84,8 +84,7 @@ where
     size
 }
 
-fn decode_address(buf: &[u8]) -> (SocketAddr, usize)
-{
+fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
     let tag = buf[0];
     let address = match tag {
         0 => {
@@ -113,7 +112,7 @@ fn decode_address(buf: &[u8]) -> (SocketAddr, usize)
     };
 
     let consumed = match tag {
-        0 => 7, // 4 bytes header + 1 byte tag + 4 bytes IPv4 + 2 bytes port
+        0 => 7,  // 4 bytes header + 1 byte tag + 4 bytes IPv4 + 2 bytes port
         1 => 19, // 4 bytes header + 1 byte tag + 16 bytes IPv6 + 2 bytes port
         _ => 1,  // 4 bytes header + 1 byte tag
     };

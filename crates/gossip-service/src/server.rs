@@ -35,12 +35,12 @@ where
     peer_list: PeerListProvider,
 }
 
-impl<M, B, A> Clone for  GossipServer<M, B, A>
+impl<M, B, A> Clone for GossipServer<M, B, A>
 where
     M: Handler<TxIngressMessage>
-    + Handler<ChunkIngressMessage>
-    + Handler<TxExistenceQuery>
-    + Actor<Context = Context<M>>,
+        + Handler<ChunkIngressMessage>
+        + Handler<TxExistenceQuery>
+        + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone + 'static,
 {

@@ -19,7 +19,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient +  Clone + 'static,
+    A: ApiClient + Clone + 'static,
 {
     pub mempool: Addr<M>,
     pub block_discovery: Addr<B>,
@@ -30,9 +30,9 @@ where
 impl<M, B, A> Clone for GossipServerDataHandler<M, B, A>
 where
     M: Handler<TxIngressMessage>
-    + Handler<ChunkIngressMessage>
-    + Handler<TxExistenceQuery>
-    + Actor<Context = Context<M>>,
+        + Handler<ChunkIngressMessage>
+        + Handler<TxExistenceQuery>
+        + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone,
 {

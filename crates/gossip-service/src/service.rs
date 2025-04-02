@@ -191,12 +191,7 @@ impl GossipService {
             spawn_broadcast_task(mempool_data_receiver, Arc::clone(&service));
 
         let gossip_service_handle =
-            spawn_main_task(
-                server,
-                server_handle,
-                cleanup_handle,
-                broadcast_task_handle
-            );
+            spawn_main_task(server, server_handle, cleanup_handle, broadcast_task_handle);
 
         Ok(gossip_service_handle)
     }

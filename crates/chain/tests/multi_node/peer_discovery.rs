@@ -14,8 +14,8 @@ use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
 use irys_chain::start_irys_node;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{Config, PeerAddress};
 use irys_types::{build_user_agent, irys::IrysSigner, PeerResponse, VersionRequest};
+use irys_types::{Config, PeerAddress};
 use reth_primitives::GenesisAccount;
 
 #[actix_web::test]
@@ -99,9 +99,9 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let version_request = VersionRequest {
         mining_address: miner_signer_1.address(),
         chain_id: miner_signer_1.chain_id,
-        address:PeerAddress {
+        address: PeerAddress {
             gossip: "127.0.0.1:8080".parse().expect("valid socket address"),
-            api: "127.0.0.1:8081".parse().expect("valid socket address")
+            api: "127.0.0.1:8081".parse().expect("valid socket address"),
         },
         user_agent: Some(build_user_agent("miner1", "0.1.0")),
         ..Default::default()
@@ -179,7 +179,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         chain_id: miner_signer_3.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
-            api: "127.0.0.3:8081".parse().expect("valid socket address")
+            api: "127.0.0.3:8081".parse().expect("valid socket address"),
         },
         user_agent: Some(build_user_agent("miner3", "0.1.0")),
         ..Default::default()
@@ -226,7 +226,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     // Parse String to JSON
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
-    let peer_list: Vec<PeerAddress> = serde_json::from_str(&body_str).expect("Failed to parse JSON");
+    let peer_list: Vec<PeerAddress> =
+        serde_json::from_str(&body_str).expect("Failed to parse JSON");
     println!("Parsed JSON: {:?}", peer_list);
 
     assert!(
