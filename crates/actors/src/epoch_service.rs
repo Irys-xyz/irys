@@ -2022,7 +2022,7 @@ mod tests {
         let storage_module_infos = epoch_service
             .initialize(&database_provider, storage_module_config.clone())
             .await
-            .unwrap(); // epoch_service.handle(GetGenesisStorageModulesMessage(storage_module_config.clone()), &mut ctx);
+            .unwrap();
         debug!("{:#?}", storage_module_infos);
 
         genesis_block.block_hash = H256::from_slice(&[0; 32]);
