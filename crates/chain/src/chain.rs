@@ -435,7 +435,7 @@ pub async fn start_irys_node(
                     storage_modules.push(arc_module.clone());
                 }
 
-                let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
+                let (gossip_service, gossip_sender) = irys_gossip_service::GossipService::new(
                     &config.gossip_service_bind_ip,
                     config.gossip_service_port,
                     irys_db.clone(),
@@ -448,7 +448,6 @@ pub async fn start_irys_node(
                     block_index_guard.clone(),
                     storage_config.clone(),
                     service_senders.clone(),
-                    gossip_tx.clone(),
                 );
                 let block_tree_arbiter = Arbiter::new();
                 SystemRegistry::set(BlockTreeService::start_in_arbiter(
@@ -479,7 +478,7 @@ pub async fn start_irys_node(
                     storage_modules.clone(),
                     block_tree_guard.clone(),
                     &config,
-                    gossip_tx,
+                    gossip_sender.clone(),
                 );
                 let mempool_arbiter = Arbiter::new();
                 SystemRegistry::set(MempoolService::start_in_arbiter(
@@ -487,8 +486,6 @@ pub async fn start_irys_node(
                     |_| mempool_service,
                 ));
                 let mempool_addr = MempoolService::from_registry();
-
-                let gossip_service_handle = gossip_service.run(mempool_addr.clone(), irys_api_client::IrysApiClient::new()).unwrap();
 
                 let chunk_migration_service = ChunkMigrationService::new(
                     block_index.clone(),
@@ -531,12 +528,16 @@ pub async fn start_irys_node(
                     vdf_config: vdf_config.clone(),
                     vdf_steps_guard: vdf_steps_guard.clone(),
                     service_senders: service_senders.clone(),
+                    gossip_sender: gossip_sender.clone(),
                 };
                 let block_discovery_arbiter = Arbiter::new();
                 let block_discovery_addr = BlockDiscoveryActor::start_in_arbiter(
                     &block_discovery_arbiter.handle(),
                     |_| block_discovery_actor,
                 );
+
+                let gossip_service_handle = gossip_service.run(mempool_addr.clone(), block_discovery_addr.clone(), irys_api_client::IrysApiClient::new()).unwrap();
+
 
                 // set up the price oracle
                 let price_oracle = match config.oracle_config {
@@ -1288,7 +1289,6 @@ impl IrysNode {
             &mut arbiters,
             &service_senders,
             &block_index_guard,
-            gossip_tx.clone(),
         );
         let block_tree_guard = block_tree_service.send(GetBlockTreeGuardMessage).await?;
 
@@ -1312,14 +1312,8 @@ impl IrysNode {
             reth_db,
             &storage_modules,
             &block_tree_guard,
-            gossip_tx,
+            gossip_tx.clone(),
         );
-
-        let gossip_service_handle = gossip_service
-            .run(
-                mempool_service.clone(),
-                irys_api_client::IrysApiClient::new(),
-            )?;
 
         // spawn the chunk migration service
         self.init_chunk_migration_service(
@@ -1349,7 +1343,15 @@ impl IrysNode {
             &block_index_guard,
             partition_assignments_guard,
             &vdf_steps_guard,
+            gossip_tx.clone(),
         );
+
+        let gossip_service_handle = gossip_service
+            .run(
+                mempool_service.clone(),
+                block_discovery.clone(),
+                irys_api_client::IrysApiClient::new(),
+            )?;
 
         // set up the price oracle
         let price_oracle = self.init_price_oracle();
@@ -1637,6 +1639,7 @@ impl IrysNode {
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
+        gossip_sender: tokio::sync::mpsc::Sender<GossipData>
     ) -> actix::Addr<BlockDiscoveryActor> {
         let block_discovery_actor = BlockDiscoveryActor {
             block_index_guard: block_index_guard.clone(),
@@ -1647,6 +1650,7 @@ impl IrysNode {
             vdf_config: self.vdf_config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
+            gossip_sender
         };
         let block_discovery_arbiter = Arbiter::new();
         let block_discovery =
@@ -1746,7 +1750,6 @@ impl IrysNode {
         arbiters: &mut Vec<Arbiter>,
         service_senders: &ServiceSenders,
         block_index_guard: &BlockIndexReadGuard,
-        gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     ) -> actix::Addr<BlockTreeService> {
         let block_tree_service = BlockTreeService::new(
             irys_db.clone(),
@@ -1755,7 +1758,6 @@ impl IrysNode {
             block_index_guard.clone(),
             self.storage_config.clone(),
             service_senders.clone(),
-            gossip_sender,
         );
         let block_tree_arbiter = Arbiter::new();
         let block_tree_service =

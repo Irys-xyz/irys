@@ -19,31 +19,36 @@ use irys_actors::mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngr
 use irys_api_client::ApiClient;
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, UnpackedChunk};
 use std::sync::Arc;
+use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_database::tables::CompactPeerListItem;
 
 #[derive(Debug)]
-pub struct GossipServer<M, A>
+pub struct GossipServer<M, B, A>
 where
     M: Handler<TxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
+    B: Handler<BlockDiscoveredMessage>
+    + Actor<Context = Context<B>>,
     A: ApiClient + 'static,
 {
-    data_handler: GossipServerDataHandler<M, A>,
+    data_handler: GossipServerDataHandler<M, B, A>,
     peer_list: PeerListProvider,
 }
 
-impl<M, A> GossipServer<M, A>
+impl<M, B, A> GossipServer<M, B, A>
 where
     M: Handler<TxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
+    B: Handler<BlockDiscoveredMessage>
+    + Actor<Context = Context<B>>,
     A: ApiClient + 'static,
 {
     pub const fn new(
-        gossip_server_data_handler: GossipServerDataHandler<M, A>,
+        gossip_server_data_handler: GossipServerDataHandler<M, B, A>,
         peer_list: PeerListProvider,
     ) -> Self {
         Self {
@@ -66,10 +71,10 @@ where
                 .wrap(middleware::Logger::default())
                 .service(
                     web::scope("/gossip")
-                        .route("/transaction", web::post().to(handle_transaction::<M, A>))
-                        .route("/chunk", web::post().to(handle_chunk::<M, A>))
-                        .route("/block", web::post().to(handle_block::<M, A>))
-                        .route("/health", web::get().to(handle_health_check::<M, A>)),
+                        .route("/transaction", web::post().to(handle_transaction::<M, B, A>))
+                        .route("/chunk", web::post().to(handle_chunk::<M, B, A>))
+                        .route("/block", web::post().to(handle_block::<M, B, A>))
+                        .route("/health", web::get().to(handle_health_check::<M, B, A>)),
                 )
         })
         .bind((bind_address, port))
@@ -106,8 +111,8 @@ fn check_peer(
     }
 }
 
-async fn handle_block<M, A>(
-    server: Data<Arc<GossipServer<M, A>>>,
+async fn handle_block<M, B, A>(
+    server: Data<Arc<GossipServer<M, B, A>>>,
     irys_block_header_json: web::Json<IrysBlockHeader>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse
@@ -116,6 +121,8 @@ where
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
+    B: Handler<BlockDiscoveredMessage>
+    + Actor<Context = Context<B>>,
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", irys_block_header_json);
@@ -137,8 +144,8 @@ where
     HttpResponse::Ok().finish()
 }
 
-async fn handle_transaction<M, A>(
-    server: Data<Arc<GossipServer<M, A>>>,
+async fn handle_transaction<M, B, A>(
+    server: Data<Arc<GossipServer<M, B, A>>>,
     irys_transaction_header_json: web::Json<IrysTransactionHeader>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse
@@ -147,6 +154,8 @@ where
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
+    B: Handler<BlockDiscoveredMessage>
+    + Actor<Context = Context<B>>,
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", irys_transaction_header_json);
@@ -169,8 +178,8 @@ where
     HttpResponse::Ok().finish()
 }
 
-async fn handle_chunk<M, A>(
-    server: Data<Arc<GossipServer<M, A>>>,
+async fn handle_chunk<M, B, A>(
+    server: Data<Arc<GossipServer<M, B, A>>>,
     unpacked_chunk_json: web::Json<UnpackedChunk>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse
@@ -179,6 +188,8 @@ where
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
+    B: Handler<BlockDiscoveredMessage>
+    + Actor<Context = Context<B>>,
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", unpacked_chunk_json);
@@ -200,8 +211,8 @@ where
     HttpResponse::Ok().finish()
 }
 
-async fn handle_health_check<M, A>(
-    server: Data<Arc<GossipServer<M, A>>>,
+async fn handle_health_check<M, B, A>(
+    server: Data<Arc<GossipServer<M, B, A>>>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse
 where
@@ -209,6 +220,8 @@ where
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
+    B: Handler<BlockDiscoveredMessage>
+    + Actor<Context = Context<B>>,
     A: ApiClient,
 {
     let Some(peer_addr) = req.peer_addr() else {

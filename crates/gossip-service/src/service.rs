@@ -27,6 +27,7 @@ use irys_types::{DatabaseProvider, GossipData};
 use rand::seq::IteratorRandom as _;
 use std::sync::Arc;
 use tokio::{sync::mpsc, time};
+use irys_actors::block_discovery::BlockDiscoveredMessage;
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -142,9 +143,10 @@ impl GossipService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<M, A>(
+    pub fn run<M, B, A>(
         mut self,
         mempool: Addr<M>,
+        block_discovery: Addr<B>,
         api_client: A,
     ) -> GossipResult<ServiceHandleWithShutdownSignal<GossipResult<()>>>
     where
@@ -152,12 +154,15 @@ impl GossipService {
             + Handler<ChunkIngressMessage>
             + Handler<TxExistenceQuery>
             + Actor<Context = Context<M>>,
+        B: Handler<BlockDiscoveredMessage>
+        + Actor<Context = Context<B>>,
         A: ApiClient + 'static,
     {
         tracing::debug!("Staring gossip service");
 
         let server_data_handler = GossipServerDataHandler {
             mempool,
+            block_discovery,
             api_client,
             cache: Arc::clone(&self.cache),
         };

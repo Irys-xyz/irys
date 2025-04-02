@@ -5,7 +5,7 @@ use crate::{
 };
 use actix::prelude::*;
 use irys_database::{block_header_by_hash, tx_header_by_txid, DataLedger};
-use irys_types::{DatabaseProvider, DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader, StorageConfig, VDFStepsConfig};
+use irys_types::{DatabaseProvider, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader, IrysTransactionHeader, StorageConfig, VDFStepsConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
 use std::sync::{Arc};
@@ -30,6 +30,8 @@ pub struct BlockDiscoveryActor {
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Service Senders
     pub service_senders: ServiceSenders,
+    /// Gossip message bus
+    pub gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
 }
 
 /// When a block is discovered, either produced locally or received from
@@ -61,6 +63,7 @@ impl BlockDiscoveryActor {
         vdf_config: VDFStepsConfig,
         vdf_steps_guard: VdfStepsReadGuard,
         service_senders: ServiceSenders,
+        gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         Self {
             block_index_guard,
@@ -71,6 +74,7 @@ impl BlockDiscoveryActor {
             vdf_config,
             vdf_steps_guard,
             service_senders,
+            gossip_sender
         }
     }
 }
@@ -194,6 +198,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             prev_output = ?new_block_header.vdf_limiter_info.prev_output,
             "Validating block"
         );
+
+        let gossip_sender = self.gossip_sender.clone();
         Box::pin(async move {
             let block_header_clone = new_block_header.clone(); // Clone before moving
 
@@ -224,11 +230,17 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     all_txs.extend_from_slice(&publish_txs);
                     block_tree_addr
                         .send(BlockPreValidatedMessage(
-                            new_block_header,
+                            new_block_header.clone(),
                             Arc::new(all_txs),
                         ))
                         .await
                         .unwrap();
+
+                    // Send the block to the gossip bus
+                    if let Err(error)  = gossip_sender.send(GossipData::Block(new_block_header.as_ref().clone())).await {
+                        tracing::error!("Failed to send gossip message: {}", error);
+                    }
+
                     Ok(())
                 }
                 Err(err) => Err(eyre::eyre!("Block validation error {:?}", err)),

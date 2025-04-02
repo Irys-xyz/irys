@@ -8,28 +8,34 @@ use irys_actors::mempool_service::{
 use irys_api_client::ApiClient;
 use irys_types::{GossipData, IrysBlockHeader, IrysTransactionHeader, UnpackedChunk, H256};
 use std::sync::Arc;
+use irys_actors::block_discovery::{BlockDiscoveredMessage};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub struct GossipServerDataHandler<M, A>
+pub struct GossipServerDataHandler<M, B, A>
 where
     M: Handler<TxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
+    B: Handler<BlockDiscoveredMessage>
+    + Actor<Context = Context<B>>,
     A: ApiClient + 'static,
 {
     pub mempool: Addr<M>,
+    pub block_discovery: Addr<B>,
     pub cache: Arc<GossipCache>,
     pub api_client: A,
 }
 
-impl<M, A> GossipServerDataHandler<M, A>
+impl<M, B, A> GossipServerDataHandler<M, B, A>
 where
     M: Handler<TxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
+    B: Handler<BlockDiscoveredMessage>
+        + Actor<Context = Context<B>>,
     A: ApiClient,
 {
     pub(crate) async fn handle_chunk(
@@ -263,7 +269,13 @@ where
 
         // Record block in cache
         self.cache
-            .record_seen(source_address, &GossipData::Block(irys_block_header))?;
+            .record_seen(source_address, &GossipData::Block(irys_block_header.clone()))?;
+
+        self.block_discovery.send(BlockDiscoveredMessage(Arc::new(irys_block_header))).await.map_err(|mailbox_error| {
+            GossipError::unknown(&mailbox_error)
+        })?.map_err(|error_report| {
+            GossipError::unknown(&error_report)
+        })?;
         Ok(())
     }
 
