@@ -1161,7 +1161,6 @@ impl IrysNode {
             genesis_header.system_ledgers[0].tx_ids.push(commitment_id);
         }
 
-        // println!("{}", serde_json::to_string_pretty(&genesis_header).unwrap());
 
         let irys_genesis = Arc::new(genesis_header);
 
