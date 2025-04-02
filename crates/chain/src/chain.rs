@@ -65,6 +65,7 @@ use reth::{
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
+use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -107,7 +108,7 @@ pub struct IrysNodeCtx {
 async fn fetch_blocks(
     peer: &SocketAddr,
     client: &awc::Client,
-    block_index: Arc<Mutex<Vec<BlockIndexItem>>>,
+    block_index: Arc<Mutex<VecDeque<BlockIndexItem>>>,
 ) {
     let _ = block_index
         .clone()
@@ -144,7 +145,7 @@ async fn fetch_blocks(
 async fn fetch_block_index(
     peer: &SocketAddr,
     client: &awc::Client,
-    block_index: Arc<Mutex<Vec<BlockIndexItem>>>,
+    block_index: Arc<Mutex<VecDeque<BlockIndexItem>>>,
     height: u64,
     limit: u32,
 ) {
@@ -160,8 +161,8 @@ async fn fetch_block_index(
                     Ok(remote_block_index) => {
                         info!("Got block_index from {}: {:?}", peer, remote_block_index);
                         let mut index = block_index.lock().await;
-                        // overwrite entire block index
-                        *index = remote_block_index;
+                        //TODO include block height before inserting into index dequeue?
+                        index.extend(remote_block_index.into_iter());
                     }
                     Err(e) => {
                         warn!("Error reading body from {}: {}", peer, e);
@@ -243,18 +244,20 @@ impl IrysNodeCtx {
             vec!["127.0.0.1:8080".parse().expect("valid SocketAddr from str")];
         let peers = Arc::new(Mutex::new(trusted_peers.clone()));
 
+        //initialize queue
+        let block_queue: Arc<tokio::sync::Mutex<VecDeque<BlockIndexItem>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
+
         info!("Discovering peers...");
         let peer_list_requests = fetch_peers(peers.clone(), &client, trusted_peers).await;
 
         info!("Downloading block index...");
-        let block_index: Arc<tokio::sync::Mutex<Vec<BlockIndexItem>>> =
-            Arc::new(Mutex::new(Vec::new()));
         let peers = peers.lock().await;
         //fixme: hard coded to first 50 blocks, needs to fetch them all
         let block_index_request = fetch_block_index(
             peers.first().expect("at least one peer"),
             &client,
-            block_index.clone(),
+            block_queue.clone(),
             0,
             50,
         )
@@ -264,7 +267,7 @@ impl IrysNodeCtx {
         let block_requests = fetch_blocks(
             peers.first().expect("at least one peer"),
             &client,
-            block_index.clone(),
+            block_queue.clone(),
         )
         .await;
 
