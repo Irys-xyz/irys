@@ -181,7 +181,7 @@ async fn fetch_peers(
     peers: Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
     client: &awc::Client,
     peers_to_ask: Vec<SocketAddr>,
-) -> u32 {
+) -> u64 {
     let futures = peers_to_ask.into_iter().map(|peer| {
         let client = client.clone();
         let peers = peers.clone();
@@ -258,16 +258,18 @@ impl IrysNodeCtx {
         let peer_list_requests = fetch_peers(peers.clone(), &client, trusted_peers).await;
 
         info!("Downloading block index...");
-        let peers = peers.lock().await;
-        //fixme: hard coded to first 50 blocks, needs to fetch them all
-        let block_index_request = fetch_block_index(
-            peers.first().expect("at least one peer"),
-            &client,
-            block_queue.clone(),
-            0,
-            50,
-        )
-        .await;
+        let peers_guard = peers.lock().await;
+        let peer = peers_guard.first().expect("at least one peer");
+        let mut height = 0;
+        let limit = 50;
+        loop {
+            let fetched =
+                fetch_block_index(peer, &client, block_queue.clone(), height, limit).await;
+            if fetched == 0 {
+                break; // no more blocks
+            }
+            height += fetched;
+        }
 
         info!("Fetching latest blocks...");
         while let Some(block) = block_queue.lock().await.pop_front() {
