@@ -68,6 +68,9 @@ where
                             ChunkIngressError::InvalidChunkSize => Err(GossipError::InvalidData(
                                 InvalidDataError::ChunkInvalidChunkSize,
                             )),
+                            ChunkIngressError::InvalidDataSize => Err(GossipError::InvalidData(
+                                InvalidDataError::ChunkInvalidDataSize,
+                            )),
                             // ===== Internal errors
                             ChunkIngressError::DatabaseError => {
                                 Err(GossipError::Internal(InternalGossipError::Database))

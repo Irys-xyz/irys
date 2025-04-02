@@ -7,10 +7,7 @@ use actix::prelude::*;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
-use irys_types::{
-    DatabaseProvider, DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader,
-    StorageConfig, VDFStepsConfig,
-};
+use irys_types::{DatabaseProvider, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader, IrysTransactionHeader, StorageConfig, VDFStepsConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
 use std::sync::Arc;

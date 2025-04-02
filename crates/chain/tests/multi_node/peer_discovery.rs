@@ -14,7 +14,7 @@ use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
 use irys_chain::start_irys_node;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::Config;
+use irys_types::{Config, PeerAddress};
 use irys_types::{build_user_agent, irys::IrysSigner, PeerResponse, VersionRequest};
 use reth_primitives::GenesisAccount;
 
@@ -99,7 +99,10 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let version_request = VersionRequest {
         mining_address: miner_signer_1.address(),
         chain_id: miner_signer_1.chain_id,
-        address: "127.0.0.1:8080".parse().expect("valid socket address"),
+        address:PeerAddress {
+            gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
+            api: "127.0.0.3:8081".parse().expect("valid socket address")
+        },
         user_agent: Some(build_user_agent("miner1", "0.1.0")),
         ..Default::default()
     };
@@ -156,7 +159,10 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         PeerResponse::Accepted(accepted) => {
             assert_eq!(accepted.peers.len(), 1, "Expected 1 peers");
             assert!(
-                accepted.peers.contains(&"127.0.0.1:8080".parse().unwrap()),
+                accepted.peers.contains(&PeerAddress {
+                    gossip: "127.0.0.1:8080".parse().unwrap(),
+                    api: "127.0.0.1:8081".parse().unwrap()
+                }),
                 "Missing expected peer 127.0.0.1:8080"
             );
         }
@@ -167,7 +173,10 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let version_request = VersionRequest {
         mining_address: miner_signer_3.address(),
         chain_id: miner_signer_3.chain_id,
-        address: "127.0.0.3:8080".parse().expect("valid socket address"),
+        address: PeerAddress {
+            gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
+            api: "127.0.0.3:8081".parse().expect("valid socket address")
+        },
         user_agent: Some(build_user_agent("miner3", "0.1.0")),
         ..Default::default()
     };
@@ -189,11 +198,17 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         PeerResponse::Accepted(accepted) => {
             assert_eq!(accepted.peers.len(), 2, "Expected 2 peers");
             assert!(
-                accepted.peers.contains(&"127.0.0.1:8080".parse().unwrap()),
+                accepted.peers.contains(&PeerAddress {
+                    gossip: "127.0.0.1:8080".parse().unwrap(),
+                    api: "127.0.0.1:8081".parse().unwrap()
+                }),
                 "Missing expected peer 127.0.0.1:8080"
             );
             assert!(
-                accepted.peers.contains(&"127.0.0.2:8080".parse().unwrap()),
+                accepted.peers.contains(&PeerAddress {
+                    gossip: "127.0.0.1:8080".parse().unwrap(),
+                    api: "127.0.0.1:8081".parse().unwrap()
+                }),
                 "Missing expected peer 127.0.0.2:8080"
             );
         }
