@@ -10,8 +10,10 @@ use tokio::time::{sleep, Duration};
 
 #[actix_web::test]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
+    let trusted_peers = vec!["127.0.0.1:8080".parse().expect("valid SocketAddr expected")];
     let testnet_config_genesis = Config {
         port: 8080,
+        trusted_peers: trusted_peers.clone(),
         ..Config::testnet()
     };
     let ctx_genesis_node = setup_with_config(
@@ -51,6 +53,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     //start peer1
     let testnet_config_peer1 = Config {
         port: 8081,
+        trusted_peers: trusted_peers.clone(),
         ..Config::testnet()
     };
     let ctx_peer1_node =
@@ -61,6 +64,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     //start peer2
     let testnet_config_peer2 = Config {
         port: 8082,
+        trusted_peers,
         ..Config::testnet()
     };
     let ctx_peer2_node =
