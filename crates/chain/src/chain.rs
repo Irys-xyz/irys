@@ -252,9 +252,7 @@ impl IrysNodeCtx {
     //TODO url paths as ENUMS? Could update external api tests too
     async fn sync_state_from_peers(&self) -> eyre::Result<()> {
         let client = awc::Client::default();
-        //FIX ME - load the ip and port correctly
-        let trusted_peers: Vec<SocketAddr> =
-            vec!["127.0.0.1:8080".parse().expect("valid SocketAddr from str")];
+        let trusted_peers = self.config.trusted_peers.clone();
         let peers = Arc::new(Mutex::new(trusted_peers.clone()));
 
         //initialize queue
