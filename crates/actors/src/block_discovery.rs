@@ -190,27 +190,21 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         // Validate commitments (if there are some)
         if let Some(commitment_ledger) = commitments_ledger {
-            let _commitment_txs = match commitment_ledger
+            let read_tx = self.db.tx()?;
+            let _commitment_txs = commitment_ledger
                 .tx_ids
                 .iter()
                 .map(|txid| {
-                    self.db
-                        .view_eyre(|tx| commitment_tx_by_txid(tx, txid))
-                        .and_then(|opt| {
-                            opt.ok_or_else(|| {
-                                eyre::eyre!("No commitment tx found for txid {:?}", txid)
-                            })
-                        })
+                    commitment_tx_by_txid(&read_tx, txid).and_then(|opt| {
+                        opt.ok_or_else(|| eyre::eyre!("No commitment tx found for txid {:?}", txid))
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(txs) => txs,
-                Err(e) => {
-                    return Box::pin(async move {
-                        Err(eyre::eyre!("Failed to collect commitment tx: {}", e))
-                    });
-                }
-            };
+                .map_err(|e| {
+                    Box::pin(
+                        async move { Err(eyre::eyre!("Failed to collect commitment tx: {}", e)) },
+                    )
+                })?;
 
             // TODO: Non epoch blocks and epoch blocks treat the commitments ledger a little differently
             // during the epoch, stake and pledge commitments accumulate waiting to be finalized when the
