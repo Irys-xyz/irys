@@ -30,6 +30,7 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 /// Run this test, until you see `waiting for tx header...`, then start the JS client test
 /// that's it!, just kill this test once the JS client test finishes.
 async fn external_api() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug,irys_actors::mining=error,irys_actors::packing=error,irys_chain::vdf=off,irys_vdf::vdf_state=off");
     let temp_dir = setup_tracing_and_temp_dir(Some("external_api"), false);
 
     let mut testnet_config = Config::testnet();
