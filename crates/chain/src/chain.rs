@@ -108,9 +108,9 @@ pub struct IrysNodeCtx {
 async fn fetch_blocks(
     peer: &SocketAddr,
     client: &awc::Client,
-    block_index: Arc<Mutex<VecDeque<BlockIndexItem>>>,
+    block_queue: Arc<Mutex<VecDeque<BlockIndexItem>>>,
 ) {
-    let _ = block_index
+    let _ = block_queue
         .clone()
         .lock()
         .await
