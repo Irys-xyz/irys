@@ -1,3 +1,4 @@
+use crate::api::external_api::block_index_endpoint_request;
 use crate::utils::mine_block;
 use irys_actors::BlockFinalizedMessage;
 use irys_chain::{start_irys_node, IrysNodeCtx};
@@ -13,10 +14,12 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         port: 8080,
         ..Config::testnet()
     };
-    let ctx_genesis_node =
-        setup_with_config(testnet_config_genesis, "heavy_sync_chain_state_genesis")
-            .await
-            .expect("found invalid genesis ctx");
+    let ctx_genesis_node = setup_with_config(
+        testnet_config_genesis.clone(),
+        "heavy_sync_chain_state_genesis",
+    )
+    .await
+    .expect("found invalid genesis ctx");
 
     // start mining
     // advance one block
@@ -50,23 +53,51 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         port: 8081,
         ..Config::testnet()
     };
-    let ctx_peer1_node = setup_with_config(testnet_config_peer1, "heavy_sync_chain_state_peer1")
-        .await
-        .expect("found invalid genesis ctx for peer1");
+    let ctx_peer1_node =
+        setup_with_config(testnet_config_peer1.clone(), "heavy_sync_chain_state_peer1")
+            .await
+            .expect("found invalid genesis ctx for peer1");
 
     //start peer2
     let testnet_config_peer2 = Config {
         port: 8082,
         ..Config::testnet()
     };
-    let ctx_peer2_node = setup_with_config(testnet_config_peer2, "heavy_sync_chain_state_peer2")
-        .await
-        .expect("found invalid genesis ctx for peer2");
+    let ctx_peer2_node =
+        setup_with_config(testnet_config_peer2.clone(), "heavy_sync_chain_state_peer2")
+            .await
+            .expect("found invalid genesis ctx for peer2");
 
     //FIXME: magic number could be a constant e.g. 3 blocks worth of time?
     sleep(Duration::from_millis(10000)).await;
 
-    //run asserts. http requests to peer1 and peer2 index after x seconds to ensure they have begun syncing the blocks
+    let mut result_genesis = block_index_endpoint_request(
+        &format!("http:127.0.0.1:{}", &testnet_config_genesis.port),
+        0,
+        1,
+    )
+    .await;
+
+    //http requests to peer1 and peer2 index after x seconds to ensure they have begun syncing the blocks
+    let mut result_peer1 = block_index_endpoint_request(
+        &format!("http:127.0.0.1:{}", &testnet_config_peer1.port),
+        0,
+        1,
+    )
+    .await;
+
+    let mut result_peer2 = block_index_endpoint_request(
+        &format!("http:127.0.0.1:{}", &testnet_config_peer2.port),
+        0,
+        1,
+    )
+    .await;
+
+    let body_genesis = result_genesis.body().await.expect("expected a valid body");
+    let body_peer1 = result_peer1.body().await.expect("expected a valid body");
+    let body_peer2 = result_peer2.body().await.expect("expected a valid body");
+    assert_eq!(body_genesis, body_peer1);
+    assert_eq!(body_peer1, body_peer2);
 
     Ok(())
 }
