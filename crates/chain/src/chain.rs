@@ -65,7 +65,7 @@ use reth::{
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -170,12 +170,13 @@ async fn fetch_block_index(
     }
 }
 
+/// Fetches `peers` list from each `peers_to_ask` via http. Adds new entries to `peers`
 async fn fetch_peers(
     peers: Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
     client: &awc::Client,
-    trusted_peers: Vec<SocketAddr>,
-) {
-    let _ = trusted_peers.iter().map(|peer| {
+    peers_to_ask: Vec<SocketAddr>,
+) -> u32 {
+    let futures = peers_to_ask.into_iter().map(|peer| {
         let client = client.clone();
         let peers = peers.clone();
         let url = format!("http://{}/peer_list", peer);
@@ -186,14 +187,18 @@ async fn fetch_peers(
                     if response.status().is_success() {
                         match response.json::<Vec<SocketAddr>>().await {
                             Ok(new_peers) => {
-                                info!(
-                                    "Got {} peers from {}: {:?}",
-                                    new_peers.len(),
-                                    peer,
-                                    new_peers
-                                );
-                                let mut peers = peers.lock().await;
-                                peers.extend(new_peers.into_iter());
+                                let mut peers_guard = peers.lock().await;
+                                let existing: HashSet<_> = peers_guard.iter().cloned().collect();
+                                let mut added = 0;
+                                for p in new_peers {
+                                    if existing.contains(&p) {
+                                        continue;
+                                    }
+                                    peers_guard.push(p);
+                                    added += 1;
+                                }
+                                info!("Got {} peers from {}", &added, peer);
+                                return added;
                             }
                             Err(e) => {
                                 warn!("Error reading json body from {}: {}", peer, e);
@@ -207,8 +212,11 @@ async fn fetch_peers(
                     warn!("Request to {} failed: {}", peer, e);
                 }
             }
+            0
         }
     });
+    let results = futures::future::join_all(futures).await;
+    results.iter().sum()
 }
 
 impl IrysNodeCtx {
