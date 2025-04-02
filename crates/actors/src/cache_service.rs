@@ -114,7 +114,7 @@ impl ChunkCacheService {
                     ?data_root,
                     ?last_height,
                     ?prune_height,
-                    "expiring ingress proof ",
+                    "expiring ingress proof",
                 );
                 write_tx.delete::<DataRootLRU>(data_root, None)?;
                 write_tx.delete::<IngressProofs>(data_root, None)?;
