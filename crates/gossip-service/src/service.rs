@@ -185,13 +185,17 @@ impl GossipService {
 
         let service = Arc::new(self);
 
-        let cleanup_handle = spawn_cache_cleanup_task(Arc::clone(&service.cache));
+        let cache_pruning_task_handle = spawn_cache_pruning_task(Arc::clone(&service.cache));
 
         let broadcast_task_handle =
             spawn_broadcast_task(mempool_data_receiver, Arc::clone(&service));
 
-        let gossip_service_handle =
-            spawn_main_task(server, server_handle, cleanup_handle, broadcast_task_handle);
+        let gossip_service_handle = spawn_main_task(
+            server,
+            server_handle,
+            cache_pruning_task_handle,
+            broadcast_task_handle,
+        );
 
         Ok(gossip_service_handle)
     }
@@ -253,18 +257,18 @@ impl GossipService {
     }
 }
 
-fn spawn_cache_cleanup_task(
+fn spawn_cache_pruning_task(
     cache: Arc<GossipCache>,
 ) -> ServiceHandleWithShutdownSignal<GossipResult<()>> {
     ServiceHandleWithShutdownSignal::spawn(
-        Some("gossip cache cleanup"),
+        Some("gossip cache pruning"),
         move |mut shutdown_rx| async move {
             let mut interval = time::interval(CACHE_CLEANUP_INTERVAL);
 
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if let Err(error) = cache.cleanup(CACHE_ENTRY_TTL) {
+                        if let Err(error) = cache.prune_expired(CACHE_ENTRY_TTL) {
                             tracing::error!("Failed to clean up cache: {}", error);
                             return Err(GossipError::Internal(InternalGossipError::CacheCleanup(error.to_string())));
                         }
@@ -321,7 +325,7 @@ fn spawn_broadcast_task(
 fn spawn_main_task(
     server: Server,
     server_handle: ServerHandle,
-    mut cleanup_handle: ServiceHandleWithShutdownSignal<GossipResult<()>>,
+    mut cache_pruning_task_handle: ServiceHandleWithShutdownSignal<GossipResult<()>>,
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal<GossipResult<()>>,
 ) -> ServiceHandleWithShutdownSignal<GossipResult<()>> {
     ServiceHandleWithShutdownSignal::spawn(Some("gossip main"), move |mut shutdown_rx| async move {
@@ -360,7 +364,7 @@ fn spawn_main_task(
             };
 
             tracing::info!("Stopping gossip cleanup");
-            handle_result(cleanup_handle.stop().await);
+            handle_result(cache_pruning_task_handle.stop().await);
             tracing::info!("Stopping gossip broadcast");
             handle_result(broadcast_task_handle.stop().await);
 

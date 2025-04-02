@@ -1224,7 +1224,9 @@ impl IrysNode {
                     let _ = main_actor_thread_shutdown_tx.try_send(());
 
                     debug!("Waiting for the main actor thread to finish");
-                    let reth_node_handle = actor_main_thread_handle.join().unwrap();
+                    let reth_node_handle = actor_main_thread_handle
+                        .join()
+                        .expect("to successfully join the actor thread handle");
 
                     reth_node_handle
                 };

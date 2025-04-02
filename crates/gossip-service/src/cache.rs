@@ -118,7 +118,7 @@ impl GossipCache {
     /// # Errors
     ///
     /// This function will return an error if the cache cannot be accessed.
-    pub fn cleanup(&self, older_than: Duration) -> GossipResult<()> {
+    pub fn prune_expired(&self, older_than: Duration) -> GossipResult<()> {
         let now = Instant::now();
 
         let cleanup_chunks = |map: &mut HashMap<H256, HashMap<SocketAddr, Instant>>| {
