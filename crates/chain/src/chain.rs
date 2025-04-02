@@ -36,6 +36,7 @@ use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::database;
 use irys_database::migration::check_db_version_and_run_migrations_if_needed;
 use irys_database::BlockIndexItem;
+use irys_database::DataLedger;
 use irys_packing::{PackingType, PACKING_TYPE};
 use irys_price_oracle::mock_oracle::MockOracle;
 use irys_price_oracle::IrysPriceOracle;
@@ -50,7 +51,7 @@ use irys_storage::{
 };
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
-    StorageConfig, CHUNK_SIZE, H256,
+    IrysTransactionHeader, StorageConfig, CHUNK_SIZE, H256,
 };
 use irys_types::{
     Config, DifficultyAdjustmentConfig, IrysBlockHeader, OracleConfig, PartitionChunkRange,
@@ -102,6 +103,41 @@ pub struct IrysNodeCtx {
     // Thread handles spawned by the start function
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
     _stop_guard: StopGuard,
+}
+
+async fn fetch_txn(
+    peer: &SocketAddr,
+    client: &awc::Client,
+    txn_id: H256,
+) -> Option<IrysTransactionHeader> {
+    let url = format!("http://{}/v1/tx/{}", peer, txn_id);
+
+    match client.get(url).send().await {
+        Ok(mut response) => {
+            if response.status().is_success() {
+                match response.json::<Vec<IrysTransactionHeader>>().await {
+                    Ok(txn) => {
+                        info!("Got txn header from {}: {:?}", peer, txn);
+                        let txn_header = txn.first().expect("valid txnid").clone();
+                        Some(txn_header)
+                    }
+                    Err(e) => {
+                        let msg = format!("Error reading body from {}: {}", peer, e);
+                        warn!(msg);
+                        None
+                    }
+                }
+            } else {
+                let msg = format!("Non-success from {}: {}", peer, response.status());
+                warn!(msg);
+                None
+            }
+        }
+        Err(e) => {
+            warn!("Request to {} failed: {}", peer, e);
+            None
+        }
+    }
 }
 
 //TODO spread requests across peers
@@ -258,6 +294,8 @@ impl IrysNodeCtx {
         //initialize queue
         let block_queue: Arc<tokio::sync::Mutex<VecDeque<BlockIndexItem>>> =
             Arc::new(Mutex::new(VecDeque::new()));
+        let txn_queue: Arc<tokio::sync::Mutex<VecDeque<H256>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
 
         info!("Discovering peers...");
         let _peer_list_requests = fetch_peers(peers.clone(), &client, trusted_peers).await;
@@ -283,10 +321,22 @@ impl IrysNodeCtx {
                 let block = Arc::new(irys_block);
                 let block_discovery_addr = self.actor_addresses.block_discovery_addr.clone();
                 let _ = block_discovery_addr.send(BlockDiscoveredMessage(block.clone()));
+                //add txns from block to txn queue
+                let mut txn_queue_guard = txn_queue.lock().await;
+                for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
+                    txn_queue_guard.push_back(tx.clone());
+                }
             }
         }
+
         info!("Fetching latest txns...");
-        // /v1//tx/{tx_id}
+        let peer = peers_guard.first().expect("at least one peer");
+        while let Some(txn_id) = txn_queue.lock().await.pop_front() {
+            if let Some(full_txn) = fetch_txn(peer, &client, txn_id).await {
+                let full_txn = Arc::new(full_txn);
+                //FIXME insert txn into db
+            }
+        }
 
         info!("Sync complete.");
         Ok(())
