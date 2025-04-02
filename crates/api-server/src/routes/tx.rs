@@ -125,26 +125,14 @@ pub fn get_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
 ) -> Result<IrysTransaction, ApiError> {
-    // Try storage transaction first
-    match get_storage_transaction(state, tx_id) {
-        Ok(tx_header) => {
-            return Ok(IrysTransaction::Storage(tx_header));
-        }
-        Err(ApiError::ErrNoId { .. }) => {
-            // Storage transaction not found, try commitment transaction
-            match get_commitment_transaction(state, tx_id) {
-                Ok(commitment_tx) => {
-                    return Ok(IrysTransaction::Commitment(commitment_tx));
-                }
-                Err(err) => {
-                    return Err(err);
-                }
+    get_storage_transaction(state, tx_id)
+        .map(IrysTransaction::Storage)
+        .or_else(|err| match err {
+            ApiError::ErrNoId { .. } => {
+                get_commitment_transaction(state, tx_id).map(IrysTransaction::Commitment)
             }
-        }
-        Err(err) => {
-            return Err(err);
-        }
-    }
+            other => Err(other),
+        })
 }
 
 // Modified to work only with storage transactions
