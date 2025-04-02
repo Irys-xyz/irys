@@ -20,7 +20,6 @@ use irys_actors::mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngr
 use irys_api_client::ApiClient;
 use irys_database::tables::CompactPeerListItem;
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, UnpackedChunk};
-use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct GossipServer<M, B, A>
@@ -30,10 +29,27 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + 'static,
+    A: ApiClient + Clone + 'static,
 {
     data_handler: GossipServerDataHandler<M, B, A>,
     peer_list: PeerListProvider,
+}
+
+impl<M, B, A> Clone for  GossipServer<M, B, A>
+where
+    M: Handler<TxIngressMessage>
+    + Handler<ChunkIngressMessage>
+    + Handler<TxExistenceQuery>
+    + Actor<Context = Context<M>>,
+    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    A: ApiClient + Clone + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            data_handler: self.data_handler.clone(),
+            peer_list: self.peer_list.clone(),
+        }
+    }
 }
 
 impl<M, B, A> GossipServer<M, B, A>
@@ -43,7 +59,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + 'static,
+    A: ApiClient + Clone + 'static,
 {
     pub const fn new(
         gossip_server_data_handler: GossipServerDataHandler<M, B, A>,
@@ -61,11 +77,11 @@ where
     ///
     /// If the server fails to bind to the specified address and port, an error is returned.
     pub fn run(self, bind_address: &str, port: u16) -> GossipResult<Server> {
-        let server = Arc::new(self);
+        let server = self;
 
         Ok(HttpServer::new(move || {
             App::new()
-                .app_data(Data::new(Arc::clone(&server)))
+                .app_data(Data::new(server.clone()))
                 .wrap(middleware::Logger::default())
                 .service(
                     web::scope("/gossip")
@@ -78,6 +94,8 @@ where
                         .route("/health", web::get().to(handle_health_check::<M, B, A>)),
                 )
         })
+        .shutdown_timeout(5)
+        .keep_alive(actix_web::http::KeepAlive::Disabled)
         .bind((bind_address, port))
         .map_err(|error| GossipError::Internal(InternalGossipError::Unknown(error.to_string())))?
         .run())
@@ -110,7 +128,7 @@ fn check_peer(
 }
 
 async fn handle_block<M, B, A>(
-    server: Data<Arc<GossipServer<M, B, A>>>,
+    server: Data<GossipServer<M, B, A>>,
     irys_block_header_json: web::Json<IrysBlockHeader>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse
@@ -120,7 +138,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient,
+    A: ApiClient + Clone,
 {
     tracing::debug!("Gossip data received: {:?}", irys_block_header_json);
     let peer = match check_peer(&server.peer_list, &req) {
@@ -142,7 +160,7 @@ where
 }
 
 async fn handle_transaction<M, B, A>(
-    server: Data<Arc<GossipServer<M, B, A>>>,
+    server: Data<GossipServer<M, B, A>>,
     irys_transaction_header_json: web::Json<IrysTransactionHeader>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse
@@ -152,7 +170,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient,
+    A: ApiClient + Clone,
 {
     tracing::debug!("Gossip data received: {:?}", irys_transaction_header_json);
     let peer = match check_peer(&server.peer_list, &req) {
@@ -175,7 +193,7 @@ where
 }
 
 async fn handle_chunk<M, B, A>(
-    server: Data<Arc<GossipServer<M, B, A>>>,
+    server: Data<GossipServer<M, B, A>>,
     unpacked_chunk_json: web::Json<UnpackedChunk>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse
@@ -185,7 +203,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient,
+    A: ApiClient + Clone,
 {
     tracing::debug!("Gossip data received: {:?}", unpacked_chunk_json);
     let peer = match check_peer(&server.peer_list, &req) {
@@ -207,7 +225,7 @@ where
 }
 
 async fn handle_health_check<M, B, A>(
-    server: Data<Arc<GossipServer<M, B, A>>>,
+    server: Data<GossipServer<M, B, A>>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse
 where
@@ -216,7 +234,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient,
+    A: ApiClient + Clone,
 {
     let Some(peer_addr) = req.peer_addr() else {
         return HttpResponse::BadRequest().finish();

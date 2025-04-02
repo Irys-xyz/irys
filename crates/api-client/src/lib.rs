@@ -7,7 +7,7 @@ use tracing::{debug, error};
 
 /// Trait defining the interface for the API client
 #[async_trait::async_trait]
-pub trait ApiClient: Send + Sync {
+pub trait ApiClient: Send + Sync + Clone {
     /// Fetch a transaction header by its ID from a peer
     async fn get_transaction(
         &self,
@@ -24,6 +24,7 @@ pub trait ApiClient: Send + Sync {
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
+#[derive(Clone)]
 pub struct IrysApiClient {
     client: Client,
 }
@@ -114,7 +115,7 @@ mod tests {
     use super::*;
 
     /// Mock implementation of the API client for testing
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     pub struct MockApiClient {
         pub expected_transactions: std::collections::HashMap<H256, Option<IrysTransactionHeader>>,
     }

@@ -155,8 +155,14 @@ impl GossipService {
             + Handler<TxExistenceQuery>
             + Actor<Context = Context<M>>,
         B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-        A: ApiClient + 'static,
+        A: ApiClient + Clone + 'static,
     {
+        // Ok(ServiceHandleWithShutdownSignal::spawn(Some("stub"), |a| {
+        //    async {
+        //        println!("Bibka");
+        //        Ok(())
+        //    }
+        // }))
         tracing::debug!("Staring gossip service");
 
         let server_data_handler = GossipServerDataHandler {
@@ -185,7 +191,12 @@ impl GossipService {
             spawn_broadcast_task(mempool_data_receiver, Arc::clone(&service));
 
         let gossip_service_handle =
-            spawn_main_task(server, server_handle, cleanup_handle, broadcast_task_handle);
+            spawn_main_task(
+                server,
+                server_handle,
+                cleanup_handle,
+                broadcast_task_handle
+            );
 
         Ok(gossip_service_handle)
     }
@@ -320,50 +331,56 @@ fn spawn_main_task(
 ) -> ServiceHandleWithShutdownSignal<GossipResult<()>> {
     ServiceHandleWithShutdownSignal::spawn(Some("gossip main"), move |mut shutdown_rx| async move {
         tracing::debug!("Starting gossip service watch thread");
-        tokio::select! {
-            _ = shutdown_rx.recv() => {
-                tracing::debug!("Gossip service shutdown signal received");
+
+        let tasks_shutdown_handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    tracing::debug!("Gossip service shutdown signal received");
+                }
+                cleanup_res = cleanup_handle.wait_for_exit() => {
+                    tracing::warn!("Gossip cleanup exited because: {:?}", cleanup_res);
+                }
+                broadcast_res = broadcast_task_handle.wait_for_exit() => {
+                    tracing::warn!("Gossip broadcast exited because: {:?}", broadcast_res);
+                }
             }
-            cleanup_res = cleanup_handle.wait_for_exit() => {
-                tracing::warn!("Gossip cleanup exited because: {:?}", cleanup_res);
+
+            tracing::debug!("Sending stop signal to server handle...");
+            server_handle.stop(true).await;
+            tracing::debug!("Server handle stop signal sent, waiting for server to shut down...");
+
+            tracing::debug!("Shutting down gossip service tasks");
+            let mut errors: Vec<GossipError> = vec![];
+
+            tracing::debug!("Gossip listener stopped");
+
+            let mut handle_result = |res: TaskExecutionResult| match res {
+                Ok(result) => match result {
+                    Ok(()) => {}
+                    Err(error) => errors.push(error),
+                },
+                Err(error) => errors.push(GossipError::Internal(InternalGossipError::Unknown(
+                    error.to_string(),
+                ))),
+            };
+
+            tracing::info!("Stopping gossip cleanup");
+            handle_result(cleanup_handle.stop().await);
+            tracing::info!("Stopping gossip broadcast");
+            handle_result(broadcast_task_handle.stop().await);
+
+            if errors.is_empty() {
+                tracing::info!("Gossip main task finished without errors");
+                Ok(())
+            } else {
+                Err(GossipError::Internal(InternalGossipError::Unknown(
+                    format!("{errors:?}"),
+                )))
             }
-            server_res = server => {
-                tracing::warn!("Gossip server exited because: {:?}", server_res);
-            }
-            broadcast_res = broadcast_task_handle.wait_for_exit() => {
-                tracing::warn!("Gossip broadcast exited because: {:?}", broadcast_res);
-            }
-        }
+        });
 
-        tracing::debug!("Shutting down gossip service tasks");
-        let mut errors: Vec<GossipError> = vec![];
-
-        server_handle.stop(true).await;
-        tracing::debug!("Gossip listener stopped");
-
-        let mut handle_result = |res: TaskExecutionResult| match res {
-            Ok(result) => match result {
-                Ok(()) => {}
-                Err(error) => errors.push(error),
-            },
-            Err(error) => errors.push(GossipError::Internal(InternalGossipError::Unknown(
-                error.to_string(),
-            ))),
-        };
-
-        tracing::info!("Stopping gossip cleanup");
-        handle_result(cleanup_handle.stop().await);
-        tracing::info!("Stopping gossip broadcast");
-        handle_result(broadcast_task_handle.stop().await);
-
-        if errors.is_empty() {
-            tracing::info!("Gossip main task finished without errors");
-            Ok(())
-        } else {
-            Err(GossipError::Internal(InternalGossipError::Unknown(
-                format!("{errors:?}"),
-            )))
-        }
+        let _ = server.await;
+        tasks_shutdown_handle.await.unwrap()
     })
 }
 

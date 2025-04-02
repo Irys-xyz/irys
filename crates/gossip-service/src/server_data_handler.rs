@@ -19,12 +19,31 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + 'static,
+    A: ApiClient +  Clone + 'static,
 {
     pub mempool: Addr<M>,
     pub block_discovery: Addr<B>,
     pub cache: Arc<GossipCache>,
     pub api_client: A,
+}
+
+impl<M, B, A> Clone for GossipServerDataHandler<M, B, A>
+where
+    M: Handler<TxIngressMessage>
+    + Handler<ChunkIngressMessage>
+    + Handler<TxExistenceQuery>
+    + Actor<Context = Context<M>>,
+    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    A: ApiClient + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            mempool: self.mempool.clone(),
+            block_discovery: self.block_discovery.clone(),
+            cache: self.cache.clone(),
+            api_client: self.api_client.clone(),
+        }
+    }
 }
 
 impl<M, B, A> GossipServerDataHandler<M, B, A>
@@ -34,7 +53,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient,
+    A: ApiClient + Clone,
 {
     pub(crate) async fn handle_chunk(
         &self,
