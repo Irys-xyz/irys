@@ -105,32 +105,39 @@ pub struct IrysNodeCtx {
 }
 
 //TODO spread requests across peers
-async fn fetch_block(peer: &SocketAddr, client: &awc::Client, block_index_item: BlockIndexItem) {
+async fn fetch_block(
+    peer: &SocketAddr,
+    client: &awc::Client,
+    block_index_item: BlockIndexItem,
+) -> Option<IrysBlockHeader> {
     let url = format!("http://{}/v1/block/{}", peer, block_index_item.block_hash);
 
-    async move {
-        match client.get(url).send().await {
-            Ok(mut response) => {
-                if response.status().is_success() {
-                    match response.json::<Vec<CombinedBlockHeader>>().await {
-                        Ok(block) => {
-                            info!("Got block from {}: {:?}", peer, block);
-                            //TODO here is the irys block header ... block.first().unwrap().irys;
-                        }
-                        Err(e) => {
-                            warn!("Error reading body from {}: {}", peer, e);
-                        }
+    match client.get(url).send().await {
+        Ok(mut response) => {
+            if response.status().is_success() {
+                match response.json::<Vec<CombinedBlockHeader>>().await {
+                    Ok(block) => {
+                        info!("Got block from {}: {:?}", peer, block);
+                        let irys_block_header = block.first().expect("valid block").irys.clone();
+                        Some(irys_block_header)
                     }
-                } else {
-                    warn!("Non-success from {}: {}", peer, response.status());
+                    Err(e) => {
+                        let msg = format!("Error reading body from {}: {}", peer, e);
+                        warn!(msg);
+                        None
+                    }
                 }
-            }
-            Err(e) => {
-                warn!("Request to {} failed: {}", peer, e);
+            } else {
+                let msg = format!("Non-success from {}: {}", peer, response.status());
+                warn!(msg);
+                None
             }
         }
-    };
-    ()
+        Err(e) => {
+            warn!("Request to {} failed: {}", peer, e);
+            None
+        }
+    }
 }
 
 /// Fetches a slice starting at `height` of size `limit` of the block index from a remote peer over HTTP.
@@ -274,9 +281,12 @@ impl IrysNodeCtx {
         info!("Fetching latest blocks...");
         let peer = peers_guard.first().expect("at least one peer");
         while let Some(block) = block_queue.lock().await.pop_front() {
-            let block_request = fetch_block(peer, &client, block);
-        }
+            if let block_request = fetch_block(peer, &client, block) {
+                /*
 
+                */
+            }
+        }
         info!("Fetching latest txns...");
         // /v1//tx/{tx_id}
 
