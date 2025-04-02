@@ -62,5 +62,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     //start two additional peers, instructing them to use the genesis peer as their trusted peer
 
+    //run asserts. http requests to peer1 and peer2 index after x seconds to ensure they have begun syncing the blocks
+
     Ok(())
 }
