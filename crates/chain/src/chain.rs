@@ -1,60 +1,54 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
 use crate::vdf::run_vdf;
-use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, Addr, System, SystemRegistry};
-use actix::{Arbiter, SystemService};
+use actix::{Actor, Addr, Arbiter, System, SystemRegistry, SystemService};
 use actix_web::dev::Server;
 use alloy_eips::BlockNumberOrTag;
-use irys_actors::block_tree_service::BlockTreeReadGuard;
-use irys_actors::cache_service::ChunkCacheService;
-use irys_actors::ema_service::EmaService;
-use irys_actors::packing::PackingConfig;
-use irys_actors::peer_list_service::PeerListService;
-use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
-use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerActor,
+    block_tree_service::BlockTreeReadGuard,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
+    ema_service::EmaService,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
         GetPartitionAssignmentsGuardMessage,
     },
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
+    packing::PackingConfig,
     packing::{PackingActor, PackingRequest},
+    peer_list_service::PeerListService,
+    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    services::ServiceSenders,
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService},
     ActorAddresses, BlockFinalizedMessage,
 };
-use irys_api_server::routes::block::CombinedBlockHeader;
-use irys_api_server::{create_listener, run_server, ApiState};
+use irys_api_server::{create_listener, routes::block::CombinedBlockHeader, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
-use irys_database::database;
-use irys_database::migration::check_db_version_and_run_migrations_if_needed;
-use irys_database::BlockIndexItem;
-use irys_database::DataLedger;
+use irys_database::{
+    database, migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables,
+    BlockIndex, BlockIndexItem, DataLedger, Initialized,
+};
 use irys_packing::{PackingType, PACKING_TYPE};
-use irys_price_oracle::mock_oracle::MockOracle;
-use irys_price_oracle::IrysPriceOracle;
+use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_storage::{
+    irys_consensus_data_db::open_or_create_irys_consensus_data_db,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
-    IrysTransactionHeader, StorageConfig, CHUNK_SIZE, H256,
-};
-use irys_types::{
-    Config, DifficultyAdjustmentConfig, IrysBlockHeader, OracleConfig, PartitionChunkRange,
+    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, Config,
+    DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader, OracleConfig,
+    PartitionChunkRange, StorageConfig, CHUNK_SIZE, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::rpc::eth::EthApiServer as _;
@@ -66,19 +60,18 @@ use reth::{
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
-use std::collections::{HashSet, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
-use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
-use std::thread::{self, JoinHandle};
 use std::{
+    collections::{HashSet, VecDeque},
     fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
+    path::PathBuf,
+    sync::atomic::AtomicU64,
     sync::{mpsc, Arc, RwLock},
+    thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::runtime::Runtime;
 use tokio::{
-    runtime::Handle,
+    runtime::{Handle, Runtime},
     sync::oneshot::{self},
     sync::Mutex,
 };
