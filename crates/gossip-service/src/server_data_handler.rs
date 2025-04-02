@@ -155,6 +155,7 @@ where
         &self,
         irys_block_header: IrysBlockHeader,
         source_address: SocketAddr,
+        source_api_address: SocketAddr,
     ) -> GossipResult<()> where {
         tracing::debug!(
             "Gossip block received from peer {}: {:?}",
@@ -194,12 +195,12 @@ where
         // Fetch missing transactions from the source peer
         let missing_txs = self
             .api_client
-            .get_transactions(source_address, &missing_tx_ids)
+            .get_transactions(source_api_address, &missing_tx_ids)
             .await
             .map_err(|error| {
                 tracing::error!(
                     "Failed to fetch transactions from peer {}: {}",
-                    source_address,
+                    source_api_address,
                     error
                 );
                 GossipError::unknown(&error)

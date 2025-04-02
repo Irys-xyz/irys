@@ -38,21 +38,21 @@ impl GossipClient {
         match data {
             GossipData::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/chunk", peer.address),
+                    format!("http://{}/gossip/chunk", peer.address.gossip),
                     unpacked_chunk,
                 )
                 .await?;
             }
             GossipData::Transaction(irys_transaction_header) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/transaction", peer.address),
+                    format!("http://{}/gossip/transaction", peer.address.gossip),
                     irys_transaction_header,
                 )
                 .await?;
             }
             GossipData::Block(irys_block_header) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/block", peer.address),
+                    format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,
                 )
                 .await?;
@@ -92,7 +92,7 @@ impl GossipClient {
         &self,
         peer: &CompactPeerListItem,
     ) -> GossipResult<CompactPeerListItem> {
-        let url = format!("http://{}/gossip/health", peer.address);
+        let url = format!("http://{}/gossip/health", peer.address.gossip);
 
         let response = self
             .client

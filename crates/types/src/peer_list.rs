@@ -1,4 +1,4 @@
-use crate::Compact;
+use crate::{Compact, PeerAddress};
 use arbitrary::Arbitrary;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,7 @@ impl PeerScore {
 pub struct PeerListItem {
     pub reputation_score: PeerScore,
     pub response_time: u16,
-    pub address: SocketAddr,
+    pub address: PeerAddress,
     pub last_seen: u64,
     pub is_online: bool,
 }
@@ -52,11 +52,73 @@ impl Default for PeerListItem {
         Self {
             reputation_score: PeerScore(0),
             response_time: 0,
-            address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+            address: PeerAddress {
+                gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+                api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+            },
             last_seen: Utc::now().timestamp_millis() as u64,
             is_online: false,
         }
     }
+}
+
+fn encode_address<B>(address: &SocketAddr, buf: &mut B) -> usize
+where
+    B: bytes::BufMut + AsMut<[u8]>,
+{
+    let mut size = 0;
+    match address {
+        SocketAddr::V4(addr4) => {
+            buf.put_u8(0); // Tag for IPv4
+            buf.put_slice(&addr4.ip().octets());
+            buf.put_u16(addr4.port());
+            size += 7; // 1 byte tag + 4 bytes IPv4 + 2 bytes port
+        }
+        SocketAddr::V6(addr6) => {
+            buf.put_u8(1); // Tag for IPv6
+            buf.put_slice(&addr6.ip().octets());
+            buf.put_u16(addr6.port());
+            size += 19; // 1 byte tag + 16 bytes IPv6 + 2 bytes port
+        }
+    };
+    size
+}
+
+fn decode_address(buf: &[u8]) -> (SocketAddr, usize)
+{
+    let tag = buf[0];
+    let address = match tag {
+        0 => {
+            // IPv4 address (needs 4 bytes IP + 2 bytes port after tag)
+            if buf.len() < 11 {
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0))
+            } else {
+                let ip_octets: [u8; 4] = buf[1..5].try_into().unwrap();
+                let port = u16::from_be_bytes(buf[5..7].try_into().unwrap());
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip_octets), port))
+            }
+        }
+        1 => {
+            // IPv6 address (needs 16 bytes IP + 2 bytes port after tag)
+            if buf.len() < 23 {
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0))
+            } else {
+                let mut ip_octets = [0u8; 16];
+                ip_octets.copy_from_slice(&buf[1..17]);
+                let port = u16::from_be_bytes(buf[17..19].try_into().unwrap());
+                SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip_octets), port, 0, 0))
+            }
+        }
+        _ => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+    };
+
+    let consumed = match tag {
+        0 => 7, // 4 bytes header + 1 byte tag + 4 bytes IPv4 + 2 bytes port
+        1 => 19, // 4 bytes header + 1 byte tag + 16 bytes IPv6 + 2 bytes port
+        _ => 1,  // 4 bytes header + 1 byte tag
+    };
+
+    (address, consumed)
 }
 
 /// This may seem a little heavy handed to implement Compact for the entire
@@ -80,20 +142,11 @@ impl Compact for PeerListItem {
         size += 2;
 
         // Encode socket address
-        match self.address {
-            SocketAddr::V4(addr4) => {
-                buf.put_u8(0); // Tag for IPv4
-                buf.put_slice(&addr4.ip().octets());
-                buf.put_u16(addr4.port());
-                size += 7; // 1 byte tag + 4 bytes IPv4 + 2 bytes port
-            }
-            SocketAddr::V6(addr6) => {
-                buf.put_u8(1); // Tag for IPv6
-                buf.put_slice(&addr6.ip().octets());
-                buf.put_u16(addr6.port());
-                size += 19; // 1 byte tag + 16 bytes IPv6 + 2 bytes port
-            }
-        }
+        let gossip_address_size = encode_address(&self.address.gossip, buf);
+        size += gossip_address_size;
+
+        let api_address_size = encode_address(&self.address.api, buf);
+        size += api_address_size;
 
         // Encode last_seen
         buf.put_u64(self.last_seen);
@@ -118,54 +171,36 @@ impl Compact for PeerListItem {
                 Self {
                     reputation_score,
                     response_time,
-                    address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+                    address: PeerAddress {
+                        gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+                        api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+                    },
                     last_seen: 0,
                     is_online: false,
                 },
                 &[],
             );
         }
+        let mut total_consumed = 4;
 
-        let tag = buf[4];
-        let address = match tag {
-            0 => {
-                // IPv4 address (needs 4 bytes IP + 2 bytes port after tag)
-                if buf.len() < 11 {
-                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0))
-                } else {
-                    let ip_octets: [u8; 4] = buf[5..9].try_into().unwrap();
-                    let port = u16::from_be_bytes(buf[9..11].try_into().unwrap());
-                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip_octets), port))
-                }
-            }
-            1 => {
-                // IPv6 address (needs 16 bytes IP + 2 bytes port after tag)
-                if buf.len() < 23 {
-                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0))
-                } else {
-                    let mut ip_octets = [0u8; 16];
-                    ip_octets.copy_from_slice(&buf[5..21]);
-                    let port = u16::from_be_bytes(buf[21..23].try_into().unwrap());
-                    SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip_octets), port, 0, 0))
-                }
-            }
-            _ => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
-        };
+        let (gossip_address, consumed) = decode_address(&buf[total_consumed..]);
+        total_consumed += consumed;
 
-        let consumed = match tag {
-            0 => 11, // 4 bytes header + 1 byte tag + 4 bytes IPv4 + 2 bytes port
-            1 => 23, // 4 bytes header + 1 byte tag + 16 bytes IPv6 + 2 bytes port
-            _ => 5,  // 4 bytes header + 1 byte tag
+        let (api_address, consumed) = decode_address(&buf[total_consumed..]);
+        total_consumed += consumed;
+
+        let address = PeerAddress {
+            gossip: gossip_address,
+            api: api_address,
         };
 
         // Read last_seen if available
-        let last_seen = if buf.len() >= consumed + 8 {
-            u64::from_be_bytes(buf[consumed..consumed + 8].try_into().unwrap())
+        let last_seen = if buf.len() >= total_consumed + 8 {
+            u64::from_be_bytes(buf[total_consumed..total_consumed + 8].try_into().unwrap())
         } else {
             0
         };
-
-        let total_consumed = consumed + 8;
+        total_consumed += 8;
 
         let is_online = if buf.len() >= total_consumed + 1 {
             buf[total_consumed] == 1

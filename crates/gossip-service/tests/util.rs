@@ -12,10 +12,7 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
-use irys_types::{
-    Base64, Config, DatabaseProvider, GossipData, IrysTransaction, IrysTransactionHeader,
-    PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk, H256,
-};
+use irys_types::{Base64, Config, DatabaseProvider, GossipData, IrysTransaction, IrysTransactionHeader, PeerAddress, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk, H256};
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
@@ -179,7 +176,8 @@ impl StubApiClient {
 #[derive(Debug)]
 pub struct GossipServiceTestFixture {
     pub temp_dir: TempDir,
-    pub port: u16,
+    pub gossip_port: u16,
+    pub api_port: u16,
     pub db: DatabaseProvider,
     pub peer_list: PeerListProvider,
     pub mining_address: Address,
@@ -201,7 +199,8 @@ impl GossipServiceTestFixture {
     #[must_use]
     pub fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
-        let port = random_free_port();
+        let gossip_port = random_free_port();
+        let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
@@ -217,7 +216,8 @@ impl GossipServiceTestFixture {
 
         Self {
             temp_dir,
-            port,
+            gossip_port,
+            api_port,
             db,
             peer_list,
             mining_address: Address::random(),
@@ -237,7 +237,7 @@ impl GossipServiceTestFixture {
         mpsc::Sender<GossipData>,
     ) {
         let (gossip_service, internal_message_bus) =
-            GossipService::new("127.0.0.1", self.port, self.db.clone());
+            GossipService::new("127.0.0.1", self.gossip_port, self.db.clone());
 
         let mempool_stub = MempoolStub::new(internal_message_bus.clone());
         self.mempool_txs = Arc::clone(&mempool_stub.txs);
@@ -260,7 +260,10 @@ impl GossipServiceTestFixture {
         PeerListItem {
             reputation_score: PeerScore::new(50),
             response_time: 0,
-            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), self.port),
+            address: PeerAddress {
+                gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), self.gossip_port),
+                api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), self.api_port),
+            },
             last_seen: 0,
             is_online: true,
         }
@@ -271,7 +274,7 @@ impl GossipServiceTestFixture {
     pub fn add_peer(&self, other: &Self) {
         let peer = other.create_default_peer_entry();
 
-        tracing::debug!("Adding peer {:?} to gossip service {:?}", peer, self.port);
+        tracing::debug!("Adding peer {:?} to gossip service {:?}", peer, self.gossip_port);
 
         self.peer_list
             .add_peer(&other.mining_address, &peer)
@@ -282,7 +285,10 @@ impl GossipServiceTestFixture {
     /// Can panic
     pub fn add_peer_with_reputation(&self, other: &Self, score: PeerScore) {
         let peer = PeerListItem {
-            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.port),
+            address: PeerAddress {
+                gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.gossip_port),
+                api: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.api_port),
+            },
             reputation_score: score,
             is_online: true,
             ..PeerListItem::default()

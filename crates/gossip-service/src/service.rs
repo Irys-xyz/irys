@@ -202,14 +202,14 @@ impl GossipService {
             .filter(|peer| {
                 let is_not_source = match original_source {
                     GossipSource::Internal => false,
-                    GossipSource::External(ip) => peer.address != ip,
+                    GossipSource::External(ip) => peer.address.gossip != ip,
                 };
                 peer.is_online
                     && peer.reputation_score.is_active()
                     && !is_not_source
                     && !self
                         .cache
-                        .has_seen(&peer.address, data, CACHE_ENTRY_TTL)
+                        .has_seen(&peer.address.gossip, data, CACHE_ENTRY_TTL)
                         .unwrap_or(true)
             })
             .collect();
@@ -222,14 +222,14 @@ impl GossipService {
         // Send data to selected peers
         for peer in selected_peers {
             if let Err(error) = self.client.send_data(peer, data).await {
-                tracing::warn!("Failed to send data to peer {}: {}", peer.address, error);
+                tracing::warn!("Failed to send data to peer {}: {}", peer.address.gossip, error);
                 continue;
             }
 
-            if let Err(error) = self.cache.record_seen(peer.address, data) {
+            if let Err(error) = self.cache.record_seen(peer.address.gossip, data) {
                 tracing::error!(
                     "Failed to record data in cache for peer {}: {}",
-                    peer.address,
+                    peer.address.gossip,
                     error
                 );
             }

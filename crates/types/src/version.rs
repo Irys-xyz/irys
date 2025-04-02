@@ -4,6 +4,7 @@ use alloy_primitives::Address;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::Arbitrary;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status")]
@@ -119,7 +120,7 @@ pub struct VersionRequest {
     pub protocol_version: ProtocolVersion,
     pub mining_address: Address,
     pub chain_id: u64,
-    pub address: SocketAddr,
+    pub address: PeerAddress,
     pub timestamp: u64,
     pub user_agent: Option<String>,
 }
@@ -135,8 +136,23 @@ impl Default for VersionRequest {
                 .as_millis() as u64,
             mining_address: Address::ZERO,
             chain_id: 0,
-            address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
+            address: PeerAddress::default(),
             user_agent: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Arbitrary)]
+pub struct PeerAddress {
+    pub gossip: SocketAddr,
+    pub api: SocketAddr,
+}
+
+impl Default for PeerAddress {
+    fn default() -> Self {
+        Self {
+            gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
+            api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8081),
         }
     }
 }
@@ -162,7 +178,7 @@ pub struct AcceptedResponse {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
     // pub features: Vec<Feature>,  // perhaps something like "features": ["DHT", "NAT"], in the future
-    pub peers: Vec<SocketAddr>,
+    pub peers: Vec<PeerAddress>,
     pub timestamp: u64,
     pub message: Option<String>,
 }

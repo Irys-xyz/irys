@@ -55,7 +55,7 @@ impl ApiState {
         // Extract IP addresses and Port (SocketAddr) into a Vec<String>
         let ips: Vec<SocketAddr> = peer_list_items
             .iter()
-            .map(|(_miner_addr, entry)| entry.address)
+            .map(|(_miner_addr, entry)| entry.gossip_address)
             .collect();
 
         Ok(ips)

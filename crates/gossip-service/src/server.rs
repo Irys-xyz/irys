@@ -15,11 +15,11 @@ use actix_web::{
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
-use core::net::SocketAddr;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngressMessage};
 use irys_api_client::ApiClient;
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, UnpackedChunk};
 use std::sync::Arc;
+use irys_database::tables::CompactPeerListItem;
 
 #[derive(Debug)]
 pub struct GossipServer<M, A>
@@ -81,19 +81,22 @@ where
 fn check_peer(
     peer_list: &PeerListProvider,
     req: &actix_web::HttpRequest,
-) -> Result<SocketAddr, HttpResponse> {
+) -> Result<CompactPeerListItem, HttpResponse> {
     let Some(peer_address) = req.peer_addr() else {
         tracing::debug!("Failed to get peer address from gossip post request");
         return Err(HttpResponse::BadRequest().finish());
     };
 
     match peer_list.is_peer_allowed(&peer_address) {
-        Ok(is_peer_allowed) => {
-            if is_peer_allowed {
-                Ok(peer_address)
-            } else {
-                tracing::debug!("Peer address is not allowed");
-                Err(HttpResponse::Forbidden().finish())
+        Ok(maybe_peer) => {
+            match maybe_peer {
+                Some(peer) => {
+                    Ok(peer)
+                }
+                None => {
+                    tracing::debug!("Peer address is not allowed");
+                    Err(HttpResponse::Forbidden().finish())
+                }
             }
         }
         Err(error) => {
@@ -116,7 +119,7 @@ where
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", irys_block_header_json);
-    let peer_address = match check_peer(&server.peer_list, &req) {
+    let peer = match check_peer(&server.peer_list, &req) {
         Ok(peer_address) => peer_address,
         Err(error_response) => return error_response,
     };
@@ -124,7 +127,7 @@ where
     let irys_block_header = irys_block_header_json.0;
     if let Err(error) = server
         .data_handler
-        .handle_block_header(irys_block_header, peer_address)
+        .handle_block_header(irys_block_header, peer.address.gossip, peer.address.api)
         .await
     {
         tracing::error!("Failed to send block: {}", error);
@@ -147,7 +150,7 @@ where
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", irys_transaction_header_json);
-    let peer_address = match check_peer(&server.peer_list, &req) {
+    let peer = match check_peer(&server.peer_list, &req) {
         Ok(peer_address) => peer_address,
         Err(error_response) => return error_response,
     };
@@ -155,7 +158,7 @@ where
     let irys_transaction_header = irys_transaction_header_json.0;
     if let Err(error) = server
         .data_handler
-        .handle_transaction(irys_transaction_header, peer_address)
+        .handle_transaction(irys_transaction_header, peer.address.gossip)
         .await
     {
         tracing::error!("Failed to send transaction: {}", error);
@@ -179,7 +182,7 @@ where
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", unpacked_chunk_json);
-    let peer_address = match check_peer(&server.peer_list, &req) {
+    let peer = match check_peer(&server.peer_list, &req) {
         Ok(peer_address) => peer_address,
         Err(error_response) => return error_response,
     };
@@ -187,7 +190,7 @@ where
     let unpacked_chunk = unpacked_chunk_json.0;
     if let Err(error) = server
         .data_handler
-        .handle_chunk(unpacked_chunk, peer_address)
+        .handle_chunk(unpacked_chunk, peer.address.gossip)
         .await
     {
         tracing::error!("Failed to send chunk: {}", error);

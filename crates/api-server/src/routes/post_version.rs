@@ -46,7 +46,7 @@ pub async fn post_version(
     let socket_addr = version_request.address;
     let mining_addr = version_request.mining_address;
     let peer_list_entry = PeerListItem {
-        address: socket_addr,
+        gossip_address: socket_addr,
         ..Default::default()
     };
 

@@ -46,12 +46,14 @@ impl PeerListProvider {
     /// # Errors
     ///
     /// This function will return an error if the database operation fails.
-    pub fn is_peer_allowed(&self, peer: &SocketAddr) -> eyre::Result<bool> {
+    pub fn is_peer_allowed(&self, peer: &SocketAddr) -> eyre::Result<Option<CompactPeerListItem>> {
         let known_peers = self.all_known_peers()?;
         let peer_ip = peer.ip();
         Ok(known_peers
             .iter()
-            .any(|peer_list_item| peer_list_item.address.ip() == peer_ip))
+            .find(|peer_list_item| peer_list_item.address.gossip.ip() == peer_ip)
+            .cloned()
+        )
     }
 
     /// Returns peer info for a given peer address.
@@ -63,7 +65,7 @@ impl PeerListProvider {
         let known_peers = self.all_known_peers()?;
         Ok(known_peers
             .iter()
-            .find(|peer_list_item| peer_list_item.address == *peer)
+            .find(|peer_list_item| peer_list_item.address.gossip == *peer)
             .cloned())
     }
 
