@@ -4,73 +4,24 @@ use irys_chain::{start_irys_node, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
 use irys_types::{Address, Config, IrysTransactionHeader, Signature, H256};
-use std::fs::File;
-use std::io::Write;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info};
-
-struct TestingConfigs {
-    genesis: String,
-    peer1: String,
-    peer2: String,
-}
-
-fn write_config(config: &Config, path: &str) -> std::io::Result<()> {
-    let toml_str = toml::to_string(config).expect("Failed to serialise config");
-    let mut file = File::create(path)?;
-    file.write_all(toml_str.as_bytes())?;
-    Ok(())
-}
 
 #[actix_web::test]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
-    let config_paths = TestingConfigs {
-        genesis: String::from(".tmp/config-genesis.toml"),
-        peer1: String::from(".tmp/config-peer1.toml"),
-        peer2: String::from(".tmp/config-peer2.toml"),
+    let testnet_config_genesis = Config {
+        port: 8080,
+        ..Config::testnet()
     };
-
-    let mut test_config = Config::testnet();
-    test_config.port = 8080;
-
-    match write_config(&test_config, &config_paths.genesis) {
-        Ok(_) => {
-            info!("{} config written", config_paths.genesis)
-        }
-        Err(_) => {
-            error!("FAILURE: {} config not written", config_paths.genesis)
-        }
-    }
-
-    test_config.port = 8081;
-    match write_config(&test_config, &config_paths.peer1) {
-        Ok(_) => {
-            info!("{} config written", config_paths.peer1)
-        }
-        Err(_) => {
-            error!("FAILURE: {} config not written", config_paths.peer1)
-        }
-    }
-
-    test_config.port = 8082;
-    match write_config(&test_config, &config_paths.peer2) {
-        Ok(_) => {
-            info!("{} config written", config_paths.peer2)
-        }
-        Err(_) => {
-            error!("FAILURE: {} config not written", config_paths.peer2)
-        }
-    }
-
-    // start genesis
-    let ctx = setup().await?;
+    let ctx_genesis_node = setup_with_config(testnet_config_genesis)
+        .await
+        .expect("found invalid genesis ctx");
 
     // start mining
     // advance one block
-    let (_header, _payload) = mine_block(&ctx.node).await?.unwrap();
+    let (_header, _payload) = mine_block(&ctx_genesis_node.node).await?.unwrap();
     // advance one block, finalizing the previous block
-    let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
+    let (header, _payload) = mine_block(&ctx_genesis_node.node).await?.unwrap();
     let mock_header = IrysTransactionHeader {
         id: H256::from([255u8; 32]),
         anchor: H256::from([1u8; 32]),
@@ -81,7 +32,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         perm_fee: Some(200),
         ledger_id: 1,
         bundle_format: None,
-        chain_id: ctx.config.chain_id,
+        chain_id: ctx_genesis_node.config.chain_id,
         version: 0,
         ingress_proofs: None,
         signature: Signature::test_signature().into(),
@@ -91,10 +42,28 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         all_txs: Arc::new(vec![mock_header]),
     };
 
+    //start two additional peers, instructing them to use the genesis peer as their trusted peer
+
+    //start peer1
+    let testnet_config_peer1 = Config {
+        port: 8081,
+        ..Config::testnet()
+    };
+    let ctx_peer1_node = setup_with_config(testnet_config_peer1)
+        .await
+        .expect("found invalid genesis ctx for peer1");
+
+    //start peer2
+    let testnet_config_peer2 = Config {
+        port: 8082,
+        ..Config::testnet()
+    };
+    let ctx_peer2_node = setup_with_config(testnet_config_peer2)
+        .await
+        .expect("found invalid genesis ctx for peer2");
+
     //FIXME: magic number could be a constant e.g. 3 blocks worth of time?
     sleep(Duration::from_millis(10000)).await;
-
-    //start two additional peers, instructing them to use the genesis peer as their trusted peer
 
     //run asserts. http requests to peer1 and peer2 index after x seconds to ensure they have begun syncing the blocks
 
@@ -109,14 +78,6 @@ struct TestCtx {
         reason = "to prevent drop() being called and cleaning up resources"
     )]
     temp_dir: TempDir,
-}
-
-async fn setup() -> eyre::Result<TestCtx> {
-    let testnet_config = Config {
-        // add any overrides here
-        ..Config::testnet()
-    };
-    setup_with_config(testnet_config).await
 }
 
 async fn setup_with_config(testnet_config: Config) -> eyre::Result<TestCtx> {
