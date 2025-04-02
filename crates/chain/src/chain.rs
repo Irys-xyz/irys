@@ -140,7 +140,7 @@ async fn fetch_block_index(
     block_index: Arc<Mutex<VecDeque<BlockIndexItem>>>,
     height: u64,
     limit: u32,
-) {
+) -> u64 {
     let url = format!(
         "http://{}/v1/block_index?height={}&limit={}",
         peer, height, limit
@@ -151,10 +151,15 @@ async fn fetch_block_index(
             if response.status().is_success() {
                 match response.json::<Vec<BlockIndexItem>>().await {
                     Ok(remote_block_index) => {
-                        info!("Got block_index from {}: {:?}", peer, remote_block_index);
+                        info!(
+                            "Got block_index {},{} from {}: {:?}",
+                            height, limit, peer, &remote_block_index
+                        );
+                        let new_block_count = remote_block_index.len().try_into().expect("");
                         let mut index = block_index.lock().await;
                         //TODO include block height before inserting into index dequeue?
                         index.extend(remote_block_index.into_iter());
+                        return new_block_count;
                     }
                     Err(e) => {
                         warn!("Error reading body from {}: {}", peer, e);
@@ -168,6 +173,7 @@ async fn fetch_block_index(
             warn!("Request to {} failed: {}", peer, e);
         }
     }
+    0
 }
 
 /// Fetches `peers` list from each `peers_to_ask` via http. Adds new entries to `peers`
