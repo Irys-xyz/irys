@@ -145,8 +145,13 @@ async fn fetch_block_index(
     peer: &SocketAddr,
     client: &awc::Client,
     block_index: Arc<Mutex<Vec<BlockIndexItem>>>,
+    height: u64,
+    limit: u32,
 ) {
-    let url = format!("http://{}/v1/block_index", peer);
+    let url = format!(
+        "http://{}/v1/block_index?height={}&limit={}",
+        peer, height, limit
+    );
 
     match client.get(url).send().await {
         Ok(mut response) => {
@@ -245,10 +250,13 @@ impl IrysNodeCtx {
         let block_index: Arc<tokio::sync::Mutex<Vec<BlockIndexItem>>> =
             Arc::new(Mutex::new(Vec::new()));
         let peers = peers.lock().await;
+        //fixme: hard coded to first 50 blocks, needs to fetch them all
         let block_index_request = fetch_block_index(
             peers.first().expect("at least one peer"),
             &client,
             block_index.clone(),
+            0,
+            50,
         )
         .await;
 
