@@ -15,12 +15,12 @@ use actix_web::{
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
+use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngressMessage};
 use irys_api_client::ApiClient;
+use irys_database::tables::CompactPeerListItem;
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, UnpackedChunk};
 use std::sync::Arc;
-use irys_actors::block_discovery::BlockDiscoveredMessage;
-use irys_database::tables::CompactPeerListItem;
 
 #[derive(Debug)]
 pub struct GossipServer<M, B, A>
@@ -29,8 +29,7 @@ where
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
-    B: Handler<BlockDiscoveredMessage>
-    + Actor<Context = Context<B>>,
+    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + 'static,
 {
     data_handler: GossipServerDataHandler<M, B, A>,
@@ -43,8 +42,7 @@ where
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
-    B: Handler<BlockDiscoveredMessage>
-    + Actor<Context = Context<B>>,
+    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + 'static,
 {
     pub const fn new(
@@ -71,7 +69,10 @@ where
                 .wrap(middleware::Logger::default())
                 .service(
                     web::scope("/gossip")
-                        .route("/transaction", web::post().to(handle_transaction::<M, B, A>))
+                        .route(
+                            "/transaction",
+                            web::post().to(handle_transaction::<M, B, A>),
+                        )
                         .route("/chunk", web::post().to(handle_chunk::<M, B, A>))
                         .route("/block", web::post().to(handle_block::<M, B, A>))
                         .route("/health", web::get().to(handle_health_check::<M, B, A>)),
@@ -94,14 +95,11 @@ fn check_peer(
 
     match peer_list.is_peer_allowed(&peer_address) {
         Ok(maybe_peer) => {
-            match maybe_peer {
-                Some(peer) => {
-                    Ok(peer)
-                }
-                None => {
-                    tracing::debug!("Peer address is not allowed");
-                    Err(HttpResponse::Forbidden().finish())
-                }
+            if let Some(peer) = maybe_peer {
+                Ok(peer)
+            } else {
+                tracing::debug!("Peer address is not allowed");
+                Err(HttpResponse::Forbidden().finish())
             }
         }
         Err(error) => {
@@ -121,8 +119,7 @@ where
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
-    B: Handler<BlockDiscoveredMessage>
-    + Actor<Context = Context<B>>,
+    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", irys_block_header_json);
@@ -154,8 +151,7 @@ where
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
-    B: Handler<BlockDiscoveredMessage>
-    + Actor<Context = Context<B>>,
+    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", irys_transaction_header_json);
@@ -188,8 +184,7 @@ where
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
-    B: Handler<BlockDiscoveredMessage>
-    + Actor<Context = Context<B>>,
+    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient,
 {
     tracing::debug!("Gossip data received: {:?}", unpacked_chunk_json);
@@ -220,8 +215,7 @@ where
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
-    B: Handler<BlockDiscoveredMessage>
-    + Actor<Context = Context<B>>,
+    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient,
 {
     let Some(peer_addr) = req.peer_addr() else {

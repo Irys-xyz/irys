@@ -1,6 +1,7 @@
 use actix::{Actor, Addr, Context, Handler};
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::Result;
+use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::{
     ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
 };
@@ -12,13 +13,16 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, Config, DatabaseProvider, GossipData, IrysBlockHeader, IrysTransaction, IrysTransactionHeader, PeerAddress, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk, H256};
+use irys_types::{
+    Base64, Config, DatabaseProvider, GossipData, IrysBlockHeader, IrysTransaction,
+    IrysTransactionHeader, PeerAddress, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk,
+    H256,
+};
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tracing::debug;
-use irys_actors::block_discovery::BlockDiscoveredMessage;
 
 #[derive(Debug)]
 pub struct MempoolStub {
@@ -137,7 +141,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryStub {
     /// # Panics
     /// Can panic
     fn handle(&mut self, msg: BlockDiscoveredMessage, _: &mut Self::Context) -> Self::Result {
-        let block = msg.0.clone();
+        let block = msg.0;
         self.blocks
             .write()
             .expect("to unlock blocks")
@@ -148,7 +152,10 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryStub {
 
         // Pretend that we've validated the block and we're ready to gossip it
         tokio::runtime::Handle::current().spawn(async move {
-            sender.send(GossipData::Block(arc_block.as_ref().clone())).await.unwrap();
+            sender
+                .send(GossipData::Block(arc_block.as_ref().clone()))
+                .await
+                .expect("to send block");
         });
 
         Ok(())
@@ -251,7 +258,7 @@ impl GossipServiceTestFixture {
 
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::new(RwLock::new(Vec::new())),
-            internal_message_bus: gossip_sender.clone(),
+            internal_message_bus: gossip_sender,
         };
         let discovery_blocks = Arc::clone(&block_discovery_stub.blocks);
 
@@ -326,7 +333,11 @@ impl GossipServiceTestFixture {
     pub fn add_peer(&self, other: &Self) {
         let peer = other.create_default_peer_entry();
 
-        tracing::debug!("Adding peer {:?} to gossip service {:?}", peer, self.gossip_port);
+        tracing::debug!(
+            "Adding peer {:?} to gossip service {:?}",
+            peer,
+            self.gossip_port
+        );
 
         self.peer_list
             .add_peer(&other.mining_address, &peer)

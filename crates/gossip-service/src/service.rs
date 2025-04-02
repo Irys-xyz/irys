@@ -19,6 +19,7 @@ use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::net::SocketAddr;
 use core::time::Duration;
+use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::TxExistenceQuery;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
 use irys_api_client::ApiClient;
@@ -27,7 +28,6 @@ use irys_types::{DatabaseProvider, GossipData};
 use rand::seq::IteratorRandom as _;
 use std::sync::Arc;
 use tokio::{sync::mpsc, time};
-use irys_actors::block_discovery::BlockDiscoveredMessage;
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -154,8 +154,7 @@ impl GossipService {
             + Handler<ChunkIngressMessage>
             + Handler<TxExistenceQuery>
             + Actor<Context = Context<M>>,
-        B: Handler<BlockDiscoveredMessage>
-        + Actor<Context = Context<B>>,
+        B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
         A: ApiClient + 'static,
     {
         tracing::debug!("Staring gossip service");
@@ -227,7 +226,11 @@ impl GossipService {
         // Send data to selected peers
         for peer in selected_peers {
             if let Err(error) = self.client.send_data(peer, data).await {
-                tracing::warn!("Failed to send data to peer {}: {}", peer.address.gossip, error);
+                tracing::warn!(
+                    "Failed to send data to peer {}: {}",
+                    peer.address.gossip,
+                    error
+                );
                 continue;
             }
 

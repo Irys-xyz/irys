@@ -52,8 +52,7 @@ impl PeerListProvider {
         Ok(known_peers
             .iter()
             .find(|peer_list_item| peer_list_item.address.gossip.ip() == peer_ip)
-            .cloned()
-        )
+            .cloned())
     }
 
     /// Returns peer info for a given peer address.
