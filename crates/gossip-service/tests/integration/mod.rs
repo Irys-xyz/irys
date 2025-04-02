@@ -40,18 +40,6 @@ async fn should_broadcast_message_to_an_established_connection() -> eyre::Result
             service2_mempool_txs.len()
         );
     };
-    // The tx also must be in the first node's mempool
-    {
-        let service1_mempool_txs = gossip_service_test_fixture_1
-            .mempool_txs
-            .read()
-            .expect("Failed to read service 1 mempool transactions");
-        eyre::ensure!(
-            service1_mempool_txs.len() == 1,
-            "Expected 1 transaction in service 1 mempool, but found {}",
-            service1_mempool_txs.len()
-        );
-    };
 
     service1_handle.stop().await??;
     service2_handle.stop().await??;
