@@ -262,7 +262,7 @@ impl IrysNodeCtx {
             Arc::new(Mutex::new(VecDeque::new()));
 
         info!("Discovering peers...");
-        let peer_list_requests = fetch_peers(peers.clone(), &client, trusted_peers).await;
+        let _peer_list_requests = fetch_peers(peers.clone(), &client, trusted_peers).await;
 
         info!("Downloading block index...");
         let peers_guard = peers.lock().await;
