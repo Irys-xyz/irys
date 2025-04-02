@@ -144,6 +144,8 @@ pub enum ChunkIngressError {
     UnknownTransaction,
     /// Only the last chunk in a `data_root` tree can be less than `CHUNK_SIZE`
     InvalidChunkSize,
+    /// Chunks should have the same data_size field as their parent tx
+    InvalidDataSize,
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
     /// The service is uninitialized
@@ -322,10 +324,10 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // recorded in the transaction header.
         if cached_data_root.data_size != chunk.data_size {
             error!(
-                "InvalidChunkSize: expected: {} got:{}",
+                "Invalid data_size for data_root: expected: {} got:{}",
                 cached_data_root.data_size, chunk.data_size
             );
-            return Err(ChunkIngressError::InvalidChunkSize);
+            return Err(ChunkIngressError::InvalidDataSize);
         }
 
         // Use data_size to identify and validate that only the last chunk

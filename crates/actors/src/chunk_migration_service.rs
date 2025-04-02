@@ -156,7 +156,10 @@ fn process_ledger_transactions(
     let mut prev_chunk_offset = block_range.start();
 
     for ((_txid, tx_path), (data_root, data_size)) in path_pairs {
-        let num_chunks_in_tx = data_size.div_ceil(chunk_size as u64) as u32;
+        let num_chunks_in_tx: u32 = data_size
+            .div_ceil(chunk_size as u64)
+            .try_into()
+            .expect("Value exceeds u32::MAX");
         let tx_chunk_range = LedgerChunkRange(ie(
             prev_chunk_offset,
             prev_chunk_offset + num_chunks_in_tx as u64,
@@ -168,6 +171,7 @@ fn process_ledger_transactions(
             tx_chunk_range,
             ledger,
             storage_modules,
+            data_size,
         )?;
 
         process_transaction_chunks(
@@ -277,13 +281,14 @@ fn update_storage_module_indexes(
     tx_chunk_range: LedgerChunkRange,
     ledger: DataLedger,
     storage_modules: &[Arc<StorageModule>],
+    data_size: u64,
 ) -> Result<(), ()> {
     let overlapped_modules =
         get_overlapped_storage_modules(storage_modules, ledger, &tx_chunk_range);
 
     for storage_module in overlapped_modules {
         storage_module
-            .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range)
+            .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range, data_size)
             .map_err(|e| {
                 error!(
                     "Failed to add tx path + data_root + start_offset to index: {}",
@@ -314,7 +319,7 @@ fn find_storage_module(
             .and_then(|pa| pa.ledger_id)
             .filter(|&id| id == ledger as u32)
             // Then check offset range
-            .and_then(|_| module.get_storage_module_range().ok())
+            .and_then(|_| module.get_storage_module_ledger_range().ok())
             .filter(|range| range.contains_point(ledger_offset.into()))
             .map(|_| module)
     })

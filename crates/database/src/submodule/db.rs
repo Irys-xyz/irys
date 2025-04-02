@@ -12,8 +12,9 @@ use reth_db::{
 use crate::open_or_create_db;
 
 use super::tables::{
-    ChunkDataPathByPathHash, ChunkOffsetsByPathHash, ChunkPathHashByOffset, ChunkPathHashes,
-    RelativeStartOffsets, StartOffsetsByDataRoot, SubmoduleTables, TxPathByTxPathHash,
+    ChunkDataPathByPathHash, ChunkOffsetsByPathHash, ChunkPathHashes, ChunkPathHashesByOffset,
+    DataSizeByDataRoot, RelativeStartOffsets, StartOffsetsByDataRoot, SubmoduleTables,
+    TxPathByTxPathHash,
 };
 
 /// Creates or opens a *submodule* MDBX database
@@ -84,7 +85,7 @@ pub fn get_path_hashes_by_offset<T: DbTx>(
     tx: &T,
     offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<ChunkPathHashes>> {
-    Ok(tx.get::<ChunkPathHashByOffset>(offset)?)
+    Ok(tx.get::<ChunkPathHashesByOffset>(offset)?)
 }
 
 pub fn get_full_data_path<T: DbTx>(
@@ -143,7 +144,7 @@ pub fn set_path_hashes_by_offset<T: DbTxMut>(
     offset: PartitionChunkOffset,
     path_hashes: ChunkPathHashes,
 ) -> eyre::Result<()> {
-    Ok(tx.put::<ChunkPathHashByOffset>(offset, path_hashes)?)
+    Ok(tx.put::<ChunkPathHashesByOffset>(offset, path_hashes)?)
 }
 
 /// get all the start offsets for the `data_root`
@@ -177,9 +178,24 @@ pub fn add_start_offset_to_data_root_index<T: DbTxMut + DbTx>(
     Ok(())
 }
 
+pub fn get_data_size_by_data_root<T: DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+) -> eyre::Result<Option<u64>> {
+    Ok(tx.get::<DataSizeByDataRoot>(data_root)?)
+}
+
+pub fn set_data_size_for_data_root<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    data_size: u64,
+) -> eyre::Result<()> {
+    Ok(tx.put::<DataSizeByDataRoot>(data_root, data_size)?)
+}
+
 /// clear db
 pub fn clear_submodule_database<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
-    tx.clear::<ChunkPathHashByOffset>()?;
+    tx.clear::<ChunkPathHashesByOffset>()?;
     tx.clear::<ChunkDataPathByPathHash>()?;
     tx.clear::<TxPathByTxPathHash>()?;
     tx.clear::<ChunkOffsetsByPathHash>()?;

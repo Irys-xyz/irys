@@ -2,11 +2,8 @@ use crate::{calculate_chunks_added, BlockFinalizedMessage};
 use actix::prelude::*;
 use irys_database::{BlockIndex, BlockIndexItem, DataLedger, Initialized, LedgerIndexItem};
 use irys_types::{IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256};
-use std::{
-    sync::{Arc, RwLock, RwLockReadGuard},
-    time::Duration,
-};
-use tracing::{error, info};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
+use tracing::error;
 
 //==============================================================================
 // BlockIndexReadGuard
@@ -79,8 +76,11 @@ impl SystemService for BlockIndexService {
 struct BlockLogEntry {
     #[allow(dead_code)]
     pub block_hash: H256,
+    #[allow(dead_code)]
     pub height: u64,
+    #[allow(dead_code)]
     pub timestamp: u128,
+    #[allow(dead_code)]
     pub difficulty: U256,
 }
 
@@ -192,23 +192,23 @@ impl BlockIndexService {
 
         self.num_blocks += 1;
 
-        if self.num_blocks % 10 == 0 {
-            let mut prev_entry: Option<&BlockLogEntry> = None;
-            info!("block_height, block_time(ms), difficulty");
-            for entry in &self.block_log {
-                let duration = if let Some(pe) = prev_entry {
-                    if entry.timestamp >= pe.timestamp {
-                        Duration::from_millis((entry.timestamp - pe.timestamp) as u64)
-                    } else {
-                        Duration::from_millis(0)
-                    }
-                } else {
-                    Duration::from_millis(0)
-                };
-                info!("{}, {:?}, {}", entry.height, duration, entry.difficulty);
-                prev_entry = Some(entry);
-            }
-        }
+        // if self.num_blocks % 10 == 0 {
+        //     let mut prev_entry: Option<&BlockLogEntry> = None;
+        //     info!("block_height, block_time(ms), difficulty");
+        //     for entry in &self.block_log {
+        //         let duration = if let Some(pe) = prev_entry {
+        //             if entry.timestamp >= pe.timestamp {
+        //                 Duration::from_millis((entry.timestamp - pe.timestamp) as u64)
+        //             } else {
+        //                 Duration::from_millis(0)
+        //             }
+        //         } else {
+        //             Duration::from_millis(0)
+        //         };
+        //         info!("{}, {:?}, {}", entry.height, duration, entry.difficulty);
+        //         prev_entry = Some(entry);
+        //     }
+        // }
     }
 }
 
