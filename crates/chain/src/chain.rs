@@ -1160,7 +1160,6 @@ impl IrysNode {
             genesis_header.system_ledgers[0].tx_ids.push(commitment_id);
         }
 
-
         let irys_genesis = Arc::new(genesis_header);
 
         Ok((reth_chain_spec, irys_genesis, commitments))
