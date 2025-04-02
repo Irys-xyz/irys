@@ -220,7 +220,7 @@ async fn fetch_block_index(
 }
 
 /// Fetches `peers` list from each `peers_to_ask` via http. Adds new entries to `peers`
-async fn fetch_peers(
+async fn fetch_and_update_peers(
     peers: Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
     client: &awc::Client,
     peers_to_ask: Vec<SocketAddr>,
@@ -298,7 +298,8 @@ impl IrysNodeCtx {
             Arc::new(Mutex::new(VecDeque::new()));
 
         info!("Discovering peers...");
-        let _peer_list_requests = fetch_peers(peers.clone(), &client, trusted_peers).await;
+        let _peer_list_requests =
+            fetch_and_update_peers(peers.clone(), &client, trusted_peers).await;
 
         info!("Downloading block index...");
         let peers_guard = peers.lock().await;
