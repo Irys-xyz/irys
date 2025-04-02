@@ -4,6 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+test-utils = []
+
 [dependencies]
 alloy-primitives.workspace = true
 actix.workspace = true
@@ -20,6 +23,7 @@ modular-bitfield.workspace = true
 reth-codecs.workspace = true
 eyre.workspace = true
 irys-types.workspace = true
+irys-primitives.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
 irys-testing-utils.workspace = true

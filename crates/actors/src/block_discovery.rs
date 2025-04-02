@@ -4,11 +4,16 @@ use crate::{
     services::ServiceSenders,
 };
 use actix::prelude::*;
-use irys_database::{block_header_by_hash, tx_header_by_txid, DataLedger};
-use irys_types::{DatabaseProvider, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader, IrysTransactionHeader, StorageConfig, VDFStepsConfig};
+use irys_database::{
+    block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
+};
+use irys_types::{
+    DatabaseProvider, DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader,
+    StorageConfig, VDFStepsConfig,
+};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
-use std::sync::{Arc};
+use std::sync::Arc;
 use tracing::info;
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -176,6 +181,38 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     });
                 }
             }
+        }
+
+        //====================================
+        // Commitments ledger TX Validation
+        //------------------------------------
+        // Extract the Commitment ledger from the epoch block
+        let commitments_ledger = new_block_header
+            .system_ledgers
+            .iter()
+            .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+        // Validate commitments (if there are some)
+        if let Some(commitment_ledger) = commitments_ledger {
+            let read_tx = self.db.tx().expect("to create a database read tx");
+            let _commitment_txs = commitment_ledger
+                .tx_ids
+                .iter()
+                .map(|txid| {
+                    commitment_tx_by_txid(&read_tx, txid).and_then(|opt| {
+                        opt.ok_or_else(|| eyre::eyre!("No commitment tx found for txid {:?}", txid))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("to be able to retrieve all of the commitment tx headers locally");
+
+            // TODO: Non epoch blocks and epoch blocks treat the commitments ledger a little differently
+            // during the epoch, stake and pledge commitments accumulate waiting to be finalized when the
+            // next epoch starts. As a result these pending commitments during the epoch need to have
+            // their own CommitmentsState where pending pledges can be checked to see if they have an
+            // outstanding stake (check with epoch_service) or if they've posted a pending stake commitment.
+            //
+            // This work will be done next, for now commitments are only handled in the genesis block
         }
 
         //====================================

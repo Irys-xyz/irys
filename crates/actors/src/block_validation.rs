@@ -456,7 +456,7 @@ mod tests {
     use actix::{prelude::*, SystemRegistry};
 
     use irys_config::IrysNodeConfig;
-    use irys_database::{BlockIndex, Initialized};
+    use irys_database::{add_genesis_commitments, BlockIndex, Initialized};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
         irys::IrysSigner, partition::PartitionAssignment, Address, Base64, Config,
@@ -504,6 +504,8 @@ mod tests {
             ..Config::testnet()
         };
 
+        let commitments = add_genesis_commitments(&mut genesis_block, &testnet_config);
+
         let data_dir = temporary_directory(Some("block_validation_tests"), false);
         let arc_genesis = Arc::new(genesis_block);
         let signer = testnet_config.irys_signer();
@@ -540,7 +542,10 @@ mod tests {
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers
-        let msg = NewEpochMessage(arc_genesis.clone());
+        let msg = NewEpochMessage {
+            epoch_block: arc_genesis.clone(),
+            commitments,
+        };
         match epoch_service_addr.send(msg).await {
             Ok(_) => info!("Genesis Epoch tasks complete."),
             Err(_) => panic!("Failed to perform genesis epoch tasks"),
@@ -710,7 +715,8 @@ mod tests {
             chunk: Some(Base64(poa_chunk.clone())),
             ledger_id: Some(1),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
-                as u32,
+                .try_into()
+                .expect("Value exceeds u32::MAX"),
             recall_chunk_index: 0,
             partition_hash: context.partition_hash,
         };

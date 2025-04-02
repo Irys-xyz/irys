@@ -241,7 +241,7 @@ pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
 //             data_size,
 //             data_path,
 //             bytes: Base64(data_bytes[min..max].to_vec()),
-//             tx_offset: tx_chunk_offset as u32,
+//             tx_offset: tx_chunk_offset.try_into().expect("Value exceeds u32::MAX"),
 //         };
 
 //         // Make a POST request with JSON payload

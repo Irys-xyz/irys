@@ -88,7 +88,7 @@ pub async fn capacity_chunk_solution(
         &vdf_steps_guard,
         &partition_hash,
     )
-    .unwrap();
+    .expect("valid recall range");
 
     let mut entropy_chunk = Vec::<u8>::with_capacity(storage_config.chunk_size as usize);
     compute_entropy_chunk(
@@ -110,7 +110,18 @@ pub async fn capacity_chunk_solution(
 
     SolutionContext {
         partition_hash,
-        chunk_offset: recall_range_idx as u32 * storage_config.num_chunks_in_recall_range as u32,
+        // FIXME: SolutionContext should in future use PartitionChunkOffset::from()
+        // chunk_offset appears to be the end byte rather than the start byte that gets read
+        // therefore a saturating_mul is fine as it will read all data up to that point
+        // this is also a test util fn, and so less of a concern than a "domain logic" fn
+        chunk_offset: TryInto::<u32>::try_into(recall_range_idx)
+            .expect("Value exceeds u32::MAX")
+            .saturating_mul(
+                storage_config
+                    .num_chunks_in_recall_range
+                    .try_into()
+                    .expect("Value exceeds u32::MAX"),
+            ),
         mining_address: miner_addr,
         chunk: entropy_chunk,
         vdf_step: step_num,
