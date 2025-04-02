@@ -87,7 +87,7 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
         .route("/tx", web::post().to(tx::post_tx))
-        .route("/tx/{tx_id}", web::get().to(tx::get_tx_header_api))
+        .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))
         .route(
             "/tx/{tx_id}/local/data_start_offset",
             web::get().to(tx::get_tx_local_start_offset),
