@@ -1153,7 +1153,6 @@ impl IrysNode {
             ..irys_genesis
         };
         let commitments = get_genesis_commitments(&self.config);
-        //println!("{}", serde_json::to_string_pretty(&commitments).unwrap());
 
         // Add the commitment txids to the system ledger in the block header one by one
         for commitment_id in commitments.iter().map(|commitment| commitment.id) {
