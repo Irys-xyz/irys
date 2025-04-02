@@ -192,7 +192,7 @@ pub async fn start_irys_node(
 
     // we create the listener here so we know the port before we start passing around `config`
     let listener = create_listener(SocketAddr::new(
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         config.port,
     ))?;
     // if `config.port` == 0, the assigned port will be random (decided by the OS)
@@ -927,7 +927,7 @@ impl IrysNode {
 
         // we create the listener here so we know the port before we start passing around `config`
         let listener = create_listener(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             self.config.port,
         ))?;
         // if `config.port` == 0, the assigned port will be random (decided by the OS)
