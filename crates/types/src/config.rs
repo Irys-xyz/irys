@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::{env, path::PathBuf};
 
 use alloy_primitives::Address;
@@ -77,6 +78,8 @@ pub struct Config {
     /// The base directory where to look for artifact data
     #[serde(default = "default_irys_path")]
     pub base_directory: PathBuf,
+    /// The initial list of peers to contact for block sync
+    pub trusted_peers: Vec<SocketAddr>,
 }
 
 fn default_irys_path() -> PathBuf {
@@ -159,6 +162,7 @@ impl Config {
                 smoothing_interval: 15,
             },
             base_directory: default_irys_path(),
+            trusted_peers: vec!["127.0.0.1:8080".parse().expect("valid SocketAddr expected")],
         }
     }
 }
@@ -275,9 +279,10 @@ mod tests {
             token_price_safe_range = "0.25"
             price_adjustment_interval = 10
             cpu_packing_concurrency = 4
-            gpu_packing_batch_size = 1024   
+            gpu_packing_batch_size = 1024
             cache_clean_lag = 2
             base_directory = "~/.irys"
+            trusted_peers = ["127.0.0.1:8080"]
 
             [oracle_config]
             type = "mock"
