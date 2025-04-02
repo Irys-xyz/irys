@@ -13,9 +13,10 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         port: 8080,
         ..Config::testnet()
     };
-    let ctx_genesis_node = setup_with_config(testnet_config_genesis)
-        .await
-        .expect("found invalid genesis ctx");
+    let ctx_genesis_node =
+        setup_with_config(testnet_config_genesis, "heavy_sync_chain_state_genesis")
+            .await
+            .expect("found invalid genesis ctx");
 
     // start mining
     // advance one block
@@ -49,7 +50,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         port: 8081,
         ..Config::testnet()
     };
-    let ctx_peer1_node = setup_with_config(testnet_config_peer1)
+    let ctx_peer1_node = setup_with_config(testnet_config_peer1, "heavy_sync_chain_state_peer1")
         .await
         .expect("found invalid genesis ctx for peer1");
 
@@ -58,7 +59,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         port: 8082,
         ..Config::testnet()
     };
-    let ctx_peer2_node = setup_with_config(testnet_config_peer2)
+    let ctx_peer2_node = setup_with_config(testnet_config_peer2, "heavy_sync_chain_state_peer2")
         .await
         .expect("found invalid genesis ctx for peer2");
 
@@ -80,8 +81,8 @@ struct TestCtx {
     temp_dir: TempDir,
 }
 
-async fn setup_with_config(testnet_config: Config) -> eyre::Result<TestCtx> {
-    let temp_dir = temporary_directory(Some("external_api"), false);
+async fn setup_with_config(testnet_config: Config, node_name: &str) -> eyre::Result<TestCtx> {
+    let temp_dir = temporary_directory(Some(node_name), false);
     let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
     let storage_config = irys_types::StorageConfig::new(&testnet_config);
