@@ -284,8 +284,8 @@ mod tests {
             gpu_packing_batch_size = 1024   
             cache_clean_lag = 2
             base_directory = "~/.irys"
-            gossip_service_bind_ip: "127.0.0.1",
-            gossip_service_port: 8081,
+            gossip_service_bind_ip = "127.0.0.1"
+            gossip_service_port = 8081
 
             [oracle_config]
             type = "mock"
