@@ -13,7 +13,7 @@ use irys_actors::peer_list_service::PeerListService;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
-    block_discovery::BlockDiscoveryActor,
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerActor,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
@@ -281,10 +281,10 @@ impl IrysNodeCtx {
         info!("Fetching latest blocks...");
         let peer = peers_guard.first().expect("at least one peer");
         while let Some(block) = block_queue.lock().await.pop_front() {
-            if let block_request = fetch_block(peer, &client, block) {
-                /*
-
-                */
+            if let Some(irys_block) = fetch_block(peer, &client, block).await {
+                let block = Arc::new(irys_block);
+                let block_discovery_addr = self.actor_addresses.block_discovery_addr.clone();
+                let _ = block_discovery_addr.send(BlockDiscoveredMessage(block.clone()));
             }
         }
         info!("Fetching latest txns...");
