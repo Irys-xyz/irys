@@ -272,9 +272,9 @@ impl IrysNodeCtx {
         }
 
         info!("Fetching latest blocks...");
+        let peer = peers_guard.first().expect("at least one peer");
         while let Some(block) = block_queue.lock().await.pop_front() {
-            let block_request =
-                fetch_block(peers.first().expect("at least one peer"), &client, block);
+            let block_request = fetch_block(peer, &client, block);
         }
 
         info!("Fetching latest txns...");
