@@ -27,7 +27,7 @@ async fn info_endpoint_request(
     client_request(&format!("{}{}", &address, "/v1/info")).await
 }
 
-async fn block_index_endpoint_request(
+pub async fn block_index_endpoint_request(
     address: &str,
     height: u64,
     limit: u64,
