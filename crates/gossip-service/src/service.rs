@@ -336,7 +336,7 @@ fn spawn_main_task(
                 _ = shutdown_rx.recv() => {
                     tracing::debug!("Gossip service shutdown signal received");
                 }
-                cleanup_res = cleanup_handle.wait_for_exit() => {
+                cleanup_res = cache_pruning_task_handle.wait_for_exit() => {
                     tracing::warn!("Gossip cleanup exited because: {:?}", cleanup_res);
                 }
                 broadcast_res = broadcast_task_handle.wait_for_exit() => {
