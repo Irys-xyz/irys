@@ -6,7 +6,6 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
 use irys_actors::mempool_service::TxIngressError;
-use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
 use irys_types::{irys::IrysSigner, Config, IrysTransaction};
 use k256::ecdsa::SigningKey;
@@ -22,14 +21,11 @@ use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 
 #[tokio::test]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
-    let testnet_config = Config::testnet();
-    let mut config = IrysNodeConfig::new(&testnet_config);
-
-    let account1 = IrysSigner::random_signer(&testnet_config);
-    let account2 = IrysSigner::random_signer(&testnet_config);
-    let account3 = IrysSigner::random_signer(&testnet_config);
-
-    config.extend_genesis_accounts(vec![
+    let mut node = IrysNodeTest::default();
+    let account1 = IrysSigner::random_signer(&node.node_ctx.config);
+    let account2 = IrysSigner::random_signer(&node.node_ctx.config);
+    let account3 = IrysSigner::random_signer(&node.node_ctx.config);
+    node.node_ctx.irys_node_config.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -52,9 +48,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             },
         ),
     ]);
-
-    let irys_node =
-        IrysNodeTest::new_with_config("test_blockprod", Some(testnet_config), Some(config)).await;
+    let irys_node = node.start().await;
 
     let mut txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
     for a in [&account1, &account2, &account3] {
@@ -105,7 +99,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
-    let node = IrysNodeTest::new("test_mine_ten_blocks_with_capacity_poa_solution").await;
+    let node = IrysNodeTest::default().start().await;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
@@ -134,7 +128,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 
 #[tokio::test]
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
-    let node = IrysNodeTest::new("test_mine_ten_blocks").await;
+    let node = IrysNodeTest::default().start().await;
 
     node.node_ctx.actor_addresses.start_mining()?;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
@@ -157,7 +151,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
-    let node = IrysNodeTest::new("test_basic_blockprod").await;
+    let node = IrysNodeTest::default().start().await;
 
     let (block, _) = mine_block(&node.node_ctx).await?.unwrap();
 
@@ -192,14 +186,13 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         chunk_migration_depth: 1,
         ..Config::testnet()
     };
-    let mut config = IrysNodeConfig::new(&testnet_config);
-
-    let mining_signer_addr = config.mining_signer.address();
-    let account1 = IrysSigner::random_signer(&testnet_config);
-    let account2 = IrysSigner::random_signer(&testnet_config);
-    let account3 = IrysSigner::random_signer(&testnet_config);
-
-    config.extend_genesis_accounts(vec![
+    let mut node = IrysNodeTest::new_genesis(testnet_config);
+    let account1 = IrysSigner::random_signer(&node.node_ctx.config);
+    let account2 = IrysSigner::random_signer(&node.node_ctx.config);
+    let account3 = IrysSigner::random_signer(&node.node_ctx.config);
+    let chain_id = node.node_ctx.config.chain_id;
+    let mining_signer_addr = node.node_ctx.config.miner_address();
+    node.node_ctx.irys_node_config.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -222,11 +215,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
             },
         ),
     ]);
-
-    let chain_id = testnet_config.chain_id;
-    let node =
-        IrysNodeTest::new_with_config("test_serial_blockprod", Some(testnet_config), Some(config))
-            .await;
+    let node = node.start().await;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
     let miner_init_balance = reth_context
         .rpc
