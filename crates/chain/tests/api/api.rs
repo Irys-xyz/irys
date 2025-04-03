@@ -18,8 +18,6 @@ use irys_types::{Config, TxChunkOffset};
 use reth_primitives::GenesisAccount;
 use tracing::info;
 
-use crate::utils::start_node_config;
-
 #[actix_web::test]
 async fn heavy_api_end_to_end_test_32b() {
     if PACKING_TYPE == PackingType::CPU {
