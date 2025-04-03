@@ -41,6 +41,8 @@ pub async fn post_chunk(
                 .body(format!("Invalid data_hash: {:?}", err))),
             ChunkIngressError::InvalidChunkSize => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                 .body(format!("Invalid chunk size: {:?}", err))),
+            ChunkIngressError::InvalidDataSize => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                .body(format!("Invalid data_size field : {:?}", err))),
             ChunkIngressError::UnknownTransaction => {
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                     .body(format!("Unknown transaction: {:?}", err)))

@@ -80,6 +80,10 @@ pub struct Config {
     pub base_directory: PathBuf,
     /// The initial list of peers to contact for block sync
     pub trusted_peers: Vec<SocketAddr>,
+    /// The IP address of the gossip service
+    pub gossip_service_bind_ip: String,
+    /// The port of the gossip service
+    pub gossip_service_port: u16,
 }
 
 fn default_irys_path() -> PathBuf {
@@ -163,6 +167,8 @@ impl Config {
             },
             base_directory: default_irys_path(),
             trusted_peers: vec!["127.0.0.1:8080".parse().expect("valid SocketAddr expected")],
+            gossip_service_bind_ip: "127.0.0.1".into(),
+            gossip_service_port: 0,
         }
     }
 }
@@ -283,6 +289,8 @@ mod tests {
             cache_clean_lag = 2
             base_directory = "~/.irys"
             trusted_peers = ["127.0.0.1:8080"]
+            gossip_service_bind_ip = "127.0.0.1"
+            gossip_service_port = 8081
 
             [oracle_config]
             type = "mock"

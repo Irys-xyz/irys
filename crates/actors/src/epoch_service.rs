@@ -3,18 +3,22 @@ use actix::{Actor, ActorContext, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
 use irys_config::StorageSubmodulesConfig;
-use irys_database::{block_header_by_hash, data_ledger::*, database};
+use irys_database::{block_header_by_hash, commitment_tx_by_txid, data_ledger::*, SystemLedger};
+use irys_primitives::CommitmentStatus;
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     DatabaseProvider, IrysBlockHeader, SimpleRNG, StorageConfig, H256,
 };
-use irys_types::{partition_chunk_offset_ie, PartitionChunkOffset};
+use irys_types::{
+    partition_chunk_offset_ie, Address, CommitmentTransaction, IrysTransactionId,
+    PartitionChunkOffset,
+};
 use irys_types::{Config, H256List};
 use openssl::sha;
 use reth_db::Database;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 
@@ -33,6 +37,7 @@ pub struct EpochServiceConfig {
     pub capacity_scalar: u64,
     /// The length of an epoch denominated in block heights
     pub num_blocks_in_epoch: u64,
+    /// Sets the minimum number of capacity partitions for the protocol.
     pub num_capacity_partitions: Option<u64>,
     /// Reference to global storage config for node
     pub storage_config: StorageConfig,
@@ -53,9 +58,9 @@ impl EpochServiceConfig {
 #[derive(Debug)]
 pub struct PartitionAssignments {
     /// Active data partition state mapped by partition hash
-    pub data_partitions: HashMap<PartitionHash, PartitionAssignment>,
+    pub data_partitions: BTreeMap<PartitionHash, PartitionAssignment>,
     /// Available capacity partitions mapped by partition hash
-    pub capacity_partitions: HashMap<PartitionHash, PartitionAssignment>,
+    pub capacity_partitions: BTreeMap<PartitionHash, PartitionAssignment>,
 }
 
 /// Implementation helper functions
@@ -69,8 +74,8 @@ impl PartitionAssignments {
     /// Initialize a new `PartitionAssignments` state wrapper struct
     pub fn new() -> Self {
         Self {
-            data_partitions: HashMap::new(),
-            capacity_partitions: HashMap::new(),
+            data_partitions: BTreeMap::new(),
+            capacity_partitions: BTreeMap::new(),
         }
     }
 
@@ -81,6 +86,81 @@ impl PartitionAssignments {
             .copied()
             .or(self.capacity_partitions.get(&partition_hash).copied())
     }
+
+    // TODO: convert to Display impl for PartitionAssignments
+    pub fn print_assignments(&self) {
+        debug!(
+            "Partition Assignments ({}):",
+            self.data_partitions.len() + self.capacity_partitions.len()
+        );
+
+        // List Publish ledger assignments, ordered by index
+        let mut publish_assignments: Vec<_> = self
+            .data_partitions
+            .iter()
+            .filter(|(_, a)| a.ledger_id == Some(DataLedger::Publish as u32))
+            .collect();
+        publish_assignments.sort_unstable_by(|(_, a1), (_, a2)| a1.slot_index.cmp(&a2.slot_index));
+
+        for (hash, assignment) in publish_assignments {
+            let ledger = DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
+            debug!(
+                "{:?}[{}] {} miner: {}",
+                ledger,
+                assignment.slot_index.unwrap(),
+                hash.0.to_base58(),
+                assignment.miner_address
+            );
+        }
+
+        // List Submit ledger assignments, ordered by index
+        let mut submit_assignments: Vec<_> = self
+            .data_partitions
+            .iter()
+            .filter(|(_, a)| a.ledger_id == Some(DataLedger::Submit as u32))
+            .collect();
+        submit_assignments.sort_unstable_by(|(_, a1), (_, a2)| a1.slot_index.cmp(&a2.slot_index));
+        for (hash, assignment) in submit_assignments {
+            let ledger = DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
+            debug!(
+                "{:?}[{}] {} miner: {}",
+                ledger,
+                assignment.slot_index.unwrap(),
+                hash.0.to_base58(),
+                assignment.miner_address
+            );
+        }
+
+        // List capacity ledger assignments, ordered by hash (natural ordering)
+        for (index, (hash, assignment)) in self.capacity_partitions.iter().enumerate() {
+            debug!(
+                "Capacity[{}] {} miner: {}",
+                index,
+                hash.0.to_base58(),
+                assignment.miner_address
+            );
+        }
+    }
+}
+
+//==============================================================================
+// CommitmentState
+//------------------------------------------------------------------------------
+#[derive(Debug, Default, Clone)]
+struct CommitmentStateEntry {
+    id: IrysTransactionId,
+    commitment_status: CommitmentStatus,
+    partition_hash: Option<H256>,
+    signer: Address,
+    /// Irys token amount in atomic units
+    #[allow(dead_code)]
+    amount: u64,
+}
+
+#[derive(Debug, Default)]
+struct CommitmentState {
+    pub stake_commitments: BTreeMap<Address, CommitmentStateEntry>,
+    pub pledge_commitments: BTreeMap<Address, Vec<CommitmentStateEntry>>,
 }
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
@@ -94,10 +174,14 @@ pub struct EpochServiceActor {
     pub partition_assignments: Arc<RwLock<PartitionAssignments>>,
     /// Sequential list of activated partition hashes
     pub all_active_partitions: Vec<PartitionHash>,
+    /// List of partition hashes not yet assigned to a mining address
+    pub unassigned_partitions: Vec<PartitionHash>,
     /// Current partition & ledger parameters
     pub config: EpochServiceConfig,
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
+    /// Computed commitment state
+    commitment_state: CommitmentState,
 }
 
 impl Actor for EpochServiceActor {
@@ -107,14 +191,18 @@ impl Actor for EpochServiceActor {
 /// Sent when a new epoch block is reached (and at genesis)
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(),EpochServiceError>")]
-pub struct NewEpochMessage(pub Arc<IrysBlockHeader>);
+pub struct NewEpochMessage {
+    pub epoch_block: Arc<IrysBlockHeader>,
+    pub commitments: Vec<CommitmentTransaction>,
+}
 
 impl Handler<NewEpochMessage> for EpochServiceActor {
     type Result = Result<(), EpochServiceError>;
     fn handle(&mut self, msg: NewEpochMessage, _ctx: &mut Self::Context) -> Self::Result {
-        let new_epoch_block = msg.0;
+        let new_epoch_block = msg.epoch_block;
+        let commitments = msg.commitments;
 
-        self.perform_epoch_tasks(new_epoch_block)?;
+        self.perform_epoch_tasks(new_epoch_block, commitments)?;
 
         Ok(())
     }
@@ -221,7 +309,7 @@ impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
         msg: GetGenesisStorageModulesMessage,
         _ctx: &mut Self::Context,
     ) -> Self::Result {
-        self.get_genesis_storage_module_infos(msg.0)
+        self.map_storage_modules_to_partition_assignments(msg.0)
     }
 }
 
@@ -262,8 +350,10 @@ impl EpochServiceActor {
             ledgers: Arc::new(RwLock::new(Ledgers::new(config))),
             partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
             all_active_partitions: Vec::new(),
+            unassigned_partitions: Vec::new(),
             config: epoch_config,
             block_index_guard,
+            commitment_state: Default::default(),
         }
     }
 
@@ -273,8 +363,8 @@ impl EpochServiceActor {
         storage_module_config: StorageSubmodulesConfig,
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
         let mut block_index = 0;
-        let mut storage_module_info = Vec::new();
 
+        // Loop though all the epoch blocks, starting with genesis (block_index = 0)
         loop {
             let block_height = {
                 self.block_index_guard
@@ -286,20 +376,44 @@ impl EpochServiceActor {
 
             match block_height {
                 Some(b) => {
-                    let block_header =
-                        database::block_header_by_hash(&db.tx().unwrap(), &b.block_hash, false)
-                            .unwrap()
-                            .unwrap();
-                    match self.perform_epoch_tasks(Arc::new(block_header)) {
+                    let tx = &db.tx().expect("to create readonly mdbx tx");
+                    let block_header = block_header_by_hash(tx, &b.block_hash, false)
+                        .unwrap()
+                        .expect(&format!(
+                            "to find the block header at height {}",
+                            block_index
+                        ));
+
+                    // Get the commitments_ledger from the block
+                    let commitments_ledger = block_header
+                        .system_ledgers
+                        .iter()
+                        .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+                    // Build a list of CommitmentTransactions from the commitments ledger txids
+                    let mut commitments: Vec<CommitmentTransaction> = Vec::new();
+                    if let Some(commitments_ledger) = commitments_ledger {
+                        for commitment_txid in commitments_ledger.tx_ids.iter() {
+                            let commitment_tx = commitment_tx_by_txid(tx, commitment_txid)
+                                .expect("getting commitment tx should succeed");
+                            if let Some(commitment_tx) = commitment_tx {
+                                commitments.push(commitment_tx);
+                            } else {
+                                return Err(eyre::eyre!(
+                                    "Commitment missing in database {:?}",
+                                    commitment_txid.0.to_base58()
+                                ));
+                            }
+                        }
+                    }
+
+                    // Process epoch tasks with the block header and commitments
+                    match self.perform_epoch_tasks(Arc::new(block_header), commitments) {
                         Ok(_) => debug!(?block_index, "Processed epoch block"),
                         Err(e) => {
                             self.print_items(self.block_index_guard.clone(), db.clone());
                             return Err(eyre::eyre!("Error performing epoch tasks {:?}", e));
                         }
-                    }
-                    if block_index == 0 {
-                        storage_module_info =
-                            self.get_genesis_storage_module_infos(storage_module_config.clone());
                     }
                     block_index += TryInto::<usize>::try_into(self.config.num_blocks_in_epoch)
                         .expect("Number of blocks in epoch is too large!");
@@ -313,27 +427,8 @@ impl EpochServiceActor {
             }
         }
 
-        // update partition slot/ledger assignments in storage module info
-        for sm in storage_module_info.iter_mut() {
-            let _ = sm
-                .partition_assignment
-                .map(|mut pa| {
-                    match self
-                        .partition_assignments
-                        .read()
-                        .map(|p| p.get_assignment(pa.partition_hash))
-                    {
-                        Ok(Some(pa2)) => {
-                            pa.ledger_id = pa2.ledger_id;
-                            pa.slot_index = pa2.slot_index;
-                            Ok(())
-                        }
-                        Ok(None) => Ok(()),
-                        Err(e) => Err(eyre::eyre!("Error reading partition assignments: {:?}", e)),
-                    }
-                })
-                .ok_or(eyre::eyre!("Error reading partition assignments"))?;
-        }
+        let storage_module_info =
+            self.map_storage_modules_to_partition_assignments(storage_module_config);
 
         Ok(storage_module_info)
     }
@@ -360,6 +455,7 @@ impl EpochServiceActor {
     pub fn perform_epoch_tasks(
         &mut self,
         new_epoch_block: Arc<IrysBlockHeader>,
+        commitments: Vec<CommitmentTransaction>,
     ) -> Result<(), EpochServiceError> {
         // Validate this is an epoch block height
         if new_epoch_block.height % self.config.num_blocks_in_epoch != 0 {
@@ -375,10 +471,10 @@ impl EpochServiceActor {
             &new_epoch_block.block_hash, &new_epoch_block.height
         );
 
-        self.try_genesis_init(&new_epoch_block);
+        // These commitment tx must be pre-validated
+        self.compute_commitment_state(commitments);
 
-        // Future: Validate partition assignments against stake/pledge
-        // requirements and remove any that no longer meet minimum thresholds
+        self.try_genesis_init(&new_epoch_block);
 
         self.expire_term_ledger_slots(&new_epoch_block);
 
@@ -388,22 +484,35 @@ impl EpochServiceActor {
 
         self.allocate_additional_capacity();
 
+        self.assign_partition_hashes_to_pledges();
+
         Ok(())
     }
 
-    /// Initialize genesis state by generating initial capacity partition hashes
-    /// if none exist
+    /// Initializes genesis state when a genesis block is processed for the first time
+    ///
+    /// This function performs critical one-time setup when processing the genesis block:
+    /// 1. Stores the genesis epoch hash
+    /// 2. Allocates initial slots for each data ledger
+    /// 3. Creates the necessary capacity partitions based on data partitions
+    /// 4. Assigns capacity partitions to pledge commitments
+    ///
+    /// The function only executes if:
+    /// - No active partitions exist yet (indicating first run)
+    /// - The block is a genesis block
+    ///
+    /// # Arguments
+    /// * `new_epoch_block` - The genesis block to initialize from
     fn try_genesis_init(&mut self, new_epoch_block: &IrysBlockHeader) {
-        if self.all_active_partitions.is_empty() && new_epoch_block.height == 0 {
+        if self.all_active_partitions.is_empty() && new_epoch_block.is_genesis() {
             debug!("Performing genesis init");
             // Store the genesis epoch hash
             self.last_epoch_hash = new_epoch_block.last_epoch_hash;
 
             // Allocate 1 slot to each ledger and calculate the number of partitions
             let mut num_data_partitions = 0;
-
-            // Create a scope for the write lock to expire with
             {
+                // Create a scope for the write lock to expire with
                 let mut ledgers = self.ledgers.write().unwrap();
                 for ledger in DataLedger::iter() {
                     debug!("Allocating 1 slot for {:?}", &ledger);
@@ -411,16 +520,27 @@ impl EpochServiceActor {
                 }
             }
 
-            // Calculate the total number of partitions
-            let num_partitions = num_data_partitions
-                + Self::get_num_capacity_partitions(num_data_partitions, &self.config);
+            // Calculate the total number of capacity partitions
+            let projected_capacity_parts =
+                Self::get_num_capacity_partitions(num_data_partitions, &self.config);
 
+            // Determine the number of capacity partitions to create
+            // We take the greater of:
+            // 1. The config override (if specified)
+            // 2. The projected number calculated from data partitions
             self.add_capacity_partitions(std::cmp::max(
                 self.config
                     .num_capacity_partitions
-                    .unwrap_or(num_partitions),
-                num_partitions,
+                    .unwrap_or(projected_capacity_parts),
+                projected_capacity_parts,
             ));
+
+            // Assign capacity partition hashes to genesis pledge commitments
+            // In previous single-node testnet, these were automatically assigned to the local node
+            // Now, with multi-node support, we explicitly assign them to pledge commitments
+            // This ensures backfill_missing_partitions() has properly assigned partitions
+            // available for data ledger slots during genesis perform_epoch_tasks()
+            self.assign_partition_hashes_to_pledges();
         } else {
             debug!(
                 "Skipping genesis init - active parts empty? {}, epoch height: {}",
@@ -578,7 +698,7 @@ impl EpochServiceActor {
         truncate_to_3_decimals(scaled).ceil() as u64
     }
 
-    /// Adds new capacity partitions to the protocols pool of partitions. This
+    /// Adds new capacity partition hashes to the protocols pool of active partition hashes. This
     /// follows the process of sequentially hashing the previous partitions
     /// hash to compute the next partitions hash.
     fn add_capacity_partitions(&mut self, parts_to_add: u64) {
@@ -597,23 +717,9 @@ impl EpochServiceActor {
                 prev_partition_hash.0.to_base58()
             );
             self.all_active_partitions.push(next_part_hash);
+            // All partition_hashes begin as unassigned capacity partitions
+            self.unassigned_partitions.push(next_part_hash);
             prev_partition_hash = next_part_hash;
-        }
-
-        // Create partition assignments for all the partitions to the local miners address
-        // TODO: Change this ^^ when pledging and staking exist
-        // TODO is this wrong ? should not be inside previous loop, not all assignments are capacity ones
-        let mut pa = self.partition_assignments.write().unwrap();
-        for partition_hash in &self.all_active_partitions {
-            pa.capacity_partitions.insert(
-                *partition_hash,
-                PartitionAssignment {
-                    partition_hash: *partition_hash,
-                    miner_address: self.config.storage_config.miner_address,
-                    ledger_id: None,
-                    slot_index: None,
-                },
-            );
         }
     }
 
@@ -718,77 +824,306 @@ impl EpochServiceActor {
         slots_to_add
     }
 
-    /// Configure storage modules for genesis partition assignments
-    pub fn get_genesis_storage_module_infos(
+    /// Computes the commitment state based on an epoch block and commitment transactions
+    ///
+    /// This function processes stake and pledge commitments to build a complete
+    /// commitment state representation. It validates that all commitment references
+    /// in the ledger have corresponding transaction data.
+    ///
+    /// TODO: Support unpledging and unstaking
+    pub fn compute_commitment_state(&mut self, commitments: Vec<CommitmentTransaction>) {
+        // Categorize commitments by their type for separate processing
+        let mut stake_commitments: Vec<CommitmentTransaction> = Vec::new();
+        let mut pledge_commitments: Vec<CommitmentTransaction> = Vec::new();
+        for commitment_tx in commitments {
+            match commitment_tx.commitment_type {
+                irys_primitives::CommitmentType::Stake => stake_commitments.push(commitment_tx),
+                irys_primitives::CommitmentType::Pledge => pledge_commitments.push(commitment_tx),
+                _ => unimplemented!(),
+            }
+        }
+
+        // Process stake commitments - these represent miners joining the network
+        for stake_commitment in stake_commitments {
+            // Register the commitment in the state
+            // Assumption: Commitments are pre-validated, so we don't check for duplicates
+            let value = CommitmentStateEntry {
+                id: stake_commitment.id.into(),
+                commitment_status: CommitmentStatus::Active,
+                partition_hash: None,
+                signer: stake_commitment.signer.clone(),
+                // TODO: implement the staking cost lookups and use that value here
+                amount: 0,
+            };
+            self.commitment_state
+                .stake_commitments
+                .insert(stake_commitment.signer, value);
+        }
+
+        // Process pledge commitments - miners committing resources to the network
+        for pledge_commitment in pledge_commitments {
+            let address = pledge_commitment.signer;
+
+            // Skip pledges that don't have a corresponding active stake
+            // This ensures only staked miners can make pledges
+            if !self
+                .commitment_state
+                .stake_commitments
+                .get(&address)
+                .is_some_and(|c| c.commitment_status == CommitmentStatus::Active)
+            {
+                continue;
+            } else {
+                // TODO: Consider raising an error - this condition should have been caught in pre-validation
+            }
+
+            // Create the state entry for the pledge commitment
+            let value = CommitmentStateEntry {
+                id: pledge_commitment.id.into(),
+                commitment_status: CommitmentStatus::Active,
+                partition_hash: None,
+                signer: pledge_commitment.signer,
+                // TODO: implement the pledging cost lookups and use that value here
+                amount: 0,
+            };
+
+            // Add the pledge state to the signer's collection (or create a new collection if first pledge)
+            self.commitment_state
+                .pledge_commitments
+                .entry(address)
+                .or_insert_with(Vec::new)
+                .push(value);
+        }
+    }
+
+    /// Assigns partition hashes to unassigned pledge commitments
+    ///
+    /// This function pairs unassigned partition hashes with active pledge commitments
+    /// that have no partition hash assigned. It:
+    ///
+    /// 1. Takes partition hashes from self.unassigned_partitions
+    /// 2. Assigns them to active pledges in commitment_state that need partitions
+    /// 3. Updates PartitionAssignments to track the assignments
+    /// 4. Removes assigned partitions from the unassigned_partitions list
+    ///
+    /// The assignment is deterministic, using sorted lists of both pledges and
+    /// partition hashes to ensure consistent results.
+    pub fn assign_partition_hashes_to_pledges(&mut self) {
+        // Exit early if no partitions available
+        if self.unassigned_partitions.is_empty() {
+            return;
+        }
+
+        // Sort all the unassigned capacity partition_hashes
+        let mut unassigned_partition_hashes = self.unassigned_partitions.clone();
+        unassigned_partition_hashes.sort_unstable();
+        let mut unassigned_parts: VecDeque<H256> = unassigned_partition_hashes.into();
+
+        // Make a list of all the active pledges with no assigned partition hash
+        let mut unassigned_pledges: Vec<CommitmentStateEntry> = self
+            .commitment_state
+            .pledge_commitments
+            .values()
+            .flat_map(|entries| entries.iter())
+            .filter(|entry| {
+                entry.commitment_status == CommitmentStatus::Active
+                    && entry.partition_hash.is_none()
+            })
+            .cloned()
+            .collect();
+
+        // Exit early if no unassigned pledges available
+        if unassigned_pledges.is_empty() {
+            return;
+        }
+
+        // Sort all the unassigned pledges by their ids, having a sorted list
+        // of pledges and unassigned hashes leads to deterministic pledge assignment
+        unassigned_pledges.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+
+        // Loop though both lists assigning capacity partitions to pledges
+        for pledge in &unassigned_pledges {
+            let partition_hash = unassigned_parts.pop_front().unwrap(); // Safe because we check isEmpty above
+
+            // Initialize flag to track if we assigned a pledge commitment to a partition_hash
+            let mut pledge_assigned = false;
+
+            // Get the pledges for this signer
+            if let Some(entries) = self
+                .commitment_state
+                .pledge_commitments
+                .get_mut(&pledge.signer)
+            {
+                // Look for the matching pledge
+                for entry in entries.iter_mut() {
+                    if entry.id == pledge.id {
+                        // Record the assigned partition hash in the pledge entry
+                        entry.partition_hash = Some(partition_hash);
+                        pledge_assigned = true;
+                        break;
+                    }
+                }
+            }
+
+            // If the pledge commitment was updated, update partition assignments state to match
+            if pledge_assigned {
+                let mut pa = self.partition_assignments.write().unwrap();
+                pa.capacity_partitions.insert(
+                    partition_hash,
+                    PartitionAssignment {
+                        partition_hash,
+                        miner_address: pledge.signer,
+                        ledger_id: None,
+                        slot_index: None,
+                    },
+                );
+                // Remove the partition_hash from the unassigned partitions list
+                self.unassigned_partitions
+                    .retain(|&hash| hash != partition_hash);
+            }
+        }
+    }
+
+    /// Returns a vector of all partition assignments associated with the provided miner address.
+    ///
+    /// This function extracts assignments from both data and capacity partitions where
+    /// the miner_address matches the input. Data partition assignments are added first,
+    /// followed by capacity partition assignments. Within each category, the ordering is
+    /// determined by the underlying BTreeMap implementation which orders entries by their
+    /// partition hash keys, ensuring consistent and deterministic iteration order.
+    ///
+    /// # Arguments
+    /// * `miner_address` - The address of the miner to get assignments for
+    ///
+    /// # Returns
+    /// * `Vec<PartitionAssignment>` - A vector containing all matching partition assignments
+    pub fn get_partition_assignments(&self, miner_address: Address) -> Vec<PartitionAssignment> {
+        let mut assignments = Vec::new();
+
+        // Get a read only view of the partition assignments
+        let pa = self.partition_assignments.read().unwrap();
+
+        // Filter the data ledgers and get assignments matching the miner_address
+        let assigned_data_partitions: Vec<&PartitionAssignment> = pa
+            .data_partitions
+            .iter()
+            .filter(|(_, ass)| ass.miner_address == miner_address)
+            .map(|(_, ass)| ass)
+            .collect();
+
+        assignments.extend(assigned_data_partitions);
+
+        let assigned_capacity_partitions: Vec<&PartitionAssignment> = pa
+            .capacity_partitions
+            .iter()
+            .filter(|(_, ass)| ass.miner_address == miner_address)
+            .map(|(_, ass)| ass)
+            .collect();
+
+        assignments.extend(assigned_capacity_partitions);
+
+        assignments
+    }
+
+    /// Maps storage modules to partition assignments for the local node.
+    ///
+    /// This function creates [`StorageModuleInfo`] instances that link storage modules to specific
+    /// partition assignments. It processes assignments in the following priority order:
+    /// 1. Publish ledger partitions (first priority)
+    /// 2. Submit ledger partitions (second priority)
+    /// 3. Capacity partitions (used for remaining storage modules)
+    ///
+    /// The function respects the BTreeMap's deterministic ordering when processing assignments
+    /// within each category, ensuring consistent mapping across node restarts.
+    ///
+    /// # Note
+    /// This function has the same configuration dependency as [`system_ledger::get_genesis_commitments()`].
+    /// When updating configuration related to StorageModule/submodule functionality, both functions
+    /// will need corresponding updates.
+    ///
+    /// # Arguments
+    /// * `storage_module_config` - Configuration containing paths for storage submodules
+    ///
+    /// # Returns
+    /// * `Vec<StorageModuleInfo>` - Vector of storage module information with assigned partitions
+    pub fn map_storage_modules_to_partition_assignments(
         &self,
         storage_module_config: StorageSubmodulesConfig,
     ) -> Vec<StorageModuleInfo> {
-        let ledgers = self.ledgers.read().unwrap();
-        let num_part_chunks: u32 = self
-            .config
-            .storage_config
-            .num_chunks_in_partition
-            .try_into()
-            .expect("Value exceeds u32::MAX");
+        let miner_address = self.config.storage_config.miner_address;
+        // Retrieve all partition assignments for the current miner
+        let miner_assignments = self.get_partition_assignments(miner_address);
 
+        let num_chunks_in_partition = self.config.storage_config.num_chunks_in_partition as u32;
         let pa = self.partition_assignments.read().unwrap();
-
         let sm_paths = storage_module_config.submodule_paths;
-        // Configure publish ledger storage
-        let mut module_infos = ledgers
-            .get_slots(DataLedger::Publish)
+
+        // STEP 1: Process Publish ledger partition assignments
+        // Filter assignments to only include those for the Publish ledger
+        let publish_assignments = miner_assignments
             .iter()
-            .flat_map(|slot| &slot.partitions)
-            .enumerate()
-            .map(|(idx, partition)| StorageModuleInfo {
+            .filter(|pa| pa.ledger_id == Some(DataLedger::Publish as u32));
+
+        // Create StorageModuleInfo for each Publish ledger assignment
+        let mut module_infos: Vec<StorageModuleInfo> = Vec::new();
+        for (idx, assign) in publish_assignments.enumerate() {
+            module_infos.push(StorageModuleInfo {
                 id: idx,
-                partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
+                partition_assignment: Some(*assign),
                 submodules: vec![(
-                    partition_chunk_offset_ie!(0, num_part_chunks),
+                    partition_chunk_offset_ie!(0, num_chunks_in_partition),
                     sm_paths[idx].clone(),
                 )],
-            })
-            .collect::<Vec<_>>();
+            });
+        }
 
+        // Remember current index for Submit ledger assignments
         let idx_start = module_infos.len();
 
-        // Configure submit ledger storage
-        let submit_infos = ledgers
-            .get_slots(DataLedger::Submit)
+        // STEP 2: Process Submit ledger partition assignments
+        // Filter assignments to only include those for the Submit ledger
+        let submit_assignments = miner_assignments
             .iter()
-            .flat_map(|slot| &slot.partitions)
-            .enumerate()
-            .map(|(idx, partition)| StorageModuleInfo {
+            .filter(|pa| pa.ledger_id == Some(DataLedger::Submit as u32));
+
+        for (idx, assign) in submit_assignments.enumerate() {
+            module_infos.push(StorageModuleInfo {
                 id: idx_start + idx,
-                partition_assignment: Some(*pa.data_partitions.get(partition).unwrap()),
+                partition_assignment: Some(*assign),
                 submodules: vec![(
-                    partition_chunk_offset_ie!(0, num_part_chunks),
+                    partition_chunk_offset_ie!(0, num_chunks_in_partition),
                     sm_paths[idx_start + idx].clone(),
                 )],
-            })
-            .collect::<Vec<_>>();
+            });
+        }
 
-        module_infos.extend(submit_infos);
+        // Exit early if no capacity partitions exist
+        if pa.capacity_partitions.is_empty() {
+            return module_infos;
+        }
 
-        // Sort the active capacity partitions by hash
-        let mut capacity_partitions: Vec<H256> = pa.capacity_partitions.keys().copied().collect();
-        capacity_partitions.sort_unstable();
-        let mut cap_parts: VecDeque<H256> = capacity_partitions.into();
+        // STEP 3: Process Capacity partition assignments (ledger_id == None)
+        // Note: The order is preserved from the BTreeMap's natural ordering by partition_hash
+        let capacity_assignments = miner_assignments.iter().filter(|pa| pa.ledger_id == None);
 
-        // Add initial capacity partition config
-        let start_idx = module_infos.len();
+        // Populate remaining storage modules with capacity partition assignments
+        // Only use as many capacity assignments as we have remaining storage modules
+        let idx_start = module_infos.len();
+        let modules_remaining = sm_paths.len() - module_infos.len();
 
-        for i in start_idx..sm_paths.len() {
-            let cap_part = cap_parts.pop_front().unwrap();
-            let sm_info = StorageModuleInfo {
-                id: i,
-                partition_assignment: Some(*pa.capacity_partitions.get(&cap_part).unwrap()),
+        for (idx, assign) in capacity_assignments.enumerate() {
+            // Stop if we've filled all available storage modules
+            if idx == modules_remaining {
+                break;
+            }
+            module_infos.push(StorageModuleInfo {
+                id: idx_start + idx,
+                partition_assignment: Some(*assign),
                 submodules: vec![(
-                    partition_chunk_offset_ie!(0, num_part_chunks),
-                    sm_paths[i].clone(),
+                    partition_chunk_offset_ie!(0, num_chunks_in_partition),
+                    sm_paths[idx_start + idx].clone(),
                 )],
-            };
-            module_infos.push(sm_info);
+            });
         }
 
         module_infos
@@ -818,11 +1153,13 @@ mod tests {
     use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
     use irys_config::IrysNodeConfig;
-    use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized};
+    use irys_database::{
+        add_genesis_commitments, add_test_commitments, insert_commitment_tx, open_or_create_db,
+        tables::IrysTables, BlockIndex, Initialized,
+    };
     use irys_storage::{ie, StorageModule, StorageModuleVec};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{partition_chunk_offset_ie, Address, PartitionChunkRange};
-    use reth::revm::primitives::hex;
     use tokio::time::sleep;
     use tracing::info;
 
@@ -842,6 +1179,7 @@ mod tests {
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         let testnet_config = Config::testnet();
         genesis_block.height = 0;
+        let commitments = add_genesis_commitments(&mut genesis_block, &testnet_config);
 
         // Create epoch service with random miner address
         let config = EpochServiceConfig::new(&testnet_config);
@@ -871,7 +1209,13 @@ mod tests {
 
         // Process genesis message directly instead of through actor system
         // This allows us to inspect the actor's state after processing
-        let _ = epoch_service.handle(NewEpochMessage(genesis_block.into()), &mut Context::new());
+        let _ = epoch_service.handle(
+            NewEpochMessage {
+                epoch_block: genesis_block.into(),
+                commitments,
+            },
+            &mut Context::new(),
+        );
 
         {
             // Verify the correct number of ledgers have been added
@@ -993,6 +1337,8 @@ mod tests {
         let testnet_config = Config::testnet();
         genesis_block.height = 0;
 
+        let commitments = add_genesis_commitments(&mut genesis_block, &testnet_config);
+
         // Create a storage config for testing
         let storage_config = StorageConfig {
             chunk_size: 32,
@@ -1044,7 +1390,13 @@ mod tests {
         // Process genesis message directly instead of through actor system
         // This allows us to inspect the actor's state after processing
         let mut ctx = Context::new();
-        let _ = epoch_service.handle(NewEpochMessage(genesis_block.clone().into()), &mut ctx);
+        let _ = epoch_service.handle(
+            NewEpochMessage {
+                epoch_block: genesis_block.clone().into(),
+                commitments,
+            },
+            &mut ctx,
+        );
 
         let msg = BlockFinalizedMessage {
             block_header: Arc::new(genesis_block.clone()),
@@ -1079,7 +1431,13 @@ mod tests {
         new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
             num_chunks_in_partition / 2;
 
-        let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
+        let _ = epoch_service.handle(
+            NewEpochMessage {
+                epoch_block: new_epoch_block.clone().into(),
+                commitments: Vec::new(),
+            },
+            &mut ctx,
+        );
 
         // Verify each ledger has one slot and the correct number of partitions
         {
@@ -1113,7 +1471,13 @@ mod tests {
         new_epoch_block.data_ledgers[DataLedger::Publish as usize].max_chunk_offset =
             (num_chunks_in_partition as f64 * 0.75) as u64;
 
-        let _ = epoch_service.handle(NewEpochMessage(new_epoch_block.into()), &mut ctx);
+        let _ = epoch_service.handle(
+            NewEpochMessage {
+                epoch_block: new_epoch_block.clone().into(),
+                commitments: Vec::new(),
+            },
+            &mut ctx,
+        );
 
         // Validate the correct number of ledgers slots were added to each ledger
         {
@@ -1163,6 +1527,7 @@ mod tests {
 
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
+        let commitments = add_test_commitments(&mut genesis_block, 5, &testnet_config);
 
         // Create a storage config for testing
         let storage_config = StorageConfig::new(&testnet_config);
@@ -1205,7 +1570,10 @@ mod tests {
         // Process genesis message directly instead of through actor system
         // This allows us to inspect the actor's state after processing
         let _ = epoch_service_actor
-            .send(NewEpochMessage(genesis_block.into()))
+            .send(NewEpochMessage {
+                epoch_block: genesis_block.into(),
+                commitments,
+            })
             .await
             .unwrap();
 
@@ -1389,7 +1757,10 @@ mod tests {
             num_chunks_in_partition / 2;
 
         let _ = epoch_service_actor
-            .send(NewEpochMessage(new_epoch_block.into()))
+            .send(NewEpochMessage {
+                epoch_block: new_epoch_block.into(),
+                commitments: Vec::new(),
+            })
             .await
             .unwrap();
 
@@ -1453,6 +1824,9 @@ mod tests {
                         || submit_partition_hash == sub_slots[2].partitions[0]),
                 "Slot 2 should not be expired and have a capacity or the just expired partition"
             );
+
+            println!("{}", serde_json::to_string_pretty(&sub_slots).unwrap());
+
             assert!(
                 !sub_slots[3].is_expired
                     && sub_slots[3].partitions.len() == 1
@@ -1593,7 +1967,7 @@ mod tests {
         let config = EpochServiceConfig {
             capacity_scalar: testnet_config.capacity_scalar,
             num_blocks_in_epoch: testnet_config.num_blocks_in_epoch,
-            num_capacity_partitions: testnet_config.num_capacity_partitions,
+            num_capacity_partitions: Some(200),
             storage_config: storage_config.clone(),
         };
         let num_blocks_in_epoch = config.num_blocks_in_epoch;
@@ -1630,12 +2004,42 @@ mod tests {
         // Initialize genesis block at height 0
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
-        genesis_block.block_hash = H256::from_slice(&[0; 32]);
-        let _ = epoch_service.handle(NewEpochMessage(genesis_block.clone().into()), &mut ctx);
+        let pledge_count = config.num_capacity_partitions.unwrap_or(31) as u8;
+        let commitments = add_test_commitments(&mut genesis_block, pledge_count, &testnet_config);
+        database_provider
+            .update_eyre(|tx| {
+                commitments
+                    .iter()
+                    .map(|commitment| insert_commitment_tx(tx, commitment))
+                    .collect::<eyre::Result<()>>()
+            })
+            .expect("inserting commitment tx should succeed");
 
         database_provider
             .update_eyre(|tx| irys_database::insert_block_header(tx, &genesis_block))
             .unwrap();
+
+        // Get the genesis storage modules and their assigned partitions
+        let storage_module_infos = epoch_service
+            .initialize(&database_provider, storage_module_config.clone())
+            .await
+            .unwrap();
+        debug!("{:#?}", storage_module_infos);
+
+        genesis_block.block_hash = H256::from_slice(&[0; 32]);
+        let _ = epoch_service.handle(
+            NewEpochMessage {
+                epoch_block: genesis_block.clone().into(),
+                commitments,
+            },
+            &mut ctx,
+        );
+
+        let pa_read_guard = epoch_service.handle(GetPartitionAssignmentsGuardMessage, &mut ctx);
+
+        // database_provider
+        //     .update_eyre(|tx| irys_database::insert_block_header(tx, &genesis_block))
+        //     .unwrap();
 
         let msg = BlockFinalizedMessage {
             block_header: Arc::new(genesis_block.clone()),
@@ -1645,13 +2049,6 @@ mod tests {
             Ok(_) => info!("Genesis block indexed"),
             Err(_) => panic!("Failed to index genesis block"),
         }
-
-        // Get the genesis storage modules and their assigned partitions
-        let storage_module_infos = epoch_service
-            .initialize(&database_provider, storage_module_config.clone())
-            .await
-            .unwrap(); // epoch_service.handle(GetGenesisStorageModulesMessage(storage_module_config.clone()), &mut ctx);
-        debug!("{:#?}", storage_module_infos);
 
         {
             let mut storage_modules: StorageModuleVec = Vec::new();
@@ -1712,8 +2109,13 @@ mod tests {
 
             if height % num_blocks_in_epoch == 0 {
                 debug!("epoch block {}", height);
-                let _ =
-                    epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
+                let _ = epoch_service.handle(
+                    NewEpochMessage {
+                        epoch_block: new_epoch_block.clone().into(),
+                        commitments: Vec::new(),
+                    },
+                    &mut ctx,
+                );
             }
 
             database_provider
@@ -1745,6 +2147,18 @@ mod tests {
         //          |    |    |     |     |
         //          0    1    2     3     4
         // Capacity
+
+        pa_read_guard.read().print_assignments();
+
+        let block_index_guard = block_index_actor
+            .send(GetBlockIndexGuardMessage)
+            .await
+            .unwrap();
+
+        debug!(
+            "num blocks in block_index: {}",
+            block_index_guard.read().num_blocks()
+        );
 
         // Get the genesis storage modules and their assigned partitions
         let mut epoch_service = EpochServiceActor::new(config, &testnet_config, block_index_guard);
@@ -1784,6 +2198,10 @@ mod tests {
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.last_epoch_hash = H256::zero(); // for partitions hash determinism
         genesis_block.height = 0;
+        let pledge_count = 20;
+        let commitments = add_test_commitments(&mut genesis_block, pledge_count, &testnet_config);
+
+        // TODO: need a test method that pledges X partitions regardless of the storage config
 
         // Create a storage config for testing
         let storage_config = StorageConfig {
@@ -1791,7 +2209,7 @@ mod tests {
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_in_slot: 1,
-            miner_address: Address::random(),
+            miner_address: testnet_config.miner_address(),
             min_writes_before_sync: 1,
             entropy_packing_iterations: testnet_config.entropy_packing_iterations,
             chunk_migration_depth: 1, // Testnet / single node config
@@ -1836,7 +2254,16 @@ mod tests {
         let mut epoch_service =
             EpochServiceActor::new(config.clone(), &testnet_config, block_index_guard.clone());
         let mut ctx = Context::new();
-        let _ = epoch_service.handle(NewEpochMessage(genesis_block.clone().into()), &mut ctx);
+        let _ = epoch_service.handle(
+            NewEpochMessage {
+                epoch_block: genesis_block.clone().into(),
+                commitments,
+            },
+            &mut ctx,
+        );
+
+        let pa_read_guard = epoch_service.handle(GetPartitionAssignmentsGuardMessage, &mut ctx);
+        pa_read_guard.read().print_assignments();
 
         let msg = BlockFinalizedMessage {
             block_header: Arc::new(genesis_block.clone()),
@@ -1871,19 +2298,27 @@ mod tests {
             if height % num_blocks_in_epoch == 0 {
                 epoch_num += 1;
                 debug!("epoch block {}", height);
-                let _ =
-                    epoch_service.handle(NewEpochMessage(new_epoch_block.clone().into()), &mut ctx);
+                let _ = epoch_service.handle(
+                    NewEpochMessage {
+                        epoch_block: new_epoch_block.clone().into(),
+                        commitments: Vec::new(),
+                    },
+                    &mut ctx,
+                );
             }
             height += 1;
         }
 
+        // pa_read_guard.read().print_assignments();
+        // debug!(
+        //     "\nAll Partitions({})\n{}",
+        //     &epoch_service.all_active_partitions.len(),
+        //     serde_json::to_string_pretty(&epoch_service.all_active_partitions).unwrap()
+        // );
+
         // Check determinism in assigned partitions
-        let publish_slot_0 = H256(
-            hex::decode("12771355e46cd47c71ed1721fd5319b383cca3a1f9fce3aa1c8cd3bd37af20d7")
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        );
+        let publish_slot_0 = H256::from_base58("2F5eg8FE2VmXGcgpyUKTzBrLzSmVXMKqawUJeDgKC1vW");
+        debug!("expected publish[0] -> {}", publish_slot_0.0.to_base58());
 
         if let Some(publish_assignment) = epoch_service
             .partition_assignments
@@ -1906,12 +2341,8 @@ mod tests {
             panic!("Should have an assignment");
         };
 
-        let publish_slot_1 = H256(
-            hex::decode("12d7fd61841c114d9a4011710874c5b4857c35266ef13b1ac3f3b476780e9b53")
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        );
+        let publish_slot_1 = H256::from_base58("2HVmW86qVyKTw1DYJMX6NoNvVxATLNZHSAyMceEWPtLC");
+        debug!("expected publish[1] -> {}", publish_slot_1.0.to_base58());
 
         if let Some(publish_assignment) = epoch_service
             .partition_assignments
@@ -1934,40 +2365,28 @@ mod tests {
             panic!("Should have an assignment");
         };
 
-        let submit_slot_11 = H256(
-            hex::decode("07a0f53a2326c4e19d72d9901769c7275a5dfeddd68b49c6ed77c96e19bb6f2d")
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        );
+        let capacity_partition = H256::from_base58("5Wvv6erYhpk9aAzdrS9i6noQf57dBXHgLaMz46mNZeds");
 
-        if let Some(submit_assignment) = epoch_service
+        if let Some(capacity_assignment) = epoch_service
             .partition_assignments
             .read()
             .unwrap()
-            .data_partitions
-            .get(&submit_slot_11)
+            .capacity_partitions
+            .get(&capacity_partition)
         {
             assert_eq!(
-                submit_assignment.ledger_id,
-                Some(DataLedger::Publish.get_id()),
-                "Should be assigned to publish ledger"
+                capacity_assignment.ledger_id, None,
+                "Should not be assigned to data ledger"
             );
             assert_eq!(
-                submit_assignment.slot_index,
-                Some(7),
-                "Should be assigned to publish slot 7"
+                capacity_assignment.slot_index, None,
+                "Should not be assigned a slot index"
             );
         } else {
             panic!("Should have an assignment");
         };
 
-        let submit_slot_15 = H256(
-            hex::decode("fe4af4eb44d9b92afdc3113bc3fba48531502d6367ad42de3a7f1d1ea4065ba4")
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        );
+        let submit_slot_15 = H256::from_base58("AtGjnuZ1EKmp8sP1FT3aMPbJWCY8tdEoksVFDB6PKXr1");
 
         if let Some(submit_assignment) = epoch_service
             .partition_assignments

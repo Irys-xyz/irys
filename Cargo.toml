@@ -17,7 +17,9 @@ members = [
     "crates/debug-utils",
     "xtask",
     "crates/price-oracle",
-    "crates/cli",
+    "crates/cli", 
+    "crates/gossip-service",
+    "crates/api-client",
 ]
 resolver = "2"
 
@@ -35,6 +37,7 @@ irys-macros = { path = "./crates/macros" }
 irys-database = { path = "./crates/database" }
 irys-actors = { path = "./crates/actors" }
 irys-api-server = { path = "./crates/api-server" }
+irys-api-client = { path = "./crates/api-client" }
 irys-c = { path = "./crates/c" }
 irys-primitives = { path = "./crates/primitives" }
 irys-config = { path = "./crates/config" }
@@ -47,6 +50,7 @@ irys-chain = { path = "./crates/chain" }
 irys-vdf = { path = "./crates/vdf" }
 irys-efficient-sampling = { path = "./crates/efficient-sampling" }
 irys-price-oracle = { path = "./crates/price-oracle" }
+irys-gossip-service = { path = "./crates/gossip-service" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"

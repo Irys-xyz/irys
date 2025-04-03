@@ -4,10 +4,12 @@ use crate::{
     services::ServiceSenders,
 };
 use actix::prelude::*;
-use irys_database::{block_header_by_hash, tx_header_by_txid, DataLedger};
+use irys_database::{
+    block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
+};
 use irys_types::{
-    DatabaseProvider, DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader,
-    StorageConfig, VDFStepsConfig,
+    DatabaseProvider, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
+    IrysTransactionHeader, StorageConfig, VDFStepsConfig,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
@@ -33,6 +35,8 @@ pub struct BlockDiscoveryActor {
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Service Senders
     pub service_senders: ServiceSenders,
+    /// Gossip message bus
+    pub gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
 }
 
 /// When a block is discovered, either produced locally or received from
@@ -64,6 +68,7 @@ impl BlockDiscoveryActor {
         vdf_config: VDFStepsConfig,
         vdf_steps_guard: VdfStepsReadGuard,
         service_senders: ServiceSenders,
+        gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         Self {
             block_index_guard,
@@ -74,6 +79,7 @@ impl BlockDiscoveryActor {
             vdf_config,
             vdf_steps_guard,
             service_senders,
+            gossip_sender,
         }
     }
 }
@@ -178,6 +184,38 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         }
 
         //====================================
+        // Commitments ledger TX Validation
+        //------------------------------------
+        // Extract the Commitment ledger from the epoch block
+        let commitments_ledger = new_block_header
+            .system_ledgers
+            .iter()
+            .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+        // Validate commitments (if there are some)
+        if let Some(commitment_ledger) = commitments_ledger {
+            let read_tx = self.db.tx().expect("to create a database read tx");
+            let _commitment_txs = commitment_ledger
+                .tx_ids
+                .iter()
+                .map(|txid| {
+                    commitment_tx_by_txid(&read_tx, txid).and_then(|opt| {
+                        opt.ok_or_else(|| eyre::eyre!("No commitment tx found for txid {:?}", txid))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("to be able to retrieve all of the commitment tx headers locally");
+
+            // TODO: Non epoch blocks and epoch blocks treat the commitments ledger a little differently
+            // during the epoch, stake and pledge commitments accumulate waiting to be finalized when the
+            // next epoch starts. As a result these pending commitments during the epoch need to have
+            // their own CommitmentsState where pending pledges can be checked to see if they have an
+            // outstanding stake (check with epoch_service) or if they've posted a pending stake commitment.
+            //
+            // This work will be done next, for now commitments are only handled in the genesis block
+        }
+
+        //====================================
         // Block header pre-validation
         //------------------------------------
         let block_index_guard = self.block_index_guard.clone();
@@ -197,6 +235,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             prev_output = ?new_block_header.vdf_limiter_info.prev_output,
             "Validating block"
         );
+
+        let gossip_sender = self.gossip_sender.clone();
         Box::pin(async move {
             let block_header_clone = new_block_header.clone(); // Clone before moving
 
@@ -227,11 +267,20 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     all_txs.extend_from_slice(&publish_txs);
                     block_tree_addr
                         .send(BlockPreValidatedMessage(
-                            new_block_header,
+                            new_block_header.clone(),
                             Arc::new(all_txs),
                         ))
                         .await
                         .unwrap();
+
+                    // Send the block to the gossip bus
+                    if let Err(error) = gossip_sender
+                        .send(GossipData::Block(new_block_header.as_ref().clone()))
+                        .await
+                    {
+                        tracing::error!("Failed to send gossip message: {}", error);
+                    }
+
                     Ok(())
                 }
                 Err(err) => Err(eyre::eyre!("Block validation error {:?}", err)),

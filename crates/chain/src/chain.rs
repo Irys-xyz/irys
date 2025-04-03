@@ -3,6 +3,7 @@ use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry, SystemService};
 use actix_web::dev::Server;
 use alloy_eips::BlockNumberOrTag;
+use base58::ToBase58;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -31,9 +32,10 @@ use irys_actors::{
 use irys_api_server::{create_listener, routes::block::CombinedBlockHeader, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::{
-    database, migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables,
+    add_genesis_commitments, database, get_genesis_commitments,insert_commitment_tx, migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, SystemLedger,
     BlockIndex, BlockIndexItem, DataLedger, Initialized,
 };
+use irys_gossip_service::{GossipResult, ServiceHandleWithShutdownSignal};
 use irys_packing::{PackingType, PACKING_TYPE};
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
@@ -45,10 +47,13 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
+
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, Config,
+    app_state::DatabaseProvider, calculate_initial_difficulty, CommitmentTransaction, vdf_config::VDFStepsConfig, Config,
     DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader, OracleConfig,
-    PartitionChunkRange, StorageConfig, CHUNK_SIZE, H256,
+    PartitionChunkRange, StorageConfig, SystemTransactionLedger, CHUNK_SIZE, H256, H256List,
+    GossipData,
+};
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::rpc::eth::EthApiServer as _;
@@ -424,6 +429,8 @@ pub async fn start_irys_node(
     let arc_node_config = Arc::new(node_config);
     let difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
 
+    let commitments = add_genesis_commitments(&mut irys_genesis, &config);
+
     // TODO: Hard coding 3 for storage module count isn't great here,
     // eventually we'll want to relate this to the genesis config
     irys_genesis.diff =
@@ -587,12 +594,24 @@ pub async fn start_irys_node(
                     .unwrap();
 
                 if at_genesis {
+                    irys_db
+                        .update_eyre(|tx| {
+                            commitments
+                                .iter()
+                                .map(|commitment| {
+                                    debug!("commitment: {}", commitment.id.0.to_base58());
+                                    insert_commitment_tx(tx, commitment)
+                                })
+                                .collect::<eyre::Result<()>>()
+                        })
+                        .expect("inserting commitment tx should succeed");
+                    irys_db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
+                    .unwrap();
+
                     let msg = BlockFinalizedMessage {
                         block_header: arc_genesis.clone(),
                         all_txs: Arc::new(vec![]),
                     };
-                    irys_db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
-                        .unwrap();
                     match block_index_actor_addr.send(msg).await {
                         Ok(_) => info!("Genesis block indexed"),
                         Err(_) => panic!("Failed to index genesis block"),
@@ -644,6 +663,11 @@ pub async fn start_irys_node(
                     storage_modules.push(arc_module.clone());
                 }
 
+                let (gossip_service, gossip_sender) = irys_gossip_service::GossipService::new(
+                    &config.gossip_service_bind_ip,
+                    config.gossip_service_port,
+                    irys_db.clone(),
+                );
 
                 let block_tree_service = BlockTreeService::new(
                     irys_db.clone(),
@@ -682,6 +706,7 @@ pub async fn start_irys_node(
                     storage_modules.clone(),
                     block_tree_guard.clone(),
                     &config,
+                    gossip_sender.clone(),
                 );
                 let mempool_arbiter = Arbiter::new();
                 SystemRegistry::set(MempoolService::start_in_arbiter(
@@ -731,12 +756,16 @@ pub async fn start_irys_node(
                     vdf_config: vdf_config.clone(),
                     vdf_steps_guard: vdf_steps_guard.clone(),
                     service_senders: service_senders.clone(),
+                    gossip_sender: gossip_sender.clone(),
                 };
                 let block_discovery_arbiter = Arbiter::new();
                 let block_discovery_addr = BlockDiscoveryActor::start_in_arbiter(
                     &block_discovery_arbiter.handle(),
                     |_| block_discovery_actor,
                 );
+
+                let gossip_service_handle = gossip_service.run(mempool_addr.clone(), block_discovery_addr.clone(), irys_api_client::IrysApiClient::new()).unwrap();
+
 
                 // set up the price oracle
                 let price_oracle = match config.oracle_config {
@@ -902,6 +931,7 @@ pub async fn start_irys_node(
                 *irys_provider_1.write().unwrap() = Some(IrysRethProviderInner {
                     chunk_provider: arc_chunk_provider.clone(),
                 });
+
                 let _ = irys_node_handle_sender.send(IrysNodeCtx {
                     actor_addresses: actor_addresses.clone(),
                     reth_handle: reth_node.clone(),
@@ -946,6 +976,8 @@ pub async fn start_irys_node(
                 server.await.unwrap();
                 info!("API server stopped");
                 server_stop_handle.await.unwrap();
+
+                gossip_service_handle.stop().await.unwrap().unwrap();
 
                 debug!("Stopping actors");
                 for arbiter in arbiters {
@@ -1055,7 +1087,6 @@ async fn start_reth_node<T: HasName + HasTableType>(
 
     node_handle.node_exit_future.await
 }
-
 /// Builder pattern for configuring and bootstrapping an Irys blockchain node.
 #[derive(Clone)]
 pub struct IrysNode {
@@ -1150,7 +1181,7 @@ impl IrysNode {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
             (false, true) => {
                 // special handilng for genesis node
-                self.init_genesis_thread(self.irys_genesis_block.clone())?
+                self.init_genesis_thread(self.irys_genesis_block.clone(), commitments)?
                     .join()
                     .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
             }
@@ -1235,6 +1266,7 @@ impl IrysNode {
     fn init_genesis_thread(
         &self,
         irys_genesis: Arc<IrysBlockHeader>,
+        commitments: Vec<CommitmentTransaction>,
     ) -> Result<JoinHandle<()>, eyre::Error> {
         let handle = std::thread::Builder::new()
             .name("genesis init system".to_string())
@@ -1251,9 +1283,14 @@ impl IrysNode {
                             .await
                             .expect("initializing a new block index should be doable");
                         let block_index = Arc::new(RwLock::new(block_index));
-                        let _block_index_service_actor =
-                            genesis_initialization(&irys_genesis, node_config, &block_index, &node)
-                                .await;
+                        let _block_index_service_actor = genesis_initialization(
+                            &irys_genesis,
+                            commitments,
+                            node_config,
+                            &block_index,
+                            &node,
+                        )
+                        .await;
                         // optionally spawn other services to set up the base state
                     });
                 }
@@ -1292,7 +1329,7 @@ impl IrysNode {
                         let block_index_service_actor = node.init_block_index_service(&block_index);
 
                         // start the rest of the services
-                        let (irys_node, actix_server, vdf_thread, arbiters, reth_node) = node
+                        let (irys_node, actix_server, vdf_thread, arbiters, reth_node, gossip_service_handle) = node
                             .init_services(
                                 reth_shutdown_sender,
                                 vdf_shutdown_receiver,
@@ -1325,6 +1362,8 @@ impl IrysNode {
                         actix_server.await.unwrap();
                         server_stop_handle.await.unwrap();
 
+                        gossip_service_handle.stop().await.unwrap().unwrap();
+
                         debug!("Stopping actors");
                         for arbiter in arbiters {
                             arbiter.stop();
@@ -1347,10 +1386,13 @@ impl IrysNode {
         Ok(actor_main_thread_handle)
     }
 
-    fn create_genesis_header(&self) -> Result<(ChainSpec, Arc<IrysBlockHeader>), eyre::Error> {
+    fn create_genesis_header(
+        &self,
+    ) -> Result<(ChainSpec, Arc<IrysBlockHeader>, Vec<CommitmentTransaction>), eyre::Error> {
         let (reth_chain_spec, irys_genesis) = self.irys_node_config.chainspec_builder.build();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let irys_genesis = IrysBlockHeader {
+
+        let mut genesis_header = IrysBlockHeader {
             diff: calculate_initial_difficulty(
                 &self.difficulty_adjustment_config,
                 &self.storage_config,
@@ -1359,10 +1401,23 @@ impl IrysNode {
             )?,
             timestamp: now.as_millis(),
             last_diff_timestamp: now.as_millis(),
+            system_ledgers: vec![SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids: H256List::default(),
+            }],
             ..irys_genesis
         };
-        let irys_genesis = Arc::new(irys_genesis);
-        Ok((reth_chain_spec, irys_genesis))
+        let commitments = get_genesis_commitments(&self.config);
+
+        // Add the commitment txids to the system ledger in the block header one by one
+        for commitment_id in commitments.iter().map(|commitment| commitment.id) {
+            // We know index 0 is the Commitment ledger because we just created it at that index
+            genesis_header.system_ledgers[0].tx_ids.push(commitment_id);
+        }
+
+        let irys_genesis = Arc::new(genesis_header);
+
+        Ok((reth_chain_spec, irys_genesis, commitments))
     }
 
     fn init_reth_thread(
@@ -1446,6 +1501,7 @@ impl IrysNode {
         JoinHandle<()>,
         Vec<Arbiter>,
         RethNodeProvider,
+        ServiceHandleWithShutdownSignal<GossipResult<()>>,
     )> {
         let node_config = Arc::new(self.irys_node_config.clone());
 
@@ -1501,6 +1557,12 @@ impl IrysNode {
             .await?;
         let storage_modules = self.init_storage_modules(storage_module_infos);
 
+        let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
+            &self.config.gossip_service_bind_ip,
+            self.config.gossip_service_port,
+            irys_db.clone(),
+        );
+
         // start the block tree service
         let block_tree_service = self.init_block_tree_service(
             &block_index,
@@ -1531,6 +1593,7 @@ impl IrysNode {
             reth_db,
             &storage_modules,
             &block_tree_guard,
+            gossip_tx.clone(),
         );
 
         // spawn the chunk migration service
@@ -1561,7 +1624,14 @@ impl IrysNode {
             &block_index_guard,
             partition_assignments_guard,
             &vdf_steps_guard,
+            gossip_tx.clone(),
         );
+
+        let gossip_service_handle = gossip_service.run(
+            mempool_service.clone(),
+            block_discovery.clone(),
+            irys_api_client::IrysApiClient::new(),
+        )?;
 
         // set up the price oracle
         let price_oracle = self.init_price_oracle();
@@ -1672,6 +1742,7 @@ impl IrysNode {
             vdf_thread_handler,
             arbiters,
             reth_node,
+            gossip_service_handle,
         ))
     }
 
@@ -1849,6 +1920,7 @@ impl IrysNode {
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
+        gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     ) -> actix::Addr<BlockDiscoveryActor> {
         let block_discovery_actor = BlockDiscoveryActor {
             block_index_guard: block_index_guard.clone(),
@@ -1859,6 +1931,7 @@ impl IrysNode {
             vdf_config: self.vdf_config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
+            gossip_sender,
         };
         let block_discovery_arbiter = Arbiter::new();
         let block_discovery =
@@ -1930,6 +2003,7 @@ impl IrysNode {
         reth_db: irys_database::db::RethDbWrapper,
         storage_modules: &Vec<Arc<StorageModule>>,
         block_tree_guard: &BlockTreeReadGuard,
+        gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> actix::Addr<MempoolService> {
         let mempool_service = MempoolService::new(
             irys_db.clone(),
@@ -1940,6 +2014,7 @@ impl IrysNode {
             storage_modules.clone(),
             block_tree_guard.clone(),
             &self.config,
+            gossip_tx,
         );
         let mempool_arbiter = Arbiter::new();
         let mempool_service =
@@ -2063,6 +2138,7 @@ async fn read_latest_block_data(
 
 async fn genesis_initialization(
     irys_genesis: &Arc<IrysBlockHeader>,
+    commitments: Vec<CommitmentTransaction>,
     node_config: Arc<IrysNodeConfig>,
     block_index: &Arc<RwLock<BlockIndex<Initialized>>>,
     node: &IrysNode,
@@ -2072,6 +2148,19 @@ async fn genesis_initialization(
     irys_db
         .update_eyre(|tx| irys_database::insert_block_header(tx, irys_genesis))
         .expect("genesis db data could not be written");
+
+    // Add the commitments to the db
+    let tx = irys_db
+        .tx_mut()
+        .expect("to create a mutable mdbx transaction");
+    for commitment in &commitments {
+        insert_commitment_tx(&tx, commitment).expect("inserting commitment tx should succeed");
+    }
+    // Make sure the database transaction completes before dropping the db reference
+    tx.inner
+        .commit()
+        .expect("to commit the mdbx transaction to the db");
+
     drop(irys_db);
 
     // start block index service, we need to preconfigure the initial finalized block

@@ -10,7 +10,7 @@ use std::ops::{Index, IndexMut};
 /// validation state at any given time.
 /// A slot in a data ledger containing one or more partition hashes
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LedgerSlot {
     /// Assigned partition hashes
     pub partitions: Vec<H256>,
