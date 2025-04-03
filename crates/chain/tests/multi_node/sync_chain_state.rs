@@ -44,10 +44,19 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         ingress_proofs: None,
         signature: Signature::test_signature().into(),
     };
-    let _block_finalized_message = BlockFinalizedMessage {
+    let block_finalized_message = BlockFinalizedMessage {
         block_header: header,
         all_txs: Arc::new(vec![mock_header]),
     };
+    sleep(Duration::from_millis(10000)).await;
+
+    let _ = ctx_genesis_node
+        .node
+        .actor_addresses
+        .block_index
+        .send(block_finalized_message);
+
+    let genesis_block = Some(ctx_genesis_node.irys_genesis_block);
 
     //start two additional peers, instructing them to use the genesis peer as their trusted peer
 
