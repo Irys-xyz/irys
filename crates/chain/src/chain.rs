@@ -314,7 +314,9 @@ impl IrysNodeCtx {
             if let Some(irys_block) = fetch_block(peer, &client, block).await {
                 let block = Arc::new(irys_block);
                 let block_discovery_addr = self.actor_addresses.block_discovery_addr.clone();
-                let _ = block_discovery_addr.send(BlockDiscoveredMessage(block.clone()));
+                let _ = block_discovery_addr
+                    .send(BlockDiscoveredMessage(block.clone()))
+                    .await?;
                 //add txns from block to txn queue
                 let mut txn_queue_guard = txn_queue.lock().await;
                 for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
