@@ -680,7 +680,11 @@ pub fn generate_ingress_proof(
     assert_eq!(data_size, size);
 
     // generate the ingress proof hash
-    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, &chunks)?;
+    let proof = irys_types::ingress::generate_ingress_proof(
+        signer,
+        data_root,
+        chunks.iter().map(|chunk| *chunk),
+    )?;
     info!(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root
