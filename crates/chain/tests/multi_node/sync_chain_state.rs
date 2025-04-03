@@ -1,7 +1,7 @@
 use crate::api::external_api::block_index_endpoint_request;
 use crate::utils::mine_block;
 use irys_actors::BlockFinalizedMessage;
-use irys_chain::{start_irys_node, IrysNodeCtx};
+use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
 use irys_types::{Address, Config, IrysTransactionHeader, Signature, H256};
@@ -19,6 +19,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let ctx_genesis_node = setup_with_config(
         testnet_config_genesis.clone(),
         "heavy_sync_chain_state_genesis",
+        true,
     )
     .await
     .expect("found invalid genesis ctx");
@@ -56,10 +57,13 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         trusted_peers: trusted_peers.clone(),
         ..Config::testnet()
     };
-    let ctx_peer1_node =
-        setup_with_config(testnet_config_peer1.clone(), "heavy_sync_chain_state_peer1")
-            .await
-            .expect("found invalid genesis ctx for peer1");
+    let ctx_peer1_node = setup_with_config(
+        testnet_config_peer1.clone(),
+        "heavy_sync_chain_state_peer1",
+        false,
+    )
+    .await
+    .expect("found invalid genesis ctx for peer1");
 
     //start peer2
     let testnet_config_peer2 = Config {
@@ -67,10 +71,13 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         trusted_peers,
         ..Config::testnet()
     };
-    let ctx_peer2_node =
-        setup_with_config(testnet_config_peer2.clone(), "heavy_sync_chain_state_peer2")
-            .await
-            .expect("found invalid genesis ctx for peer2");
+    let ctx_peer2_node = setup_with_config(
+        testnet_config_peer2.clone(),
+        "heavy_sync_chain_state_peer2",
+        false,
+    )
+    .await
+    .expect("found invalid genesis ctx for peer2");
 
     //FIXME: magic number could be a constant e.g. 3 blocks worth of time?
     sleep(Duration::from_millis(10000)).await;
@@ -116,12 +123,16 @@ struct TestCtx {
     temp_dir: TempDir,
 }
 
-async fn setup_with_config(testnet_config: Config, node_name: &str) -> eyre::Result<TestCtx> {
+async fn setup_with_config(
+    mut testnet_config: Config,
+    node_name: &str,
+    genesis: bool,
+) -> eyre::Result<TestCtx> {
     let temp_dir = temporary_directory(Some(node_name), false);
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
+    testnet_config.base_directory = temp_dir.path().to_path_buf();
+    let node = IrysNode::new(testnet_config.clone(), genesis)
+        .init()
+        .await?;
     Ok(TestCtx {
         config: testnet_config,
         node,
