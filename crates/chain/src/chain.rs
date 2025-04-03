@@ -1458,7 +1458,7 @@ impl IrysNode {
             .send(GetBlockIndexGuardMessage)
             .await?;
 
-        // start the broadcast mimning service
+        // start the broadcast mining service
         let broadcast_mining_actor = init_broadcaster_service(&mut arbiters);
 
         // start the epoch service
