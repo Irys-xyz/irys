@@ -1119,7 +1119,7 @@ impl IrysNode {
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         match (self.data_exists, self.is_genesis) {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
-            (false, true) => {
+            (false, _) => {
                 // special handilng for genesis node
                 self.init_genesis_thread(irys_genesis)?
                     .join()
