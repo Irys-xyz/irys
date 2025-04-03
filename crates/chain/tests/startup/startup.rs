@@ -1,6 +1,6 @@
-use crate::utils::mine_block;
+use crate::utils::{mine_block, IrysNodeTest};
 use irys_actors::block_tree_service::get_canonical_chain;
-use irys_chain::{start_irys_node, IrysNode};
+use irys_chain::IrysNode;
 use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
 use irys_types::Config;
@@ -64,8 +64,5 @@ async fn heavy_test_stop_guard() -> () {
     config.base_directory = temp_dir.path().to_path_buf();
 
     let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let _node = start_irys_node(config, storage_config, testnet_config.clone())
-        .await
-        .unwrap();
-    ()
+    let _node = IrysNodeTest::default().start().await;
 }

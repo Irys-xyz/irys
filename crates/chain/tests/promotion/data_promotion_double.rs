@@ -1,34 +1,29 @@
-use crate::utils::{mine_blocks, post_chunk, start_node_config};
+use crate::utils::{get_block_parent, get_chunk, mine_block, verify_published_chunk, IrysNodeTest};
+use crate::utils::{mine_blocks, post_chunk};
+use actix_web::{
+    middleware::Logger,
+    test::{self, call_service, TestRequest},
+    web::{self, JsonConfig},
+    App,
+};
+use alloy_core::primitives::U256;
 use awc::http::StatusCode;
-use irys_config::IrysNodeConfig;
+use base58::ToBase58;
+use irys_actors::packing::wait_for_packing;
+use irys_api_server::{routes, ApiState};
 use irys_database::DataLedger;
-
+use irys_database::{tables::IngressProofs, walk_all};
 use irys_types::Config;
+use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
+use reth_db::Database as _;
+use reth_primitives::GenesisAccount;
+use std::time::Duration;
+use tokio::time::sleep;
 use tracing::debug;
+use tracing::info;
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_double_root_data_promotion_test() {
-    use std::time::Duration;
-
-    use actix_web::{
-        middleware::Logger,
-        test::{self, call_service, TestRequest},
-        web::{self, JsonConfig},
-        App,
-    };
-    use alloy_core::primitives::U256;
-    use base58::ToBase58;
-    use irys_actors::packing::wait_for_packing;
-    use irys_api_server::{routes, ApiState};
-    use irys_database::{tables::IngressProofs, walk_all};
-    use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
-    use reth_db::Database as _;
-    use reth_primitives::GenesisAccount;
-    use tokio::time::sleep;
-    use tracing::info;
-
-    use crate::utils::{get_block_parent, get_chunk, mine_block, verify_published_chunk};
-
     let chunk_size = 32; // 32 byte chunks
     let testnet_config = Config {
         chunk_size: chunk_size as u64,
@@ -40,12 +35,10 @@ async fn heavy_double_root_data_promotion_test() {
         chunk_migration_depth: 1, // Testnet / single node config
         ..Config::testnet()
     };
-
     let signer = IrysSigner::random_signer(&testnet_config);
     let signer2 = IrysSigner::random_signer(&testnet_config);
-
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.extend_genesis_accounts(vec![
+    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
+    node.node_ctx.irys_node_config.extend_genesis_accounts(vec![
         (
             signer.address(),
             GenesisAccount {
@@ -61,33 +54,26 @@ async fn heavy_double_root_data_promotion_test() {
             },
         ),
     ]);
-    // This will create 3 storage modules, one for submit, one for publish, and one for capacity
-    let (node_context, _tmp_dir) = start_node_config(
-        "serial_double_root_data_promotion_test",
-        Some(testnet_config.clone()),
-        Some(config),
-    )
-    .await;
+    let node = node.start().await;
 
     wait_for_packing(
-        node_context.actor_addresses.packing.clone(),
+        node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
     .await
     .unwrap();
 
-    let block1 = mine_block(&node_context).await.unwrap().unwrap();
+    let block1 = mine_block(&node.node_ctx).await.unwrap().unwrap();
 
-    // node_context.actor_addresses.start_mining().unwrap();
-
+    // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app_state = ApiState {
         reth_provider: None,
         reth_http_url: None,
         block_index: None,
         block_tree: None,
-        db: node_context.db.clone(),
-        mempool: node_context.actor_addresses.mempool.clone(),
-        chunk_provider: node_context.chunk_provider.clone(),
+        db: node.node_ctx.db.clone(),
+        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: testnet_config,
     };
 
@@ -170,7 +156,7 @@ async fn heavy_double_root_data_promotion_test() {
             unconfirmed_tx.remove(0);
         }
 
-        mine_block(&node_context).await.unwrap();
+        mine_block(&node.node_ctx).await.unwrap();
     }
 
     // Verify all transactions are confirmed
@@ -256,7 +242,7 @@ async fn heavy_double_root_data_promotion_test() {
                 println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
             }
         }
-        mine_block(&node_context).await.unwrap();
+        mine_block(&node.node_ctx).await.unwrap();
         sleep(delay).await;
     }
 
@@ -284,7 +270,7 @@ async fn heavy_double_root_data_promotion_test() {
         sleep(delay).await;
     }
 
-    let db = &node_context.db.clone();
+    let db = &node.node_ctx.db.clone();
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
@@ -333,7 +319,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
@@ -343,7 +329,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
@@ -353,7 +339,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
@@ -361,7 +347,7 @@ async fn heavy_double_root_data_promotion_test() {
     debug!("PHASE 2");
 
     // mine 1 block
-    let blk = mine_block(&node_context).await.unwrap().unwrap();
+    let blk = mine_block(&node.node_ctx).await.unwrap().unwrap();
     debug!("P2 block {}", &blk.0.height);
 
     // ensure the ingress proof still exists
@@ -439,7 +425,7 @@ async fn heavy_double_root_data_promotion_test() {
             unconfirmed_tx.remove(0);
         }
 
-        mine_blocks(&node_context, 1).await.unwrap();
+        mine_blocks(&node.node_ctx, 1).await.unwrap();
     }
 
     // Verify all transactions are confirmed
@@ -499,7 +485,7 @@ async fn heavy_double_root_data_promotion_test() {
                 println!("unconfirmed_promotions: {:?}", unconfirmed_promotions);
             }
         }
-        mine_blocks(&node_context, 1).await.unwrap();
+        mine_blocks(&node.node_ctx, 1).await.unwrap();
         sleep(delay).await;
     }
 
@@ -516,7 +502,7 @@ async fn heavy_double_root_data_promotion_test() {
         sleep(delay).await;
     }
 
-    let db = &node_context.db.clone();
+    let db = &node.node_ctx.db.clone();
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     // let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
 
@@ -541,7 +527,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
@@ -551,7 +537,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
@@ -561,7 +547,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
@@ -582,7 +568,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     // println!("\n{:?}", unpacked_chunk);
 
-    mine_blocks(&node_context, 5).await.unwrap();
+    mine_blocks(&node.node_ctx, 5).await.unwrap();
     // ensure the ingress proof is gone
     let ingress_proofs = db
         .view(|rtx| walk_all::<IngressProofs, _>(rtx))
@@ -590,5 +576,5 @@ async fn heavy_double_root_data_promotion_test() {
         .unwrap();
     assert_eq!(ingress_proofs.len(), 0);
 
-    node_context.stop().await;
+    node.node_ctx.stop().await;
 }

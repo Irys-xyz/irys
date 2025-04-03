@@ -1,15 +1,12 @@
-use crate::utils::{future_or_mine_on_timeout, mine_block};
+use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
-use irys_chain::start_irys_node;
-use irys_config::IrysNodeConfig;
 use irys_database::get_cache_size;
 use irys_database::tables::CachedChunks;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::{Base64, Config, IrysTransactionHeader, TxChunkOffset, UnpackedChunk};
 use reth::providers::BlockReader as _;
@@ -21,17 +18,15 @@ use tracing::{debug, info};
 
 #[actix_web::test]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("heavy_test_cache_pruning"), false);
-    let mut testnet_config = Config::testnet();
-    testnet_config.chunk_size = 32;
-    testnet_config.chunk_migration_depth = 2;
+    let mut testnet_config = Config {
+        chunk_size: 32,
+        chunk_migration_depth: 2,
+        ..Config::testnet()
+    };
     let main_address = testnet_config.miner_address();
     let account1 = IrysSigner::random_signer(&testnet_config);
-    let mut config = IrysNodeConfig {
-        base_directory: temp_dir.path().to_path_buf(),
-        ..IrysNodeConfig::new(&testnet_config)
-    };
-    config.extend_genesis_accounts(vec![
+    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
+    node.node_ctx.irys_node_config.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -47,16 +42,15 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             },
         ),
     ]);
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let node = node.start().await;
 
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     wait_for_packing(
-        node.actor_addresses.packing.clone(),
+        node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
     .await?;
 
-    let http_url = format!("http://127.0.0.1:{}", node.config.port);
+    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -111,12 +105,12 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     });
 
     future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut tx_header_fut,
         Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
+        node.node_ctx.vdf_steps_guard.clone(),
+        &node.node_ctx.vdf_config,
+        &node.node_ctx.storage_config,
     )
     .await?;
 
@@ -175,19 +169,20 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     });
 
     let start_offset = future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
+        node.node_ctx.vdf_steps_guard.clone(),
+        &node.node_ctx.vdf_config,
+        &node.node_ctx.storage_config,
     )
     .await?
     .unwrap();
 
     // mine a couple blocks
-    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
+    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
     let (chunk_cache_count, _) = &node
+        .node_ctx
         .db
         .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, testnet_config.chunk_size))?;
 
@@ -195,7 +190,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
 
     for i in 1..4 {
         info!("manually producing block {}", i);
-        let (block, _reth_exec_env) = mine_block(&node).await?.unwrap();
+        let (block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
 
         //check reth for built block
         let reth_block = reth_context
@@ -206,6 +201,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
 
         // check irys DB for built block
         let db_irys_block = &node
+            .node_ctx
             .db
             .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
             .unwrap();
@@ -215,6 +211,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     }
 
     let (chunk_cache_count, _) = &node
+        .node_ctx
         .db
         .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, testnet_config.chunk_size))?;
     assert_eq!(*chunk_cache_count, 0);

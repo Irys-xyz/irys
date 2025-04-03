@@ -1,4 +1,8 @@
-// todo delete the whole module. the tests are ignored anyway. They can be restored in the future
+use irys_types::{irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, UnpackedChunk};
+use rand::Rng;
+use std::time::Duration;
+use tokio::time::sleep;
+use tracing::{debug, info};
 
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
@@ -16,7 +20,8 @@ use actix_web::{
 use base58::ToBase58;
 use irys_types::{Config, TxChunkOffset};
 use reth_primitives::GenesisAccount;
-use tracing::info;
+
+use crate::utils::IrysNodeTest;
 
 #[actix_web::test]
 async fn heavy_api_end_to_end_test_32b() {
@@ -33,11 +38,6 @@ async fn heavy_api_end_to_end_test_256kb() {
 }
 
 async fn api_end_to_end_test(chunk_size: usize) {
-    use irys_types::{irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, UnpackedChunk};
-    use rand::Rng;
-    use std::time::Duration;
-    use tokio::time::sleep;
-    use tracing::{debug, info};
     let entropy_packing_iterations = 1_000;
     let testnet_config = Config {
         chunk_size: chunk_size.try_into().unwrap(),
@@ -45,35 +45,32 @@ async fn api_end_to_end_test(chunk_size: usize) {
         ..Config::testnet()
     };
     let chain_id = testnet_config.chain_id;
-    let mut node_config = IrysNodeConfig::new(&testnet_config);
+    let main_signer = IrysSigner::random_signer(&testnet_config);
+    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
+    node.node_ctx
+        .irys_node_config
+        .extend_genesis_accounts(vec![(
+            main_signer.address(),
+            GenesisAccount {
+                balance: U256::from(1000),
+                ..Default::default()
+            },
+        )]);
+    let node = node.start().await;
 
-    let irys = IrysSigner::random_signer(&testnet_config);
-    node_config.extend_genesis_accounts(vec![(
-        irys.address(),
-        GenesisAccount {
-            balance: U256::from(1000),
-            ..Default::default()
-        },
-    )]);
-
-    let (handle, _tmp_dir) = start_node_config(
-        &format!("api_end_to_end_{}_test_", chunk_size),
-        Some(testnet_config.clone()),
-        Some(node_config),
-    )
-    .await;
-
-    handle.actor_addresses.start_mining().unwrap();
+    // FIXME: The node startup already spins up an internal actix-web API service.
+    // Is there any reason for spawning another one here?
+    node.node_ctx.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
         reth_provider: None,
         reth_http_url: None,
         block_index: None,
         block_tree: None,
-        db: handle.db.clone(),
-        mempool: handle.actor_addresses.mempool.clone(),
-        chunk_provider: handle.chunk_provider.clone(),
-        config: testnet_config.clone(),
+        db: node.node_ctx.db.clone(),
+        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        chunk_provider: node.node_ctx.chunk_provider.clone(),
+        config: testnet_config,
     };
 
     // Initialize the app
@@ -87,7 +84,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     .await;
 
     wait_for_packing(
-        handle.actor_addresses.packing.clone(),
+        node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
     .await
@@ -100,8 +97,10 @@ async fn api_end_to_end_test(chunk_size: usize) {
 
     // Create a new Irys API instance & a signed transaction
 
-    let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
-    let tx = irys.sign_transaction(tx).unwrap();
+    let tx = main_signer
+        .create_transaction(data_bytes.clone(), None)
+        .unwrap();
+    let tx = main_signer.sign_transaction(tx).unwrap();
 
     // Make a POST request with JSON payload
     let req = test::TestRequest::post()
@@ -237,5 +236,5 @@ async fn api_end_to_end_test(chunk_size: usize) {
         attempts
     );
 
-    handle.stop().await;
+    node.node_ctx.stop().await;
 }

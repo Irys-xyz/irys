@@ -142,7 +142,6 @@ pub enum AddTxError {
 
 pub struct IrysNodeTest<T = IrysNode> {
     pub node_ctx: T,
-    pub config: Config,
     pub temp_dir: TempDir,
 }
 
@@ -157,23 +156,15 @@ impl IrysNodeTest<IrysNode> {
     pub fn new(mut config: Config) -> Self {
         let temp_dir = temporary_directory(None, false);
         config.base_directory = temp_dir.path().to_path_buf();
-        let node_ctx = IrysNode::new(config.clone(), false);
-        Self {
-            config,
-            temp_dir,
-            node_ctx,
-        }
+        let node_ctx = IrysNode::new(config, false);
+        Self { temp_dir, node_ctx }
     }
 
     pub fn new_genesis(mut config: Config) -> Self {
         let temp_dir = temporary_directory(None, false);
         config.base_directory = temp_dir.path().to_path_buf();
-        let node_ctx = IrysNode::new(config.clone(), true);
-        Self {
-            config,
-            temp_dir,
-            node_ctx,
-        }
+        let node_ctx = IrysNode::new(config, true);
+        Self { temp_dir, node_ctx }
     }
 
     pub async fn start(mut self) -> IrysNodeTest<IrysNodeCtx> {
@@ -184,7 +175,6 @@ impl IrysNodeTest<IrysNode> {
             .expect("node cannot be initialized");
         IrysNodeTest {
             node_ctx,
-            config: self.config,
             temp_dir: self.temp_dir,
         }
     }
