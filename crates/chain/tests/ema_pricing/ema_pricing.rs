@@ -158,7 +158,7 @@ async fn setup(price_adjustment_interval: u64) -> eyre::Result<TestCtx> {
 async fn setup_with_config(mut config: Config) -> eyre::Result<TestCtx> {
     let temp_dir = temporary_directory(Some("test_ema"), false);
     config.base_directory = temp_dir.path().to_path_buf();
-    let node = IrysNode::new(config.clone(), true).init().await?;
+    let node = IrysNode::new(config.clone(), true, None).init().await?;
     Ok(TestCtx {
         config,
         node,

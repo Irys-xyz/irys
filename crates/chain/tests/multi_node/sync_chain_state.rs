@@ -2,9 +2,8 @@ use crate::api::external_api::block_index_endpoint_request;
 use crate::utils::mine_block;
 use irys_actors::BlockFinalizedMessage;
 use irys_chain::{IrysNode, IrysNodeCtx};
-use irys_config::IrysNodeConfig;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
-use irys_types::{Address, Config, IrysTransactionHeader, Signature, H256};
+use irys_types::{Address, Config, IrysBlockHeader, IrysTransactionHeader, Signature, H256};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
@@ -20,6 +19,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         testnet_config_genesis.clone(),
         "heavy_sync_chain_state_genesis",
         true,
+        None,
     )
     .await
     .expect("found invalid genesis ctx");
@@ -61,6 +61,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         testnet_config_peer1.clone(),
         "heavy_sync_chain_state_peer1",
         false,
+        genesis_block.clone(),
     )
     .await
     .expect("found invalid genesis ctx for peer1");
@@ -75,6 +76,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         testnet_config_peer2.clone(),
         "heavy_sync_chain_state_peer2",
         false,
+        genesis_block.clone(),
     )
     .await
     .expect("found invalid genesis ctx for peer2");
@@ -109,13 +111,13 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let body_peer2 = result_peer2.body().await.expect("expected a valid body");
     assert_eq!(body_genesis, body_peer1);
     assert_eq!(body_peer1, body_peer2);
-
     Ok(())
 }
 
 struct TestCtx {
     config: Config,
     node: IrysNodeCtx,
+    irys_genesis_block: Arc<IrysBlockHeader>,
     #[expect(
         dead_code,
         reason = "to prevent drop() being called and cleaning up resources"
@@ -127,14 +129,15 @@ async fn setup_with_config(
     mut testnet_config: Config,
     node_name: &str,
     genesis: bool,
+    genesis_block: Option<Arc<IrysBlockHeader>>,
 ) -> eyre::Result<TestCtx> {
     let temp_dir = temporary_directory(Some(node_name), false);
     testnet_config.base_directory = temp_dir.path().to_path_buf();
-    let node = IrysNode::new(testnet_config.clone(), genesis)
-        .init()
-        .await?;
+    let mut irys_node = IrysNode::new(testnet_config.clone(), genesis, genesis_block);
+    let node = irys_node.init().await?;
     Ok(TestCtx {
         config: testnet_config,
+        irys_genesis_block: irys_node.irys_genesis_block,
         node,
         temp_dir,
     })

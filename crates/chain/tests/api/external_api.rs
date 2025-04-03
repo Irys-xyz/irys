@@ -5,8 +5,7 @@ use crate::utils::mine_block;
 use actix_web::{http::header::ContentType, HttpMessage};
 use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
-use irys_chain::{start_irys_node, IrysNodeCtx};
-use irys_config::IrysNodeConfig;
+use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::BlockIndexItem;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
 use irys_types::{Address, Config, IrysTransactionHeader, Signature, H256};
@@ -175,15 +174,19 @@ async fn setup() -> eyre::Result<TestCtx> {
         // add any overrides here
         ..Config::testnet()
     };
-    setup_with_config(testnet_config).await
+    setup_with_config(testnet_config, "external_api", true).await
 }
 
-async fn setup_with_config(testnet_config: Config) -> eyre::Result<TestCtx> {
-    let temp_dir = temporary_directory(Some("external_api"), false);
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
+async fn setup_with_config(
+    mut testnet_config: Config,
+    node_name: &str,
+    genesis: bool,
+) -> eyre::Result<TestCtx> {
+    let temp_dir = temporary_directory(Some(node_name), false);
+    testnet_config.base_directory = temp_dir.path().to_path_buf();
+    let node = IrysNode::new(testnet_config.clone(), genesis, None)
+        .init()
+        .await?;
     Ok(TestCtx {
         config: testnet_config,
         node,

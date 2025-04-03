@@ -15,8 +15,8 @@ async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
         base_directory: temp_dir.path().to_path_buf(),
         ..Config::testnet()
     };
-    let mut genesis_node = IrysNode::new(config.clone(), true);
-    let mut non_genesis_node = IrysNode::new(config.clone(), false);
+    let mut genesis_node = IrysNode::new(config.clone(), true, None);
+    let mut non_genesis_node = IrysNode::new(config.clone(), false, None);
 
     // action:
     // 1. start the genesis node;

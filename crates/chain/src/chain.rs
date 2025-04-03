@@ -1059,6 +1059,8 @@ async fn start_reth_node<T: HasName + HasTableType>(
 /// Builder pattern for configuring and bootstrapping an Irys blockchain node.
 #[derive(Clone)]
 pub struct IrysNode {
+    pub irys_genesis_block: Arc<IrysBlockHeader>,
+    pub chain_spec: ChainSpec,
     pub config: Config,
     pub irys_node_config: IrysNodeConfig,
     pub storage_config: StorageConfig,
@@ -1073,7 +1075,11 @@ pub struct IrysNode {
 
 impl IrysNode {
     /// Creates a new node builder instance.
-    pub fn new(config: Config, is_genesis: bool) -> Self {
+    pub fn new(
+        config: Config,
+        is_genesis: bool,
+        irys_genesis_block: Option<Arc<IrysBlockHeader>>,
+    ) -> Self {
         let storage_config = StorageConfig::new(&config);
         let irys_node_config = IrysNodeConfig::new(&config);
         let data_exists = Self::blockchain_data_exists(&irys_node_config.base_directory);
@@ -1086,7 +1092,31 @@ impl IrysNode {
         let storage_submodule_config =
             StorageSubmodulesConfig::load(irys_node_config.instance_directory().clone()).unwrap();
 
+        let (chain_spec, irys_genesis) = irys_node_config.chainspec_builder.build();
+        let irys_genesis_block: Arc<IrysBlockHeader> = match irys_genesis_block {
+            Some(v) => v,
+            None => {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+                let irys_genesis = IrysBlockHeader {
+                    diff: calculate_initial_difficulty(
+                        &difficulty_adjustment_config,
+                        &storage_config,
+                        // TODO: where does this magic constant come from?
+                        3,
+                    )
+                    .expect("valid calculated initial difficulty"),
+                    timestamp: now.as_millis(),
+                    last_diff_timestamp: now.as_millis(),
+                    ..irys_genesis
+                };
+                Arc::new(irys_genesis)
+            }
+        };
+
         IrysNode {
+            irys_genesis_block,
+            chain_spec,
             config,
             data_exists,
             irys_node_config,
@@ -1115,13 +1145,12 @@ impl IrysNode {
         info!(miner_address = ?self.config.miner_address(), "Starting Irys Node");
 
         // figure out the init mode
-        let (chain_spec, irys_genesis) = self.create_genesis_header()?;
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         match (self.data_exists, self.is_genesis) {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
-            (false, _) => {
+            (false, true) => {
                 // special handilng for genesis node
-                self.init_genesis_thread(irys_genesis)?
+                self.init_genesis_thread(self.irys_genesis_block.clone())?
                     .join()
                     .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
             }
@@ -1189,7 +1218,7 @@ impl IrysNode {
             reth_handle_sender,
             actor_main_thread_handle,
             irys_provider.clone(),
-            chain_spec,
+            self.chain_spec.clone(),
             latest_height,
             task_manager,
             tokio_runtime,
