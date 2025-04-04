@@ -64,7 +64,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     //start peer1
     let testnet_config_peer1 = Config {
-        port: 8081,
+        port: 0, //random port
         trusted_peers: trusted_peers.clone(),
         ..Config::testnet()
     };
@@ -79,7 +79,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     //start peer2
     let testnet_config_peer2 = Config {
-        port: 8082,
+        port: 0, //random port
         trusted_peers,
         ..Config::testnet()
     };
