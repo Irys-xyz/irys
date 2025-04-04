@@ -145,7 +145,10 @@ async fn fetch_block(
     client: &awc::Client,
     block_index_item: BlockIndexItem,
 ) -> Option<IrysBlockHeader> {
-    let url = format!("http://{}/v1/block/{}", peer, block_index_item.block_hash);
+    let url = format!(
+        "http://{}/v1/block/{:?}",
+        peer, block_index_item.block_hash.0
+    );
 
     match client.get(url.clone()).send().await {
         Ok(mut response) => {
