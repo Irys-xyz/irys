@@ -1,9 +1,8 @@
-use irys_config::IrysNodeConfig;
 use irys_types::Config;
 
-use crate::utils::start_node_config;
+use crate::utils::IrysNodeTest;
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_data_promotion_test() {
     use actix_web::{
         middleware::Logger,
@@ -39,42 +38,35 @@ async fn heavy_data_promotion_test() {
         ..Config::testnet()
     };
     testnet_config.chunk_size = chunk_size;
-    let mut config = IrysNodeConfig::new(&testnet_config);
     let signer = IrysSigner::random_signer(&testnet_config);
-
-    config.extend_genesis_accounts(vec![(
+    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![(
         signer.address(),
         GenesisAccount {
             balance: U256::from(690000000000000000_u128),
             ..Default::default()
         },
     )]);
-
-    // This will create 3 storage modules, one for submit, one for publish, and one for capacity
-    let (node_context, _tmp_dir) = start_node_config(
-        "serial_data_promotion_test",
-        Some(testnet_config.clone()),
-        Some(config),
-    )
-    .await;
+    let node = node.start().await;
 
     wait_for_packing(
-        node_context.actor_addresses.packing.clone(),
+        node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
     .await
     .unwrap();
 
-    node_context.actor_addresses.start_mining().unwrap();
+    node.node_ctx.actor_addresses.start_mining().unwrap();
 
+    // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app_state = ApiState {
         reth_provider: None,
         reth_http_url: None,
         block_index: None,
         block_tree: None,
-        db: node_context.db.clone(),
-        mempool: node_context.actor_addresses.mempool.clone(),
-        chunk_provider: node_context.chunk_provider.clone(),
+        db: node.node_ctx.db.clone(),
+        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: testnet_config,
     };
 
@@ -268,7 +260,7 @@ async fn heavy_data_promotion_test() {
         sleep(delay).await;
     }
 
-    let db = &node_context.db.clone();
+    let db = &node.node_ctx.db.clone();
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
     let block_tx2 = get_block_parent(txs[2].header.id, DataLedger::Publish, db).unwrap();
 
@@ -310,7 +302,7 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
@@ -320,7 +312,7 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
@@ -330,7 +322,7 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
@@ -343,7 +335,7 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
@@ -353,7 +345,7 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
@@ -363,9 +355,9 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node_context.storage_config,
+        &node.node_ctx.storage_config,
     )
     .await;
 
-    node_context.stop().await;
+    node.node_ctx.stop().await;
 }

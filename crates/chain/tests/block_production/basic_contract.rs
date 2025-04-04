@@ -5,14 +5,11 @@ use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use irys_chain::start_irys_node;
-use irys_config::IrysNodeConfig;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, Config};
+use irys_types::irys::IrysSigner;
 use reth_primitives::GenesisAccount;
 use tracing::info;
 
-use crate::utils::future_or_mine_on_timeout;
+use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
 sol!(
@@ -23,15 +20,10 @@ sol!(
 );
 #[tokio::test]
 async fn heavy_test_erc20() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_erc20"), false);
-    let testnet_config = Config::testnet();
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-    let main_address = config.mining_signer.address();
-
-    let account1 = IrysSigner::random_signer(&testnet_config);
-
-    config.extend_genesis_accounts(vec![
+    let mut node = IrysNodeTest::default();
+    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    let main_address = node.cfg.config.miner_address();
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -47,26 +39,29 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
             },
         ),
     ]);
-
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let signer: PrivateKeySigner = config.mining_signer.clone().into();
-
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
+    let signer: PrivateKeySigner = node.cfg.config.mining_key.clone().into();
+    let node = node.start().await;
 
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(EthereumWallet::from(signer))
-        .on_http(format!("http://127.0.0.1:{}/v1/execution-rpc", node.config.port).parse()?);
+        .on_http(
+            format!(
+                "http://127.0.0.1:{}/v1/execution-rpc",
+                node.node_ctx.config.port
+            )
+            .parse()?,
+        );
 
     let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.address()));
 
     let contract = future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut deploy_fut,
         Duration::from_millis(2_000),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
+        node.node_ctx.vdf_steps_guard.clone(),
+        &node.node_ctx.vdf_config,
+        &node.node_ctx.storage_config,
     )
     .await??;
 
@@ -79,12 +74,12 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
     let mut transfer_receipt_fut = Box::pin(transfer_call.get_receipt());
 
     let _ = future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut transfer_receipt_fut,
         Duration::from_millis(2_000),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
+        node.node_ctx.vdf_steps_guard.clone(),
+        &node.node_ctx.vdf_config,
+        &node.node_ctx.storage_config,
     )
     .await??;
 
@@ -94,6 +89,6 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
 
     assert_eq!(addr1_balance, U256::from(10));
     assert_eq!(main_balance2, U256::from(10000000000000000000000 - 10_u128));
-    node.stop().await;
+    node.node_ctx.stop().await;
     Ok(())
 }

@@ -2,10 +2,7 @@ use std::time::Duration;
 
 use alloy_core::primitives::{TxHash, U256};
 use irys_actors::block_producer::SolutionFoundMessage;
-use irys_chain::start_irys_node;
-use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, Config};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
@@ -13,6 +10,8 @@ use reth_db::Database as _;
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
 use tracing::info;
+
+use crate::utils::IrysNodeTest;
 
 // hardcoded wallets
 const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
@@ -27,43 +26,29 @@ const DEV2_ADDRESS: &str = "Bea4f456A5801cf9Af196a582D6Ec425c970c2C6";
 async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
     let expected_addr = hex::decode(DEV_ADDRESS)?;
-    let testnet_config = Config::testnet();
-    let temp_dir = setup_tracing_and_temp_dir(Some("continuous_blockprod_evm_tx"), false);
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.mining_signer = IrysSigner {
-        signer: SigningKey::from_slice(dev_wallet.as_slice())?,
-        chain_id: testnet_config.chain_id,
-        chunk_size: testnet_config.chunk_size as usize,
-    };
-    config.base_directory = temp_dir.path().to_path_buf();
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let mut node = IrysNodeTest::new_genesis(Config {
+        mining_key: SigningKey::from_slice(&dev_wallet).unwrap(),
+        ..Config::testnet()
+    });
 
     assert_eq!(
-        config.mining_signer.address(),
+        node.cfg.config.miner_address(),
         Address::from_slice(expected_addr.as_slice())
     );
-    // let account1 = IrysSigner::random_signer();
     let account1_address = hex::decode(DEV2_ADDRESS)?;
     let account1 = IrysSigner {
         signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
-        chain_id: testnet_config.chain_id,
-        chunk_size: testnet_config.chunk_size as usize,
+        chain_id: node.cfg.config.chain_id,
+        chunk_size: node.cfg.config.chunk_size as usize,
     };
     assert_eq!(
         account1.address(),
         Address::from_slice(account1_address.as_slice())
     );
 
-    config.extend_genesis_accounts(vec![
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
-            config.mining_signer.address(),
-            GenesisAccount {
-                balance: U256::from(690000000000000000_u128),
-                ..Default::default()
-            },
-        ),
-        (
-            config.mining_signer.address(),
+            node.cfg.config.miner_address(),
             GenesisAccount {
                 balance: U256::from(690000000000000000_u128),
                 ..Default::default()
@@ -77,10 +62,9 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
             },
         ),
     ]);
+    let node = node.start().await;
 
-    let node = start_irys_node(config, storage_config, testnet_config).await?;
-
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.into()).await?;
 
     while reth_context.inner.pool.pending_transactions().is_empty() {
         info!("waiting for tx...");
@@ -96,6 +80,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
 
     loop {
         let (block, _) = node
+            .node_ctx
             .actor_addresses
             .block_producer
             .send(SolutionFoundMessage(SolutionContext::default()))
@@ -111,6 +96,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
 
         // check irys DB for built block
         let db_irys_block = &node
+            .node_ctx
             .db
             .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
             .unwrap();
