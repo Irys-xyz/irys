@@ -228,7 +228,7 @@ async fn fetch_and_update_peers(
     let futures = peers_to_ask.into_iter().map(|peer| {
         let client = client.clone();
         let peers = peers.clone();
-        let url = format!("http://{}/peer_list", peer);
+        let url = format!("http://{}/v1/peer_list", peer);
 
         async move {
             match client.get(url.clone()).send().await {
