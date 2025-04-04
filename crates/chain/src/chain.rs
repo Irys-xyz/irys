@@ -1184,14 +1184,13 @@ impl IrysNode {
     pub async fn init(&mut self) -> eyre::Result<IrysNodeCtx> {
         info!(miner_address = ?self.config.miner_address(), "Starting Irys Node");
 
-        //todo these commitments need dealing with rather than calling this fn needlessly
-        let (_, _, commitments) = self.create_genesis_header()?;
         // figure out the init mode
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         match (self.data_exists, self.is_genesis) {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
             (false, true) => {
-                // special handilng for genesis node
+                // special handling for genesis node
+                let commitments = get_genesis_commitments(&self.config);
                 self.init_genesis_thread(self.irys_genesis_block.clone(), commitments)?
                     .join()
                     .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
