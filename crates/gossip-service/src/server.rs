@@ -140,7 +140,7 @@ where
     A: ApiClient + Clone,
 {
     tracing::debug!("Gossip data received: {:?}", irys_block_header_json);
-    let peer = match check_peer(&server.peer_list, &req) {
+    let mut peer = match check_peer(&server.peer_list, &req) {
         Ok(peer_address) => peer_address,
         Err(error_response) => return error_response,
     };
@@ -151,6 +151,7 @@ where
         .handle_block_header(irys_block_header, peer.address.gossip, peer.address.api)
         .await
     {
+        GossipServerDataHandler::handle_invalid_data(&mut peer, &error);
         tracing::error!("Failed to send block: {}", error);
         return HttpResponse::InternalServerError().finish();
     }
@@ -172,7 +173,7 @@ where
     A: ApiClient + Clone,
 {
     tracing::debug!("Gossip data received: {:?}", irys_transaction_header_json);
-    let peer = match check_peer(&server.peer_list, &req) {
+    let mut peer = match check_peer(&server.peer_list, &req) {
         Ok(peer_address) => peer_address,
         Err(error_response) => return error_response,
     };
@@ -183,6 +184,7 @@ where
         .handle_transaction(irys_transaction_header, peer.address.gossip)
         .await
     {
+        GossipServerDataHandler::handle_invalid_data(&mut peer, &error);
         tracing::error!("Failed to send transaction: {}", error);
         return HttpResponse::InternalServerError().finish();
     }
@@ -205,7 +207,7 @@ where
     A: ApiClient + Clone,
 {
     tracing::debug!("Gossip data received: {:?}", unpacked_chunk_json);
-    let peer = match check_peer(&server.peer_list, &req) {
+    let mut peer = match check_peer(&server.peer_list, &req) {
         Ok(peer_address) => peer_address,
         Err(error_response) => return error_response,
     };
@@ -216,6 +218,7 @@ where
         .handle_chunk(unpacked_chunk, peer.address.gossip)
         .await
     {
+        GossipServerDataHandler::handle_invalid_data(&mut peer, &error);
         tracing::error!("Failed to send chunk: {}", error);
         return HttpResponse::InternalServerError().finish();
     }

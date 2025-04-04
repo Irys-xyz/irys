@@ -315,7 +315,7 @@ where
             })
     }
 
-    fn handle_invalid_data(&self, peer: &mut PeerListItem, error: &GossipError) {
+    pub fn handle_invalid_data(peer: &mut PeerListItem, error: &GossipError) {
         if let GossipError::InvalidData(_) = error {
             peer.reputation_score.decrease_bogus_data();
         }
