@@ -95,27 +95,15 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     //FIXME: magic number could be a constant e.g. 3 blocks worth of time?
     sleep(Duration::from_millis(10000)).await;
 
-    let mut result_genesis = block_index_endpoint_request(
-        &format!("http://127.0.0.1:{}", &testnet_config_genesis.port),
-        0,
-        2,
-    )
-    .await;
+    let mut result_genesis =
+        block_index_endpoint_request(&local_test_url(&testnet_config_genesis.port), 0, 2).await;
 
     //http requests to peer1 and peer2 index after x seconds to ensure they have begun syncing the blocks
-    let mut result_peer1 = block_index_endpoint_request(
-        &format!("http://127.0.0.1:{}", &ctx_peer1_node.node.config.port),
-        0,
-        2,
-    )
-    .await;
+    let mut result_peer1 =
+        block_index_endpoint_request(&local_test_url(&ctx_peer1_node.node.config.port), 0, 2).await;
 
-    let mut result_peer2 = block_index_endpoint_request(
-        &format!("http://127.0.0.1:{}", &ctx_peer2_node.node.config.port),
-        0,
-        2,
-    )
-    .await;
+    let mut result_peer2 =
+        block_index_endpoint_request(&local_test_url(&ctx_peer2_node.node.config.port), 0, 2).await;
 
     //shutdown nodes
     ctx_genesis_node.node.stop().await;
@@ -160,4 +148,8 @@ async fn setup_with_config(
         node,
         temp_dir,
     })
+}
+
+fn local_test_url(port: &u16) -> String {
+    format!("http://127.0.0.1:{}", port)
 }
