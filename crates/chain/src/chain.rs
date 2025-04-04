@@ -154,10 +154,10 @@ async fn fetch_block(
     match client.get(url.clone()).send().await {
         Ok(mut response) => {
             if response.status().is_success() {
-                match response.json::<Vec<CombinedBlockHeader>>().await {
+                match response.json::<CombinedBlockHeader>().await {
                     Ok(block) => {
                         info!("Got block from {}", &url);
-                        let irys_block_header = block.first().expect("valid block").irys.clone();
+                        let irys_block_header = block.irys.clone();
                         Some(irys_block_header)
                     }
                     Err(e) => {
