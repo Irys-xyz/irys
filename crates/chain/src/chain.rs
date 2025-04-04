@@ -1103,7 +1103,6 @@ async fn start_reth_node<T: HasName + HasTableType>(
 #[derive(Clone)]
 pub struct IrysNode {
     pub irys_genesis_block: Arc<IrysBlockHeader>,
-    pub chain_spec: ChainSpec,
     pub config: Config,
     pub irys_node_config: IrysNodeConfig,
     pub storage_config: StorageConfig,
@@ -1135,7 +1134,7 @@ impl IrysNode {
         let storage_submodule_config =
             StorageSubmodulesConfig::load(irys_node_config.instance_directory().clone()).unwrap();
 
-        let (chain_spec, irys_genesis) = irys_node_config.chainspec_builder.build();
+        let (_, irys_genesis) = irys_node_config.chainspec_builder.build();
         let irys_genesis_block: Arc<IrysBlockHeader> = match irys_genesis_block {
             Some(v) => v,
             None => {
@@ -1159,7 +1158,6 @@ impl IrysNode {
 
         IrysNode {
             irys_genesis_block,
-            chain_spec,
             config,
             data_exists,
             irys_node_config,
@@ -1186,6 +1184,8 @@ impl IrysNode {
     /// Initializes the node (genesis or non-genesis).
     pub async fn init(&mut self) -> eyre::Result<IrysNodeCtx> {
         info!(miner_address = ?self.config.miner_address(), "Starting Irys Node");
+
+        let (chain_spec, _) = self.irys_node_config.chainspec_builder.build();
 
         // figure out the init mode
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
@@ -1262,7 +1262,7 @@ impl IrysNode {
             reth_handle_sender,
             actor_main_thread_handle,
             irys_provider.clone(),
-            self.chain_spec.clone(),
+            chain_spec.clone(),
             latest_height,
             task_manager,
             tokio_runtime,
