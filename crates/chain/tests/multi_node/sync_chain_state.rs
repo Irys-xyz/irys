@@ -96,7 +96,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     sleep(Duration::from_millis(10000)).await;
 
     let mut result_genesis = block_index_endpoint_request(
-        &format!("http:127.0.0.1:{}", &testnet_config_genesis.port),
+        &format!("http://127.0.0.1:{}", &testnet_config_genesis.port),
         0,
         1,
     )
@@ -104,14 +104,14 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     //http requests to peer1 and peer2 index after x seconds to ensure they have begun syncing the blocks
     let mut result_peer1 = block_index_endpoint_request(
-        &format!("http:127.0.0.1:{}", &testnet_config_peer1.port),
+        &format!("http://127.0.0.1:{}", &testnet_config_peer1.port),
         0,
         1,
     )
     .await;
 
     let mut result_peer2 = block_index_endpoint_request(
-        &format!("http:127.0.0.1:{}", &testnet_config_peer2.port),
+        &format!("http://127.0.0.1:{}", &testnet_config_peer2.port),
         0,
         1,
     )
