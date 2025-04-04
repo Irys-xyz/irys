@@ -1194,7 +1194,7 @@ impl IrysNode {
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         match (self.data_exists, self.is_genesis) {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
-            (false, true) => {
+            (false, _) => {
                 // special handling for genesis node
                 let commitments = get_genesis_commitments(&self.config);
                 self.init_genesis_thread(self.irys_genesis_block.clone(), commitments)?
