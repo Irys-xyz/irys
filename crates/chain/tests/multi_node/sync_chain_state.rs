@@ -98,7 +98,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let mut result_genesis = block_index_endpoint_request(
         &format!("http://127.0.0.1:{}", &testnet_config_genesis.port),
         0,
-        1,
+        2,
     )
     .await;
 
@@ -106,14 +106,14 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let mut result_peer1 = block_index_endpoint_request(
         &format!("http://127.0.0.1:{}", &ctx_peer1_node.node.config.port),
         0,
-        1,
+        2,
     )
     .await;
 
     let mut result_peer2 = block_index_endpoint_request(
         &format!("http://127.0.0.1:{}", &ctx_peer2_node.node.config.port),
         0,
-        1,
+        2,
     )
     .await;
 
