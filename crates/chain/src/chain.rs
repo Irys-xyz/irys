@@ -219,45 +219,48 @@ async fn fetch_block_index(
 }
 
 /// Fetches `peers` list from each `peers_to_ask` via http. Adds new entries to `peers`
+#[tracing::instrument(err, skip_all)]
 async fn fetch_and_update_peers(
     peers: Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
     client: &awc::Client,
     peers_to_ask: Vec<SocketAddr>,
-) -> u64 {
+) -> eyre::Result<u64> {
     let futures = peers_to_ask.into_iter().map(|peer| {
         let client = client.clone();
         let peers = peers.clone();
         let url = format!("http://{}/peer_list", peer);
 
         async move {
-            match client.get(url).send().await {
+            match client.get(url.clone()).send().await {
                 Ok(mut response) => {
                     if response.status().is_success() {
-                        match response.json::<Vec<SocketAddr>>().await {
-                            Ok(new_peers) => {
-                                let mut peers_guard = peers.lock().await;
-                                let existing: HashSet<_> = peers_guard.iter().cloned().collect();
-                                let mut added = 0;
-                                for p in new_peers {
-                                    if existing.contains(&p) {
-                                        continue;
-                                    }
-                                    peers_guard.push(p);
-                                    added += 1;
-                                }
-                                info!("Got {} peers from {}", &added, peer);
-                                return added;
+                        let Ok(new_peers) = response.json::<Vec<SocketAddr>>().await else {
+                            warn!("Error reading json body from {}", &url);
+                            return 0;
+                        };
+
+                        let mut peers_guard = peers.lock().await;
+                        let existing: HashSet<_> = peers_guard.iter().cloned().collect();
+                        let mut added = 0;
+                        for p in new_peers {
+                            if existing.contains(&p) {
+                                continue;
                             }
-                            Err(e) => {
-                                warn!("Error reading json body from {}: {}", peer, e);
-                            }
+                            peers_guard.push(p);
+                            added += 1;
                         }
+                        info!("Got {} peers from {}", &added, peer);
+                        return added;
                     } else {
-                        warn!("Non-success from {}: {}", peer, response.status());
+                        warn!(
+                            "fetch_and_update_peers Non-success from {}: {}",
+                            &url,
+                            response.status()
+                        );
                     }
                 }
                 Err(e) => {
-                    warn!("Request to {} failed: {}", peer, e);
+                    warn!("Request to {} failed: {}", &url, e);
                 }
             }
             0
