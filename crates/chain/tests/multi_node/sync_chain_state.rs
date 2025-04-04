@@ -117,11 +117,19 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
 
+    //shutdown nodes
+    ctx_genesis_node.node.stop().await;
+    ctx_peer1_node.node.stop().await;
+    ctx_peer2_node.node.stop().await;
+
+    // compere blocks in indexes from each of the three nodes
+    // they should be identical if the sync was a success
     let body_genesis = result_genesis.body().await.expect("expected a valid body");
     let body_peer1 = result_peer1.body().await.expect("expected a valid body");
     let body_peer2 = result_peer2.body().await.expect("expected a valid body");
     assert_eq!(body_genesis, body_peer1);
     assert_eq!(body_peer1, body_peer2);
+
     Ok(())
 }
 
