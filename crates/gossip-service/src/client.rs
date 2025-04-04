@@ -4,8 +4,7 @@
 )]
 use crate::types::{GossipError, GossipResult};
 use core::time::Duration;
-use irys_database::tables::CompactPeerListItem;
-use irys_types::GossipData;
+use irys_types::{GossipData, PeerListItem};
 use reqwest::Response;
 use serde::Serialize;
 
@@ -31,7 +30,7 @@ impl GossipClient {
     /// If the peer is offline or the request fails, an error is returned.
     pub async fn send_data(
         &self,
-        peer: &CompactPeerListItem,
+        peer: &PeerListItem,
         data: &GossipData,
     ) -> GossipResult<()> {
         Self::check_if_peer_online(peer)?;
@@ -62,7 +61,7 @@ impl GossipClient {
         Ok(())
     }
 
-    fn check_if_peer_online(peer: &CompactPeerListItem) -> GossipResult<()> {
+    fn check_if_peer_online(peer: &PeerListItem) -> GossipResult<()> {
         if !peer.is_online {
             return Err(GossipError::InvalidPeer("Peer is offline".into()));
         }
@@ -90,8 +89,8 @@ impl GossipClient {
     /// If the health check fails or the response is not valid JSON, an error is returned.
     pub async fn check_health(
         &self,
-        peer: &CompactPeerListItem,
-    ) -> GossipResult<CompactPeerListItem> {
+        peer: &PeerListItem,
+    ) -> GossipResult<PeerListItem> {
         let url = format!("http://{}/gossip/health", peer.address.gossip);
 
         let response = self
@@ -113,5 +112,54 @@ impl GossipClient {
             .json()
             .await
             .map_err(|error| GossipError::Network(error.to_string()))
+    }
+
+    /// Check the health of a peer and update their score
+    ///
+    /// # Errors
+    ///
+    /// If the health check fails or the response is not valid JSON, an error is returned.
+    pub async fn check_health_and_update_score(
+        &self,
+        peer: &mut PeerListItem,
+    ) -> GossipResult<PeerListItem> {
+        let res = self.check_health(peer).await;
+        match res {
+            Ok(updated_peer) => {
+                // Peer is alive, increase score
+                peer.reputation_score.increase();
+                Ok(updated_peer)
+            }
+            Err(error) => {
+                // Peer is offline or unreachable
+                peer.reputation_score.decrease_offline();
+                Err(error)
+            }
+        }
+    }
+
+    /// Send data to a peer and update their score based on the result
+    ///
+    /// # Errors
+    ///
+    /// If the peer is offline or the request fails, an error is returned.
+    pub async fn send_data_and_update_score(
+        &self,
+        peer: &mut PeerListItem,
+        data: &GossipData,
+    ) -> GossipResult<()> {
+        let res = self.send_data(peer, data).await;
+        match res {
+            Ok(_) => {
+                // Successful send, increase score
+                peer.reputation_score.increase();
+                Ok(())
+            }
+            Err(error) => {
+                // Failed to send, decrease score
+                peer.reputation_score.decrease_offline();
+                Err(error)
+            }
+        }
     }
 }

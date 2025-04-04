@@ -8,13 +8,7 @@
 )]
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
-use crate::{
-    cache::GossipCache,
-    client::GossipClient,
-    server::GossipServer,
-    types::{GossipError, GossipResult},
-    PeerListProvider,
-};
+use crate::{cache::GossipCache, client::GossipClient, peer_list_provider, server::GossipServer, types::{GossipError, GossipResult}, PeerListProvider};
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::net::SocketAddr;
@@ -23,11 +17,12 @@ use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::TxExistenceQuery;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
 use irys_api_client::ApiClient;
-use irys_database::tables::CompactPeerListItem;
-use irys_types::{DatabaseProvider, GossipData};
+use irys_types::{DatabaseProvider, GossipData, PeerListItem};
 use rand::seq::IteratorRandom as _;
 use std::sync::Arc;
 use tokio::{sync::mpsc, time};
+use std::collections::HashMap;
+use irys_primitives::Address;
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -103,6 +98,7 @@ pub struct GossipService {
     cache: Arc<GossipCache>,
     peer_list: PeerListProvider,
     mempool_data_receiver: Option<mpsc::Receiver<GossipData>>,
+    peer_list_update_receiver: Option<mpsc::Receiver<(Address, PeerListItem)>>,
     client: GossipClient,
 }
 
@@ -118,7 +114,7 @@ impl GossipService {
         let cache = Arc::new(GossipCache::new());
         let (trusted_data_tx, trusted_data_rx) = mpsc::channel(1000);
 
-        let peer_list = PeerListProvider::new(irys_db);
+        let (peer_list, update_receiver) = PeerListProvider::new(irys_db);
 
         let client_timeout = Duration::from_secs(5);
         let client = GossipClient::new(client_timeout);
@@ -131,6 +127,7 @@ impl GossipService {
                 cache,
                 peer_list,
                 mempool_data_receiver: Some(trusted_data_rx),
+                peer_list_update_receiver: Some(update_receiver),
             },
             trusted_data_tx,
         )
@@ -183,18 +180,29 @@ impl GossipService {
                     InternalGossipError::BroadcastReceiverShutdown,
                 ))?;
 
+        let peer_list_update_receiver = self
+            .peer_list_update_receiver
+            .take()
+            .ok_or(GossipError::Internal(
+                InternalGossipError::BroadcastReceiverShutdown,
+            ))?;
+
+        let peer_list_update_task_handle = spawn_peer_list_update_task(
+            self.peer_list.clone(),
+            peer_list_update_receiver,
+        );
+
         let service = Arc::new(self);
 
         let cache_pruning_task_handle = spawn_cache_pruning_task(Arc::clone(&service.cache));
-
-        let broadcast_task_handle =
-            spawn_broadcast_task(mempool_data_receiver, Arc::clone(&service));
+        let broadcast_task_handle = spawn_broadcast_task(mempool_data_receiver, Arc::clone(&service));
 
         let gossip_service_handle = spawn_main_task(
             server,
             server_handle,
             cache_pruning_task_handle,
             broadcast_task_handle,
+            peer_list_update_task_handle,
         );
 
         Ok(gossip_service_handle)
@@ -206,7 +214,7 @@ impl GossipService {
         data: &GossipData,
     ) -> GossipResult<()> {
         // Get all active peers except the source
-        let peers: Vec<CompactPeerListItem> = self
+        let mut peers: Vec<PeerListItem> = self
             .peer_list
             .all_known_peers()
             .map_err(|error| {
@@ -229,18 +237,22 @@ impl GossipService {
             .collect();
 
         // Select random subset of peers
-        let selected_peers: Vec<&CompactPeerListItem> = peers
-            .iter()
+        let selected_peers: Vec<&mut PeerListItem> = peers
+            .iter_mut()
             .choose_multiple(&mut rand::thread_rng(), MAX_PEERS_PER_BROADCAST);
 
         // Send data to selected peers
         for peer in selected_peers {
-            if let Err(error) = self.client.send_data(peer, data).await {
+            if let Err(error) = self.client.send_data_and_update_score(peer, data).await {
                 tracing::warn!(
                     "Failed to send data to peer {}: {}",
                     peer.address.gossip,
                     error
                 );
+                // Update peer in database after score change
+                if let Err(e) = self.peer_list.update_peer(peer) {
+                    tracing::error!("Failed to update peer score: {}", e);
+                }
                 continue;
             }
 
@@ -250,6 +262,11 @@ impl GossipService {
                     peer.address.gossip,
                     error
                 );
+            }
+
+            // Update peer in database after successful send and score increase
+            if let Err(e) = self.peer_list.update_peer(peer) {
+                tracing::error!("Failed to update peer score: {}", e);
             }
         }
 
@@ -322,11 +339,53 @@ fn spawn_broadcast_task(
     )
 }
 
+fn spawn_peer_list_update_task(
+    peer_list: PeerListProvider,
+    mut update_receiver: mpsc::Receiver<(Address, PeerListItem)>,
+) -> ServiceHandleWithShutdownSignal<GossipResult<()>> {
+    ServiceHandleWithShutdownSignal::spawn(
+        Some("peer list update"),
+        move |mut shutdown_rx| async move {
+            let mut interval = time::interval(peer_list_provider::FLUSH_INTERVAL);
+            let mut pending_updates: HashMap<Address, PeerListItem> = HashMap::new();
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if !pending_updates.is_empty() {
+                            if let Err(e) = peer_list.flush_updates(&pending_updates) {
+                                tracing::error!("Failed to flush peer updates to database: {}", e);
+                            }
+                            pending_updates.clear();
+                        }
+                    }
+                    Some((addr, peer)) = update_receiver.recv() => {
+                        pending_updates.insert(addr, peer);
+                    }
+                    _ = shutdown_rx.recv() => {
+                        // Final flush of pending updates before shutdown
+                        if !pending_updates.is_empty() {
+                            if let Err(e) = peer_list.flush_updates(&pending_updates) {
+                                tracing::error!("Failed to flush final peer updates to database: {}", e);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            tracing::debug!("Peer list update task complete");
+            Ok(())
+        },
+    )
+}
+
 fn spawn_main_task(
     server: Server,
     server_handle: ServerHandle,
     mut cache_pruning_task_handle: ServiceHandleWithShutdownSignal<GossipResult<()>>,
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal<GossipResult<()>>,
+    mut peer_list_update_task_handle: ServiceHandleWithShutdownSignal<GossipResult<()>>,
 ) -> ServiceHandleWithShutdownSignal<GossipResult<()>> {
     ServiceHandleWithShutdownSignal::spawn(Some("gossip main"), move |mut shutdown_rx| async move {
         tracing::debug!("Starting gossip service watch thread");
@@ -341,6 +400,9 @@ fn spawn_main_task(
                 }
                 broadcast_res = broadcast_task_handle.wait_for_exit() => {
                     tracing::warn!("Gossip broadcast exited because: {:?}", broadcast_res);
+                }
+                peer_list_update_res = peer_list_update_task_handle.wait_for_exit() => {
+                    tracing::warn!("Peer list update exited because: {:?}", peer_list_update_res);
                 }
             }
 
@@ -367,6 +429,8 @@ fn spawn_main_task(
             handle_result(cache_pruning_task_handle.stop().await);
             tracing::info!("Stopping gossip broadcast");
             handle_result(broadcast_task_handle.stop().await);
+            tracing::info!("Stopping peer list update");
+            handle_result(peer_list_update_task_handle.stop().await);
 
             if errors.is_empty() {
                 tracing::info!("Gossip main task finished without errors");
@@ -400,29 +464,3 @@ impl GossipSource {
         matches!(self, Self::Internal)
     }
 }
-
-// async fn handle_gossip_data_from_other_peer<T>(
-//     source_address: SocketAddr,
-//     data: GossipData,
-//     service: &GossipService,
-//     mempool: &Addr<T>,
-//     api_client: &impl ApiClient,
-// ) -> GossipResult<()>
-// where
-//     T: Handler<TxIngressMessage>
-//         + Handler<ChunkIngressMessage>
-//         + Handler<TxExistenceQuery>
-//         + Actor<Context = Context<T>>,
-// {
-//     match data {
-//         GossipData::Transaction(tx) => {
-//             handle_transaction(&mempool, tx, &service.cache, source_address).await
-//         }
-//         GossipData::Chunk(chunk) => {
-//             handle_chunk(&mempool, chunk, &service.cache, source_address).await
-//         }
-//         GossipData::Block(irys_block_header) => {
-//             handle_block_header(&mempool, irys_block_header, &service.cache, source_address, api_client).await
-//         }
-//     }
-// }
