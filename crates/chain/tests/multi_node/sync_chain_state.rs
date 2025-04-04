@@ -54,7 +54,9 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         .node
         .actor_addresses
         .block_index
-        .send(block_finalized_message);
+        .send(block_finalized_message)
+        .await
+        .expect("expected valid response from block_index actor");
 
     let genesis_block = Some(ctx_genesis_node.irys_genesis_block);
 
