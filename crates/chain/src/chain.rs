@@ -195,7 +195,6 @@ async fn fetch_block_index(
                         info!("Got block_index {},{} from {}", height, limit, &url);
                         let new_block_count = remote_block_index.len().try_into().expect("");
                         let mut index = block_index.lock().await;
-                        //TODO include block height before inserting into index dequeue?
                         index.extend(remote_block_index.into_iter());
                         return new_block_count;
                     }
