@@ -194,7 +194,10 @@ async fn fetch_block_index(
                 match response.json::<Vec<BlockIndexItem>>().await {
                     Ok(remote_block_index) => {
                         info!("Got block_index {},{} from {}", height, limit, &url);
-                        let new_block_count = remote_block_index.len().try_into().expect("");
+                        let new_block_count = remote_block_index
+                            .len()
+                            .try_into()
+                            .expect("try into should succeed as u64");
                         let mut index = block_index.lock().await;
                         index.extend(remote_block_index.into_iter());
                         return new_block_count;
