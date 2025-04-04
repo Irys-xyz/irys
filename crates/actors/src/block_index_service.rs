@@ -95,7 +95,6 @@ impl BlockIndexService {
         block_index: Arc<RwLock<BlockIndex<Initialized>>>,
         storage_config: StorageConfig,
     ) -> Self {
-        println!("service started: block_index (Default)");
         Self {
             block_index: Some(block_index),
             block_log: Vec::new(),
