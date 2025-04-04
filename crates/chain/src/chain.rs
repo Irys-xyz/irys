@@ -330,7 +330,7 @@ async fn fetch_and_update_peers(
         }
     });
     let results = futures::future::join_all(futures).await;
-    results.iter().sum()
+    Ok(results.iter().sum())
 }
 
 impl IrysNodeCtx {
