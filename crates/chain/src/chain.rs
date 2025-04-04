@@ -110,29 +110,29 @@ async fn fetch_txn(
 ) -> Option<IrysTransactionHeader> {
     let url = format!("http://{}/v1/tx/{}", peer, txn_id);
 
-    match client.get(url).send().await {
+    match client.get(url.clone()).send().await {
         Ok(mut response) => {
             if response.status().is_success() {
                 match response.json::<Vec<IrysTransactionHeader>>().await {
                     Ok(txn) => {
-                        info!("Got txn header from {}: {:?}", peer, txn);
+                        //info!("Synced txn {} from {}", txn_id, &url);
                         let txn_header = txn.first().expect("valid txnid").clone();
                         Some(txn_header)
                     }
                     Err(e) => {
-                        let msg = format!("Error reading body from {}: {}", peer, e);
+                        let msg = format!("Error reading body from {}: {}", &url, e);
                         warn!(msg);
                         None
                     }
                 }
             } else {
-                let msg = format!("Non-success from {}: {}", peer, response.status());
+                let msg = format!("Non-success from {}: {}", &url, response.status());
                 warn!(msg);
                 None
             }
         }
         Err(e) => {
-            warn!("Request to {} failed: {}", peer, e);
+            warn!("Request to {} failed: {}", &url, e);
             None
         }
     }
@@ -146,29 +146,29 @@ async fn fetch_block(
 ) -> Option<IrysBlockHeader> {
     let url = format!("http://{}/v1/block/{}", peer, block_index_item.block_hash);
 
-    match client.get(url).send().await {
+    match client.get(url.clone()).send().await {
         Ok(mut response) => {
             if response.status().is_success() {
                 match response.json::<Vec<CombinedBlockHeader>>().await {
                     Ok(block) => {
-                        info!("Got block from {}: {:?}", peer, block);
+                        info!("Got block from {}", &url);
                         let irys_block_header = block.first().expect("valid block").irys.clone();
                         Some(irys_block_header)
                     }
                     Err(e) => {
-                        let msg = format!("Error reading body from {}: {}", peer, e);
+                        let msg = format!("Error reading body from {}: {}", &url, e);
                         warn!(msg);
                         None
                     }
                 }
             } else {
-                let msg = format!("Non-success from {}: {}", peer, response.status());
+                let msg = format!("Non-success from {}: {}", &url, response.status());
                 warn!(msg);
                 None
             }
         }
         Err(e) => {
-            warn!("Request to {} failed: {}", peer, e);
+            warn!("Request to {} failed: {}", &url, e);
             None
         }
     }
