@@ -151,7 +151,7 @@ where
         .handle_block_header(irys_block_header, peer.address.gossip, peer.address.api)
         .await
     {
-        GossipServerDataHandler::handle_invalid_data(&mut peer, &error);
+        handle_invalid_data(&mut peer, &error);
         tracing::error!("Failed to send block: {}", error);
         return HttpResponse::InternalServerError().finish();
     }
@@ -184,7 +184,7 @@ where
         .handle_transaction(irys_transaction_header, peer.address.gossip)
         .await
     {
-        GossipServerDataHandler::handle_invalid_data(&mut peer, &error);
+        handle_invalid_data(&mut peer, &error);
         tracing::error!("Failed to send transaction: {}", error);
         return HttpResponse::InternalServerError().finish();
     }
@@ -218,7 +218,7 @@ where
         .handle_chunk(unpacked_chunk, peer.address.gossip)
         .await
     {
-        GossipServerDataHandler::handle_invalid_data(&mut peer, &error);
+        handle_invalid_data(&mut peer, &error);
         tracing::error!("Failed to send chunk: {}", error);
         return HttpResponse::InternalServerError().finish();
     }
@@ -248,5 +248,11 @@ where
             None => HttpResponse::NotFound().finish(),
         },
         Err(_) => HttpResponse::InternalServerError().finish(),
+    }
+}
+
+fn handle_invalid_data(peer: &mut PeerListItem, error: &GossipError) {
+    if let GossipError::InvalidData(_) = error {
+        peer.reputation_score.decrease_bogus_data();
     }
 }

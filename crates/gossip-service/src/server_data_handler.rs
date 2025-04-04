@@ -7,7 +7,7 @@ use irys_actors::mempool_service::{
     ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
 };
 use irys_api_client::ApiClient;
-use irys_types::{GossipData, IrysBlockHeader, IrysTransactionHeader, PeerListItem, UnpackedChunk, H256};
+use irys_types::{GossipData, IrysBlockHeader, IrysTransactionHeader, UnpackedChunk, H256};
 use std::sync::Arc;
 
 /// Handles data received by the `GossipServer`
@@ -313,11 +313,5 @@ where
                     )
                 })
             })
-    }
-
-    pub fn handle_invalid_data(peer: &mut PeerListItem, error: &GossipError) {
-        if let GossipError::InvalidData(_) = error {
-            peer.reputation_score.decrease_bogus_data();
-        }
     }
 }
