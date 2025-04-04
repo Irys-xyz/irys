@@ -149,7 +149,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 Ok(None) =>
                     Err(eyre!("No block header found for block {} ({}) ", prev_block_hash.0.to_base58(), prev_block_height)),
                 Err(e) =>
-                    Err(eyre!("Failed to get previous block {} ({}) header: {}", prev_block_hash.0.to_base58(), prev_block_height,  e)) 
+                    Err(eyre!("Failed to get previous block {} ({}) header: {}", prev_block_hash.0.to_base58(), prev_block_height,  e))
             }?;
 
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
@@ -188,7 +188,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     }
                 }
 
-                // Loop though all the pending tx to see which haven't been promoted 
+                // Loop though all the pending tx to see which haven't been promoted
                 for txid in &publish_txids {
                     let tx_header = match tx_header_by_txid(&read_tx, txid) {
                         Ok(Some(header)) => header,
@@ -235,7 +235,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let publish_max_chunk_offset =  prev_block_header.data_ledgers[DataLedger::Publish].max_chunk_offset + publish_chunks_added;
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
-            // Submit Ledger Transactions    
+            // Submit Ledger Transactions
             let submit_txs: Vec<IrysTransactionHeader> =
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
 
@@ -460,7 +460,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-            // TODO: This really needs to be sent from the block_discovery service 
+            // TODO: This really needs to be sent from the block_discovery service
             // and the commitment transactions are pre-verified as stored locally and valid
             if block_height > 0 && block_height % blocks_in_epoch == 0 {
                 epoch_service_addr.do_send(NewEpochMessage{ epoch_block: block.clone(), commitments: Vec::new() });

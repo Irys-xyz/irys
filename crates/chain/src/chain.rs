@@ -1,63 +1,59 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
 use crate::vdf::run_vdf;
-use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::{Actor, Addr, System, SystemRegistry};
-use actix::{Arbiter, SystemService};
+use actix::{Actor, Addr, Arbiter, System, SystemRegistry, SystemService};
 use actix_web::dev::Server;
 use alloy_eips::BlockNumberOrTag;
 use base58::ToBase58;
-use irys_actors::block_tree_service::BlockTreeReadGuard;
-use irys_actors::cache_service::ChunkCacheService;
-use irys_actors::ema_service::EmaService;
-use irys_actors::packing::PackingConfig;
-use irys_actors::peer_list_service::PeerListService;
-use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
-use irys_actors::services::ServiceSenders;
 use irys_actors::{
-    block_discovery::BlockDiscoveryActor,
+    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerActor,
+    block_tree_service::BlockTreeReadGuard,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
+    ema_service::EmaService,
     epoch_service::{
         EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
         GetPartitionAssignmentsGuardMessage,
     },
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
+    packing::PackingConfig,
     packing::{PackingActor, PackingRequest},
+    peer_list_service::PeerListService,
+    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    services::ServiceSenders,
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService},
     ActorAddresses, BlockFinalizedMessage,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
-use irys_database::migration::check_db_version_and_run_migrations_if_needed;
 use irys_database::{
-    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx, SystemLedger,
+    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx,
+    migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, BlockIndex,
+    BlockIndexItem, DataLedger, Initialized, SystemLedger,
 };
 use irys_gossip_service::{GossipResult, ServiceHandleWithShutdownSignal};
 use irys_packing::{PackingType, PACKING_TYPE};
-use irys_price_oracle::mock_oracle::MockOracle;
-use irys_price_oracle::IrysPriceOracle;
+use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_storage::{
+    irys_consensus_data_db::open_or_create_irys_consensus_data_db,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
 };
 
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
-    GossipData, StorageConfig, CHUNK_SIZE, H256,
-};
-use irys_types::{
-    CommitmentTransaction, Config, DifficultyAdjustmentConfig, H256List, IrysBlockHeader,
-    OracleConfig, PartitionChunkRange, SystemTransactionLedger,
+    app_state::DatabaseProvider, block::CombinedBlockHeader, calculate_initial_difficulty,
+    vdf_config::VDFStepsConfig, CommitmentTransaction, Config, DifficultyAdjustmentConfig,
+    GossipData, H256List, IrysBlockHeader, IrysTransactionHeader, OracleConfig,
+    PartitionChunkRange, StorageConfig, SystemTransactionLedger, CHUNK_SIZE, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::rpc::eth::EthApiServer as _;
@@ -69,21 +65,23 @@ use reth::{
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
-use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
-use std::thread::{self, JoinHandle};
 use std::{
+    collections::{HashSet, VecDeque},
     fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
+    path::PathBuf,
+    sync::atomic::AtomicU64,
     sync::{mpsc, Arc, RwLock},
+    thread::{self, sleep, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::runtime::Runtime;
 use tokio::{
-    runtime::Handle,
+    runtime::{Handle, Runtime},
     sync::oneshot::{self},
+    sync::Mutex,
+    time::Duration,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -106,6 +104,244 @@ pub struct IrysNodeCtx {
     _stop_guard: StopGuard,
 }
 
+async fn fetch_txn(
+    peer: &SocketAddr,
+    client: &awc::Client,
+    txn_id: H256,
+) -> Option<IrysTransactionHeader> {
+    let url = format!("http://{}/v1/tx/{}", peer, txn_id);
+
+    match client.get(url.clone()).send().await {
+        Ok(mut response) => {
+            if response.status().is_success() {
+                match response.json::<Vec<IrysTransactionHeader>>().await {
+                    Ok(txn) => {
+                        //info!("Synced txn {} from {}", txn_id, &url);
+                        let txn_header = txn.first().expect("valid txnid").clone();
+                        Some(txn_header)
+                    }
+                    Err(e) => {
+                        let msg = format!("Error reading body from {}: {}", &url, e);
+                        warn!(msg);
+                        None
+                    }
+                }
+            } else {
+                let msg = format!("Non-success from {}: {}", &url, response.status());
+                warn!(msg);
+                None
+            }
+        }
+        Err(e) => {
+            warn!("Request to {} failed: {}", &url, e);
+            None
+        }
+    }
+}
+
+//TODO spread requests across peers
+async fn fetch_block(
+    peer: &SocketAddr,
+    client: &awc::Client,
+    block_index_item: BlockIndexItem,
+) -> Option<IrysBlockHeader> {
+    let url = format!(
+        "http://{}/v1/block/{}",
+        peer,
+        block_index_item.block_hash.0.to_base58(),
+    );
+
+    match client.get(url.clone()).send().await {
+        Ok(mut response) => {
+            if response.status().is_success() {
+                match response.json::<CombinedBlockHeader>().await {
+                    Ok(block) => {
+                        info!("Got block from {}", &url);
+                        let irys_block_header = block.irys.clone();
+                        Some(irys_block_header)
+                    }
+                    Err(e) => {
+                        let msg = format!("Error reading body from {}: {}", &url, e);
+                        warn!(msg);
+                        None
+                    }
+                }
+            } else {
+                let msg = format!("Non-success from {}: {}", &url, response.status());
+                warn!(msg);
+                None
+            }
+        }
+        Err(e) => {
+            warn!("Request to {} failed: {}", &url, e);
+            None
+        }
+    }
+}
+
+/// Fetches a slice starting at `height` of size `limit` of the block index from a remote peer over HTTP.
+async fn fetch_block_index(
+    peer: &SocketAddr,
+    client: &awc::Client,
+    block_index: Arc<Mutex<VecDeque<BlockIndexItem>>>,
+    height: u64,
+    limit: u32,
+) -> u64 {
+    let url = format!(
+        "http://{}/v1/block_index?height={}&limit={}",
+        peer, height, limit
+    );
+
+    match client.get(url.clone()).send().await {
+        Ok(mut response) => {
+            if response.status().is_success() {
+                match response.json::<Vec<BlockIndexItem>>().await {
+                    Ok(remote_block_index) => {
+                        info!("Got block_index {},{} from {}", height, limit, &url);
+                        let new_block_count = remote_block_index
+                            .len()
+                            .try_into()
+                            .expect("try into should succeed as u64");
+                        let mut index = block_index.lock().await;
+                        index.extend(remote_block_index.into_iter());
+                        return new_block_count;
+                    }
+                    Err(e) => {
+                        warn!("Error reading body from {}: {}", &url, e);
+                    }
+                }
+            } else {
+                warn!(
+                    "fetch_block_index Non-success from {}: {}",
+                    &url,
+                    response.status()
+                );
+            }
+        }
+        Err(e) => {
+            warn!("Request to {} failed: {}", &url, e);
+        }
+    }
+    0
+}
+
+//TODO url paths as ENUMS? Could update external api tests too
+//#[tracing::instrument(err)]
+async fn sync_state_from_peers(
+    trusted_peers: Vec<SocketAddr>,
+    block_discovery_addr: Addr<BlockDiscoveryActor>,
+) -> eyre::Result<()> {
+    let client = awc::Client::default();
+    let peers = Arc::new(Mutex::new(trusted_peers.clone()));
+
+    // lets give the local api a few second to load...
+    sleep(Duration::from_millis(2000));
+
+    //initialize queue
+    let block_queue: Arc<tokio::sync::Mutex<VecDeque<BlockIndexItem>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    let txn_queue: Arc<tokio::sync::Mutex<VecDeque<H256>>> = Arc::new(Mutex::new(VecDeque::new()));
+
+    info!("Discovering peers...");
+    let _peer_list_requests = fetch_and_update_peers(peers.clone(), &client, trusted_peers).await;
+
+    info!("Downloading block index...");
+    let peers_guard = peers.lock().await;
+    let peer = peers_guard.first().expect("at least one peer");
+    let mut height = 0;
+    let limit = 50;
+    loop {
+        let fetched = fetch_block_index(peer, &client, block_queue.clone(), height, limit).await;
+        if fetched == 0 {
+            break; // no more blocks
+        } else {
+            info!("fetched {fetched} block index items");
+        }
+        height += fetched;
+    }
+
+    info!("Fetching latest blocks...");
+    let peer = peers_guard.first().expect("at least one peer");
+    while let Some(block) = block_queue.lock().await.pop_front() {
+        if let Some(irys_block) = fetch_block(peer, &client, block).await {
+            let block = Arc::new(irys_block);
+            let block_discovery_addr = block_discovery_addr.clone();
+            let _ = block_discovery_addr
+                .send(BlockDiscoveredMessage(block.clone()))
+                .await?;
+            //add txns from block to txn queue
+            let mut txn_queue_guard = txn_queue.lock().await;
+            for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
+                txn_queue_guard.push_back(tx.clone());
+            }
+        }
+    }
+
+    info!("Fetching latest txns...");
+    let peer = peers_guard.first().expect("at least one peer");
+    while let Some(txn_id) = txn_queue.lock().await.pop_front() {
+        if let Some(full_txn) = fetch_txn(peer, &client, txn_id).await {
+            let full_txn = Arc::new(full_txn);
+            //FIXME insert txn into db
+        }
+    }
+
+    info!("Sync complete.");
+    Ok(())
+}
+
+/// Fetches `peers` list from each `peers_to_ask` via http. Adds new entries to `peers`
+#[tracing::instrument(err, skip_all)]
+async fn fetch_and_update_peers(
+    peers: Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
+    client: &awc::Client,
+    peers_to_ask: Vec<SocketAddr>,
+) -> eyre::Result<u64> {
+    let futures = peers_to_ask.into_iter().map(|peer| {
+        let client = client.clone();
+        let peers = peers.clone();
+        let url = format!("http://{}/v1/peer_list", peer);
+
+        async move {
+            match client.get(url.clone()).send().await {
+                Ok(mut response) => {
+                    if response.status().is_success() {
+                        let Ok(new_peers) = response.json::<Vec<SocketAddr>>().await else {
+                            warn!("Error reading json body from {}", &url);
+                            return 0;
+                        };
+
+                        let mut peers_guard = peers.lock().await;
+                        let existing: HashSet<_> = peers_guard.iter().cloned().collect();
+                        let mut added = 0;
+                        for p in new_peers {
+                            if existing.contains(&p) {
+                                continue;
+                            }
+                            peers_guard.push(p);
+                            added += 1;
+                        }
+                        info!("Got {} peers from {}", &added, peer);
+                        return added;
+                    } else {
+                        warn!(
+                            "fetch_and_update_peers Non-success from {}: {}",
+                            &url,
+                            response.status()
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("Request to {} failed: {}", &url, e);
+                }
+            }
+            0
+        }
+    });
+    let results = futures::future::join_all(futures).await;
+    Ok(results.iter().sum())
+}
+
 impl IrysNodeCtx {
     pub async fn stop(self) {
         let _ = self.actor_addresses.stop_mining();
@@ -120,17 +356,6 @@ impl IrysNodeCtx {
     pub fn start_mining(&self) -> eyre::Result<()> {
         // start processing new blocks
         self.actor_addresses.start_mining()?;
-        Ok(())
-    }
-
-    async fn sync_state_from_peers(&self) -> eyre::Result<()> {
-        info!("Discovering peers...");
-        tracing::warn!("not yet implemented");
-
-        info!("Fetching latest blocks...");
-        tracing::warn!("not yet implemented");
-
-        info!("Sync complete.");
         Ok(())
     }
 
@@ -572,7 +797,7 @@ pub async fn start_irys_node(
                 let block_producer_actor = BlockProducerActor {
                     db: irys_db.clone(),
                     mempool_addr: mempool_addr.clone(),
-                    block_discovery_addr,
+                    block_discovery_addr: block_discovery_addr.clone(),
                     epoch_service: epoch_service_actor_addr.clone(),
                     reth_provider: reth_node.clone(),
                     storage_config: storage_config.clone(),
@@ -710,6 +935,7 @@ pub async fn start_irys_node(
                     packing: packing_actor_addr,
                     mempool: mempool_addr.clone(),
                     block_index: block_index_actor_addr,
+                    block_discovery_addr: block_discovery_addr,
                     epoch_service: epoch_service_actor_addr,
                 };
 
@@ -869,7 +1095,8 @@ async fn start_reth_node<T: HasName + HasTableType>(
         latest_block,
         random_ports,
     )
-    .await?;
+    .await
+    .expect("expected reth node to have started");
     debug!("Reth node started");
     sender
         .send(node_handle.node.clone())
@@ -880,6 +1107,7 @@ async fn start_reth_node<T: HasName + HasTableType>(
 /// Builder pattern for configuring and bootstrapping an Irys blockchain node.
 #[derive(Clone)]
 pub struct IrysNode {
+    pub irys_genesis_block: Arc<IrysBlockHeader>,
     pub config: Config,
     pub irys_node_config: IrysNodeConfig,
     pub storage_config: StorageConfig,
@@ -894,7 +1122,11 @@ pub struct IrysNode {
 
 impl IrysNode {
     /// Creates a new node builder instance.
-    pub fn new(config: Config, is_genesis: bool) -> Self {
+    pub fn new(
+        config: Config,
+        is_genesis: bool,
+        irys_genesis_block: Option<Arc<IrysBlockHeader>>,
+    ) -> Self {
         let storage_config = StorageConfig::new(&config);
         let irys_node_config = IrysNodeConfig::new(&config);
         let data_exists = Self::blockchain_data_exists(&irys_node_config.base_directory);
@@ -903,11 +1135,34 @@ impl IrysNode {
         let difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
         let packing_config = PackingConfig::new(&config);
 
-        // this populates the bas directory
+        // this populates the base directory
         let storage_submodule_config =
             StorageSubmodulesConfig::load(irys_node_config.instance_directory().clone()).unwrap();
 
+        let (_, irys_genesis) = irys_node_config.chainspec_builder.build();
+        let irys_genesis_block: Arc<IrysBlockHeader> = match irys_genesis_block {
+            Some(v) => v,
+            None => {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+                let irys_genesis = IrysBlockHeader {
+                    diff: calculate_initial_difficulty(
+                        &difficulty_adjustment_config,
+                        &storage_config,
+                        // TODO: where does this magic constant come from?
+                        3,
+                    )
+                    .expect("valid calculated initial difficulty"),
+                    timestamp: now.as_millis(),
+                    last_diff_timestamp: now.as_millis(),
+                    ..irys_genesis
+                };
+                Arc::new(irys_genesis)
+            }
+        };
+
         IrysNode {
+            irys_genesis_block,
             config,
             data_exists,
             irys_node_config,
@@ -935,14 +1190,16 @@ impl IrysNode {
     pub async fn init(&mut self) -> eyre::Result<IrysNodeCtx> {
         info!(miner_address = ?self.config.miner_address(), "Starting Irys Node");
 
+        let (chain_spec, _) = self.irys_node_config.chainspec_builder.build();
+
         // figure out the init mode
-        let (chain_spec, irys_genesis, commitments) = self.create_genesis_header()?;
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         match (self.data_exists, self.is_genesis) {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
-            (false, true) => {
-                // special handilng for genesis node
-                self.init_genesis_thread(irys_genesis, commitments)?
+            (false, _) => {
+                // special handling for genesis node
+                let commitments = get_genesis_commitments(&self.config);
+                self.init_genesis_thread(self.irys_genesis_block.clone(), commitments)?
                     .join()
                     .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
             }
@@ -1010,7 +1267,7 @@ impl IrysNode {
             reth_handle_sender,
             actor_main_thread_handle,
             irys_provider.clone(),
-            chain_spec,
+            chain_spec.clone(),
             latest_height,
             task_manager,
             tokio_runtime,
@@ -1019,7 +1276,14 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
-        ctx.sync_state_from_peers().await?;
+        // if we are an empty node joining an existing network
+        if !self.data_exists && !self.is_genesis {
+            sync_state_from_peers(
+                ctx.config.trusted_peers.clone(),
+                ctx.actor_addresses.block_discovery_addr.clone(),
+            )
+            .await?;
+        }
 
         Ok(ctx)
     }
@@ -1083,7 +1347,7 @@ impl IrysNode {
                         // read the latest block info
                         let node_config = Arc::new(node.irys_node_config.clone());
                         let (latest_block_height, block_index, latest_block) =
-                            read_latest_block_data(node_config).await;
+                            read_latest_block_data(node_config.clone()).await;
                         latest_block_height_tx
                             .send(latest_block_height)
                             .expect("to be able to send the latest block height");
@@ -1304,7 +1568,7 @@ impl IrysNode {
             .send(GetBlockIndexGuardMessage)
             .await?;
 
-        // start the broadcast mimning service
+        // start the broadcast mining service
         let broadcast_mining_actor = init_broadcaster_service(&mut arbiters);
 
         // start the epoch service
@@ -1407,7 +1671,7 @@ impl IrysNode {
             &block_tree_guard,
             &mempool_service,
             &vdf_steps_guard,
-            block_discovery,
+            block_discovery.clone(),
             price_oracle,
         );
 
@@ -1451,6 +1715,7 @@ impl IrysNode {
         let irys_node_ctx = IrysNodeCtx {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
+                block_discovery_addr: block_discovery,
                 block_producer: block_producer_addr,
                 packing: packing_actor_addr,
                 mempool: mempool_service.clone(),
@@ -1472,6 +1737,7 @@ impl IrysNode {
             config: Arc::new(self.config.clone()),
             _stop_guard: StopGuard::new(),
         };
+
         let server = run_server(
             ApiState {
                 mempool: mempool_service,

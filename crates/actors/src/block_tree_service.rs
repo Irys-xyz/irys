@@ -1010,7 +1010,7 @@ impl BlockTreeCache {
         self.blocks.get(block_hash).map(|entry| &entry.block)
     }
 
-    /// Gets block and its current validation status    
+    /// Gets block and its current validation status
     #[must_use]
     pub fn get_block_and_status(
         &self,

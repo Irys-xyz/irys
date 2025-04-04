@@ -34,6 +34,7 @@ const BPS_SCALE_NATIVE: u64 = 1_000_000;
 )]
 pub struct Amount<T> {
     pub amount: U256,
+    #[serde(skip_serializing, default)]
     _t: PhantomData<T>,
 }
 
