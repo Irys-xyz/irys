@@ -214,6 +214,7 @@ pub struct IrysNode {
     pub storage_submodule_config: StorageSubmodulesConfig,
     pub difficulty_adjustment_config: DifficultyAdjustmentConfig,
     pub packing_config: PackingConfig,
+    pub genesis_timestamp: u128,
 }
 
 impl IrysNode {
@@ -231,8 +232,12 @@ impl IrysNode {
         let storage_submodule_config =
             StorageSubmodulesConfig::load(irys_node_config.instance_directory().clone()).unwrap();
 
+        let (_chain_spec, irys_genesis) = irys_node_config.chainspec_builder.build();
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         IrysNode {
             config,
+            genesis_timestamp: now.as_millis(),
             data_exists,
             irys_node_config,
             storage_config,
@@ -256,17 +261,34 @@ impl IrysNode {
     }
 
     /// Initializes the node (genesis or non-genesis).
-    pub async fn init(&mut self) -> eyre::Result<IrysNodeCtx> {
+    pub async fn start(&mut self) -> eyre::Result<IrysNodeCtx> {
         info!(miner_address = ?self.config.miner_address(), "Starting Irys Node");
+        let (chain_spec, irys_genesis) = self.irys_node_config.chainspec_builder.build();
+        let mut irys_genesis = IrysBlockHeader {
+            diff: calculate_initial_difficulty(
+                &self.difficulty_adjustment_config,
+                &self.storage_config,
+                // TODO: where does this magic constant come from?
+                3,
+            )
+            .expect("valid calculated initial difficulty"),
+            timestamp: self.genesis_timestamp,
+            last_diff_timestamp: self.genesis_timestamp,
+            ..irys_genesis
+        };
+        add_genesis_commitments(&mut irys_genesis, &self.config);
+        let irys_genesis_block = Arc::new(irys_genesis);
 
         // figure out the init mode
-        let (chain_spec, irys_genesis, commitments) = self.create_genesis_header()?;
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         match (self.data_exists, self.is_genesis) {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
             (false, true) => {
+                // special handling for genesis node
+                let commitments = get_genesis_commitments(&self.config);
+
                 // special handilng for genesis node
-                self.init_genesis_thread(irys_genesis, commitments)?
+                self.init_genesis_thread(irys_genesis_block.clone(), commitments)?
                     .join()
                     .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
             }
@@ -334,7 +356,7 @@ impl IrysNode {
             reth_handle_sender,
             actor_main_thread_handle,
             irys_provider.clone(),
-            chain_spec,
+            chain_spec.clone(),
             latest_height,
             task_manager,
             tokio_runtime,

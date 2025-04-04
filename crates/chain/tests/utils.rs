@@ -177,7 +177,7 @@ impl IrysNodeTest<()> {
         let node_ctx = self
             .cfg
             .clone()
-            .init()
+            .start()
             .await
             .expect("node cannot be initialized");
         IrysNodeTest {
@@ -305,10 +305,15 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
         tokio::time::sleep(Duration::from_secs(1)).await;
+        // this will reload the storage config data too
+        let cfg = IrysNode {
+            irys_node_config: self.cfg.irys_node_config,
+            genesis_timestamp: self.cfg.genesis_timestamp,
+            ..IrysNode::new(self.cfg.config, false)
+        };
         IrysNodeTest {
             node_ctx: (),
-            // this will reload the storage config data too
-            cfg: IrysNode::new(self.cfg.config, false),
+            cfg,
             temp_dir: self.temp_dir,
         }
     }

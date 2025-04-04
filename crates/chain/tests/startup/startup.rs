@@ -15,31 +15,31 @@ async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
     // 2. mine 2 new blocks
     // 3. This rolls over the epoch (meaning the genesis + second block get finalized and written to disk)
     let ctx = node.start().await;
-    // let (header_1, ..) = mine_block(&ctx.node_ctx).await?.unwrap();
-    // let (_header_2, ..) = mine_block(&ctx.node_ctx).await?.unwrap();
-    // tokio::time::sleep(Duration::from_secs(2)).await;
+    let (header_1, ..) = mine_block(&ctx.node_ctx).await?.unwrap();
+    let (_header_2, ..) = mine_block(&ctx.node_ctx).await?.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
     // restart the node
     let ctx = ctx.stop().await.start().await;
 
     // assert -- expect that the non genesis node can continue with the genesis data
-    // let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
-    //     .await
-    //     .unwrap();
-    // assert_eq!(
-    //     header_1.height,
-    //     chain.last().unwrap().1,
-    //     "expect only the first manually miend block to be saved"
-    // );
-    // assert_eq!(
-    //     chain.len(),
-    //     2,
-    //     "we expect the genesis block + 1 new block (the second block does not get saved)"
-    // );
-    // mine_block(&ctx.node_ctx).await?;
-    // let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
-    //     .await
-    //     .unwrap();
-    // assert_eq!(chain.len(), 3, "we expect the genesis block + 2 new blocks");
+    let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        header_1.height,
+        chain.last().unwrap().1,
+        "expect only the first manually miend block to be saved"
+    );
+    assert_eq!(
+        chain.len(),
+        2,
+        "we expect the genesis block + 1 new block (the second block does not get saved)"
+    );
+    mine_block(&ctx.node_ctx).await?;
+    let (chain, ..) = get_canonical_chain(ctx.node_ctx.block_tree_guard.clone())
+        .await
+        .unwrap();
+    assert_eq!(chain.len(), 3, "we expect the genesis block + 2 new blocks");
 
     ctx.stop().await;
     Ok(())
@@ -54,6 +54,5 @@ async fn heavy_test_stop_guard() -> () {
     let mut config = IrysNodeConfig::new(&testnet_config);
     config.base_directory = temp_dir.path().to_path_buf();
 
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
     let _node = IrysNodeTest::default().start().await;
 }
