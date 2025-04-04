@@ -146,8 +146,9 @@ async fn fetch_block(
     block_index_item: BlockIndexItem,
 ) -> Option<IrysBlockHeader> {
     let url = format!(
-        "http://{}/v1/block/{:?}",
-        peer, block_index_item.block_hash.0
+        "http://{}/v1/block/{}",
+        peer,
+        block_index_item.block_hash.0.to_base58(),
     );
 
     match client.get(url.clone()).send().await {
