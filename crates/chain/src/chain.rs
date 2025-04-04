@@ -247,6 +247,8 @@ async fn sync_state_from_peers(
         let fetched = fetch_block_index(peer, &client, block_queue.clone(), height, limit).await;
         if fetched == 0 {
             break; // no more blocks
+        } else {
+            info!("fetched {fetched} block index items");
         }
         height += fetched;
     }
