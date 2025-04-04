@@ -1094,7 +1094,8 @@ async fn start_reth_node<T: HasName + HasTableType>(
         latest_block,
         random_ports,
     )
-    .await?;
+    .await
+    .expect("expected reth node to have started");
     debug!("Reth node started");
     sender
         .send(node_handle.node.clone())
