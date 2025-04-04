@@ -31,11 +31,14 @@ impl Decompress for IngressProof {
     }
 }
 
-pub fn generate_ingress_proof_tree<'a>(
-    chunks: impl Iterator<Item = &'a [u8]>,
+pub fn generate_ingress_proof_tree<'a, T>(
+    chunks: impl Iterator<Item = eyre::Result<T>>,
     address: Address,
     and_regular: bool,
-) -> eyre::Result<(Node, Option<Node>)> {
+) -> eyre::Result<(Node, Option<Node>)>
+where
+    T: AsRef<[u8]> + 'a,
+{
     let (ingress_leaves, regular_leaves) = generate_ingress_leaves(chunks, address, and_regular)?;
     let ingress_root = generate_data_root(ingress_leaves)?;
 
@@ -45,11 +48,14 @@ pub fn generate_ingress_proof_tree<'a>(
     ))
 }
 
-pub fn generate_ingress_proof<'a>(
+pub fn generate_ingress_proof<'a, T>(
     signer: IrysSigner,
     data_root: DataRoot,
-    chunks: impl Iterator<Item = &'a [u8]>,
-) -> eyre::Result<IngressProof> {
+    chunks: impl Iterator<Item = eyre::Result<T>>,
+) -> eyre::Result<IngressProof>
+where
+    T: AsRef<[u8]> + 'a,
+{
     let (root, _) = generate_ingress_proof_tree(chunks, signer.address(), false)?;
     let proof: [u8; 32] = root.id;
 
@@ -68,10 +74,13 @@ pub fn generate_ingress_proof<'a>(
     })
 }
 
-pub fn verify_ingress_proof<'a>(
+pub fn verify_ingress_proof<'a, T>(
     proof: IngressProof,
-    chunks: impl Iterator<Item = &'a [u8]>,
-) -> eyre::Result<bool> {
+    chunks: impl Iterator<Item = eyre::Result<T>>,
+) -> eyre::Result<bool>
+where
+    T: AsRef<[u8]> + 'a,
+{
     let mut hasher = sha::Sha256::new();
     hasher.update(&proof.proof.0);
     hasher.update(&proof.data_root.0);
@@ -153,19 +162,22 @@ mod tests {
         let chunks: Vec<&[u8]> = data_bytes
             .chunks(testnet_config.chunk_size as usize)
             .collect();
-        let proof =
-            generate_ingress_proof(signer.clone(), data_root, chunks.iter().map(|chunk| *chunk))?;
+        let proof = generate_ingress_proof(
+            signer.clone(),
+            data_root,
+            chunks.iter().map(|chunk| Ok(*chunk)),
+        )?;
 
         // Verify the ingress proof
         assert!(verify_ingress_proof(
             proof.clone(),
-            chunks.iter().map(|chunk| *chunk)
+            chunks.iter().map(|chunk| Ok(*chunk))
         )?);
         let mut reversed = chunks.clone();
         reversed.reverse();
         assert!(!verify_ingress_proof(
             proof,
-            reversed.iter().map(|chunk| *chunk)
+            reversed.iter().map(|chunk| Ok(*chunk))
         )?);
 
         Ok(())

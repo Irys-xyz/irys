@@ -328,15 +328,20 @@ pub fn generate_leaves_from_chunks(chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Err
 
 /// Generates data chunks from which the calculation of root id starts, including the provided address to interleave into the leaf data hash for ingress proofs
 /// and_regular can be set to re-use the chunk iterator to produce the "standard" leaves, as well as the ingress proof specific ones for when we validate ingress proofs
-pub fn generate_ingress_leaves<'a>(
-    chunks: impl Iterator<Item = &'a [u8]>,
+pub fn generate_ingress_leaves<'a, T>(
+    chunks: impl Iterator<Item = eyre::Result<T>>,
     address: Address,
     and_regular: bool,
-) -> Result<(Vec<Node>, Option<Vec<Node>>), Error> {
+) -> Result<(Vec<Node>, Option<Vec<Node>>), Error>
+where
+    T: AsRef<[u8]> + 'a,
+{
     let mut leaves = Vec::<Node>::new();
     let mut regular_leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
-    for chunk in chunks.into_iter() {
+    for chunk in chunks {
+        let chunk = chunk?;
+        let chunk = chunk.as_ref(); // double-binding required
         let data_hash = hash_ingress_sha256(&chunk, address)?;
         let max_byte_range = min_byte_range + &chunk.len();
         let offset = max_byte_range.to_note_vec();
