@@ -103,7 +103,7 @@ pub struct IrysNodeCtx {
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
-    _stop_guard: StopGuard,
+    stop_guard: StopGuard,
 }
 
 impl IrysNodeCtx {
@@ -114,7 +114,7 @@ impl IrysNodeCtx {
         let _ = self.reth_shutdown_sender.send(()).await;
         let _ = self.reth_thread_handle.unwrap().join();
         debug!("Main actor thread and reth thread stopped");
-        self._stop_guard.mark_stopped();
+        self.stop_guard.mark_stopped();
     }
 
     pub fn start_mining(&self) -> eyre::Result<()> {
@@ -784,7 +784,7 @@ impl IrysNode {
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),
             config: Arc::new(self.config.clone()),
-            _stop_guard: StopGuard::new(),
+            stop_guard: StopGuard::new(),
         };
 
         let mut service_arbiters = Vec::new();

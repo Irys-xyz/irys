@@ -32,23 +32,23 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     });
 
     assert_eq!(
-        node.node_ctx.config.miner_address(),
+        node.cfg.config.miner_address(),
         Address::from_slice(expected_addr.as_slice())
     );
     let account1_address = hex::decode(DEV2_ADDRESS)?;
     let account1 = IrysSigner {
         signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
-        chain_id: node.node_ctx.config.chain_id,
-        chunk_size: node.node_ctx.config.chunk_size as usize,
+        chain_id: node.cfg.config.chain_id,
+        chunk_size: node.cfg.config.chunk_size as usize,
     };
     assert_eq!(
         account1.address(),
         Address::from_slice(account1_address.as_slice())
     );
 
-    node.node_ctx.irys_node_config.extend_genesis_accounts(vec![
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
-            node.node_ctx.config.miner_address(),
+            node.cfg.config.miner_address(),
             GenesisAccount {
                 balance: U256::from(690000000000000000_u128),
                 ..Default::default()

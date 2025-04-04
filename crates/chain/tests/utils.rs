@@ -140,40 +140,48 @@ pub enum AddTxError {
     Mailbox(MailboxError),
 }
 
-pub struct IrysNodeTest<T = IrysNode> {
+pub struct IrysNodeTest<T = ()> {
     pub node_ctx: T,
+    pub cfg: IrysNode,
     pub temp_dir: TempDir,
 }
 
-impl Default for IrysNodeTest<IrysNode> {
+impl Default for IrysNodeTest<()> {
     fn default() -> Self {
         let config = Config::testnet();
         Self::new_genesis(config)
     }
 }
 
-impl IrysNodeTest<IrysNode> {
-    pub fn new(mut config: Config) -> Self {
-        let temp_dir = temporary_directory(None, false);
-        config.base_directory = temp_dir.path().to_path_buf();
-        let node_ctx = IrysNode::new(config, false);
-        Self { temp_dir, node_ctx }
+impl IrysNodeTest<()> {
+    pub fn new(config: Config) -> Self {
+        Self::new_inner(config, false)
     }
 
-    pub fn new_genesis(mut config: Config) -> Self {
-        let temp_dir = temporary_directory(None, false);
-        config.base_directory = temp_dir.path().to_path_buf();
-        let node_ctx = IrysNode::new(config, true);
-        Self { temp_dir, node_ctx }
+    pub fn new_genesis(config: Config) -> Self {
+        Self::new_inner(config, true)
     }
 
-    pub async fn start(mut self) -> IrysNodeTest<IrysNodeCtx> {
+    fn new_inner(mut config: Config, is_genesis: bool) -> Self {
+        let temp_dir = temporary_directory(None, false);
+        config.base_directory = temp_dir.path().to_path_buf();
+        let cfg = IrysNode::new(config, is_genesis);
+        Self {
+            cfg,
+            temp_dir,
+            node_ctx: (),
+        }
+    }
+
+    pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
         let node_ctx = self
-            .node_ctx
+            .cfg
+            .clone()
             .init()
             .await
             .expect("node cannot be initialized");
         IrysNodeTest {
+            cfg: self.cfg,
             node_ctx,
             temp_dir: self.temp_dir,
         }
@@ -294,30 +302,16 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn stop(self) {
+    pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        IrysNodeTest {
+            node_ctx: (),
+            // this will reload the storage config data too
+            cfg: IrysNode::new(self.cfg.config, false),
+            temp_dir: self.temp_dir,
+        }
     }
-}
-
-pub struct TestCtx {
-    config: Config,
-    node: IrysNodeCtx,
-    #[expect(
-        dead_code,
-        reason = "to prevent drop() being called and cleaning up resources"
-    )]
-    temp_dir: TempDir,
-}
-
-async fn setup_with_config(mut config: Config) -> eyre::Result<TestCtx> {
-    let temp_dir = temporary_directory(None, false);
-    config.base_directory = temp_dir.path().to_path_buf();
-    let node = IrysNode::new(config.clone(), true).init().await?;
-    Ok(TestCtx {
-        config,
-        node,
-        temp_dir,
-    })
 }
 
 pub async fn mine_blocks(node_ctx: &IrysNodeCtx, blocks: usize) -> eyre::Result<()> {

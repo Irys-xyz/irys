@@ -22,10 +22,10 @@ use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 #[tokio::test]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default();
-    let account1 = IrysSigner::random_signer(&node.node_ctx.config);
-    let account2 = IrysSigner::random_signer(&node.node_ctx.config);
-    let account3 = IrysSigner::random_signer(&node.node_ctx.config);
-    node.node_ctx.irys_node_config.extend_genesis_accounts(vec![
+    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    let account2 = IrysSigner::random_signer(&node.cfg.config);
+    let account3 = IrysSigner::random_signer(&node.cfg.config);
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -187,12 +187,12 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         ..Config::testnet()
     };
     let mut node = IrysNodeTest::new_genesis(testnet_config);
-    let account1 = IrysSigner::random_signer(&node.node_ctx.config);
-    let account2 = IrysSigner::random_signer(&node.node_ctx.config);
-    let account3 = IrysSigner::random_signer(&node.node_ctx.config);
-    let chain_id = node.node_ctx.config.chain_id;
-    let mining_signer_addr = node.node_ctx.config.miner_address();
-    node.node_ctx.irys_node_config.extend_genesis_accounts(vec![
+    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    let account2 = IrysSigner::random_signer(&node.cfg.config);
+    let account3 = IrysSigner::random_signer(&node.cfg.config);
+    let chain_id = node.cfg.config.chain_id;
+    let mining_signer_addr = node.cfg.config.miner_address();
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {

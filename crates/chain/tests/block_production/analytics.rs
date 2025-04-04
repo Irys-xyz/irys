@@ -30,21 +30,21 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
     let mut node = IrysNodeTest::default();
-    node.node_ctx.storage_config = StorageConfig {
+    node.cfg.storage_config = StorageConfig {
         chunk_size: 32,
         num_chunks_in_partition: 1000,
         num_chunks_in_recall_range: 2,
         num_partitions_in_slot: 1,
-        miner_address: node.node_ctx.config.miner_address(),
+        miner_address: node.cfg.config.miner_address(),
         min_writes_before_sync: 1,
         entropy_packing_iterations: 1_000,
         chunk_migration_depth: 1, // Testnet / single node config
-        chain_id: node.node_ctx.config.chain_id,
+        chain_id: node.cfg.config.chain_id,
     };
-    let account1 = IrysSigner::random_signer(&node.node_ctx.config);
-    let account2 = IrysSigner::random_signer(&node.node_ctx.config);
-    let account3 = IrysSigner::random_signer(&node.node_ctx.config);
-    node.node_ctx.irys_node_config.extend_genesis_accounts(vec![
+    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    let account2 = IrysSigner::random_signer(&node.cfg.config);
+    let account3 = IrysSigner::random_signer(&node.cfg.config);
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -70,7 +70,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let node = node.start().await;
     let _reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
-    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.port);
+    let http_url = format!("http://127.0.0.1:{}", node.cfg.config.port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -119,12 +119,9 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 .with_recommended_fillers()
                 .wallet(EthereumWallet::from(signer))
                 .on_http(
-                    format!(
-                        "http://127.0.0.1:{}/v1/execution-rpc",
-                        node.node_ctx.config.port
-                    )
-                    .parse()
-                    .unwrap(),
+                    format!("http://127.0.0.1:{}/v1/execution-rpc", node.cfg.config.port)
+                        .parse()
+                        .unwrap(),
                 )
         })
         .collect::<Vec<_>>();
@@ -151,7 +148,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 gas: Some(21000),
                 value: Some(U256::from(simple_rng.next_range(20_000))),
                 nonce: Some(alloy_provider.get_transaction_count(a.address()).await?),
-                chain_id: Some(node.node_ctx.config.chain_id),
+                chain_id: Some(node.cfg.config.chain_id),
                 ..Default::default()
             };
 

@@ -46,34 +46,31 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         chunk_migration_depth: 2,
         ..Config::testnet()
     });
-    let main_address = irys_node.node_ctx.config.miner_address();
-    let account1 = IrysSigner::random_signer(&irys_node.node_ctx.config);
-    irys_node
-        .node_ctx
-        .irys_node_config
-        .extend_genesis_accounts(vec![
-            (
-                main_address,
-                GenesisAccount {
-                    balance: U256::from(690000000000000000_u128),
-                    ..Default::default()
-                },
-            ),
-            (
-                account1.address(),
-                GenesisAccount {
-                    balance: U256::from(420000000000000_u128),
-                    ..Default::default()
-                },
-            ),
-            (
-                Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice()),
-                GenesisAccount {
-                    balance: U256::from(4200000000000000000_u128),
-                    ..Default::default()
-                },
-            ),
-        ]);
+    let main_address = irys_node.cfg.config.miner_address();
+    let account1 = IrysSigner::random_signer(&irys_node.cfg.config);
+    irys_node.cfg.irys_node_config.extend_genesis_accounts(vec![
+        (
+            main_address,
+            GenesisAccount {
+                balance: U256::from(690000000000000000_u128),
+                ..Default::default()
+            },
+        ),
+        (
+            account1.address(),
+            GenesisAccount {
+                balance: U256::from(420000000000000_u128),
+                ..Default::default()
+            },
+        ),
+        (
+            Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice()),
+            GenesisAccount {
+                balance: U256::from(4200000000000000000_u128),
+                ..Default::default()
+            },
+        ),
+    ]);
 
     let node = irys_node.start().await;
     wait_for_packing(

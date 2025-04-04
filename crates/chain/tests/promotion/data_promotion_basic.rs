@@ -40,15 +40,13 @@ async fn heavy_data_promotion_test() {
     testnet_config.chunk_size = chunk_size;
     let signer = IrysSigner::random_signer(&testnet_config);
     let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
-    node.node_ctx
-        .irys_node_config
-        .extend_genesis_accounts(vec![(
-            signer.address(),
-            GenesisAccount {
-                balance: U256::from(690000000000000000_u128),
-                ..Default::default()
-            },
-        )]);
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![(
+        signer.address(),
+        GenesisAccount {
+            balance: U256::from(690000000000000000_u128),
+            ..Default::default()
+        },
+    )]);
     let node = node.start().await;
 
     wait_for_packing(

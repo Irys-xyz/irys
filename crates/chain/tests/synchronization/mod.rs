@@ -6,23 +6,23 @@ use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_types::irys::IrysSigner;
 use irys_types::{Config, IrysTransactionHeader};
 
-use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
+use crate::utils::{future_or_mine_on_timeout, mine_block, mine_blocks, IrysNodeTest};
 use reth::rpc::eth::EthApiServer;
 use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     let testnet_config = Config {
         chunk_size: 32,
         ..Config::testnet()
     };
     let mut node = IrysNodeTest::new_genesis(testnet_config);
-    let main_address = node.node_ctx.config.miner_address();
-    let account1 = IrysSigner::random_signer(&node.node_ctx.config);
-    node.node_ctx.irys_node_config.extend_genesis_accounts(vec![
+    let main_address = node.cfg.config.miner_address();
+    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -111,7 +111,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 
     mine_blocks(&node.node_ctx, 1).await?;
     // Waiting a little for the block
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     let latest_block_before_restart = {
         let context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
@@ -129,23 +129,10 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     // Add one block on top to confirm previous one
     mine_blocks(&node.node_ctx, 1).await?;
     // Waiting a little for the block
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
-    debug!("Stopping node");
-    let node_config = (*node.node_ctx.node_config).clone();
-    let storage_config = node.node_ctx.storage_config.clone();
-    node.stop().await;
-
-    // That shouldn't be necessary, but just in case
-    debug!("Node stopped, waiting a little just in case");
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    debug!("Restarting node");
-    let testnet_config = Config {
-        chunk_size: 32,
-        ..Config::testnet()
-    };
-    let restarted_node = IrysNodeTest::new(testnet_config).start().await;
+    error!("Restarting node");
+    let restarted_node = node.stop().await.start().await;
 
     let (latest_block_right_after_restart, earliest_block) = {
         let context =
@@ -168,7 +155,9 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         (latest.unwrap(), earliest.unwrap())
     };
 
-    mine_blocks(&restarted_node.node_ctx, 1).await?;
+    error!("mining blocks");
+    mine_block(&restarted_node.node_ctx).await?;
+    // mine_blocks(&restarted_node.node_ctx, 1).await?;
 
     let next_block = {
         let context =

@@ -33,15 +33,13 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     };
     let signer = IrysSigner::random_signer(&test_config);
     let mut node = IrysNodeTest::new_genesis(test_config.clone());
-    node.node_ctx
-        .irys_node_config
-        .extend_genesis_accounts(vec![(
-            signer.address(),
-            GenesisAccount {
-                balance: U256::from(690000000000000000_u128),
-                ..Default::default()
-            },
-        )]);
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![(
+        signer.address(),
+        GenesisAccount {
+            balance: U256::from(690000000000000000_u128),
+            ..Default::default()
+        },
+    )]);
     let node = node.start().await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),

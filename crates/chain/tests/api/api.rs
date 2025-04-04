@@ -47,15 +47,13 @@ async fn api_end_to_end_test(chunk_size: usize) {
     let chain_id = testnet_config.chain_id;
     let main_signer = IrysSigner::random_signer(&testnet_config);
     let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
-    node.node_ctx
-        .irys_node_config
-        .extend_genesis_accounts(vec![(
-            main_signer.address(),
-            GenesisAccount {
-                balance: U256::from(1000),
-                ..Default::default()
-            },
-        )]);
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![(
+        main_signer.address(),
+        GenesisAccount {
+            balance: U256::from(1000),
+            ..Default::default()
+        },
+    )]);
     let node = node.start().await;
 
     // FIXME: The node startup already spins up an internal actix-web API service.

@@ -40,9 +40,9 @@ async fn heavy_test_mine() {
 #[actix::test]
 async fn heavy_test_mine_tx() {
     let mut irys_node = IrysNodeTest::default();
-    let account = IrysSigner::random_signer(&irys_node.node_ctx.config);
+    let account = IrysSigner::random_signer(&irys_node.cfg.config);
     irys_node
-        .node_ctx
+        .cfg
         .irys_node_config
         .extend_genesis_accounts(vec![(
             account.address(),

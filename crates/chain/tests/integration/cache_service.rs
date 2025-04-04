@@ -26,7 +26,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let main_address = testnet_config.miner_address();
     let account1 = IrysSigner::random_signer(&testnet_config);
     let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
-    node.node_ctx.irys_node_config.extend_genesis_accounts(vec![
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
