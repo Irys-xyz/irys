@@ -292,6 +292,9 @@ impl IrysNodeCtx {
         let trusted_peers = self.config.trusted_peers.clone();
         let peers = Arc::new(Mutex::new(trusted_peers.clone()));
 
+        // lets give the local api a few second to load...
+        sleep(Duration::from_millis(2000));
+
         //initialize queue
         let block_queue: Arc<tokio::sync::Mutex<VecDeque<BlockIndexItem>>> =
             Arc::new(Mutex::new(VecDeque::new()));
