@@ -1130,7 +1130,7 @@ impl IrysNode {
         let difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
         let packing_config = PackingConfig::new(&config);
 
-        // this populates the bas directory
+        // this populates the base directory
         let storage_submodule_config =
             StorageSubmodulesConfig::load(irys_node_config.instance_directory().clone()).unwrap();
 
