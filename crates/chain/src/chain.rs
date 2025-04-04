@@ -1268,11 +1268,14 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
-        sync_state_from_peers(
-            ctx.config.trusted_peers.clone(),
-            ctx.actor_addresses.block_discovery_addr.clone(),
-        )
-        .await?;
+        // if we are an empty node joining an existing network
+        if !self.data_exists && !self.is_genesis {
+            sync_state_from_peers(
+                ctx.config.trusted_peers.clone(),
+                ctx.actor_addresses.block_discovery_addr.clone(),
+            )
+            .await?;
+        }
 
         Ok(ctx)
     }
