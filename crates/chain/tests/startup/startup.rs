@@ -8,6 +8,7 @@ use std::time::Duration;
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
+    // init logging
     // setup
     let temp_dir = temporary_directory(Some("test_startup"), false);
     let config = Config {
