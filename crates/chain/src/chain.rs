@@ -187,15 +187,12 @@ async fn fetch_block_index(
         peer, height, limit
     );
 
-    match client.get(url).send().await {
+    match client.get(url.clone()).send().await {
         Ok(mut response) => {
             if response.status().is_success() {
                 match response.json::<Vec<BlockIndexItem>>().await {
                     Ok(remote_block_index) => {
-                        info!(
-                            "Got block_index {},{} from {}: {:?}",
-                            height, limit, peer, &remote_block_index
-                        );
+                        info!("Got block_index {},{} from {}", height, limit, &url);
                         let new_block_count = remote_block_index.len().try_into().expect("");
                         let mut index = block_index.lock().await;
                         //TODO include block height before inserting into index dequeue?
@@ -203,15 +200,19 @@ async fn fetch_block_index(
                         return new_block_count;
                     }
                     Err(e) => {
-                        warn!("Error reading body from {}: {}", peer, e);
+                        warn!("Error reading body from {}: {}", &url, e);
                     }
                 }
             } else {
-                warn!("Non-success from {}: {}", peer, response.status());
+                warn!(
+                    "fetch_block_index Non-success from {}: {}",
+                    &url,
+                    response.status()
+                );
             }
         }
         Err(e) => {
-            warn!("Request to {} failed: {}", peer, e);
+            warn!("Request to {} failed: {}", &url, e);
         }
     }
     0
