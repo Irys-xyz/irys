@@ -18,8 +18,7 @@ use actix_web::{
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngressMessage};
 use irys_api_client::ApiClient;
-use irys_database::tables::CompactPeerListItem;
-use irys_types::{IrysBlockHeader, IrysTransactionHeader, UnpackedChunk};
+use irys_types::{IrysBlockHeader, IrysTransactionHeader, PeerListItem, UnpackedChunk};
 
 #[derive(Debug)]
 pub struct GossipServer<M, B, A>
@@ -105,7 +104,7 @@ where
 fn check_peer(
     peer_list: &PeerListProvider,
     req: &actix_web::HttpRequest,
-) -> Result<CompactPeerListItem, HttpResponse> {
+) -> Result<PeerListItem, HttpResponse> {
     let Some(peer_address) = req.peer_addr() else {
         tracing::debug!("Failed to get peer address from gossip post request");
         return Err(HttpResponse::BadRequest().finish());
