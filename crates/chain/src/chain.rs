@@ -29,11 +29,12 @@ use irys_actors::{
     vdf_service::{GetVdfStateMessage, VdfService},
     ActorAddresses, BlockFinalizedMessage,
 };
-use irys_api_server::{create_listener, routes::block::CombinedBlockHeader, run_server, ApiState};
+use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::{
-    add_genesis_commitments, database, get_genesis_commitments,insert_commitment_tx, migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, SystemLedger,
-    BlockIndex, BlockIndexItem, DataLedger, Initialized,
+    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx,
+    migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, BlockIndex,
+    BlockIndexItem, DataLedger, Initialized, SystemLedger,
 };
 use irys_gossip_service::{GossipResult, ServiceHandleWithShutdownSignal};
 use irys_packing::{PackingType, PACKING_TYPE};
@@ -49,11 +50,10 @@ use irys_storage::{
 };
 
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, CommitmentTransaction, vdf_config::VDFStepsConfig, Config,
-    DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader, OracleConfig,
-    PartitionChunkRange, StorageConfig, SystemTransactionLedger, CHUNK_SIZE, H256, H256List,
-    GossipData,
-};
+    app_state::DatabaseProvider, block::CombinedBlockHeader, calculate_initial_difficulty,
+    vdf_config::VDFStepsConfig, CommitmentTransaction, Config, DifficultyAdjustmentConfig,
+    GossipData, H256List, IrysBlockHeader, IrysTransactionHeader, OracleConfig,
+    PartitionChunkRange, StorageConfig, SystemTransactionLedger, CHUNK_SIZE, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::rpc::eth::EthApiServer as _;
@@ -1175,6 +1175,8 @@ impl IrysNode {
     pub async fn init(&mut self) -> eyre::Result<IrysNodeCtx> {
         info!(miner_address = ?self.config.miner_address(), "Starting Irys Node");
 
+        //todo these commitments need dealing with rather than calling this fn needlessly
+        let (_, _, commitments) = self.create_genesis_header()?;
         // figure out the init mode
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         match (self.data_exists, self.is_genesis) {
@@ -1322,7 +1324,7 @@ impl IrysNode {
                         // read the latest block info
                         let node_config = Arc::new(node.irys_node_config.clone());
                         let (latest_block_height, block_index, latest_block) =
-                            read_latest_block_data(node_config).await;
+                            read_latest_block_data(node_config.clone()).await;
                         latest_block_height_tx
                             .send(latest_block_height)
                             .expect("to be able to send the latest block height");
@@ -1712,6 +1714,7 @@ impl IrysNode {
             config: Arc::new(self.config.clone()),
             _stop_guard: StopGuard::new(),
         };
+
         let server = run_server(
             ApiState {
                 mempool: mempool_service,
