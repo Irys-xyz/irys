@@ -218,6 +218,69 @@ async fn fetch_block_index(
     0
 }
 
+//TODO url paths as ENUMS? Could update external api tests too
+//#[tracing::instrument(err)]
+async fn sync_state_from_peers(
+    trusted_peers: Vec<SocketAddr>,
+    block_discovery_addr: Addr<BlockDiscoveryActor>,
+) -> eyre::Result<()> {
+    let client = awc::Client::default();
+    let peers = Arc::new(Mutex::new(trusted_peers.clone()));
+
+    // lets give the local api a few second to load...
+    sleep(Duration::from_millis(2000));
+
+    //initialize queue
+    let block_queue: Arc<tokio::sync::Mutex<VecDeque<BlockIndexItem>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    let txn_queue: Arc<tokio::sync::Mutex<VecDeque<H256>>> = Arc::new(Mutex::new(VecDeque::new()));
+
+    info!("Discovering peers...");
+    let _peer_list_requests = fetch_and_update_peers(peers.clone(), &client, trusted_peers).await;
+
+    info!("Downloading block index...");
+    let peers_guard = peers.lock().await;
+    let peer = peers_guard.first().expect("at least one peer");
+    let mut height = 0;
+    let limit = 50;
+    loop {
+        let fetched = fetch_block_index(peer, &client, block_queue.clone(), height, limit).await;
+        if fetched == 0 {
+            break; // no more blocks
+        }
+        height += fetched;
+    }
+
+    info!("Fetching latest blocks...");
+    let peer = peers_guard.first().expect("at least one peer");
+    while let Some(block) = block_queue.lock().await.pop_front() {
+        if let Some(irys_block) = fetch_block(peer, &client, block).await {
+            let block = Arc::new(irys_block);
+            let block_discovery_addr = block_discovery_addr.clone();
+            let _ = block_discovery_addr
+                .send(BlockDiscoveredMessage(block.clone()))
+                .await?;
+            //add txns from block to txn queue
+            let mut txn_queue_guard = txn_queue.lock().await;
+            for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
+                txn_queue_guard.push_back(tx.clone());
+            }
+        }
+    }
+
+    info!("Fetching latest txns...");
+    let peer = peers_guard.first().expect("at least one peer");
+    while let Some(txn_id) = txn_queue.lock().await.pop_front() {
+        if let Some(full_txn) = fetch_txn(peer, &client, txn_id).await {
+            let full_txn = Arc::new(full_txn);
+            //FIXME insert txn into db
+        }
+    }
+
+    info!("Sync complete.");
+    Ok(())
+}
+
 /// Fetches `peers` list from each `peers_to_ask` via http. Adds new entries to `peers`
 #[tracing::instrument(err, skip_all)]
 async fn fetch_and_update_peers(
@@ -284,69 +347,6 @@ impl IrysNodeCtx {
     pub fn start_mining(&self) -> eyre::Result<()> {
         // start processing new blocks
         self.actor_addresses.start_mining()?;
-        Ok(())
-    }
-
-    //TODO url paths as ENUMS? Could update external api tests too
-    async fn sync_state_from_peers(&self) -> eyre::Result<()> {
-        let client = awc::Client::default();
-        let trusted_peers = self.config.trusted_peers.clone();
-        let peers = Arc::new(Mutex::new(trusted_peers.clone()));
-
-        // lets give the local api a few second to load...
-        sleep(Duration::from_millis(2000));
-
-        //initialize queue
-        let block_queue: Arc<tokio::sync::Mutex<VecDeque<BlockIndexItem>>> =
-            Arc::new(Mutex::new(VecDeque::new()));
-        let txn_queue: Arc<tokio::sync::Mutex<VecDeque<H256>>> =
-            Arc::new(Mutex::new(VecDeque::new()));
-
-        info!("Discovering peers...");
-        let _peer_list_requests =
-            fetch_and_update_peers(peers.clone(), &client, trusted_peers).await;
-
-        info!("Downloading block index...");
-        let peers_guard = peers.lock().await;
-        let peer = peers_guard.first().expect("at least one peer");
-        let mut height = 0;
-        let limit = 50;
-        loop {
-            let fetched =
-                fetch_block_index(peer, &client, block_queue.clone(), height, limit).await;
-            if fetched == 0 {
-                break; // no more blocks
-            }
-            height += fetched;
-        }
-
-        info!("Fetching latest blocks...");
-        let peer = peers_guard.first().expect("at least one peer");
-        while let Some(block) = block_queue.lock().await.pop_front() {
-            if let Some(irys_block) = fetch_block(peer, &client, block).await {
-                let block = Arc::new(irys_block);
-                let block_discovery_addr = self.actor_addresses.block_discovery_addr.clone();
-                let _ = block_discovery_addr
-                    .send(BlockDiscoveredMessage(block.clone()))
-                    .await?;
-                //add txns from block to txn queue
-                let mut txn_queue_guard = txn_queue.lock().await;
-                for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
-                    txn_queue_guard.push_back(tx.clone());
-                }
-            }
-        }
-
-        info!("Fetching latest txns...");
-        let peer = peers_guard.first().expect("at least one peer");
-        while let Some(txn_id) = txn_queue.lock().await.pop_front() {
-            if let Some(full_txn) = fetch_txn(peer, &client, txn_id).await {
-                let full_txn = Arc::new(full_txn);
-                //FIXME insert txn into db
-            }
-        }
-
-        info!("Sync complete.");
         Ok(())
     }
 
@@ -1267,7 +1267,11 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
-        ctx.sync_state_from_peers().await?;
+        sync_state_from_peers(
+            ctx.config.trusted_peers.clone(),
+            ctx.actor_addresses.block_discovery_addr.clone(),
+        )
+        .await?;
 
         Ok(ctx)
     }
