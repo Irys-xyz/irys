@@ -793,6 +793,10 @@ impl IrysNode {
             "block_producer_arbiter".to_string(),
         ));
         service_arbiters.push(ArbiterHandle::new(
+            broadcast_arbiter,
+            "broadcast_arbiter".to_string(),
+        ));
+        service_arbiters.push(ArbiterHandle::new(
             block_discovery_arbiter,
             "block_discovery_arbiter".to_string(),
         ));
