@@ -14,7 +14,7 @@ use irys_database::{
     Ledger,
 };
 use irys_price_oracle::IrysPriceOracle;
-use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
+use irys_primitives::{BlockRewardShadow, DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
@@ -363,20 +363,20 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             })
             .collect();
         
-            warn!("\x1b[1;31m FAUCET RESUPPLY ACTIVE \x1b[0m");
+            // warn!("\x1b[1;31m FAUCET RESUPPLY ACTIVE \x1b[0m");
             
-            shadows_vec.push(ShadowTx {
-                tx_id: IrysTxId::ZERO,
-                fee: irys_primitives::U256::ZERO,
-                address: Address::from_slice(
-                    hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
-                        .unwrap()
-                        .as_slice(),
-                ),
-                tx: ShadowTxType::BlockReward(BlockRewardShadow {
-                    reward: irys_primitives::U256::from(1_000_000_000_000_000_000_000_000_u128)
-                })
-            });
+            // shadows_vec.push(ShadowTx {
+            //     tx_id: IrysTxId::ZERO,
+            //     fee: irys_primitives::U256::ZERO,
+            //     address: Address::from_slice(
+            //         hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
+            //             .unwrap()
+            //             .as_slice(),
+            //     ),
+            //     tx: ShadowTxType::BlockReward(BlockRewardShadow {
+            //         reward: irys_primitives::U256::from(1_000_000_000_000_000_000_000_000_u128)
+            //     })
+            // });
 
 
             let shadows = Shadows::new(
