@@ -130,7 +130,7 @@ pub fn vdf_sha_verification(
 /// 4. Comparing computed results against provided checkpoints
 ///
 /// Returns Ok(()) if checkpoints are valid, Err otherwise with details of mismatches.
-pub async fn last_step_checkpoints_is_valid(
+pub async fn last_step_checkpoints_are_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VDFStepsConfig,
 ) -> eyre::Result<()> {
@@ -237,7 +237,7 @@ pub async fn last_step_checkpoints_is_valid(
     }
 }
 
-/// Validate the steps from the `nonce_info` to see if they are valid.
+/// Validate the steps from the `vdf_info` to see if they are valid.
 /// Verifies each step in parallel across as many cores as are available.
 ///
 /// # Arguments
@@ -279,7 +279,7 @@ pub fn vdf_steps_are_valid(
 
     let mut step_hashes = vdf_info.steps.clone();
 
-    // Add the seed from the previous nonce info to the steps
+    // Add the seed from the previous vdf info to the steps
     let previous_seed = vdf_info.prev_output;
     step_hashes.0.insert(0, previous_seed);
 
@@ -487,7 +487,7 @@ mod tests {
         let mut config = VDFStepsConfig::new(&testnet_config);
         config.vdf_difficulty = 100_000;
 
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let x = last_step_checkpoints_are_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
 
         if x.is_ok() {
@@ -710,7 +710,7 @@ mod tests {
         let mut config = VDFStepsConfig::new(&testnet_config);
         config.vdf_difficulty = 100_000;
 
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let x = last_step_checkpoints_are_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
 
         if x.is_ok() {
@@ -930,7 +930,7 @@ mod tests {
 
         let config = VDFStepsConfig::new(&testnet_config);
 
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let x = last_step_checkpoints_are_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
     }
 
@@ -1129,7 +1129,7 @@ mod tests {
         };
 
         let config = VDFStepsConfig::new(&testnet_config);
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let x = last_step_checkpoints_are_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
 
         if x.is_ok() {
