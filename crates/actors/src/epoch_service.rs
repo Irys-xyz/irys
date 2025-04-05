@@ -147,7 +147,7 @@ impl PartitionAssignments {
 // CommitmentState
 //------------------------------------------------------------------------------
 #[derive(Debug, Default, Clone)]
-struct CommitmentStateEntry {
+pub struct CommitmentStateEntry {
     id: IrysTransactionId,
     commitment_status: CommitmentStatus,
     partition_hash: Option<H256>,
@@ -158,7 +158,7 @@ struct CommitmentStateEntry {
 }
 
 #[derive(Debug, Default)]
-struct CommitmentState {
+pub struct CommitmentState {
     pub stake_commitments: BTreeMap<Address, CommitmentStateEntry>,
     pub pledge_commitments: BTreeMap<Address, Vec<CommitmentStateEntry>>,
 }
@@ -181,7 +181,7 @@ pub struct EpochServiceActor {
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
     /// Computed commitment state
-    commitment_state: CommitmentState,
+    commitment_state: Arc<RwLock<CommitmentState>>,
 }
 
 impl Actor for EpochServiceActor {
@@ -293,25 +293,44 @@ impl Handler<GetPartitionAssignmentsGuardMessage> for EpochServiceActor {
 }
 
 //==============================================================================
-// EpochServiceActor implementation
+// CommitmentStateReadGuard
 //------------------------------------------------------------------------------
+/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
+#[derive(Debug, Clone, MessageResponse)]
+pub struct CommitmentStateReadGuard {
+    commitment_state: Arc<RwLock<CommitmentState>>,
+}
 
-/// Retrieve a read only reference to the ledger partition assignments
-#[derive(Message, Debug)]
-#[rtype(result = "Vec<StorageModuleInfo>")]
-pub struct GetGenesisStorageModulesMessage(pub StorageSubmodulesConfig);
+impl CommitmentStateReadGuard {
+    /// Creates a new `ReadGuard` for the CommitmentState
+    pub const fn new(commitment_state: Arc<RwLock<CommitmentState>>) -> Self {
+        Self { commitment_state }
+    }
 
-impl Handler<GetGenesisStorageModulesMessage> for EpochServiceActor {
-    type Result = Vec<StorageModuleInfo>;
-
-    fn handle(
-        &mut self,
-        msg: GetGenesisStorageModulesMessage,
-        _ctx: &mut Self::Context,
-    ) -> Self::Result {
-        self.map_storage_modules_to_partition_assignments(msg.0)
+    /// Accessor method to get a ReadGuard for the CommitmentState
+    pub fn read(&self) -> RwLockReadGuard<'_, CommitmentState> {
+        self.commitment_state.read().unwrap()
     }
 }
+
+/// Retrieve a read only reference to the commitment state
+#[derive(Message, Debug)]
+#[rtype(result = "CommitmentStateReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
+pub struct GetCommitmentStateGuardMessage;
+
+impl Handler<GetCommitmentStateGuardMessage> for EpochServiceActor {
+    type Result = CommitmentStateReadGuard; // Return guard directly
+    fn handle(
+        &mut self,
+        _msg: GetCommitmentStateGuardMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        CommitmentStateReadGuard::new(self.commitment_state.clone())
+    }
+}
+//==============================================================================
+// EpochServiceActor implementation
+//------------------------------------------------------------------------------
 
 /// Retrieve partition assignment (ledger and its relative offset) for a partition
 #[derive(Message, Debug)]
@@ -843,6 +862,11 @@ impl EpochServiceActor {
             }
         }
 
+        let mut commitment_state = self
+            .commitment_state
+            .write()
+            .expect("to create a writeable commitment state");
+
         // Process stake commitments - these represent miners joining the network
         for stake_commitment in stake_commitments {
             // Register the commitment in the state
@@ -855,7 +879,7 @@ impl EpochServiceActor {
                 // TODO: implement the staking cost lookups and use that value here
                 amount: 0,
             };
-            self.commitment_state
+            commitment_state
                 .stake_commitments
                 .insert(stake_commitment.signer, value);
         }
@@ -866,8 +890,7 @@ impl EpochServiceActor {
 
             // Skip pledges that don't have a corresponding active stake
             // This ensures only staked miners can make pledges
-            if !self
-                .commitment_state
+            if !commitment_state
                 .stake_commitments
                 .get(&address)
                 .is_some_and(|c| c.commitment_status == CommitmentStatus::Active)
@@ -888,7 +911,7 @@ impl EpochServiceActor {
             };
 
             // Add the pledge state to the signer's collection (or create a new collection if first pledge)
-            self.commitment_state
+            commitment_state
                 .pledge_commitments
                 .entry(address)
                 .or_insert_with(Vec::new)
@@ -919,9 +942,13 @@ impl EpochServiceActor {
         unassigned_partition_hashes.sort_unstable();
         let mut unassigned_parts: VecDeque<H256> = unassigned_partition_hashes.into();
 
-        // Make a list of all the active pledges with no assigned partition hash
-        let mut unassigned_pledges: Vec<CommitmentStateEntry> = self
+        let mut commitment_state = self
             .commitment_state
+            .write()
+            .expect("to create writeable commitment state");
+
+        // Make a list of all the active pledges with no assigned partition hash
+        let mut unassigned_pledges: Vec<CommitmentStateEntry> = commitment_state
             .pledge_commitments
             .values()
             .flat_map(|entries| entries.iter())
@@ -949,11 +976,7 @@ impl EpochServiceActor {
             let mut pledge_assigned = false;
 
             // Get the pledges for this signer
-            if let Some(entries) = self
-                .commitment_state
-                .pledge_commitments
-                .get_mut(&pledge.signer)
-            {
+            if let Some(entries) = commitment_state.pledge_commitments.get_mut(&pledge.signer) {
                 // Look for the matching pledge
                 for entry in entries.iter_mut() {
                     if entry.id == pledge.id {
@@ -1564,7 +1587,44 @@ mod tests {
             .await
             .unwrap();
 
-        let epoch_service = EpochServiceActor::new(config, &testnet_config, block_index_guard);
+        let db_env = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Make sure the genesis_block is in the DB so the epoch service is initialized
+        // I don't like this dependency, dependencies should be passed into initialize() -DMac
+        {
+            db.update_eyre(|tx| irys_database::insert_block_header(tx, &genesis_block))
+                .expect("to write genesis_block to db");
+
+            db.update_eyre(|tx| {
+                commitments
+                    .iter()
+                    .map(|commitment| insert_commitment_tx(tx, commitment))
+                    .collect::<eyre::Result<()>>()
+            })
+            .expect("inserting commitment tx should succeed");
+        }
+
+        //  You also can't initialize the epoch_service without the genesis block being in the block_index
+        // Need a better way to communicate these dependencies. -DMac
+        let msg = BlockFinalizedMessage {
+            block_header: Arc::new(genesis_block.clone()),
+            all_txs: Arc::new(vec![]),
+        };
+        match block_index_actor.send(msg).await {
+            Ok(_) => info!("Genesis block indexed"),
+            Err(_) => panic!("Failed to index genesis block"),
+        }
+
+        let storage_module_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
+        let mut epoch_service = EpochServiceActor::new(config, &testnet_config, block_index_guard);
+        let _ = epoch_service
+            .initialize(&db, storage_module_config.clone())
+            .await;
+
+        // Get the genesis storage modules and their assigned partitions
+        let storage_module_infos =
+            epoch_service.map_storage_modules_to_partition_assignments(storage_module_config);
         let epoch_service_actor = epoch_service.start();
 
         // Process genesis message directly instead of through actor system
@@ -1574,13 +1634,6 @@ mod tests {
                 epoch_block: genesis_block.into(),
                 commitments,
             })
-            .await
-            .unwrap();
-
-        let storage_module_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
-        // Get the genesis storage modules and their assigned partitions
-        let storage_module_infos = epoch_service_actor
-            .send(GetGenesisStorageModulesMessage(storage_module_config))
             .await
             .unwrap();
 
@@ -1594,9 +1647,6 @@ mod tests {
             );
             storage_modules.push(arc_module.clone());
         }
-
-        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
-        let database_provider = DatabaseProvider(Arc::new(db));
 
         let rwlock: RwLock<Option<PackingRequest>> = RwLock::new(None);
         let arc_rwlock = Arc::new(rwlock);
@@ -1640,7 +1690,7 @@ mod tests {
         for sm in &storage_modules {
             let partition_mining_actor = PartitionMiningActor::new(
                 mining_address,
-                database_provider.clone(),
+                db.clone(),
                 mocked_addr.0.clone(),
                 packing_addr.clone().recipient(),
                 sm.clone(),
