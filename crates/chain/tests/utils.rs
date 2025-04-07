@@ -303,7 +303,6 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
         // this will reload the storage config data too
         let cfg = IrysNode {
             irys_node_config: self.cfg.irys_node_config,
