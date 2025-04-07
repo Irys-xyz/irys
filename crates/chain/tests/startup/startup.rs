@@ -48,11 +48,6 @@ async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
 #[tokio::test]
 #[should_panic(expected = "IrysNodeCtx must be stopped before all instances are dropped")]
 async fn heavy_test_stop_guard() -> () {
-    let temp_dir = setup_tracing_and_temp_dir(Some("heavy_test_stop_guard"), false);
-
-    let testnet_config = Config::testnet();
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-
-    let _node = IrysNodeTest::default().start().await;
+    let node = IrysNodeTest::default().start().await;
+    drop(node);
 }
