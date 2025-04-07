@@ -850,26 +850,17 @@ impl IrysNode {
         atomic_global_step_number: Arc<AtomicU64>,
     ) -> JoinHandle<()> {
         let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
-        // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
-        // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
-        let is_test = self
-            .irys_node_config
-            .base_directory
-            .parent()
-            .is_some_and(|p| p.ends_with(".tmp"));
         let vdf_thread_handler = std::thread::spawn({
             let vdf_config = self.vdf_config.clone();
             move || {
-                if !is_test {
-                    // Setup core affinity in prod only (perf gain shouldn't matter for tests, and we don't want pinning overlap)
-                    let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
-
-                    for core in core_ids {
-                        let success = core_affinity::set_for_current(core);
-                        if success {
-                            info!("VDF thread pinned to core {:?}", core);
-                            break;
-                        }
+                // Setup core affinity
+                let core_ids =
+                    core_affinity::get_core_ids().expect("Getting core IDs should not fail");
+                for core in core_ids {
+                    let success = core_affinity::set_for_current(core);
+                    if success {
+                        info!("VDF thread pinned to core {:?}", core);
+                        break;
                     }
                 }
 
