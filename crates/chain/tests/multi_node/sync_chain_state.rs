@@ -103,64 +103,26 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // check the height returned by the peers, and when it is high enough do the api call for the block_index and then shutdown the peer
     let required_blocks_height = 2;
     let max_attempts = 20;
-    let mut attempts = 0;
-    let mut result_peer1 = None;
-    loop {
-        let mut response =
-            info_endpoint_request(&local_test_url(&ctx_peer1_node.node.config.port)).await;
 
-        if max_attempts < attempts {
-            panic!("peer1 never fully synced");
-        } else {
-            attempts += 1;
-        }
+    let result_peer1 = poll_until_fetch_at_block_index_height(
+        &ctx_peer1_node,
+        required_blocks_height,
+        max_attempts,
+    )
+    .await;
 
-        let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
-        if required_blocks_height > json_response.block_index_height {
-            debug!(
-                "required_blocks_height > json_response.block_index_height {} > {}",
-                required_blocks_height, json_response.block_index_height
-            );
-            //wait 5 seconds and try again
-            sleep(Duration::from_millis(5000)).await;
-        } else {
-            result_peer1 = Some(
-                block_index_endpoint_request(
-                    &local_test_url(&ctx_peer1_node.node.config.port),
-                    0,
-                    required_blocks_height,
-                )
-                .await,
-            );
-            //shut down peer1, we have what we need
-            ctx_peer1_node.node.stop().await;
-            break;
-        }
-    }
+    //shut down peer, we have what we need
+    ctx_peer1_node.node.stop().await;
 
-    let mut result_peer2 = None;
-    loop {
-        let mut response =
-            info_endpoint_request(&local_test_url(&ctx_peer2_node.node.config.port)).await;
+    let result_peer2 = poll_until_fetch_at_block_index_height(
+        &ctx_peer2_node,
+        required_blocks_height,
+        max_attempts,
+    )
+    .await;
 
-        let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
-        if required_blocks_height > json_response.block_index_height {
-            //wait 5 seconds and try again
-            sleep(Duration::from_millis(5000)).await;
-        } else {
-            result_peer2 = Some(
-                block_index_endpoint_request(
-                    &local_test_url(&ctx_peer2_node.node.config.port),
-                    0,
-                    required_blocks_height,
-                )
-                .await,
-            );
-            //shut down peer2, we have what we need
-            ctx_peer2_node.node.stop().await;
-            break;
-        }
-    }
+    //shut down peer, we have what we need
+    ctx_peer2_node.node.stop().await;
 
     //shutdown genesis node, as the peers are no longer going make http calls to it
     ctx_genesis_node.node.stop().await;
@@ -226,4 +188,43 @@ async fn setup_with_config(
 
 fn local_test_url(port: &u16) -> String {
     format!("http://127.0.0.1:{}", port)
+}
+
+async fn poll_until_fetch_at_block_index_height(
+    node_ctx: &TestCtx,
+    required_blocks_height: u64,
+    max_attempts: u64,
+) -> Option<awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>>> {
+    let mut attempts = 0;
+    let mut result_peer = None;
+    loop {
+        let mut response = info_endpoint_request(&local_test_url(&node_ctx.node.config.port)).await;
+
+        if max_attempts < attempts {
+            error!("peer never fully synced");
+            break;
+        } else {
+            attempts += 1;
+        }
+
+        let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
+        if required_blocks_height > json_response.block_index_height {
+            debug!(
+                "attempt {}. required_blocks_height > json_response.block_index_height {} > {}",
+                &attempts, required_blocks_height, json_response.block_index_height
+            );
+            //wait 5 seconds and try again
+            sleep(Duration::from_millis(5000)).await;
+        } else {
+            result_peer = Some(
+                block_index_endpoint_request(
+                    &local_test_url(&node_ctx.node.config.port),
+                    0,
+                    required_blocks_height,
+                )
+                .await,
+            );
+        }
+    }
+    result_peer
 }
