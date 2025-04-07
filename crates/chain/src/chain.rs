@@ -1260,13 +1260,13 @@ impl IrysNode {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             self.config.port,
         ))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
         // if `config.port` == 0, the assigned port will be random (decided by the OS)
         // we re-assign the configuration with the actual port here.
         let random_ports = if self.config.port == 0 {
-            self.config.port = listener
-                .local_addr()
-                .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?
-                .port();
+            self.config.port = local_addr.port();
             true
         } else {
             false
@@ -1321,6 +1321,7 @@ impl IrysNode {
         if !self.data_exists && !self.is_genesis {
             sync_state_from_peers(
                 ctx.config.trusted_peers.clone(),
+                local_addr,
                 ctx.actor_addresses.block_discovery_addr.clone(),
             )
             .await?;
