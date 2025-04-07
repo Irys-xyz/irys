@@ -18,7 +18,7 @@ use tracing::{debug, info};
 
 #[actix_web::test]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
-    let mut testnet_config = Config {
+    let testnet_config = Config {
         chunk_size: 32,
         chunk_migration_depth: 2,
         ..Config::testnet()

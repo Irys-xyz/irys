@@ -1,6 +1,5 @@
 use actix::MailboxError;
 use futures::future::select;
-use futures::FutureExt;
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_actors::block_validation;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};

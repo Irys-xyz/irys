@@ -1,8 +1,5 @@
 use crate::utils::{mine_block, IrysNodeTest};
 use irys_actors::block_tree_service::get_canonical_chain;
-use irys_config::IrysNodeConfig;
-use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
-use irys_types::Config;
 use std::time::Duration;
 
 #[test_log::test(tokio::test)]
@@ -45,7 +42,7 @@ async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 #[should_panic(expected = "IrysNodeCtx must be stopped before all instances are dropped")]
 async fn heavy_test_stop_guard() -> () {
     let node = IrysNodeTest::default().start().await;

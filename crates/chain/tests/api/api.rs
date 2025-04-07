@@ -8,7 +8,6 @@ use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_config::IrysNodeConfig;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 
 use actix_web::{

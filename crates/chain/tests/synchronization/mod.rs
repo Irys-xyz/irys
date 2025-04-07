@@ -4,14 +4,14 @@ use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_types::irys::IrysSigner;
-use irys_types::{Config, IrysTransactionHeader};
+use irys_types::IrysTransactionHeader;
 
-use crate::utils::{future_or_mine_on_timeout, mine_block, mine_blocks, IrysNodeTest};
+use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
 use reth::rpc::eth::EthApiServer;
 use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {

@@ -1,11 +1,9 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
 use crate::vdf::run_vdf;
 use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
+use actix::Arbiter;
 use actix::{Actor, Addr, System, SystemRegistry};
-use actix::{Arbiter, SystemService};
 use actix_web::dev::Server;
-use alloy_eips::BlockNumberOrTag;
-use base58::ToBase58;
 use irys_actors::block_tree_service::BlockTreeReadGuard;
 use irys_actors::cache_service::ChunkCacheService;
 use irys_actors::ema_service::EmaService;
@@ -20,10 +18,7 @@ use irys_actors::{
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     chunk_migration_service::ChunkMigrationService,
-    epoch_service::{
-        EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
-        GetPartitionAssignmentsGuardMessage,
-    },
+    epoch_service::{EpochServiceActor, EpochServiceConfig, GetPartitionAssignmentsGuardMessage},
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
     packing::{PackingActor, PackingRequest},
@@ -35,32 +30,29 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::migration::check_db_version_and_run_migrations_if_needed;
 use irys_database::{
-    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx, SystemLedger,
+    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx,
 };
 use irys_gossip_service::{GossipResult, ServiceHandleWithShutdownSignal};
-use irys_packing::{PackingType, PACKING_TYPE};
 use irys_price_oracle::mock_oracle::MockOracle;
 use irys_price_oracle::IrysPriceOracle;
-use irys_reth_node_bridge::adapter::node::RethNodeContext;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
-    ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
+    ChunkProvider, ChunkType, StorageModule,
 };
 
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
-    GossipData, StorageConfig, CHUNK_SIZE, H256,
+    GossipData, StorageConfig, H256,
 };
 use irys_types::{
-    CommitmentTransaction, Config, DifficultyAdjustmentConfig, H256List, IrysBlockHeader,
-    OracleConfig, PartitionChunkRange, SystemTransactionLedger,
+    CommitmentTransaction, Config, DifficultyAdjustmentConfig, IrysBlockHeader, OracleConfig,
+    PartitionChunkRange,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
-use reth::rpc::eth::EthApiServer as _;
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
@@ -83,7 +75,7 @@ use tokio::{
     runtime::Handle,
     sync::oneshot::{self},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -231,8 +223,6 @@ impl IrysNode {
         // this populates the bas directory
         let storage_submodule_config =
             StorageSubmodulesConfig::load(irys_node_config.instance_directory().clone()).unwrap();
-
-        let (_chain_spec, irys_genesis) = irys_node_config.chainspec_builder.build();
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         IrysNode {
@@ -490,40 +480,6 @@ impl IrysNode {
                 }
             })?;
         Ok(actor_main_thread_handle)
-    }
-
-    fn create_genesis_header(
-        &self,
-    ) -> Result<(ChainSpec, Arc<IrysBlockHeader>, Vec<CommitmentTransaction>), eyre::Error> {
-        let (reth_chain_spec, irys_genesis) = self.irys_node_config.chainspec_builder.build();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-
-        let mut genesis_header = IrysBlockHeader {
-            diff: calculate_initial_difficulty(
-                &self.difficulty_adjustment_config,
-                &self.storage_config,
-                // TODO: where does this magic constant come from?
-                3,
-            )?,
-            timestamp: now.as_millis(),
-            last_diff_timestamp: now.as_millis(),
-            system_ledgers: vec![SystemTransactionLedger {
-                ledger_id: SystemLedger::Commitment.into(),
-                tx_ids: H256List::default(),
-            }],
-            ..irys_genesis
-        };
-        let commitments = get_genesis_commitments(&self.config);
-
-        // Add the commitment txids to the system ledger in the block header one by one
-        for commitment_id in commitments.iter().map(|commitment| commitment.id) {
-            // We know index 0 is the Commitment ledger because we just created it at that index
-            genesis_header.system_ledgers[0].tx_ids.push(commitment_id);
-        }
-
-        let irys_genesis = Arc::new(genesis_header);
-
-        Ok((reth_chain_spec, irys_genesis, commitments))
     }
 
     fn init_reth_thread(
