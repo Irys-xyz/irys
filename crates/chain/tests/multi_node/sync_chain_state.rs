@@ -102,7 +102,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     // check the height returned by the peers, and when it is high enough do the api call for the block_index and then shutdown the peer
     let required_blocks_height = 2;
-    let max_attempts = 20;
+    let max_attempts = 10;
 
     let result_peer1 = poll_until_fetch_at_block_index_height(
         &ctx_peer1_node,
