@@ -6,6 +6,7 @@ use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
 use irys_types::{Address, Config, IrysBlockHeader, IrysTransactionHeader, Signature, H256};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
+use tracing::error;
 
 #[actix_web::test]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
@@ -115,8 +116,19 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let body_genesis = result_genesis.body().await.expect("expected a valid body");
     let body_peer1 = result_peer1.body().await.expect("expected a valid body");
     let body_peer2 = result_peer2.body().await.expect("expected a valid body");
-    assert_eq!(body_genesis, body_peer1);
-    assert_eq!(body_peer1, body_peer2);
+    error!("body_genesis {:?}", body_genesis);
+    error!("body_peer1   {:?}", body_peer1);
+    error!("body_peer2   {:?}", body_peer2);
+    assert_eq!(
+        body_genesis, body_peer1,
+        "expecting body from genesis node {:?} to match body from peer1 {:?}",
+        body_genesis, body_peer1
+    );
+    assert_eq!(
+        body_peer1, body_peer2,
+        "expecting body from peer1 node {:?} to match body from peer2 {:?}",
+        body_peer1, body_peer2
+    );
 
     Ok(())
 }
