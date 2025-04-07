@@ -259,6 +259,7 @@ async fn post_txn(
 //#[tracing::instrument(err)]
 async fn sync_state_from_peers(
     trusted_peers: Vec<SocketAddr>,
+    local_node: SocketAddr,
     block_discovery_addr: Addr<BlockDiscoveryActor>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
@@ -310,11 +311,10 @@ async fn sync_state_from_peers(
     info!("Fetching latest txns...");
     let mut fetched = 0;
     let mut duplicates_and_failures = 0;
-    let peer = peers_guard.first().expect("at least one peer");
     while let Some(txn_id) = txn_queue.lock().await.pop_front() {
-        if let Some(full_txn) = fetch_txn(peer, &client, txn_id).await {
+        if let Some(full_txn) = fetch_txn(&local_node, &client, txn_id).await {
             let full_txn = Arc::new(full_txn);
-            match post_txn(peer, &client, full_txn).await {
+            match post_txn(&local_node, &client, full_txn).await {
                 Ok(_) => fetched += 1,
                 Err(_) => duplicates_and_failures += 1,
             }
