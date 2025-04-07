@@ -77,7 +77,9 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     let result_peer1 = poll_until_fetch_at_block_index_height(
         &ctx_peer1_node,
-        required_blocks_height,
+        required_blocks_height
+            .try_into()
+            .expect("expected required_blocks_height to be valid u64"),
         max_attempts,
     )
     .await;
@@ -87,7 +89,9 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     let result_peer2 = poll_until_fetch_at_block_index_height(
         &ctx_peer2_node,
-        required_blocks_height,
+        required_blocks_height
+            .try_into()
+            .expect("expected required_blocks_height to be valid u64"),
         max_attempts,
     )
     .await;
