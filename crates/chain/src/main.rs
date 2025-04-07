@@ -6,7 +6,7 @@ use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> eyre::Result<()> {
     // init logging
     init_tracing().expect("initializing tracing should work");

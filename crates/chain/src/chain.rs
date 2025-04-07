@@ -70,6 +70,7 @@ use std::{
     sync::{mpsc, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::runtime::Runtime;
 use tokio::{
     runtime::Handle,
     sync::oneshot::{self},
@@ -287,8 +288,10 @@ impl IrysNode {
         };
 
         // all async tasks will be run on a new tokio runtime
-        let tokio_runtime = tokio::runtime::Handle::current();
-        let task_manager = TaskManager::new(tokio_runtime.clone());
+        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let task_manager = TaskManager::new(tokio_runtime.handle().clone());
 
         // we create the listener here so we know the port before we start passing around `config`
         let listener = create_listener(SocketAddr::new(
@@ -489,7 +492,7 @@ impl IrysNode {
         reth_chainspec: ChainSpec,
         latest_block_height: u64,
         mut task_manager: TaskManager,
-        tokio_runtime: Handle,
+        tokio_runtime: Runtime,
         random_ports: bool,
     ) -> eyre::Result<JoinHandle<()>> {
         let node_config = Arc::new(self.irys_node_config.clone());
