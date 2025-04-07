@@ -144,7 +144,7 @@ async fn fetch_txn(
 async fn fetch_block(
     peer: &SocketAddr,
     client: &awc::Client,
-    block_index_item: BlockIndexItem,
+    block_index_item: &BlockIndexItem,
 ) -> Option<IrysBlockHeader> {
     let url = format!(
         "http://{}/v1/block/{}",
@@ -293,13 +293,20 @@ async fn sync_state_from_peers(
 
     info!("Fetching latest blocks...");
     let peer = peers_guard.first().expect("at least one peer");
-    while let Some(block) = block_queue.lock().await.pop_front() {
-        if let Some(irys_block) = fetch_block(peer, &client, block).await {
+    while let Some(block_index_item) = block_queue.lock().await.pop_front() {
+        if let Some(irys_block) = fetch_block(peer, &client, &block_index_item).await {
             let block = Arc::new(irys_block);
             let block_discovery_addr = block_discovery_addr.clone();
-            let _ = block_discovery_addr
+            if let Err(e) = block_discovery_addr
                 .send(BlockDiscoveredMessage(block.clone()))
-                .await?;
+                .await?
+            {
+                error!(
+                    "Error sending BlockDiscoveredMessage for block {}: {:?}",
+                    block_index_item.block_hash.0.to_base58(),
+                    e
+                );
+            }
             //add txns from block to txn queue
             let mut txn_queue_guard = txn_queue.lock().await;
             for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
