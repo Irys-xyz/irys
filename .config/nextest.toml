@@ -14,6 +14,6 @@ test-group = 'serial'
 # heavy tests
 [[profile.default.overrides]]
 filter = 'test(/.*heavy_.*/)'
-threads-required = 5
+threads-required = 3
 priority = 100
 retries = 1
