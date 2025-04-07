@@ -20,7 +20,7 @@ async fn client_request(
     client.get(url).send().await.expect("client request")
 }
 
-async fn info_endpoint_request(
+pub async fn info_endpoint_request(
     address: &str,
 ) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
     client_request(&format!("{}{}", &address, "/v1/info")).await

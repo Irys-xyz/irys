@@ -1,12 +1,13 @@
-use crate::api::external_api::block_index_endpoint_request;
+use crate::api::external_api::{block_index_endpoint_request, info_endpoint_request};
 use crate::utils::mine_block;
 use irys_actors::BlockFinalizedMessage;
+use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
 use irys_types::{Address, Config, IrysBlockHeader, IrysTransactionHeader, Signature, H256};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
-use tracing::error;
+use tracing::{debug, error};
 
 #[actix_web::test]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
@@ -97,25 +98,86 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     sleep(Duration::from_millis(10000)).await;
 
     let mut result_genesis =
-        block_index_endpoint_request(&local_test_url(&testnet_config_genesis.port), 0, 2).await;
+        block_index_endpoint_request(&local_test_url(&testnet_config_genesis.port), 0, 5).await;
 
-    //http requests to peer1 and peer2 index after x seconds to ensure they have begun syncing the blocks
-    let mut result_peer1 =
-        block_index_endpoint_request(&local_test_url(&ctx_peer1_node.node.config.port), 0, 2).await;
+    // check the height returned by the peers, and when it is high enough do the api call for the block_index and then shutdown the peer
+    let required_blocks_height = 2;
+    let max_attempts = 20;
+    let mut attempts = 0;
+    let mut result_peer1 = None;
+    loop {
+        let mut response =
+            info_endpoint_request(&local_test_url(&ctx_peer1_node.node.config.port)).await;
 
-    let mut result_peer2 =
-        block_index_endpoint_request(&local_test_url(&ctx_peer2_node.node.config.port), 0, 2).await;
+        if max_attempts < attempts {
+            panic!("peer1 never fully synced");
+        } else {
+            attempts += 1;
+        }
 
-    //shutdown nodes
+        let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
+        if required_blocks_height > json_response.block_index_height {
+            debug!(
+                "required_blocks_height > json_response.block_index_height {} > {}",
+                required_blocks_height, json_response.block_index_height
+            );
+            //wait 5 seconds and try again
+            sleep(Duration::from_millis(5000)).await;
+        } else {
+            result_peer1 = Some(
+                block_index_endpoint_request(
+                    &local_test_url(&ctx_peer1_node.node.config.port),
+                    0,
+                    required_blocks_height,
+                )
+                .await,
+            );
+            //shut down peer1, we have what we need
+            ctx_peer1_node.node.stop().await;
+            break;
+        }
+    }
+
+    let mut result_peer2 = None;
+    loop {
+        let mut response =
+            info_endpoint_request(&local_test_url(&ctx_peer2_node.node.config.port)).await;
+
+        let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
+        if required_blocks_height > json_response.block_index_height {
+            //wait 5 seconds and try again
+            sleep(Duration::from_millis(5000)).await;
+        } else {
+            result_peer2 = Some(
+                block_index_endpoint_request(
+                    &local_test_url(&ctx_peer2_node.node.config.port),
+                    0,
+                    required_blocks_height,
+                )
+                .await,
+            );
+            //shut down peer2, we have what we need
+            ctx_peer2_node.node.stop().await;
+            break;
+        }
+    }
+
+    //shutdown genesis node, as the peers are no longer going make http calls to it
     ctx_genesis_node.node.stop().await;
-    ctx_peer1_node.node.stop().await;
-    ctx_peer2_node.node.stop().await;
 
     // compere blocks in indexes from each of the three nodes
     // they should be identical if the sync was a success
     let body_genesis = result_genesis.body().await.expect("expected a valid body");
-    let body_peer1 = result_peer1.body().await.expect("expected a valid body");
-    let body_peer2 = result_peer2.body().await.expect("expected a valid body");
+    let body_peer1 = result_peer1
+        .expect("expected a client response from peer1")
+        .body()
+        .await
+        .expect("expected a valid body");
+    let body_peer2 = result_peer2
+        .expect("expected a client response from peer2")
+        .body()
+        .await
+        .expect("expected a valid body");
     error!("body_genesis {:?}", body_genesis);
     error!("body_peer1   {:?}", body_peer1);
     error!("body_peer2   {:?}", body_peer2);
