@@ -70,10 +70,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     .expect("found invalid genesis ctx for peer2");
 
     //FIXME: magic number could be a constant e.g. 3 blocks worth of time?
-    sleep(Duration::from_millis(10000)).await;
-
-    let mut result_genesis =
-        block_index_endpoint_request(&local_test_url(&testnet_config_genesis.port), 0, 5).await;
+    sleep(Duration::from_millis(30000)).await; // wait for mining blocks to have occured on genesis node
 
     // check the height returned by the peers, and when it is high enough do the api call for the block_index and then shutdown the peer
     let max_attempts = 10;
@@ -97,6 +94,9 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     //shut down peer, we have what we need
     ctx_peer2_node.node.stop().await;
+
+    let mut result_genesis =
+        block_index_endpoint_request(&local_test_url(&testnet_config_genesis.port), 0, 5).await;
 
     //shutdown genesis node, as the peers are no longer going make http calls to it
     ctx_genesis_node.node.stop().await;
