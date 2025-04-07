@@ -1,5 +1,5 @@
 use crate::api::external_api::{block_index_endpoint_request, info_endpoint_request};
-use crate::utils::mine_block;
+use crate::utils::mine_blocks;
 use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{IrysNode, IrysNodeCtx};
@@ -16,8 +16,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let testnet_config_genesis = Config {
         port: 8080,
         trusted_peers: trusted_peers.clone(),
-        chunk_size: 32,             // small to allow VERY quick mining of valid blocks
-        num_chunks_in_partition: 2, // small to allow VERY quick mining of valid blocks
         ..Config::testnet()
     };
     let ctx_genesis_node = setup_with_config(
@@ -29,11 +27,10 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     .await
     .expect("found invalid genesis ctx");
 
-    ctx_genesis_node
-        .node
-        .actor_addresses
-        .start_mining()
-        .expect("expected mining to start");
+    // mine x blocks
+    mine_blocks(&ctx_genesis_node.node, required_blocks_height)
+        .await
+        .expect("expected many mined blocks");
 
     let genesis_block = Some(ctx_genesis_node.irys_genesis_block);
 
