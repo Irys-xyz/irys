@@ -11,7 +11,7 @@ use reth::rpc::eth::EthApiServer;
 use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
@@ -128,10 +128,10 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     // Waiting a little for the block
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    error!("Restarting node");
+    info!("Restarting node");
     let restarted_node = node.stop().await.start().await;
 
-    error!("getting reth node context");
+    info!("getting reth node context");
     let (latest_block_right_after_restart, earliest_block) = {
         let context =
             RethNodeContext::new(restarted_node.node_ctx.reth_handle.clone().into()).await?;
@@ -153,7 +153,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         (latest.unwrap(), earliest.unwrap())
     };
 
-    error!("mining blocks");
+    info!("mining blocks");
     mine_block(&restarted_node.node_ctx).await?;
 
     let next_block = {
