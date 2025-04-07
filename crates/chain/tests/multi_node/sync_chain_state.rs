@@ -197,8 +197,9 @@ async fn poll_until_fetch_at_block_index_height(
 ) -> Option<awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>>> {
     let mut attempts = 0;
     let mut result_peer = None;
+    let url = local_test_url(&node_ctx.node.config.port);
     loop {
-        let mut response = info_endpoint_request(&local_test_url(&node_ctx.node.config.port)).await;
+        let mut response = info_endpoint_request(&url).await;
 
         if max_attempts < attempts {
             error!("peer never fully synced");
@@ -210,8 +211,8 @@ async fn poll_until_fetch_at_block_index_height(
         let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
         if required_blocks_height > json_response.block_index_height {
             debug!(
-                "attempt {}. required_blocks_height > json_response.block_index_height {} > {}",
-                &attempts, required_blocks_height, json_response.block_index_height
+                "attempt {} checking {}. required_blocks_height > json_response.block_index_height {} > {}",
+                &attempts, &url, required_blocks_height, json_response.block_index_height
             );
             //wait 5 seconds and try again
             sleep(Duration::from_millis(5000)).await;
