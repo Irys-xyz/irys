@@ -65,6 +65,7 @@ use reth::{
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
+use serde_json::json;
 use std::{
     collections::{HashSet, VecDeque},
     fs,
@@ -225,6 +226,35 @@ async fn fetch_block_index(
     0
 }
 
+/// Posts txn to remote peer over HTTP.
+async fn post_txn(
+    peer: &SocketAddr,
+    client: &awc::Client,
+    full_txn: Arc<IrysTransactionHeader>,
+) -> eyre::Result<()> {
+    let url = format!("http://{}/v1/tx", peer);
+
+    match client
+        .post(url.clone())
+        .send_json(&json!({ "full_txn": full_txn }))
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                debug!("Posted txn to {}", peer);
+                return Ok(());
+            } else {
+                warn!("Non success. Failed to post txn to {}", peer);
+            }
+        }
+        Err(e) => {
+            warn!("Request to {} failed: {}", &url, e);
+        }
+    }
+
+    Ok(())
+}
+
 //TODO url paths as ENUMS? Could update external api tests too
 //#[tracing::instrument(err)]
 async fn sync_state_from_peers(
@@ -278,13 +308,24 @@ async fn sync_state_from_peers(
     }
 
     info!("Fetching latest txns...");
+    let mut fetched = 0;
+    let mut duplicates_and_failures = 0;
     let peer = peers_guard.first().expect("at least one peer");
     while let Some(txn_id) = txn_queue.lock().await.pop_front() {
         if let Some(full_txn) = fetch_txn(peer, &client, txn_id).await {
             let full_txn = Arc::new(full_txn);
-            //FIXME insert txn into db
+            match post_txn(peer, &client, full_txn).await {
+                Ok(_) => fetched += 1,
+                Err(_) => duplicates_and_failures += 1,
+            }
         }
     }
+    info!(
+        "locally posted {} txns. {} Succeeded, {} failed.",
+        duplicates_and_failures + fetched,
+        fetched,
+        duplicates_and_failures
+    );
 
     info!("Sync complete.");
     Ok(())
