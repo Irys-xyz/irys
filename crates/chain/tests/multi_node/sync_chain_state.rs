@@ -11,6 +11,7 @@ use tracing::{debug, error};
 
 #[actix_web::test]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
+    let required_blocks_height = 2;
     let trusted_peers = vec!["127.0.0.1:8080".parse().expect("valid SocketAddr expected")];
     let testnet_config_genesis = Config {
         port: 8080,
@@ -27,38 +28,38 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     .expect("found invalid genesis ctx");
 
     // start mining
-    // advance one block
-    let (_header, _payload) = mine_block(&ctx_genesis_node.node).await?.unwrap();
-    // advance one block, finalizing the previous block
-    let (header, _payload) = mine_block(&ctx_genesis_node.node).await?.unwrap();
-    let mock_header = IrysTransactionHeader {
-        id: H256::from([255u8; 32]),
-        anchor: H256::from([1u8; 32]),
-        signer: Address::default(),
-        data_root: H256::from([3u8; 32]),
-        data_size: 1024,
-        term_fee: 100,
-        perm_fee: Some(200),
-        ledger_id: 1,
-        bundle_format: None,
-        chain_id: ctx_genesis_node.config.chain_id,
-        version: 0,
-        ingress_proofs: None,
-        signature: Signature::test_signature().into(),
-    };
-    let block_finalized_message = BlockFinalizedMessage {
-        block_header: header,
-        all_txs: Arc::new(vec![mock_header]),
-    };
-    sleep(Duration::from_millis(10000)).await;
+    // advance some blocks, finalizing the previous block
+    for _ in 1..(required_blocks_height + 3) {
+        sleep(Duration::from_millis(2000)).await;
+        let (header, _payload) = mine_block(&ctx_genesis_node.node).await?.unwrap();
+        let mock_header = IrysTransactionHeader {
+            id: H256::from([255u8; 32]),
+            anchor: H256::from([1u8; 32]),
+            signer: Address::default(),
+            data_root: H256::from([3u8; 32]),
+            data_size: 1024,
+            term_fee: 100,
+            perm_fee: Some(200),
+            ledger_id: 1,
+            bundle_format: None,
+            chain_id: ctx_genesis_node.config.chain_id,
+            version: 0,
+            ingress_proofs: None,
+            signature: Signature::test_signature().into(),
+        };
+        let block_finalized_message = BlockFinalizedMessage {
+            block_header: header,
+            all_txs: Arc::new(vec![mock_header]),
+        };
 
-    let _ = ctx_genesis_node
-        .node
-        .actor_addresses
-        .block_index
-        .send(block_finalized_message)
-        .await
-        .expect("expected valid response from block_index actor");
+        let _ = ctx_genesis_node
+            .node
+            .actor_addresses
+            .block_index
+            .send(block_finalized_message)
+            .await
+            .expect("expected valid response from block_index actor");
+    }
 
     let genesis_block = Some(ctx_genesis_node.irys_genesis_block);
 
@@ -101,7 +102,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         block_index_endpoint_request(&local_test_url(&testnet_config_genesis.port), 0, 5).await;
 
     // check the height returned by the peers, and when it is high enough do the api call for the block_index and then shutdown the peer
-    let required_blocks_height = 2;
     let max_attempts = 10;
 
     let result_peer1 = poll_until_fetch_at_block_index_height(
