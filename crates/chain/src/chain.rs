@@ -14,7 +14,7 @@ use irys_actors::{
     chunk_migration_service::ChunkMigrationService,
     ema_service::EmaService,
     epoch_service::{EpochServiceActor, EpochServiceConfig, GetPartitionAssignmentsGuardMessage},
-    mempool_service::MempoolService,
+    mempool_service::{MempoolService, TxIngressMessage},
     mining::PartitionMiningActor,
     packing::PackingConfig,
     packing::{PackingActor, PackingRequest},
@@ -225,6 +225,7 @@ async fn sync_state_from_peers(
     trusted_peers: Vec<SocketAddr>,
     local_node: SocketAddr,
     block_discovery_addr: Addr<BlockDiscoveryActor>,
+    mempool_addr: Addr<MempoolService>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
@@ -259,7 +260,7 @@ async fn sync_state_from_peers(
         height += fetched;
     }
 
-    info!("Fetching latest blocks...");
+    info!("Fetching latest blocks...and corresponding txns");
     let peer = peers_guard.first().expect("at least one peer");
     while let Some(block_index_item) = block_queue.lock().await.pop_front() {
         if let Some(irys_block) = fetch_block(peer, &client, &block_index_item).await {
@@ -268,6 +269,19 @@ async fn sync_state_from_peers(
             //TODO: temporarily introducing a 2 second pause to allow vdf steps to be created. otherwise vdf steps try to be included that do not exist locally. This helps prevent against the following type of error:
             //      Error sending BlockDiscoveredMessage for block 3Yy6zT8as2P4n4A4xYtVL4oMfwsAzgBpFMdoUJ6UYKoy: Block validation error Unavailable requested range (6..=10). Stored steps range is (1..=8)
             sleep(Duration::from_millis(2000));
+
+            //add txns from block to txn db
+            for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
+                let tx_ingress_msg = TxIngressMessage(
+                    fetch_txn(peer, &client, *tx)
+                        .await
+                        .expect("valid txn from http GET"),
+                );
+                if let Err(e) = mempool_addr.send(tx_ingress_msg).await {
+                    error!("Error sending txn {:?} to mempool: {}", tx, e);
+                }
+            }
+
             if let Err(e) = block_discovery_addr
                 .send(BlockDiscoveredMessage(block.clone()))
                 .await?
@@ -279,35 +293,8 @@ async fn sync_state_from_peers(
                     block.clone().evm_block_hash,
                 );
             }
-            //todo: it may be better to have a queue that includes the block, along with it's corresponding txn headers as they are coupled. this would remove the txn queue entirely.
-            //add txns from block to txn queue
-            let mut txn_queue_guard = txn_queue.lock().await;
-            for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
-                txn_queue_guard.push_back(tx.clone());
-            }
         }
     }
-
-    info!("Fetching latest txns...");
-    let mut fetched = 0;
-    let mut duplicates_and_failures = 0;
-    while let Some(txn_id) = txn_queue.lock().await.pop_front() {
-        if let Some(full_txn) = fetch_txn(&local_node, &client, txn_id).await {
-            let full_txn = Arc::new(full_txn);
-            //todo: this needs to prite the txn directly to the db and not use POST
-            //      this also needs to happen BEFORE you add the corresponding block
-            /*match post_txn(&local_node, &client, full_txn).await {
-                Ok(_) => fetched += 1,
-                Err(_) => duplicates_and_failures += 1,
-            }*/
-        }
-    }
-    info!(
-        "locally posted {} txns. {} Succeeded, {} failed.",
-        duplicates_and_failures + fetched,
-        fetched,
-        duplicates_and_failures
-    );
 
     info!("Sync complete.");
     Ok(())
@@ -651,6 +638,7 @@ impl IrysNode {
                 ctx.config.trusted_peers.clone(),
                 local_addr,
                 ctx.actor_addresses.block_discovery_addr.clone(),
+                ctx.actor_addresses.mempool.clone(),
             )
             .await?;
         }
