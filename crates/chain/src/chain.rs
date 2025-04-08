@@ -566,8 +566,6 @@ impl IrysNode {
         add_genesis_commitments(&mut irys_genesis, &self.config);
         let irys_genesis_block = Arc::new(irys_genesis);
 
-        let (chain_spec, _) = self.irys_node_config.chainspec_builder.build();
-
         // figure out the init mode
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         match (self.data_exists, self.is_genesis) {
