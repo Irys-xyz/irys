@@ -1,8 +1,7 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
 use crate::vdf::run_vdf;
-use actix::{Actor, Addr, Arbiter, System, SystemRegistry, SystemService};
+use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
-use alloy_eips::BlockNumberOrTag;
 use base58::ToBase58;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
@@ -14,10 +13,7 @@ use irys_actors::{
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
     ema_service::EmaService,
-    epoch_service::{
-        EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
-        GetPartitionAssignmentsGuardMessage,
-    },
+    epoch_service::{EpochServiceActor, EpochServiceConfig, GetPartitionAssignmentsGuardMessage},
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
     packing::PackingConfig,
@@ -34,12 +30,10 @@ use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx,
     migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, BlockIndex,
-    BlockIndexItem, DataLedger, Initialized, SystemLedger,
+    BlockIndexItem, DataLedger, Initialized,
 };
 use irys_gossip_service::{GossipResult, ServiceHandleWithShutdownSignal};
-use irys_packing::{PackingType, PACKING_TYPE};
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
-use irys_reth_node_bridge::adapter::node::RethNodeContext;
 
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
@@ -54,7 +48,7 @@ use irys_types::{
     app_state::DatabaseProvider, block::CombinedBlockHeader, calculate_initial_difficulty,
     vdf_config::VDFStepsConfig, CommitmentTransaction, Config, DifficultyAdjustmentConfig,
     GossipData, IrysBlockHeader, IrysTransactionHeader, OracleConfig, PartitionChunkRange,
-    StorageConfig, CHUNK_SIZE, H256,
+    StorageConfig, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
@@ -65,7 +59,6 @@ use reth::{
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
-use serde_json::json;
 use std::{
     collections::{HashSet, VecDeque},
     fs,
