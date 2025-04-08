@@ -5,7 +5,6 @@ use crate::utils::{mine_block, IrysNodeTest};
 use actix_web::{http::header::ContentType, HttpMessage};
 use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
-use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::BlockIndexItem;
 use irys_types::{Address, IrysTransactionHeader, Signature, H256};
 use tokio::time::{sleep, Duration};
@@ -156,38 +155,4 @@ async fn heavy_external_api() -> eyre::Result<()> {
 
     ctx.node_ctx.stop().await;
     Ok(())
-}
-struct TestCtx {
-    config: Config,
-    node: IrysNodeCtx,
-    #[expect(
-        dead_code,
-        reason = "to prevent drop() being called and cleaning up resources"
-    )]
-    temp_dir: TempDir,
-}
-
-async fn setup() -> eyre::Result<TestCtx> {
-    let testnet_config = Config {
-        // add any overrides here
-        ..Config::testnet()
-    };
-    setup_with_config(testnet_config, "external_api", true).await
-}
-
-async fn setup_with_config(
-    mut testnet_config: Config,
-    node_name: &str,
-    genesis: bool,
-) -> eyre::Result<TestCtx> {
-    let temp_dir = temporary_directory(Some(node_name), false);
-    testnet_config.base_directory = temp_dir.path().to_path_buf();
-    let node = IrysNode::new(testnet_config.clone(), genesis, None)
-        .start()
-        .await?;
-    Ok(TestCtx {
-        config: testnet_config,
-        node,
-        temp_dir,
-    })
 }
