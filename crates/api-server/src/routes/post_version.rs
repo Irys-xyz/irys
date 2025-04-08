@@ -2,6 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ApiState;
 use actix_web::{
+    http::header::ContentType,
     web::{self, Json},
     HttpResponse,
 };
@@ -42,15 +43,15 @@ pub async fn post_version(
         }
     };
 
-    let socket_addr = version_request.address;
+    let peer_address = version_request.address;
     let mining_addr = version_request.mining_address;
     let peer_list_entry = PeerListItem {
-        address: socket_addr,
+        address: peer_address,
         ..Default::default()
     };
 
     // Check if peer already exists in the list
-    let is_new_peer = !peers.iter().any(|peer| peer == &socket_addr);
+    let is_new_peer = !peers.iter().any(|peer| peer == &peer_address);
 
     // Only update if it's a new peer
     if is_new_peer {
@@ -86,5 +87,7 @@ pub async fn post_version(
         message: Some(format!("Welcome to the network {}", node_name)),
     });
 
-    Ok(HttpResponse::Ok().json(response))
+    Ok(HttpResponse::Ok()
+        .content_type(ContentType::json())
+        .json(response))
 }

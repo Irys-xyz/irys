@@ -11,7 +11,7 @@ use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
-    Ledger,
+    DataLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_primitives::{BlockRewardShadow, DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
@@ -19,8 +19,8 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
-    Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
-    IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
+    Base64, DataTransactionLedger, DifficultyAdjustmentConfig, H256List, IngressProofsList,
+    IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TxIngressProof, VDFLimiterInfo,
     H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
@@ -38,9 +38,13 @@ use crate::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     block_tree_service::BlockTreeReadGuard,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
+    ema_service::EmaServiceMessage,
+    epoch_service::{
+        EpochServiceActor, EpochServiceConfig, GetPartitionAssignmentMessage, NewEpochMessage,
+    },
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    services::ServiceSenders,
 };
 
 /// Used to mock up a `BlockProducerActor`
@@ -61,6 +65,8 @@ pub struct BlockProducerActor {
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     /// Tracks the global state of partition assignments on the protocol
     pub epoch_service: Addr<EpochServiceActor>,
+    /// Tracks the global state of partition assignments on the protocol
+    pub service_senders: ServiceSenders,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
     /// Storage config
@@ -73,6 +79,8 @@ pub struct BlockProducerActor {
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Get the head of the chain
     pub block_tree_guard: BlockTreeReadGuard,
+    /// Epoch config
+    pub epoch_config: EpochServiceConfig,
     /// The Irys price oracle
     pub price_oracle: Arc<IrysPriceOracle>,
 }
@@ -118,9 +126,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let difficulty_config = self.difficulty_config;
         let chunk_size = self.storage_config.chunk_size;
         let block_tree_guard = self.block_tree_guard.clone();
-
+        let blocks_in_epoch = self.epoch_config.num_blocks_in_epoch;
         let vdf_steps = self.vdf_steps_guard.clone();
         let price_oracle = self.price_oracle.clone();
+        let ema_service = self.service_senders.ema.clone();
 
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
@@ -128,7 +137,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let (latest_block_hash, prev_block_height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
             info!(?latest_block_hash, ?prev_block_height, "Starting block production, previous block");
 
-            let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash)) {
+            let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash, false)) {
                 Ok(Some(header)) => Ok(header),
                     Ok(None) =>
                     Err(eyre!("No block header found for hash {} ({})", latest_block_hash, prev_block_height + 1)),
@@ -138,7 +147,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // Retrieve the previous block header and hash
 
             let prev_block_hash = block_item.block_hash;
-            let prev_block_header: IrysBlockHeader = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash)) {
+            let prev_block_header: IrysBlockHeader = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false)) {
                 Ok(Some(header)) => Ok(header),
                 Ok(None) =>
                     Err(eyre!("No block header found for block {} ({}) ", prev_block_hash.0.to_base58(), prev_block_height)),
@@ -226,7 +235,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // Publish Ledger Transactions
             let publish_chunks_added = calculate_chunks_added(&publish_txs, chunk_size);
-            let publish_max_chunk_offset =  prev_block_header.ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
+            let publish_max_chunk_offset =  prev_block_header.data_ledgers[DataLedger::Publish].max_chunk_offset + publish_chunks_added;
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
             // Submit Ledger Transactions    
@@ -234,7 +243,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
 
             let submit_chunks_added = calculate_chunks_added(&submit_txs, chunk_size);
-            let submit_max_chunk_offset = prev_block_header.ledgers[Ledger::Submit].max_chunk_offset + submit_chunks_added;
+            let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
 
             let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -272,11 +281,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 .await?
                 .and_then(|pa| pa.ledger_id);
 
-
+            let poa_chunk = Base64(solution.chunk);
+            let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
             let poa = PoaData {
                 tx_path: solution.tx_path.map(Base64),
                 data_path: solution.data_path.map(Base64),
-                chunk: Base64(solution.chunk),
+                chunk: Some(poa_chunk),
                 recall_chunk_index: solution.recall_chunk_index,
                 ledger_id,
                 partition_chunk_offset: solution.chunk_offset,
@@ -292,9 +302,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             steps.push(solution.seed.0);
 
             // fetch the irys price from the oracle
-            let irys_price = price_oracle.current_price().await?;
+            let oracle_irys_price = price_oracle.current_price().await?;
+            // fetch the ema price to use
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            ema_service.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
+            let ema_irys_price = rx.await??;
 
-            // build a new block header 
+            // build a new block header
             let mut irys_block = IrysBlockHeader {
                 block_hash,
                 height: block_height,
@@ -304,7 +318,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 solution_hash: solution.solution_hash,
                 previous_solution_hash: H256::zero(),
                 last_epoch_hash: H256::random(),
-                chunk_hash: H256(sha::sha256(&poa.chunk.0)),
+                chunk_hash: poa_chunk_hash,
                 previous_block_hash: prev_block_hash,
                 previous_cumulative_diff: prev_block_header.cumulative_diff,
                 poa,
@@ -312,20 +326,21 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 miner_address: solution.mining_address,
                 signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
-                ledgers: vec![
+                system_ledgers: vec![],
+                data_ledgers: vec![
                     // Permanent Publish Ledger
-                    TransactionLedger {
-                        ledger_id: Ledger::Publish.into(),
-                        tx_root: TransactionLedger::merklize_tx_root(&publish_txs).0,
+                    DataTransactionLedger {
+                        ledger_id: DataLedger::Publish.into(),
+                        tx_root: DataTransactionLedger::merklize_tx_root(&publish_txs).0,
                         tx_ids: H256List(publish_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
                         max_chunk_offset: publish_max_chunk_offset,
                         expires: None,
                         proofs: opt_proofs,
                     },
                     // Term Submit Ledger
-                    TransactionLedger {
-                        ledger_id: Ledger::Submit.into(),
-                        tx_root: TransactionLedger::merklize_tx_root(&submit_txs).0,
+                    DataTransactionLedger {
+                        ledger_id: DataLedger::Submit.into(),
+                        tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
                         tx_ids: H256List(submit_txids.clone()),
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),
@@ -342,7 +357,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     steps,
                     ..Default::default()
                 },
-                irys_price
+                oracle_irys_price: ema_irys_price.range_adjusted_oracle_price,
+                ema_irys_price: ema_irys_price.ema,
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
@@ -462,6 +478,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
+            }
+
+            // TODO: This really needs to be sent from the block_discovery service 
+            // and the commitment transactions are pre-verified as stored locally and valid
+            if block_height > 0 && block_height % blocks_in_epoch == 0 {
+                epoch_service_addr.do_send(NewEpochMessage{ epoch_block: block.clone(), commitments: Vec::new() });
             }
 
             info!("Finished producing block {}, ({})", &block_hash.0.to_base58(),&block_height);

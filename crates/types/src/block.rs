@@ -11,8 +11,9 @@ use crate::{
     Compact, DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader,
     Proof, H256, U256,
 };
-use alloy_primitives::{keccak256, Address, B256};
+use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
+use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
@@ -135,10 +136,13 @@ pub struct IrysBlockHeader {
     #[serde(with = "string_u128")]
     pub timestamp: u128,
 
-    /// A list of transaction ledgers, one for each active data ledger
+    /// A list of system transaction ledgers
+    pub system_ledgers: Vec<SystemTransactionLedger>,
+
+    /// A list of storage transaction ledgers, one for each active data ledger
     /// Maintains the block->tx_root->data_root relationship for each block
     /// and ledger.
-    pub ledgers: Vec<TransactionLedger>,
+    pub data_ledgers: Vec<DataTransactionLedger>,
 
     /// Evm block hash (32 bytes)
     pub evm_block_hash: B256,
@@ -146,13 +150,22 @@ pub struct IrysBlockHeader {
     /// Metadata about the verifiable delay function, used for block verification purposes
     pub vdf_limiter_info: VDFLimiterInfo,
 
-    /// $IRYS token price expressed in $USD
-    pub irys_price: IrysTokenPrice,
+    /// $IRYS token price expressed in $USD, returned from the oracle
+    pub oracle_irys_price: IrysTokenPrice,
+
+    /// $IRYS token price expressed in $USD, updated only on EMA recalculation blocks.
+    /// This is what the protocol uses for different pricing calculation purposes.
+    pub ema_irys_price: IrysTokenPrice,
 }
 
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
 
 impl IrysBlockHeader {
+    /// Returns true if the block is the genesis block, false otherwise
+    pub fn is_genesis(&self) -> bool {
+        self.height == 0
+    }
+
     /// Proxy method for `Encodable::encode`
     ///
     /// Packs all the header data into a byte buffer, using RLP encoding.
@@ -200,8 +213,27 @@ impl IrysBlockHeader {
 
 // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
 pub fn is_ema_recalculation_block(height: u64, blocks_in_price_adjustment_interval: u64) -> bool {
-    // heights are zero indexed hence adding +1
-    (height + 1) % blocks_in_price_adjustment_interval == 0
+    // the first 2 adjustment intervals have special handling where we calculate the
+    // EMA for each block using the value from the preceding one
+    if height < (blocks_in_price_adjustment_interval * 2) {
+        true
+    } else {
+        (height.saturating_add(1)) % blocks_in_price_adjustment_interval == 0
+    }
+}
+
+pub fn block_height_to_use_for_price(height: u64, blocks_in_price_adjustment_interval: u64) -> u64 {
+    // we need to use the genesis price
+    if height < (blocks_in_price_adjustment_interval * 2) {
+        0
+    } else {
+        // we need to use the price from 2 intervals ago
+        let prev_ema_height =
+            prev_ema_ignore_genesis_rules(height, blocks_in_price_adjustment_interval);
+
+        // the preceding ema
+        prev_ema_ignore_genesis_rules(prev_ema_height, blocks_in_price_adjustment_interval)
+    }
 }
 
 /// Returns the height of the "previous" EMA recalculation block.
@@ -209,6 +241,18 @@ pub fn previous_ema_recalculation_block_height(
     height: u64,
     blocks_in_price_adjustment_interval: u64,
 ) -> u64 {
+    // the first 2 adjustment intervals have special handling where we calculate the
+    // EMA for each block using the value from the preceding one
+    if height < (blocks_in_price_adjustment_interval * 2) {
+        return height.saturating_sub(1);
+    }
+
+    // After the first 2 adjustment intervals we start calculating the EMA
+    // only using the last EMA block
+    prev_ema_ignore_genesis_rules(height, blocks_in_price_adjustment_interval)
+}
+
+fn prev_ema_ignore_genesis_rules(height: u64, blocks_in_price_adjustment_interval: u64) -> u64 {
     // heights are zero indexed hence adding +1
     let remainder = (height + 1) % blocks_in_price_adjustment_interval;
     if remainder == 0 {
@@ -240,7 +284,7 @@ pub struct PoaData {
     pub recall_chunk_index: u32,
     pub partition_chunk_offset: u32,
     pub partition_hash: PartitionHash,
-    pub chunk: Base64,
+    pub chunk: Option<Base64>,
     pub ledger_id: Option<u32>,
     pub tx_path: Option<Base64>,
     pub data_path: Option<Base64>,
@@ -263,7 +307,7 @@ pub type TxRoot = H256;
 )]
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
-pub struct TransactionLedger {
+pub struct DataTransactionLedger {
     /// Unique identifier for this ledger, maps to discriminant in `Ledger` enum
     pub ledger_id: u32,
     /// Root of the merkle tree built from the ledger transaction data_roots
@@ -281,7 +325,7 @@ pub struct TransactionLedger {
     pub proofs: Option<IngressProofsList>,
 }
 
-impl TransactionLedger {
+impl DataTransactionLedger {
     /// Computes the tx_root and tx_paths. The TX Root is composed of taking the data_roots of each of the storage
     /// transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
     pub fn merklize_tx_root(data_txs: &[IrysTransactionHeader]) -> (H256, Vec<Proof>) {
@@ -301,6 +345,28 @@ impl TransactionLedger {
         let proofs = resolve_proofs(root, None).unwrap();
         (H256(root_id), proofs)
     }
+}
+
+#[derive(
+    Default,
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    Compact,
+    Arbitrary,
+    RlpDecodable,
+    RlpEncodable,
+)]
+#[rlp(trailing)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemTransactionLedger {
+    /// Unique identifier for this ledger, maps to discriminant in `SystemLedger` enum
+    pub ledger_id: u32,
+    /// List of system transaction ids added to the system ledger in this block
+    pub tx_ids: H256List,
 }
 
 impl fmt::Display for IrysBlockHeader {
@@ -337,7 +403,7 @@ impl IrysBlockHeader {
             poa: PoaData {
                 tx_path: None,
                 data_path: None,
-                chunk: Base64::from_str("").unwrap(),
+                chunk: Some(Base64::from_str("").unwrap()),
                 partition_hash: PartitionHash::zero(),
                 partition_chunk_offset: 0,
                 recall_chunk_index: 0,
@@ -346,9 +412,10 @@ impl IrysBlockHeader {
             reward_address: Address::ZERO,
             signature: IrysSignature::new(alloy_signer::Signature::test_signature()),
             timestamp: now.as_millis(),
-            ledgers: vec![
+            system_ledgers: vec![], // Many tests will fail if you add fake txids to this ledger
+            data_ledgers: vec![
                 // Permanent Publish Ledger
-                TransactionLedger {
+                DataTransactionLedger {
                     ledger_id: 0, // Publish ledger_id
                     tx_root: H256::zero(),
                     tx_ids,
@@ -357,7 +424,7 @@ impl IrysBlockHeader {
                     proofs: None,
                 },
                 // Term Submit Ledger
-                TransactionLedger {
+                DataTransactionLedger {
                     ledger_id: 1, // Submit ledger_id
                     tx_root: H256::zero(),
                     tx_ids: H256List::new(),
@@ -368,11 +435,29 @@ impl IrysBlockHeader {
             ],
             evm_block_hash: B256::ZERO,
             miner_address: Address::ZERO,
-            irys_price: Amount::token(dec!(1.0))
+            oracle_irys_price: Amount::token(dec!(1.0))
+                .expect("dec!(1.0) must evaluate to a valid token amount"),
+            ema_irys_price: Amount::token(dec!(1.0))
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
             ..Default::default()
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExecutionHeader {
+    #[serde(flatten)]
+    pub header: Header,
+    pub transactions: Vec<TxHash>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CombinedBlockHeader {
+    #[serde(flatten)]
+    pub irys: IrysBlockHeader,
+    pub execution: ExecutionHeader,
 }
 
 #[cfg(test)]
@@ -394,10 +479,33 @@ mod tests {
             recall_chunk_index: 123,
             partition_chunk_offset: 321,
             partition_hash: H256::random(),
-            chunk: Base64(vec![42; 16]),
+            chunk: Some(Base64(vec![42; 16])),
             ledger_id: Some(44),
             tx_path: None,
             data_path: Some(Base64(vec![13; 16])),
+        };
+
+        // action
+        let mut buffer = vec![];
+        data.encode(&mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn test_vdf_limiter_info_rlp_round_trip() {
+        let data = VDFLimiterInfo {
+            output: H256::random(),
+            global_step_number: 42,
+            seed: H256::random(),
+            next_seed: H256::random(),
+            prev_output: H256::random(),
+            last_step_checkpoints: H256List(vec![H256::random(), H256::random()]),
+            steps: H256List(vec![H256::random(), H256::random()]),
+            vdf_difficulty: Some(123),
+            next_vdf_difficulty: Some(321),
         };
 
         // action
@@ -425,17 +533,17 @@ mod tests {
 
         // action
         let mut buffer = vec![];
-        data.encode(&mut buffer);
-        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+        data.to_compact(&mut buffer);
+        let (decoded, ..) = VDFLimiterInfo::from_compact(&mut buffer.as_slice(), buffer.len());
 
         // Assert
         assert_eq!(data, decoded);
     }
 
     #[test]
-    fn test_transaction_ledger_rlp_round_trip() {
+    fn test_storage_transaction_ledger_rlp_round_trip() {
         // setup
-        let data = TransactionLedger {
+        let data = DataTransactionLedger {
             ledger_id: 1,
             tx_root: H256::random(),
             tx_ids: H256List(vec![]),
@@ -454,6 +562,23 @@ mod tests {
 
         // Assert
         assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn test_system_transaction_ledger_rlp_round_trip() {
+        // setup
+        let system = SystemTransactionLedger {
+            ledger_id: 0, // System Ledger
+            tx_ids: H256List(vec![H256::random(), H256::random()]),
+        };
+
+        // action
+        let mut buffer = vec![];
+        system.encode(&mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(system, decoded);
     }
 
     #[test]
@@ -492,6 +617,8 @@ mod tests {
         let header = mock_header();
         let mut buf = vec![];
 
+        println!("{}", serde_json::to_string_pretty(&header).unwrap());
+
         // action
         header.to_compact(&mut buf);
         assert!(!buf.is_empty(), "expect data to be written into the buffer");
@@ -508,8 +635,8 @@ mod tests {
     #[rstest]
     #[case(0, 0)]
     #[case(1, 0)]
-    #[case(15, 9)]
-    #[case(19, 9)]
+    #[case(15, 14)]
+    #[case(19, 18)]
     #[case(20, 19)]
     #[case(21, 19)]
     #[case(29, 19)]
@@ -538,11 +665,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, false)]
-    #[case(1, false)]
+    #[case(0, true)]
+    #[case(1, true)]
     #[case(9, true)]
-    #[case(10, false)]
-    #[case(11, false)]
+    #[case(10, true)]
+    #[case(11, true)]
     #[case(19, true)]
     #[case(20, false)]
     #[case(21, false)]
@@ -571,7 +698,7 @@ mod tests {
             tx.data_size = 64
         }
 
-        let (tx_root, proofs) = TransactionLedger::merklize_tx_root(&txs);
+        let (tx_root, proofs) = DataTransactionLedger::merklize_tx_root(&txs);
 
         for proof in proofs {
             let encoded_proof = Base64(proof.proof.to_vec());
@@ -608,8 +735,8 @@ mod tests {
             |h: &mut IrysBlockHeader| h.reward_address.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.miner_address.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.timestamp.as_mut_bytes(),
-            |h: &mut IrysBlockHeader| h.ledgers[0].ledger_id.as_mut_bytes(),
-            |h: &mut IrysBlockHeader| h.ledgers[0].max_chunk_offset.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.data_ledgers[0].ledger_id.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.data_ledgers[0].max_chunk_offset.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.evm_block_hash.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.vdf_limiter_info.global_step_number.as_mut_bytes(),
         ];
@@ -620,7 +747,7 @@ mod tests {
             assert!(!header_clone.is_signature_valid());
         }
 
-        // assert that changing the block hash, the signature is still valid (because the validatoin does not validate )
+        // assert that changing the block hash, the signature is still valid (because the validation does not validate )
         header.block_hash = H256::random();
         assert!(header.is_signature_valid());
     }

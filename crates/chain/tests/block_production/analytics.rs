@@ -9,24 +9,19 @@ use alloy_provider::Provider;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::LocalSigner;
 use alloy_signer_local::PrivateKeySigner;
-use irys_types::Config;
 use irys_types::TxChunkOffset;
 use irys_types::UnpackedChunk;
 use rand::Rng;
 
-use irys_actors::block_producer::SolutionFoundMessage;
-use irys_chain::start_irys_node;
-use irys_config::IrysNodeConfig;
+use crate::utils::mine_block;
+use crate::utils::IrysNodeTest;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG, StorageConfig};
 use k256::ecdsa::SigningKey;
 use reth::rpc::types::TransactionRequest;
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
-use tracing::{debug, info};
-
-use crate::utils::capacity_chunk_solution;
+use tracing::info;
 
 // network simulation test for analytics
 #[ignore]
@@ -34,15 +29,22 @@ use crate::utils::capacity_chunk_solution;
 async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let testnet_config = Config::testnet();
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-
-    let account1 = IrysSigner::random_signer(&testnet_config);
-    let account2 = IrysSigner::random_signer(&testnet_config);
-    let account3 = IrysSigner::random_signer(&testnet_config);
-    config.extend_genesis_accounts(vec![
+    let mut node = IrysNodeTest::default();
+    node.cfg.storage_config = StorageConfig {
+        chunk_size: 32,
+        num_chunks_in_partition: 1000,
+        num_chunks_in_recall_range: 2,
+        num_partitions_in_slot: 1,
+        miner_address: node.cfg.config.miner_address(),
+        min_writes_before_sync: 1,
+        entropy_packing_iterations: 1_000,
+        chunk_migration_depth: 1, // Testnet / single node config
+        chain_id: node.cfg.config.chain_id,
+    };
+    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    let account2 = IrysSigner::random_signer(&node.cfg.config);
+    let account3 = IrysSigner::random_signer(&node.cfg.config);
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -65,26 +67,10 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             },
         ),
     ]);
+    let node = node.start().await;
+    let _reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
-    let node = start_irys_node(
-        config.clone(),
-        StorageConfig {
-            chunk_size: 32,
-            num_chunks_in_partition: 1000,
-            num_chunks_in_recall_range: 2,
-            num_partitions_in_slot: 1,
-            miner_address: config.mining_signer.address(),
-            min_writes_before_sync: 1,
-            entropy_packing_iterations: 1_000,
-            chunk_migration_depth: 1, // Testnet / single node config
-            chain_id: testnet_config.chain_id,
-        },
-        testnet_config.clone(),
-    )
-    .await?;
-    let _reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
-
-    let http_url = "http://127.0.0.1:8080";
+    let http_url = format!("http://127.0.0.1:{}", node.cfg.config.port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -132,7 +118,11 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             ProviderBuilder::new()
                 .with_recommended_fillers()
                 .wallet(EthereumWallet::from(signer))
-                .on_http("http://localhost:8080/v1/execution-rpc".parse().unwrap())
+                .on_http(
+                    format!("http://127.0.0.1:{}/v1/execution-rpc", node.cfg.config.port)
+                        .parse()
+                        .unwrap(),
+                )
         })
         .collect::<Vec<_>>();
 
@@ -158,7 +148,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 gas: Some(21000),
                 value: Some(U256::from(simple_rng.next_range(20_000))),
                 nonce: Some(alloy_provider.get_transaction_count(a.address()).await?),
-                chain_id: Some(testnet_config.chain_id),
+                chain_id: Some(node.cfg.config.chain_id),
                 ..Default::default()
             };
 
@@ -198,7 +188,9 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     data_size,
                     data_path,
                     bytes: Base64(data_bytes[min..max].to_vec()),
-                    tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
+                    tx_offset: TxChunkOffset::from(
+                        TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+                    ),
                 };
 
                 // Make a POST request with JSON payload
@@ -251,25 +243,10 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             }
         }
 
-        let poa_solution = capacity_chunk_solution(
-            node.config.mining_signer.address(),
-            node.vdf_steps_guard.clone(),
-            &node.vdf_config,
-            &node.storage_config,
-        )
-        .await;
-
-        let (_block, _reth_exec_env) = node
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution))
-            .await?
-            .unwrap()
-            .unwrap();
+        mine_block(&node.node_ctx).await?;
         info!("Finished step {}", &i);
     }
 
-    debug!("JESSEDEBUG DONE");
     sleep(Duration::from_secs(u64::MAX)).await;
 
     Ok(())

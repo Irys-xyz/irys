@@ -1,16 +1,18 @@
 use actix::prelude::*;
+use futures::future::join_all;
 use irys_database::block_header_by_hash;
+use irys_types::{block_production::Seed, Config, DatabaseProvider, IrysBlockHeader};
 use irys_vdf::vdf_state::{AtomicVdfState, VdfState, VdfStepsReadGuard};
 use reth_db::Database;
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock},
 };
+use tokio::task::{self, JoinHandle};
 use tracing::info;
 
-use irys_types::{block_production::Seed, Config, DatabaseProvider};
-
 use crate::block_index_service::BlockIndexReadGuard;
+use crate::services::Stop;
 
 #[derive(Debug, Default)]
 pub struct VdfService {
@@ -54,7 +56,9 @@ fn create_state(
         let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
         let tx = db.tx().unwrap();
 
-        let mut block = block_header_by_hash(&tx, &block_hash).unwrap().unwrap();
+        let mut block = block_header_by_hash(&tx, &block_hash, false)
+            .unwrap()
+            .unwrap();
         let global_step_number = block.vdf_limiter_info.global_step_number;
         let mut steps_remaining = capacity;
 
@@ -68,7 +72,7 @@ fn create_state(
                 }
             }
             // get the previous block
-            block = block_header_by_hash(&tx, &block.previous_block_hash)
+            block = block_header_by_hash(&tx, &block.previous_block_hash, false)
                 .unwrap()
                 .unwrap();
         }
@@ -89,6 +93,71 @@ fn create_state(
         seeds: VecDeque::with_capacity(capacity),
         max_seeds_num: capacity,
     }
+}
+
+#[allow(dead_code)]
+async fn create_state_parallel(
+    block_index: BlockIndexReadGuard,
+    db: DatabaseProvider,
+    config: &Config,
+) -> VdfState {
+    let capacity = calc_capacity(config);
+
+    let mut height = block_index.read().latest_height();
+    let mut steps_remaining = capacity;
+
+    let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
+    let mut global_step_number: u64 = 0;
+    let n = 50; // number of block headers read in parallel
+
+    while steps_remaining > 0 && height > 0 {
+        // get in parallel n blocks
+        info!("reading from {} to {}", height.saturating_sub(n), height);
+        let mut blocks_handles: Vec<JoinHandle<IrysBlockHeader>> = Vec::new();
+        for block in height.saturating_sub(n)..height {
+            let db = db.clone();
+            let block_index = block_index.clone();
+            let join = task::spawn_blocking(move || {
+                let block_hash = block_index
+                    .read()
+                    .get_item(block.try_into().expect("usize overflow"))
+                    .map(|item| item.block_hash)
+                    .expect("Error getting block hash");
+                db.view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))
+                    .expect("Db error reading block header by hash")
+                    .expect("Block hash not found")
+            });
+            blocks_handles.push(join);
+        }
+
+        // Wait for all tasks to complete
+        let results = join_all(blocks_handles).await;
+
+        'outer: for block in results.iter().rev() {
+            let block = block.as_ref().expect("Error getting block");
+            if global_step_number == 0 {
+                global_step_number = block.vdf_limiter_info.global_step_number;
+            }
+            for step in block.vdf_limiter_info.steps.0.iter().rev() {
+                seeds.push_front(Seed(*step));
+                steps_remaining -= 1;
+                if steps_remaining == 0 {
+                    break 'outer;
+                }
+            }
+        }
+        height = height.saturating_sub(n + 1);
+    }
+    info!(
+        "Initializing vdf service from block's info in step number {} to {}",
+        global_step_number,
+        global_step_number - capacity as u64
+    );
+    return VdfState {
+        global_step: global_step_number,
+        seeds,
+        max_seeds_num: capacity,
+    };
 }
 
 pub fn calc_capacity(config: &Config) -> usize {
@@ -145,11 +214,32 @@ impl Handler<GetVdfStateMessage> for VdfService {
     }
 }
 
+impl Handler<Stop> for VdfService {
+    type Result = ();
+
+    fn handle(&mut self, _msg: Stop, ctx: &mut Context<Self>) -> Self::Result {
+        ctx.stop();
+    }
+}
+
 // Tests
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
+    use actix::SystemRegistry;
+    use irys_config::IrysNodeConfig;
+    use irys_database::{
+        open_or_create_db, tables::IrysTables, BlockIndex, DataLedger, Initialized,
+    };
     use irys_storage::ii;
-    use irys_types::{H256List, H256};
+    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_types::{H256List, IrysBlockHeader, StorageConfig, H256};
+
+    use crate::{
+        block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
+        BlockFinalizedMessage,
+    };
 
     use super::*;
 
@@ -199,5 +289,98 @@ mod tests {
             ]),
             get_all
         );
+    }
+
+    #[ignore = "benchmark test"]
+    #[actix_rt::test]
+    async fn test_create_state_performance() {
+        let testnet_config = Config {
+            num_chunks_in_partition: 51_872_000, // testnet.toml numbers
+            num_chunks_in_recall_range: 800,
+            ..Config::testnet()
+        };
+
+        // Create a storage config for testing
+        let storage_config = StorageConfig::new(&testnet_config);
+
+        let tmp_dir = setup_tracing_and_temp_dir(Some("create_state_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+
+        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+        let database_provider = DatabaseProvider(Arc::new(db));
+
+        let arc_config = Arc::new(IrysNodeConfig {
+            base_directory: base_path.clone(),
+            ..IrysNodeConfig::default()
+        });
+
+        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
+            BlockIndex::default()
+                .reset(&arc_config.clone())
+                .unwrap()
+                .init(arc_config.clone())
+                .await
+                .unwrap(),
+        ));
+
+        let block_index_actor =
+            BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        SystemRegistry::set(block_index_actor.clone());
+
+        let block_index_guard = block_index_actor
+            .send(GetBlockIndexGuardMessage)
+            .await
+            .unwrap();
+
+        let mut new_epoch_block = IrysBlockHeader::new_mock_header();
+        new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
+
+        let now = Instant::now();
+        // index and store in db blocks
+        let mut height = 0;
+        let capacity = calc_capacity(&testnet_config) as u64;
+        while height <= capacity {
+            new_epoch_block.height = height;
+            new_epoch_block.previous_block_hash = new_epoch_block.block_hash;
+            new_epoch_block.block_hash = H256::random();
+
+            let msg = BlockFinalizedMessage {
+                block_header: Arc::new(new_epoch_block.clone()),
+                all_txs: Arc::new(vec![]),
+            };
+            match block_index_actor.send(msg).await {
+                Ok(_) => (), // debug!("block indexed"),
+                Err(err) => panic!("Failed to index block {:?}", err),
+            }
+
+            database_provider
+                .update_eyre(|tx| irys_database::insert_block_header(tx, &new_epoch_block))
+                .unwrap();
+            height += 1;
+        }
+        let elapsed = now.elapsed();
+        println!("Indexed: {} blocks in {:.2?}", height, elapsed);
+
+        let now = Instant::now();
+        let vdf_state = create_state(
+            block_index_guard.clone(),
+            database_provider.clone(),
+            &testnet_config,
+        );
+        let elapsed = now.elapsed();
+        println!("VdfService vdf steps initialization time: {:.2?}", elapsed);
+
+        let now = Instant::now();
+        let vdf_state_parallel =
+            create_state_parallel(block_index_guard, database_provider, &testnet_config).await;
+        let elapsed = now.elapsed();
+        println!(
+            "VdfService vdf steps initialization time in parallel: {:.2?}",
+            elapsed
+        );
+
+        assert_eq!(vdf_state.max_seeds_num, vdf_state_parallel.max_seeds_num);
+        assert_eq!(vdf_state.global_step, vdf_state_parallel.global_step);
+        assert_eq!(vdf_state.seeds, vdf_state_parallel.seeds);
     }
 }

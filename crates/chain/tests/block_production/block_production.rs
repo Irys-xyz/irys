@@ -5,15 +5,11 @@ use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_signer_local::LocalSigner;
 use eyre::eyre;
-use irys_actors::{block_producer::SolutionFoundMessage, mempool_service::TxIngressMessage};
-use irys_chain::start_irys_node;
-use irys_config::IrysNodeConfig;
+use irys_actors::mempool_service::TxIngressError;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{irys::IrysSigner, Config, IrysTransaction};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
-use reth_db::Database;
 use reth_primitives::{
     irys_primitives::{IrysTxId, ShadowResult},
     GenesisAccount,
@@ -21,22 +17,15 @@ use reth_primitives::{
 use tokio::time::sleep;
 use tracing::info;
 
-use crate::utils::capacity_chunk_solution;
-/// Create a valid capacity PoA solution
+use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 
 #[tokio::test]
-async fn serial_test_blockprod() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let testnet_config = Config::testnet();
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-
-    let account1 = IrysSigner::random_signer(&testnet_config);
-    let account2 = IrysSigner::random_signer(&testnet_config);
-    let account3 = IrysSigner::random_signer(&testnet_config);
-
-    config.extend_genesis_accounts(vec![
+async fn heavy_test_blockprod() -> eyre::Result<()> {
+    let mut node = IrysNodeTest::default();
+    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    let account2 = IrysSigner::random_signer(&node.cfg.config);
+    let account3 = IrysSigner::random_signer(&node.cfg.config);
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -59,51 +48,34 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
             },
         ),
     ]);
-
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
+    let irys_node = node.start().await;
 
     let mut txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
     for a in [&account1, &account2, &account3] {
         let data_bytes = "Hello, world!".as_bytes().to_vec();
-        let tx = a.create_transaction(data_bytes, None).unwrap();
-        let tx = a.sign_transaction(tx).unwrap();
-        // submit to mempool
-        let _tx_res = node
-            .actor_addresses
-            .mempool
-            .send(TxIngressMessage(tx.header.clone()))
-            .await
-            .unwrap();
-        txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
-        // txs.push(tx);
-    }
-
-    let poa_solution = capacity_chunk_solution(
-        node.config.mining_signer.address(),
-        node.vdf_steps_guard,
-        &node.vdf_config,
-        &node.storage_config,
-    )
-    .await;
-
-    let (block, reth_exec_env) = node
-        .actor_addresses
-        .block_producer
-        .send(SolutionFoundMessage(poa_solution))
-        .await??
-        .unwrap();
-
-    for receipt in reth_exec_env.shadow_receipts {
-        let og_tx = txs.get(&receipt.tx_id).unwrap();
-        if og_tx.header.signer == account1.address() {
-            assert_eq!(receipt.result, ShadowResult::OutOfFunds)
-        } else {
-            assert_eq!(receipt.result, ShadowResult::Success)
+        match irys_node.create_submit_data_tx(&a, data_bytes).await {
+            Ok(tx) => {
+                txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
+            }
+            Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
+                assert_eq!(a.address(), account1.address(), "account1 should fail");
+            }
+            Err(e) => panic!("unexpected error {:?}", e),
         }
     }
 
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let (block, reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
+
+    for receipt in reth_exec_env.shadow_receipts {
+        if let Some(og_tx) = txs.get(&receipt.tx_id) {
+            assert_eq!(receipt.result, ShadowResult::Success);
+            assert_ne!(og_tx.header.signer, account1.address()); // account1 has no funds
+        } else {
+            assert_eq!(receipt.result, ShadowResult::OutOfFunds)
+        }
+    }
+
+    let reth_context = RethNodeContext::new(irys_node.node_ctx.reth_handle.clone().into()).await?;
 
     //check reth for built block
     let reth_block = reth_context
@@ -116,42 +88,23 @@ async fn serial_test_blockprod() -> eyre::Result<()> {
     // assert_eq!(reth_block.number, block.height);
 
     // check irys DB for built block
-
-    let db_irys_block = &node
-        .db
-        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
+    let db_irys_block = irys_node
+        .get_block_by_hash(&block.block_hash, false)
         .unwrap();
-
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
+    irys_node.stop().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let testnet_config = Config::testnet();
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
-
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
+    let node = IrysNodeTest::default().start().await;
+    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
         info!("manually producing block {}", i);
-        let poa_solution = capacity_chunk_solution(
-            node.config.mining_signer.address(),
-            node.vdf_steps_guard.clone(),
-            &node.vdf_config,
-            &node.storage_config,
-        )
-        .await;
-        let fut = node
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()));
-        let (block, _reth_exec_env) = fut.await??.unwrap();
+        let (block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
 
         //check reth for built block
         let reth_block = reth_context
@@ -164,90 +117,45 @@ async fn serial_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()>
         // assert_eq!(reth_block.number, block.height);
 
         // check irys DB for built block
-        let db_irys_block = &node
-            .db
-            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
-            .unwrap();
+        let db_irys_block = node.get_block_by_hash(&block.block_hash, false).unwrap();
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
         // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
         sleep(Duration::from_millis(1500)).await;
     }
+    node.stop().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn serial_mine_ten_blocks() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let testnet_config = Config::testnet();
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
-    node.actor_addresses.start_mining()?;
+async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
+    let node = IrysNodeTest::default().start().await;
 
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    node.node_ctx.actor_addresses.start_mining()?;
+    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
-        info!("waiting block {}", i);
-
-        let mut retries = 0;
-        while node.block_index_guard.read().num_blocks() < i + 1 && retries < 60_u64 {
-            sleep(Duration::from_secs(1)).await;
-            retries += 1;
-        }
-
-        info!("got block after {} seconds/retries", &retries);
-
-        let block = node
-            .block_index_guard
-            .read()
-            .get_item(i as usize)
-            .unwrap()
-            .clone();
+        node.wait_until_height(i + 1, 60).await?;
 
         //check reth for built block
         let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
         assert_eq!(i, reth_block.header.number);
         assert_eq!(i, reth_block.number);
 
-        // check irys DB for built block
-        let db_irys_block = &node
-            .db
-            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
-            .unwrap();
+        let db_irys_block = node.get_block_by_height(i as u64, false).unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     }
+    node.stop().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn serial_test_basic_blockprod() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
+async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
+    let node = IrysNodeTest::default().start().await;
 
-    let testnet_config = Config::testnet();
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
+    let (block, _) = mine_block(&node.node_ctx).await?.unwrap();
 
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
-
-    let poa_solution = capacity_chunk_solution(
-        node.config.mining_signer.address(),
-        node.vdf_steps_guard,
-        &node.vdf_config,
-        &node.storage_config,
-    )
-    .await;
-
-    let (block, _) = node
-        .actor_addresses
-        .block_producer
-        .send(SolutionFoundMessage(poa_solution))
-        .await??
-        .unwrap();
-
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     //check reth for built block
     let reth_block = reth_context
@@ -260,18 +168,14 @@ async fn serial_test_basic_blockprod() -> eyre::Result<()> {
     // assert_eq!(reth_block.number, block.height);
 
     // check irys DB for built block
-    let db_irys_block = &node
-        .db
-        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
-        .unwrap();
+    let db_irys_block = node.get_block_by_hash(&block.block_hash, false).unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-
+    node.stop().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
+async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let testnet_config = Config {
         chunk_size: 32,
         num_chunks_in_partition: 10,
@@ -282,16 +186,13 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         chunk_migration_depth: 1,
         ..Config::testnet()
     };
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-
-    let mining_signer_addr = config.mining_signer.address();
-    let account1 = IrysSigner::random_signer(&testnet_config);
-    let account2 = IrysSigner::random_signer(&testnet_config);
-    let account3 = IrysSigner::random_signer(&testnet_config);
-
-    config.extend_genesis_accounts(vec![
+    let mut node = IrysNodeTest::new_genesis(testnet_config);
+    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    let account2 = IrysSigner::random_signer(&node.cfg.config);
+    let account3 = IrysSigner::random_signer(&node.cfg.config);
+    let chain_id = node.cfg.config.chain_id;
+    let mining_signer_addr = node.cfg.config.miner_address();
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -314,9 +215,8 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
             },
         ),
     ]);
-
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
-    let reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let node = node.start().await;
+    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
     let miner_init_balance = reth_context
         .rpc
         .get_balance(mining_signer_addr, None)
@@ -333,7 +233,7 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
             gas: Some(21000),
             value: Some(U256::from(1)),
             nonce: Some(0),
-            chain_id: Some(testnet_config.chain_id),
+            chain_id: Some(chain_id),
             ..Default::default()
         };
         let tx_env = TransactionTestContext::sign_tx(es, evm_tx_req).await;
@@ -369,39 +269,29 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         evm_txs.insert(*tx_env.tx_hash(), tx_env.clone());
 
         let data_bytes = "Hello, world!".as_bytes().to_vec();
-        let tx = a.create_transaction(data_bytes, None).unwrap();
-        let tx = a.sign_transaction(tx).unwrap();
-        // submit to mempool
-        let _tx_res = node
-            .actor_addresses
-            .mempool
-            .send(TxIngressMessage(tx.header.clone()))
-            .await
-            .unwrap();
-        irys_txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
+        match node.create_submit_data_tx(&a, data_bytes).await {
+            Ok(tx) => {
+                irys_txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
+            }
+            Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
+                assert_eq!(
+                    a.address(),
+                    account1.address(),
+                    "account1 should be unfunded"
+                );
+            }
+            Err(e) => panic!("unexpected error {:?}", e),
+        }
     }
 
-    let poa_solution = capacity_chunk_solution(
-        node.config.mining_signer.address(),
-        node.vdf_steps_guard,
-        &node.vdf_config,
-        &node.storage_config,
-    )
-    .await;
-
-    let (block, reth_exec_env) = node
-        .actor_addresses
-        .block_producer
-        .send(SolutionFoundMessage(poa_solution))
-        .await??
-        .unwrap();
+    let (block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
 
     for receipt in reth_exec_env.shadow_receipts {
-        let og_tx = irys_txs.get(&receipt.tx_id).unwrap();
-        if og_tx.header.signer == account1.address() {
-            assert_eq!(receipt.result, ShadowResult::OutOfFunds)
+        if let Some(og_tx) = irys_txs.get(&receipt.tx_id) {
+            assert_eq!(receipt.result, ShadowResult::Success);
+            assert_ne!(og_tx.header.signer, account1.address()); // account1 has no funds
         } else {
-            assert_eq!(receipt.result, ShadowResult::Success)
+            assert_eq!(receipt.result, ShadowResult::OutOfFunds);
         }
     }
 
@@ -423,12 +313,9 @@ async fn serial_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         miner_init_balance + U256::from(1)
     );
     // check irys DB for built block
-    let db_irys_block = &node
-        .db
-        .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash))?
-        .unwrap();
+    let db_irys_block = node.get_block_by_hash(&block.block_hash, false).unwrap();
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-
+    node.stop().await;
     Ok(())
 }

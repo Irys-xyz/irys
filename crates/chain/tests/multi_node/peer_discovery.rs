@@ -12,60 +12,51 @@ use actix_web::{
 use alloy_core::primitives::U256;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_chain::start_irys_node;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::Config;
 use irys_types::{build_user_agent, irys::IrysSigner, PeerResponse, VersionRequest};
+use irys_types::{Config, PeerAddress};
 use reth_primitives::GenesisAccount;
 
-#[actix_web::test]
-async fn serial_peer_discovery() -> eyre::Result<()> {
+use crate::utils::IrysNodeTest;
+
+#[test_log::test(actix_web::test)]
+async fn heavy_peer_discovery() -> eyre::Result<()> {
     let chunk_size = 32; // 32Byte chunks
-
-    let mut test_config = Config::testnet();
-
-    // Override testnet parameters for local test
-    test_config.chunk_size = chunk_size as u64;
-    test_config.num_chunks_in_partition = 10;
-    test_config.num_chunks_in_recall_range = 2;
-    test_config.num_partitions_per_slot = 1;
-    test_config.num_writes_before_sync = 1;
-    test_config.entropy_packing_iterations = 1_000;
-    test_config.chunk_migration_depth = 1;
-
-    let temp_dir = setup_tracing_and_temp_dir(Some("data_promotion_test"), false);
-    let mut config = irys_config::IrysNodeConfig {
-        base_directory: temp_dir.path().to_path_buf(),
-        ..Default::default()
+    let test_config = Config {
+        chunk_size: chunk_size as u64,
+        num_chunks_in_partition: 10,
+        num_chunks_in_recall_range: 2,
+        num_partitions_per_slot: 1,
+        num_writes_before_sync: 1,
+        entropy_packing_iterations: 1_000,
+        chunk_migration_depth: 1,
+        ..Config::testnet()
     };
     let signer = IrysSigner::random_signer(&test_config);
-
-    config.extend_genesis_accounts(vec![(
+    let mut node = IrysNodeTest::new_genesis(test_config.clone());
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![(
         signer.address(),
         GenesisAccount {
             balance: U256::from(690000000000000000_u128),
             ..Default::default()
         },
     )]);
-
-    // This will create 3 storage modules, one for submit, one for publish, and one for capacity
-    let storage_config = irys_types::StorageConfig::new(&test_config);
-    let node = start_irys_node(config, storage_config, test_config.clone()).await?;
+    let node = node.start().await;
     wait_for_packing(
-        node.actor_addresses.packing.clone(),
+        node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
     .await?;
 
-    node.actor_addresses.start_mining().unwrap();
+    node.node_ctx.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
         reth_provider: None,
+        reth_http_url: None,
         block_index: None,
         block_tree: None,
-        db: node.db.clone(),
-        mempool: node.actor_addresses.mempool,
-        chunk_provider: node.chunk_provider.clone(),
+        db: node.node_ctx.db.clone(),
+        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: test_config.clone(),
     };
 
@@ -98,7 +89,10 @@ async fn serial_peer_discovery() -> eyre::Result<()> {
     let version_request = VersionRequest {
         mining_address: miner_signer_1.address(),
         chain_id: miner_signer_1.chain_id,
-        address: "127.0.0.1:8080".parse().expect("valid socket address"),
+        address: PeerAddress {
+            gossip: "127.0.0.1:8080".parse().expect("valid socket address"),
+            api: "127.0.0.1:8081".parse().expect("valid socket address"),
+        },
         user_agent: Some(build_user_agent("miner1", "0.1.0")),
         ..Default::default()
     };
@@ -133,7 +127,10 @@ async fn serial_peer_discovery() -> eyre::Result<()> {
         "protocol_version": "V1",
         "mining_address": miner_signer_2.address(),
         "chain_id": miner_signer_2.chain_id,
-        "address": "127.0.0.2:8080",
+        "address": {
+            "gossip": "127.0.0.2:8080",
+            "api": "127.0.0.2:8081"
+        },
         "user_agent": build_user_agent("miner2", "0.1.0"),
         "timestamp": timestamp
     });
@@ -145,6 +142,7 @@ async fn serial_peer_discovery() -> eyre::Result<()> {
     let resp = call_service(&app, req).await;
     let body = read_body(resp).await;
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
+    println!("Unparsed JSON:\n{}", body_str);
     let peer_response: PeerResponse =
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
     println!("\nParsed Response:");
@@ -155,7 +153,10 @@ async fn serial_peer_discovery() -> eyre::Result<()> {
         PeerResponse::Accepted(accepted) => {
             assert_eq!(accepted.peers.len(), 1, "Expected 1 peers");
             assert!(
-                accepted.peers.contains(&"127.0.0.1:8080".parse().unwrap()),
+                accepted.peers.contains(&PeerAddress {
+                    gossip: "127.0.0.1:8080".parse().unwrap(),
+                    api: "127.0.0.1:8081".parse().unwrap()
+                }),
                 "Missing expected peer 127.0.0.1:8080"
             );
         }
@@ -166,7 +167,10 @@ async fn serial_peer_discovery() -> eyre::Result<()> {
     let version_request = VersionRequest {
         mining_address: miner_signer_3.address(),
         chain_id: miner_signer_3.chain_id,
-        address: "127.0.0.3:8080".parse().expect("valid socket address"),
+        address: PeerAddress {
+            gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
+            api: "127.0.0.3:8081".parse().expect("valid socket address"),
+        },
         user_agent: Some(build_user_agent("miner3", "0.1.0")),
         ..Default::default()
     };
@@ -188,11 +192,17 @@ async fn serial_peer_discovery() -> eyre::Result<()> {
         PeerResponse::Accepted(accepted) => {
             assert_eq!(accepted.peers.len(), 2, "Expected 2 peers");
             assert!(
-                accepted.peers.contains(&"127.0.0.1:8080".parse().unwrap()),
+                accepted.peers.contains(&PeerAddress {
+                    gossip: "127.0.0.1:8080".parse().unwrap(),
+                    api: "127.0.0.1:8081".parse().unwrap()
+                }),
                 "Missing expected peer 127.0.0.1:8080"
             );
             assert!(
-                accepted.peers.contains(&"127.0.0.2:8080".parse().unwrap()),
+                accepted.peers.contains(&PeerAddress {
+                    gossip: "127.0.0.2:8080".parse().unwrap(),
+                    api: "127.0.0.2:8081".parse().unwrap()
+                }),
                 "Missing expected peer 127.0.0.2:8080"
             );
         }
@@ -206,19 +216,31 @@ async fn serial_peer_discovery() -> eyre::Result<()> {
 
     // Parse String to JSON
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
-    let peer_list: Vec<SocketAddr> = serde_json::from_str(&body_str).expect("Failed to parse JSON");
+    let peer_list: Vec<PeerAddress> =
+        serde_json::from_str(&body_str).expect("Failed to parse JSON");
     println!("Parsed JSON: {:?}", peer_list);
 
     assert!(
         peer_list.iter().all(|addr| {
             vec![
-                "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
-                "127.0.0.2:8080".parse::<SocketAddr>().unwrap(),
-                "127.0.0.3:8080".parse::<SocketAddr>().unwrap(),
+                PeerAddress {
+                    gossip: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
+                    api: "127.0.0.1:8081".parse::<SocketAddr>().unwrap(),
+                },
+                PeerAddress {
+                    gossip: "127.0.0.2:8080".parse::<SocketAddr>().unwrap(),
+                    api: "127.0.0.2:8081".parse::<SocketAddr>().unwrap(),
+                },
+                PeerAddress {
+                    gossip: "127.0.0.3:8080".parse::<SocketAddr>().unwrap(),
+                    api: "127.0.0.3:8081".parse::<SocketAddr>().unwrap(),
+                },
             ]
             .contains(addr)
         }),
         "Peer list missing expected addresses"
     );
+
+    node.stop().await;
     Ok(())
 }

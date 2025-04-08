@@ -6,10 +6,8 @@ use actix_web::{
 };
 use base58::FromBase58 as _;
 use irys_database::database;
-use irys_types::{IrysBlockHeader, H256};
-use reth::{
-    primitives::Header, providers::BlockReader, revm::primitives::alloy_primitives::TxHash,
-};
+use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
+use reth::{providers::BlockReader, revm::primitives::alloy_primitives::TxHash};
 use reth_db::Database;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -80,7 +78,7 @@ fn get_block_by_hash(
 ) -> Result<Json<CombinedBlockHeader>, ApiError> {
     let irys_header = match state
         .db
-        .view_eyre(|tx| database::block_header_by_hash(tx, &block_hash))
+        .view_eyre(|tx| database::block_header_by_hash(tx, &block_hash, true))
     {
         Err(_error) => Err(ApiError::Internal {
             err: String::from("db error"),
@@ -131,24 +129,6 @@ fn get_block_by_hash(
     };
 
     Ok(web::Json(cbh))
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-
-pub struct CombinedBlockHeader {
-    #[serde(flatten)]
-    pub irys: IrysBlockHeader,
-    pub execution: ExecutionHeader,
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-
-pub struct ExecutionHeader {
-    #[serde(flatten)]
-    pub header: Header,
-    pub transactions: Vec<TxHash>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -244,6 +224,7 @@ impl FromStr for BlockParam {
 
 //         let app_state = ApiState {
 //             reth_provider: None,
+//             reth_http_url: None,
 //             block_index: None,
 //             block_tree: None,
 //             db: DatabaseProvider(db_arc.clone()),
@@ -300,6 +281,7 @@ impl FromStr for BlockParam {
 
 //         let app_state = ApiState {
 //             reth_provider: None,
+//             reth_http_url: None,
 //             block_index: None,
 //             block_tree: None,
 //             db: DatabaseProvider(db_arc.clone()),

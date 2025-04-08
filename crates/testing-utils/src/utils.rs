@@ -1,4 +1,5 @@
 use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _};
+pub use tempfile;
 use tempfile::TempDir;
 use tracing::debug;
 use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt, EnvFilter};
@@ -20,11 +21,15 @@ pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
 /// Constant used to make sure .tmp shows up in the right place all the time
 pub const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
+pub fn tmp_base_dir() -> PathBuf {
+    PathBuf::from_str(CARGO_MANIFEST_DIR)
+        .unwrap()
+        .join("../../.tmp")
+}
+
 /// Creates a temporary directory
 pub fn temporary_directory(name: Option<&str>, keep: bool) -> TempDir {
-    let tmp_path = PathBuf::from_str(CARGO_MANIFEST_DIR)
-        .unwrap()
-        .join("../../.tmp");
+    let tmp_path = tmp_base_dir();
 
     create_dir_all(&tmp_path).unwrap();
 

@@ -6,8 +6,8 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
-use irys_database::{database, Ledger};
-use irys_types::{u64_stringify, IrysTransactionHeader, H256};
+use irys_database::{database, DataLedger};
+use irys_types::{u64_stringify, CommitmentTransaction, IrysTransactionHeader, H256};
 use reth_db::Database;
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -64,42 +64,88 @@ pub async fn post_tx(
     Ok(HttpResponse::Ok().finish())
 }
 
-pub async fn get_tx_header_api(
-    state: web::Data<ApiState>,
-    path: web::Path<H256>,
-) -> Result<Json<IrysTransactionHeader>, ApiError> {
-    let tx_id: H256 = path.into_inner();
-    info!("Get tx by tx_id: {}", tx_id);
-    get_tx_header(&state, tx_id).map(web::Json)
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum IrysTransaction {
+    #[serde(rename = "commitment")]
+    Commitment(CommitmentTransaction),
+
+    #[serde(rename = "storage")]
+    Storage(IrysTransactionHeader),
 }
 
-pub fn get_tx_header(
+pub async fn get_transaction_api(
+    state: web::Data<ApiState>,
+    path: web::Path<H256>,
+) -> Result<Json<IrysTransaction>, ApiError> {
+    let tx_id: H256 = path.into_inner();
+    info!("Get tx by tx_id: {}", tx_id);
+    get_transaction(&state, tx_id).map(web::Json)
+}
+// Helper function to retrieve IrysTransactionHeader
+pub fn get_storage_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
 ) -> Result<IrysTransactionHeader, ApiError> {
-    match state
+    state
         .db
         .view_eyre(|tx| database::tx_header_by_txid(tx, &tx_id))
-    {
-        Err(_error) => Err(ApiError::Internal {
-            err: String::from("db error"),
-        }),
-        Ok(None) => Err(ApiError::ErrNoId {
-            id: tx_id.to_string(),
-            err: String::from("tx not found"),
-        }),
-        Ok(Some(tx_header)) => Ok(tx_header),
-    }
+        .map_err(|_| ApiError::Internal {
+            err: String::from("db error while looking up Irys transaction"),
+        })
+        .and_then(|opt| {
+            opt.ok_or(ApiError::ErrNoId {
+                id: tx_id.to_string(),
+                err: String::from("storage tx not found"),
+            })
+        })
 }
 
+// Helper function to retrieve CommitmentTransaction
+pub fn get_commitment_transaction(
+    state: &web::Data<ApiState>,
+    tx_id: H256,
+) -> Result<CommitmentTransaction, ApiError> {
+    state
+        .db
+        .view_eyre(|tx| database::commitment_tx_by_txid(tx, &tx_id))
+        .map_err(|_| ApiError::Internal {
+            err: String::from("db error while looking up commitment transaction"),
+        })
+        .and_then(|opt| {
+            opt.ok_or(ApiError::ErrNoId {
+                id: tx_id.to_string(),
+                err: String::from("commitment tx not found"),
+            })
+        })
+}
+
+// Combined function to get either type of transaction
+pub fn get_transaction(
+    state: &web::Data<ApiState>,
+    tx_id: H256,
+) -> Result<IrysTransaction, ApiError> {
+    get_storage_transaction(state, tx_id)
+        .map(IrysTransaction::Storage)
+        .or_else(|err| match err {
+            ApiError::ErrNoId { .. } => {
+                get_commitment_transaction(state, tx_id).map(IrysTransaction::Commitment)
+            }
+            other => Err(other),
+        })
+}
+
+// Modified to work only with storage transactions
 pub async fn get_tx_local_start_offset(
     state: web::Data<ApiState>,
     path: web::Path<H256>,
 ) -> Result<Json<TxOffset>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx data metadata by tx_id: {}", tx_id);
-    let tx_header = get_tx_header(&state, tx_id)?;
-    let ledger = Ledger::try_from(tx_header.ledger_id).unwrap();
+
+    // Only works for storage transaction header
+    let tx_header = get_storage_transaction(&state, tx_id)?;
+    let ledger = DataLedger::try_from(tx_header.ledger_id).unwrap();
 
     match state
         .chunk_provider
@@ -130,151 +176,186 @@ pub struct TxOffset {
     pub data_start_offset: u64,
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use crate::routes;
+#[cfg(test)]
+mod tests {
+    use crate::routes;
 
-//     use super::*;
-//     use actix::{Actor, ArbiterService, SystemRegistry, SystemService as _};
-//     use actix_web::{middleware::Logger, test, App, Error};
-//     use base58::ToBase58;
-//     use database::open_or_create_db;
-//     use irys_actors::mempool_service::MempoolService;
-//     use irys_database::tables::IrysTables;
-//     use irys_storage::ChunkProvider;
-//     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
-//     use reth::tasks::TaskManager;
-//     use std::sync::Arc;
-//     use tempfile::tempdir;
-//     use tracing::{error, info};
+    use super::*;
+    use actix::SystemService as _;
+    use actix_web::{middleware::Logger, test, App};
+    use base58::ToBase58;
+    use database::open_or_create_db;
+    use irys_actors::mempool_service::MempoolService;
+    use irys_database::tables::IrysTables;
+    use irys_storage::ChunkProvider;
+    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_types::{app_state::DatabaseProvider, Config, StorageConfig};
+    use std::sync::Arc;
+    use tracing::{error, info};
 
-//     #[actix_web::test]
-//     async fn test_get_tx() -> eyre::Result<()> {
-//         //std::env::set_var("RUST_LOG", "debug");
-//         let _ = env_logger::try_init();
+    #[actix_web::test]
+    async fn test_get_tx() -> eyre::Result<()> {
+        std::env::set_var("RUST_LOG", "debug");
+        let tmp_dir = setup_tracing_and_temp_dir(Some("test_get_tx"), false);
+        let db_env = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+        let db = DatabaseProvider(Arc::new(db_env));
 
-//         let path = tempdir().unwrap();
-//         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
-//         let tx_header = IrysTransactionHeader::default();
-//         info!("Generated tx_id: {}", tx_header.id);
+        let storage_tx = IrysTransactionHeader {
+            id: H256::random(),
+            ..Default::default()
+        };
+        info!("Generated storage_tx.id: {}", storage_tx.id);
 
-//         let _ =
-//             db.update(|tx| -> eyre::Result<()> { database::insert_tx_header(tx, &tx_header) })?;
+        let commitment_tx = CommitmentTransaction {
+            id: H256::random(),
+            ..Default::default()
+        };
+        info!("Generated commitment_tx.id: {}", commitment_tx.id);
 
-//         match db.view_eyre(|tx| database::tx_header_by_txid(tx, &tx_header.id))? {
-//             None => error!("tx not found, test db error!"),
-//             Some(_tx_header) => info!("tx found!"),
-//         };
+        // Insert the storage_tx and make sure it's in the database
+        let _ =
+            db.update(|tx| -> eyre::Result<()> { database::insert_tx_header(tx, &storage_tx) })?;
+        match db.view_eyre(|tx| database::tx_header_by_txid(tx, &storage_tx.id))? {
+            None => error!("tx not found, test db error!"),
+            Some(_tx_header) => info!("storage_tx found!"),
+        };
 
-//         let arc_db = Arc::new(db);
+        // Insert the commitment_tx and make sure it's in the database
+        let _ = db.update(|tx| -> eyre::Result<()> {
+            database::insert_commitment_tx(tx, &commitment_tx)
+        })?;
+        match db.view_eyre(|tx| database::commitment_tx_by_txid(tx, &commitment_tx.id))? {
+            None => error!("tx not found, test db error!"),
+            Some(_tx_header) => info!("commitment_tx found!"),
+        };
 
-//         let task_manager = TaskManager::current();
-//         let storage_config = StorageConfig::default();
+        // Initialize a dummy ApiState so we can start a test actix web server
+        let config = Config::testnet();
+        let storage_config = StorageConfig::new(&config);
+        let mempool_addr = MempoolService::from_registry();
+        let chunk_provider =
+            ChunkProvider::new(storage_config.clone(), Arc::new(Vec::new()).to_vec());
+        let app_state = ApiState {
+            reth_provider: None,
+            reth_http_url: None,
+            block_index: None,
+            block_tree: None,
+            db: db,
+            mempool: mempool_addr,
+            chunk_provider: Arc::new(chunk_provider),
+            config,
+        };
 
-//         let mempool_service = MempoolService::new(
-//             irys_types::app_state::DatabaseProvider(arc_db.clone()),
-//             task_manager.executor(),
-//             IrysSigner::random_signer(),
-//             storage_config.clone(),
-//             Arc::new(Vec::new()).to_vec(),
-//         );
-//         SystemRegistry::set(mempool_service.start());
-//         let mempool_addr = MempoolService::from_registry();
+        // Start the actix webserver
+        let app = test::init_service(
+            App::new()
+                .wrap(Logger::default())
+                .app_data(web::Data::new(app_state))
+                .service(routes()),
+        )
+        .await;
 
-//         let chunk_provider = ChunkProvider::new(
-//             storage_config.clone(),
-//             Arc::new(Vec::new()).to_vec(),
-//             DatabaseProvider(arc_db.clone()),
-//         );
+        // Test storage transaction
+        let id: String = storage_tx.id.as_bytes().to_base58();
+        let req = test::TestRequest::get()
+            .uri(&format!("/v1/tx/{}", &id))
+            .to_request();
 
-//         let app_state = ApiState {
-//             reth_provider: None,
-//             block_index: None,
-//             block_tree: None,
-//             db: DatabaseProvider(arc_db.clone()),
-//             mempool: mempool_addr,
-//             chunk_provider: Arc::new(chunk_provider),
-//         };
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let transaction: IrysTransaction = test::read_body_json(resp).await;
+        info!("{}", serde_json::to_string_pretty(&transaction).unwrap());
 
-//         let app = test::init_service(
-//             App::new()
-//                 .wrap(Logger::default())
-//                 .app_data(web::Data::new(app_state))
-//                 .service(routes()),
-//         )
-//         .await;
+        // Extract storage transaction or fail
+        let storage = match transaction {
+            IrysTransaction::Storage(storage) => storage,
+            IrysTransaction::Commitment(_) => {
+                panic!("Expected Storage transaction, got Commitment")
+            }
+        };
+        assert_eq!(storage_tx, storage);
 
-//         let id: String = tx_header.id.as_bytes().to_base58();
-//         let req = test::TestRequest::get()
-//             .uri(&format!("/v1/tx/{}", &id))
-//             .to_request();
+        // Test commitment transaction
+        let id: String = commitment_tx.id.as_bytes().to_base58();
+        let req = test::TestRequest::get()
+            .uri(&format!("/v1/tx/{}", &id))
+            .to_request();
 
-//         let resp = test::call_service(&app, req).await;
-//         assert_eq!(resp.status(), StatusCode::OK);
-//         let result: IrysTransactionHeader = test::read_body_json(resp).await;
-//         assert_eq!(tx_header, result);
-//         Ok(())
-//     }
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let transaction: IrysTransaction = test::read_body_json(resp).await;
+        info!("{}", serde_json::to_string_pretty(&transaction).unwrap());
 
-//     #[actix_web::test]
-//     async fn test_get_non_existent_tx() -> Result<(), Error> {
-//         // std::env::set_var("RUST_LOG", "debug");
-//         // env_logger::init();
+        // Extract commitment transaction or fail
+        let commitment = match transaction {
+            IrysTransaction::Commitment(commitment) => commitment,
+            IrysTransaction::Storage(_) => panic!("Expected Commitment transaction, got Storage"),
+        };
+        assert_eq!(commitment_tx, commitment);
 
-//         let path = tempdir().unwrap();
-//         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
-//         let tx = IrysTransactionHeader::default();
+        Ok(())
+    }
 
-//         let db_arc = Arc::new(db);
+    //     #[actix_web::test]
+    //     async fn test_get_non_existent_tx() -> Result<(), Error> {
+    //         // std::env::set_var("RUST_LOG", "debug");
+    //         // env_logger::init();
 
-//         let task_manager = TaskManager::current();
-//         let storage_config = StorageConfig::default();
+    //         let path = tempdir().unwrap();
+    //         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+    //         let tx = IrysTransactionHeader::default();
 
-//         let mempool_service = MempoolService::new(
-//             irys_types::app_state::DatabaseProvider(db_arc.clone()),
-//             task_manager.executor(),
-//             IrysSigner::random_signer(),
-//             storage_config.clone(),
-//             Arc::new(Vec::new()).to_vec(),
-//         );
-//         SystemRegistry::set(mempool_service.start());
-//         let mempool_addr = MempoolService::from_registry();
+    //         let db_arc = Arc::new(db);
 
-//         let chunk_provider = ChunkProvider::new(
-//             storage_config.clone(),
-//             Arc::new(Vec::new()).to_vec(),
-//             DatabaseProvider(db_arc.clone()),
-//         );
+    //         let task_manager = TaskManager::current();
+    //         let storage_config = StorageConfig::default();
 
-//         let app_state = ApiState {
-//             reth_provider: None,
-//             block_index: None,
-//             block_tree: None,
-//             db: DatabaseProvider(db_arc.clone()),
-//             mempool: mempool_addr,
-//             chunk_provider: Arc::new(chunk_provider),
-//         };
+    //         let mempool_service = MempoolService::new(
+    //             irys_types::app_state::DatabaseProvider(db_arc.clone()),
+    //             task_manager.executor(),
+    //             IrysSigner::random_signer(),
+    //             storage_config.clone(),
+    //             Arc::new(Vec::new()).to_vec(),
+    //         );
+    //         SystemRegistry::set(mempool_service.start());
+    //         let mempool_addr = MempoolService::from_registry();
 
-//         let app = test::init_service(
-//             App::new()
-//                 .app_data(web::Data::new(app_state))
-//                 .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx_header_api))),
-//         )
-//         .await;
+    //         let chunk_provider = ChunkProvider::new(
+    //             storage_config.clone(),
+    //             Arc::new(Vec::new()).to_vec(),
+    //             DatabaseProvider(db_arc.clone()),
+    //         );
 
-//         let id: String = tx.id.as_bytes().to_base58();
-//         let req = test::TestRequest::get()
-//             .uri(&format!("/v1/tx/{}", &id))
-//             .to_request();
+    //         let app_state = ApiState {
+    //             reth_provider: None,
+    //             reth_http_url: None,
+    //             block_index: None,
+    //             block_tree: None,
+    //             db: DatabaseProvider(db_arc.clone()),
+    //             mempool: mempool_addr,
+    //             chunk_provider: Arc::new(chunk_provider),
+    //         };
 
-//         let resp = test::call_service(&app, req).await;
-//         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-//         let result: ApiError = test::read_body_json(resp).await;
-//         let tx_error = ApiError::ErrNoId {
-//             id: tx.id.to_string(),
-//             err: String::from("tx not found"),
-//         };
-//         assert_eq!(tx_error, result);
-//         Ok(())
-//     }
-// }
+    //         let app = test::init_service(
+    //             App::new()
+    //                 .app_data(web::Data::new(app_state))
+    //                 .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx_header_api))),
+    //         )
+    //         .await;
+
+    //         let id: String = tx.id.as_bytes().to_base58();
+    //         let req = test::TestRequest::get()
+    //             .uri(&format!("/v1/tx/{}", &id))
+    //             .to_request();
+
+    //         let resp = test::call_service(&app, req).await;
+    //         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    //         let result: ApiError = test::read_body_json(resp).await;
+    //         let tx_error = ApiError::ErrNoId {
+    //             id: tx.id.to_string(),
+    //             err: String::from("tx not found"),
+    //         };
+    //         assert_eq!(tx_error, result);
+    //         Ok(())
+    //     }
+}

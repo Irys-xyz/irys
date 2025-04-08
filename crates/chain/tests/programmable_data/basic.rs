@@ -10,10 +10,7 @@ use alloy_sol_macro::sol;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
-use irys_chain::start_irys_node;
-use irys_config::IrysNodeConfig;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{irys::IrysSigner, Address};
 use irys_types::{Base64, Config, IrysTransactionHeader, TxChunkOffset, UnpackedChunk};
 
@@ -28,7 +25,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use crate::utils::future_or_mine_on_timeout;
+use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
@@ -42,19 +39,16 @@ sol!(
 const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
 const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
-#[actix_web::test]
-async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic"), false);
-    let mut testnet_config = Config::testnet();
-    testnet_config.chunk_size = 32;
-    testnet_config.chunk_migration_depth = 2; // PD reads chunks from the chunk cache rn
-    let main_address = testnet_config.miner_address();
-    let account1 = IrysSigner::random_signer(&testnet_config);
-    let mut config = IrysNodeConfig {
-        base_directory: temp_dir.path().to_path_buf(),
-        ..IrysNodeConfig::new(&testnet_config)
-    };
-    config.extend_genesis_accounts(vec![
+#[test_log::test(actix_web::test)]
+async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
+    let mut irys_node = IrysNodeTest::new_genesis(Config {
+        chunk_size: 32,
+        chunk_migration_depth: 2,
+        ..Config::testnet()
+    });
+    let main_address = irys_node.cfg.config.miner_address();
+    let account1 = IrysSigner::random_signer(&irys_node.cfg.config);
+    irys_node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -77,11 +71,10 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
             },
         ),
     ]);
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
 
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
+    let node = irys_node.start().await;
     wait_for_packing(
-        node.actor_addresses.packing.clone(),
+        node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
     .await?;
@@ -97,7 +90,13 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
-        .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
+        .on_http(
+            format!(
+                "http://127.0.0.1:{}/v1/execution-rpc",
+                node.node_ctx.config.port
+            )
+            .parse()?,
+        );
 
     let deploy_builder =
         IrysProgrammableDataBasic::deploy_builder(alloy_provider.clone()).gas(29506173);
@@ -105,12 +104,12 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
     let mut deploy_fut = Box::pin(deploy_builder.deploy());
 
     let contract_address = future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut deploy_fut,
         Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
+        node.node_ctx.vdf_steps_guard.clone(),
+        &node.node_ctx.vdf_config,
+        &node.node_ctx.storage_config,
     )
     .await??;
 
@@ -123,11 +122,14 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
         precompile_address
     );
 
-    let http_url = "http://127.0.0.1:8080";
+    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.port);
 
     // server should be running
     // check with request to `/v1/info`
     let client = awc::Client::default();
+
+    // Waiting for the server to start
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     let response = client
         .get(format!("{}/v1/info", http_url))
@@ -161,11 +163,15 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
         // sleep(delay).await;
         // println!("slept");
         for attempt in 1..20 {
-            let mut response = client
+            let response = client
                 .get(format!("{}/v1/tx/{}", http_url, &id))
                 .send()
-                .await
-                .unwrap();
+                .await;
+
+            let Some(mut response) = response.ok() else {
+                sleep(delay).await;
+                continue;
+            };
 
             if response.status() == StatusCode::OK {
                 let result: IrysTransactionHeader = response.json().await.unwrap();
@@ -178,12 +184,12 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
     });
 
     future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut tx_header_fut,
         Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
+        node.node_ctx.vdf_steps_guard.clone(),
+        &node.node_ctx.vdf_config,
+        &node.node_ctx.storage_config,
     )
     .await?;
 
@@ -200,7 +206,9 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
+            tx_offset: TxChunkOffset::from(
+                TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+            ),
         };
 
         // Make a POST request with JSON payload
@@ -219,14 +227,18 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
         let delay = Duration::from_secs(1);
 
         for attempt in 1..20 {
-            let mut response = client
+            let response = client
                 .get(format!(
                     "{}/v1/tx/{}/local/data_start_offset",
                     http_url, &id
                 ))
                 .send()
-                .await
-                .unwrap();
+                .await;
+
+            let Some(mut response) = response.ok() else {
+                sleep(delay).await;
+                continue;
+            };
 
             if response.status() == StatusCode::OK {
                 let res: TxOffset = response.json().await.unwrap();
@@ -240,12 +252,12 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
     });
 
     let _start_offset = future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
+        node.node_ctx.vdf_steps_guard.clone(),
+        &node.node_ctx.vdf_config,
+        &node.node_ctx.storage_config,
     )
     .await?
     .unwrap();
@@ -290,12 +302,12 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
     let invocation_call = invocation_builder.send().await?;
     let mut invocation_receipt_fut = Box::pin(invocation_call.get_receipt());
     let _res = future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut invocation_receipt_fut,
         Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
+        node.node_ctx.vdf_steps_guard.clone(),
+        &node.node_ctx.vdf_config,
+        &node.node_ctx.storage_config,
     )
     .await??;
 
@@ -309,7 +321,7 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
 
     assert_eq!(&message, &stored_message);
 
-    let context = RethNodeContext::new(node.reth_handle.into()).await?;
+    let context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     let latest = context
         .rpc
@@ -334,5 +346,6 @@ async fn serial_test_programmable_data_basic() -> eyre::Result<()> {
 
     dbg!(latest, safe, finalized);
 
+    node.stop().await;
     Ok(())
 }

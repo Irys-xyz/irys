@@ -30,7 +30,7 @@ pub struct BroadcastMiningSeed {
 #[rtype(result = "()")]
 pub struct BroadcastDifficultyUpdate(pub Arc<IrysBlockHeader>);
 
-/// Send the latest difficulty update to all the `PartitionMiningActors`
+/// Send Partition expiration list to miners
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
 pub struct BroadcastPartitionsExpiration(pub H256List);

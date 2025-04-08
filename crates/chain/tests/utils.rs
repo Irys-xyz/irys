@@ -1,14 +1,20 @@
+use actix::MailboxError;
 use futures::future::select;
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_actors::block_validation;
-use irys_chain::IrysNodeCtx;
+use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
+use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_database::tx_header_by_txid;
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_storage::ii;
+use irys_testing_utils::utils::tempfile::TempDir;
+use irys_testing_utils::utils::temporary_directory;
+use irys_types::irys::IrysSigner;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, H256List, H256,
 };
-use irys_types::{Config, StorageConfig, TxChunkOffset, VDFStepsConfig};
+use irys_types::{Config, IrysTransactionHeader, StorageConfig, TxChunkOffset, VDFStepsConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
@@ -26,7 +32,7 @@ use actix_web::{
     test,
 };
 use awc::{body::MessageBody, http::StatusCode};
-use irys_database::{tables::IrysBlockHeaders, Ledger};
+use irys_database::{tables::IrysBlockHeaders, DataLedger};
 use irys_types::{
     Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
     UnpackedChunk,
@@ -81,7 +87,7 @@ pub async fn capacity_chunk_solution(
         &vdf_steps_guard,
         &partition_hash,
     )
-    .unwrap();
+    .expect("valid recall range");
 
     let mut entropy_chunk = Vec::<u8>::with_capacity(storage_config.chunk_size as usize);
     compute_entropy_chunk(
@@ -103,7 +109,18 @@ pub async fn capacity_chunk_solution(
 
     SolutionContext {
         partition_hash,
-        chunk_offset: recall_range_idx as u32 * storage_config.num_chunks_in_recall_range as u32,
+        // FIXME: SolutionContext should in future use PartitionChunkOffset::from()
+        // chunk_offset appears to be the end byte rather than the start byte that gets read
+        // therefore a saturating_mul is fine as it will read all data up to that point
+        // this is also a test util fn, and so less of a concern than a "domain logic" fn
+        chunk_offset: TryInto::<u32>::try_into(recall_range_idx)
+            .expect("Value exceeds u32::MAX")
+            .saturating_mul(
+                storage_config
+                    .num_chunks_in_recall_range
+                    .try_into()
+                    .expect("Value exceeds u32::MAX"),
+            ),
         mining_address: miner_addr,
         chunk: entropy_chunk,
         vdf_step: step_num,
@@ -114,24 +131,195 @@ pub async fn capacity_chunk_solution(
     }
 }
 
-pub async fn mine_blocks(node_ctx: &IrysNodeCtx, blocks: usize) -> eyre::Result<()> {
-    let storage_config = &node_ctx.storage_config;
-    let vdf_config = &node_ctx.vdf_config;
-    let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    for _ in 0..blocks {
-        let poa_solution = capacity_chunk_solution(
-            node_ctx.config.mining_signer.address(),
-            vdf_steps_guard.clone(),
-            vdf_config,
-            storage_config,
-        )
-        .await;
-        let _ = node_ctx
+// Reasons tx could fail to be added to mempool
+#[derive(Debug)]
+pub enum AddTxError {
+    CreateTx(eyre::Report),
+    TxIngress(TxIngressError),
+    Mailbox(MailboxError),
+}
+
+pub struct IrysNodeTest<T = ()> {
+    pub node_ctx: T,
+    pub cfg: IrysNode,
+    pub temp_dir: TempDir,
+}
+
+impl Default for IrysNodeTest<()> {
+    fn default() -> Self {
+        let config = Config::testnet();
+        Self::new_genesis(config)
+    }
+}
+
+impl IrysNodeTest<()> {
+    pub fn new(config: Config) -> Self {
+        Self::new_inner(config, false)
+    }
+
+    pub fn new_genesis(config: Config) -> Self {
+        Self::new_inner(config, true)
+    }
+
+    fn new_inner(mut config: Config, is_genesis: bool) -> Self {
+        let temp_dir = temporary_directory(None, false);
+        config.base_directory = temp_dir.path().to_path_buf();
+        let cfg = IrysNode::new(config, is_genesis);
+        Self {
+            cfg,
+            temp_dir,
+            node_ctx: (),
+        }
+    }
+
+    pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
+        let node_ctx = self
+            .cfg
+            .clone()
+            .start()
+            .await
+            .expect("node cannot be initialized");
+        IrysNodeTest {
+            cfg: self.cfg,
+            node_ctx,
+            temp_dir: self.temp_dir,
+        }
+    }
+}
+
+impl IrysNodeTest<IrysNodeCtx> {
+    pub async fn wait_until_height(
+        &self,
+        target_height: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<()> {
+        let mut retries = 0;
+        let max_retries = max_seconds; // 1 second per retry
+        while self.node_ctx.block_index_guard.read().latest_height() < target_height
+            && retries < max_retries
+        {
+            sleep(Duration::from_secs(1)).await;
+            retries += 1;
+        }
+        if retries == max_retries {
+            Err(eyre::eyre!(
+                "Failed to reach target height after {} retries",
+                retries
+            ))
+        } else {
+            info!(
+                "got block after {} seconds and {} retries",
+                max_seconds, &retries
+            );
+            Ok(())
+        }
+    }
+
+    pub fn get_height(&self) -> u64 {
+        self.node_ctx.block_index_guard.read().latest_height()
+    }
+
+    pub async fn mine_block(&self) -> eyre::Result<()> {
+        self.mine_blocks(1).await
+    }
+
+    pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
+        let height = self.get_height();
+        self.node_ctx.actor_addresses.set_mining(true)?;
+        self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
+            .await?;
+        self.node_ctx.actor_addresses.set_mining(false)
+    }
+
+    pub async fn create_submit_data_tx(
+        &self,
+        account: &IrysSigner,
+        data: Vec<u8>,
+    ) -> Result<IrysTransaction, AddTxError> {
+        let tx = account
+            .create_transaction(data, None)
+            .map_err(AddTxError::CreateTx)?;
+        let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
+
+        match self
+            .node_ctx
             .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()))
-            .await?
-            .unwrap();
+            .mempool
+            .send(TxIngressMessage(tx.header.clone()))
+            .await
+        {
+            Ok(Ok(())) => return Ok(tx),
+            Ok(Err(tx_error)) => return Err(AddTxError::TxIngress(tx_error)),
+            Err(e) => return Err(AddTxError::Mailbox(e)),
+        };
+    }
+
+    pub fn get_tx_header(&self, tx_id: &H256) -> eyre::Result<IrysTransactionHeader> {
+        match self
+            .node_ctx
+            .db
+            .view_eyre(|tx| tx_header_by_txid(tx, tx_id))
+        {
+            Ok(Some(tx_header)) => Ok(tx_header),
+            Ok(None) => Err(eyre::eyre!("No tx header found for txid {:?}", tx_id)),
+            Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
+        }
+    }
+
+    pub fn get_block_by_height(
+        &self,
+        height: u64,
+        include_chunk: bool,
+    ) -> eyre::Result<IrysBlockHeader> {
+        self.node_ctx
+            .block_index_guard
+            .read()
+            .get_item(height as usize)
+            .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
+            .and_then(|block| {
+                self.node_ctx
+                    .db
+                    .view_eyre(|tx| {
+                        irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk)
+                    })?
+                    .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
+            })
+    }
+
+    pub fn get_block_by_hash(
+        &self,
+        hash: &H256,
+        include_chunk: bool,
+    ) -> eyre::Result<IrysBlockHeader> {
+        match &self
+            .node_ctx
+            .db
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, hash, include_chunk))?
+        {
+            Some(db_irys_block) => Ok(db_irys_block.clone()),
+            None => Err(eyre::eyre!("Block with hash {} not found", hash)),
+        }
+    }
+
+    pub async fn stop(self) -> IrysNodeTest<()> {
+        self.node_ctx.stop().await;
+        // this will reload the storage config data too
+        let cfg = IrysNode {
+            irys_node_config: self.cfg.irys_node_config,
+            genesis_timestamp: self.cfg.genesis_timestamp,
+            ..IrysNode::new(self.cfg.config, false)
+        };
+        IrysNodeTest {
+            node_ctx: (),
+            cfg,
+            temp_dir: self.temp_dir,
+        }
+    }
+}
+
+pub async fn mine_blocks(node_ctx: &IrysNodeCtx, blocks: usize) -> eyre::Result<()> {
+    for _ in 0..blocks {
+        mine_block(node_ctx).await?.unwrap();
     }
     Ok(())
 }
@@ -143,7 +331,7 @@ pub async fn mine_block(
     let vdf_config = &node_ctx.vdf_config;
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
     let poa_solution = capacity_chunk_solution(
-        node_ctx.config.mining_signer.address(),
+        node_ctx.node_config.mining_signer.address(),
         vdf_steps_guard.clone(),
         vdf_config,
         storage_config,
@@ -172,7 +360,7 @@ where
 {
     loop {
         let poa_solution = capacity_chunk_solution(
-            node_ctx.config.mining_signer.address(),
+            node_ctx.node_config.mining_signer.address(),
             vdf_steps_guard.clone(),
             vdf_config,
             storage_config,
@@ -237,7 +425,7 @@ pub async fn post_chunk<T, B>(
 /// Returns `Some(PackedChunk)` if found (HTTP 200), `None` otherwise.
 pub async fn get_chunk<T, B>(
     app: &T,
-    ledger: Ledger,
+    ledger: DataLedger,
     chunk_offset: LedgerChunkOffset,
 ) -> Option<PackedChunk>
 where
@@ -266,7 +454,7 @@ where
 /// Returns None if the transaction isn't found in any block.
 pub fn get_block_parent(
     txid: H256,
-    ledger: Ledger,
+    ledger: DataLedger,
     db: &DatabaseProvider,
 ) -> Option<IrysBlockHeader> {
     let read_tx = db
@@ -299,7 +487,7 @@ pub fn get_block_parent(
 
     // Loop tough all the blocks and find the one that contains the txid
     for block_header in block_headers.values() {
-        if block_header.ledgers[ledger].tx_ids.0.contains(&txid) {
+        if block_header.data_ledgers[ledger].tx_ids.0.contains(&txid) {
             return Some(IrysBlockHeader::from(block_header.clone()));
         }
     }
@@ -319,7 +507,7 @@ pub async fn verify_published_chunk<T, B>(
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
     B: MessageBody,
 {
-    if let Some(packed_chunk) = get_chunk(&app, Ledger::Publish, chunk_offset).await {
+    if let Some(packed_chunk) = get_chunk(&app, DataLedger::Publish, chunk_offset).await {
         let unpacked_chunk = unpack(
             &packed_chunk,
             storage_config.entropy_packing_iterations,

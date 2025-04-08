@@ -1,8 +1,15 @@
 use core::fmt;
 use std::{fs::canonicalize, future::Future, ops::Deref, sync::Arc};
 
+use crate::{
+    launcher::CustomEngineNodeLauncher,
+    precompile::irys_executor::{
+        IrysEvmConfig, IrysExecutorBuilder, IrysPayloadBuilder, PrecompileStateProvider,
+    },
+};
 use clap::{command, Args, Parser};
 use irys_config::IrysNodeConfig;
+use irys_database::db::RethDbWrapper;
 use irys_storage::reth_provider::IrysRethProvider;
 use reth::{
     chainspec::EthereumChainSpecParser,
@@ -15,7 +22,7 @@ use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::NodeCommand;
 use reth_consensus::Consensus;
-use reth_db::{init_db, DatabaseEnv, HasName, HasTableType};
+use reth_db::{init_db, HasName, HasTableType};
 use reth_engine_tree::tree::TreeConfig;
 use reth_ethereum_engine_primitives::EthereumEngineValidator;
 use reth_node_api::{FullNodeTypesAdapter, NodeTypesWithDBAdapter};
@@ -32,14 +39,7 @@ use reth_transaction_pool::{
     blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
     EthTransactionValidator, Pool, TransactionValidationTaskExecutor,
 };
-use tracing::info;
-
-use crate::{
-    launcher::CustomEngineNodeLauncher,
-    precompile::irys_executor::{
-        IrysEvmConfig, IrysExecutorBuilder, IrysPayloadBuilder, PrecompileStateProvider,
-    },
-};
+use tracing::{info, warn};
 
 // use crate::node_launcher::CustomNodeLauncher;
 
@@ -54,18 +54,18 @@ macro_rules! vec_of_strings {
 // reth node with custom IrysExecutor
 pub type RethNode = NodeAdapter<
     FullNodeTypesAdapter<
-        NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
-        BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+        NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+        BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
     >,
     Components<
         FullNodeTypesAdapter<
-            NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
-            BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+            NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+            BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
         >,
         Pool<
             TransactionValidationTaskExecutor<
                 EthTransactionValidator<
-                    BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+                    BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
                     EthPooledTransaction,
                 >,
             >,
@@ -82,18 +82,18 @@ pub type RethNode = NodeAdapter<
 // reth node with the standard EVM
 pub type RethNodeStandard = NodeAdapter<
     FullNodeTypesAdapter<
-        NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
-        BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+        NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+        BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
     >,
     Components<
         FullNodeTypesAdapter<
-            NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
-            BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+            NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+            BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
         >,
         Pool<
             TransactionValidationTaskExecutor<
                 EthTransactionValidator<
-                    BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>>,
+                    BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
                     EthPooledTransaction,
                 >,
             >,
@@ -136,6 +136,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     tables: &[T],
     provider: IrysRethProvider,
     latest_block: u64,
+    random_ports: bool,
 ) -> eyre::Result<RethNodeExitHandle> {
     let mut os_args: Vec<String> = std::env::args().collect();
     let bp = os_args.remove(0);
@@ -143,8 +144,6 @@ pub async fn run_node<T: HasName + HasTableType>(
     let mut args = vec_of_strings![
         "node",
         "-vvvvv",
-        "--instance",
-        format!("{}", irys_config.instance_number.unwrap_or(1)),
         "--disable-discovery",
         "--http",
         "--http.api",
@@ -169,6 +168,17 @@ pub async fn run_node<T: HasName + HasTableType>(
             // "--chain",
             // ".reth/dev_genesis.json"
     ];
+
+    // `instance` is mutually exclusive with random ports
+    if random_ports {
+        args.push("--with-unused-ports".to_string());
+        if irys_config.instance_number.is_some() {
+            warn!("Reth instance numbers will not be used when port randomisation is enabled")
+        }
+    } else {
+        args.push("--instance".to_string());
+        args.push(format!("{}", irys_config.instance_number.unwrap_or(1)).to_string())
+    }
 
     args.insert(0, bp.to_string());
     info!("discarding os args: {:?}", os_args);
@@ -248,8 +258,9 @@ pub async fn run_node<T: HasName + HasTableType>(
     let db_path = data_dir.db();
 
     tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
-    let database =
-        Arc::new(init_db(db_path.clone(), db.database_args())?.with_metrics_and_tables(tables));
+    let database = RethDbWrapper::new(
+        init_db(db_path.clone(), db.database_args())?.with_metrics_and_tables(tables),
+    );
 
     let irys_provider = provider;
 
@@ -273,7 +284,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     let handle =
         builder
             .with_types_and_provider::<EthereumNode, BlockchainProvider2<
-                NodeTypesWithDBAdapter<EthereumNode, Arc<DatabaseEnv>>,
+                NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
             >>()
             .with_components(
                 EthereumNode::components()
@@ -297,7 +308,7 @@ pub async fn run_node<T: HasName + HasTableType>(
                     builder.config().datadir(),
                     engine_tree_config,
                     irys_provider,
-                    latest_block
+                    latest_block,
                 );
                 builder.launch_with(launcher)
             })
@@ -343,7 +354,7 @@ pub async fn run_custom_node<Ext, C, L, Fut>(
 where
     C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks + EthChainSpec>,
     Ext: clap::Args + Clone + fmt::Debug,
-    L: Fn(WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, C::ChainSpec>>, Ext) -> Fut,
+    L: Fn(WithLaunchContext<NodeBuilder<RethDbWrapper, C::ChainSpec>>, Ext) -> Fut,
     Fut: Future<Output = eyre::Result<NodeExitReason>>,
 {
     // from reth/bin/reth/src/commands/node/mod.rs:137
@@ -403,7 +414,7 @@ where
     let db_path = data_dir.db();
 
     tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
-    let database = Arc::new(init_db(db_path.clone(), db.database_args())?.with_metrics());
+    let database = RethDbWrapper::new(init_db(db_path.clone(), db.database_args())?.with_metrics());
 
     if with_unused_ports {
         node_config = node_config.with_unused_ports();

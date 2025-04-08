@@ -7,13 +7,9 @@ use alloy_sol_macro::sol;
 use base58::ToBase58;
 use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
-use irys_actors::SolutionFoundMessage;
 use irys_api_server::routes::tx::TxOffset;
-use irys_chain::start_irys_node;
-use irys_config::IrysNodeConfig;
 use irys_database::tables::IngressProofs;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, Address, Config};
+use irys_types::{irys::IrysSigner, Address};
 use k256::ecdsa::SigningKey;
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
@@ -22,7 +18,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use crate::utils::{capacity_chunk_solution, future_or_mine_on_timeout};
+use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
 
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
@@ -47,17 +43,10 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "info");
 
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_programmable_data_basic_external"), false);
-
-    let testnet_config = Config::testnet();
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let main_address = config.mining_signer.address();
-    let account1 = IrysSigner::random_signer(&testnet_config);
-
-    config.extend_genesis_accounts(vec![
+    let mut node = IrysNodeTest::default();
+    let main_address = node.cfg.config.miner_address();
+    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -80,11 +69,10 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
             },
         ),
     ]);
-
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
-    node.actor_addresses.stop_mining()?;
+    let node = node.start().await;
+    node.node_ctx.actor_addresses.stop_mining()?;
     wait_for_packing(
-        node.actor_addresses.packing.clone(),
+        node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
     .await?;
@@ -100,7 +88,13 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
-        .on_http("http://localhost:8080/v1/execution-rpc".parse()?);
+        .on_http(
+            format!(
+                "http://127.0.0.1:{}/v1/execution-rpc",
+                node.node_ctx.config.port
+            )
+            .parse()?,
+        );
 
     let deploy_builder =
         IrysProgrammableDataBasic::deploy_builder(alloy_provider.clone()).gas(29506173);
@@ -108,12 +102,12 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     let mut deploy_fut = Box::pin(deploy_builder.deploy());
 
     let contract_address = future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut deploy_fut,
         Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
+        node.node_ctx.vdf_steps_guard.clone(),
+        &node.node_ctx.vdf_config,
+        &node.node_ctx.storage_config,
     )
     .await??;
 
@@ -126,7 +120,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         precompile_address
     );
 
-    let http_url = "http://127.0.0.1:8080";
+    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -144,7 +138,12 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     info!("waiting for tx header...");
 
     let recv_tx = loop {
-        let txs = node.actor_addresses.mempool.send(GetBestMempoolTxs).await;
+        let txs = node
+            .node_ctx
+            .actor_addresses
+            .mempool
+            .send(GetBestMempoolTxs)
+            .await;
         match txs {
             Ok(transactions) if !transactions.is_empty() => {
                 break transactions[0].clone();
@@ -163,7 +162,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     // now we wait for an ingress proof to be generated for this tx (automatic once all chunks have been uploaded)
     let ingress_proof = loop {
         // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
-        let ro_tx = &node.db.0.tx().unwrap();
+        let ro_tx = &node.node_ctx.db.0.tx().unwrap();
         match ro_tx.get::<IngressProofs>(recv_tx.data_root).unwrap() {
             Some(ip) => break ip,
             None => sleep(Duration::from_millis(100)).await,
@@ -204,32 +203,17 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     });
 
     let _start_offset = future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
+        node.node_ctx.vdf_steps_guard.clone(),
+        &node.node_ctx.vdf_config,
+        &node.node_ctx.storage_config,
     )
     .await?
     .unwrap();
 
-    for _i in 1..10 {
-        let poa_solution = capacity_chunk_solution(
-            node.config.mining_signer.address(),
-            node.vdf_steps_guard.clone(),
-            &node.vdf_config,
-            &node.storage_config,
-        )
-        .await;
-
-        let _ = node
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()))
-            .await?
-            .unwrap();
-    }
+    mine_blocks(&node.node_ctx, 10).await?;
 
     // sleep so the client has a chance to read the chunks
     sleep(Duration::from_millis(100_000)).await;

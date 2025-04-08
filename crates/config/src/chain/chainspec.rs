@@ -1,5 +1,5 @@
 use irys_primitives::GenesisAccount;
-use irys_types::{Address, IrysBlockHeader};
+use irys_types::{config, Address, IrysBlockHeader};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder};
 use tracing::debug;
 
@@ -14,9 +14,17 @@ pub struct IrysChainSpecBuilder {
 
 impl IrysChainSpecBuilder {
     /// Construct a new builder from the mainnet chain spec.
-    pub fn testnet() -> Self {
-        let mut genesis = IrysBlockHeader::new_mock_header();
-        genesis.height = 0;
+    pub fn from_config(config: &config::Config) -> Self {
+        let genesis = IrysBlockHeader {
+            oracle_irys_price: config.genesis_token_price,
+            ema_irys_price: config.genesis_token_price,
+            miner_address: config.miner_address(),
+            reward_address: config.miner_address(),
+            height: 0,
+            system_ledgers: vec![], // Make sure theres no invalid txids in the system ledger
+            // todo: we need a proper genesis block in the config rather than re-using a mock header
+            ..IrysBlockHeader::new_mock_header()
+        };
         Self {
             reth_builder: ChainSpecBuilder {
                 chain: Some(IRYS_TESTNET.chain),
@@ -34,10 +42,6 @@ impl IrysChainSpecBuilder {
         genesis.evm_block_hash = cs.genesis_hash();
         debug!("EVM genesis block hash: {}", &genesis.evm_block_hash);
         (cs, genesis)
-    }
-
-    pub fn new() -> Self {
-        Default::default()
     }
 
     /// extend the genesis accounts

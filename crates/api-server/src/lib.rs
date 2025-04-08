@@ -1,16 +1,14 @@
 pub mod error;
 pub mod routes;
-use std::{net::SocketAddr, sync::Arc};
-
 use actix::Addr;
 use actix_cors::Cors;
+use actix_web::dev::Server;
 use actix_web::{
     dev::HttpServiceFactory,
     error::InternalError,
     web::{self, JsonConfig},
     App, HttpResponse, HttpServer,
 };
-
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,
@@ -18,12 +16,14 @@ use irys_actors::{
 use irys_database::{tables::PeerListItems, walk_all};
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
-use irys_types::{app_state::DatabaseProvider, Config};
+use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use reth_db::Database;
 use routes::{
-    block, get_chunk, index, network_config, peer_list, post_chunk, post_version, price,
-    proxy::proxy, tx,
+    block, block_index, get_chunk, index, network_config, peer_list, post_chunk, post_version,
+    price, proxy::proxy, tx,
 };
+use std::net::TcpListener;
+use std::{net::SocketAddr, sync::Arc};
 use tracing::{debug, info};
 
 #[derive(Clone)]
@@ -35,12 +35,13 @@ pub struct ApiState {
     // TODO: slim this down to what we actually use - beware the types!
     // TODO: remove the Option<>
     pub reth_provider: Option<RethNodeProvider>,
+    pub reth_http_url: Option<String>,
     pub block_tree: Option<BlockTreeReadGuard>,
     pub block_index: Option<BlockIndexReadGuard>,
 }
 
 impl ApiState {
-    pub fn get_known_peers(&self) -> eyre::Result<Vec<SocketAddr>> {
+    pub fn get_known_peers(&self) -> eyre::Result<Vec<PeerAddress>> {
         // Attempt to create a read transaction
         let read_tx = self
             .db
@@ -52,24 +53,23 @@ impl ApiState {
             walk_all::<PeerListItems, _>(&read_tx).map_err(|e| eyre::eyre!("Read error: {}", e))?;
 
         // Extract IP addresses and Port (SocketAddr) into a Vec<String>
-        let ips: Vec<SocketAddr> = peer_list_items
+        let addresses: Vec<PeerAddress> = peer_list_items
             .iter()
             .map(|(_miner_addr, entry)| entry.address)
             .collect();
 
-        Ok(ips)
+        Ok(addresses)
     }
 }
 
 pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
-        .route("/execution-rpc", web::to(proxy))
-        .route("/info", web::get().to(index::info_route))
-        .route(
-            "/network/config",
-            web::get().to(network_config::get_network_config),
-        )
         .route("/block/{block_tag}", web::get().to(block::get_block))
+        .route(
+            "/block_index",
+            web::get().to(block_index::block_index_route),
+        )
+        .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route(
             "/chunk/data_root/{ledger_id}/{data_root}/{offset}",
             web::get().to(get_chunk::get_chunk_by_data_root_offset),
@@ -78,19 +78,24 @@ pub fn routes() -> impl HttpServiceFactory {
             "/chunk/ledger/{ledger_id}/{ledger_offset}",
             web::get().to(get_chunk::get_chunk_by_ledger_offset),
         )
-        .route("/chunk", web::post().to(post_chunk::post_chunk))
+        .route("/execution-rpc", web::to(proxy))
+        .route("/info", web::get().to(index::info_route))
+        .route(
+            "/network/config",
+            web::get().to(network_config::get_network_config),
+        )
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
-        .route("/tx/{tx_id}", web::get().to(tx::get_tx_header_api))
+        .route("/price/{ledger}/{size}", web::get().to(price::get_price))
+        .route("/tx", web::post().to(tx::post_tx))
+        .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))
         .route(
             "/tx/{tx_id}/local/data_start_offset",
             web::get().to(tx::get_tx_local_start_offset),
         )
-        .route("/tx", web::post().to(tx::post_tx))
-        .route("/price/{ledger}/{size}", web::get().to(price::get_price))
         .route("/version", web::post().to(post_version::post_version))
 }
 
-pub async fn run_server(app_state: ApiState) {
+pub async fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     let port = app_state.config.port;
     info!(?port, "Starting API server");
 
@@ -109,14 +114,31 @@ pub async fn run_server(app_state: ApiState) {
                     }),
             )
             .service(routes())
+            //FIXME this default route is not behind a api version, should it be before 1.0 release?
             .route("/", web::get().to(index::info_route))
             .wrap(Cors::permissive())
     })
-    .bind(("0.0.0.0", port))
+    .listen(listener)
     .unwrap()
     .run()
-    .await
-    .unwrap();
+}
+
+// Adapted from /actix-web-4.9.0/src/server.rs create_listener
+// This is required as we need to access the TcpListener directly to figure out what port we've been assigned
+// if randomisation (requested port 0) is used.
+pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let backlog = 1024;
+    let domain = Domain::for_address(addr);
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    // need this so application restarts can pick back up the same port without suffering from time-wait
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    // clamp backlog to max u32 that fits in i32 range
+    let backlog = core::cmp::min(backlog, i32::MAX as u32) as i32;
+    socket.listen(backlog)?;
+    let listener = TcpListener::from(socket);
+    Ok(listener)
 }
 
 //==============================================================================
@@ -169,6 +191,7 @@ pub async fn run_server(app_state: ApiState) {
 //         mempool: mempool_addr,
 //         chunk_provider: Arc::new(chunk_provider),
 //         reth_provider: None,
+//         reth_http_url: None,
 //         block_tree: None,
 //         block_index: None,
 //     };
@@ -218,7 +241,7 @@ pub async fn run_server(app_state: ApiState) {
 //             data_size,
 //             data_path,
 //             bytes: Base64(data_bytes[min..max].to_vec()),
-//             tx_offset: tx_chunk_offset as u32,
+//             tx_offset: tx_chunk_offset.try_into().expect("Value exceeds u32::MAX"),
 //         };
 
 //         // Make a POST request with JSON payload

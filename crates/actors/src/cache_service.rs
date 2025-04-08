@@ -1,6 +1,6 @@
 use core::{future::Future, task::Poll, time::Duration};
 use eyre::Context;
-use futures::{FutureExt as _, StreamExt as _};
+use futures::FutureExt as _;
 use irys_database::{
     db_cache::DataRootLRUEntry,
     delete_cached_chunks_by_data_root, get_cache_size,
@@ -17,11 +17,13 @@ use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
-use tokio::sync::{
-    mpsc::{UnboundedReceiver, UnboundedSender},
-    oneshot,
+use tokio::{
+    sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender},
+        oneshot,
+    },
+    task::JoinHandle,
 };
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
@@ -31,55 +33,35 @@ pub enum CacheServiceAction {
 
 pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
 
-#[derive(Debug, Clone)]
-pub struct ChunkCacheServiceHandle {
-    pub sender: CacheServiceSender,
+#[derive(Debug)]
+pub struct ChunkCacheService {
+    pub config: Config,
+    pub db: DatabaseProvider,
+    pub msg_rx: UnboundedReceiver<CacheServiceAction>,
+    pub shutdown: GracefulShutdown,
 }
 
-impl ChunkCacheServiceHandle {
+impl ChunkCacheService {
     pub fn spawn_service(
-        tx: CacheServiceSender,
-        rx: UnboundedReceiver<CacheServiceAction>,
-        exec: TaskExecutor,
+        exec: &TaskExecutor,
         db: DatabaseProvider,
+        rx: UnboundedReceiver<CacheServiceAction>,
         config: Config,
-    ) -> Self {
+    ) -> JoinHandle<()> {
         exec.spawn_critical_with_graceful_shutdown_signal("Cache Service", |shutdown| async move {
             let cache_service = ChunkCacheService {
                 shutdown,
                 db,
                 config,
-                msg_rx: UnboundedReceiverStream::new(rx),
+                msg_rx: rx,
             };
             cache_service
                 .await
                 .wrap_err("Error running cache_service")
                 .unwrap();
-        });
-        Self { sender: tx }
+        })
     }
 
-    pub fn send(
-        &self,
-        msg: CacheServiceAction,
-    ) -> core::result::Result<(), tokio::sync::mpsc::error::SendError<CacheServiceAction>> {
-        self.sender.send(msg)
-    }
-}
-
-#[derive(Debug)]
-pub struct ChunkCacheService {
-    pub config: Config,
-    pub db: DatabaseProvider,
-    pub msg_rx: UnboundedReceiverStream<CacheServiceAction>,
-    pub shutdown: GracefulShutdown,
-}
-
-// TODO: improve this, store state in-memory (derived from DB state) to reduce db lookups
-// take into account other usage (i.e API/gossip) for cache expiry
-// partition expiries to prevent holding the write lock for too long
-// use a two-stage pass - read only find, and then a write-locked prune (with checks to make sure expiry hasn't been updated inbetween)
-impl ChunkCacheService {
     fn on_handle_message(&self, msg: CacheServiceAction) {
         match msg {
             CacheServiceAction::OnFinalizedBlock(finalized_height, sender) => {
@@ -132,7 +114,7 @@ impl ChunkCacheService {
                     ?data_root,
                     ?last_height,
                     ?prune_height,
-                    "expiring ingress proof ",
+                    "expiring ingress proof",
                 );
                 write_tx.delete::<DataRootLRU>(data_root, None)?;
                 write_tx.delete::<IngressProofs>(data_root, None)?;
@@ -186,7 +168,7 @@ impl Future for ChunkCacheService {
             Poll::Ready(guard) => {
                 debug!("Shutting down CacheService");
                 // process all remaining tasks
-                while let Poll::Ready(Some(msg)) = this.msg_rx.poll_next_unpin(cx) {
+                while let Poll::Ready(Some(msg)) = this.msg_rx.poll_recv(cx) {
                     this.on_handle_message(msg);
                 }
                 drop(guard);
@@ -203,7 +185,7 @@ impl Future for ChunkCacheService {
             "cache",
             "cache service channel",
             DRAIN_BUDGET,
-            this.msg_rx.poll_next_unpin(cx),
+            this.msg_rx.poll_recv(cx),
             |msg| this.on_handle_message(msg),
             error!("cache channel closed");
         );

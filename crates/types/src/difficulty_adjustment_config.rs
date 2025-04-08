@@ -37,13 +37,14 @@ pub fn calculate_initial_difficulty(
     difficulty_config: &DifficultyAdjustmentConfig,
     storage_config: &StorageConfig,
     storage_module_count: u64,
-) -> Result<U256, &'static str> {
+) -> eyre::Result<U256> {
     let hashes_per_sec = storage_config.num_chunks_in_recall_range * storage_module_count;
     let block_time = difficulty_config.target_block_time;
 
-    if hashes_per_sec == 0 || block_time == 0 {
-        return Err("Input values cannot be zero");
-    }
+    eyre::ensure!(
+        !(hashes_per_sec == 0 || block_time == 0),
+        "Input values cannot be zero"
+    );
 
     let max_diff = U256::MAX;
     let block_hashrate = U256::from(hashes_per_sec) * U256::from(block_time);
@@ -124,7 +125,7 @@ pub fn calculate_difficulty(
     // Calculate difference
     let percent_diff = actual_block_time.abs_diff(target_block_time).as_millis() * 100
         / target_block_time.as_millis();
-    let min_threshold = (difficulty_config.min_adjustment_factor * dec![100.0])
+    let min_threshold: u128 = (difficulty_config.min_adjustment_factor * dec![100.0])
         .try_into()
         .unwrap();
 
@@ -132,7 +133,7 @@ pub fn calculate_difficulty(
         actual_block_time,
         target_block_time,
         percent_different: percent_diff as u32,
-        min_threshold: min_threshold as u32,
+        min_threshold: min_threshold.try_into().expect("Value exceeds u32::MAX"),
         is_adjusted: percent_diff > min_threshold,
     };
 

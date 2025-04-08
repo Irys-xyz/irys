@@ -3,7 +3,6 @@ use alloy_primitives::{bytes, Address};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58};
-use bytes::Buf;
 use eyre::{Error, OptionExt};
 use openssl::sha;
 use rand::RngCore;
@@ -107,19 +106,15 @@ impl Compact for U256 {
         // Create a temporary byte array for the big-endian representation of `self`
         let mut bytes = [0u8; 32];
         self.to_big_endian(&mut bytes);
-
-        // Write the bytes to the buffer
-        buf.put_slice(&bytes);
-
-        // Return the number of bytes written (32 bytes for a U256)
-        bytes.len()
+        bytes.to_compact(buf)
     }
 
     #[inline]
-    fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let res = Self::from_big_endian(&buf[..len]);
-        buf.advance(len);
-        (res, buf)
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        // Disambiguate and call the correct H256::from method
+        let (v, remaining_buf) = <[u8; 32]>::from_compact(buf, len);
+        // Fully qualify this call to avoid calling DecodeHash::from
+        (<U256 as From<[u8; 32]>>::from(v), remaining_buf)
     }
 }
 
@@ -129,6 +124,17 @@ impl Compact for U256 {
 construct_fixed_hash! {
     /// A 256-bit hash type (32 bytes).
     pub struct H256(32);
+}
+
+impl H256 {
+    pub fn from_base58(string: &str) -> Self {
+        let decoded = string.from_base58().expect("to parse base58 string");
+        let array: [u8; 32] = decoded.as_slice()[..32]
+            .try_into()
+            .expect("Decoded base58 string should have at least 32 bytes");
+
+        H256(array)
+    }
 }
 
 // Manually implement Arbitrary for H256
@@ -237,7 +243,6 @@ pub mod address_base58_stringify {
     use base58::{FromBase58, ToBase58};
     use serde::{self, de, Deserialize, Deserializer, Serializer};
 
-    #[allow(dead_code)]
     pub fn serialize<S>(value: &Address, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -253,18 +258,53 @@ pub mod address_base58_stringify {
 
         // Decode the base58 string into bytes
         let bytes = FromBase58::from_base58(s.as_str())
-            .map_err(|e| format!("Failed to decode from base58 {:?}", e))
-            .expect("base58 should prase");
+            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {:?}", e)))?;
 
         // Ensure the byte array is exactly 20 bytes
         if bytes.len() != 20 {
             return Err(de::Error::invalid_length(
                 bytes.len(),
-                &"expected 65 bytes for signature",
+                &"expected 20 bytes for address",
             ));
         }
 
         Ok(Address::from_slice(&bytes))
+    }
+}
+pub mod option_address_base58_stringify {
+    use super::address_base58_stringify;
+    use alloy_primitives::Address;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Option<Address>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(address) => address_base58_stringify::serialize(address, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Address>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::deserialize(deserializer)? {
+            None => Ok(None),
+            Some(s) => {
+                // re-deserialize the string to an Address
+                let s_deserializer =
+                    serde::de::value::StringDeserializer::<serde::de::value::Error>::new(s);
+                match address_base58_stringify::deserialize(s_deserializer) {
+                    Ok(address) => Ok(Some(address)),
+                    Err(e) => Err(serde::de::Error::custom(format!(
+                        "Failed to deserialize address: {}",
+                        e
+                    ))),
+                }
+            }
+        }
     }
 }
 
@@ -759,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn test_u256_from_compact() {
+    fn test_u256_compact_round_trip() {
         // Create a U256 value and convert it to compact bytes
         let original_value = U256::from(123456789u64);
         let mut buf = BytesMut::with_capacity(32);
