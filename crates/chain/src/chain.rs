@@ -1463,40 +1463,6 @@ impl IrysNode {
         Ok(actor_main_thread_handle)
     }
 
-    fn create_genesis_header(
-        &self,
-    ) -> Result<(ChainSpec, Arc<IrysBlockHeader>, Vec<CommitmentTransaction>), eyre::Error> {
-        let (reth_chain_spec, irys_genesis) = self.irys_node_config.chainspec_builder.build();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-
-        let mut genesis_header = IrysBlockHeader {
-            diff: calculate_initial_difficulty(
-                &self.difficulty_adjustment_config,
-                &self.storage_config,
-                // TODO: where does this magic constant come from?
-                3,
-            )?,
-            timestamp: now.as_millis(),
-            last_diff_timestamp: now.as_millis(),
-            system_ledgers: vec![SystemTransactionLedger {
-                ledger_id: SystemLedger::Commitment.into(),
-                tx_ids: H256List::default(),
-            }],
-            ..irys_genesis
-        };
-        let commitments = get_genesis_commitments(&self.config);
-
-        // Add the commitment txids to the system ledger in the block header one by one
-        for commitment_id in commitments.iter().map(|commitment| commitment.id) {
-            // We know index 0 is the Commitment ledger because we just created it at that index
-            genesis_header.system_ledgers[0].tx_ids.push(commitment_id);
-        }
-
-        let irys_genesis = Arc::new(genesis_header);
-
-        Ok((reth_chain_spec, irys_genesis, commitments))
-    }
-
     fn init_reth_thread(
         &self,
         reth_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
