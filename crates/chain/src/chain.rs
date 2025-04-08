@@ -223,7 +223,6 @@ async fn fetch_block_index(
 //#[tracing::instrument(err)]
 async fn sync_state_from_peers(
     trusted_peers: Vec<SocketAddr>,
-    local_node: SocketAddr,
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
 ) -> eyre::Result<()> {
@@ -236,7 +235,6 @@ async fn sync_state_from_peers(
     //initialize queue
     let block_queue: Arc<tokio::sync::Mutex<VecDeque<BlockIndexItem>>> =
         Arc::new(Mutex::new(VecDeque::new()));
-    let txn_queue: Arc<tokio::sync::Mutex<VecDeque<H256>>> = Arc::new(Mutex::new(VecDeque::new()));
 
     info!("Discovering peers...");
     if let Some(new_peers_found) =
@@ -636,7 +634,6 @@ impl IrysNode {
         if !self.data_exists && !self.is_genesis {
             sync_state_from_peers(
                 ctx.config.trusted_peers.clone(),
-                local_addr,
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
             )
