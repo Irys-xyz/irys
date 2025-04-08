@@ -237,7 +237,7 @@ async fn sync_state_from_peers(
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
 
     // lets give the local api a few second to load...
-    sleep(Duration::from_millis(10000));
+    sleep(Duration::from_millis(15000));
 
     //initialize queue
     let block_queue: Arc<tokio::sync::Mutex<VecDeque<BlockIndexItem>>> =
