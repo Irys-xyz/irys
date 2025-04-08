@@ -40,23 +40,23 @@ use irys_gossip_service::{GossipResult, ServiceHandleWithShutdownSignal};
 use irys_packing::{PackingType, PACKING_TYPE};
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
+
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 use irys_storage::{
     irys_consensus_data_db::open_or_create_irys_consensus_data_db,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
-    ChunkProvider, ChunkType, StorageModule, StorageModuleVec,
+    ChunkProvider, ChunkType, StorageModule,
 };
 
 use irys_types::{
     app_state::DatabaseProvider, block::CombinedBlockHeader, calculate_initial_difficulty,
     vdf_config::VDFStepsConfig, CommitmentTransaction, Config, DifficultyAdjustmentConfig,
-    GossipData, H256List, IrysBlockHeader, IrysTransactionHeader, OracleConfig,
-    PartitionChunkRange, StorageConfig, SystemTransactionLedger, CHUNK_SIZE, H256,
+    GossipData, IrysBlockHeader, IrysTransactionHeader, OracleConfig,
+    PartitionChunkRange, StorageConfig, CHUNK_SIZE, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
-use reth::rpc::eth::EthApiServer as _;
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
@@ -102,7 +102,7 @@ pub struct IrysNodeCtx {
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
-    _stop_guard: StopGuard,
+    stop_guard: StopGuard,
 }
 
 async fn fetch_txn(
@@ -376,7 +376,7 @@ impl IrysNodeCtx {
         let _ = self.reth_shutdown_sender.send(()).await;
         let _ = self.reth_thread_handle.unwrap().join();
         debug!("Main actor thread and reth thread stopped");
-        self._stop_guard.mark_stopped();
+        self.stop_guard.mark_stopped();
     }
 
     pub fn start_mining(&self) -> eyre::Result<()> {
@@ -425,683 +425,6 @@ impl Clone for StopGuard {
     }
 }
 
-pub async fn start_irys_node(
-    node_config: IrysNodeConfig,
-    storage_config: StorageConfig,
-    mut config: Config,
-) -> eyre::Result<IrysNodeCtx> {
-    info!("Using directory {:?}", &node_config.base_directory);
-
-    // Delete the .irys folder if we are not persisting data on restart
-    let base_dir = node_config.instance_directory();
-    if fs::exists(&base_dir).unwrap_or(false) && config.reset_state_on_restart {
-        // remove existing data directory as storage modules are packed with a different miner_signer generated next
-        info!("Removing .irys folder {:?}", &base_dir);
-        fs::remove_dir_all(&base_dir).expect("Unable to remove .irys folder");
-    }
-
-    // Autogenerates the ".irys_submodules.toml" in dev mode
-    let storage_module_config = StorageSubmodulesConfig::load(base_dir.clone()).unwrap();
-
-    if PACKING_TYPE != PackingType::CPU && storage_config.chunk_size != CHUNK_SIZE {
-        error!("GPU packing only supports chunk size {}!", CHUNK_SIZE)
-    }
-
-    // we create the listener here so we know the port before we start passing around `config`
-    let listener = create_listener(SocketAddr::new(
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        config.port,
-    ))?;
-    // if `config.port` == 0, the assigned port will be random (decided by the OS)
-    // we re-assign the configuration with the actual port here.
-    let random_ports = if config.port == 0 {
-        config.port = listener
-            .local_addr()
-            .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?
-            .port();
-        true
-    } else {
-        false
-    };
-
-    let (reth_handle_sender, reth_handle_receiver) =
-        oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
-    let (irys_node_handle_sender, irys_node_handle_receiver) = oneshot::channel::<IrysNodeCtx>();
-    let (reth_chainspec, mut irys_genesis) = node_config.chainspec_builder.build();
-    let arc_node_config = Arc::new(node_config);
-    let difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
-
-    let commitments = add_genesis_commitments(&mut irys_genesis, &config);
-
-    // TODO: Hard coding 3 for storage module count isn't great here,
-    // eventually we'll want to relate this to the genesis config
-    irys_genesis.diff =
-        calculate_initial_difficulty(&difficulty_adjustment_config, &storage_config, 3).unwrap();
-
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    irys_genesis.timestamp = now.as_millis();
-    irys_genesis.last_diff_timestamp = irys_genesis.timestamp;
-    let arc_genesis = Arc::new(irys_genesis);
-
-    let mut storage_modules: StorageModuleVec = Vec::new();
-
-    let at_genesis;
-    let latest_block_index: Option<irys_database::BlockIndexItem>;
-
-    let latest_block_height;
-    let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new({
-        let idx = BlockIndex::default();
-        let i = idx.init(arc_node_config.clone()).await.unwrap();
-
-        at_genesis = i.get_item(0).is_none();
-        if at_genesis {
-            debug!("At genesis!")
-        } else {
-            debug!("Not at genesis!")
-        }
-        latest_block_index = i.get_latest_item().cloned();
-        latest_block_height = i.latest_height();
-        debug!(
-            "Requesting prune until block height {}",
-            &latest_block_height
-        );
-
-        i
-    }));
-
-    let cloned_arc = arc_node_config.clone();
-
-    // Spawn thread and runtime for actors
-    let arc_config_copy = arc_node_config.clone();
-    let irys_provider = irys_storage::reth_provider::create_provider();
-
-    // clone as this gets `move`d into the thread
-    let irys_provider_1 = irys_provider.clone();
-
-    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let mut task_manager = TaskManager::new(tokio_runtime.handle().clone());
-    let task_exec = task_manager.executor();
-    let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
-    let (main_actor_thread_shutdown_tx, mut main_actor_thread_shutdown_rx) =
-        tokio::sync::mpsc::channel::<()>(1);
-
-    let actor_main_thread_handle = std::thread::Builder::new()
-        .name("actor-main-thread".to_string())
-        .stack_size(32 * 1024 * 1024)
-        .spawn(move || {
-            let node_config = arc_config_copy.clone();
-            let reth_node_handle = System::new().block_on(async move {
-                let mut arbiters = Vec::new();
-                let irys_db_env = open_or_create_irys_consensus_data_db(
-                    &arc_node_config.irys_consensus_data_dir(),
-                ).unwrap();
-                // the RethNodeHandle doesn't *need* to be Arc, but it will reduce the copy cost
-                let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await.unwrap()));
-                let reth_db = reth_node.provider.database.db.clone();
-                let irys_db = DatabaseProvider(Arc::new(irys_db_env));
-                let vdf_config = VDFStepsConfig::new(&config);
-
-                check_db_version_and_run_migrations_if_needed(&reth_db, &irys_db).unwrap();
-
-                let (service_senders, receivers) = ServiceSenders::new();
-                let _handle = ChunkCacheService::spawn_service(&task_exec, irys_db.clone(), receivers.chunk_cache, config.clone());
-
-                let latest_block = latest_block_index
-                    .map(|b| {
-                        database::block_header_by_hash(&irys_db.tx().unwrap(), &b.block_hash, false)
-                            .unwrap()
-                            .unwrap()
-                    })
-                    .map(Arc::new)
-                    .unwrap_or(arc_genesis.clone());
-
-                // Initialize the epoch_service actor to handle partition ledger assignments
-                let epoch_config = EpochServiceConfig::new(&config);
-
-                let miner_address = node_config.mining_signer.address();
-                debug!("Miner address {:?}", miner_address);
-
-                let reth_service = RethServiceActor::new(reth_node.clone(), irys_db.clone());
-                let reth_arbiter = Arbiter::new();
-                SystemRegistry::set(RethServiceActor::start_in_arbiter(
-                    &reth_arbiter.handle(),
-                    |_| reth_service,
-                ));
-
-                debug!(
-                    "JESSEDEBUG setting head to block {} ({})",
-                    &latest_block.evm_block_hash, &latest_block.height
-                );
-
-                {
-                    let context = RethNodeContext::new(reth_node.clone().into())
-                        .await
-                        .map_err(|e| eyre::eyre!("Error connecting to Reth: {}", e))
-                        .unwrap();
-
-                    let latest = context
-                        .rpc
-                        .inner
-                        .eth_api()
-                        .block_by_number(BlockNumberOrTag::Latest, false)
-                        .await;
-
-                    let safe = context
-                        .rpc
-                        .inner
-                        .eth_api()
-                        .block_by_number(BlockNumberOrTag::Safe, false)
-                        .await;
-
-                    let finalized = context
-                        .rpc
-                        .inner
-                        .eth_api()
-                        .block_by_number(BlockNumberOrTag::Finalized, false)
-                        .await;
-
-                    debug!(
-                        "JESSEDEBUG FCU S latest {:?}, safe {:?}, finalized {:?}",
-                        &latest, &safe, &finalized
-                    );
-
-
-                    if latest.unwrap().unwrap().header.number != latest_block.height {
-                        error!("Reth is out of sync with Irys block index! recovery will be attempted.")
-                    };
-
-                }
-
-                RethServiceActor::from_registry()
-                    .send(ForkChoiceUpdateMessage {
-                        head_hash: BlockHashType::Evm(latest_block.evm_block_hash),
-                        confirmed_hash: Some(BlockHashType::Evm(latest_block.evm_block_hash)),
-                        finalized_hash: None,
-                    })
-                    .await
-                    .unwrap()
-                    .unwrap();
-
-                // Initialize the block_index actor and tell it about the genesis block
-                let block_index_actor =
-                    BlockIndexService::new(block_index.clone(), storage_config.clone());
-                SystemRegistry::set(block_index_actor.start());
-                let block_index_actor_addr = BlockIndexService::from_registry();
-
-                let block_index_guard = block_index_actor_addr
-                    .send(GetBlockIndexGuardMessage)
-                    .await
-                    .unwrap();
-
-                if at_genesis {
-                    irys_db
-                        .update_eyre(|tx| {
-                            commitments
-                                .iter()
-                                .map(|commitment| {
-                                    debug!("commitment: {}", commitment.id.0.to_base58());
-                                    insert_commitment_tx(tx, commitment)
-                                })
-                                .collect::<eyre::Result<()>>()
-                        })
-                        .expect("inserting commitment tx should succeed");
-                    irys_db.update_eyre(|tx| irys_database::insert_block_header(tx, &arc_genesis))
-                    .unwrap();
-
-                    let msg = BlockFinalizedMessage {
-                        block_header: arc_genesis.clone(),
-                        all_txs: Arc::new(vec![]),
-                    };
-                    match block_index_actor_addr.send(msg).await {
-                        Ok(_) => info!("Genesis block indexed"),
-                        Err(_) => panic!("Failed to index genesis block"),
-                    }
-                }
-
-                debug!("AT GENESIS {}", at_genesis);
-
-                // need to start before the epoch service, as epoch service calls from_registry that triggers broadcast mining service initialization
-                let broadcast_arbiter = Arbiter::new();
-                let broadcast_mining_service =
-                    BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
-                        BroadcastMiningService::default()
-                    });
-                SystemRegistry::set(broadcast_mining_service.clone());
-
-                let mut epoch_service = EpochServiceActor::new(epoch_config.clone(), &config, block_index_guard.clone());
-                // initialize the epoch service from block 1
-                let storage_module_infos = epoch_service.initialize(&irys_db, storage_module_config.clone()).await.expect("Failed to initialize epoch service");
-                let epoch_service_actor_addr = epoch_service.start();
-
-                // Retrieve ledger assignments
-                let ledgers_guard = epoch_service_actor_addr
-                    .send(GetLedgersGuardMessage)
-                    .await
-                    .unwrap();
-
-                {
-                    let ledgers = ledgers_guard.read();
-                    debug!("ledgers: {:?}", ledgers);
-                }
-
-                let partition_assignments_guard = epoch_service_actor_addr
-                    .send(GetPartitionAssignmentsGuardMessage)
-                    .await
-                    .unwrap();
-
-                // Create a list of storage modules wrapping the storage files
-                for info in storage_module_infos {
-                    let arc_module = Arc::new(
-                        StorageModule::new(
-                            &arc_node_config.storage_module_dir(),
-                            &info,
-                            storage_config.clone(),
-                        )
-                        // TODO: remove this unwrap
-                        .unwrap(),
-                    );
-                    storage_modules.push(arc_module.clone());
-                }
-
-                let (gossip_service, gossip_sender) = irys_gossip_service::GossipService::new(
-                    &config.gossip_service_bind_ip,
-                    config.gossip_service_port,
-                    irys_db.clone(),
-                );
-
-                let block_tree_service = BlockTreeService::new(
-                    irys_db.clone(),
-                    block_index.clone(),
-                    &miner_address,
-                    block_index_guard.clone(),
-                    storage_config.clone(),
-                    service_senders.clone(),
-                );
-                let block_tree_arbiter = Arbiter::new();
-                SystemRegistry::set(BlockTreeService::start_in_arbiter(
-                    &block_tree_arbiter.handle(),
-                    |_| block_tree_service,
-                ));
-                let block_tree_service = BlockTreeService::from_registry();
-
-                let block_tree_guard = block_tree_service
-                    .send(GetBlockTreeGuardMessage)
-                    .await
-                    .unwrap();
-                let _handle = EmaService::spawn_service(&task_exec, block_tree_guard.clone(),  receivers.ema, &config);
-
-                let peer_list_service = PeerListService::new(irys_db.clone());
-                let peer_list_arbiter = Arbiter::new();
-                SystemRegistry::set(PeerListService::start_in_arbiter(
-                    &peer_list_arbiter.handle(),
-                    |_| peer_list_service,
-                ));
-
-                let mempool_service = MempoolService::new(
-                    irys_db.clone(),
-                    reth_db.clone(),
-                    reth_node.task_executor.clone(),
-                    node_config.mining_signer.clone(),
-                    storage_config.clone(),
-                    storage_modules.clone(),
-                    block_tree_guard.clone(),
-                    &config,
-                    gossip_sender.clone(),
-                );
-                let mempool_arbiter = Arbiter::new();
-                SystemRegistry::set(MempoolService::start_in_arbiter(
-                    &mempool_arbiter.handle(),
-                    |_| mempool_service,
-                ));
-                let mempool_addr = MempoolService::from_registry();
-
-                let chunk_migration_service = ChunkMigrationService::new(
-                    block_index.clone(),
-                    storage_config.clone(),
-                    storage_modules.clone(),
-                    irys_db.clone(),
-                    service_senders.clone()
-                );
-                SystemRegistry::set(chunk_migration_service.start());
-
-                let vdf_service_actor = VdfService::new(block_index_guard.clone(), irys_db.clone(), &config);
-                let vdf_service = vdf_service_actor.start();
-                SystemRegistry::set(vdf_service.clone());
-
-                let vdf_steps_guard: VdfStepsReadGuard =
-                    vdf_service.send(GetVdfStateMessage).await.unwrap();
-
-                let validation_service = ValidationService::new(
-                    block_index_guard.clone(),
-                    partition_assignments_guard.clone(),
-                    vdf_steps_guard.clone(),
-                    storage_config.clone(),
-                    vdf_config.clone(),
-                );
-                let validation_arbiter = Arbiter::new();
-                SystemRegistry::set(ValidationService::start_in_arbiter(
-                    &validation_arbiter.handle(),
-                    |_| validation_service,
-                ));
-
-                let (global_step_number, seed) = vdf_steps_guard.read().get_last_step_and_seed();
-                info!("Starting at global step number: {}", global_step_number);
-
-                let block_discovery_actor = BlockDiscoveryActor {
-                    block_index_guard: block_index_guard.clone(),
-                    partition_assignments_guard: partition_assignments_guard.clone(),
-                    storage_config: storage_config.clone(),
-                    difficulty_config: difficulty_adjustment_config,
-                    db: irys_db.clone(),
-                    vdf_config: vdf_config.clone(),
-                    vdf_steps_guard: vdf_steps_guard.clone(),
-                    service_senders: service_senders.clone(),
-                    gossip_sender: gossip_sender.clone(),
-                };
-                let block_discovery_arbiter = Arbiter::new();
-                let block_discovery_addr = BlockDiscoveryActor::start_in_arbiter(
-                    &block_discovery_arbiter.handle(),
-                    |_| block_discovery_actor,
-                );
-
-                let gossip_service_handle = gossip_service.run(mempool_addr.clone(), block_discovery_addr.clone(), irys_api_client::IrysApiClient::new()).unwrap();
-
-
-                // set up the price oracle
-                let price_oracle = match config.oracle_config {
-                    OracleConfig::Mock { initial_price, percent_change, smoothing_interval } => {
-                        IrysPriceOracle::MockOracle(MockOracle::new(initial_price, percent_change, smoothing_interval))
-                    },
-                    // note: depending on the oracle, it may require spawning an async background service.
-                };
-                let price_oracle = Arc::new(price_oracle);
-
-                // set up the block producer
-                let block_producer_arbiter = Arbiter::new();
-                let block_producer_actor = BlockProducerActor {
-                    db: irys_db.clone(),
-                    mempool_addr: mempool_addr.clone(),
-                    block_discovery_addr: block_discovery_addr.clone(),
-                    epoch_service: epoch_service_actor_addr.clone(),
-                    reth_provider: reth_node.clone(),
-                    storage_config: storage_config.clone(),
-                    difficulty_config: difficulty_adjustment_config,
-                    vdf_config: vdf_config.clone(),
-                    vdf_steps_guard: vdf_steps_guard.clone(),
-                    block_tree_guard: block_tree_guard.clone(),
-                    epoch_config: epoch_config.clone(),
-                    price_oracle,
-                    service_senders: service_senders.clone(),
-                };
-                let block_producer_addr =
-                    BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
-                        block_producer_actor
-                    });
-
-                let mut part_actors = Vec::new();
-
-                let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
-
-                let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
-
-                let packing_actor_addr = PackingActor::new(
-                    Handle::current(),
-                    reth_node.task_executor.clone(),
-                    sm_ids,
-                    PackingConfig::new(&config),
-                )
-                .start();
-
-                for sm in &storage_modules {
-                    let partition_mining_actor = PartitionMiningActor::new(
-                        miner_address,
-                        irys_db.clone(),
-                        block_producer_addr.clone().recipient(),
-                        packing_actor_addr.clone().recipient(),
-                        sm.clone(),
-                        false, // do not start mining automatically
-                        vdf_steps_guard.clone(),
-                        atomic_global_step_number.clone(),
-                    );
-                    let part_arbiter = Arbiter::new();
-                    part_actors.push(PartitionMiningActor::start_in_arbiter(
-                        &part_arbiter.handle(),
-                        |_| partition_mining_actor,
-                    ));
-                    arbiters.push(ArbiterHandle::new(part_arbiter, "part_arbiter".to_string()));
-                }
-
-                // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
-                tokio::task::yield_now().await;
-
-                // request packing for uninitialized ranges
-                for sm in &storage_modules {
-                    let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
-                    debug!("ranges to pack: {:?}", &uninitialized);
-                    let _ = uninitialized
-                        .iter()
-                        .map(|interval| {
-                            packing_actor_addr.do_send(PackingRequest {
-                                storage_module: sm.clone(),
-                                chunk_range: PartitionChunkRange(*interval),
-                            })
-                        })
-                        .collect::<Vec<()>>();
-                }
-                let part_actors_clone = part_actors.clone();
-
-                // Let the partition actors know about the genesis difficulty
-                broadcast_mining_service
-                    .send(BroadcastDifficultyUpdate(latest_block.clone()))
-                    .await
-                    .unwrap();
-
-                let mut service_arbiters = Vec::new();
-                service_arbiters.push(ArbiterHandle::new(block_producer_arbiter, "block_producer_arbiter".to_string()));
-                service_arbiters.push(ArbiterHandle::new(block_discovery_arbiter, "block_discovery_arbiter".to_string()));
-                service_arbiters.push(ArbiterHandle::new(validation_arbiter, "validation_arbiter".to_string()));
-                service_arbiters.push(ArbiterHandle::new(block_tree_arbiter, "block_tree_arbiter".to_string()));
-                service_arbiters.push(ArbiterHandle::new(peer_list_arbiter, "peer_list_arbiter".to_string()));
-                service_arbiters.push(ArbiterHandle::new(mempool_arbiter, "mempool_arbiter".to_string()));
-                service_arbiters.push(ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()));
-                service_arbiters.append(&mut arbiters); // so services stop before "anonymous" actors i.e partition actors
-                arbiters = service_arbiters;
-
-                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
-                let (shutdown_tx, shutdown_rx) = mpsc::channel();
-
-                let vdf_config2 = vdf_config.clone();
-                let seed = seed.map_or(arc_genesis.vdf_limiter_info.output, |seed| seed.0);
-                let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
-
-                info!(
-                    ?seed,
-                    ?global_step_number,
-                    reset_seed = ?arc_genesis.vdf_limiter_info.seed,
-                    "Starting VDF thread",
-                );
-
-                // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
-                let is_test = node_config.base_directory.parent().is_some_and(|p| p.ends_with(".tmp"));
-
-                let vdf_thread_handler = std::thread::spawn(move || {
-
-                    if !is_test {
-                        // Setup core affinity in prod only (perf gain shouldn't matter for tests, and we don't want pinning overlap)
-                        let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
-
-                        for core in core_ids {
-                            let success = core_affinity::set_for_current(core);
-                            if success {
-                                info!("VDF thread pinned to core {:?}", core);
-                                break;
-                            }
-                        }
-                    }
-
-                    run_vdf(
-                        vdf_config2,
-                        global_step_number,
-                        seed,
-                        vdf_reset_seed,
-                        new_seed_rx,
-                        shutdown_rx,
-                        broadcast_mining_service.clone(),
-                        vdf_service.clone(),
-                        atomic_global_step_number.clone(),
-                    );
-                    debug!("VDF thread exiting...")
-                });
-
-                let actor_addresses = ActorAddresses {
-                    partitions: part_actors_clone,
-                    block_producer: block_producer_addr,
-                    packing: packing_actor_addr,
-                    mempool: mempool_addr.clone(),
-                    block_index: block_index_actor_addr,
-                    block_discovery_addr: block_discovery_addr,
-                    epoch_service: epoch_service_actor_addr,
-                };
-
-                let chunk_provider =
-                    ChunkProvider::new(storage_config.clone(), storage_modules.clone());
-                let arc_chunk_provider = Arc::new(chunk_provider);
-                // this OnceLock is due to the cyclic chain between Reth & the Irys node, where the IrysRethProvider requires both
-                // this is "safe", as the OnceLock is always set before this start function returns
-                *irys_provider_1.write().unwrap() = Some(IrysRethProviderInner {
-                    chunk_provider: arc_chunk_provider.clone(),
-                });
-
-                let _ = irys_node_handle_sender.send(IrysNodeCtx {
-                    actor_addresses: actor_addresses.clone(),
-                    reth_handle: reth_node.clone(),
-                    db: irys_db.clone(),
-                    node_config: arc_node_config.clone(),
-                    chunk_provider: arc_chunk_provider.clone(),
-                    block_index_guard: block_index_guard.clone(),
-                    vdf_steps_guard: vdf_steps_guard.clone(),
-                    vdf_config: vdf_config.clone(),
-                    storage_config: storage_config.clone(),
-                    service_senders: service_senders.clone(),
-                    reth_shutdown_sender,
-                    reth_thread_handle: None,
-                    block_tree_guard: block_tree_guard.clone(),
-                    config: Arc::new(config.clone()),
-                    _stop_guard: StopGuard::new()
-                });
-
-                let server = run_server(ApiState {
-                    mempool: mempool_addr,
-                    chunk_provider: arc_chunk_provider.clone(),
-                    db: irys_db,
-                    reth_provider: Some(reth_node.clone()),
-                    block_tree: Some(block_tree_guard.clone()),
-                    block_index: Some(block_index_guard.clone()),
-                    reth_http_url: reth_node.rpc_server_handle().http_url(),
-                    config: config.clone()
-                }, listener)
-                .await;
-
-                let server_handle = server.handle();
-
-                let server_stop_handle = actix_rt::spawn(async move {
-                    let _ = main_actor_thread_shutdown_rx.recv().await;
-                    info!("Main actor thread received shutdown signal");
-
-                    debug!("Stopping API server");
-                    server_handle.stop(true).await;
-                    info!("API server stopped");
-                });
-
-                server.await.unwrap();
-                info!("API server stopped");
-                server_stop_handle.await.unwrap();
-
-                gossip_service_handle.stop().await.unwrap().unwrap();
-
-                debug!("Stopping actors");
-                for arbiter in arbiters {
-
-                    let name = arbiter.name.clone();
-                    debug!("stopping {}", &name);
-
-                    arbiter.stop_and_join();
-                    debug!("stopped {}", &name);
-
-                }
-                debug!("Actors stopped");
-
-                // Send shutdown signal
-                shutdown_tx.send(()).unwrap();
-
-                debug!("Waiting for VDF thread to finish");
-                // Wait for vdf thread to finish & save steps
-                vdf_thread_handler.join().unwrap();
-
-                debug!("VDF thread finished");
-                reth_node
-            });
-            debug!("Main actor thread finished");
-
-            reth_node_handle
-        })?;
-
-    // run reth in it's own thread w/ it's own tokio runtime
-    // this is done as reth exhibits strange behaviour (notably channel dropping) when not in it's own context/when the exit future isn't been awaited
-    let exec: reth::tasks::TaskExecutor = task_manager.executor();
-
-    let reth_thread_handler = std::thread::Builder::new()
-        .name("reth-thread".to_string())
-        .stack_size(32 * 1024 * 1024)
-        .spawn(move || {
-            let node_config = cloned_arc.clone();
-
-            let run_reth_until_ctrl_c_or_signal = async || {
-                _ = run_to_completion_or_panic(
-                    &mut task_manager,
-                    run_until_ctrl_c_or_channel_message(
-                        start_reth_node(
-                            exec,
-                            reth_chainspec,
-                            node_config,
-                            IrysTables::ALL,
-                            reth_handle_sender,
-                            irys_provider.clone(),
-                            latest_block_height,
-                            random_ports,
-                        ),
-                        reth_shutdown_receiver,
-                    ),
-                )
-                .await;
-
-                debug!("Sending shutdown signal to the main actor thread");
-                let _ = main_actor_thread_shutdown_tx.try_send(());
-                debug!("Waiting for the main actor thread to finish");
-                let reth_node_handle = actor_main_thread_handle.join().unwrap();
-
-                reth_node_handle
-            };
-
-            let reth_node = tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal());
-
-            debug!("Shutting down the rest of the reth jobs in case there are unfinished ones");
-            task_manager.graceful_shutdown();
-
-            reth_node.provider.database.db.close();
-            irys_storage::reth_provider::cleanup_provider(&irys_provider);
-
-            debug!("Reth thread finished");
-        })?;
-
-    // wait for the full handle to be send over by the actix thread
-    let mut node = irys_node_handle_receiver.await?;
-    node.reth_thread_handle = Some(reth_thread_handler.into());
-    Ok(node)
-}
-
 async fn start_reth_node<T: HasName + HasTableType>(
     task_executor: TaskExecutor,
     chainspec: ChainSpec,
@@ -1144,6 +467,7 @@ pub struct IrysNode {
     pub storage_submodule_config: StorageSubmodulesConfig,
     pub difficulty_adjustment_config: DifficultyAdjustmentConfig,
     pub packing_config: PackingConfig,
+    pub genesis_timestamp: u128,
 }
 
 impl IrysNode {
@@ -1190,6 +514,7 @@ impl IrysNode {
         IrysNode {
             irys_genesis_block,
             config,
+            genesis_timestamp: now.as_millis(),
             data_exists,
             irys_node_config,
             storage_config,
@@ -1213,8 +538,23 @@ impl IrysNode {
     }
 
     /// Initializes the node (genesis or non-genesis).
-    pub async fn init(&mut self) -> eyre::Result<IrysNodeCtx> {
+    pub async fn start(&mut self) -> eyre::Result<IrysNodeCtx> {
         info!(miner_address = ?self.config.miner_address(), "Starting Irys Node");
+        let (chain_spec, irys_genesis) = self.irys_node_config.chainspec_builder.build();
+        let mut irys_genesis = IrysBlockHeader {
+            diff: calculate_initial_difficulty(
+                &self.difficulty_adjustment_config,
+                &self.storage_config,
+                // TODO: where does this magic constant come from?
+                3,
+            )
+            .expect("valid calculated initial difficulty"),
+            timestamp: self.genesis_timestamp,
+            last_diff_timestamp: self.genesis_timestamp,
+            ..irys_genesis
+        };
+        add_genesis_commitments(&mut irys_genesis, &self.config);
+        let irys_genesis_block = Arc::new(irys_genesis);
 
         let (chain_spec, _) = self.irys_node_config.chainspec_builder.build();
 
@@ -1225,7 +565,9 @@ impl IrysNode {
             (false, _) => {
                 // special handling for genesis node
                 let commitments = get_genesis_commitments(&self.config);
-                self.init_genesis_thread(self.irys_genesis_block.clone(), commitments)?
+
+                // special handilng for genesis node
+                self.init_genesis_thread(irys_genesis_block.clone(), commitments)?
                     .join()
                     .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
             }
@@ -1418,8 +760,7 @@ impl IrysNode {
 
                         debug!("Stopping actors");
                         for arbiter in arbiters {
-                            arbiter.stop();
-                            let _ = arbiter.join();
+                            arbiter.stop_and_join();
                         }
                         debug!("Actors stopped");
 
@@ -1517,7 +858,7 @@ impl IrysNode {
         IrysNodeCtx,
         Server,
         JoinHandle<()>,
-        Vec<Arbiter>,
+        Vec<ArbiterHandle>,
         RethNodeProvider,
         ServiceHandleWithShutdownSignal<GossipResult<()>>,
     )> {
@@ -1525,9 +866,6 @@ impl IrysNode {
 
         // init Irys DB
         let irys_db = init_irys_db(&node_config)?;
-
-        // final arbiters
-        let mut arbiters = Vec::new();
 
         // initialize the databases
         let (reth_node, reth_db) = init_reth_db(reth_handle_receiver, &irys_db).await?;
@@ -1544,7 +882,7 @@ impl IrysNode {
         debug!("Chunk cache initiailsed");
 
         // start reth service
-        let reth_service_actor = init_reth_service(&irys_db, &mut arbiters, &reth_node);
+        let (reth_service_actor, reth_arbiter) = init_reth_service(&irys_db, &reth_node);
         debug!("Reth Service Actor initiailsed");
 
         // update reth service about the latest block data it must use
@@ -1561,8 +899,8 @@ impl IrysNode {
             .send(GetBlockIndexGuardMessage)
             .await?;
 
-        // start the broadcast mining service
-        let broadcast_mining_actor = init_broadcaster_service(&mut arbiters);
+        // start the broadcast mimning service
+        let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service();
 
         // start the epoch service
         let (storage_module_infos, epoch_service_actor) = self
@@ -1582,10 +920,9 @@ impl IrysNode {
         );
 
         // start the block tree service
-        let block_tree_service = self.init_block_tree_service(
+        let (block_tree_service, block_tree_arbiter) = self.init_block_tree_service(
             &block_index,
             &irys_db,
-            &mut arbiters,
             &service_senders,
             &block_index_guard,
         );
@@ -1600,13 +937,12 @@ impl IrysNode {
         );
 
         // Spawn peer list service
-        init_peer_list_service(&irys_db, &mut arbiters);
+        let peer_list_arbiter = init_peer_list_service(&irys_db);
 
         // Spawn the mempool service
-        let mempool_service = self.init_mempools_service(
+        let (mempool_service, mempool_arbiter) = self.init_mempools_service(
             &node_config,
             &irys_db,
-            &mut arbiters,
             &reth_node,
             reth_db,
             &storage_modules,
@@ -1627,17 +963,15 @@ impl IrysNode {
         let vdf_steps_guard = vdf_service.send(GetVdfStateMessage).await?;
 
         // spawn the validation service
-        self.init_validation_service(
-            &mut arbiters,
+        let validation_arbiter = self.init_validation_service(
             &block_index_guard,
             &partition_assignments_guard,
             &vdf_steps_guard,
         );
 
         // spawn block discovery
-        let block_discovery = self.init_block_discovery_service(
+        let (block_discovery, block_discovery_arbiter) = self.init_block_discovery_service(
             &irys_db,
-            &mut arbiters,
             &service_senders,
             &block_index_guard,
             partition_assignments_guard,
@@ -1655,9 +989,8 @@ impl IrysNode {
         let price_oracle = self.init_price_oracle();
 
         // set up the block producer
-        let block_producer_addr = self.init_block_producer(
+        let (block_producer_addr, block_producer_arbiter) = self.init_block_producer(
             &irys_db,
-            &mut arbiters,
             &reth_node,
             &service_senders,
             &epoch_service_actor,
@@ -1678,9 +1011,8 @@ impl IrysNode {
             self.init_packing_actor(global_step_number, &reth_node, &storage_modules);
 
         // set up storage modules
-        let part_actors = self.init_partition_mining_actor(
+        let (part_actors, part_arbiters) = self.init_partition_mining_actor(
             &irys_db,
-            &mut arbiters,
             &storage_modules,
             &vdf_steps_guard,
             &block_producer_addr,
@@ -1728,8 +1060,44 @@ impl IrysNode {
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),
             config: Arc::new(self.config.clone()),
-            _stop_guard: StopGuard::new(),
+            stop_guard: StopGuard::new(),
         };
+
+        let mut service_arbiters = Vec::new();
+        service_arbiters.push(ArbiterHandle::new(
+            block_producer_arbiter,
+            "block_producer_arbiter".to_string(),
+        ));
+        service_arbiters.push(ArbiterHandle::new(
+            broadcast_arbiter,
+            "broadcast_arbiter".to_string(),
+        ));
+        service_arbiters.push(ArbiterHandle::new(
+            block_discovery_arbiter,
+            "block_discovery_arbiter".to_string(),
+        ));
+        service_arbiters.push(ArbiterHandle::new(
+            validation_arbiter,
+            "validation_arbiter".to_string(),
+        ));
+        service_arbiters.push(ArbiterHandle::new(
+            block_tree_arbiter,
+            "block_tree_arbiter".to_string(),
+        ));
+        service_arbiters.push(ArbiterHandle::new(
+            peer_list_arbiter,
+            "peer_list_arbiter".to_string(),
+        ));
+        service_arbiters.push(ArbiterHandle::new(
+            mempool_arbiter,
+            "mempool_arbiter".to_string(),
+        ));
+        service_arbiters.push(ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()));
+        service_arbiters.extend(
+            part_arbiters
+                .into_iter()
+                .map(|x| ArbiterHandle::new(x, "partition_arbiter".to_string())),
+        );
 
         let server = run_server(
             ApiState {
@@ -1759,7 +1127,7 @@ impl IrysNode {
             irys_node_ctx,
             server,
             vdf_thread_handler,
-            arbiters,
+            service_arbiters,
             reth_node,
             gossip_service_handle,
         ))
@@ -1783,17 +1151,26 @@ impl IrysNode {
         atomic_global_step_number: Arc<AtomicU64>,
     ) -> JoinHandle<()> {
         let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
+        // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
+        // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
+        let is_test = self
+            .irys_node_config
+            .base_directory
+            .parent()
+            .is_some_and(|p| p.ends_with(".tmp"));
         let vdf_thread_handler = std::thread::spawn({
             let vdf_config = self.vdf_config.clone();
             move || {
-                // Setup core affinity
-                let core_ids =
-                    core_affinity::get_core_ids().expect("Getting core IDs should not fail");
-                for core in core_ids {
-                    let success = core_affinity::set_for_current(core);
-                    if success {
-                        info!("VDF thread pinned to core {:?}", core);
-                        break;
+                if !is_test {
+                    // Setup core affinity in prod only (perf gain shouldn't matter for tests, and we don't want pinning overlap)
+                    let core_ids = core_affinity::get_core_ids().expect("Failed to get core IDs");
+
+                    for core in core_ids {
+                        let success = core_affinity::set_for_current(core);
+                        if success {
+                            info!("VDF thread pinned to core {:?}", core);
+                            break;
+                        }
                     }
                 }
 
@@ -1818,14 +1195,14 @@ impl IrysNode {
     fn init_partition_mining_actor(
         &self,
         irys_db: &DatabaseProvider,
-        arbiters: &mut Vec<Arbiter>,
         storage_modules: &Vec<Arc<StorageModule>>,
         vdf_steps_guard: &VdfStepsReadGuard,
         block_producer_addr: &actix::Addr<BlockProducerActor>,
         atomic_global_step_number: &Arc<AtomicU64>,
         packing_actor_addr: &actix::Addr<PackingActor>,
-    ) -> Vec<actix::Addr<PartitionMiningActor>> {
+    ) -> (Vec<actix::Addr<PartitionMiningActor>>, Vec<Arbiter>) {
         let mut part_actors = Vec::new();
+        let mut arbiters = Vec::new();
         for sm in storage_modules {
             let partition_mining_actor = PartitionMiningActor::new(
                 self.config.miner_address(),
@@ -1856,7 +1233,7 @@ impl IrysNode {
                 });
             }
         }
-        part_actors
+        (part_actors, arbiters)
     }
 
     fn init_packing_actor(
@@ -1880,7 +1257,6 @@ impl IrysNode {
     fn init_block_producer(
         &self,
         irys_db: &DatabaseProvider,
-        arbiters: &mut Vec<Arbiter>,
         reth_node: &RethNodeProvider,
         service_senders: &ServiceSenders,
         epoch_service_actor: &actix::Addr<EpochServiceActor>,
@@ -1889,7 +1265,7 @@ impl IrysNode {
         vdf_steps_guard: &VdfStepsReadGuard,
         block_discovery: actix::Addr<BlockDiscoveryActor>,
         price_oracle: Arc<IrysPriceOracle>,
-    ) -> actix::Addr<BlockProducerActor> {
+    ) -> (actix::Addr<BlockProducerActor>, Arbiter) {
         let block_producer_arbiter = Arbiter::new();
         let block_producer_actor = BlockProducerActor {
             db: irys_db.clone(),
@@ -1910,8 +1286,7 @@ impl IrysNode {
             BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
                 block_producer_actor
             });
-        arbiters.push(block_producer_arbiter.into());
-        block_producer_addr
+        (block_producer_addr, block_producer_arbiter)
     }
 
     fn init_price_oracle(&self) -> Arc<IrysPriceOracle> {
@@ -1934,13 +1309,12 @@ impl IrysNode {
     fn init_block_discovery_service(
         &self,
         irys_db: &DatabaseProvider,
-        arbiters: &mut Vec<Arbiter>,
         service_senders: &ServiceSenders,
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
         gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
-    ) -> actix::Addr<BlockDiscoveryActor> {
+    ) -> (actix::Addr<BlockDiscoveryActor>, Arbiter) {
         let block_discovery_actor = BlockDiscoveryActor {
             block_index_guard: block_index_guard.clone(),
             partition_assignments_guard: partition_assignments_guard.clone(),
@@ -1957,17 +1331,15 @@ impl IrysNode {
             BlockDiscoveryActor::start_in_arbiter(&block_discovery_arbiter.handle(), |_| {
                 block_discovery_actor
             });
-        arbiters.push(block_discovery_arbiter.into());
-        block_discovery
+        (block_discovery, block_discovery_arbiter)
     }
 
     fn init_validation_service(
         &self,
-        arbiters: &mut Vec<Arbiter>,
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: &irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
-    ) {
+    ) -> Arbiter {
         let validation_service = ValidationService::new(
             block_index_guard.clone(),
             partition_assignments_guard.clone(),
@@ -1981,7 +1353,7 @@ impl IrysNode {
                 validation_service
             });
         SystemRegistry::set(validation_service);
-        arbiters.push(validation_arbiter.into());
+        validation_arbiter
     }
 
     fn init_vdf_service(
@@ -2017,13 +1389,12 @@ impl IrysNode {
         &self,
         node_config: &Arc<IrysNodeConfig>,
         irys_db: &DatabaseProvider,
-        arbiters: &mut Vec<Arbiter>,
         reth_node: &RethNodeProvider,
         reth_db: irys_database::db::RethDbWrapper,
         storage_modules: &Vec<Arc<StorageModule>>,
         block_tree_guard: &BlockTreeReadGuard,
         gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
-    ) -> actix::Addr<MempoolService> {
+    ) -> (actix::Addr<MempoolService>, Arbiter) {
         let mempool_service = MempoolService::new(
             irys_db.clone(),
             reth_db.clone(),
@@ -2039,18 +1410,16 @@ impl IrysNode {
         let mempool_service =
             MempoolService::start_in_arbiter(&mempool_arbiter.handle(), |_| mempool_service);
         SystemRegistry::set(mempool_service.clone());
-        arbiters.push(mempool_arbiter.into());
-        mempool_service
+        (mempool_service, mempool_arbiter)
     }
 
     fn init_block_tree_service(
         &self,
         block_index: &Arc<RwLock<BlockIndex<Initialized>>>,
         irys_db: &DatabaseProvider,
-        arbiters: &mut Vec<Arbiter>,
         service_senders: &ServiceSenders,
         block_index_guard: &BlockIndexReadGuard,
-    ) -> actix::Addr<BlockTreeService> {
+    ) -> (actix::Addr<BlockTreeService>, Arbiter) {
         let block_tree_service = BlockTreeService::new(
             irys_db.clone(),
             block_index.clone(),
@@ -2065,8 +1434,7 @@ impl IrysNode {
                 block_tree_service
             });
         SystemRegistry::set(block_tree_service.clone());
-        arbiters.push(block_tree_arbiter.into());
-        block_tree_service
+        (block_tree_service, block_tree_arbiter)
     }
 
     fn init_storage_modules(
@@ -2196,38 +1564,35 @@ async fn genesis_initialization(
     block_index_service_actor
 }
 
-fn init_peer_list_service(irys_db: &DatabaseProvider, arbiters: &mut Vec<Arbiter>) {
+fn init_peer_list_service(irys_db: &DatabaseProvider) -> Arbiter {
     let peer_list_arbiter = Arbiter::new();
     let peer_list_service = PeerListService::new(irys_db.clone());
     let peer_list_service =
         PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
     SystemRegistry::set(peer_list_service);
-    arbiters.push(peer_list_arbiter.into());
+    peer_list_arbiter
 }
 
-fn init_broadcaster_service(arbiters: &mut Vec<Arbiter>) -> actix::Addr<BroadcastMiningService> {
+fn init_broadcaster_service() -> (actix::Addr<BroadcastMiningService>, Arbiter) {
     let broadcast_arbiter = Arbiter::new();
     let broadcast_mining_actor =
         BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
             BroadcastMiningService::default()
         });
     SystemRegistry::set(broadcast_mining_actor.clone());
-    arbiters.push(broadcast_arbiter);
-    broadcast_mining_actor
+    (broadcast_mining_actor, broadcast_arbiter)
 }
 
 fn init_reth_service(
     irys_db: &DatabaseProvider,
-    arbiters: &mut Vec<Arbiter>,
     reth_node: &RethNodeProvider,
-) -> actix::Addr<RethServiceActor> {
+) -> (actix::Addr<RethServiceActor>, Arbiter) {
     let reth_service = RethServiceActor::new(reth_node.clone(), irys_db.clone());
     let reth_arbiter = Arbiter::new();
     let reth_service_actor =
         RethServiceActor::start_in_arbiter(&reth_arbiter.handle(), |_| reth_service);
     SystemRegistry::set(reth_service_actor.clone());
-    arbiters.push(reth_arbiter);
-    reth_service_actor
+    (reth_service_actor, reth_arbiter)
 }
 
 async fn init_reth_db(

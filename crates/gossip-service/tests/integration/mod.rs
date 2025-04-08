@@ -3,7 +3,7 @@ use core::time::Duration;
 use irys_types::{DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore};
 
 #[actix_web::test]
-async fn should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
+async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
     let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new();
     let mut gossip_service_test_fixture_2 = GossipServiceTestFixture::new();
 
@@ -48,7 +48,7 @@ async fn should_broadcast_message_to_an_established_connection() -> eyre::Result
 }
 
 #[actix_web::test]
-async fn should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
+async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
     let mut fixtures = vec![
         GossipServiceTestFixture::new(),
         GossipServiceTestFixture::new(),
@@ -115,7 +115,7 @@ async fn should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
 }
 
 #[actix_web::test]
-async fn should_not_resend_recently_seen_data() -> eyre::Result<()> {
+async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -160,7 +160,7 @@ async fn should_not_resend_recently_seen_data() -> eyre::Result<()> {
 }
 
 #[actix_web::test]
-async fn should_broadcast_chunk_data() -> eyre::Result<()> {
+async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -203,7 +203,7 @@ async fn should_broadcast_chunk_data() -> eyre::Result<()> {
 }
 
 #[actix_web::test]
-async fn should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()> {
+async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -244,7 +244,7 @@ async fn should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()> {
 }
 
 #[actix_web::test]
-async fn should_handle_offline_peer_gracefully() -> eyre::Result<()> {
+async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let fixture2 = GossipServiceTestFixture::new();
 
@@ -271,7 +271,7 @@ async fn should_handle_offline_peer_gracefully() -> eyre::Result<()> {
 }
 
 #[actix_web::test]
-async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
+async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -323,7 +323,7 @@ async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
 }
 
 #[actix_web::test]
-async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
+async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
