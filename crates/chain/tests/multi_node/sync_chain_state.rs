@@ -143,7 +143,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 }
 
 struct TestCtx {
-    config: Config,
     node: IrysNodeCtx,
     irys_genesis_block: Arc<IrysBlockHeader>,
     #[expect(
@@ -164,7 +163,6 @@ async fn setup_with_config(
     let mut irys_node = IrysNode::new(testnet_config.clone(), genesis, genesis_block);
     let node = irys_node.start().await?;
     Ok(TestCtx {
-        config: testnet_config,
         irys_genesis_block: irys_node.irys_genesis_block,
         node,
         temp_dir,
