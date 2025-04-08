@@ -522,9 +522,9 @@ impl IrysNode {
         };
 
         IrysNode {
-            irys_genesis_block,
+            irys_genesis_block: irys_genesis_block.clone(),
             config,
-            genesis_timestamp: now.as_millis(),
+            genesis_timestamp: irys_genesis_block.timestamp,
             data_exists,
             irys_node_config,
             storage_config,
