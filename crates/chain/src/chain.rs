@@ -277,9 +277,10 @@ async fn sync_state_from_peers(
                 .await?
             {
                 error!(
-                    "Error sending BlockDiscoveredMessage for block {}: {:?}",
+                    "Error sending BlockDiscoveredMessage for block {}: {:?}\nOFFENDING BLOCK: {}",
                     block_index_item.block_hash.0.to_base58(),
-                    e
+                    e,
+                    block.clone()
                 );
             }
             //todo: it may be better to have a queue that includes the block, along with it's corresponding txn headers as they are coupled. this would remove the txn queue entirely.
