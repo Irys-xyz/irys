@@ -274,7 +274,11 @@ async fn sync_state_from_peers(
     let txn_queue: Arc<tokio::sync::Mutex<VecDeque<H256>>> = Arc::new(Mutex::new(VecDeque::new()));
 
     info!("Discovering peers...");
-    let _peer_list_requests = fetch_and_update_peers(peers.clone(), &client, trusted_peers).await;
+    if let Some(new_peers_found) =
+        fetch_and_update_peers(peers.clone(), &client, trusted_peers).await
+    {
+        info!("Discovered {new_peers_found} new peers");
+    }
 
     info!("Downloading block index...");
     let peers_guard = peers.lock().await;
@@ -339,12 +343,11 @@ async fn sync_state_from_peers(
 }
 
 /// Fetches `peers` list from each `peers_to_ask` via http. Adds new entries to `peers`
-#[tracing::instrument(err, skip_all)]
 async fn fetch_and_update_peers(
     peers: Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
     client: &awc::Client,
     peers_to_ask: Vec<SocketAddr>,
-) -> eyre::Result<u64> {
+) -> Option<u64> {
     let futures = peers_to_ask.into_iter().map(|peer| {
         let client = client.clone();
         let peers = peers.clone();
@@ -387,7 +390,7 @@ async fn fetch_and_update_peers(
         }
     });
     let results = futures::future::join_all(futures).await;
-    Ok(results.iter().sum())
+    Some(results.iter().sum())
 }
 
 impl IrysNodeCtx {
