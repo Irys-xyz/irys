@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use irys_chain::IrysNode;
 use irys_types::Config;
+use reth_primitives::GenesisAccount;
 use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
@@ -29,7 +30,22 @@ async fn main() -> eyre::Result<()> {
 
     // start the node
     tracing::info!("starting the node");
-    let handle = IrysNode::new(config, is_genesis).start().await?;
+    let mut node = IrysNode::new(config, is_genesis);
+    if is_genesis {
+        let file = std::fs::File::open("genesis-accounts.json")?;
+        let accounts: Vec<(irys_types::Address, reth_primitives::Account)> =
+            serde_json::from_reader(file)?;
+        node.irys_node_config
+            .extend_genesis_accounts(accounts.iter().map(|(addr, acc)| {
+                let mapped_acc = GenesisAccount {
+                    balance: acc.balance,
+                    nonce: None,
+                    ..Default::default()
+                };
+                (*addr, mapped_acc)
+            }));
+    }
+    let handle = node.start().await?;
     handle.start_mining()?;
 
     // wait for the node to be shut down
