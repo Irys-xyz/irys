@@ -15,6 +15,8 @@ use tracing::{debug, error};
 #[test_log::test(actix_web::test)]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let required_blocks_height: usize = 5;
+    // +2 is so genesis is two blocks ahead of the peer nodes, as currently we check the peers index which lags behind
+    let required_genesis_node_height = required_blocks_height + 2;
     let trusted_peers = vec!["127.0.0.1:8080".parse().expect("valid SocketAddr expected")];
     let testnet_config_genesis = Config {
         port: 8080,
@@ -29,9 +31,8 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await
     .expect("found invalid genesis ctx");
-
     // mine x blocks
-    mine_blocks(&ctx_genesis_node.node, required_blocks_height)
+    mine_blocks(&ctx_genesis_node.node, required_genesis_node_height)
         .await
         .expect("expected many mined blocks");
 
