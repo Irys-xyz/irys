@@ -162,7 +162,7 @@ async fn setup_with_config(
     let temp_dir = temporary_directory(Some(node_name), false);
     testnet_config.base_directory = temp_dir.path().to_path_buf();
     let mut irys_node = IrysNode::new(testnet_config.clone(), genesis, genesis_block);
-    let node = irys_node.init().await?;
+    let node = irys_node.start().await?;
     Ok(TestCtx {
         config: testnet_config,
         irys_genesis_block: irys_node.irys_genesis_block,

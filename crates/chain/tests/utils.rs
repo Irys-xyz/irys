@@ -164,7 +164,7 @@ impl IrysNodeTest<()> {
     fn new_inner(mut config: Config, is_genesis: bool) -> Self {
         let temp_dir = temporary_directory(None, false);
         config.base_directory = temp_dir.path().to_path_buf();
-        let cfg = IrysNode::new(config, is_genesis);
+        let cfg = IrysNode::new(config, is_genesis, None);
         Self {
             cfg,
             temp_dir,
@@ -307,7 +307,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let cfg = IrysNode {
             irys_node_config: self.cfg.irys_node_config,
             genesis_timestamp: self.cfg.genesis_timestamp,
-            ..IrysNode::new(self.cfg.config, false)
+            ..IrysNode::new(self.cfg.config, false, None)
         };
         IrysNodeTest {
             node_ctx: (),
