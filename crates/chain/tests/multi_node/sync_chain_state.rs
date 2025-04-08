@@ -1,11 +1,11 @@
 use crate::api::external_api::{block_index_endpoint_request, info_endpoint_request};
 use crate::utils::mine_blocks;
-use irys_actors::BlockFinalizedMessage;
+use base58::ToBase58;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::BlockIndexItem;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
-use irys_types::{Address, Config, IrysBlockHeader, IrysTransactionHeader, Signature, H256};
+use irys_types::{Config, IrysBlockHeader};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
