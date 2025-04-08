@@ -283,7 +283,7 @@ async fn sync_state_from_peers(
     info!("Downloading block index...");
     let peers_guard = peers.lock().await;
     let peer = peers_guard.first().expect("at least one peer");
-    let mut height = 0;
+    let mut height = 1; // start at height 1 as we already have the genesis block
     let limit = 50;
     loop {
         let fetched = fetch_block_index(peer, &client, block_queue.clone(), height, limit).await;
