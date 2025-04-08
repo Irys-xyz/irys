@@ -126,6 +126,17 @@ construct_fixed_hash! {
     pub struct H256(32);
 }
 
+impl H256 {
+    pub fn from_base58(string: &str) -> Self {
+        let decoded = string.from_base58().expect("to parse base58 string");
+        let array: [u8; 32] = decoded.as_slice()[..32]
+            .try_into()
+            .expect("Decoded base58 string should have at least 32 bytes");
+
+        H256(array)
+    }
+}
+
 // Manually implement Arbitrary for H256
 impl<'a> Arbitrary<'a> for H256 {
     fn arbitrary(_u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {

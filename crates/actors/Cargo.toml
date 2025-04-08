@@ -34,10 +34,13 @@ irys-testing-utils.workspace = true
 base58.workspace = true
 futures.workspace = true
 rust_decimal.workspace = true
+serde_json = { workspace = true, features = ["std", "raw_value"] }
+# serde.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-config = { workspace = true, features = ["test-utils"] }
+irys-database = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true
 rstest.workspace = true
 rand.workspace = true

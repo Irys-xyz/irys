@@ -16,7 +16,7 @@ use irys_actors::{
 use irys_database::{tables::PeerListItems, walk_all};
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
-use irys_types::{app_state::DatabaseProvider, Config};
+use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use reth_db::Database;
 use routes::{
     block, block_index, get_chunk, index, network_config, peer_list, post_chunk, post_version,
@@ -41,7 +41,7 @@ pub struct ApiState {
 }
 
 impl ApiState {
-    pub fn get_known_peers(&self) -> eyre::Result<Vec<SocketAddr>> {
+    pub fn get_known_peers(&self) -> eyre::Result<Vec<PeerAddress>> {
         // Attempt to create a read transaction
         let read_tx = self
             .db
@@ -53,12 +53,12 @@ impl ApiState {
             walk_all::<PeerListItems, _>(&read_tx).map_err(|e| eyre::eyre!("Read error: {}", e))?;
 
         // Extract IP addresses and Port (SocketAddr) into a Vec<String>
-        let ips: Vec<SocketAddr> = peer_list_items
+        let addresses: Vec<PeerAddress> = peer_list_items
             .iter()
             .map(|(_miner_addr, entry)| entry.address)
             .collect();
 
-        Ok(ips)
+        Ok(addresses)
     }
 }
 
@@ -87,7 +87,7 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
         .route("/tx", web::post().to(tx::post_tx))
-        .route("/tx/{tx_id}", web::get().to(tx::get_tx_header_api))
+        .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))
         .route(
             "/tx/{tx_id}/local/data_start_offset",
             web::get().to(tx::get_tx_local_start_offset),

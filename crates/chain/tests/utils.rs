@@ -3,14 +3,13 @@ use futures::future::select;
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_actors::block_validation;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
-use irys_chain::{start_irys_node, IrysNodeCtx};
-use irys_config::IrysNodeConfig;
+use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::tx_header_by_txid;
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_storage::ii;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
+use irys_testing_utils::utils::temporary_directory;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, H256List, H256,
@@ -132,11 +131,6 @@ pub async fn capacity_chunk_solution(
     }
 }
 
-pub struct IrysNodeTest {
-    pub node_ctx: IrysNodeCtx,
-    pub temp_dir: TempDir,
-}
-
 // Reasons tx could fail to be added to mempool
 #[derive(Debug)]
 pub enum AddTxError {
@@ -145,21 +139,55 @@ pub enum AddTxError {
     Mailbox(MailboxError),
 }
 
-impl IrysNodeTest {
-    pub async fn new(name: &str) -> Self {
-        let (node_ctx, temp_dir) = start_node(name).await;
-        Self { node_ctx, temp_dir }
+pub struct IrysNodeTest<T = ()> {
+    pub node_ctx: T,
+    pub cfg: IrysNode,
+    pub temp_dir: TempDir,
+}
+
+impl Default for IrysNodeTest<()> {
+    fn default() -> Self {
+        let config = Config::testnet();
+        Self::new_genesis(config)
+    }
+}
+
+impl IrysNodeTest<()> {
+    pub fn new(config: Config) -> Self {
+        Self::new_inner(config, false)
     }
 
-    pub async fn new_with_config(
-        name: &str,
-        config: Option<Config>,
-        node_config: Option<IrysNodeConfig>,
-    ) -> Self {
-        let (node_ctx, temp_dir) = start_node_config(name, config, node_config).await;
-        Self { node_ctx, temp_dir }
+    pub fn new_genesis(config: Config) -> Self {
+        Self::new_inner(config, true)
     }
 
+    fn new_inner(mut config: Config, is_genesis: bool) -> Self {
+        let temp_dir = temporary_directory(None, false);
+        config.base_directory = temp_dir.path().to_path_buf();
+        let cfg = IrysNode::new(config, is_genesis);
+        Self {
+            cfg,
+            temp_dir,
+            node_ctx: (),
+        }
+    }
+
+    pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
+        let node_ctx = self
+            .cfg
+            .clone()
+            .start()
+            .await
+            .expect("node cannot be initialized");
+        IrysNodeTest {
+            cfg: self.cfg,
+            node_ctx,
+            temp_dir: self.temp_dir,
+        }
+    }
+}
+
+impl IrysNodeTest<IrysNodeCtx> {
     pub async fn wait_until_height(
         &self,
         target_height: u64,
@@ -273,33 +301,20 @@ impl IrysNodeTest {
         }
     }
 
-    pub async fn stop(self) {
+    pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
+        // this will reload the storage config data too
+        let cfg = IrysNode {
+            irys_node_config: self.cfg.irys_node_config,
+            genesis_timestamp: self.cfg.genesis_timestamp,
+            ..IrysNode::new(self.cfg.config, false)
+        };
+        IrysNodeTest {
+            node_ctx: (),
+            cfg,
+            temp_dir: self.temp_dir,
+        }
     }
-}
-
-pub async fn start_node(name: &str) -> (IrysNodeCtx, TempDir) {
-    start_node_config(name, None, None).await
-}
-
-/// need to return tmp_dir to prevent it from being dropped
-pub async fn start_node_config(
-    name: &str,
-    config: Option<Config>,
-    node_config: Option<IrysNodeConfig>,
-) -> (IrysNodeCtx, TempDir) {
-    std::env::set_var("RUST_LOG", "debug");
-    let temp_dir = setup_tracing_and_temp_dir(Some(name), false);
-    let testnet_config = config.unwrap_or_else(|| Config::testnet());
-    let storage_config = StorageConfig::new(&testnet_config);
-    let mut config = node_config.unwrap_or_else(|| IrysNodeConfig::new(&testnet_config));
-    config.base_directory = temp_dir.path().to_path_buf();
-    (
-        start_irys_node(config, storage_config, testnet_config.clone())
-            .await
-            .unwrap(),
-        temp_dir,
-    )
 }
 
 pub async fn mine_blocks(node_ctx: &IrysNodeCtx, blocks: usize) -> eyre::Result<()> {

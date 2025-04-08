@@ -11,8 +11,9 @@ use crate::{
     Compact, DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader,
     Proof, H256, U256,
 };
-use alloy_primitives::{keccak256, Address, B256};
+use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
+use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
@@ -160,6 +161,11 @@ pub struct IrysBlockHeader {
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
 
 impl IrysBlockHeader {
+    /// Returns true if the block is the genesis block, false otherwise
+    pub fn is_genesis(&self) -> bool {
+        self.height == 0
+    }
+
     /// Proxy method for `Encodable::encode`
     ///
     /// Packs all the header data into a byte buffer, using RLP encoding.
@@ -406,10 +412,7 @@ impl IrysBlockHeader {
             reward_address: Address::ZERO,
             signature: IrysSignature::new(alloy_signer::Signature::test_signature()),
             timestamp: now.as_millis(),
-            system_ledgers: vec![SystemTransactionLedger {
-                ledger_id: 0, // SystemLedger::Commitment
-                tx_ids: H256List(vec![H256::random(), H256::random()]),
-            }],
+            system_ledgers: vec![], // Many tests will fail if you add fake txids to this ledger
             data_ledgers: vec![
                 // Permanent Publish Ledger
                 DataTransactionLedger {
@@ -439,6 +442,22 @@ impl IrysBlockHeader {
             ..Default::default()
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExecutionHeader {
+    #[serde(flatten)]
+    pub header: Header,
+    pub transactions: Vec<TxHash>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CombinedBlockHeader {
+    #[serde(flatten)]
+    pub irys: IrysBlockHeader,
+    pub execution: ExecutionHeader,
 }
 
 #[cfg(test)]

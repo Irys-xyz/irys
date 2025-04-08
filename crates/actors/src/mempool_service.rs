@@ -14,7 +14,7 @@ use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path,
+    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, GossipData,
     IrysTransactionHeader, H256,
 };
 use irys_types::{Config, DataRoot, StorageConfig, U256};
@@ -27,7 +27,7 @@ use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, error, info, warn};
 /// The Mempool oversees pending transactions and validation of incoming tx.
-#[derive(Debug, Default)]
+#[derive(Default, Debug)]
 pub struct MempoolService {
     irys_db: Option<DatabaseProvider>,
     reth_db: Option<RethDbWrapper>,
@@ -44,6 +44,7 @@ pub struct MempoolService {
     max_data_txs_per_block: u64,
     storage_modules: StorageModuleVec,
     block_tree_read_guard: Option<BlockTreeReadGuard>,
+    gossip_tx: Option<tokio::sync::mpsc::Sender<GossipData>>,
 }
 
 impl Actor for MempoolService {
@@ -67,6 +68,7 @@ impl MempoolService {
         storage_modules: StorageModuleVec,
         block_tree_read_guard: BlockTreeReadGuard,
         config: &Config,
+        gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         info!("service started");
         Self {
@@ -81,6 +83,7 @@ impl MempoolService {
             max_data_txs_per_block: config.max_data_txs_per_block,
             anchor_expiry_depth: config.anchor_expiry_depth.into(),
             block_tree_read_guard: Some(block_tree_read_guard),
+            gossip_tx: Some(gossip_tx),
         }
     }
 }
@@ -270,6 +273,15 @@ impl Handler<TxIngressMessage> for MempoolService {
             irys_database::cache_data_root(db_tx, tx)?;
             irys_database::insert_tx_header(db_tx, tx)?;
             Ok(())
+        });
+
+        let gossip_sender = self.gossip_tx.clone();
+        let gossip_data = GossipData::Transaction(tx.clone());
+
+        let _ = tokio::task::spawn(async move {
+            if let Err(error) = gossip_sender.unwrap().send(gossip_data).await {
+                tracing::error!("Failed to send gossip data: {:?}", error);
+            }
         });
 
         Ok(())
@@ -483,6 +495,15 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             });
         }
 
+        let gossip_sender = self.gossip_tx.clone();
+        let gossip_data = GossipData::Chunk(chunk);
+
+        let _ = tokio::task::spawn(async move {
+            if let Err(error) = gossip_sender.unwrap().send(gossip_data).await {
+                tracing::error!("Failed to send gossip data: {:?}", error);
+            }
+        });
+
         Ok(())
     }
 }
@@ -615,6 +636,50 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
     }
 }
 
+/// Message to check whether a transaction exists in the mempool or on disk
+#[derive(Message, Debug)]
+#[rtype(result = "Result<bool, TxIngressError>")]
+pub struct TxExistenceQuery(pub H256);
+
+impl TxExistenceQuery {
+    #[must_use]
+    pub fn into_inner(self) -> H256 {
+        self.0
+    }
+}
+
+impl Handler<TxExistenceQuery> for MempoolService {
+    type Result = Result<bool, TxIngressError>;
+
+    fn handle(&mut self, tx_msg: TxExistenceQuery, _ctx: &mut Context<Self>) -> Self::Result {
+        if self.irys_db.is_none() {
+            return Err(TxIngressError::ServiceUninitialized);
+        }
+
+        if self.valid_tx.contains_key(&tx_msg.0) {
+            return Ok(true);
+        }
+
+        // Still has it, just invalid
+        if self.invalid_tx.contains(&tx_msg.0) {
+            return Ok(true);
+        }
+
+        let read_tx = &self
+            .irys_db
+            .as_ref()
+            .ok_or(TxIngressError::ServiceUninitialized)?
+            .tx()
+            .map_err(|_| TxIngressError::DatabaseError)?;
+
+        let txid = tx_msg.0;
+        let tx_header =
+            tx_header_by_txid(read_tx, &txid).map_err(|_| TxIngressError::DatabaseError)?;
+
+        Ok(tx_header.is_some())
+    }
+}
+
 /// Generates an ingress proof for a specific `data_root`
 /// pulls required data from all sources
 pub fn generate_ingress_proof(
@@ -628,7 +693,7 @@ pub fn generate_ingress_proof(
     // TODO: for now we assume the chunks all all in the DB chunk cache
     // in future, we'll need access to whatever unified storage provider API we have to get chunks
     // regardless of actual location
-    // TODO: allow for "streaming" the tree chunks, instead of having to read them all into memory
+
     let ro_tx = db.tx()?;
     let mut dup_cursor = ro_tx.cursor_dup_read::<CachedChunksIndex>()?;
 
@@ -641,11 +706,10 @@ pub fn generate_ingress_proof(
     let mut set = HashSet::<H256>::new();
     let expected_chunk_count = data_size_to_chunk_count(size, chunk_size).unwrap();
 
-    let mut chunks = Vec::with_capacity(expected_chunk_count as usize);
-    let mut owned_chunks = Vec::with_capacity(expected_chunk_count as usize);
+    let mut chunk_count: u32 = 0;
     let mut data_size: u64 = 0;
 
-    for entry in dup_walker {
+    let iter = dup_walker.into_iter().map(|entry| {
         let (root_hash2, index_entry) = entry?;
         // make sure we haven't traversed into the wrong key
         assert_eq!(data_root, root_hash2);
@@ -661,28 +725,33 @@ pub fn generate_ingress_proof(
         }
         set.insert(chunk_path_hash);
 
+        // TODO: add code to read from ChunkProvider once it can read through CachedChunks & we have a nice system for unpacking chunks on-demand
         let chunk = ro_tx
             .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
-            .unwrap_or_else(|| {
-                panic!("unable to get chunk {chunk_path_hash} for data root {data_root} from DB")
-            });
-        let chunk_bin = chunk.chunk.unwrap().0;
+            .ok_or(eyre!(
+                "unable to get chunk {chunk_path_hash} for data root {data_root} from DB"
+            ))?;
+
+        let chunk_bin = chunk
+            .chunk
+            .ok_or(eyre!(
+                "Missing required chunk ({chunk_path_hash}) body for data root {data_root} from DB"
+            ))?
+            .0;
         data_size += chunk_bin.len() as u64;
-        owned_chunks.push(chunk_bin);
-    }
+        chunk_count += 1;
 
-    // Now create the slice references
-    chunks.extend(owned_chunks.iter().map(std::vec::Vec::as_slice));
-
-    assert_eq!(chunks.len() as u32, expected_chunk_count);
-    assert_eq!(data_size, size);
+        Ok(chunk_bin)
+    });
 
     // generate the ingress proof hash
-    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, &chunks)?;
+    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, iter)?;
     info!(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root
     );
+    assert_eq!(data_size, size);
+    assert_eq!(chunk_count as u32, expected_chunk_count);
 
     ro_tx.commit()?;
 

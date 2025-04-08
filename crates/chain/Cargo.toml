@@ -23,6 +23,8 @@ irys-actors.workspace = true
 irys-packing.workspace = true
 irys-vdf.workspace = true
 irys-price-oracle.workspace = true
+irys-gossip-service.workspace = true
+irys-api-client.workspace = true
 
 base58.workspace = true
 color-eyre.workspace = true
@@ -42,7 +44,6 @@ actix-http.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tempfile.workspace = true
 
 alloy-network = { path = "../../ext/alloy/crates/network" }
 alloy-signer-local.workspace = true
@@ -63,7 +64,7 @@ alloy-provider.workspace = true
 core_affinity = "0.8.1"
 
 [dev-dependencies]
-awc = "3.5"
+awc.workspace = true
 irys-actors = { workspace = true, features = ["test-utils"] }
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true
