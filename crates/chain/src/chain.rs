@@ -53,8 +53,8 @@ use irys_storage::{
 use irys_types::{
     app_state::DatabaseProvider, block::CombinedBlockHeader, calculate_initial_difficulty,
     vdf_config::VDFStepsConfig, CommitmentTransaction, Config, DifficultyAdjustmentConfig,
-    GossipData, IrysBlockHeader, IrysTransactionHeader, OracleConfig,
-    PartitionChunkRange, StorageConfig, CHUNK_SIZE, H256,
+    GossipData, IrysBlockHeader, IrysTransactionHeader, OracleConfig, PartitionChunkRange,
+    StorageConfig, CHUNK_SIZE, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
