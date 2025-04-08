@@ -154,7 +154,7 @@ pub struct StorageSubmodule {
     pub path: PathBuf,
     /// Persistent storage handle
     file: Arc<Mutex<File>>,
-    /// Mutex containing the inteval file path
+    /// Mutex containing the interval file path
     /// we create an [`AtomicWriteFile`] for each interval file update, to ensure we are never left with interrupted writes
     intervals_file: Arc<Mutex<PathBuf>>,
 }
