@@ -12,7 +12,7 @@ use tracing::{debug, error};
 
 /// spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
 /// check that the blocks ar evalid, check that peer1, peer2, and gensis are indeed synced
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let required_blocks_height: usize = 5;
     let trusted_peers = vec!["127.0.0.1:8080".parse().expect("valid SocketAddr expected")];
