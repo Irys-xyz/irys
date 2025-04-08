@@ -226,35 +226,6 @@ async fn fetch_block_index(
     0
 }
 
-/// Posts txn to remote peer over HTTP.
-async fn post_txn(
-    peer: &SocketAddr,
-    client: &awc::Client,
-    full_txn: Arc<IrysTransactionHeader>,
-) -> eyre::Result<()> {
-    let url = format!("http://{}/v1/tx", peer);
-
-    match client
-        .post(url.clone())
-        .send_json(&json!({ "full_txn": full_txn }))
-        .await
-    {
-        Ok(response) => {
-            if response.status().is_success() {
-                debug!("Posted txn to {}", peer);
-                return Ok(());
-            } else {
-                warn!("Non success. Failed to post txn to {}", peer);
-            }
-        }
-        Err(e) => {
-            warn!("Request to {} failed: {}", &url, e);
-        }
-    }
-
-    Ok(())
-}
-
 //TODO url paths as ENUMS? Could update external api tests too
 //#[tracing::instrument(err)]
 async fn sync_state_from_peers(
@@ -311,6 +282,7 @@ async fn sync_state_from_peers(
                     e
                 );
             }
+            //todo: it may be better to have a queue that includes the block, along with it's corresponding txn headers as they are coupled. this would remove the txn queue entirely.
             //add txns from block to txn queue
             let mut txn_queue_guard = txn_queue.lock().await;
             for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
@@ -325,10 +297,12 @@ async fn sync_state_from_peers(
     while let Some(txn_id) = txn_queue.lock().await.pop_front() {
         if let Some(full_txn) = fetch_txn(&local_node, &client, txn_id).await {
             let full_txn = Arc::new(full_txn);
-            match post_txn(&local_node, &client, full_txn).await {
+            //todo: this needs to prite the txn directly to the db and not use POST
+            //      this also needs to happen BEFORE you add the corresponding block
+            /*match post_txn(&local_node, &client, full_txn).await {
                 Ok(_) => fetched += 1,
                 Err(_) => duplicates_and_failures += 1,
-            }
+            }*/
         }
     }
     info!(
