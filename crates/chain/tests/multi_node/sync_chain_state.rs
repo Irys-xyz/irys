@@ -113,7 +113,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     //shutdown genesis node, as the peers are no longer going make http calls to it
     ctx_genesis_node.node.stop().await;
 
-    // compere blocks in indexes from each of the three nodes
+    // compare blocks in indexes from each of the three nodes
     // they should be identical if the sync was a success
     let block_index_genesis = result_genesis
         .json::<Vec<BlockIndexItem>>()
