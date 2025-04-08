@@ -129,9 +129,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         .json::<Vec<BlockIndexItem>>()
         .await
         .expect("expected a valid json deserialize");
-    error!("body_genesis {:?}", block_index_genesis);
-    error!("body_peer1   {:?}", block_index_peer1);
-    error!("body_peer2   {:?}", block_index_peer2);
+
     assert_eq!(
         block_index_genesis, block_index_peer1,
         "expecting json from genesis node {:?} to match json from peer1 {:?}",
