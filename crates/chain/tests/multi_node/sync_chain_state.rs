@@ -3,12 +3,15 @@ use crate::utils::mine_blocks;
 use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_database::BlockIndexItem;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
 use irys_types::{Address, Config, IrysBlockHeader, IrysTransactionHeader, Signature, H256};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
 
+/// spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
+/// check that the blocks ar evalid, check that peer1, peer2, and gensis are indeed synced
 #[actix_web::test]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let required_blocks_height: usize = 5;
@@ -70,12 +73,11 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     sleep(Duration::from_millis(30000)).await; // wait for mining blocks to have occured on genesis node
 
     // check the height returned by the peers, and when it is high enough do the api call for the block_index and then shutdown the peer
-    let max_attempts = 10;
+    let max_attempts = 5;
 
     let result_peer1 = poll_until_fetch_at_block_index_height(
         &ctx_peer1_node,
-        required_blocks_height
-            .try_into()
+        1.try_into()
             .expect("expected required_blocks_height to be valid u64"),
         max_attempts,
     )
@@ -86,8 +88,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     let result_peer2 = poll_until_fetch_at_block_index_height(
         &ctx_peer2_node,
-        required_blocks_height
-            .try_into()
+        1.try_into()
             .expect("expected required_blocks_height to be valid u64"),
         max_attempts,
     )
@@ -96,37 +97,46 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     //shut down peer, we have what we need
     ctx_peer2_node.node.stop().await;
 
-    let mut result_genesis =
-        block_index_endpoint_request(&local_test_url(&testnet_config_genesis.port), 0, 5).await;
+    let mut result_genesis = block_index_endpoint_request(
+        &local_test_url(&testnet_config_genesis.port),
+        0,
+        required_blocks_height
+            .try_into()
+            .expect("expected required_blocks_height to be valid u64"),
+    )
+    .await;
 
     //shutdown genesis node, as the peers are no longer going make http calls to it
     ctx_genesis_node.node.stop().await;
 
     // compere blocks in indexes from each of the three nodes
     // they should be identical if the sync was a success
-    let body_genesis = result_genesis.body().await.expect("expected a valid body");
-    let body_peer1 = result_peer1
+    let block_index_genesis = result_genesis
+        .json::<Vec<BlockIndexItem>>()
+        .await
+        .expect("expected a valid json deserialize");
+    let block_index_peer1 = result_peer1
         .expect("expected a client response from peer1")
-        .body()
+        .json::<Vec<BlockIndexItem>>()
         .await
-        .expect("expected a valid body");
-    let body_peer2 = result_peer2
+        .expect("expected a valid json deserialize");
+    let block_index_peer2 = result_peer2
         .expect("expected a client response from peer2")
-        .body()
+        .json::<Vec<BlockIndexItem>>()
         .await
-        .expect("expected a valid body");
-    error!("body_genesis {:?}", body_genesis);
-    error!("body_peer1   {:?}", body_peer1);
-    error!("body_peer2   {:?}", body_peer2);
+        .expect("expected a valid json deserialize");
+    error!("body_genesis {:?}", block_index_genesis);
+    error!("body_peer1   {:?}", block_index_peer1);
+    error!("body_peer2   {:?}", block_index_peer2);
     assert_eq!(
-        body_genesis, body_peer1,
-        "expecting body from genesis node {:?} to match body from peer1 {:?}",
-        body_genesis, body_peer1
+        block_index_genesis, block_index_peer1,
+        "expecting json from genesis node {:?} to match json from peer1 {:?}",
+        block_index_genesis, block_index_peer1
     );
     assert_eq!(
-        body_peer1, body_peer2,
-        "expecting body from peer1 node {:?} to match body from peer2 {:?}",
-        body_peer1, body_peer2
+        block_index_peer1, block_index_peer2,
+        "expecting json from peer1 node {:?} to match json from peer2 {:?}",
+        block_index_peer1, block_index_peer2
     );
 
     Ok(())
