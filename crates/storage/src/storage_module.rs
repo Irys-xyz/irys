@@ -1112,7 +1112,7 @@ impl StorageModule {
 
 fn ensure_default_intervals(
     submodule_interval: &Interval<PartitionChunkOffset>,
-    intervals_path: &PathBuf,
+    intervals_path: &Path,
 ) -> eyre::Result<()> {
     let mut intervals = StorageIntervals::new();
     intervals
@@ -1144,7 +1144,7 @@ fn ensure_default_intervals(
 ///
 /// Loads the stored interval mapping that tracks chunk states.
 /// Expects a JSON-formatted file containing StorageIntervals.
-pub fn read_intervals_file(path: &PathBuf) -> eyre::Result<StorageIntervals> {
+pub fn read_intervals_file(path: &Path) -> eyre::Result<StorageIntervals> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
