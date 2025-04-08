@@ -36,6 +36,7 @@
 //! - Invisible to rest of the node
 //! - Storage Module handles mapping of partition chunk offsets to appropriate submodule
 
+use atomic_write_file::AtomicWriteFile;
 use base58::ToBase58;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{eyre, Context, OptionExt, Result};
@@ -44,7 +45,8 @@ use irys_database::{
         add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
         add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
         clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
-        get_start_offsets_by_data_root, get_tx_path_by_offset, tables::RelativeStartOffsets,
+        get_data_size_by_data_root, get_start_offsets_by_data_root, get_tx_path_by_offset,
+        set_data_size_for_data_root, tables::RelativeStartOffsets,
     },
     DataLedger,
 };
@@ -152,8 +154,16 @@ pub struct StorageSubmodule {
     pub path: PathBuf,
     /// Persistent storage handle
     file: Arc<Mutex<File>>,
-    /// Intervals file handle
-    intervals_file: Arc<Mutex<File>>,
+    /// Mutex containing the interval file path
+    /// we create an [`AtomicWriteFile`] for each interval file update, to ensure we are never left with interrupted writes
+    intervals_file: Arc<Mutex<PathBuf>>,
+}
+
+pub fn get_atomic_file<P: AsRef<Path> + std::fmt::Debug>(path: P) -> eyre::Result<AtomicWriteFile> {
+    Ok(AtomicWriteFile::options()
+        .read(true)
+        .open(&path)
+        .wrap_err_with(|| format!("Failed to create or open atomic file for {:?}", &path))?)
 }
 
 /// Defines how chunk data is processed and stored
@@ -267,17 +277,8 @@ impl StorageModule {
             }
 
             let intervals_file_path = sub_base_path.join("intervals.json");
-            let submodules_intervals_file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(&intervals_file_path)
-                .wrap_err_with(|| {
-                    format!(
-                        "Failed to create or open intervals file at {}",
-                        path.display()
-                    )
-                })?;
+
+            let submodules_intervals_file = PathBuf::from(&intervals_file_path);
 
             // Ensure the intervals.json has a default range
             ensure_default_intervals(&submodule_interval, &submodules_intervals_file)
@@ -493,11 +494,11 @@ impl StorageModule {
                         .expect("to insert a default range to the submodule intervals");
                 }
 
-                let mut file = submodule.intervals_file.lock().unwrap();
-                // let intervals = self.intervals.read().unwrap();
-                file.set_len(0)?;
-                file.seek(SeekFrom::Start(0))?;
+                let path = submodule.intervals_file.lock().unwrap();
+                let mut file = get_atomic_file(path.clone())?;
+                // this `file` is actually a temporary file that will get renamed over the original, once we commit
                 file.write_all(serde_json::to_string(&submodule_intervals)?.as_bytes())?;
+                file.commit()?;
             }
         }
         Ok(())
@@ -699,8 +700,9 @@ impl StorageModule {
         tx_path: TxPath,
         data_root: DataRoot,
         chunk_range: LedgerChunkRange,
+        data_size: u64,
     ) -> eyre::Result<()> {
-        let storage_range = self.get_storage_module_range()?;
+        let storage_range = self.get_storage_module_ledger_range()?;
         let tx_path_hash = H256::from(hash_sha256(&tx_path).unwrap());
 
         let overlap = storage_range
@@ -717,7 +719,7 @@ impl StorageModule {
             let _ = submodule.db.update(|tx| -> eyre::Result<()> {
                 // Because each submodule index receives a copy of the path, we need to clone it
                 add_full_tx_path(tx, tx_path_hash, tx_path.clone())?;
-
+                set_data_size_for_data_root(tx, data_root, data_size)?;
                 if let Some(range) = interval.intersection(&partition_overlap) {
                     // Add the tx_path_hash to every offset in the intersecting range
                     for offset in *range.start()..=*range.end() {
@@ -877,6 +879,15 @@ impl StorageModule {
         Ok(offsets)
     }
 
+    pub fn generate_full_chunk_ledger_offset(
+        &self,
+        ledger_offset: LedgerChunkOffset,
+    ) -> Result<Option<PackedChunk>> {
+        let range = self.get_storage_module_ledger_range()?;
+        let partition_offset = PartitionChunkOffset::from(*(ledger_offset - range.start()));
+        self.generate_full_chunk(partition_offset)
+    }
+
     /// Constructs a Chunk struct for the given ledger offset
     ///
     /// This function:
@@ -887,75 +898,58 @@ impl StorageModule {
     ///
     /// Note: Handles cases where data spans partition boundaries by supporting
     /// negative offsets in the calculation of chunk position
+    /// this is why the input offset is a LedgerOffset and not a PartitionOffset
     pub fn generate_full_chunk(
         &self,
-        ledger_offset: LedgerChunkOffset,
+        partition_offset: PartitionChunkOffset,
     ) -> Result<Option<PackedChunk>> {
         // Get paths and process them
-        let (tx_path, data_path) = self.read_tx_data_path(ledger_offset)?;
+        let (data_root, data_size, data_path, chunk_offset) =
+            self.query_submodule_db_by_offset(partition_offset, |tx| {
+                let tx_path = get_tx_path_by_offset(tx, partition_offset)?
+                    .ok_or(eyre::eyre!("Unable to find a chunk with that tx_path"))?;
 
-        let (data_root, data_size) = match tx_path {
-            Some(tp) => {
-                let path_buff = Base64::from(tp);
+                let path_buff = Base64::from(tx_path);
                 let proof = get_leaf_proof(&path_buff)?;
                 let data_root = proof
                     .hash()
                     .map(H256::from)
-                    .ok_or_eyre("Unable to parse data_root from tx_path ")?;
-                let data_size = proof.offset() as u64;
-                (data_root, data_size)
-            }
-            None => return Err(eyre::eyre!("Unable to find a chunk with that tx_path")),
-        };
+                    .ok_or_eyre("Unable to parse data_root from tx_path")?;
 
-        let (data_path, _offset) = match data_path {
-            Some(dp) => {
-                let path_buff = Base64::from(dp);
+                let data_size = get_data_size_by_data_root(tx, data_root)?.ok_or(eyre!(
+                    "Unable to get data_size for data_root {}",
+                    &data_root
+                ))?;
+
+                let data_path = get_data_path_by_offset(tx, partition_offset)?
+                    .ok_or(eyre::eyre!("Unable to find a chunk for that data_path"))?;
+                let path_buff = Base64::from(data_path);
                 let proof = get_leaf_proof(&path_buff)?;
-                (path_buff, proof.offset() as u64)
-            }
-            None => return Err(eyre::eyre!("Unable to find a chunk for that data_path")),
-        };
+                // -1 as it starts with 0
+                let chunk_offset =
+                    (proof.offset() as u64).div_ceil(self.storage_config.chunk_size) - 1;
 
-        // Get chunk info and calculate index
-        let range = self.get_storage_module_range()?;
-        let partition_offset = PartitionChunkOffset::from(
-            *(ledger_offset - range.start().try_into().expect("Value exceeds u32::MAX")),
-        );
-        let closest_offsets = self.collect_start_offsets(data_root)?;
+                Ok((
+                    data_root,
+                    data_size,
+                    path_buff,
+                    TxChunkOffset(chunk_offset.try_into().expect("Value exceeds u32::MAX")),
+                ))
+            })?;
 
-        let nearest_start_offset = closest_offsets
-            .0
-            .iter()
-            .filter(|&&offset| *offset <= *partition_offset as i32)
-            .max()
-            .copied()
-            .ok_or_eyre("Could not find nearest_start_offset")?;
-
-        let chunks = self.read_chunks(partition_chunk_offset_ii!(
+        let mut chunks = self.read_chunks(partition_chunk_offset_ii!(
             partition_offset,
             partition_offset
         ))?;
         let chunk_info = chunks
-            .get(&partition_offset)
+            .remove(&partition_offset)
             .ok_or_eyre("Could not find chunk bytes on disk")?;
-
-        // Because nearest_start_offset can be negative (for data_roots that
-        // overlap partition boundaries) we do our calculations with i64s to
-        // account for negative nearest_start_offset
-        let data_root_start_offset: LedgerChunkOffset =
-            LedgerChunkOffset::from(*range.start() as i64 + *nearest_start_offset as i64);
-
-        // Finally the index of the chunk in the transaction can be calculated
-        // using the ledger relative start_offset of the data_root and the
-        // ledger_offset provided by the caller
-        let chunk_offset = TxChunkOffset::from(ledger_offset - data_root_start_offset);
 
         Ok(Some(PackedChunk {
             data_root,
             data_size,
             data_path,
-            bytes: Base64::from(chunk_info.0.clone()),
+            bytes: Base64::from(chunk_info.0),
             partition_offset,
             tx_offset: chunk_offset,
             packing_address: self.storage_config.miner_address,
@@ -968,17 +962,35 @@ impl StorageModule {
         &self,
         chunk_offset: LedgerChunkOffset,
     ) -> eyre::Result<(Option<TxPath>, Option<ChunkDataPath>)> {
-        let (_interval, submodule) = self
-            .submodules
-            .get_key_value_at_point(PartitionChunkOffset::from(chunk_offset))
-            .unwrap();
-
-        submodule.db.view(|tx| {
+        self.query_submodule_db_by_offset(PartitionChunkOffset::from(chunk_offset), |tx| {
             Ok((
                 get_tx_path_by_offset(tx, PartitionChunkOffset::from(chunk_offset))?,
                 get_data_path_by_offset(tx, PartitionChunkOffset::from(chunk_offset))?,
             ))
-        })?
+        })
+    }
+
+    #[inline]
+    pub fn query_submodule_db_by_offset<S, R>(
+        &self,
+        chunk_offset: PartitionChunkOffset,
+        fetch_from_db: S,
+    ) -> eyre::Result<R>
+    where
+        S: FnOnce(&reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>) -> eyre::Result<R>,
+    {
+        let (_, submodule) = self.get_submodule_for_offset(chunk_offset)?;
+        submodule.db.view(fetch_from_db)?
+    }
+
+    #[inline]
+    pub fn get_submodule_for_offset(
+        &self,
+        chunk_offset: PartitionChunkOffset,
+    ) -> eyre::Result<(&Interval<PartitionChunkOffset>, &StorageSubmodule)> {
+        self.submodules
+            .get_key_value_at_point(chunk_offset)
+            .map_err(|e| eyre!("Unable to get submodule for offset {:?}", &e))
     }
 
     /// Writes chunk data to physical storage and updates state tracking
@@ -998,10 +1010,7 @@ impl StorageModule {
     ) -> eyre::Result<()> {
         let chunk_size = self.storage_config.chunk_size;
         // Get the correct submodule reference based on chunk_offset
-        let (interval, submodule) = self
-            .submodules
-            .get_key_value_at_point(chunk_offset)
-            .unwrap();
+        let (interval, submodule) = self.get_submodule_for_offset(chunk_offset).unwrap();
 
         // Get the submodule relative offset of the chunk
         let submodule_offset = chunk_offset - interval.start();
@@ -1029,7 +1038,7 @@ impl StorageModule {
 
     /// Utility method asking the StorageModule to return its chunk range in
     /// ledger relative coordinates
-    pub fn get_storage_module_range(&self) -> eyre::Result<LedgerChunkRange> {
+    pub fn get_storage_module_ledger_range(&self) -> eyre::Result<LedgerChunkRange> {
         if let Some(part_assign) = self.partition_assignment {
             if let Some(slot_index) = part_assign.slot_index {
                 let start = slot_index as u64 * self.storage_config.num_chunks_in_partition;
@@ -1050,7 +1059,7 @@ impl StorageModule {
         &self,
         chunk_range: LedgerChunkRange,
     ) -> eyre::Result<PartitionChunkRange> {
-        let storage_module_range = self.get_storage_module_range()?;
+        let storage_module_range = self.get_storage_module_ledger_range()?;
         let start = chunk_range.start() - storage_module_range.start();
         let end = chunk_range.end() - storage_module_range.start();
         Ok(PartitionChunkRange(ii(
@@ -1066,7 +1075,7 @@ impl StorageModule {
         &self,
         start_offset: LedgerChunkOffset,
     ) -> eyre::Result<i32> {
-        let storage_module_range = self.get_storage_module_range()?;
+        let storage_module_range = self.get_storage_module_ledger_range()?;
         let start = *start_offset as i64 - *storage_module_range.start() as i64;
         Ok(start.try_into()?)
     }
@@ -1103,17 +1112,30 @@ impl StorageModule {
 
 fn ensure_default_intervals(
     submodule_interval: &Interval<PartitionChunkOffset>,
-    mut file: &File,
+    intervals_path: &Path,
 ) -> eyre::Result<()> {
     let mut intervals = StorageIntervals::new();
     intervals
         .insert_merge_touching_if_values_equal(*submodule_interval, ChunkType::Uninitialized)
         .expect("to insert a default interval to the submodule intervals");
 
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&intervals_path)
+        .wrap_err_with(|| {
+            format!(
+                "Failed to create or open intervals file at {}",
+                intervals_path.display()
+            )
+        })?;
+
     let file_size = file.metadata()?.len();
     if file_size == 0 {
-        file.seek(SeekFrom::Start(0))?;
+        let mut file = get_atomic_file(&intervals_path)?;
         file.write_all(serde_json::to_string(&intervals)?.as_bytes())?;
+        file.commit()?;
     }
     Ok(())
 }
@@ -1122,7 +1144,19 @@ fn ensure_default_intervals(
 ///
 /// Loads the stored interval mapping that tracks chunk states.
 /// Expects a JSON-formatted file containing StorageIntervals.
-pub fn read_intervals_file(mut file: &File) -> eyre::Result<StorageIntervals> {
+pub fn read_intervals_file(path: &Path) -> eyre::Result<StorageIntervals> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+        .wrap_err_with(|| {
+            format!(
+                "Failed to create or open intervals file at {}",
+                path.display()
+            )
+        })?;
+
     let size = file.metadata().unwrap().len() as usize;
 
     if size == 0 {
@@ -1182,7 +1216,7 @@ pub fn get_overlapped_storage_modules(
                 .and_then(|pa| pa.ledger_id)
                 .map_or(false, |id| id == ledger as u32)
                 && module
-                    .get_storage_module_range()
+                    .get_storage_module_ledger_range()
                     .map_or(false, |range| range.overlaps(tx_chunk_range))
         })
         .cloned() // Clone the Arc, which is cheap
@@ -1204,7 +1238,7 @@ pub fn get_storage_module_at_offset(
                 .and_then(|pa| pa.ledger_id)
                 .map_or(false, |id| id == ledger as u32)
                 && module
-                    .get_storage_module_range()
+                    .get_storage_module_ledger_range()
                     .map_or(false, |range| range.contains_point(chunk_offset))
         })
         .cloned()
@@ -1712,7 +1746,7 @@ mod tests {
         let data_path = vec![4, 3, 2, 1];
         let tx_path = vec![5, 6, 7, 8];
         let data_root = H256::zero();
-
+        let data_size = chunk_data.len() as u64;
         // Pack the storage module
         storage_module.pack_with_zeros();
 
@@ -1720,11 +1754,12 @@ mod tests {
             tx_path,
             data_root,
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            data_size,
         );
 
         let chunk = UnpackedChunk {
             data_root: H256::zero(),
-            data_size: chunk_data.len() as u64,
+            data_size,
             data_path: data_path.clone().into(),
             bytes: chunk_data.into(),
             tx_offset: TxChunkOffset::from(0),

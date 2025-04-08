@@ -1,15 +1,12 @@
 //! endpoint tests
 use std::sync::Arc;
 
-use crate::utils::mine_block;
+use crate::utils::{mine_block, IrysNodeTest};
 use actix_web::{http::header::ContentType, HttpMessage};
 use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
-use irys_chain::{start_irys_node, IrysNodeCtx};
-use irys_config::IrysNodeConfig;
 use irys_database::BlockIndexItem;
-use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
-use irys_types::{Address, Config, IrysTransactionHeader, Signature, H256};
+use irys_types::{Address, IrysTransactionHeader, Signature, H256};
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
@@ -65,9 +62,9 @@ async fn version_endpoint_request(
 
 #[actix::test]
 async fn heavy_external_api() -> eyre::Result<()> {
-    let ctx = setup().await?; // start api service
+    let ctx = IrysNodeTest::default().start().await;
 
-    let address = format!("http://127.0.0.1:{}", ctx.node.config.port);
+    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
 
     // FIXME: Test to be updated with future endpoint work
     let mut _response = chunk_endpoint_request(&address).await;
@@ -101,9 +98,9 @@ async fn heavy_external_api() -> eyre::Result<()> {
     assert_eq!(json_response.block_index_height, 0);
 
     // advance one block
-    let (_header, _payload) = mine_block(&ctx.node).await?.unwrap();
+    let (_header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
     // advance one block, finalizing the previous block
-    let (header, _payload) = mine_block(&ctx.node).await?.unwrap();
+    let (header, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();
 
     let mock_header = IrysTransactionHeader {
         id: H256::from([255u8; 32]),
@@ -115,7 +112,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
         perm_fee: Some(200),
         ledger_id: 1,
         bundle_format: None,
-        chain_id: ctx.config.chain_id,
+        chain_id: ctx.node_ctx.config.chain_id,
         version: 0,
         ingress_proofs: None,
         signature: Signature::test_signature().into(),
@@ -130,7 +127,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
     sleep(Duration::from_millis(10000)).await;
 
     let _ = ctx
-        .node
+        .node_ctx
         .actor_addresses
         .block_index
         .send(block_finalized_message);
@@ -156,37 +153,6 @@ async fn heavy_external_api() -> eyre::Result<()> {
         }
     }
 
-    ctx.node.stop().await;
+    ctx.node_ctx.stop().await;
     Ok(())
-}
-
-struct TestCtx {
-    config: Config,
-    node: IrysNodeCtx,
-    #[expect(
-        dead_code,
-        reason = "to prevent drop() being called and cleaning up resources"
-    )]
-    temp_dir: TempDir,
-}
-
-async fn setup() -> eyre::Result<TestCtx> {
-    let testnet_config = Config {
-        // add any overrides here
-        ..Config::testnet()
-    };
-    setup_with_config(testnet_config).await
-}
-
-async fn setup_with_config(testnet_config: Config) -> eyre::Result<TestCtx> {
-    let temp_dir = temporary_directory(Some("external_api"), false);
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
-    Ok(TestCtx {
-        config: testnet_config,
-        node,
-        temp_dir,
-    })
 }
