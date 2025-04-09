@@ -6,7 +6,7 @@ use irys_types::{Address, DatabaseProvider, PeerListItem};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
-use tokio::time::{Duration};
+use tokio::time::Duration;
 
 pub const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const UPDATE_CHANNEL_SIZE: usize = 100;
@@ -23,7 +23,7 @@ impl PeerListProvider {
     pub fn new(db: DatabaseProvider) -> (Self, mpsc::Receiver<(Address, PeerListItem)>) {
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
         let cache = Arc::new(RwLock::new(HashMap::new()));
-        
+
         // Initialize cache from database
         if let Ok(read_tx) = db.tx() {
             if let Ok(peer_list_items) = walk_all::<PeerListItems, _>(&read_tx) {
@@ -35,11 +35,14 @@ impl PeerListProvider {
             }
         }
 
-        (Self {
-            db,
-            cache,
-            update_sender,
-        }, update_receiver)
+        (
+            Self {
+                db,
+                cache,
+                update_sender,
+            },
+            update_receiver,
+        )
     }
 
     /// Flushes pending updates to the database
@@ -47,7 +50,10 @@ impl PeerListProvider {
     /// # Errors
     ///
     /// This function will return an error if the database operation fails
-    pub fn flush_updates(&self, pending_updates: &HashMap<Address, PeerListItem>) -> eyre::Result<()> {
+    pub fn flush_updates(
+        &self,
+        pending_updates: &HashMap<Address, PeerListItem>,
+    ) -> eyre::Result<()> {
         if pending_updates.is_empty() {
             return Ok(());
         }
@@ -68,10 +74,11 @@ impl PeerListProvider {
     ///
     /// This function will return an error if the cache cannot be accessed.
     pub fn all_known_peers(&self) -> eyre::Result<Vec<PeerListItem>> {
-        let cache_read = self.cache
+        let cache_read = self
+            .cache
             .read()
             .map_err(|e| eyre::eyre!("Failed to read cache: {}", e))?;
-        
+
         Ok(cache_read.values().cloned().collect())
     }
 
@@ -82,10 +89,11 @@ impl PeerListProvider {
     ///
     /// This function will return an error if the cache cannot be accessed.
     pub fn is_peer_allowed(&self, peer: &SocketAddr) -> eyre::Result<Option<PeerListItem>> {
-        let cache_read = self.cache
+        let cache_read = self
+            .cache
             .read()
             .map_err(|e| eyre::eyre!("Failed to read cache: {}", e))?;
-        
+
         let peer_ip = peer.ip();
         Ok(cache_read
             .values()
@@ -99,10 +107,11 @@ impl PeerListProvider {
     ///
     /// This function will return an error if the cache cannot be accessed.
     pub fn update_peer(&self, peer: &PeerListItem) -> eyre::Result<()> {
-        let cache_read = self.cache
+        let cache_read = self
+            .cache
             .read()
             .map_err(|e| eyre::eyre!("Failed to read cache: {}", e))?;
-        
+
         // Find the mining address associated with this peer
         let mut mining_address = None;
         for (addr, item) in cache_read.iter() {
@@ -111,21 +120,22 @@ impl PeerListProvider {
                 break;
             }
         }
-        
+
         drop(cache_read); // Release the read lock
 
         if let Some(addr) = mining_address {
-            let mut cache_write = self.cache
+            let mut cache_write = self
+                .cache
                 .write()
                 .map_err(|e| eyre::eyre!("Failed to write to cache: {}", e))?;
-            
+
             cache_write.insert(addr, peer.clone());
-            
+
             // Queue update for database
             if let Err(e) = self.update_sender.try_send((addr, peer.clone())) {
                 tracing::warn!("Failed to queue peer update: {}", e);
             }
-            
+
             Ok(())
         } else {
             Err(eyre::eyre!("Peer not found in cache"))
@@ -138,10 +148,11 @@ impl PeerListProvider {
     ///
     /// This function will return an error if the cache cannot be accessed.
     pub fn get_peer_info(&self, peer: &SocketAddr) -> eyre::Result<Option<PeerListItem>> {
-        let cache_read = self.cache
+        let cache_read = self
+            .cache
             .read()
             .map_err(|e| eyre::eyre!("Failed to read cache: {}", e))?;
-        
+
         let peer_ip = peer.ip();
         Ok(cache_read
             .values()
@@ -155,17 +166,18 @@ impl PeerListProvider {
     ///
     /// This function will return an error if the cache cannot be accessed.
     pub fn add_peer(&self, mining_address: &Address, peer: &PeerListItem) -> eyre::Result<()> {
-        let mut cache_write = self.cache
+        let mut cache_write = self
+            .cache
             .write()
             .map_err(|e| eyre::eyre!("Failed to write to cache: {}", e))?;
 
         cache_write.insert(*mining_address, peer.clone());
-        
+
         // Queue update for database
         if let Err(e) = self.update_sender.try_send((*mining_address, peer.clone())) {
             tracing::warn!("Failed to queue peer update: {}", e);
         }
-        
+
         Ok(())
     }
 }

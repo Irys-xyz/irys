@@ -28,11 +28,7 @@ impl GossipClient {
     /// # Errors
     ///
     /// If the peer is offline or the request fails, an error is returned.
-    pub async fn send_data(
-        &self,
-        peer: &PeerListItem,
-        data: &GossipData,
-    ) -> GossipResult<()> {
+    pub async fn send_data(&self, peer: &PeerListItem, data: &GossipData) -> GossipResult<()> {
         Self::check_if_peer_online(peer)?;
         match data {
             GossipData::Chunk(unpacked_chunk) => {
@@ -87,10 +83,7 @@ impl GossipClient {
     /// # Errors
     ///
     /// If the health check fails or the response is not valid JSON, an error is returned.
-    pub async fn check_health(
-        &self,
-        peer: &PeerListItem,
-    ) -> GossipResult<PeerListItem> {
+    pub async fn check_health(&self, peer: &PeerListItem) -> GossipResult<PeerListItem> {
         let url = format!("http://{}/gossip/health", peer.address.gossip);
 
         let response = self

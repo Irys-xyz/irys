@@ -8,7 +8,14 @@
 )]
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
-use crate::{cache::GossipCache, client::GossipClient, peer_list_provider, server::GossipServer, types::{GossipError, GossipResult}, PeerListProvider};
+use crate::{
+    cache::GossipCache,
+    client::GossipClient,
+    peer_list_provider,
+    server::GossipServer,
+    types::{GossipError, GossipResult},
+    PeerListProvider,
+};
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::net::SocketAddr;
@@ -17,12 +24,12 @@ use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::TxExistenceQuery;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
 use irys_api_client::ApiClient;
+use irys_primitives::Address;
 use irys_types::{DatabaseProvider, GossipData, PeerListItem};
 use rand::seq::IteratorRandom as _;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::{sync::mpsc, time};
-use std::collections::HashMap;
-use irys_primitives::Address;
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -180,22 +187,21 @@ impl GossipService {
                     InternalGossipError::BroadcastReceiverShutdown,
                 ))?;
 
-        let peer_list_update_receiver = self
-            .peer_list_update_receiver
-            .take()
-            .ok_or(GossipError::Internal(
-                InternalGossipError::BroadcastReceiverShutdown,
-            ))?;
+        let peer_list_update_receiver =
+            self.peer_list_update_receiver
+                .take()
+                .ok_or(GossipError::Internal(
+                    InternalGossipError::BroadcastReceiverShutdown,
+                ))?;
 
-        let peer_list_update_task_handle = spawn_peer_list_update_task(
-            self.peer_list.clone(),
-            peer_list_update_receiver,
-        );
+        let peer_list_update_task_handle =
+            spawn_peer_list_update_task(self.peer_list.clone(), peer_list_update_receiver);
 
         let service = Arc::new(self);
 
         let cache_pruning_task_handle = spawn_cache_pruning_task(Arc::clone(&service.cache));
-        let broadcast_task_handle = spawn_broadcast_task(mempool_data_receiver, Arc::clone(&service));
+        let broadcast_task_handle =
+            spawn_broadcast_task(mempool_data_receiver, Arc::clone(&service));
 
         let gossip_service_handle = spawn_main_task(
             server,
