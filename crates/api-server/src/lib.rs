@@ -30,6 +30,7 @@ use tracing::{debug, info};
 pub struct ApiState {
     pub mempool: Addr<MempoolService>,
     pub chunk_provider: Arc<ChunkProvider>,
+    pub ema_service: UnboundedSender<EmaServiceMessage>,
     pub db: DatabaseProvider,
     pub config: Config,
     // TODO: slim this down to what we actually use - beware the types!

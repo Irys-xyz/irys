@@ -109,9 +109,6 @@ impl IrysNodeConfig {
     }
 }
 
-pub const PRICE_PER_CHUNK_PERM: u128 = 10000;
-pub const PRICE_PER_CHUNK_5_EPOCH: u128 = 10;
-
 /// Subsystem allowing for the configuration of storage submodules via a handy TOML file
 ///
 /// Storage submodule path mappings are now governed by a `~/.irys_storage_modules.toml` file.

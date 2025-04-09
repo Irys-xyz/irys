@@ -226,15 +226,11 @@ impl DataLedger {
         *self as u32
     }
 
-    // Takes "perm" or some term e.g. "1year", or an integer ID
-    pub fn from_url(s: &str) -> eyre::Result<Self> {
-        if let Ok(ledger_id) = s.parse::<u32>() {
-            return DataLedger::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
-        }
-        match s {
-            "perm" => eyre::Result::Ok(Self::Publish),
-            "5days" => eyre::Result::Ok(Self::Submit),
-            _ => Err(eyre::eyre!("Ledger {} not supported", s)),
+    fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Publish),
+            1 => Some(Self::Submit),
+            _ => None,
         }
     }
 }
@@ -246,14 +242,19 @@ impl From<DataLedger> for u32 {
 }
 
 impl TryFrom<u32> for DataLedger {
-    type Error = &'static str;
+    type Error = eyre::Report;
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Publish),
-            1 => Ok(Self::Submit),
-            _ => Err("Invalid ledger number"),
-        }
+    fn try_from(value: u32) -> eyre::Result<Self> {
+        Self::from_u32(value).ok_or_else(|| eyre::eyre!("Invalid ledger number"))
+    }
+}
+
+impl TryFrom<&str> for DataLedger {
+    type Error = eyre::Report;
+
+    fn try_from(value: &str) -> eyre::Result<Self> {
+        let x = value.parse()?;
+        Self::from_u32(x).ok_or_else(|| eyre::eyre!("Invalid ledger number"))
     }
 }
 

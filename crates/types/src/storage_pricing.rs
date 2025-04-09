@@ -5,13 +5,13 @@
 //! - `Amount<(IrysPrice, Usd)>` - Cost in $USD of a single $IRYS token, the data retrieved form oracles
 //! - `Amount<(NetworkFee, Irys)>` - The cost in $IRYS that the user will have to pay to store his data on Irys
 
-use crate::U256;
+pub use crate::U256;
 use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Arbitrary;
 use core::{fmt::Debug, marker::PhantomData};
 use eyre::{ensure, eyre, Result};
 use reth_codecs::Compact;
-use rust_decimal::Decimal;
+pub use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 

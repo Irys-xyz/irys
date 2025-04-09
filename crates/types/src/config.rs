@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
-        phantoms::{IrysPrice, Percentage, Usd},
+        phantoms::{CostPerGb, DecayRate, IrysPrice, NetworkFee, Percentage, Usd},
         Amount,
     },
 };
@@ -81,6 +81,19 @@ pub struct Config {
     pub gossip_service_bind_ip: String,
     /// The port of the gossip service
     pub gossip_service_port: u16,
+    /// todo
+    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    pub annual_cost_per_gb: Amount<(CostPerGb, Usd)>,
+    /// todo
+    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    pub decay_rate: Amount<DecayRate>,
+    /// todo
+    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    pub fee_percentage: Amount<Percentage>,
+    /// todo
+    pub safe_minimum_number_of_years: u64,
+    /// todo
+    pub number_of_ingerss_proofs: u64,
 }
 
 fn default_irys_path() -> PathBuf {
@@ -165,6 +178,11 @@ impl Config {
             base_directory: default_irys_path(),
             gossip_service_bind_ip: "127.0.0.1".into(),
             gossip_service_port: 0,
+            annual_cost_per_gb: todo!(),
+            decay_rate: todo!(),
+            fee_percentage: todo!(),
+            safe_minimum_number_of_years: todo!(),
+            number_of_ingerss_proofs: todo!(),
         }
     }
 }
