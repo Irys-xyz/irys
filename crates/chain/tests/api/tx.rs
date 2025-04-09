@@ -1,14 +1,14 @@
 //! endpoint tests
 use crate::utils::IrysNodeTest;
-use actix_http::{test, StatusCode};
-use actix_web::{http::header::ContentType, middleware::Logger, App, HttpMessage};
+use actix_http::StatusCode;
+use actix_web::{middleware::Logger, App};
 use alloy_core::primitives::U256;
 use base58::ToBase58;
-use irys_actors::{packing::wait_for_packing, BlockFinalizedMessage};
+use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, routes::tx::IrysTransaction, ApiState};
-use irys_database::{database, BlockIndexItem};
+use irys_database::database;
 use irys_types::{
-    irys::IrysSigner, Address, CommitmentTransaction, Config, IrysTransactionHeader, Signature,
+    irys::IrysSigner, CommitmentTransaction, Config, IrysTransactionHeader,
     H256,
 };
 use reth_db::Database;
