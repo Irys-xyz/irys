@@ -157,12 +157,6 @@ impl GossipService {
         B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
         A: ApiClient + Clone + 'static,
     {
-        // Ok(ServiceHandleWithShutdownSignal::spawn(Some("stub"), |a| {
-        //    async {
-        //        println!("Bibka");
-        //        Ok(())
-        //    }
-        // }))
         tracing::debug!("Staring gossip service");
 
         let server_data_handler = GossipServerDataHandler {
@@ -378,8 +372,17 @@ fn spawn_main_task(
             }
         });
 
-        let _ = server.await;
-        tasks_shutdown_handle.await.unwrap()
+        match server.await {
+            Ok(()) => {
+                tracing::info!("Gossip server stopped");
+            }
+            Err(error) => {
+                tracing::warn!("Gossip server shutdown error: {}", error);
+            }
+        };
+        tasks_shutdown_handle.await.map_err(|error| {
+            GossipError::Internal(InternalGossipError::CacheCleanup(error.to_string()))
+        })?
     })
 }
 
@@ -400,29 +403,3 @@ impl GossipSource {
         matches!(self, Self::Internal)
     }
 }
-
-// async fn handle_gossip_data_from_other_peer<T>(
-//     source_address: SocketAddr,
-//     data: GossipData,
-//     service: &GossipService,
-//     mempool: &Addr<T>,
-//     api_client: &impl ApiClient,
-// ) -> GossipResult<()>
-// where
-//     T: Handler<TxIngressMessage>
-//         + Handler<ChunkIngressMessage>
-//         + Handler<TxExistenceQuery>
-//         + Actor<Context = Context<T>>,
-// {
-//     match data {
-//         GossipData::Transaction(tx) => {
-//             handle_transaction(&mempool, tx, &service.cache, source_address).await
-//         }
-//         GossipData::Chunk(chunk) => {
-//             handle_chunk(&mempool, chunk, &service.cache, source_address).await
-//         }
-//         GossipData::Block(irys_block_header) => {
-//             handle_block_header(&mempool, irys_block_header, &service.cache, source_address, api_client).await
-//         }
-//     }
-// }

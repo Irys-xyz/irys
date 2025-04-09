@@ -83,7 +83,7 @@ use tokio::{
     runtime::Handle,
     sync::oneshot::{self},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -767,7 +767,10 @@ pub async fn start_irys_node(
                 info!("API server stopped");
                 server_stop_handle.await.unwrap();
 
-                gossip_service_handle.stop().await.unwrap().unwrap();
+                match gossip_service_handle.stop().await {
+                    Ok(_) => info!("Gossip service stopped"),
+                    Err(e) => warn!("Gossip service already stopped: {:?}", e),
+                }
 
                 debug!("Stopping actors");
                 for arbiter in arbiters {
