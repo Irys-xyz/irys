@@ -4,6 +4,7 @@ use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
 use actix::Arbiter;
 use actix::{Actor, Addr, System, SystemRegistry};
 use actix_web::dev::Server;
+use base58::{FromBase58, ToBase58 as _};
 use irys_actors::block_tree_service::BlockTreeReadGuard;
 use irys_actors::cache_service::ChunkCacheService;
 use irys_actors::ema_service::EmaService;
@@ -273,8 +274,13 @@ impl IrysNode {
                     .expect("valid calculated initial difficulty"),
                     timestamp: self.genesis_timestamp,
                     last_diff_timestamp: self.genesis_timestamp,
+                    last_epoch_hash: H256::from_base58(
+                        "6mZBRJGrxbYZsLLQqwZEFEAsdvNvx4Hd7RVVBAD69f7Y",
+                    ),
                     ..irys_genesis
                 };
+                dbg!(&irys_genesis.last_epoch_hash.0);
+
                 add_genesis_commitments(&mut irys_genesis, &self.config);
                 let irys_genesis_block = Arc::new(irys_genesis);
 
@@ -615,6 +621,7 @@ impl IrysNode {
         let partition_assignments_guard = epoch_service_actor
             .send(GetPartitionAssignmentsGuardMessage)
             .await?;
+        dbg!(&storage_module_infos);
         let storage_modules = self.init_storage_modules(storage_module_infos);
 
         let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
@@ -1146,6 +1153,10 @@ impl IrysNode {
     ) -> Vec<Arc<StorageModule>> {
         let mut storage_modules = Vec::new();
         for info in storage_module_infos {
+            dbg!(&info
+                .partition_assignment
+                .and_then(|pa| Some(pa.partition_hash.0.to_base58())));
+
             let arc_module = Arc::new(
                 StorageModule::new(
                     &self.irys_node_config.storage_module_dir(),

@@ -22,7 +22,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::block_index_service::BlockIndexReadGuard;
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
@@ -730,7 +730,7 @@ impl EpochServiceActor {
         // Compute the partition hashes for all of the added partitions
         for _i in 0..parts_to_add {
             let next_part_hash = H256(hash_sha256(&prev_partition_hash.0).unwrap());
-            trace!(
+            debug!(
                 "Adding partition with hash: {} (prev: {})",
                 next_part_hash.0.to_base58(),
                 prev_partition_hash.0.to_base58()
@@ -1147,6 +1147,16 @@ impl EpochServiceActor {
                     sm_paths[idx_start + idx].clone(),
                 )],
             });
+        }
+
+        // info!("module infos: {:?}", &module_infos);
+        for info in &module_infos {
+            info!(
+                "{} :{:?}",
+                info.id,
+                info.partition_assignment
+                    .and_then(|pa| Some(pa.partition_hash.0.to_base58()))
+            )
         }
 
         module_infos
