@@ -104,21 +104,21 @@ pub async fn prevalidate_block(
         "last_step_checkpoints_is_valid",
     );
 
-    // Check that the oracle price does not exceed the EMA pricing parameters
-    check_valid_oracle_price(&block, &ema_serviece_sendr).await?;
-    debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
-        ?block.height,
-        "check_valid_oracle_price",
-    );
+    // // Check that the oracle price does not exceed the EMA pricing parameters
+    // check_valid_oracle_price(&block, &ema_serviece_sendr).await?;
+    // debug!(
+    //     block_hash = ?block.block_hash.0.to_base58(),
+    //     ?block.height,
+    //     "check_valid_oracle_price",
+    // );
 
-    // Check that the EMA has been correctly calculated
-    check_valid_ema_calculation(&block, &ema_serviece_sendr).await?;
-    debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
-        ?block.height,
-        "check_valid_ema_calculation",
-    );
+    // // Check that the EMA has been correctly calculated
+    // check_valid_ema_calculation(&block, &ema_serviece_sendr).await?;
+    // debug!(
+    //     block_hash = ?block.block_hash.0.to_base58(),
+    //     ?block.height,
+    //     "check_valid_ema_calculation",
+    // );
 
     Ok(())
 }

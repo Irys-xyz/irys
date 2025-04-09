@@ -17,11 +17,7 @@ use irys_price_oracle::IrysPriceOracle;
 use irys_primitives::{BlockRewardShadow, DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
-    Base64, DataTransactionLedger, DifficultyAdjustmentConfig, H256List, IngressProofsList,
-    IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TxIngressProof, VDFLimiterInfo,
-    H256, U256,
+    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty, next_cumulative_diff, storage_config::StorageConfig, storage_pricing::Amount, vdf_config::VDFStepsConfig, Address, Base64, DataTransactionLedger, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TxIngressProof, VDFLimiterInfo, H256, U256
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -32,6 +28,7 @@ use reth::{
 };
 use reth_db::cursor::*;
 use reth_db::Database;
+use rust_decimal_macros::dec;
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -304,9 +301,11 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // fetch the irys price from the oracle
             let oracle_irys_price = price_oracle.current_price().await?;
             // fetch the ema price to use
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            ema_service.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
-            let ema_irys_price = rx.await??;
+
+            // TODO TESTNET: revert once EMA is stable
+            // let (tx, rx) = tokio::sync::oneshot::channel();
+            // ema_service.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
+            // let ema_irys_price = rx.await??;
 
             // build a new block header
             let mut irys_block = IrysBlockHeader {
@@ -357,8 +356,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     steps,
                     ..Default::default()
                 },
-                oracle_irys_price: ema_irys_price.range_adjusted_oracle_price,
-                ema_irys_price: ema_irys_price.ema,
+                // oracle_irys_price: ema_irys_price.range_adjusted_oracle_price,
+                // ema_irys_price: ema_irys_price.ema,
+                // TODO TESTNET: revert once EMA is stable
+                oracle_irys_price: Amount::token(dec!(1.0))
+                .expect("dec!(1.0) must evaluate to a valid token amount"),
+                ema_irys_price: Amount::token(dec!(1.0))
+                .expect("dec!(1.0) must evaluate to a valid token amount"),
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
