@@ -26,9 +26,10 @@ use irys_api_client::ApiClient;
 use irys_database::tables::CompactPeerListItem;
 use irys_types::{DatabaseProvider, GossipData};
 use rand::seq::IteratorRandom as _;
-use std::sync::Arc;
-use tokio::{sync::mpsc, time};
 use reth_tasks::{TaskExecutor, TaskManager};
+use std::sync::Arc;
+use tokio::sync::mpsc::error::SendError;
+use tokio::{sync::mpsc, time};
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -41,7 +42,7 @@ type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 #[derive(Debug)]
 pub struct ServiceHandleWithShutdownSignal {
     pub handle: tokio::task::JoinHandle<()>,
-    shutdown_tx: mpsc::Sender<()>,
+    pub shutdown_tx: mpsc::Sender<()>,
     pub name: &'static str,
 }
 
@@ -52,7 +53,6 @@ impl ServiceHandleWithShutdownSignal {
         Fut: core::future::Future<Output = ()> + Send + 'static,
     {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-        let name = name.into();
         let handle = task_executor.spawn(task(shutdown_rx));
         Self {
             handle,
@@ -68,13 +68,20 @@ impl ServiceHandleWithShutdownSignal {
     /// If the task panics, an error is returned.
     pub async fn stop(mut self) -> Result<(), tokio::task::JoinError> {
         tracing::info!("Called stop on task \"{}\"", self.name);
-        let _ = self.shutdown_tx.send(()).await;
+        match self.shutdown_tx.send(()).await {
+            Ok(()) => {
+                tracing::debug!("Shutdown signal sent to task \"{}\"", self.name);
+            }
+            Err(SendError(())) => {
+                tracing::warn!("Shutdown signal was already sent to task \"{}\"", self.name);
+            }
+        }
 
-        let result = self.wait_for_exit().await?;
+        self.wait_for_exit().await?;
 
         tracing::debug!("Task \"{}\" stopped", self.name);
 
-        Ok(result)
+        Ok(())
     }
 
     /// Waits for the task to exit or immediately returns if the task has already exited. To get
@@ -174,7 +181,8 @@ impl GossipService {
 
         let service = Arc::new(self);
 
-        let cache_pruning_task_handle = spawn_cache_pruning_task(Arc::clone(&service.cache), task_executor);
+        let cache_pruning_task_handle =
+            spawn_cache_pruning_task(Arc::clone(&service.cache), task_executor);
 
         let broadcast_task_handle =
             spawn_broadcast_task(mempool_data_receiver, Arc::clone(&service), task_executor);
@@ -309,7 +317,7 @@ fn spawn_broadcast_task(
 
             tracing::debug!("Broadcast task complete");
         },
-        task_executor
+        task_executor,
     )
 }
 
@@ -318,71 +326,78 @@ fn spawn_main_task(
     server_handle: ServerHandle,
     mut cache_pruning_task_handle: ServiceHandleWithShutdownSignal,
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,
-    task_executor: &TaskExecutor
+    task_executor: &TaskExecutor,
 ) -> ServiceHandleWithShutdownSignal {
-    ServiceHandleWithShutdownSignal::spawn("gossip main", move |mut task_shutdown_signal| async move {
-        tracing::debug!("Starting gossip service watch thread");
+    ServiceHandleWithShutdownSignal::spawn(
+        "gossip main",
+        move |mut task_shutdown_signal| async move {
+            tracing::debug!("Starting gossip service watch thread");
 
-        let tasks_shutdown_handle = TaskManager::current().executor().spawn_critical_with_shutdown_signal("server shutdown task", |_| async move {
-            tokio::select! {
-                _ = task_shutdown_signal.recv() => {
-                    tracing::debug!("Gossip service shutdown signal received");
+            let tasks_shutdown_handle = TaskManager::current()
+                .executor()
+                .spawn_critical_with_shutdown_signal("server shutdown task", |_| async move {
+                    tokio::select! {
+                        _ = task_shutdown_signal.recv() => {
+                            tracing::debug!("Gossip service shutdown signal received");
+                        }
+                        cleanup_res = cache_pruning_task_handle.wait_for_exit() => {
+                            tracing::warn!("Gossip cleanup exited because: {:?}", cleanup_res);
+                        }
+                        broadcast_res = broadcast_task_handle.wait_for_exit() => {
+                            tracing::warn!("Gossip broadcast exited because: {:?}", broadcast_res);
+                        }
+                    }
+
+                    tracing::debug!("Sending stop signal to server handle...");
+                    server_handle.stop(true).await;
+                    tracing::debug!(
+                        "Server handle stop signal sent, waiting for server to shut down..."
+                    );
+
+                    tracing::debug!("Shutting down gossip service tasks");
+                    let mut errors: Vec<GossipError> = vec![];
+
+                    tracing::debug!("Gossip listener stopped");
+
+                    let mut handle_result = |res: TaskExecutionResult| match res {
+                        Ok(()) => {}
+                        Err(error) => errors.push(GossipError::Internal(
+                            InternalGossipError::Unknown(error.to_string()),
+                        )),
+                    };
+
+                    tracing::info!("Stopping gossip cleanup");
+                    handle_result(cache_pruning_task_handle.stop().await);
+                    tracing::info!("Stopping gossip broadcast");
+                    handle_result(broadcast_task_handle.stop().await);
+
+                    if errors.is_empty() {
+                        tracing::info!("Gossip main task finished without errors");
+                    } else {
+                        tracing::warn!("Gossip main task finished with errors:");
+                        for error in errors {
+                            tracing::warn!("Error: {}", error);
+                        }
+                    };
+                });
+
+            match server.await {
+                Ok(()) => {
+                    tracing::info!("Gossip server stopped");
                 }
-                cleanup_res = cache_pruning_task_handle.wait_for_exit() => {
-                    tracing::warn!("Gossip cleanup exited because: {:?}", cleanup_res);
+                Err(error) => {
+                    tracing::warn!("Gossip server shutdown error: {}", error);
                 }
-                broadcast_res = broadcast_task_handle.wait_for_exit() => {
-                    tracing::warn!("Gossip broadcast exited because: {:?}", broadcast_res);
-                }
-            }
-
-            tracing::debug!("Sending stop signal to server handle...");
-            server_handle.stop(true).await;
-            tracing::debug!("Server handle stop signal sent, waiting for server to shut down...");
-
-            tracing::debug!("Shutting down gossip service tasks");
-            let mut errors: Vec<GossipError> = vec![];
-
-            tracing::debug!("Gossip listener stopped");
-
-            let mut handle_result = |res: TaskExecutionResult| match res {
+            };
+            match tasks_shutdown_handle.await {
                 Ok(()) => {}
-                Err(error) => errors.push(GossipError::Internal(InternalGossipError::Unknown(
-                    error.to_string(),
-                ))),
-            };
-
-            tracing::info!("Stopping gossip cleanup");
-            handle_result(cache_pruning_task_handle.stop().await);
-            tracing::info!("Stopping gossip broadcast");
-            handle_result(broadcast_task_handle.stop().await);
-
-            if errors.is_empty() {
-                tracing::info!("Gossip main task finished without errors");
-            } else {
-                tracing::warn!("Gossip main task finished with errors:");
-                for error in errors {
-                    tracing::warn!("Error: {}", error);
+                Err(error) => {
+                    tracing::warn!("Gossip service shutdown error: {}", error);
                 }
             };
-        });
-
-        match server.await {
-            Ok(()) => {
-                tracing::info!("Gossip server stopped");
-            }
-            Err(error) => {
-                tracing::warn!("Gossip server shutdown error: {}", error);
-            }
-        };
-        match tasks_shutdown_handle.await {
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!("Gossip service shutdown error: {}", error);
-                GossipError::Internal(InternalGossipError::Unknown(error.to_string()));
-            }
-        };
-    }, task_executor)
+        },
+        task_executor,
+    )
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]

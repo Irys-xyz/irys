@@ -18,10 +18,10 @@ use irys_types::{
     IrysTransactionHeader, PeerAddress, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk,
     H256,
 };
+use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
-use reth_tasks::{TaskExecutor, TaskManager};
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -293,12 +293,7 @@ impl GossipServiceTestFixture {
 
     /// # Panics
     /// Can panic
-    pub fn run_service(
-        &mut self,
-    ) -> (
-        ServiceHandleWithShutdownSignal,
-        mpsc::Sender<GossipData>,
-    ) {
+    pub fn run_service(&mut self) -> (ServiceHandleWithShutdownSignal, mpsc::Sender<GossipData>) {
         let (gossip_service, internal_message_bus) =
             GossipService::new("127.0.0.1", self.gossip_port, self.db.clone());
 
@@ -318,7 +313,12 @@ impl GossipServiceTestFixture {
         let api_client = self.api_client.clone();
 
         let service_handle = gossip_service
-            .run(mempool_stub_addr, block_discovery_stub_addr, api_client, &self.task_executor)
+            .run(
+                mempool_stub_addr,
+                block_discovery_stub_addr,
+                api_client,
+                &self.task_executor,
+            )
             .expect("failed to run gossip service");
 
         (service_handle, internal_message_bus)
