@@ -1,6 +1,6 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
+use crate::peer_utilities::sync_state_from_peers;
 use crate::vdf::run_vdf;
-use crate::peer_utilities::{sync_state_from_peers};
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58;

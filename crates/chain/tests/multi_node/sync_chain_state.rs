@@ -1,6 +1,7 @@
 use crate::api::external_api::{block_index_endpoint_request, info_endpoint_request};
 use crate::utils::mine_blocks;
 use irys_api_server::routes::index::NodeInfo;
+use irys_chain::peer_utilities::fetch_block;
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::BlockIndexItem;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
@@ -8,7 +9,6 @@ use irys_types::{Config, IrysBlockHeader};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
-use irys_chain::peer_utilities::fetch_block;
 
 /// spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
 /// check that the blocks ar evalid, check that peer1, peer2, and gensis are indeed synced
@@ -46,7 +46,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let ctx_peer1_node = setup_with_config(
         testnet_config_peer1.clone(),
         "heavy_sync_chain_state_peer1",
-        false
+        false,
     )
     .await
     .expect("found invalid genesis ctx for peer1");
@@ -60,7 +60,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let ctx_peer2_node = setup_with_config(
         testnet_config_peer2.clone(),
         "heavy_sync_chain_state_peer2",
-        false
+        false,
     )
     .await
     .expect("found invalid genesis ctx for peer2");
@@ -156,9 +156,16 @@ async fn setup_with_config(
     let temp_dir = temporary_directory(Some(node_name), false);
     testnet_config.base_directory = temp_dir.path().to_path_buf();
 
-    let genesis_block = if !genesis {  
+    let genesis_block = if !genesis {
         let mut result_genesis = block_index_endpoint_request(
-            &format!("http://{}",testnet_config.trusted_peers.get(0).expect("Should be at least one trusted peer!").to_string()),
+            &format!(
+                "http://{}",
+                testnet_config
+                    .trusted_peers
+                    .get(0)
+                    .expect("Should be at least one trusted peer!")
+                    .to_string()
+            ),
             0,
             1,
         )
@@ -169,20 +176,26 @@ async fn setup_with_config(
             .await
             .expect("expected a valid json deserialize");
 
-        let client = awc::Client::default();                
-        let fetched_genesis_block = fetch_block(testnet_config.trusted_peers.get(0).expect("Should be at least one trusted peer!"), &client, &block_index_genesis.get(0).unwrap()).await.unwrap();
+        let client = awc::Client::default();
+        let fetched_genesis_block = fetch_block(
+            testnet_config
+                .trusted_peers
+                .get(0)
+                .expect("Should be at least one trusted peer!"),
+            &client,
+            &block_index_genesis.get(0).unwrap(),
+        )
+        .await
+        .unwrap();
         let fetched_genesis_block = Arc::new(fetched_genesis_block);
         Some(fetched_genesis_block)
     } else {
         None
     };
-    
+
     let mut irys_node = IrysNode::new(testnet_config.clone(), genesis, genesis_block);
     let node = irys_node.start().await?;
-    Ok(TestCtx {
-        node,
-        temp_dir,
-    })
+    Ok(TestCtx { node, temp_dir })
 }
 
 fn local_test_url(port: &u16) -> String {
