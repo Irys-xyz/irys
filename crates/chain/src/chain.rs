@@ -32,7 +32,7 @@ use irys_database::migration::check_db_version_and_run_migrations_if_needed;
 use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx,
 };
-use irys_gossip_service::{ServiceHandleWithShutdownSignal};
+use irys_gossip_service::ServiceHandleWithShutdownSignal;
 use irys_price_oracle::mock_oracle::MockOracle;
 use irys_price_oracle::IrysPriceOracle;
 pub use irys_reth_node_bridge::node::{
@@ -690,7 +690,7 @@ impl IrysNode {
             mempool_service.clone(),
             block_discovery.clone(),
             irys_api_client::IrysApiClient::new(),
-            task_exec
+            task_exec,
         )?;
 
         // set up the price oracle
