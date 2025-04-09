@@ -4,27 +4,20 @@ use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     mempool_service::{MempoolService, TxIngressMessage},
 };
-use irys_database::{
-    BlockIndexItem, DataLedger,
-};
+use irys_database::{BlockIndexItem, DataLedger};
 
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
-use irys_types::{
-    block::CombinedBlockHeader, IrysBlockHeader, IrysTransactionHeader, H256,
-};
+use irys_types::{block::CombinedBlockHeader, IrysBlockHeader, IrysTransactionHeader, H256};
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
     sync::Arc,
-    thread::{sleep},
+    thread::sleep,
 };
-use tokio::{
-    sync::Mutex,
-    time::Duration,
-};
+use tokio::{sync::Mutex, time::Duration};
 use tracing::{error, info, warn};
 
 pub async fn fetch_txn(

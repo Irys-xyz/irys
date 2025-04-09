@@ -29,7 +29,8 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx,
-    migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, BlockIndex, Initialized,
+    migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, BlockIndex,
+    Initialized,
 };
 use irys_gossip_service::{GossipResult, ServiceHandleWithShutdownSignal};
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
@@ -44,10 +45,9 @@ use irys_storage::{
 };
 
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty,
-    vdf_config::VDFStepsConfig, CommitmentTransaction, Config, DifficultyAdjustmentConfig,
-    GossipData, IrysBlockHeader, OracleConfig, PartitionChunkRange,
-    StorageConfig, H256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
+    CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
+    OracleConfig, PartitionChunkRange, StorageConfig, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
