@@ -248,7 +248,7 @@ impl GossipServiceTestFixture {
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
-        let peer_list = PeerListProvider::new(db.clone());
+        let (peer_list, peer_list_updater) = PeerListProvider::new(db.clone());
 
         let (gossip_sender, _rx) = mpsc::channel(100);
 
