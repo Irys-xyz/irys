@@ -1,81 +1,31 @@
-use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
-use crate::vdf::run_vdf;
-use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
-use actix_web::dev::Server;
+use actix::Addr;
 use base58::ToBase58;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
-    block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
-    block_producer::BlockProducerActor,
-    block_tree_service::BlockTreeReadGuard,
-    block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
-    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    cache_service::ChunkCacheService,
-    chunk_migration_service::ChunkMigrationService,
-    ema_service::EmaService,
-    epoch_service::{EpochServiceActor, EpochServiceConfig, GetPartitionAssignmentsGuardMessage},
     mempool_service::{MempoolService, TxIngressMessage},
-    mining::PartitionMiningActor,
-    packing::PackingConfig,
-    packing::{PackingActor, PackingRequest},
-    peer_list_service::PeerListService,
-    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
-    services::ServiceSenders,
-    validation_service::ValidationService,
-    vdf_service::{GetVdfStateMessage, VdfService},
-    ActorAddresses, BlockFinalizedMessage,
 };
-use irys_api_server::{create_listener, run_server, ApiState};
-use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
 use irys_database::{
-    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx,
-    migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, BlockIndex,
-    BlockIndexItem, DataLedger, Initialized,
+    BlockIndexItem, DataLedger,
 };
-use irys_gossip_service::{GossipResult, ServiceHandleWithShutdownSignal};
-use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
-use irys_storage::{
-    irys_consensus_data_db::open_or_create_irys_consensus_data_db,
-    reth_provider::{IrysRethProvider, IrysRethProviderInner},
-    ChunkProvider, ChunkType, StorageModule,
-};
 
 use irys_types::{
-    app_state::DatabaseProvider, block::CombinedBlockHeader, calculate_initial_difficulty,
-    vdf_config::VDFStepsConfig, CommitmentTransaction, Config, DifficultyAdjustmentConfig,
-    GossipData, IrysBlockHeader, IrysTransactionHeader, OracleConfig, PartitionChunkRange,
-    StorageConfig, H256,
+    block::CombinedBlockHeader, IrysBlockHeader, IrysTransactionHeader, H256,
 };
-use irys_vdf::vdf_state::VdfStepsReadGuard;
-use reth::{
-    builder::FullNode,
-    chainspec::ChainSpec,
-    core::irys_ext::NodeExitReason,
-    tasks::{TaskExecutor, TaskManager},
-};
-use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
-use reth_db::{Database as _, HasName, HasTableType};
 use std::{
     collections::{HashSet, VecDeque},
-    fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
-    path::PathBuf,
-    sync::atomic::AtomicU64,
-    sync::{mpsc, Arc, RwLock},
-    thread::{self, sleep, JoinHandle},
-    time::{SystemTime, UNIX_EPOCH},
+    net::SocketAddr,
+    sync::Arc,
+    thread::{sleep},
 };
 use tokio::{
-    runtime::{Handle, Runtime},
-    sync::oneshot::{self},
     sync::Mutex,
     time::Duration,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 pub async fn fetch_txn(
     peer: &SocketAddr,

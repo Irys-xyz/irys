@@ -5,7 +5,7 @@ use irys_chain::peer_utilities::fetch_block;
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::BlockIndexItem;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
-use irys_types::{Config, IrysBlockHeader};
+use irys_types::Config;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
