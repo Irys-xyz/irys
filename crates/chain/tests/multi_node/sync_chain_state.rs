@@ -8,6 +8,7 @@ use irys_types::{Config, IrysBlockHeader};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
+use irys_chain::peer_utilities::fetch_block;
 
 /// spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
 /// check that the blocks ar evalid, check that peer1, peer2, and gensis are indeed synced
@@ -26,7 +27,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         testnet_config_genesis.clone(),
         "heavy_sync_chain_state_genesis",
         true,
-        None,
     )
     .await
     .expect("found invalid genesis ctx");
@@ -34,8 +34,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     mine_blocks(&ctx_genesis_node.node, required_genesis_node_height)
         .await
         .expect("expected many mined blocks");
-
-    let genesis_block = Some(ctx_genesis_node.irys_genesis_block);
 
     //start two additional peers, instructing them to use the genesis peer as their trusted peer
 
@@ -48,8 +46,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let ctx_peer1_node = setup_with_config(
         testnet_config_peer1.clone(),
         "heavy_sync_chain_state_peer1",
-        false,
-        genesis_block.clone(),
+        false
     )
     .await
     .expect("found invalid genesis ctx for peer1");
@@ -63,8 +60,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let ctx_peer2_node = setup_with_config(
         testnet_config_peer2.clone(),
         "heavy_sync_chain_state_peer2",
-        false,
-        genesis_block.clone(),
+        false
     )
     .await
     .expect("found invalid genesis ctx for peer2");
@@ -145,7 +141,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
 struct TestCtx {
     node: IrysNodeCtx,
-    irys_genesis_block: Arc<IrysBlockHeader>,
     #[expect(
         dead_code,
         reason = "to prevent drop() being called and cleaning up resources"
@@ -157,14 +152,34 @@ async fn setup_with_config(
     mut testnet_config: Config,
     node_name: &str,
     genesis: bool,
-    genesis_block: Option<Arc<IrysBlockHeader>>,
 ) -> eyre::Result<TestCtx> {
     let temp_dir = temporary_directory(Some(node_name), false);
     testnet_config.base_directory = temp_dir.path().to_path_buf();
+
+    let genesis_block = if !genesis {  
+        let mut result_genesis = block_index_endpoint_request(
+            &format!("http://{}",testnet_config.trusted_peers.get(0).expect("Should be at least one trusted peer!").to_string()),
+            0,
+            1,
+        )
+        .await;
+
+        let block_index_genesis = result_genesis
+            .json::<Vec<BlockIndexItem>>()
+            .await
+            .expect("expected a valid json deserialize");
+
+        let client = awc::Client::default();                
+        let fetched_genesis_block = fetch_block(testnet_config.trusted_peers.get(0).expect("Should be at least one trusted peer!"), &client, &block_index_genesis.get(0).unwrap()).await.unwrap();
+        let fetched_genesis_block = Arc::new(fetched_genesis_block);
+        Some(fetched_genesis_block)
+    } else {
+        None
+    };
+    
     let mut irys_node = IrysNode::new(testnet_config.clone(), genesis, genesis_block);
     let node = irys_node.start().await?;
     Ok(TestCtx {
-        irys_genesis_block: irys_node.irys_genesis_block,
         node,
         temp_dir,
     })
