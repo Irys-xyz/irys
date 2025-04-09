@@ -7,10 +7,7 @@ use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, routes::tx::IrysTransaction, ApiState};
 use irys_database::database;
-use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, Config, IrysTransactionHeader,
-    H256,
-};
+use irys_types::{irys::IrysSigner, CommitmentTransaction, Config, IrysTransactionHeader, H256};
 use reth_db::Database;
 use reth_primitives::GenesisAccount;
 use tokio::time::Duration;
