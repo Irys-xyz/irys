@@ -173,11 +173,7 @@ impl Handler<TxIngressMessage> for MempoolService {
     type Result = Result<(), TxIngressError>;
 
     fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        if self.irys_db.is_none() {
-            return Err(TxIngressError::ServiceUninitialized);
-        }
-
-        if self.reth_db.is_none() {
+        if self.irys_db.is_none() || self.reth_db.is_none() {
             return Err(TxIngressError::ServiceUninitialized);
         }
 
@@ -309,6 +305,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             ));
         }
 
+        info!( data_root=?chunk.data_root, number=?chunk.tx_offset, "Processing chunk");
         let db = self.irys_db.clone().unwrap();
 
         // Check to see if we have a cached data_root for this chunk
@@ -328,6 +325,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             .map_err(|_| ChunkIngressError::DatabaseError)?
             .map(|cdr| cdr.data_size)
             .or_else(|| {
+                debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
                 candidate_sms.iter().find_map(|(sm, write_offsets)| {
                     write_offsets.iter().find_map(|wo| {
                         sm.query_submodule_db_by_offset(*wo, |tx| {
@@ -353,7 +351,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // Next validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
         let root_hash = chunk.data_root.0;
-        let target_offset = u128::from(chunk.byte_offset(self.storage_config.chunk_size));
+        let target_offset = u128::from(chunk.end_byte_offset(self.storage_config.chunk_size));
         let path_buff = &chunk.data_path;
 
         info!(
@@ -695,7 +693,7 @@ pub fn generate_ingress_proof(
     // TODO: for now we assume the chunks all all in the DB chunk cache
     // in future, we'll need access to whatever unified storage provider API we have to get chunks
     // regardless of actual location
-    // TODO: allow for "streaming" the tree chunks, instead of having to read them all into memory
+
     let ro_tx = db.tx()?;
     let mut dup_cursor = ro_tx.cursor_dup_read::<CachedChunksIndex>()?;
 
@@ -708,11 +706,10 @@ pub fn generate_ingress_proof(
     let mut set = HashSet::<H256>::new();
     let expected_chunk_count = data_size_to_chunk_count(size, chunk_size).unwrap();
 
-    let mut chunks = Vec::with_capacity(expected_chunk_count as usize);
-    let mut owned_chunks = Vec::with_capacity(expected_chunk_count as usize);
+    let mut chunk_count: u32 = 0;
     let mut data_size: u64 = 0;
 
-    for entry in dup_walker {
+    let iter = dup_walker.into_iter().map(|entry| {
         let (root_hash2, index_entry) = entry?;
         // make sure we haven't traversed into the wrong key
         assert_eq!(data_root, root_hash2);
@@ -728,28 +725,33 @@ pub fn generate_ingress_proof(
         }
         set.insert(chunk_path_hash);
 
+        // TODO: add code to read from ChunkProvider once it can read through CachedChunks & we have a nice system for unpacking chunks on-demand
         let chunk = ro_tx
             .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
-            .unwrap_or_else(|| {
-                panic!("unable to get chunk {chunk_path_hash} for data root {data_root} from DB")
-            });
-        let chunk_bin = chunk.chunk.unwrap().0;
+            .ok_or(eyre!(
+                "unable to get chunk {chunk_path_hash} for data root {data_root} from DB"
+            ))?;
+
+        let chunk_bin = chunk
+            .chunk
+            .ok_or(eyre!(
+                "Missing required chunk ({chunk_path_hash}) body for data root {data_root} from DB"
+            ))?
+            .0;
         data_size += chunk_bin.len() as u64;
-        owned_chunks.push(chunk_bin);
-    }
+        chunk_count += 1;
 
-    // Now create the slice references
-    chunks.extend(owned_chunks.iter().map(std::vec::Vec::as_slice));
-
-    assert_eq!(chunks.len() as u32, expected_chunk_count);
-    assert_eq!(data_size, size);
+        Ok(chunk_bin)
+    });
 
     // generate the ingress proof hash
-    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, &chunks)?;
+    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, iter)?;
     info!(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root
     );
+    assert_eq!(data_size, size);
+    assert_eq!(chunk_count as u32, expected_chunk_count);
 
     ro_tx.commit()?;
 

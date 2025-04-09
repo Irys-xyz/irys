@@ -1,51 +1,41 @@
+use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
-use alloy_network::EthereumWallet;
-use alloy_provider::ProviderBuilder;
-use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_macro::sol;
 use base58::ToBase58;
 use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
-use irys_types::{irys::IrysSigner, Address};
-use k256::ecdsa::SigningKey;
+use irys_types::{irys::IrysSigner, Address, Config};
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
-use reth_primitives::{irys_primitives::precompile::IrysPrecompileOffsets, GenesisAccount};
+use reth_primitives::GenesisAccount;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
-
-// Codegen from artifact.
-// taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
-sol!(
-    #[allow(missing_docs)]
-    #[sol(rpc)]
-    IrysProgrammableDataBasic,
-    "../../fixtures/contracts/out/IrysProgrammableDataBasic.sol/ProgrammableDataBasic.json"
-);
-
-const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
+const _DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
 const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
 #[ignore]
 #[actix_web::test]
-/// This test is the counterpart test to the programmable data basic test in the JS Client https://github.com/Irys-xyz/irys-js
-/// It waits for a valid storage tx header & chunks, mines and confirms it, then mines a couple more blocks, which will include the programmable data EVM tx.
-/// we then halt so the client has time to make the getStorage call and read the contract state.
+/// This test is the counterpart test to the external API basic test in the JS Client https://github.com/Irys-xyz/irys-js
+/// It waits for a valid storage tx header & chunks, mines and confirms it, then mines a couple more blocks.
+/// we then halt so the client has time to read everything it needs to.
 /// Instructions:
 /// Run this test, until you see `waiting for tx header...`, then start the JS client test
 /// that's it!, just kill this test once the JS client test finishes.
-async fn test_programmable_data_basic_external() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "info");
+async fn external_api() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug,irys_actors::mining=error,irys_actors::packing=error,irys_chain::vdf=off,irys_vdf::vdf_state=off");
 
-    let mut node = IrysNodeTest::default();
-    let main_address = node.cfg.config.miner_address();
-    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    let mut testnet_config = Config::testnet();
+    testnet_config.port = 8080; // external test, should never be run concurrently
+
+    let account1 = IrysSigner::random_signer(&testnet_config);
+
+    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
+    let main_address = node.cfg.irys_node_config.mining_signer.address();
+
     node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             main_address,
@@ -70,6 +60,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         ),
     ]);
     let node = node.start().await;
+
     node.node_ctx.actor_addresses.stop_mining()?;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
@@ -77,50 +68,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     )
     .await?;
 
-    // let signer: PrivateKeySigner = config.mining_signer.signer.into();
-    // let wallet = EthereumWallet::from(signer.clone());
-
-    // use a constant signer so we get constant deploy addresses (for the same bytecode!)
-    let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
-    let signer: PrivateKeySigner = SigningKey::from_slice(dev_wallet.as_slice())?.into();
-    let wallet = EthereumWallet::from(signer);
-
-    let alloy_provider = ProviderBuilder::new()
-        .with_recommended_fillers()
-        .wallet(wallet)
-        .on_http(
-            format!(
-                "http://127.0.0.1:{}/v1/execution-rpc",
-                node.node_ctx.config.port
-            )
-            .parse()?,
-        );
-
-    let deploy_builder =
-        IrysProgrammableDataBasic::deploy_builder(alloy_provider.clone()).gas(29506173);
-
-    let mut deploy_fut = Box::pin(deploy_builder.deploy());
-
-    let contract_address = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut deploy_fut,
-        Duration::from_millis(500),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
-    )
-    .await??;
-
-    let contract = IrysProgrammableDataBasic::new(contract_address, alloy_provider.clone());
-
-    let precompile_address: Address = IrysPrecompileOffsets::ProgrammableData.into();
-    info!(
-        "Contract address is {:?}, precompile address is {:?}",
-        contract.address(),
-        precompile_address
-    );
-
-    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.port);
+    let http_url = format!("http://127.0.0.1:{}", node.cfg.config.port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -133,7 +81,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         .unwrap();
 
     assert_eq!(response.status(), 200);
-    info!("HTTP server started");
+    info!("HTTP server started on port {}", node.cfg.config.port);
 
     info!("waiting for tx header...");
 
