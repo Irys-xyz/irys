@@ -223,8 +223,15 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<()> {
         let mut retries = 0;
         let max_retries = max_seconds; // 1 second per retry
-                
-        while get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await.unwrap().0.last().unwrap().1 < target_height
+
+        while get_canonical_chain(self.node_ctx.block_tree_guard.clone())
+            .await
+            .unwrap()
+            .0
+            .last()
+            .unwrap()
+            .1
+            < target_height
             && retries < max_retries
         {
             sleep(Duration::from_secs(1)).await;
@@ -249,7 +256,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn get_height(&self) -> u64 {
-        get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await.unwrap().0.last().unwrap().1
+        get_canonical_chain(self.node_ctx.block_tree_guard.clone())
+            .await
+            .unwrap()
+            .0
+            .last()
+            .unwrap()
+            .1
     }
 
     pub async fn mine_block(&self) -> eyre::Result<()> {
@@ -319,18 +332,21 @@ impl IrysNodeTest<IrysNodeCtx> {
             })
     }
 
-    pub async fn get_block_by_height(
-        &self,
-        height: u64,
-    ) -> eyre::Result<IrysBlockHeader> {
+    pub async fn get_block_by_height(&self, height: u64) -> eyre::Result<IrysBlockHeader> {
         get_canonical_chain(self.node_ctx.block_tree_guard.clone())
-            .await.unwrap().0.iter()
+            .await
+            .unwrap()
+            .0
+            .iter()
             .find(|(_, blk_height, _, _)| *blk_height == height)
-            .map(|(blk_hash,_,_,_)| 
-                self.node_ctx.block_tree_guard.read()
+            .map(|(blk_hash, _, _, _)| {
+                self.node_ctx
+                    .block_tree_guard
+                    .read()
                     .get_block(blk_hash)
                     .cloned()
-            ).flatten()
+            })
+            .flatten()
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
     }
 
@@ -349,11 +365,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub fn get_block_by_hash(
-        &self,
-        hash: &H256,
-    ) -> eyre::Result<IrysBlockHeader> {
-        self.node_ctx.block_tree_guard.read()
+    pub fn get_block_by_hash(&self, hash: &H256) -> eyre::Result<IrysBlockHeader> {
+        self.node_ctx
+            .block_tree_guard
+            .read()
             .get_block(hash)
             .cloned()
             .ok_or_else(|| eyre::eyre!("Block with hash {} not found", hash))

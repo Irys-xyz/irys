@@ -20,14 +20,11 @@ pub struct NodeInfo {
 }
 
 pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
-    let block_index_height = state
-        .block_index
-        .read()
-        .latest_height();
+    let block_index_height = state.block_index.read().latest_height();
 
     let (chain, blocks) = get_canonical_chain(state.block_tree.clone()).await.unwrap();
-    let (block_hash, height,_ ,_) = chain.last().unwrap();
-    
+    let (block_hash, height, _, _) = chain.last().unwrap();
+
     let node_info = NodeInfo {
         version: "0.0.1".into(),
         peer_count: 0,

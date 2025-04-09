@@ -51,7 +51,12 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     let app_state = ApiState {
         reth_provider: node.node_ctx.reth_handle.clone(),
-        reth_http_url: node.node_ctx.reth_handle.rpc_server_handle().http_url().unwrap(), 
+        reth_http_url: node
+            .node_ctx
+            .reth_handle
+            .rpc_server_handle()
+            .http_url()
+            .unwrap(),
         block_index: node.node_ctx.block_index_guard.clone(),
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),

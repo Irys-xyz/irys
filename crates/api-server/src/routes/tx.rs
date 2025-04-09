@@ -193,66 +193,66 @@ pub struct TxOffset {
 //     use reth::{primitives::GenesisAccount, revm::primitives::U256};
 //     use std::{sync::Arc, time::Duration};
 //     use tracing::{error, info};
-    //     #[actix_web::test]
-    //     async fn test_get_non_existent_tx() -> Result<(), Error> {
-    //         // std::env::set_var("RUST_LOG", "debug");
-    //         // env_logger::init();
+//     #[actix_web::test]
+//     async fn test_get_non_existent_tx() -> Result<(), Error> {
+//         // std::env::set_var("RUST_LOG", "debug");
+//         // env_logger::init();
 
-    //         let path = tempdir().unwrap();
-    //         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
-    //         let tx = IrysTransactionHeader::default();
+//         let path = tempdir().unwrap();
+//         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+//         let tx = IrysTransactionHeader::default();
 
-    //         let db_arc = Arc::new(db);
+//         let db_arc = Arc::new(db);
 
-    //         let task_manager = TaskManager::current();
-    //         let storage_config = StorageConfig::default();
+//         let task_manager = TaskManager::current();
+//         let storage_config = StorageConfig::default();
 
-    //         let mempool_service = MempoolService::new(
-    //             irys_types::app_state::DatabaseProvider(db_arc.clone()),
-    //             task_manager.executor(),
-    //             IrysSigner::random_signer(),
-    //             storage_config.clone(),
-    //             Arc::new(Vec::new()).to_vec(),
-    //         );
-    //         SystemRegistry::set(mempool_service.start());
-    //         let mempool_addr = MempoolService::from_registry();
+//         let mempool_service = MempoolService::new(
+//             irys_types::app_state::DatabaseProvider(db_arc.clone()),
+//             task_manager.executor(),
+//             IrysSigner::random_signer(),
+//             storage_config.clone(),
+//             Arc::new(Vec::new()).to_vec(),
+//         );
+//         SystemRegistry::set(mempool_service.start());
+//         let mempool_addr = MempoolService::from_registry();
 
-    //         let chunk_provider = ChunkProvider::new(
-    //             storage_config.clone(),
-    //             Arc::new(Vec::new()).to_vec(),
-    //             DatabaseProvider(db_arc.clone()),
-    //         );
+//         let chunk_provider = ChunkProvider::new(
+//             storage_config.clone(),
+//             Arc::new(Vec::new()).to_vec(),
+//             DatabaseProvider(db_arc.clone()),
+//         );
 
-    //         let app_state = ApiState {
-    //             reth_provider: None,
-    //             reth_http_url: None,
-    //             block_index: None,
-    //             block_tree: None,
-    //             db: DatabaseProvider(db_arc.clone()),
-    //             mempool: mempool_addr,
-    //             chunk_provider: Arc::new(chunk_provider),
-    //         };
+//         let app_state = ApiState {
+//             reth_provider: None,
+//             reth_http_url: None,
+//             block_index: None,
+//             block_tree: None,
+//             db: DatabaseProvider(db_arc.clone()),
+//             mempool: mempool_addr,
+//             chunk_provider: Arc::new(chunk_provider),
+//         };
 
-    //         let app = test::init_service(
-    //             App::new()
-    //                 .app_data(web::Data::new(app_state))
-    //                 .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx_header_api))),
-    //         )
-    //         .await;
+//         let app = test::init_service(
+//             App::new()
+//                 .app_data(web::Data::new(app_state))
+//                 .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx_header_api))),
+//         )
+//         .await;
 
-    //         let id: String = tx.id.as_bytes().to_base58();
-    //         let req = test::TestRequest::get()
-    //             .uri(&format!("/v1/tx/{}", &id))
-    //             .to_request();
+//         let id: String = tx.id.as_bytes().to_base58();
+//         let req = test::TestRequest::get()
+//             .uri(&format!("/v1/tx/{}", &id))
+//             .to_request();
 
-    //         let resp = test::call_service(&app, req).await;
-    //         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    //         let result: ApiError = test::read_body_json(resp).await;
-    //         let tx_error = ApiError::ErrNoId {
-    //             id: tx.id.to_string(),
-    //             err: String::from("tx not found"),
-    //         };
-    //         assert_eq!(tx_error, result);
-    //         Ok(())
-    //     }
+//         let resp = test::call_service(&app, req).await;
+//         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+//         let result: ApiError = test::read_body_json(resp).await;
+//         let tx_error = ApiError::ErrNoId {
+//             id: tx.id.to_string(),
+//             err: String::from("tx not found"),
+//         };
+//         assert_eq!(tx_error, result);
+//         Ok(())
+//     }
 //}

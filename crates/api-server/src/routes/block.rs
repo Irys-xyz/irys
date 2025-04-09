@@ -23,11 +23,9 @@ pub async fn get_block(
 
     // all roads lead to block hash
     let block_hash: H256 = match tag_param {
-        BlockParam::Latest => 
-            state.block_tree.read().tip.clone(),
+        BlockParam::Latest => state.block_tree.read().tip.clone(),
         BlockParam::BlockHeight(height) => 'outer: {
-            let in_block_tree =
-                state
+            let in_block_tree = state
                 .block_tree
                 .read()
                 .get_canonical_chain()
@@ -41,7 +39,9 @@ pub async fn get_block(
             if let Some(hash) = in_block_tree {
                 break 'outer hash.clone();
             }
-            state.block_index.read()
+            state
+                .block_index
+                .read()
                 .get_item(height.try_into().map_err(|_| ApiError::Internal {
                     err: String::from("Block height out of range"),
                 })?)
@@ -49,7 +49,7 @@ pub async fn get_block(
                     id: path.to_string(),
                     err: String::from("Invalid block height"),
                 })
-                .map(|b | (*b).block_hash)?
+                .map(|b| (*b).block_hash)?
         }
         BlockParam::Finalized | BlockParam::Pending => {
             return Err(ApiError::Internal {
@@ -79,7 +79,8 @@ fn get_block_by_hash(
         Ok(Some(tx_header)) => Ok(tx_header),
     }?;
 
-    let reth_block = match state.reth_provider
+    let reth_block = match state
+        .reth_provider
         .provider
         .block_by_hash(irys_header.evm_block_hash)
         .ok()

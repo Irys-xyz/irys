@@ -88,9 +88,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     // assert_eq!(reth_block.number, block.height);
 
     // check irys DB for built block
-    let db_irys_block = irys_node
-        .get_block_by_hash(&block.block_hash)
-        .unwrap();
+    let db_irys_block = irys_node.get_block_by_hash(&block.block_hash).unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
     irys_node.stop().await;

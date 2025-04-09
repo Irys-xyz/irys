@@ -811,7 +811,10 @@ impl IrysNode {
                 block_tree: block_tree_guard.clone(),
                 block_index: block_index_guard.clone(),
                 config: self.config.clone(),
-                reth_http_url: reth_node.rpc_server_handle().http_url().expect("Missing reth rpc url!"),
+                reth_http_url: reth_node
+                    .rpc_server_handle()
+                    .http_url()
+                    .expect("Missing reth rpc url!"),
             },
             http_listener,
         )
