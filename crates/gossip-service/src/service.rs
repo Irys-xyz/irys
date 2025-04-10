@@ -227,7 +227,9 @@ impl GossipService {
             let peers_that_seen_data = self.cache.peers_that_have_seen(data)?;
             peers.retain(|peer| !peers_that_seen_data.contains(&peer.address.gossip));
 
-            let maybe_selected_peers = peers.get(..MAX_PEERS_PER_BROADCAST);
+            let n = std::cmp::min(MAX_PEERS_PER_BROADCAST, peers.len());
+            let maybe_selected_peers = peers.get(0..n);
+
             if let Some(selected_peers) = maybe_selected_peers {
                 // Send data to selected peers
                 for peer in selected_peers {
