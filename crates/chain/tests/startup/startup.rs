@@ -57,8 +57,8 @@ async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
         .unwrap();
     assert_eq!(chain.len(), 3, "we expect the genesis block + 2 new blocks");
 
-    genesis_ctx.stop().await;
     ctx.stop().await;
+    genesis_ctx.stop().await;
     Ok(())
 }
 
