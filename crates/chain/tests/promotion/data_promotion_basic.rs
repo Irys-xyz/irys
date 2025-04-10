@@ -66,6 +66,7 @@ async fn heavy_data_promotion_test() {
         block_tree: None,
         db: node.node_ctx.db.clone(),
         mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        peer_list: node.node_ctx.actor_addresses.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: testnet_config,
     };

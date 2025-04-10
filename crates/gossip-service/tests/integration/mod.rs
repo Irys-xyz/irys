@@ -7,8 +7,12 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
     let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new();
     let mut gossip_service_test_fixture_2 = GossipServiceTestFixture::new();
 
-    gossip_service_test_fixture_1.add_peer(&gossip_service_test_fixture_2);
-    gossip_service_test_fixture_2.add_peer(&gossip_service_test_fixture_1);
+    gossip_service_test_fixture_1
+        .add_peer(&gossip_service_test_fixture_2)
+        .await;
+    gossip_service_test_fixture_2
+        .add_peer(&gossip_service_test_fixture_1)
+        .await;
 
     let (service1_handle, gossip_service1_message_bus) =
         gossip_service_test_fixture_1.run_service();
@@ -64,7 +68,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
                     clippy::indexing_slicing,
                     reason = "just a test - doesn't need to fight the borrow checker this way"
                 )]
-                fixtures[i].add_peer(&fixtures[j]);
+                fixtures[i].add_peer(&fixtures[j]).await;
             }
         }
     }
@@ -119,8 +123,8 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
-    fixture1.add_peer(&fixture2);
-    fixture2.add_peer(&fixture1);
+    fixture1.add_peer(&fixture2).await;
+    fixture2.add_peer(&fixture1).await;
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
@@ -164,8 +168,8 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
-    fixture1.add_peer(&fixture2);
-    fixture2.add_peer(&fixture1);
+    fixture1.add_peer(&fixture2).await;
+    fixture2.add_peer(&fixture1).await;
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _) = fixture2.run_service();
@@ -208,8 +212,10 @@ async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()
     let mut fixture2 = GossipServiceTestFixture::new();
 
     // Add peer2 with low reputation
-    fixture1.add_peer_with_reputation(&fixture2, PeerScore::new(0));
-    fixture2.add_peer(&fixture1);
+    fixture1
+        .add_peer_with_reputation(&fixture2, PeerScore::new(0))
+        .await;
+    fixture2.add_peer(&fixture1).await;
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
@@ -249,7 +255,7 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     let fixture2 = GossipServiceTestFixture::new();
 
     // Add peer2 but don't start its service
-    fixture1.add_peer(&fixture2);
+    fixture1.add_peer(&fixture2).await;
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
 
@@ -275,8 +281,8 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
-    fixture1.add_peer(&fixture2);
-    fixture2.add_peer(&fixture1);
+    fixture1.add_peer(&fixture2).await;
+    fixture2.add_peer(&fixture1).await;
 
     // Create a test block with transactions
     let mut block = IrysBlockHeader::default();
@@ -327,8 +333,8 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
-    fixture1.add_peer(&fixture2);
-    fixture2.add_peer(&fixture1);
+    fixture1.add_peer(&fixture2).await;
+    fixture2.add_peer(&fixture1).await;
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();

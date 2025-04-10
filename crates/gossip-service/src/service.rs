@@ -227,29 +227,33 @@ impl GossipService {
             let peers_that_seen_data = self.cache.peers_that_have_seen(data)?;
             peers.retain(|peer| !peers_that_seen_data.contains(&peer.address.gossip));
 
-            let selected_peers = &peers.get(..MAX_PEERS_PER_BROADCAST);
-            // Send data to selected peers
-            for peer in selected_peers {
-                if let Err(error) = self
-                    .client
-                    .send_data_and_update_score(peer, data, peer_list_service)
-                    .await
-                {
-                    tracing::warn!(
-                        "Failed to send data to peer {}: {}",
-                        peer.address.gossip,
-                        error
-                    );
-                }
+            let maybe_selected_peers = peers.get(..MAX_PEERS_PER_BROADCAST);
+            if let Some(selected_peers) = maybe_selected_peers {
+                // Send data to selected peers
+                for peer in selected_peers {
+                    if let Err(error) = self
+                        .client
+                        .send_data_and_update_score(peer, data, peer_list_service)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to send data to peer {}: {}",
+                            peer.address.gossip,
+                            error
+                        );
+                    }
 
-                // Record as seen anyway, so we don't rebroadcast to them
-                if let Err(error) = self.cache.record_seen(peer.address.gossip, data) {
-                    tracing::error!(
-                        "Failed to record data in cache for peer {}: {}",
-                        peer.address.gossip,
-                        error
-                    );
+                    // Record as seen anyway, so we don't rebroadcast to them
+                    if let Err(error) = self.cache.record_seen(peer.address.gossip, data) {
+                        tracing::error!(
+                            "Failed to record data in cache for peer {}: {}",
+                            peer.address.gossip,
+                            error
+                        );
+                    }
                 }
+            } else {
+                break;
             }
 
             tokio::time::sleep(BROADCAST_INTERVAL).await;

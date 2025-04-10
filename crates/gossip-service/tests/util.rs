@@ -5,9 +5,10 @@ use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::{
     ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
 };
+use irys_actors::peer_list_service::{AddPeer, PeerListService};
 use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
-use irys_gossip_service::{GossipResult, GossipService, PeerListProvider};
+use irys_gossip_service::{GossipResult, GossipService};
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -221,9 +222,9 @@ pub struct GossipServiceTestFixture {
     pub gossip_port: u16,
     pub api_port: u16,
     pub db: DatabaseProvider,
-    pub peer_list: PeerListProvider,
     pub mining_address: Address,
     pub mempool: Addr<MempoolStub>,
+    pub peer_list: Addr<PeerListService>,
     pub block_discovery: Addr<BlockDiscoveryStub>,
     pub mempool_txs: Arc<RwLock<Vec<TxIngressMessage>>>,
     pub mempool_chunks: Arc<RwLock<Vec<ChunkIngressMessage>>>,
@@ -248,7 +249,9 @@ impl GossipServiceTestFixture {
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
-        let (peer_list, peer_list_updater) = PeerListProvider::new(db.clone());
+
+        let peer_service = PeerListService::new(db.clone());
+        let peer_list = peer_service.start();
 
         let (gossip_sender, _rx) = mpsc::channel(100);
 
@@ -270,9 +273,9 @@ impl GossipServiceTestFixture {
             gossip_port,
             api_port,
             db,
-            peer_list,
             mining_address: Address::random(),
             mempool: mempool_stub_addr,
+            peer_list,
             block_discovery: block_discovery_addr,
             mempool_txs,
             mempool_chunks,
@@ -290,7 +293,7 @@ impl GossipServiceTestFixture {
         mpsc::Sender<GossipData>,
     ) {
         let (gossip_service, internal_message_bus) =
-            GossipService::new("127.0.0.1", self.gossip_port, self.db.clone());
+            GossipService::new("127.0.0.1", self.gossip_port);
 
         let mempool_stub = MempoolStub::new(internal_message_bus.clone());
         self.mempool_txs = Arc::clone(&mempool_stub.txs);
@@ -308,7 +311,12 @@ impl GossipServiceTestFixture {
         let api_client = self.api_client.clone();
 
         let service_handle = gossip_service
-            .run(mempool_stub_addr, block_discovery_stub_addr, api_client)
+            .run(
+                mempool_stub_addr,
+                block_discovery_stub_addr,
+                api_client,
+                self.peer_list.clone(),
+            )
             .expect("failed to run gossip service");
 
         (service_handle, internal_message_bus)
@@ -330,7 +338,7 @@ impl GossipServiceTestFixture {
 
     /// # Panics
     /// Can panic
-    pub fn add_peer(&self, other: &Self) {
+    pub async fn add_peer(&self, other: &Self) {
         let peer = other.create_default_peer_entry();
 
         tracing::debug!(
@@ -340,13 +348,17 @@ impl GossipServiceTestFixture {
         );
 
         self.peer_list
-            .add_peer(&other.mining_address, &peer)
-            .expect("to add peer");
+            .send(AddPeer {
+                mining_addr: other.mining_address,
+                peer: peer.clone(),
+            })
+            .await
+            .expect("Adding peer failed");
     }
 
     /// # Panics
     /// Can panic
-    pub fn add_peer_with_reputation(&self, other: &Self, score: PeerScore) {
+    pub async fn add_peer_with_reputation(&self, other: &Self, score: PeerScore) {
         let peer = PeerListItem {
             address: PeerAddress {
                 gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.gossip_port),
@@ -357,8 +369,12 @@ impl GossipServiceTestFixture {
             ..PeerListItem::default()
         };
         self.peer_list
-            .add_peer(&other.mining_address, &peer)
-            .expect("to add a peer");
+            .send(AddPeer {
+                mining_addr: other.mining_address,
+                peer: peer.clone(),
+            })
+            .await
+            .expect("Adding peer failed");
     }
 }
 
