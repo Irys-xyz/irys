@@ -74,7 +74,8 @@ pub async fn fetch_genesis_block(
     peer: &SocketAddr,
     client: &awc::Client,
 ) -> Option<Arc<IrysBlockHeader>> {
-    let mut result_genesis = block_index_endpoint_request(&peer.to_string(), 0, 1).await;
+    let url = format!("http://{}/", peer);
+    let mut result_genesis = block_index_endpoint_request(&url, 0, 1).await;
 
     let block_index_genesis = result_genesis
         .json::<Vec<BlockIndexItem>>()
