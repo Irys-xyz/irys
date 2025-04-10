@@ -37,7 +37,7 @@ async fn heavy_api_end_to_end_test_256kb() {
 }
 
 async fn api_end_to_end_test(chunk_size: usize) {
-    let (ema_tx, ema_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let entropy_packing_iterations = 1_000;
     let testnet_config = Config {
         chunk_size: chunk_size.try_into().unwrap(),

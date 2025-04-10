@@ -7,7 +7,7 @@ use irys_database::DataLedger;
 use irys_types::U256;
 
 #[test_log::test(actix::test)]
-async fn pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
+async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default().start().await;
     let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
@@ -57,7 +57,7 @@ async fn pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
 }
 
 #[test_log::test(actix::test)]
-async fn pricing_endpoint_small_data() -> eyre::Result<()> {
+async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default().start().await;
     let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
@@ -108,7 +108,7 @@ async fn pricing_endpoint_small_data() -> eyre::Result<()> {
 }
 
 #[test_log::test(actix::test)]
-async fn pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
+async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default().start().await;
     let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
