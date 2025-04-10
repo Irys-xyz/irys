@@ -71,7 +71,7 @@ use tokio::{
     runtime::{Handle, Runtime},
     sync::oneshot::{self},
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -490,7 +490,10 @@ impl IrysNode {
                         actix_server.await.unwrap();
                         server_stop_handle.await.unwrap();
 
-                        gossip_service_handle.stop().await.unwrap().unwrap();
+                        match gossip_service_handle.stop().await {
+                            Ok(_) => info!("Gossip service stopped"),
+                            Err(e) => warn!("Gossip service is already stopped: {:?}", e),
+                        }
 
                         debug!("Stopping actors");
                         for arbiter in arbiters {
@@ -594,7 +597,7 @@ impl IrysNode {
         JoinHandle<()>,
         Vec<ArbiterHandle>,
         RethNodeProvider,
-        ServiceHandleWithShutdownSignal<GossipResult<()>>,
+        ServiceHandleWithShutdownSignal,
     )> {
         let node_config = Arc::new(self.irys_node_config.clone());
 
@@ -717,6 +720,7 @@ impl IrysNode {
             mempool_service.clone(),
             block_discovery.clone(),
             irys_api_client::IrysApiClient::new(),
+            task_exec,
         )?;
 
         // set up the price oracle
