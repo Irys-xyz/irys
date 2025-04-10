@@ -77,7 +77,6 @@ impl PackingActor {
         storage_module_ids: Vec<usize>,
         config: PackingConfig,
     ) -> Self {
-
         let semaphore = Arc::new(Semaphore::new(config.concurrency.into()));
         let pending_jobs = storage_module_ids
             .iter()
@@ -136,7 +135,12 @@ impl PackingActor {
 
             let start_value = *chunk_range.0.start();
             let end_value = *chunk_range.0.end();
-            let short_writes_before_sync: u32 = (storage_module.storage_config.min_writes_before_sync.div_ceil(2)).try_into().expect("Should be able to convert min_writes_before_sync to u32");
+            let short_writes_before_sync: u32 = (storage_module
+                .storage_config
+                .min_writes_before_sync
+                .div_ceil(2))
+            .try_into()
+            .expect("Should be able to convert min_writes_before_sync to u32");
             match PACKING_TYPE {
                 PackingType::CPU => {
                     for i in start_value..=end_value {
@@ -171,7 +175,7 @@ impl PackingActor {
                             );
 
                             debug!(target: "irys::packing::progress", "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
-                            
+
                             // write the chunk
                             storage_module.write_chunk(PartitionChunkOffset::from(i), out, ChunkType::Entropy);
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing through the internal pending_writes lock write_chunk acquires
@@ -246,7 +250,7 @@ impl PackingActor {
                 _ => unimplemented!(),
             }
 
-            let _ = storage_module.sync_pending_chunks();            
+            let _ = storage_module.sync_pending_chunks();
             // Remove from queue once complete
             let _ = pending_jobs.write().unwrap().pop_front();
         }
@@ -269,7 +273,7 @@ impl Actor for PackingActor {
     type Context = Context<Self>;
 
     fn start(self) -> actix::Addr<Self> {
-        let keys = self.pending_jobs.keys().cloned().collect::<Vec<usize>>();
+        let keys = self.pending_jobs.keys().copied().collect::<Vec<usize>>();
         for key in keys {
             self.task_executor.spawn_critical(
                 "packing controller",
@@ -345,13 +349,7 @@ pub async fn wait_for_packing(
                 // try to get all the semaphore permits - this is how we know that the packing is done
                 let _permit = internals
                     .semaphore
-                    .acquire_many(
-                        internals
-                            .config
-                            .concurrency
-                            .try_into()
-                            .expect("Value exceeds u32::MAX"),
-                    )
+                    .acquire_many(internals.config.concurrency.into())
                     .await
                     .unwrap();
                 break Some(());
@@ -370,12 +368,11 @@ mod tests {
 
     use actix::Actor as _;
     use irys_packing::capacity_single::compute_entropy_chunk;
-    use irys_storage::{ ChunkType, StorageModule, StorageModuleInfo};
+    use irys_storage::{ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
-         Address, Config, PartitionChunkOffset, PartitionChunkRange,
-        StorageConfig,
+        Address, Config, PartitionChunkOffset, PartitionChunkRange, StorageConfig,
     };
     use reth::tasks::TaskManager;
 
@@ -438,11 +435,7 @@ mod tests {
         // Create an instance of the mempool actor
         let task_manager = TaskManager::current();
         let sm_ids = vec![storage_module.id];
-        let packing = PackingActor::new(
-            task_manager.executor(),
-            sm_ids,
-            config.clone(),
-        );
+        let packing = PackingActor::new(task_manager.executor(), sm_ids, config.clone());
         let packing_addr = packing.start();
 
         // action
