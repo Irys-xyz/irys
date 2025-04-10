@@ -24,6 +24,7 @@ use tracing::info;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_double_root_data_promotion_test() {
+    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let chunk_size = 32; // 32 byte chunks
     let testnet_config = Config {
         chunk_size: chunk_size as u64,
@@ -67,6 +68,7 @@ async fn heavy_double_root_data_promotion_test() {
 
     // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app_state = ApiState {
+        ema_service: ema_tx,
         reth_provider: None,
         reth_http_url: None,
         block_index: None,

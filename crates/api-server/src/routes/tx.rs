@@ -193,9 +193,9 @@ mod tests {
     use std::sync::Arc;
     use tracing::{error, info};
 
-    #[actix_web::test]
+    #[test_log::test(actix_web::test)]
     async fn test_get_tx() -> eyre::Result<()> {
-        std::env::set_var("RUST_LOG", "debug");
+        let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
         let tmp_dir = setup_tracing_and_temp_dir(Some("test_get_tx"), false);
         let db_env = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
         let db = DatabaseProvider(Arc::new(db_env));
@@ -236,11 +236,12 @@ mod tests {
         let chunk_provider =
             ChunkProvider::new(storage_config.clone(), Arc::new(Vec::new()).to_vec());
         let app_state = ApiState {
+            ema_service: ema_tx,
             reth_provider: None,
             reth_http_url: None,
             block_index: None,
             block_tree: None,
-            db: db,
+            db,
             mempool: mempool_addr,
             chunk_provider: Arc::new(chunk_provider),
             config,

@@ -4116,6 +4116,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2 0.5.8",
+ "test-log",
  "tokio",
  "tracing",
 ]

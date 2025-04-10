@@ -1,32 +1,28 @@
-use irys_types::Config;
-
 use crate::utils::IrysNodeTest;
+use crate::utils::{get_block_parent, get_chunk, post_chunk, verify_published_chunk};
+use actix_web::{
+    middleware::Logger,
+    test::{self, call_service, TestRequest},
+    web::{self, JsonConfig},
+    App,
+};
+use alloy_core::primitives::U256;
+use awc::http::StatusCode;
+use base58::ToBase58;
+use irys_actors::packing::wait_for_packing;
+use irys_api_server::{routes, ApiState};
+use irys_database::DataLedger;
+use irys_types::Config;
+use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
+use reth_primitives::GenesisAccount;
+use std::time::Duration;
+use tokio::time::sleep;
+use tracing::{debug, info};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_data_promotion_test() {
-    use actix_web::{
-        middleware::Logger,
-        test::{self, call_service, TestRequest},
-        web::{self, JsonConfig},
-        App,
-    };
-    use alloy_core::primitives::U256;
-    use awc::http::StatusCode;
-    use base58::ToBase58;
-    use irys_actors::packing::wait_for_packing;
-    use irys_api_server::{routes, ApiState};
-    use irys_database::DataLedger;
-
-    use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
-    use reth_primitives::GenesisAccount;
-    use std::time::Duration;
-    use tokio::time::sleep;
-    use tracing::{debug, info};
-
-    use crate::utils::{get_block_parent, get_chunk, post_chunk, verify_published_chunk};
-
+    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let chunk_size = 32_u64; // 32 byte chunks
-
     let mut testnet_config = Config {
         chunk_size,
         num_chunks_in_partition: 10,
@@ -60,6 +56,7 @@ async fn heavy_data_promotion_test() {
 
     // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app_state = ApiState {
+        ema_service: ema_tx,
         reth_provider: None,
         reth_http_url: None,
         block_index: None,

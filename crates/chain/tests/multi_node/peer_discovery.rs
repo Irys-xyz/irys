@@ -20,6 +20,7 @@ use crate::utils::IrysNodeTest;
 
 #[test_log::test(actix_web::test)]
 async fn heavy_peer_discovery() -> eyre::Result<()> {
+    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let chunk_size = 32; // 32Byte chunks
     let test_config = Config {
         chunk_size: chunk_size as u64,
@@ -50,6 +51,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     node.node_ctx.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
+        ema_service: ema_tx,
         reth_provider: None,
         reth_http_url: None,
         block_index: None,
