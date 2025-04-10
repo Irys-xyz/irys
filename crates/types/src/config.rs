@@ -305,6 +305,11 @@ mod tests {
             base_directory = "~/.irys"
             gossip_service_bind_ip = "127.0.0.1"
             gossip_service_port = 8081
+            annual_cost_per_gb = "0.01"
+            decay_rate = "0.01"
+            fee_percentage = "0.05"
+            safe_minimum_number_of_years = 200
+            number_of_ingerss_proofs = 10
 
             [oracle_config]
             type = "mock"
