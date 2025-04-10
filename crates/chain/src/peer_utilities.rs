@@ -70,6 +70,24 @@ pub async fn version_endpoint_request(
     client_request(&format!("{}{}", &address, "/v1/version")).await
 }
 
+pub async fn fetch_genesis_block(
+    peer: &SocketAddr,
+    client: &awc::Client,
+) -> Option<Arc<IrysBlockHeader>> {
+    let mut result_genesis = block_index_endpoint_request(&peer.to_string(), 0, 1).await;
+
+    let block_index_genesis = result_genesis
+        .json::<Vec<BlockIndexItem>>()
+        .await
+        .expect("expected a valid json deserialize");
+
+    let fetched_genesis_block = fetch_block(peer, &client, &block_index_genesis.get(0).unwrap())
+        .await
+        .unwrap();
+    let fetched_genesis_block = Arc::new(fetched_genesis_block);
+    Some(fetched_genesis_block)
+}
+
 pub async fn fetch_txn(
     peer: &SocketAddr,
     client: &awc::Client,
