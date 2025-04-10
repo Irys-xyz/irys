@@ -233,38 +233,38 @@ pub async fn fetch_and_update_peers(
 
         async move {
             match client.get(url.clone()).send().await {
-                Ok(mut response) => {
-                    if response.status().is_success() {
-                        let Ok(new_peers) = response.json::<Vec<SocketAddr>>().await else {
-                            warn!("Error reading json body from {}", &url);
-                            return 0;
-                        };
+                Ok(mut response) if response.status().is_success() => {
+                    let Ok(new_peers) = response.json::<Vec<SocketAddr>>().await else {
+                        warn!("Invalid JSON from {}", &url);
+                        return 0;
+                    };
 
-                        let mut peers_guard = peers.lock().await;
-                        let existing: HashSet<_> = peers_guard.iter().cloned().collect();
-                        let mut added = 0;
-                        for p in new_peers {
-                            if existing.contains(&p) {
-                                continue;
-                            }
-                            peers_guard.push(p);
-                            added += 1;
+                    let mut peers_guard = peers.lock().await;
+                    let existing: HashSet<_> = peers_guard.iter().cloned().collect();
+                    let mut added = 0;
+                    for p in new_peers {
+                        if existing.contains(&p) {
+                            continue;
                         }
-                        info!("Got {} peers from {}", &added, peer);
-                        return added;
-                    } else {
-                        warn!(
-                            "fetch_and_update_peers Non-success from {}: {}",
-                            &url,
-                            response.status()
-                        );
+                        peers_guard.push(p);
+                        added += 1;
                     }
+                    error!("Got {} peers from {}", &added, peer);
+                    added
+                }
+                Ok(response) => {
+                    warn!(
+                        "fetch_and_update_peers Non-success from {}: {}",
+                        &url,
+                        response.status()
+                    );
+                    0
                 }
                 Err(e) => {
                     warn!("Request to {} failed: {}", &url, e);
+                    0
                 }
             }
-            0
         }
     });
     let results = futures::future::join_all(futures).await;
