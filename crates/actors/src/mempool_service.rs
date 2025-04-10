@@ -173,11 +173,7 @@ impl Handler<TxIngressMessage> for MempoolService {
     type Result = Result<(), TxIngressError>;
 
     fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        if self.irys_db.is_none() {
-            return Err(TxIngressError::ServiceUninitialized);
-        }
-
-        if self.reth_db.is_none() {
+        if self.irys_db.is_none() || self.reth_db.is_none() {
             return Err(TxIngressError::ServiceUninitialized);
         }
 
@@ -309,6 +305,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             ));
         }
 
+        info!( data_root=?chunk.data_root, number=?chunk.tx_offset, "Processing chunk");
         let db = self.irys_db.clone().unwrap();
 
         // Check to see if we have a cached data_root for this chunk
@@ -328,6 +325,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             .map_err(|_| ChunkIngressError::DatabaseError)?
             .map(|cdr| cdr.data_size)
             .or_else(|| {
+                debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
                 candidate_sms.iter().find_map(|(sm, write_offsets)| {
                     write_offsets.iter().find_map(|wo| {
                         sm.query_submodule_db_by_offset(*wo, |tx| {
@@ -353,7 +351,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // Next validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
         let root_hash = chunk.data_root.0;
-        let target_offset = u128::from(chunk.byte_offset(self.storage_config.chunk_size));
+        let target_offset = u128::from(chunk.end_byte_offset(self.storage_config.chunk_size));
         let path_buff = &chunk.data_path;
 
         info!(

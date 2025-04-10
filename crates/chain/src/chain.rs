@@ -274,20 +274,6 @@ impl IrysNode {
     pub async fn start(&mut self) -> eyre::Result<IrysNodeCtx> {
         info!(miner_address = ?self.config.miner_address(), "Starting Irys Node");
         let (chain_spec, irys_genesis) = self.irys_node_config.chainspec_builder.build();
-        let mut irys_genesis = IrysBlockHeader {
-            diff: calculate_initial_difficulty(
-                &self.difficulty_adjustment_config,
-                &self.storage_config,
-                // TODO: where does this magic constant come from?
-                3,
-            )
-            .expect("valid calculated initial difficulty"),
-            timestamp: self.genesis_timestamp,
-            last_diff_timestamp: self.genesis_timestamp,
-            ..irys_genesis
-        };
-        add_genesis_commitments(&mut irys_genesis, &self.config);
-        let irys_genesis_block = Arc::new(irys_genesis);
 
         // figure out the init mode
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
@@ -296,6 +282,21 @@ impl IrysNode {
             (false, _) => {
                 // special handling for genesis node
                 let commitments = get_genesis_commitments(&self.config);
+
+                let mut irys_genesis = IrysBlockHeader {
+                    diff: calculate_initial_difficulty(
+                        &self.difficulty_adjustment_config,
+                        &self.storage_config,
+                        // TODO: where does this magic constant come from?
+                        3,
+                    )
+                    .expect("valid calculated initial difficulty"),
+                    timestamp: self.genesis_timestamp,
+                    last_diff_timestamp: self.genesis_timestamp,
+                    ..irys_genesis
+                };
+                add_genesis_commitments(&mut irys_genesis, &self.config);
+                let irys_genesis_block = Arc::new(irys_genesis);
 
                 // special handilng for genesis node
                 self.init_genesis_thread(irys_genesis_block.clone(), commitments)?
@@ -315,7 +316,7 @@ impl IrysNode {
 
         // we create the listener here so we know the port before we start passing around `config`
         let listener = create_listener(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             self.config.port,
         ))?;
         let local_addr = listener
