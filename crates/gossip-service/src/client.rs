@@ -3,7 +3,11 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::types::{GossipError, GossipResult};
+use actix::Addr;
 use core::time::Duration;
+use irys_actors::peer_list_service::{
+    DecreasePeerScore, IncreasePeerScore, PeerListService, ScoreDecreaseReason, ScoreIncreaseReason,
+};
 use irys_types::{GossipData, PeerListItem};
 use reqwest::Response;
 use serde::Serialize;
@@ -138,19 +142,42 @@ impl GossipClient {
     /// If the peer is offline or the request fails, an error is returned.
     pub async fn send_data_and_update_score(
         &self,
-        peer: &mut PeerListItem,
+        peer: &PeerListItem,
         data: &GossipData,
+        peer_list_service: &Addr<PeerListService>,
     ) -> GossipResult<()> {
         let res = self.send_data(peer, data).await;
         match res {
             Ok(_) => {
                 // Successful send, increase score
-                peer.reputation_score.increase();
+                match peer_list_service
+                    .send(IncreasePeerScore {
+                        peer: peer.address.gossip,
+                        reason: ScoreIncreaseReason::Online,
+                    })
+                    .await
+                {
+                    Err(e) => {
+                        tracing::error!("Failed to increase peer score: {}", e);
+                    }
+                    _ => {}
+                }
                 Ok(())
             }
             Err(error) => {
                 // Failed to send, decrease score
-                peer.reputation_score.decrease_offline();
+                match peer_list_service
+                    .send(DecreasePeerScore {
+                        peer: peer.address.gossip,
+                        reason: ScoreDecreaseReason::Offline,
+                    })
+                    .await
+                {
+                    Err(e) => {
+                        tracing::error!("Failed to decrease peer score: {}", e);
+                    }
+                    _ => {}
+                };
                 Err(error)
             }
         }

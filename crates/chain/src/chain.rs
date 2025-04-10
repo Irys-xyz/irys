@@ -620,7 +620,6 @@ impl IrysNode {
         let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
             &self.config.gossip_service_bind_ip,
             self.config.gossip_service_port,
-            irys_db.clone(),
         );
 
         // start the block tree service
@@ -641,7 +640,7 @@ impl IrysNode {
         );
 
         // Spawn peer list service
-        let peer_list_arbiter = init_peer_list_service(&irys_db);
+        let (peer_list_service, peer_list_arbiter) = init_peer_list_service(&irys_db);
 
         // Spawn the mempool service
         let (mempool_service, mempool_arbiter) = self.init_mempools_service(
@@ -687,6 +686,7 @@ impl IrysNode {
             mempool_service.clone(),
             block_discovery.clone(),
             irys_api_client::IrysApiClient::new(),
+            peer_list_service.clone(),
         )?;
 
         // set up the price oracle
@@ -806,6 +806,7 @@ impl IrysNode {
             ApiState {
                 mempool: mempool_service,
                 chunk_provider: chunk_provider.clone(),
+                peer_list: peer_list_service,
                 db: irys_db,
                 reth_provider: Some(reth_node.clone()),
                 block_tree: Some(block_tree_guard.clone()),
@@ -1267,13 +1268,16 @@ async fn genesis_initialization(
     block_index_service_actor
 }
 
-fn init_peer_list_service(irys_db: &DatabaseProvider) -> Arbiter {
+fn init_peer_list_service(irys_db: &DatabaseProvider) -> (Addr<PeerListService>, Arbiter) {
     let peer_list_arbiter = Arbiter::new();
-    let peer_list_service = PeerListService::new(irys_db.clone());
+    let mut peer_list_service = PeerListService::new(irys_db.clone());
+    peer_list_service
+        .initialize()
+        .expect("to initialize peer_list_service");
     let peer_list_service =
         PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
-    SystemRegistry::set(peer_list_service);
-    peer_list_arbiter
+    SystemRegistry::set(peer_list_service.clone());
+    (peer_list_service, peer_list_arbiter)
 }
 
 fn init_broadcaster_service() -> (actix::Addr<BroadcastMiningService>, Arbiter) {
