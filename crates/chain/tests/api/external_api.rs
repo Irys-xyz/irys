@@ -5,60 +5,11 @@ use crate::utils::{mine_block, IrysNodeTest};
 use actix_web::{http::header::ContentType, HttpMessage};
 use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
+use irys_chain::peer_utilities::*;
 use irys_database::BlockIndexItem;
 use irys_types::{Address, IrysTransactionHeader, Signature, H256};
 use tokio::time::{sleep, Duration};
 use tracing::info;
-
-async fn client_request(
-    url: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    let client = awc::Client::default();
-
-    client.get(url).send().await.expect("client request")
-}
-
-pub async fn info_endpoint_request(
-    address: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!("{}{}", &address, "/v1/info")).await
-}
-
-pub async fn block_index_endpoint_request(
-    address: &str,
-    height: u64,
-    limit: u64,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!(
-        "{}{}?height={}&limit={}",
-        &address, "/v1/block_index", &height, &limit
-    ))
-    .await
-}
-
-async fn chunk_endpoint_request(
-    address: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!("{}{}", &address, "/v1/chunk/ledger/0/0")).await
-}
-
-async fn network_config_endpoint_request(
-    address: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!("{}{}", &address, "/v1/network/config")).await
-}
-
-async fn peer_list_endpoint_request(
-    address: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!("{}{}", &address, "/v1/peer_list")).await
-}
-
-async fn version_endpoint_request(
-    address: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!("{}{}", &address, "/v1/version")).await
-}
 
 #[actix::test]
 async fn heavy_external_api() -> eyre::Result<()> {
