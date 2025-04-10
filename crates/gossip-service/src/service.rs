@@ -43,13 +43,14 @@ type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 pub struct ServiceHandleWithShutdownSignal {
     pub handle: tokio::task::JoinHandle<()>,
     pub shutdown_tx: mpsc::Sender<()>,
-    pub name: &'static str,
+    pub name: String,
 }
 
 impl ServiceHandleWithShutdownSignal {
-    pub fn spawn<F, Fut>(name: &'static str, task: F, task_executor: &TaskExecutor) -> Self
+    pub fn spawn<F, S, Fut>(name: S, task: F, task_executor: &TaskExecutor) -> Self
     where
         F: FnOnce(mpsc::Receiver<()>) -> Fut + Send + 'static,
+        S: Into<String>,
         Fut: core::future::Future<Output = ()> + Send + 'static,
     {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
@@ -57,7 +58,7 @@ impl ServiceHandleWithShutdownSignal {
         Self {
             handle,
             shutdown_tx,
-            name,
+            name: name.into(),
         }
     }
 
