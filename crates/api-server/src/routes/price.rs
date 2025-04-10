@@ -28,21 +28,17 @@ pub async fn get_price(
     state: web::Data<ApiState>,
 ) -> ActixResult<HttpResponse> {
     let (ledger, bytes_to_store) = path.into_inner();
+    let chunk_size = state.config.chunk_size;
 
     // Convert ledger to enum, or bail out with an HTTP 400
     let data_ledger =
         DataLedger::try_from(ledger).map_err(|_| ErrorBadRequest("Ledger type not supported"))?;
 
     // enforece that the requested size is at least equal to a single chunk
-    let bytes_to_store = std::cmp::max(state.config.chunk_size, bytes_to_store);
+    let bytes_to_store = std::cmp::max(chunk_size, bytes_to_store);
 
     // round up to the next multiple of chunk_size
-    let remainder = bytes_to_store % state.config.chunk_size;
-    let bytes_to_store = if remainder == 0 {
-        bytes_to_store
-    } else {
-        bytes_to_store + (state.config.chunk_size - remainder)
-    };
+    let bytes_to_store = bytes_to_store.div_ceil(chunk_size) * chunk_size;
 
     match data_ledger {
         DataLedger::Publish => {
