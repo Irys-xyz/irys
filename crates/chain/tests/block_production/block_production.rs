@@ -88,9 +88,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     // assert_eq!(reth_block.number, block.height);
 
     // check irys DB for built block
-    let db_irys_block = irys_node
-        .get_block_by_hash(&block.block_hash, false)
-        .unwrap();
+    let db_irys_block = irys_node.get_block_by_hash(&block.block_hash).unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
 
     irys_node.stop().await;
@@ -117,7 +115,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
         // assert_eq!(reth_block.number, block.height);
 
         // check irys DB for built block
-        let db_irys_block = node.get_block_by_hash(&block.block_hash, false).unwrap();
+        let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
         // MAGIC: we wait more than 1s so that the block timestamps (evm block timestamps are seconds) don't overlap
         sleep(Duration::from_millis(1500)).await;
@@ -141,7 +139,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
         assert_eq!(i, reth_block.header.number);
         assert_eq!(i, reth_block.number);
 
-        let db_irys_block = node.get_block_by_height(i as u64, false).unwrap();
+        let db_irys_block = node.get_block_by_height(i as u64).await.unwrap();
 
         assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     }
@@ -168,7 +166,7 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     // assert_eq!(reth_block.number, block.height);
 
     // check irys DB for built block
-    let db_irys_block = node.get_block_by_hash(&block.block_hash, false).unwrap();
+    let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     node.stop().await;
     Ok(())
@@ -313,7 +311,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         miner_init_balance + U256::from(1)
     );
     // check irys DB for built block
-    let db_irys_block = node.get_block_by_hash(&block.block_hash, false).unwrap();
+    let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
     node.stop().await;

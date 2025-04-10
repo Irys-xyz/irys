@@ -12,13 +12,11 @@ pub async fn block_index_route(
     state: web::Data<ApiState>,
     query: web::Query<BlockIndexQuery>,
 ) -> HttpResponse {
-    let block_index = state.block_index.clone().expect("block index");
-
     let limit = query.limit;
     let height = query.height;
 
-    let read = block_index.read();
-    let requested_blocks: Vec<&BlockIndexItem> = read
+    let block_index_read = state.block_index.read();
+    let requested_blocks: Vec<&BlockIndexItem> = block_index_read
         .items
         .into_iter()
         .enumerate()
