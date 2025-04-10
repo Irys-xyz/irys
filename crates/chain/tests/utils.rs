@@ -4,6 +4,7 @@ use irys_actors::block_producer::SolutionFoundMessage;
 use irys_actors::block_tree_service::get_canonical_chain;
 use irys_actors::block_validation;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
+use irys_api_server::create_listener;
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::tx_header_by_txid;
 use irys_packing::capacity_single::compute_entropy_chunk;
@@ -20,6 +21,8 @@ use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::time::sleep;
@@ -130,6 +133,16 @@ pub async fn capacity_chunk_solution(
         solution_hash,
         ..Default::default()
     }
+}
+
+pub async fn random_port() -> eyre::Result<u16> {
+    let listener = create_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))?;
+    //the assigned port will be random (decided by the OS)
+    let port = listener
+        .local_addr()
+        .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?
+        .port();
+    Ok(port)
 }
 
 // Reasons tx could fail to be added to mempool
