@@ -45,8 +45,8 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
         );
     };
 
-    service1_handle.stop().await??;
-    service2_handle.stop().await??;
+    service1_handle.stop().await?;
+    service2_handle.stop().await?;
 
     Ok(())
 }
@@ -112,7 +112,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
     }
 
     for handle in handles {
-        handle.stop().await??;
+        handle.stop().await?;
     }
 
     Ok(())
@@ -157,8 +157,8 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
         );
     };
 
-    service1_handle.stop().await??;
-    service2_handle.stop().await??;
+    service1_handle.stop().await?;
+    service2_handle.stop().await?;
 
     Ok(())
 }
@@ -200,8 +200,8 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
         );
     };
 
-    service1_handle.stop().await??;
-    service2_handle.stop().await??;
+    service1_handle.stop().await?;
+    service2_handle.stop().await?;
 
     Ok(())
 }
@@ -243,8 +243,8 @@ async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()
         );
     };
 
-    service1_handle.stop().await??;
-    service2_handle.stop().await??;
+    service1_handle.stop().await?;
+    service2_handle.stop().await?;
 
     Ok(())
 }
@@ -271,7 +271,7 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
 
-    service1_handle.stop().await??;
+    service1_handle.stop().await?;
 
     Ok(())
 }
@@ -322,8 +322,8 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
         );
     };
 
-    service1_handle.stop().await??;
-    service2_handle.stop().await??;
+    service1_handle.stop().await?;
+    service2_handle.stop().await?;
 
     Ok(())
 }
@@ -340,7 +340,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
 
     // Waiting a little for the service to initialize
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
 
     // Create a test block with transactions
     let mut block = IrysBlockHeader::default();
@@ -358,7 +358,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
     gossip_service1_message_bus
         .send(GossipData::Block(block))
         .await
-        .expect("Failed to send block to service 2");
+        .expect("Failed to send block to service 1");
 
     // Wait for service 2 to process the block and attempt to fetch transactions
     tokio::time::sleep(Duration::from_millis(3000)).await;
@@ -374,8 +374,8 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
         );
     };
 
-    service1_handle.stop().await??;
-    service2_handle.stop().await??;
+    service1_handle.stop().await?;
+    service2_handle.stop().await?;
 
     Ok(())
 }
