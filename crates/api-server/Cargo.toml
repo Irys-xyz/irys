@@ -10,8 +10,6 @@ irys-database.workspace = true
 irys-reth-node-bridge.workspace = true
 irys-storage.workspace = true
 irys-types.workspace = true
-irys-config.workspace = true
-#
 
 awc.workspace = true
 socket2 = "0.5"
