@@ -8,7 +8,7 @@ use irys_database::DataLedger;
 use irys_types::{
     storage_pricing::{
         phantoms::{Irys, NetworkFee},
-        Amount, Decimal,
+        Amount,
     },
     U256,
 };
@@ -33,6 +33,17 @@ pub async fn get_price(
     let data_ledger =
         DataLedger::try_from(ledger).map_err(|_| ErrorBadRequest("Ledger type not supported"))?;
 
+    // enforece that the requested size is at least equal to a single chunk
+    let bytes_to_store = std::cmp::max(state.config.chunk_size, bytes_to_store);
+
+    // round up to the next multiple of chunk_size
+    let remainder = bytes_to_store % state.config.chunk_size;
+    let bytes_to_store = if remainder == 0 {
+        bytes_to_store
+    } else {
+        bytes_to_store + (state.config.chunk_size - remainder)
+    };
+
     match data_ledger {
         DataLedger::Publish => {
             // If the cost calculation fails, return 400 with the error text
@@ -46,7 +57,7 @@ pub async fn get_price(
                 bytes: bytes_to_store,
             }))
         }
-        DataLedger::Submit => Ok(HttpResponse::BadRequest().body("term not yet implemented")),
+        DataLedger::Submit => Err(ErrorBadRequest("Term ledeger not supported")),
     }
 }
 

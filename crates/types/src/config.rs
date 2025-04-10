@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
-        phantoms::{CostPerGb, DecayRate, IrysPrice, NetworkFee, Percentage, Usd},
+        phantoms::{CostPerGb, DecayRate, IrysPrice, Percentage, Usd},
         Amount,
     },
 };
