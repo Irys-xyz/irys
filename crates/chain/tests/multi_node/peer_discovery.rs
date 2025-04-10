@@ -32,7 +32,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         ..Config::testnet()
     };
     let signer = IrysSigner::random_signer(&test_config);
-    let mut node = IrysNodeTest::new_genesis(test_config.clone());
+    let mut node = IrysNodeTest::new_genesis(test_config.clone()).await;
     node.cfg.irys_node_config.extend_genesis_accounts(vec![(
         signer.address(),
         GenesisAccount {

@@ -37,7 +37,7 @@ async fn heavy_double_root_data_promotion_test() {
     };
     let signer = IrysSigner::random_signer(&testnet_config);
     let signer2 = IrysSigner::random_signer(&testnet_config);
-    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
+    let mut node = IrysNodeTest::new_genesis(testnet_config.clone()).await;
     node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             signer.address(),

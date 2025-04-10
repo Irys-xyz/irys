@@ -147,24 +147,29 @@ pub struct IrysNodeTest<T = ()> {
 
 impl Default for IrysNodeTest<()> {
     fn default() -> Self {
-        let config = Config::testnet();
-        Self::new_genesis(config)
+        tokio::runtime::Runtime::new()
+            .expect("expected valid tokio runtime")
+            .block_on(IrysNodeTest::default_async())
     }
 }
 
 impl IrysNodeTest<()> {
-    pub fn new(config: Config) -> Self {
-        Self::new_inner(config, false)
+    pub async fn default_async() -> Self {
+        let config = Config::testnet();
+        Self::new_genesis(config).await
+    }
+    pub async fn new(config: Config) -> Self {
+        Self::new_inner(config, false).await
     }
 
-    pub fn new_genesis(config: Config) -> Self {
-        Self::new_inner(config, true)
+    pub async fn new_genesis(config: Config) -> Self {
+        Self::new_inner(config, true).await
     }
 
-    fn new_inner(mut config: Config, is_genesis: bool) -> Self {
+    async fn new_inner(mut config: Config, is_genesis: bool) -> Self {
         let temp_dir = temporary_directory(None, false);
         config.base_directory = temp_dir.path().to_path_buf();
-        let cfg = IrysNode::new(config, is_genesis, None);
+        let cfg = IrysNode::new(config, is_genesis).await;
         Self {
             cfg,
             temp_dir,
@@ -307,7 +312,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let cfg = IrysNode {
             irys_node_config: self.cfg.irys_node_config,
             genesis_timestamp: self.cfg.genesis_timestamp,
-            ..IrysNode::new(self.cfg.config, false, None)
+            ..IrysNode::new(self.cfg.config, false).await
         };
         IrysNodeTest {
             node_ctx: (),

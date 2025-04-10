@@ -153,7 +153,7 @@ async fn setup_with_config(
 ) -> eyre::Result<TestCtx> {
     let temp_dir = temporary_directory(Some(node_name), false);
     testnet_config.base_directory = temp_dir.path().to_path_buf();
-    let mut irys_node = IrysNode::new(testnet_config.clone(), genesis, None);
+    let mut irys_node = IrysNode::new(testnet_config.clone(), genesis).await;
     let node = irys_node.start().await?;
     Ok(TestCtx { node, temp_dir })
 }

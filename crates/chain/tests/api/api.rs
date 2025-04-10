@@ -45,7 +45,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     };
     let chain_id = testnet_config.chain_id;
     let main_signer = IrysSigner::random_signer(&testnet_config);
-    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
+    let mut node = IrysNodeTest::new_genesis(testnet_config.clone()).await;
     node.cfg.irys_node_config.extend_genesis_accounts(vec![(
         main_signer.address(),
         GenesisAccount {

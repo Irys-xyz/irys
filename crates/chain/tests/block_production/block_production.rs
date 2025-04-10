@@ -186,7 +186,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         chunk_migration_depth: 1,
         ..Config::testnet()
     };
-    let mut node = IrysNodeTest::new_genesis(testnet_config);
+    let mut node = IrysNodeTest::new_genesis(testnet_config).await;
     let account1 = IrysSigner::random_signer(&node.cfg.config);
     let account2 = IrysSigner::random_signer(&node.cfg.config);
     let account3 = IrysSigner::random_signer(&node.cfg.config);

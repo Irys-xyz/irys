@@ -198,11 +198,7 @@ pub struct IrysNode {
 
 impl IrysNode {
     /// Creates a new node builder instance.
-    pub fn new(
-        config: Config,
-        is_genesis: bool,
-        irys_genesis_block: Option<Arc<IrysBlockHeader>>,
-    ) -> Self {
+    pub async fn new(config: Config, is_genesis: bool) -> Self {
         let storage_config = StorageConfig::new(&config);
         let irys_node_config = IrysNodeConfig::new(&config);
         let data_exists = Self::blockchain_data_exists(&irys_node_config.base_directory);
