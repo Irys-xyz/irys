@@ -146,14 +146,6 @@ pub struct IrysNodeTest<T = ()> {
     pub temp_dir: TempDir,
 }
 
-impl Default for IrysNodeTest<()> {
-    fn default() -> Self {
-        tokio::runtime::Runtime::new()
-            .expect("expected valid tokio runtime")
-            .block_on(IrysNodeTest::default_async())
-    }
-}
-
 impl IrysNodeTest<()> {
     pub async fn default_async() -> Self {
         let config = Config::testnet();

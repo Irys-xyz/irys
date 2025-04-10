@@ -13,7 +13,7 @@ use tracing::info;
 
 #[actix::test]
 async fn heavy_external_api() -> eyre::Result<()> {
-    let ctx = IrysNodeTest::default().start().await;
+    let ctx = IrysNodeTest::default_async().await.start().await;
 
     let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
 

@@ -21,7 +21,7 @@ use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 
 #[tokio::test]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
-    let mut node = IrysNodeTest::default();
+    let mut node = IrysNodeTest::default_async().await;
     let account1 = IrysSigner::random_signer(&node.cfg.config);
     let account2 = IrysSigner::random_signer(&node.cfg.config);
     let account3 = IrysSigner::random_signer(&node.cfg.config);
@@ -97,7 +97,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
-    let node = IrysNodeTest::default().start().await;
+    let node = IrysNodeTest::default_async().await.start().await;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
@@ -126,7 +126,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 
 #[tokio::test]
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
-    let node = IrysNodeTest::default().start().await;
+    let node = IrysNodeTest::default_async().await.start().await;
 
     node.node_ctx.actor_addresses.start_mining()?;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
@@ -149,7 +149,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
-    let node = IrysNodeTest::default().start().await;
+    let node = IrysNodeTest::default_async().await.start().await;
 
     let (block, _) = mine_block(&node.node_ctx).await?.unwrap();
 
