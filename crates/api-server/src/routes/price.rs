@@ -1,20 +1,26 @@
 use actix_web::{
-    error::{ErrorBadRequest, ErrorInternalServerError},
+    error::ErrorBadRequest,
     web::{self, Path},
     HttpResponse, Result as ActixResult,
 };
 use irys_actors::ema_service::EmaServiceMessage;
 use irys_database::DataLedger;
-use irys_types::{storage_pricing::Decimal, U256};
+use irys_types::{
+    storage_pricing::{
+        phantoms::{Irys, NetworkFee},
+        Amount, Decimal,
+    },
+    U256,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::ApiState;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct PriceInfo {
-    cost_in_irys: Decimal,
-    ledger: u32,
-    bytes: u64,
+    pub cost_in_irys: U256,
+    pub ledger: u32,
+    pub bytes: u64,
 }
 
 pub async fn get_price(
@@ -30,12 +36,12 @@ pub async fn get_price(
     match data_ledger {
         DataLedger::Publish => {
             // If the cost calculation fails, return 400 with the error text
-            let perm_storage_price = cost_of_publish_ledger(state, bytes_to_store)
+            let perm_storage_price = cost_of_perm_storage(state, bytes_to_store)
                 .await
                 .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
-                cost_in_irys: perm_storage_price,
+                cost_in_irys: perm_storage_price.amount,
                 ledger,
                 bytes: bytes_to_store,
             }))
@@ -44,10 +50,10 @@ pub async fn get_price(
     }
 }
 
-async fn cost_of_publish_ledger(
+async fn cost_of_perm_storage(
     state: web::Data<ApiState>,
     bytes_to_store: u64,
-) -> eyre::Result<Decimal> {
+) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
     // get the latest EMA to use for pricing
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
@@ -69,8 +75,7 @@ async fn cost_of_publish_ledger(
     // calculate the cost of storing the bytes
     let price_with_network_reward = cost_per_gb
         .base_network_fee(U256::from(bytes_to_store), current_ema)?
-        .add_multiplier(state.config.fee_percentage)?
-        .token_to_decimal()?;
+        .add_multiplier(state.config.fee_percentage)?;
 
     Ok(price_with_network_reward)
 }
