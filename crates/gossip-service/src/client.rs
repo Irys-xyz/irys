@@ -82,59 +82,6 @@ impl GossipClient {
             .map_err(|error| GossipError::Network(error.to_string()))
     }
 
-    /// Check the health of a peer
-    ///
-    /// # Errors
-    ///
-    /// If the health check fails or the response is not valid JSON, an error is returned.
-    pub async fn check_health(&self, peer: &PeerListItem) -> GossipResult<PeerListItem> {
-        let url = format!("http://{}/gossip/health", peer.address.gossip);
-
-        let response = self
-            .client
-            .get(&url)
-            .timeout(self.timeout)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(GossipError::Network(format!(
-                "Health check failed with status: {}",
-                response.status()
-            )));
-        }
-
-        response
-            .json()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))
-    }
-
-    /// Check the health of a peer and update their score
-    ///
-    /// # Errors
-    ///
-    /// If the health check fails or the response is not valid JSON, an error is returned.
-    pub async fn check_health_and_update_score(
-        &self,
-        peer: &mut PeerListItem,
-    ) -> GossipResult<PeerListItem> {
-        let res = self.check_health(peer).await;
-        match res {
-            Ok(updated_peer) => {
-                // Peer is alive, increase score
-                peer.reputation_score.increase();
-                Ok(updated_peer)
-            }
-            Err(error) => {
-                // Peer is offline or unreachable
-                peer.reputation_score.decrease_offline();
-                Err(error)
-            }
-        }
-    }
-
     /// Send data to a peer and update their score based on the result
     ///
     /// # Errors

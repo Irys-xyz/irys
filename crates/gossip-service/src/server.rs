@@ -249,7 +249,7 @@ where
         .await
     {
         Ok(info) => match info {
-            Some(info) => HttpResponse::Ok().json(info),
+            Some(_info) => HttpResponse::Ok().json(true),
             None => HttpResponse::NotFound().finish(),
         },
         Err(_) => HttpResponse::InternalServerError().finish(),

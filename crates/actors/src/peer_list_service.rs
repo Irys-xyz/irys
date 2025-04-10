@@ -3,12 +3,15 @@ use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
 use irys_types::{Address, DatabaseProvider, PeerAddress, PeerListItem};
+use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Default)]
 pub struct PeerListService {
@@ -19,6 +22,8 @@ pub struct PeerListService {
     gossip_addr_to_mining_addr_map: HashMap<IpAddr, Address>,
     peer_list_cache: HashMap<Address, PeerListItem>,
     known_peers_cache: HashSet<PeerAddress>,
+
+    client: Client,
 }
 
 impl Actor for PeerListService {
@@ -34,6 +39,45 @@ impl Actor for PeerListService {
                 Err(e) => {
                     error!("Failed to flush peer list to database: {:?}", e);
                 }
+            }
+        });
+
+        ctx.run_interval(INACTIVE_PEERS_HEALTH_CHECK_INTERVAL, |act, ctx| {
+            // Collect inactive peers with the required fields
+            let inactive_peers: Vec<(Address, PeerListItem, SocketAddr)> = act
+                .peer_list_cache
+                .iter()
+                .filter(|(_mining_addr, peer)| !peer.reputation_score.is_active())
+                .map(|(mining_addr, peer)| {
+                    // Clone or copy the fields we need for the async operation
+                    let peer_item = peer.clone();
+                    let mining_addr = *mining_addr;
+                    let peer_addr = peer_item.address.clone();
+                    (mining_addr, peer_item, peer_addr.gossip)
+                })
+                .collect();
+
+            for (mining_addr, peer, gossip_addr) in inactive_peers {
+                // Clone the peer address to use in the async block
+                let peer_address = peer.address.clone();
+                let client = act.client.clone();
+                // Create the future that does the health check
+                let fut = async move { check_health(peer_address, client).await }
+                    .into_actor(act)
+                    .map(move |result, act, _ctx| match result {
+                        Ok(true) => {
+                            debug!("Peer {:?} is online", mining_addr);
+                            act.increase_peer_score(&gossip_addr, ScoreIncreaseReason::Online);
+                        }
+                        Ok(false) => {
+                            debug!("Peer {:?} is offline", mining_addr);
+                            act.decrease_peer_score(&gossip_addr, ScoreDecreaseReason::Offline);
+                        }
+                        Err(e) => {
+                            error!("Failed to check health of peer {:?}: {:?}", mining_addr, e);
+                        }
+                    });
+                ctx.spawn(fut);
             }
         });
     }
@@ -58,6 +102,7 @@ impl PeerListService {
             gossip_addr_to_mining_addr_map: HashMap::new(),
             peer_list_cache: HashMap::new(),
             known_peers_cache: HashSet::new(),
+            client: Client::new(),
         }
     }
 }
@@ -66,6 +111,7 @@ impl PeerListService {
 pub enum PeerListServiceError {
     DatabaseNotConnected,
     Database(DatabaseError),
+    HealthCheckFailed(String),
 }
 
 impl From<DatabaseError> for PeerListServiceError {
@@ -149,6 +195,21 @@ impl PeerListService {
         }
     }
 
+    fn increase_peer_score(&mut self, address: &SocketAddr, score: ScoreIncreaseReason) {
+        if let Some(mining_addr) = self.gossip_addr_to_mining_addr_map.get(&address.ip()) {
+            if let Some(peer_item) = self.peer_list_cache.get_mut(mining_addr) {
+                match score {
+                    ScoreIncreaseReason::Online => {
+                        peer_item.reputation_score.increase();
+                    }
+                    ScoreIncreaseReason::ValidData => {
+                        peer_item.reputation_score.increase();
+                    }
+                }
+            }
+        }
+    }
+
     fn decrease_peer_score(&mut self, peer: &SocketAddr, reason: ScoreDecreaseReason) {
         if let Some(mining_addr) = self.gossip_addr_to_mining_addr_map.get(&peer.ip()) {
             if let Some(peer_item) = self.peer_list_cache.get_mut(mining_addr) {
@@ -168,6 +229,29 @@ impl PeerListService {
             }
         }
     }
+}
+
+async fn check_health(peer: PeerAddress, client: Client) -> Result<bool, PeerListServiceError> {
+    let url = format!("http://{}/gossip/health", peer.gossip);
+
+    let response = client
+        .get(&url)
+        .timeout(HEALTH_CHECK_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| PeerListServiceError::HealthCheckFailed(error.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(PeerListServiceError::HealthCheckFailed(format!(
+            "Health check failed with status: {}",
+            response.status()
+        )));
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|error| PeerListServiceError::HealthCheckFailed(error.to_string()))
 }
 
 impl From<eyre::Report> for PeerListServiceError {

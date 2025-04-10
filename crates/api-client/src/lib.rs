@@ -24,7 +24,7 @@ pub trait ApiClient: Send + Sync + Clone {
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct IrysApiClient {
     client: Client,
 }
