@@ -61,7 +61,8 @@ pub async fn post_version(
                 mining_addr,
                 peer: peer_list_entry.clone(),
             })
-            .await.is_err()
+            .await
+            .is_err()
         {
             let response = PeerResponse::Rejected(RejectedResponse {
                 reason: RejectionReason::InternalError,

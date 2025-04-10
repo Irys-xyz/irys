@@ -186,6 +186,7 @@ mod tests {
     use base58::ToBase58;
     use database::open_or_create_db;
     use irys_actors::mempool_service::MempoolService;
+    use irys_actors::peer_list_service::PeerListService;
     use irys_database::tables::IrysTables;
     use irys_storage::ChunkProvider;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -233,6 +234,7 @@ mod tests {
         let config = Config::testnet();
         let storage_config = StorageConfig::new(&config);
         let mempool_addr = MempoolService::from_registry();
+        let peer_list_addr = PeerListService::from_registry();
         let chunk_provider =
             ChunkProvider::new(storage_config.clone(), Arc::new(Vec::new()).to_vec());
         let app_state = ApiState {
@@ -242,6 +244,7 @@ mod tests {
             block_tree: None,
             db: db,
             mempool: mempool_addr,
+            peer_list: peer_list_addr,
             chunk_provider: Arc::new(chunk_provider),
             config,
         };

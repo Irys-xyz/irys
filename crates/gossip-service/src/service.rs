@@ -24,7 +24,7 @@ use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
 use irys_actors::peer_list_service::{ActivePeersRequest, PeerListService};
 use irys_api_client::ApiClient;
 use irys_types::{GossipData, PeerListItem};
-use rand::prelude::SliceRandom;
+use rand::prelude::SliceRandom as _;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::{sync::mpsc, time};
@@ -227,7 +227,7 @@ impl GossipService {
             let peers_that_seen_data = self.cache.peers_that_have_seen(data)?;
             peers.retain(|peer| !peers_that_seen_data.contains(&peer.address.gossip));
 
-            let selected_peers = &peers[..MAX_PEERS_PER_BROADCAST];
+            let selected_peers = &peers.get(..MAX_PEERS_PER_BROADCAST);
             // Send data to selected peers
             for peer in selected_peers {
                 if let Err(error) = self

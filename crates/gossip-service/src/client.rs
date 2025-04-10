@@ -148,35 +148,29 @@ impl GossipClient {
     ) -> GossipResult<()> {
         let res = self.send_data(peer, data).await;
         match res {
-            Ok(_) => {
+            Ok(()) => {
                 // Successful send, increase score
-                match peer_list_service
+                if let Err(e) = peer_list_service
                     .send(IncreasePeerScore {
                         peer: peer.address.gossip,
                         reason: ScoreIncreaseReason::Online,
                     })
                     .await
                 {
-                    Err(e) => {
-                        tracing::error!("Failed to increase peer score: {}", e);
-                    }
-                    _ => {}
+                    tracing::error!("Failed to increase peer score: {}", e);
                 }
                 Ok(())
             }
             Err(error) => {
                 // Failed to send, decrease score
-                match peer_list_service
+                if let Err(e) = peer_list_service
                     .send(DecreasePeerScore {
                         peer: peer.address.gossip,
                         reason: ScoreDecreaseReason::Offline,
                     })
                     .await
                 {
-                    Err(e) => {
-                        tracing::error!("Failed to decrease peer score: {}", e);
-                    }
-                    _ => {}
+                    tracing::error!("Failed to decrease peer score: {}", e);
                 };
                 Err(error)
             }

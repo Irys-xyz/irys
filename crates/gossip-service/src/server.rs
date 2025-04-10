@@ -262,17 +262,14 @@ async fn handle_invalid_data(
     peer_list_service: &Addr<PeerListService>,
 ) {
     if let GossipError::InvalidData(_) = error {
-        match peer_list_service
+        if let Err(error) = peer_list_service
             .send(DecreasePeerScore {
                 peer: peer.address.gossip,
                 reason: irys_actors::peer_list_service::ScoreDecreaseReason::BogusData,
             })
             .await
         {
-            Err(error) => {
-                tracing::error!("Failed to decrease peer score: {}", error);
-            }
-            _ => {}
+            tracing::error!("Failed to decrease peer score: {}", error);
         }
     }
 }
