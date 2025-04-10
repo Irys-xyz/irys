@@ -30,12 +30,10 @@ impl Actor for PeerListService {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        ctx.run_interval(FLUSH_INTERVAL, |act, _ctx| {
-            match act.flush() {
-                Ok(()) => {},
-                Err(e) => {
-                    error!("Failed to flush peer list to database: {:?}", e);
-                }
+        ctx.run_interval(FLUSH_INTERVAL, |act, _ctx| match act.flush() {
+            Ok(()) => {}
+            Err(e) => {
+                error!("Failed to flush peer list to database: {:?}", e);
             }
         });
 

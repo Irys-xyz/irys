@@ -24,8 +24,8 @@ use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
 use irys_actors::peer_list_service::{ActivePeersRequest, PeerListService};
 use irys_api_client::ApiClient;
 use irys_types::{GossipData, PeerListItem};
-use reth_tasks::{TaskExecutor, TaskManager};
 use rand::prelude::SliceRandom as _;
+use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc::error::SendError;
@@ -147,7 +147,7 @@ impl GossipService {
         block_discovery: Addr<B>,
         api_client: A,
         task_executor: &TaskExecutor,
-        peer_list: Addr<PeerListService>
+        peer_list: Addr<PeerListService>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         M: Handler<TxIngressMessage>
@@ -182,8 +182,12 @@ impl GossipService {
         let cache_pruning_task_handle =
             spawn_cache_pruning_task(Arc::clone(&service.cache), task_executor);
 
-        let broadcast_task_handle =
-            spawn_broadcast_task(mempool_data_receiver, Arc::clone(&service), task_executor, peer_list);
+        let broadcast_task_handle = spawn_broadcast_task(
+            mempool_data_receiver,
+            Arc::clone(&service),
+            task_executor,
+            peer_list,
+        );
 
         let gossip_service_handle = spawn_main_task(
             server,
