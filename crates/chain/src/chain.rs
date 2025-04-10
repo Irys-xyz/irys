@@ -71,10 +71,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::Runtime;
-use tokio::{
-    runtime::Handle,
-    sync::oneshot::{self},
-};
+use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info};
 
 #[derive(Debug, Clone)]
@@ -952,7 +949,6 @@ impl IrysNode {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
         let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
         let packing_actor_addr = PackingActor::new(
-            Handle::current(),
             reth_node.task_executor.clone(),
             sm_ids,
             self.packing_config.clone(),
