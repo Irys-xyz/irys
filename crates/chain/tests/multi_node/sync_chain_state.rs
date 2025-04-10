@@ -16,9 +16,14 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // +2 is so genesis is two blocks ahead of the peer nodes, as currently we check the peers index which lags behind
     let required_genesis_node_height = required_blocks_height + 2;
     let trusted_peers = vec!["127.0.0.1:8080".parse().expect("valid SocketAddr expected")];
+    let genesis_trusted_peers = vec![
+        "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+        "10.0.0.1:1234".parse().expect("valid SocketAddr expected"),
+        "10.0.0.2:1234".parse().expect("valid SocketAddr expected"),
+    ];
     let testnet_config_genesis = Config {
         port: 8080,
-        trusted_peers: trusted_peers.clone(),
+        trusted_peers: genesis_trusted_peers.clone(),
         ..Config::testnet()
     };
     let ctx_genesis_node = setup_with_config(
@@ -79,6 +84,12 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
 
+    // assert that peer1 node has updated trusted peers
+    assert_eq!(
+        &genesis_trusted_peers,
+        &ctx_peer1_node.node.config.trusted_peers
+    );
+
     //shut down peer, we have what we need
     ctx_peer1_node.node.stop().await;
 
@@ -90,6 +101,12 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         max_attempts,
     )
     .await;
+
+    // assert that peer2 node has updated trusted peers
+    assert_eq!(
+        &genesis_trusted_peers,
+        &ctx_peer2_node.node.config.trusted_peers
+    );
 
     //shut down peer, we have what we need
     ctx_peer2_node.node.stop().await;
