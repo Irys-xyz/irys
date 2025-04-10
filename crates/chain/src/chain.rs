@@ -75,7 +75,7 @@ use tokio::{
     runtime::Handle,
     sync::oneshot::{self},
 };
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -521,7 +521,8 @@ impl IrysNode {
                             reth_shutdown_receiver,
                         ),
                     )
-                    .await;
+                    .await
+                    .inspect_err(|e| error!("Reth thread error: {:?}", &e));
                     debug!("Sending shutdown signal to the main actor thread");
                     let _ = main_actor_thread_shutdown_tx.try_send(());
 
