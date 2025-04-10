@@ -8,8 +8,7 @@ use irys_actors::mempool_service::{
 use irys_actors::peer_list_service::{AddPeer, PeerListService};
 use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
-use irys_gossip_service::{GossipService, PeerListProvider};
-use irys_gossip_service::{GossipResult, GossipService};
+use irys_gossip_service::GossipService;
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;

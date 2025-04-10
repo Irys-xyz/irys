@@ -23,11 +23,8 @@ use irys_actors::mempool_service::TxExistenceQuery;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
 use irys_actors::peer_list_service::{ActivePeersRequest, PeerListService};
 use irys_api_client::ApiClient;
-use irys_database::tables::CompactPeerListItem;
-use irys_types::{DatabaseProvider, GossipData};
-use rand::seq::IteratorRandom as _;
-use reth_tasks::{TaskExecutor, TaskManager};
 use irys_types::{GossipData, PeerListItem};
+use reth_tasks::{TaskExecutor, TaskManager};
 use rand::prelude::SliceRandom as _;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -150,9 +147,8 @@ impl GossipService {
         block_discovery: Addr<B>,
         api_client: A,
         task_executor: &TaskExecutor,
+        peer_list: Addr<PeerListService>
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
-        peer_list: Addr<PeerListService>,
-    ) -> GossipResult<ServiceHandleWithShutdownSignal<GossipResult<()>>>
     where
         M: Handler<TxIngressMessage>
             + Handler<ChunkIngressMessage>
