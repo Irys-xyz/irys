@@ -7,7 +7,7 @@ use irys_actors::mempool_service::{
 };
 use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
-use irys_gossip_service::{GossipResult, GossipService, PeerListProvider};
+use irys_gossip_service::{GossipService, PeerListProvider};
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -18,6 +18,7 @@ use irys_types::{
     IrysTransactionHeader, PeerAddress, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk,
     H256,
 };
+use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
@@ -229,6 +230,8 @@ pub struct GossipServiceTestFixture {
     pub mempool_chunks: Arc<RwLock<Vec<ChunkIngressMessage>>>,
     pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
     pub api_client: StubApiClient,
+    pub task_manager: TaskManager,
+    pub task_executor: TaskExecutor,
 }
 
 impl Default for GossipServiceTestFixture {
@@ -265,6 +268,11 @@ impl GossipServiceTestFixture {
         let mempool_stub_addr = mempool_stub.start();
         let block_discovery_addr = block_discovery_stub.start();
 
+        let tokio_runtime = tokio::runtime::Handle::current();
+
+        let task_manager = TaskManager::new(tokio_runtime);
+        let task_executor = task_manager.executor();
+
         Self {
             temp_dir,
             gossip_port,
@@ -278,17 +286,14 @@ impl GossipServiceTestFixture {
             mempool_chunks,
             discovery_blocks,
             api_client: StubApiClient::new(),
+            task_manager,
+            task_executor,
         }
     }
 
     /// # Panics
     /// Can panic
-    pub fn run_service(
-        &mut self,
-    ) -> (
-        ServiceHandleWithShutdownSignal<GossipResult<()>>,
-        mpsc::Sender<GossipData>,
-    ) {
+    pub fn run_service(&mut self) -> (ServiceHandleWithShutdownSignal, mpsc::Sender<GossipData>) {
         let (gossip_service, internal_message_bus) =
             GossipService::new("127.0.0.1", self.gossip_port, self.db.clone());
 
@@ -308,7 +313,12 @@ impl GossipServiceTestFixture {
         let api_client = self.api_client.clone();
 
         let service_handle = gossip_service
-            .run(mempool_stub_addr, block_discovery_stub_addr, api_client)
+            .run(
+                mempool_stub_addr,
+                block_discovery_stub_addr,
+                api_client,
+                &self.task_executor,
+            )
             .expect("failed to run gossip service");
 
         (service_handle, internal_message_bus)
