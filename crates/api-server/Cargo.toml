@@ -10,21 +10,22 @@ irys-database.workspace = true
 irys-reth-node-bridge.workspace = true
 irys-storage.workspace = true
 irys-types.workspace = true
-irys-config.workspace = true
-#
-socket2 = "0.5.8"
+
 awc.workspace = true
+socket2 = "0.5"
 base58.workspace = true
+tokio.workspace = true
 reth.workspace = true
 reth-db.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 serde.workspace = true
 actix.workspace = true
 actix-web.workspace = true
-actix-cors = "0.7.0"
+actix-cors = "0.7"
 tracing.workspace = true
 semver.workspace = true
 eyre.workspace = true
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
+test-log.workspace = true

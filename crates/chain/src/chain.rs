@@ -860,6 +860,7 @@ impl IrysNode {
 
         let server = run_server(
             ApiState {
+                ema_service: service_senders.ema.clone(),
                 mempool: mempool_service,
                 chunk_provider: chunk_provider.clone(),
                 db: irys_db,
