@@ -47,7 +47,7 @@ pub struct BlockDiscoveredMessage(pub Arc<IrysBlockHeader>);
 
 /// Sent when a discovered block is pre-validated
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
+#[rtype(result = "eyre::Result<()>")]
 pub struct BlockPreValidatedMessage(
     pub Arc<IrysBlockHeader>,
     pub Arc<Vec<IrysTransactionHeader>>,

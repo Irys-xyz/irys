@@ -41,7 +41,9 @@ pub enum EmaServiceMessage {
         response: oneshot::Sender<eyre::Result<NewBlockEmaResponse>>,
     },
     /// Supposted to be sent whenever Irys produces a new confirmed block. The EMA service will refrech its cache.
-    NewConfirmedBlock,
+    UpdateCache,
+    /// Supposted to be sent whenever Irys produces a new confirmed block. The EMA service will refrech its cache.
+    UpdateCacheBlocking { response: oneshot::Sender<()> },
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -182,8 +184,8 @@ impl Inner {
                     ema: new_ema,
                 }));
             }
-            EmaServiceMessage::NewConfirmedBlock => {
-                tracing::debug!("new confirmed block");
+            EmaServiceMessage::UpdateCache => {
+                tracing::debug!("new cache update request (async)");
 
                 // Rebuild the entire data cache just like we do at startup.
                 self.price_ctx = PriceCacheContext::from_canonical_chain(
@@ -191,6 +193,18 @@ impl Inner {
                     self.blocks_in_interval,
                 )
                 .await?;
+            }
+            EmaServiceMessage::UpdateCacheBlocking { response } => {
+                tracing::debug!("new cache update request (blocking)");
+
+                // Rebuild the entire data cache just like we do at startup.
+                self.price_ctx = PriceCacheContext::from_canonical_chain(
+                    self.block_tree_read_guard.clone(),
+                    self.blocks_in_interval,
+                )
+                .await?;
+
+                let _ = response.send(());
             }
             EmaServiceMessage::ValidateOraclePrice {
                 block_height,
@@ -1178,7 +1192,7 @@ mod tests {
         drop(tree);
 
         // Send a `NewConfirmedBlock` message
-        let send_result = ctx.ema_sender.send(EmaServiceMessage::NewConfirmedBlock);
+        let send_result = ctx.ema_sender.send(EmaServiceMessage::UpdateCache);
         assert!(
             send_result.is_ok(),
             "Service should accept new confirmed block messages"

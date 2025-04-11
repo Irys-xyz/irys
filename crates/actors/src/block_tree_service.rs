@@ -199,7 +199,7 @@ impl BlockTreeService {
         MempoolService::from_registry().do_send(msg);
         self.service_senders
             .ema
-            .send(EmaServiceMessage::NewConfirmedBlock)
+            .send(EmaServiceMessage::UpdateCache)
             .expect("EMA service has unexpectedly become unreachable");
     }
 
@@ -295,44 +295,56 @@ pub struct ValidationResultMessage {
 /// After adding the block, it's scheduled for full validation and the previous
 /// block is marked for storage finalization.
 impl Handler<BlockPreValidatedMessage> for BlockTreeService {
-    type Result = ();
+    type Result = ResponseFuture<eyre::Result<()>>;
+
     fn handle(&mut self, msg: BlockPreValidatedMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        let block = msg.0;
-        let all_txs = msg.1;
-        let block_hash = &block.block_hash;
-        let _finalized_block_hash = block.previous_block_hash;
+        let miner_address = self.miner_address;
+        let ema_service = self.service_senders.ema.clone();
+        let cache = self.cache.clone().expect("cache to be initialised").clone();
+        let cache = cache.write().expect("cache lock poisoined");
 
-        let binding = self.cache.clone().unwrap();
-        let mut cache = binding.write().unwrap();
+        return Box::pin(async move {
+            let block = msg.0;
+            let all_txs = msg.1;
+            let block_hash = &block.block_hash;
+            let _finalized_block_hash = block.previous_block_hash;
 
-        // Handle block addition differently based on origin
-        let add_result = if block.miner_address == self.miner_address {
-            // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
-            // extension while full validation is still pending. This prevents blocking
-            // new block production while validation completes.
-            cache.add_validated_block((*block).clone(), BlockState::Unknown, all_txs)
-        } else {
-            // For blocks from peers: Add via standard path requiring validation
-            cache.add_block(&block, all_txs)
-        };
+            // Handle block addition differently based on origin
+            let add_result = if block.miner_address == miner_address {
+                // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
+                // extension while full validation is still pending. This prevents blocking
+                // new block production while validation completes.
+                cache.add_validated_block((*block).clone(), BlockState::Unknown, all_txs)
+            } else {
+                // For blocks from peers: Add via standard path requiring validation
+                cache.add_block(&block, all_txs)
+            };
 
-        if add_result.is_ok() {
-            // Schedule block for full validation regardless of origin
-            let validation_service = ValidationService::from_registry();
-            validation_service.do_send(RequestValidationMessage(block.clone()));
+            if add_result.is_ok() {
+                // Schedule block for full validation regardless of origin
+                let validation_service = ValidationService::from_registry();
+                validation_service.do_send(RequestValidationMessage(block.clone()));
 
-            // Update block state to reflect scheduled validation
-            if cache
-                .mark_block_as_validation_scheduled(block_hash)
-                .is_err()
-            {
-                error!("Unable to mark block as ValidationScheduled");
+                // block until EMA service is updated
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                ema_service.send(EmaServiceMessage::UpdateCacheBlocking { response: tx })?;
+                rx.await?;
+
+                // Update block state to reflect scheduled validation
+                if cache
+                    .mark_block_as_validation_scheduled(block_hash)
+                    .is_err()
+                {
+                    error!("Unable to mark block as ValidationScheduled");
+                }
+                debug!(
+                    "scheduling block for validation: {}",
+                    block_hash.0.to_base58()
+                );
             }
-            debug!(
-                "scheduling block for validation: {}",
-                block_hash.0.to_base58()
-            );
-        }
+
+            Ok(())
+        });
     }
 }
 
