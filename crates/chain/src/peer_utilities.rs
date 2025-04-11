@@ -3,6 +3,7 @@ use base58::ToBase58;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     mempool_service::{MempoolService, TxIngressMessage},
+    peer_list_service::{AddPeerMessage, PeerListService},
 };
 use irys_database::{BlockIndexItem, DataLedger};
 
@@ -10,7 +11,10 @@ pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
-use irys_types::{block::CombinedBlockHeader, IrysBlockHeader, IrysTransactionHeader, H256};
+use irys_types::{
+    block::CombinedBlockHeader, IrysBlockHeader, IrysTransactionHeader, PeerAddress, PeerListItem,
+    H256,
+};
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
@@ -215,6 +219,7 @@ pub async fn sync_state_from_peers(
     trusted_peers: Vec<SocketAddr>,
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
+    peer_list_service_addr: Addr<PeerListService>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
@@ -227,8 +232,13 @@ pub async fn sync_state_from_peers(
         Arc::new(Mutex::new(VecDeque::new()));
 
     info!("Discovering peers...");
-    if let Some(new_peers_found) =
-        fetch_and_update_peers(peers.clone(), &client, trusted_peers).await
+    if let Some(new_peers_found) = fetch_and_update_peers(
+        peers.clone(),
+        &client,
+        trusted_peers,
+        peer_list_service_addr.clone(),
+    )
+    .await
     {
         info!("Discovered {new_peers_found} new peers");
     }
@@ -293,28 +303,45 @@ pub async fn fetch_and_update_peers(
     peers: Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
     client: &awc::Client,
     peers_to_ask: Vec<SocketAddr>,
+    peer_list_service_addr: Addr<PeerListService>,
 ) -> Option<u64> {
     let futures = peers_to_ask.into_iter().map(|peer| {
         let client = client.clone();
         let peers = peers.clone();
         let url = format!("http://{}/v1/peer_list", peer);
+        let peer_list_service_addr = peer_list_service_addr.clone();
 
         async move {
             match client.get(url.clone()).send().await {
                 Ok(mut response) if response.status().is_success() => {
-                    let Ok(new_peers) = response.json::<Vec<SocketAddr>>().await else {
-                        warn!("Invalid JSON from {}", &url);
+                    let Ok(new_peers) = response.json::<Vec<PeerAddress>>().await else {
+                        warn!("Invalid JSON {:?} from {}", response.body().await, &url);
                         return 0;
                     };
+
+                    info!("fetched {:?} peers from {url}: ", new_peers);
 
                     let mut peers_guard = peers.lock().await;
                     let existing: HashSet<_> = peers_guard.iter().cloned().collect();
                     let mut added = 0;
                     for p in new_peers {
-                        if existing.contains(&p) {
+                        if existing.contains(&p.api) {
                             continue;
                         }
-                        peers_guard.push(p);
+                        peers_guard.push(p.api);
+                        let peer_list_entry = PeerListItem {
+                            address: PeerAddress {
+                                api: p.api,
+                                gossip: p.gossip,
+                            },
+                            ..Default::default()
+                        };
+                        if let Err(e) = peer_list_service_addr
+                            .send(AddPeerMessage(peer_list_entry))
+                            .await
+                        {
+                            error!("Unable to send AddPeerMessage message {e}");
+                        };
                         added += 1;
                     }
                     error!("Got {} peers from {}", &added, peer);

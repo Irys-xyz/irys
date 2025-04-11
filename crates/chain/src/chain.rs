@@ -404,6 +404,7 @@ impl IrysNode {
                 ctx.config.trusted_peers.clone(),
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
+                ctx.actor_addresses.peer_list_service_addr.clone(),
             )
             .await?;
         }
