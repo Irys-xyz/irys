@@ -24,7 +24,6 @@ pub async fn client_request(
     url: &str,
 ) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
     let client = awc::Client::default();
-
     client.get(url).send().await.expect("client request")
 }
 

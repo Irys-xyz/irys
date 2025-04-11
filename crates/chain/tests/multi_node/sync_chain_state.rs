@@ -1,10 +1,13 @@
 use crate::utils::mine_blocks;
 use irys_api_server::routes::index::NodeInfo;
-use irys_chain::peer_utilities::{block_index_endpoint_request, info_endpoint_request};
+use irys_chain::peer_utilities::{
+    block_index_endpoint_request, info_endpoint_request, peer_list_endpoint_request,
+};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::BlockIndexItem;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
-use irys_types::Config;
+use irys_types::{Config, PeerAddress};
+use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
 
@@ -18,8 +21,8 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let trusted_peers = vec!["127.0.0.1:8080".parse().expect("valid SocketAddr expected")];
     let genesis_trusted_peers = vec![
         "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
-        "10.0.0.1:1234".parse().expect("valid SocketAddr expected"),
-        "10.0.0.2:1234".parse().expect("valid SocketAddr expected"),
+        "127.0.0.2:1234".parse().expect("valid SocketAddr expected"),
+        "127.0.0.3:1234".parse().expect("valid SocketAddr expected"),
     ];
     let testnet_config_genesis = Config {
         port: 8080,
@@ -83,6 +86,30 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         max_attempts,
     )
     .await;
+
+    //wait and retry hitting the peer_list endpoint of genesis node
+    let mut peer_list_items: Vec<SocketAddr> = Vec::new();
+    for _ in 0..20 {
+        sleep(Duration::from_millis(2000)).await;
+
+        let mut peer_results_genesis =
+            peer_list_endpoint_request(&local_test_url(&ctx_genesis_node.node.config.port)).await;
+
+        peer_list_items = peer_results_genesis
+            .json::<Vec<PeerAddress>>()
+            .await
+            .expect("valid PeerAddress")
+            .iter()
+            .map(|v| v.api)
+            .collect::<Vec<SocketAddr>>();
+        peer_list_items.sort(); //sort so we have sane comparisons in asserts
+        if &genesis_trusted_peers == &peer_list_items {
+            break;
+        }
+    }
+
+    // assert that genesis node is advertising the trusted peers it was given via config
+    assert_eq!(&genesis_trusted_peers, &peer_list_items);
 
     // assert that peer1 node has updated trusted peers
     assert_eq!(

@@ -387,7 +387,7 @@ impl IrysNode {
                 },
                 ..Default::default()
             };
-            error!("Tried adding peer");
+
             if let Err(e) = ctx
                 .actor_addresses
                 .peer_list_service_addr
