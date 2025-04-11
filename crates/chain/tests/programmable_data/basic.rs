@@ -45,7 +45,8 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         chunk_size: 32,
         chunk_migration_depth: 2,
         ..Config::testnet()
-    });
+    })
+    .await;
     let main_address = irys_node.cfg.config.miner_address();
     let account1 = IrysSigner::random_signer(&irys_node.cfg.config);
     irys_node.cfg.irys_node_config.extend_genesis_accounts(vec![

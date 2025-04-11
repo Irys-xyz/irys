@@ -20,7 +20,7 @@ sol!(
 );
 #[tokio::test]
 async fn heavy_test_erc20() -> eyre::Result<()> {
-    let mut node = IrysNodeTest::default();
+    let mut node = IrysNodeTest::default_async().await;
     let account1 = IrysSigner::random_signer(&node.cfg.config);
     let main_address = node.cfg.config.miner_address();
     node.cfg.irys_node_config.extend_genesis_accounts(vec![

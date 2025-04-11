@@ -29,7 +29,8 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let mut node = IrysNodeTest::new_genesis(Config {
         mining_key: SigningKey::from_slice(&dev_wallet).unwrap(),
         ..Config::testnet()
-    });
+    })
+    .await;
 
     assert_eq!(
         node.cfg.config.miner_address(),

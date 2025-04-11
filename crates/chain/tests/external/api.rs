@@ -33,7 +33,7 @@ async fn external_api() -> eyre::Result<()> {
 
     let account1 = IrysSigner::random_signer(&testnet_config);
 
-    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
+    let mut node = IrysNodeTest::new_genesis(testnet_config.clone()).await;
     let main_address = node.cfg.irys_node_config.mining_signer.address();
 
     node.cfg.irys_node_config.extend_genesis_accounts(vec![
