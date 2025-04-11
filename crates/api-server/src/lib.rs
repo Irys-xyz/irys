@@ -36,11 +36,10 @@ pub struct ApiState {
     pub db: DatabaseProvider,
     pub config: Config,
     // TODO: slim this down to what we actually use - beware the types!
-    // TODO: remove the Option<>
-    pub reth_provider: Option<RethNodeProvider>,
-    pub reth_http_url: Option<String>,
-    pub block_tree: Option<BlockTreeReadGuard>,
-    pub block_index: Option<BlockIndexReadGuard>,
+    pub reth_provider: RethNodeProvider,
+    pub reth_http_url: String,
+    pub block_tree: BlockTreeReadGuard,
+    pub block_index: BlockIndexReadGuard,
 }
 
 impl ApiState {
