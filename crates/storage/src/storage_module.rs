@@ -364,7 +364,7 @@ impl StorageModule {
                 .expect("Failed to create new interval, should never happen as interval is empty!");
             storage_interval
         };
-        Self::write_intervals_to_submodules(&self.intervals, &self.submodules)
+        self.write_intervals_to_submodules()
             .wrap_err("Could not update submodule interval files")?;
 
         for (_interval, submodule) in self.submodules.iter() {
@@ -413,7 +413,9 @@ impl StorageModule {
         // First use read lock to check if we have work to do
         let write_batch = {
             let pending = arc.read().unwrap();
-            self.submodules
+
+            let pending_writes = self
+                .submodules
                 .iter()
                 .flat_map(|(interval, _)| {
                     let submodule_writes: Vec<_> = pending
@@ -428,23 +430,26 @@ impl StorageModule {
                         Vec::new()
                     }
                 })
-                .collect::<Vec<_>>()
-        }; // Read lock released here
+                .collect::<Vec<_>>();
+
+            drop(pending);
+            pending_writes
+        };
 
         // Only acquire write lock if we have work to do
         if !write_batch.is_empty() {
             let mut pending = arc.write().unwrap();
+
             for (chunk_offset, (bytes, chunk_type)) in write_batch {
                 // self.intervals are updated by write_chunk_internal()
                 self.write_chunk_internal(chunk_offset, bytes, chunk_type.clone())?;
                 pending.remove(&chunk_offset); // Clean up written chunks
             }
+            drop(pending);
 
-            {
-                // Save the updated intervals
-                if Self::write_intervals_to_submodules(&self.intervals, &self.submodules).is_err() {
-                    error!("Could not update submodule interval files");
-                }
+            // Save the updated intervals
+            if self.write_intervals_to_submodules().is_err() {
+                error!("Could not update submodule interval files");
             }
         }
 
@@ -471,17 +476,15 @@ impl StorageModule {
     /// # Note
     /// If a submodule has no intervals after filtering, a default `Uninitialized` interval
     /// is created spanning the submodule's entire range to ensure consistency.
-    fn write_intervals_to_submodules(
-        intervals: &Arc<RwLock<StorageIntervals>>,
-        submodules: &SubmoduleMap,
-    ) -> eyre::Result<()> {
-        let intervals = intervals.read().unwrap();
+    fn write_intervals_to_submodules(&self) -> eyre::Result<()> {
+        let intervals = self.intervals.read().unwrap();
+
         // Loop though each of the submodule ranges
-        for (submodule_interval, submodule) in submodules.iter() {
+        for (submodule_interval, submodule) in self.submodules.iter() {
             // Split out the ChunkType intervals that overlap the submodule interval
             let mut working_copy = intervals.clone();
             let cut_iter = working_copy.cut(*submodule_interval);
-
+            drop(working_copy);
             // Write them to the submodules disk
             if let Ok(mut submodule_intervals) = NoditMap::from_iter_strict(cut_iter) {
                 // Make sure the there is at least one interval spanning the submodule range
@@ -495,12 +498,17 @@ impl StorageModule {
                 }
 
                 let path = submodule.intervals_file.lock().unwrap();
+
                 let mut file = get_atomic_file(path.clone())?;
                 // this `file` is actually a temporary file that will get renamed over the original, once we commit
                 file.write_all(serde_json::to_string(&submodule_intervals)?.as_bytes())?;
                 file.commit()?;
+
+                drop(path);
             }
         }
+        drop(intervals);
+
         Ok(())
     }
 
@@ -555,9 +563,15 @@ impl StorageModule {
 
         // Query overlapping intervals from storage map
         let intervals = self.intervals.read().unwrap();
+        let intervals2 = intervals.clone();
+        // this is here to prevent a deadlock with the later `pending_writes.read()` rwlock acquisition
+        // this locking order (intervals -> pending_writes) is reversed in sync_pending_chunks (pending_writes -> intervals), which is the cause of the deadlock.
+        drop(intervals);
+        // TODO: figure out how to only clone the overlap instead of the entire interval map (low prio as the intervals should be small generally speaking)
+        let overlapping = intervals2.overlapping(chunk_range);
 
         // Process each overlapping interval
-        for (interval, interval_chunk_type) in intervals.overlapping(chunk_range) {
+        for (interval, interval_chunk_type) in overlapping {
             // Get intersection with requested range
             let start = *chunk_range.start().max(interval.start());
             let end = *chunk_range.end().min(interval.end());
@@ -567,12 +581,11 @@ impl StorageModule {
                 let partition_chunk_offset = PartitionChunkOffset::from(chunk_offset);
 
                 // Check for pending writes first
-                let pending_chunk = {
-                    let pending = self.pending_writes.read().unwrap();
-                    pending
-                        .get(&partition_chunk_offset)
-                        .map(|(bytes, chunk_type)| (bytes.clone(), chunk_type.clone()))
-                };
+                let pending = self.pending_writes.read().unwrap();
+                let pending_chunk = pending
+                    .get(&partition_chunk_offset)
+                    .map(|(bytes, chunk_type)| (bytes.clone(), chunk_type.clone()));
+                drop(pending);
 
                 // Use pending chunk if available, otherwise use storage based on chunk type
                 match (pending_chunk, interval_chunk_type) {
@@ -640,6 +653,7 @@ impl StorageModule {
                 let _ = set.insert_merge_touching_or_overlapping(interval.clone());
             }
         }
+        drop(intervals);
 
         // Also loop though pending write for matching chunks
         let pending = self
@@ -678,9 +692,10 @@ impl StorageModule {
         chunk_offset: PartitionChunkOffset,
         bytes: Vec<u8>,
         chunk_type: ChunkType,
-    ) {
+    ) -> () {
         let mut pending = self.pending_writes.write().unwrap();
         pending.insert(chunk_offset, (bytes, chunk_type));
+        drop(pending);
     }
 
     /// Test utility function
@@ -817,6 +832,7 @@ impl StorageModule {
                 writeable_offsets.push(partition_offset);
                 continue;
             }
+            drop(intervals);
 
             // Check and collect offsets with pending entropy chunks
             let pending = self.pending_writes.read().unwrap();
@@ -1016,7 +1032,9 @@ impl StorageModule {
         let submodule_offset = chunk_offset - interval.start();
         {
             // Lock to the submodules internal file handle & write the chunk
+
             let mut file = submodule.file.lock().unwrap();
+
             file.seek(SeekFrom::Start(u64::from(submodule_offset) * chunk_size))?;
             let result = file.write(bytes.as_slice());
             match result {
@@ -1026,13 +1044,18 @@ impl StorageModule {
                 }
                 Err(err) => info!("{:?}", err),
             }
+            drop(file);
         }
 
         // If successful, update the StorageModules interval state
         let mut intervals = self.intervals.write().unwrap();
+
         let chunk_interval = ii(chunk_offset, chunk_offset);
         let _ = intervals.cut(chunk_interval);
         let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, chunk_type);
+
+        drop(intervals);
+
         Ok(())
     }
 

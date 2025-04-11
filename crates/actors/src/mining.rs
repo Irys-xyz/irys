@@ -157,8 +157,10 @@ impl PartitionMiningActor {
 
         if chunks.is_empty() {
             warn!(
-                "No chunks found - storage_module_id:{}",
-                self.storage_module.id
+                "No chunks found - storage_module_id:{} {}-{}",
+                self.storage_module.id,
+                &read_range.start(),
+                &read_range.end()
             );
         }
 
