@@ -290,7 +290,7 @@ impl Handler<DecreasePeerScore> for PeerListService {
     }
 }
 
-/// Decrease the score of a peer
+/// Increase the score of a peer
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub struct IncreasePeerScore {
