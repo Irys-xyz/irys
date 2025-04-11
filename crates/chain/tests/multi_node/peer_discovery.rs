@@ -84,11 +84,12 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     // Parse String to JSON
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
-    let peer_list: Vec<SocketAddr> = serde_json::from_str(&body_str).expect("Failed to parse JSON");
+    let peer_list: Vec<PeerAddress> =
+        serde_json::from_str(&body_str).expect("Failed to parse JSON");
     println!("Parsed JSON: {:?}", peer_list);
 
     // Now you can work with the structured data
-    assert!(peer_list.is_empty(), "Peer list should be empty");
+    assert!(!peer_list.is_empty(), "Peer list should not be empty");
 
     // Post a 3 peer requests from different mining addresses, have them report
     // different IP addresses
