@@ -225,7 +225,7 @@ async fn poll_until_fetch_at_block_index_height(
     result_peer
 }
 
-// poll peer_list_endpoint until timeout or we get the exected result
+// poll peer_list_endpoint until timeout or we get the expected result
 async fn poll_peer_list(trusted_peers: Vec<SocketAddr>, ctx_node: &TestCtx) -> Vec<SocketAddr> {
     let mut peer_list_items: Vec<SocketAddr> = Vec::new();
     for _ in 0..20 {
