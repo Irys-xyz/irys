@@ -41,6 +41,11 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         .await
         .expect("expected many mined blocks");
 
+    // wait and retry hitting the peer_list endpoint of genesis node
+    let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_genesis_node).await;
+    // assert that genesis node is advertising the trusted peers it was given via config
+    assert_eq!(&genesis_trusted_peers, &peer_list_items);
+
     //start two additional peers, instructing them to use the genesis peer as their trusted peer
 
     //start peer1
@@ -86,11 +91,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         max_attempts,
     )
     .await;
-
-    // wait and retry hitting the peer_list endpoint of genesis node
-    let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_genesis_node).await;
-    // assert that genesis node is advertising the trusted peers it was given via config
-    assert_eq!(&genesis_trusted_peers, &peer_list_items);
 
     // wait and retry hitting the peer_list endpoint of peer1 node
     let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer1_node).await;
