@@ -18,7 +18,7 @@ use irys_actors::{
     mining::PartitionMiningActor,
     packing::PackingConfig,
     packing::{PackingActor, PackingRequest},
-    peer_list_service::PeerListService,
+    peer_list_service::{AddPeerMessage, PeerListService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationService,
@@ -47,7 +47,7 @@ use irys_storage::{
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
     CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
-    OracleConfig, PartitionChunkRange, StorageConfig, H256,
+    OracleConfig, PartitionChunkRange, PeerAddress, PeerListItem, StorageConfig, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
@@ -71,7 +71,7 @@ use tokio::{
     runtime::{Handle, Runtime},
     sync::oneshot::{self},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -378,6 +378,26 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
+        // load peers from config into our database
+        for peer_address in ctx.config.trusted_peers.clone() {
+            let peer_list_entry = PeerListItem {
+                address: PeerAddress {
+                    api: peer_address,
+                    gossip: peer_address, //FIXME this should be the gossip address and not a copy of the api address
+                },
+                ..Default::default()
+            };
+            error!("Tried adding peer");
+            if let Err(e) = ctx
+                .actor_addresses
+                .peer_list_service_addr
+                .send(AddPeerMessage(peer_list_entry))
+                .await
+            {
+                error!("Unable to send AddPeerMessage message {e}");
+            };
+        }
+
         // if we are an empty node joining an existing network
         if !self.data_exists && !self.is_genesis {
             sync_state_from_peers(
@@ -674,7 +694,7 @@ impl IrysNode {
         );
 
         // Spawn peer list service
-        let peer_list_arbiter = init_peer_list_service(&irys_db);
+        let (peer_list_addr, peer_list_arbiter) = init_peer_list_service(&irys_db);
 
         // Spawn the mempool service
         let (mempool_service, mempool_arbiter) = self.init_mempools_service(
@@ -784,6 +804,7 @@ impl IrysNode {
                 mempool: mempool_service.clone(),
                 block_index: block_index_service_actor,
                 epoch_service: epoch_service_actor,
+                peer_list_service_addr: peer_list_addr,
             },
             reth_handle: reth_node.clone(),
             db: irys_db.clone(),
@@ -1305,13 +1326,13 @@ async fn genesis_initialization(
     block_index_service_actor
 }
 
-fn init_peer_list_service(irys_db: &DatabaseProvider) -> Arbiter {
+fn init_peer_list_service(irys_db: &DatabaseProvider) -> (actix::Addr<PeerListService>, Arbiter) {
     let peer_list_arbiter = Arbiter::new();
     let peer_list_service = PeerListService::new(irys_db.clone());
     let peer_list_service =
         PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
-    SystemRegistry::set(peer_list_service);
-    peer_list_arbiter
+    SystemRegistry::set(peer_list_service.clone());
+    (peer_list_service, peer_list_arbiter)
 }
 
 fn init_broadcaster_service() -> (actix::Addr<BroadcastMiningService>, Arbiter) {

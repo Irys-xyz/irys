@@ -8,6 +8,7 @@ use crate::{
     mempool_service::MempoolService,
     mining::{MiningControl, PartitionMiningActor},
     packing::PackingActor,
+    peer_list_service::PeerListService,
 };
 
 /// Serves as a kind of app state that can be passed into actix web to allow
@@ -21,6 +22,7 @@ pub struct ActorAddresses {
     pub mempool: Addr<MempoolService>,
     pub block_index: Addr<BlockIndexService>,
     pub epoch_service: Addr<EpochServiceActor>,
+    pub peer_list_service_addr: Addr<PeerListService>,
 }
 
 impl ActorAddresses {
