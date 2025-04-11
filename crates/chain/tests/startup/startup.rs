@@ -6,25 +6,7 @@ use std::time::Duration;
 #[test_log::test(actix_web::test)]
 async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
     // setup
-    //
-    // genesis node
-    let mut testnet_genesis_config = Config::testnet();
-    let port = random_port().await?;
-    let trusted_peer = vec![format!("127.0.0.1:{}", port)
-        .parse()
-        .expect("valid SocketAddr expected")];
-    testnet_genesis_config.port = port;
-    testnet_genesis_config.trusted_peers = trusted_peer.clone();
-    let genesis_node = IrysNodeTest::new_genesis(testnet_genesis_config).await;
-    let genesis_ctx = genesis_node.start().await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    mine_block(&genesis_ctx.node_ctx).await?;
-    //mine_block(&genesis_ctx.node_ctx).await?;
-    // peer node
-    let mut testnet_peer_config = Config::testnet();
-    testnet_peer_config.trusted_peers = trusted_peer;
-    //this next line errors
-    let node = IrysNodeTest::new(testnet_peer_config).await;
+    let node = IrysNodeTest::default_async().await;
 
     // action:
     // 1. start the genesis node;
@@ -58,7 +40,6 @@ async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
     assert_eq!(chain.len(), 3, "we expect the genesis block + 2 new blocks");
 
     ctx.stop().await;
-    genesis_ctx.stop().await;
     Ok(())
 }
 
