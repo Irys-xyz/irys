@@ -32,7 +32,7 @@ use irys_database::{
     migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, BlockIndex,
     Initialized,
 };
-use irys_gossip_service::{GossipResult, ServiceHandleWithShutdownSignal};
+use irys_gossip_service::ServiceHandleWithShutdownSignal;
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 
 pub use irys_reth_node_bridge::node::{
