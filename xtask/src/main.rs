@@ -66,6 +66,10 @@ fn main() -> eyre::Result<()> {
                     sh.set_var(key, val);
                 }
             }
+
+            // this is needed otherwirse some tests will fail (that assert panic messages)
+            sh.set_var("RUST_BACKTRACE", "1");
+
             cmd!(
                 sh,
                 "cargo nextest run --workspace --tests --all-targets {args...}"
