@@ -386,11 +386,12 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
-        // this will reload the storage config data too
         let cfg = IrysNode {
             irys_node_config: self.cfg.irys_node_config,
             genesis_timestamp: self.cfg.genesis_timestamp,
-            ..IrysNode::new(self.cfg.config, false).await
+            data_exists: true,
+            is_genesis: false,
+            ..self.cfg
         };
         IrysNodeTest {
             node_ctx: (),
