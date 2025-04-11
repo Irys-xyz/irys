@@ -1,6 +1,5 @@
-use crate::utils::{mine_block, random_port, IrysNodeTest};
+use crate::utils::{mine_block, IrysNodeTest};
 use irys_actors::block_tree_service::get_canonical_chain;
-use irys_types::Config;
 use std::time::Duration;
 
 #[test_log::test(actix_web::test)]
