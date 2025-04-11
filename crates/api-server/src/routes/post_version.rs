@@ -7,13 +7,13 @@ use actix_web::{
     HttpResponse,
 };
 
-use irys_database::insert_peer_list_item;
+use irys_actors::peer_list_service::AddPeer;
 use irys_types::{
     parse_user_agent, AcceptedResponse, PeerListItem, PeerResponse, ProtocolVersion,
     RejectedResponse, RejectionReason, VersionRequest,
 };
-use reth_db::Database;
 use semver::Version;
+
 pub async fn post_version(
     state: web::Data<ApiState>,
     body: Json<VersionRequest>,
@@ -31,7 +31,7 @@ pub async fn post_version(
     }
 
     // Fetch peers and handle potential errors
-    let peers = match state.get_known_peers() {
+    let peers = match state.get_known_peers().await {
         Ok(peers) => peers,
         Err(e) => {
             let response = PeerResponse::Rejected(RejectedResponse {
@@ -56,8 +56,12 @@ pub async fn post_version(
     // Only update if it's a new peer
     if is_new_peer {
         if state
-            .db
-            .update(|tx| insert_peer_list_item(tx, &mining_addr, &peer_list_entry))
+            .peer_list
+            .send(AddPeer {
+                mining_addr,
+                peer: peer_list_entry.clone(),
+            })
+            .await
             .is_err()
         {
             let response = PeerResponse::Rejected(RejectedResponse {

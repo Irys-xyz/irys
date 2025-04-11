@@ -4,7 +4,7 @@ use serde_json::to_string;
 
 pub async fn peer_list_route(state: web::Data<ApiState>) -> HttpResponse {
     // Fetch the list of known peers
-    let ips_result = state.get_known_peers();
+    let ips_result = state.get_known_peers().await;
 
     // Handle the Result from get_known_peers
     let ips = match ips_result {

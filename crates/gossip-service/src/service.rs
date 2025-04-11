@@ -13,7 +13,6 @@ use crate::{
     client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
-    PeerListProvider,
 };
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
@@ -22,11 +21,12 @@ use core::time::Duration;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::TxExistenceQuery;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
+use irys_actors::peer_list_service::{ActivePeersRequest, PeerListService};
 use irys_api_client::ApiClient;
-use irys_database::tables::CompactPeerListItem;
-use irys_types::{DatabaseProvider, GossipData};
-use rand::seq::IteratorRandom as _;
+use irys_types::{GossipData, PeerListItem};
+use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc::error::SendError;
 use tokio::{sync::mpsc, time};
@@ -34,6 +34,7 @@ use tokio::{sync::mpsc, time};
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
 const MAX_PEERS_PER_BROADCAST: usize = 5;
+const BROADCAST_INTERVAL: Duration = Duration::from_secs(1);
 const CACHE_CLEANUP_INTERVAL: Duration = ONE_HOUR;
 const CACHE_ENTRY_TTL: Duration = TWO_HOURS;
 
@@ -103,7 +104,6 @@ pub struct GossipService {
     server_address: String,
     server_port: u16,
     cache: Arc<GossipCache>,
-    peer_list: PeerListProvider,
     mempool_data_receiver: Option<mpsc::Receiver<GossipData>>,
     client: GossipClient,
 }
@@ -115,12 +115,9 @@ impl GossipService {
     pub fn new<T: Into<String>>(
         server_address: T,
         server_port: u16,
-        irys_db: DatabaseProvider,
     ) -> (Self, mpsc::Sender<GossipData>) {
         let cache = Arc::new(GossipCache::new());
         let (trusted_data_tx, trusted_data_rx) = mpsc::channel(1000);
-
-        let peer_list = PeerListProvider::new(irys_db);
 
         let client_timeout = Duration::from_secs(5);
         let client = GossipClient::new(client_timeout);
@@ -131,7 +128,6 @@ impl GossipService {
                 server_port,
                 client,
                 cache,
-                peer_list,
                 mempool_data_receiver: Some(trusted_data_rx),
             },
             trusted_data_tx,
@@ -151,6 +147,7 @@ impl GossipService {
         block_discovery: Addr<B>,
         api_client: A,
         task_executor: &TaskExecutor,
+        peer_list: Addr<PeerListService>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         M: Handler<TxIngressMessage>
@@ -168,7 +165,7 @@ impl GossipService {
             api_client,
             cache: Arc::clone(&self.cache),
         };
-        let server = GossipServer::new(server_data_handler, self.peer_list.clone());
+        let server = GossipServer::new(server_data_handler, peer_list.clone());
 
         let server = server.run(&self.server_address, self.server_port)?;
         let server_handle = server.handle();
@@ -185,8 +182,12 @@ impl GossipService {
         let cache_pruning_task_handle =
             spawn_cache_pruning_task(Arc::clone(&service.cache), task_executor);
 
-        let broadcast_task_handle =
-            spawn_broadcast_task(mempool_data_receiver, Arc::clone(&service), task_executor);
+        let broadcast_task_handle = spawn_broadcast_task(
+            mempool_data_receiver,
+            Arc::clone(&service),
+            task_executor,
+            peer_list,
+        );
 
         let gossip_service_handle = spawn_main_task(
             server,
@@ -203,53 +204,65 @@ impl GossipService {
         &self,
         original_source: GossipSource,
         data: &GossipData,
+        peer_list_service: &Addr<PeerListService>,
     ) -> GossipResult<()> {
+        let exclude_peers = match original_source {
+            GossipSource::Internal => HashSet::new(),
+            GossipSource::External(addr) => {
+                let mut exclude_peers = HashSet::new();
+                exclude_peers.insert(addr);
+                exclude_peers
+            }
+        };
+
         // Get all active peers except the source
-        let peers: Vec<CompactPeerListItem> = self
-            .peer_list
-            .all_known_peers()
-            .map_err(|error| {
-                GossipError::Internal(InternalGossipError::Unknown(error.to_string()))
-            })?
-            .into_iter()
-            .filter(|peer| {
-                let is_not_source = match original_source {
-                    GossipSource::Internal => false,
-                    GossipSource::External(ip) => peer.address.gossip != ip,
-                };
-                peer.is_online
-                    && peer.reputation_score.is_active()
-                    && !is_not_source
-                    && !self
-                        .cache
-                        .has_seen(&peer.address.gossip, data, CACHE_ENTRY_TTL)
-                        .unwrap_or(true)
+        let mut peers: Vec<PeerListItem> = peer_list_service
+            .send(ActivePeersRequest {
+                truncate: None,
+                exclude_peers,
             })
-            .collect();
+            .await
+            .map_err(|err| GossipError::Internal(InternalGossipError::Unknown(err.to_string())))?;
 
-        // Select random subset of peers
-        let selected_peers: Vec<&CompactPeerListItem> = peers
-            .iter()
-            .choose_multiple(&mut rand::thread_rng(), MAX_PEERS_PER_BROADCAST);
+        peers.shuffle(&mut rand::thread_rng());
 
-        // Send data to selected peers
-        for peer in selected_peers {
-            if let Err(error) = self.client.send_data(peer, data).await {
-                tracing::warn!(
-                    "Failed to send data to peer {}: {}",
-                    peer.address.gossip,
-                    error
-                );
-                continue;
+        while !peers.is_empty() {
+            // Remove peers that seen the data since the last iteration
+            let peers_that_seen_data = self.cache.peers_that_have_seen(data)?;
+            peers.retain(|peer| !peers_that_seen_data.contains(&peer.address.gossip));
+
+            let n = std::cmp::min(MAX_PEERS_PER_BROADCAST, peers.len());
+            let maybe_selected_peers = peers.get(0..n);
+
+            if let Some(selected_peers) = maybe_selected_peers {
+                // Send data to selected peers
+                for peer in selected_peers {
+                    if let Err(error) = self
+                        .client
+                        .send_data_and_update_score(peer, data, peer_list_service)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to send data to peer {}: {}",
+                            peer.address.gossip,
+                            error
+                        );
+                    }
+
+                    // Record as seen anyway, so we don't rebroadcast to them
+                    if let Err(error) = self.cache.record_seen(peer.address.gossip, data) {
+                        tracing::error!(
+                            "Failed to record data in cache for peer {}: {}",
+                            peer.address.gossip,
+                            error
+                        );
+                    }
+                }
+            } else {
+                break;
             }
 
-            if let Err(error) = self.cache.record_seen(peer.address.gossip, data) {
-                tracing::error!(
-                    "Failed to record data in cache for peer {}: {}",
-                    peer.address.gossip,
-                    error
-                );
-            }
+            tokio::time::sleep(BROADCAST_INTERVAL).await;
         }
 
         Ok(())
@@ -290,17 +303,19 @@ fn spawn_broadcast_task(
     mut mempool_data_receiver: mpsc::Receiver<GossipData>,
     service: Arc<GossipService>,
     task_executor: &TaskExecutor,
+    peer_list_service: Addr<PeerListService>,
 ) -> ServiceHandleWithShutdownSignal {
     ServiceHandleWithShutdownSignal::spawn(
         "gossip broadcast",
         move |mut shutdown_rx| async move {
+            let peer_list_service = peer_list_service.clone();
             let service = Arc::clone(&service);
             loop {
                 tokio::select! {
                     maybe_data = mempool_data_receiver.recv() => {
                         match maybe_data {
                             Some(data) => {
-                                match service.broadcast_data(GossipSource::Internal, &data).await {
+                                match service.broadcast_data(GossipSource::Internal, &data, &peer_list_service).await {
                                     Ok(()) => {}
                                     Err(error) => {
                                         tracing::warn!("Failed to broadcast data: {}", error);
