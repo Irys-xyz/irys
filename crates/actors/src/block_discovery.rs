@@ -270,8 +270,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             new_block_header.clone(),
                             Arc::new(all_txs),
                         ))
-                        .await
-                        .unwrap();
+                        .await??;
 
                     // Send the block to the gossip bus
                     if let Err(error) = gossip_sender

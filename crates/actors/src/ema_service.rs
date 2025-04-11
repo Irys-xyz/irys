@@ -1,14 +1,14 @@
 //! EMA service module. It is responsible for keeping track of Irys token price readjustment period.
-use crate::block_tree_service::{get_canonical_chain, BlockTreeReadGuard};
+use crate::block_tree_service::BlockTreeReadGuard;
 use futures::future::Either;
 use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height,
     storage_pricing::{phantoms::Percentage, Amount},
     Config, IrysBlockHeader, IrysTokenPrice,
 };
-use price_cache_context::PriceCacheContext;
+use price_cache_context::{ChainStrategy, Confirmed, Optimistic, PriceCacheContext};
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
-use std::pin::pin;
+use std::{pin::pin, sync::Arc};
 use tokio::{
     sync::{mpsc::UnboundedReceiver, oneshot},
     task::JoinHandle,
@@ -41,7 +41,7 @@ pub enum EmaServiceMessage {
         response: oneshot::Sender<eyre::Result<NewBlockEmaResponse>>,
     },
     /// Supposted to be sent whenever Irys produces a new confirmed block. The EMA service will refrech its cache.
-    UpdateCache,
+    BlockConfirmed,
     /// Supposted to be sent whenever Irys produces a new confirmed block. The EMA service will refrech its cache.
     UpdateCacheBlocking { response: oneshot::Sender<()> },
 }
@@ -70,7 +70,8 @@ struct Inner {
     blocks_in_interval: u64,
     token_price_safe_range: Amount<Percentage>,
     block_tree_read_guard: BlockTreeReadGuard,
-    price_ctx: PriceCacheContext,
+    confirmed_price_ctx: PriceCacheContext<Confirmed>,
+    optimistic_price_ctx: PriceCacheContext<Optimistic>,
 }
 
 impl EmaService {
@@ -84,17 +85,25 @@ impl EmaService {
         let blocks_in_interval = config.price_adjustment_interval;
         let token_price_safe_range = config.token_price_safe_range;
         exec.spawn_critical_with_graceful_shutdown_signal("EMA Service", |shutdown| async move {
-            let price_ctx = PriceCacheContext::from_canonical_chain(
+            let confirmed_price_ctx = PriceCacheContext::<Confirmed>::from_chain(
                 block_tree_read_guard.clone(),
                 blocks_in_interval,
             )
             .await
             .expect("initial PriceCacheContext restoration failed");
+            let optimistic_price_ctx = PriceCacheContext::<Optimistic>::from_chain(
+                block_tree_read_guard.clone(),
+                blocks_in_interval,
+            )
+            .await
+            .expect("initial PriceCacheContext restoration failed");
+
             let ema_service = Self {
                 shutdown,
                 msg_rx: rx,
                 inner: Inner {
-                    price_ctx,
+                    optimistic_price_ctx,
+                    confirmed_price_ctx,
                     token_price_safe_range,
                     blocks_in_interval,
                     block_tree_read_guard,
@@ -146,7 +155,7 @@ impl Inner {
     async fn handle_message(&mut self, msg: EmaServiceMessage) -> eyre::Result<()> {
         match msg {
             EmaServiceMessage::GetCurrentEmaForPricing { response } => {
-                let _ = response.send(self.price_ctx.block_for_pricing.ema_irys_price)
+                let _ = response.send(self.confirmed_price_ctx.block_for_pricing.ema_irys_price)
                     .inspect_err(|_| tracing::warn!("current EMA cannot be returned, sender has dropped its half of the channel"));
             }
             EmaServiceMessage::GetPriceDataForNewBlock {
@@ -154,7 +163,13 @@ impl Inner {
                 height_of_new_block,
                 oracle_price,
             } => {
-                if height_of_new_block != self.price_ctx.block_previous.height.saturating_add(1) {
+                if height_of_new_block
+                    != self
+                        .confirmed_price_ctx
+                        .block_previous
+                        .height
+                        .saturating_add(1)
+                {
                     let _ = response.send(Err(eyre::eyre!(
                         "EMA Service has not yet been updated with the latest canonical chain"
                     )));
@@ -165,17 +180,17 @@ impl Inner {
                 let capped_oracle_price = bound_in_min_max_range(
                     oracle_price,
                     self.token_price_safe_range,
-                    self.price_ctx.block_previous.oracle_irys_price,
+                    self.confirmed_price_ctx.block_previous.oracle_irys_price,
                 );
                 let new_ema = self
-                    .price_ctx
+                    .confirmed_price_ctx
                     .get_ema_for_new_block(self.blocks_in_interval, capped_oracle_price);
 
                 tracing::info!(
                     ?new_ema,
                     ?capped_oracle_price,
-                    prev_predecessor_height = ?self.price_ctx.block_latest_ema_predecessor.height,
-                    prev_ema_height = ?self.price_ctx.block_latest_ema.height,
+                    prev_predecessor_height = ?self.confirmed_price_ctx.block_latest_ema_predecessor.height,
+                    prev_ema_height = ?self.confirmed_price_ctx.block_latest_ema.height,
                     "computing new EMA"
                 );
 
@@ -184,11 +199,11 @@ impl Inner {
                     ema: new_ema,
                 }));
             }
-            EmaServiceMessage::UpdateCache => {
+            EmaServiceMessage::BlockConfirmed => {
                 tracing::debug!("new cache update request (async)");
 
                 // Rebuild the entire data cache just like we do at startup.
-                self.price_ctx = PriceCacheContext::from_canonical_chain(
+                self.confirmed_price_ctx = PriceCacheContext::<Confirmed>::from_chain(
                     self.block_tree_read_guard.clone(),
                     self.blocks_in_interval,
                 )
@@ -198,7 +213,7 @@ impl Inner {
                 tracing::debug!("new cache update request (blocking)");
 
                 // Rebuild the entire data cache just like we do at startup.
-                self.price_ctx = PriceCacheContext::from_canonical_chain(
+                self.optimistic_price_ctx = PriceCacheContext::<Optimistic>::from_chain(
                     self.block_tree_read_guard.clone(),
                     self.blocks_in_interval,
                 )
@@ -245,7 +260,7 @@ impl Inner {
         // TODO: CANONICAL CHAIN HAS IT'S OWN CACHE CLEANUP STRATEGY;
         // IF THE BLOCK IS NOT AVAILABLE IN THE CACHE THEN WE CANNOT VALIDATE IT.
         // ADD LOGIC TO READ IT FROM THE DB IN THAT CASE?
-        let temp_price_context = PriceCacheContext::from_canonical_chain_subset(
+        let temp_price_context = PriceCacheContext::<Optimistic>::from_chain_subset(
             self.block_tree_read_guard.clone(),
             self.blocks_in_interval,
             // subtract 1 because we want to simulate the price for *before* the block was mined
@@ -274,7 +289,9 @@ impl Inner {
     ) -> Result<PriceStatus, eyre::Error> {
         // Get the previous block
         let prev_block = block_height.saturating_sub(1);
-        let prev_block = self.fetch_block_using_local_cache(prev_block).await?;
+        let prev_block = self
+            .fetch_block_using_local_cache::<Optimistic>(prev_block)
+            .await?;
 
         // check if the oracle price is valid
         let capped_oracle_price = bound_in_min_max_range(
@@ -291,32 +308,33 @@ impl Inner {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn fetch_block_using_local_cache(
+    async fn fetch_block_using_local_cache<T: ChainStrategy>(
         &self,
         desired_height: u64,
-    ) -> Result<IrysBlockHeader, eyre::Error> {
+    ) -> Result<Arc<IrysBlockHeader>, eyre::Error> {
         let cached_header = [
-            &self.price_ctx.block_latest_ema,
-            &self.price_ctx.block_latest_ema_predecessor,
-            &self.price_ctx.block_previous,
+            // check confirmed entries
+            &self.confirmed_price_ctx.block_latest_ema,
+            &self.confirmed_price_ctx.block_latest_ema_predecessor,
+            &self.confirmed_price_ctx.block_previous,
+            // check optimistic entries
+            &self.optimistic_price_ctx.block_latest_ema,
+            &self.optimistic_price_ctx.block_latest_ema_predecessor,
+            &self.optimistic_price_ctx.block_previous,
         ]
         .into_iter()
         .find(|hdr| hdr.height == desired_height);
         let block_header = if let Some(cached_header) = cached_header {
-            cached_header.clone()
+            Arc::clone(&cached_header)
         } else {
-            // Safely acquire the canonical chain
-            let canonical_chain = get_canonical_chain(self.block_tree_read_guard.clone())
-                .await?
-                .0;
-            let (_, latest_block_height, ..) =
-                canonical_chain.last().expect("canonical chain is empty");
+            let chain = T::get_chain(self.block_tree_read_guard.clone()).await?;
+            let (_, latest_block_height, ..) = chain.last().expect("optimistic chain is empty");
 
             // Attempt to find the needed block in the chain
             price_cache_context::fetch_block_with_height(
                 desired_height,
                 self.block_tree_read_guard.clone(),
-                &canonical_chain,
+                &chain,
                 *latest_block_height,
             )
             .await?
@@ -359,32 +377,67 @@ fn bound_in_min_max_range(
 /// Utility module for that's responsible for extracting the desired blocks from the
 /// `BlockTree` to properly report prices & calculate new interval values
 mod price_cache_context {
+    use std::{marker::PhantomData, sync::Arc};
+
     use eyre::{ensure, OptionExt};
     use futures::try_join;
-    use irys_types::block_height_to_use_for_price;
+    use irys_types::{block_height_to_use_for_price, H256};
 
-    use crate::block_tree_service::{get_block, get_canonical_chain};
+    use crate::block_tree_service::{get_block, get_canonical_chain, get_optimistic_chain};
 
     use super::*;
 
-    #[derive(Debug)]
-    pub(super) struct PriceCacheContext {
-        pub(super) block_latest_ema: IrysBlockHeader,
-        pub(super) block_latest_ema_predecessor: IrysBlockHeader,
-        pub(super) block_for_pricing: IrysBlockHeader,
-        pub(super) block_previous: IrysBlockHeader,
+    #[derive(Debug, Clone)]
+    pub(super) struct Optimistic;
+    #[derive(Debug, Clone)]
+    pub(super) struct Confirmed;
+
+    pub(super) trait ChainStrategy {
+        async fn get_chain(
+            block_tree_read_guard: BlockTreeReadGuard,
+        ) -> eyre::Result<Vec<(H256, u64)>>;
     }
 
-    impl PriceCacheContext {
+    impl ChainStrategy for Optimistic {
+        async fn get_chain(
+            block_tree_read_guard: BlockTreeReadGuard,
+        ) -> eyre::Result<Vec<(H256, u64)>> {
+            get_optimistic_chain(block_tree_read_guard).await
+        }
+    }
+
+    impl ChainStrategy for Confirmed {
+        async fn get_chain(
+            block_tree_read_guard: BlockTreeReadGuard,
+        ) -> eyre::Result<Vec<(H256, u64)>> {
+            let chain = get_canonical_chain(block_tree_read_guard).await?.0;
+            let chain = chain
+                .into_iter()
+                .map(|(hash, height, ..)| (hash, height))
+                .collect();
+            Ok(chain)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub(super) struct PriceCacheContext<T: ChainStrategy> {
+        pub(super) block_latest_ema: Arc<IrysBlockHeader>,
+        pub(super) block_latest_ema_predecessor: Arc<IrysBlockHeader>,
+        pub(super) block_for_pricing: Arc<IrysBlockHeader>,
+        pub(super) block_previous: Arc<IrysBlockHeader>,
+        pub(super) chain_strategy: PhantomData<T>,
+    }
+
+    impl<T: ChainStrategy> PriceCacheContext<T> {
         /// Builds the entire context from scratch by scanning the canonical chain, but only from a certain point.
         /// Used for historical price data validation.
-        pub(super) async fn from_canonical_chain_subset(
+        pub(super) async fn from_chain_subset(
             block_tree_read_guard: BlockTreeReadGuard,
             blocks_in_price_adjustment_interval: u64,
             max_height: u64,
         ) -> eyre::Result<Self> {
             // Rebuild the entire data cache just like we do at startup.
-            let canonical_chain = get_canonical_chain(block_tree_read_guard.clone()).await?.0;
+            let canonical_chain = T::get_chain(block_tree_read_guard.clone()).await?;
             let (_latest_block_hash, latest_block_height, ..) = canonical_chain
                 .last()
                 .ok_or_eyre("canonical chain is empty")?;
@@ -415,12 +468,11 @@ mod price_cache_context {
         }
 
         /// Builds the entire context from scratch by scanning the canonical chain.
-        pub(super) async fn from_canonical_chain(
+        pub(super) async fn from_chain(
             block_tree_read_guard: BlockTreeReadGuard,
             blocks_in_price_adjustment_interval: u64,
         ) -> eyre::Result<Self> {
-            // Rebuild the entire data cache just like we do at startup.
-            let canonical_chain = get_canonical_chain(block_tree_read_guard.clone()).await?.0;
+            let canonical_chain = T::get_chain(block_tree_read_guard.clone()).await?;
             let (_latest_block_hash, latest_block_height, ..) =
                 canonical_chain.last().expect("canonical chain is empty");
             Self::with_chain_and_height(
@@ -436,12 +488,7 @@ mod price_cache_context {
             latest_block_height: u64,
             block_tree_read_guard: BlockTreeReadGuard,
             blocks_in_price_adjustment_interval: u64,
-            canonical_chain: &[(
-                irys_types::H256,
-                u64,
-                Vec<irys_types::H256>,
-                Vec<irys_types::H256>,
-            )],
+            canonical_chain: &[(irys_types::H256, u64)],
         ) -> eyre::Result<Self> {
             let height_pricing_block = block_height_to_use_for_price(
                 latest_block_height,
@@ -487,6 +534,7 @@ mod price_cache_context {
                 block_latest_ema_predecessor,
                 block_previous,
                 block_for_pricing,
+                chain_strategy: PhantomData,
             })
         }
 
@@ -532,20 +580,15 @@ mod price_cache_context {
     pub(crate) async fn fetch_block_with_height(
         height: u64,
         block_tree_read_guard: BlockTreeReadGuard,
-        canonical_chain: &[(
-            irys_types::H256,
-            u64,
-            Vec<irys_types::H256>,
-            Vec<irys_types::H256>,
-        )],
+        chain: &[(irys_types::H256, u64)],
         latest_block_height: u64,
-    ) -> Result<IrysBlockHeader, eyre::Error> {
-        let canonical_len = canonical_chain.len();
+    ) -> Result<Arc<IrysBlockHeader>, eyre::Error> {
+        let chain_len = chain.len();
         let diff_from_latest_height = latest_block_height.saturating_sub(height) as usize;
-        let adjusted_index = canonical_len
+        let adjusted_index = chain_len
             .saturating_sub(diff_from_latest_height)
             .saturating_sub(1); // -1 because heights are zero based
-        let (hash, new_height, ..) = canonical_chain
+        let (hash, new_height, ..) = chain
             .get(adjusted_index)
             .expect("the block at the index to be present");
         assert_eq!(
@@ -591,9 +634,10 @@ mod price_cache_context {
             let block_tree_guard = genesis_tree(&mut blocks);
 
             // action
-            let price_cache = PriceCacheContext::from_canonical_chain(block_tree_guard, interval)
-                .await
-                .unwrap();
+            let price_cache =
+                PriceCacheContext::<Confirmed>::from_chain(block_tree_guard, interval)
+                    .await
+                    .unwrap();
 
             // assert
             assert_eq!(
@@ -645,7 +689,7 @@ mod price_cache_context {
                 let block_tree_guard = genesis_tree(&mut blocks);
 
                 // Action
-                let ctx = PriceCacheContext::from_canonical_chain_subset(
+                let ctx = PriceCacheContext::<Confirmed>::from_chain_subset(
                     block_tree_guard,
                     blocks_in_interval,
                     height_chain_subset_max,
@@ -1192,7 +1236,7 @@ mod tests {
         drop(tree);
 
         // Send a `NewConfirmedBlock` message
-        let send_result = ctx.ema_sender.send(EmaServiceMessage::UpdateCache);
+        let send_result = ctx.ema_sender.send(EmaServiceMessage::BlockConfirmed);
         assert!(
             send_result.is_ok(),
             "Service should accept new confirmed block messages"
