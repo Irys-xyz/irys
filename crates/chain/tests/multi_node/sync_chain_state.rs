@@ -87,38 +87,23 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
 
-    //wait and retry hitting the peer_list endpoint of genesis node
-    let mut peer_list_items: Vec<SocketAddr> = Vec::new();
-    for _ in 0..20 {
-        sleep(Duration::from_millis(2000)).await;
-
-        let mut peer_results_genesis =
-            peer_list_endpoint_request(&local_test_url(&ctx_genesis_node.node.config.port)).await;
-
-        peer_list_items = peer_results_genesis
-            .json::<Vec<PeerAddress>>()
-            .await
-            .expect("valid PeerAddress")
-            .iter()
-            .map(|v| v.api)
-            .collect::<Vec<SocketAddr>>();
-        peer_list_items.sort(); //sort so we have sane comparisons in asserts
-        if &genesis_trusted_peers == &peer_list_items {
-            break;
-        }
-    }
-
+    // wait and retry hitting the peer_list endpoint of genesis node
+    let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_genesis_node).await;
     // assert that genesis node is advertising the trusted peers it was given via config
     assert_eq!(&genesis_trusted_peers, &peer_list_items);
 
+    // wait and retry hitting the peer_list endpoint of peer1 node
+    let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer1_node).await;
     // assert that peer1 node has updated trusted peers
-    assert_eq!(
-        &genesis_trusted_peers,
-        &ctx_peer1_node.node.config.trusted_peers
-    );
+    assert_eq!(&genesis_trusted_peers, &peer_list_items);
 
-    //shut down peer, we have what we need
+    // shut down peer, we have what we need
     ctx_peer1_node.node.stop().await;
+
+    // wait and retry hitting the peer_list endpoint of peer2 node
+    let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer2_node).await;
+    // assert that peer2 node has updated trusted peers
+    assert_eq!(&genesis_trusted_peers, &peer_list_items);
 
     let result_peer2 = poll_until_fetch_at_block_index_height(
         &ctx_peer2_node,
@@ -129,13 +114,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
 
-    // assert that peer2 node has updated trusted peers
-    assert_eq!(
-        &genesis_trusted_peers,
-        &ctx_peer2_node.node.config.trusted_peers
-    );
-
-    //shut down peer, we have what we need
+    // shut down peer, we have what we need
     ctx_peer2_node.node.stop().await;
 
     let mut result_genesis = block_index_endpoint_request(
@@ -244,4 +223,28 @@ async fn poll_until_fetch_at_block_index_height(
         }
     }
     result_peer
+}
+
+// poll peer_list_endpoint until timeout or we get the exected result
+async fn poll_peer_list(trusted_peers: Vec<SocketAddr>, ctx_node: &TestCtx) -> Vec<SocketAddr> {
+    let mut peer_list_items: Vec<SocketAddr> = Vec::new();
+    for _ in 0..20 {
+        sleep(Duration::from_millis(2000)).await;
+
+        let mut peer_results_genesis =
+            peer_list_endpoint_request(&local_test_url(&ctx_node.node.config.port)).await;
+
+        peer_list_items = peer_results_genesis
+            .json::<Vec<PeerAddress>>()
+            .await
+            .expect("valid PeerAddress")
+            .iter()
+            .map(|v| v.api)
+            .collect::<Vec<SocketAddr>>();
+        peer_list_items.sort(); //sort so we have sane comparisons in asserts
+        if &trusted_peers == &peer_list_items {
+            break;
+        }
+    }
+    peer_list_items
 }
