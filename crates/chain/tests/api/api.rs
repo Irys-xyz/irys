@@ -37,6 +37,7 @@ async fn heavy_api_end_to_end_test_256kb() {
 }
 
 async fn api_end_to_end_test(chunk_size: usize) {
+    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let entropy_packing_iterations = 1_000;
     let testnet_config = Config {
         chunk_size: chunk_size.try_into().unwrap(),
@@ -60,6 +61,7 @@ async fn api_end_to_end_test(chunk_size: usize) {
     node.node_ctx.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
+        ema_service: ema_tx,
         reth_provider: node.node_ctx.reth_handle.clone(),
         reth_http_url: node
             .node_ctx
