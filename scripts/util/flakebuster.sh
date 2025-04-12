@@ -19,7 +19,7 @@ while getopts "m:h" opt; do
 done
 
 # Remove the options from the argument list
-shift $((OPTIND-1))
+shift $((OPTIND > 1 ? OPTIND - 1 : 0))
 
 # Check if a command was provided
 if [ $# -eq 0 ]; then
