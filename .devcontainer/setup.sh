@@ -9,7 +9,7 @@ EOF
 
 # remove these once GCC13 stops being in the testing branch (or when we upgrade debian releases)
 cat << 'EOF' >> /etc/apt/sources.list.d/testing.list
-deb http://deb.debian.org/debian testing main
+deb http://ftp.debian.org/debian/ testing main
 EOF
 
 cat << 'EOF' >>  /etc/apt/preferences.d/50-local
