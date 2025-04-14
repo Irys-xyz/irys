@@ -9,6 +9,7 @@ use actix_web::{
     web::{self, JsonConfig},
     App, HttpResponse, HttpServer,
 };
+use irys_actors::ema_service::EmaServiceMessage;
 use irys_actors::peer_list_service::{KnownPeersRequest, PeerListService};
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
@@ -25,7 +26,6 @@ use std::net::TcpListener;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
-use irys_actors::ema_service::EmaServiceMessage;
 
 #[derive(Clone)]
 pub struct ApiState {
