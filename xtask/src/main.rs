@@ -67,7 +67,7 @@ fn main() -> eyre::Result<()> {
                 }
             }
 
-            // this is needed otherwirse some tests will fail (that assert panic messages)
+            // this is needed otherwise some tests will fail (that assert panic messages)
             sh.set_var("RUST_BACKTRACE", "1");
 
             cmd!(
