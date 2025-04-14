@@ -4,7 +4,6 @@ use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
 use irys_types::{Address, DatabaseProvider, PeerAddress, PeerListItem};
 use reqwest::Client;
-use reth_db::Database;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;

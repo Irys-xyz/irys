@@ -1,6 +1,5 @@
 use actix::Addr;
 
-use crate::peer_list_service::PeerListService;
 use crate::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::BlockIndexService,
