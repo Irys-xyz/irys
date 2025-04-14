@@ -105,7 +105,7 @@ pub fn parse_user_agent(user_agent: &str) -> Option<(String, String, String, Str
 /// Example handshake request JSON:
 /// ```json
 /// {
-///   "version": "1.2.0",             // Node version using semver  
+///   "version": "1.2.0",             // Node version using semver
 ///   "protocol_version": "1",        // Supported protocol version (V1, V2, etc)
 ///   "mining_address": "0x11111...", // Mining address as hex
 ///   "chain_id": 1270,               // Network chain identifier
