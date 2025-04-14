@@ -8,3 +8,4 @@
 /.VSCodeCounter
 .vscode/settings.json
 ext/
+config.toml
