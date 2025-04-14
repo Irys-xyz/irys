@@ -142,7 +142,9 @@ impl Default for VersionRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Arbitrary)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialOrd, Ord, Hash, Eq, PartialEq, Arbitrary,
+)]
 pub struct PeerAddress {
     pub gossip: SocketAddr,
     pub api: SocketAddr,

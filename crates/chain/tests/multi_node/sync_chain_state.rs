@@ -7,7 +7,6 @@ use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::BlockIndexItem;
 use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
 use irys_types::{Config, PeerAddress};
-use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
 
@@ -18,11 +17,23 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let required_blocks_height: usize = 5;
     // +2 is so genesis is two blocks ahead of the peer nodes, as currently we check the peers index which lags behind
     let required_genesis_node_height = required_blocks_height + 2;
-    let trusted_peers = vec!["127.0.0.1:8080".parse().expect("valid SocketAddr expected")];
+    let trusted_peers = vec![PeerAddress {
+        api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+        gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+    }];
     let genesis_trusted_peers = vec![
-        "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
-        "127.0.0.2:1234".parse().expect("valid SocketAddr expected"),
-        "127.0.0.3:1234".parse().expect("valid SocketAddr expected"),
+        PeerAddress {
+            api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+        },
+        PeerAddress {
+            api: "127.0.0.2:1234".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.2:1235".parse().expect("valid SocketAddr expected"),
+        },
+        PeerAddress {
+            api: "127.0.0.3:1234".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.3:1235".parse().expect("valid SocketAddr expected"),
+        },
     ];
     let testnet_config_genesis = Config {
         port: 8080,
@@ -226,8 +237,8 @@ async fn poll_until_fetch_at_block_index_height(
 }
 
 // poll peer_list_endpoint until timeout or we get the expected result
-async fn poll_peer_list(trusted_peers: Vec<SocketAddr>, ctx_node: &TestCtx) -> Vec<SocketAddr> {
-    let mut peer_list_items: Vec<SocketAddr> = Vec::new();
+async fn poll_peer_list(trusted_peers: Vec<PeerAddress>, ctx_node: &TestCtx) -> Vec<PeerAddress> {
+    let mut peer_list_items: Vec<PeerAddress> = Vec::new();
     for _ in 0..20 {
         sleep(Duration::from_millis(2000)).await;
 
@@ -237,10 +248,7 @@ async fn poll_peer_list(trusted_peers: Vec<SocketAddr>, ctx_node: &TestCtx) -> V
         peer_list_items = peer_results_genesis
             .json::<Vec<PeerAddress>>()
             .await
-            .expect("valid PeerAddress")
-            .iter()
-            .map(|v| v.api)
-            .collect::<Vec<SocketAddr>>();
+            .expect("valid PeerAddress");
         peer_list_items.sort(); //sort so we have sane comparisons in asserts
         if &trusted_peers == &peer_list_items {
             break;

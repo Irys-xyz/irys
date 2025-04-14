@@ -216,7 +216,7 @@ pub async fn fetch_block_index(
 //TODO url paths as ENUMS? Could update external api tests too
 //#[tracing::instrument(err)]
 pub async fn sync_state_from_peers(
-    trusted_peers: Vec<SocketAddr>,
+    trusted_peers: Vec<PeerAddress>,
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
     peer_list_service_addr: Addr<PeerListService>,
@@ -249,7 +249,8 @@ pub async fn sync_state_from_peers(
     let mut height = 1; // start at height 1 as we already have the genesis block
     let limit = 50;
     loop {
-        let fetched = fetch_block_index(peer, &client, block_queue.clone(), height, limit).await;
+        let fetched =
+            fetch_block_index(&peer.api, &client, block_queue.clone(), height, limit).await;
         if fetched == 0 {
             break; // no more blocks
         } else {
@@ -261,7 +262,7 @@ pub async fn sync_state_from_peers(
     info!("Fetching latest blocks...and corresponding txns");
     let peer = peers_guard.first().expect("at least one peer");
     while let Some(block_index_item) = block_queue.lock().await.pop_front() {
-        if let Some(irys_block) = fetch_block(peer, &client, &block_index_item).await {
+        if let Some(irys_block) = fetch_block(&peer.api, &client, &block_index_item).await {
             let block = Arc::new(irys_block);
             let block_discovery_addr = block_discovery_addr.clone();
             //TODO: temporarily introducing a 2 second pause to allow vdf steps to be created. otherwise vdf steps try to be included that do not exist locally. This helps prevent against the following type of error:
@@ -271,7 +272,7 @@ pub async fn sync_state_from_peers(
             //add txns from block to txn db
             for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
                 let tx_ingress_msg = TxIngressMessage(
-                    fetch_txn(peer, &client, *tx)
+                    fetch_txn(&peer.api, &client, *tx)
                         .await
                         .expect("valid txn from http GET"),
                 );
@@ -300,15 +301,15 @@ pub async fn sync_state_from_peers(
 
 /// Fetches `peers` list from each `peers_to_ask` via http. Adds new entries to `peers`
 pub async fn fetch_and_update_peers(
-    peers: Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
+    peers: Arc<tokio::sync::Mutex<Vec<PeerAddress>>>,
     client: &awc::Client,
-    peers_to_ask: Vec<SocketAddr>,
+    peers_to_ask: Vec<PeerAddress>,
     peer_list_service_addr: Addr<PeerListService>,
 ) -> Option<u64> {
     let futures = peers_to_ask.into_iter().map(|peer| {
         let client = client.clone();
         let peers = peers.clone();
-        let url = format!("http://{}/v1/peer_list", peer);
+        let url = format!("http://{}/v1/peer_list", peer.api);
         let peer_list_service_addr = peer_list_service_addr.clone();
 
         async move {
@@ -325,15 +326,12 @@ pub async fn fetch_and_update_peers(
                     let existing: HashSet<_> = peers_guard.iter().cloned().collect();
                     let mut added = 0;
                     for p in new_peers {
-                        if existing.contains(&p.api) {
+                        if existing.contains(&p) {
                             continue;
                         }
-                        peers_guard.push(p.api);
+                        peers_guard.push(p);
                         let peer_list_entry = PeerListItem {
-                            address: PeerAddress {
-                                api: p.api,
-                                gossip: p.gossip,
-                            },
+                            address: p,
                             ..Default::default()
                         };
                         if let Err(e) = peer_list_service_addr
@@ -344,7 +342,7 @@ pub async fn fetch_and_update_peers(
                         };
                         added += 1;
                     }
-                    error!("Got {} peers from {}", &added, peer);
+                    error!("Got {} peers from {}", &added, peer.api);
                     added
                 }
                 Ok(response) => {

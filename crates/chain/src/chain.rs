@@ -47,7 +47,7 @@ use irys_storage::{
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
     CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
-    OracleConfig, PartitionChunkRange, PeerAddress, PeerListItem, StorageConfig, H256,
+    OracleConfig, PartitionChunkRange, PeerListItem, StorageConfig, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
@@ -233,10 +233,11 @@ impl IrysNode {
             info!("fetching genesis block from trusted peer");
             let awc_client = awc::Client::new();
             fetch_genesis_block(
-                config
+                &config
                     .trusted_peers
                     .first()
-                    .expect("expected at least one trusted peer in config"),
+                    .expect("expected at least one trusted peer in config")
+                    .api,
                 &awc_client,
             )
             .await
@@ -377,10 +378,7 @@ impl IrysNode {
         // load peers from config into our database
         for peer_address in ctx.config.trusted_peers.clone() {
             let peer_list_entry = PeerListItem {
-                address: PeerAddress {
-                    api: peer_address,
-                    gossip: peer_address, //FIXME this should be the gossip address and not a copy of the api address
-                },
+                address: peer_address,
                 ..Default::default()
             };
 
