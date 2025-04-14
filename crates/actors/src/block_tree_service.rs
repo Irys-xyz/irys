@@ -341,7 +341,7 @@ impl Handler<BlockPreValidatedMessage> for BlockTreeService {
 
                 // block until EMA service is updated
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                ema_service.send(EmaServiceMessage::UpdateCacheBlocking { response: tx })?;
+                ema_service.send(EmaServiceMessage::NewPrevalidatedBlock { response: tx })?;
                 rx.await?;
             }
 

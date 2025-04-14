@@ -1,4 +1,20 @@
-//! EMA service module. It is responsible for keeping track of Irys token price readjustment period.
+//! EMA service module.
+//!
+//! The EMA service is responsible for:
+//! - Keeping track of the Irys token price readjustment period.
+//! - Validating the EMA price and the oracle price.
+//! - Returning the current EMA price.
+//! - Returning the price data for the next block.
+//!
+//! The EMA service keeps track of 2 caches:
+//! - Confirmed: The cache of confirmed blocks.
+//! - Optimistic: The cache of the longest chain, which also contains blocks
+//!   that have not yet gone through the full solution validation.
+//!
+//! The EMA service will use the confirmed cache to calculate the EMA price for
+//! outside usage (eg pricing module, API endpoints).
+//! The EMA service will use the optimistic cache to validate the EMA price and
+//! the oracle price.
 use crate::block_tree_service::BlockTreeReadGuard;
 use futures::future::Either;
 use irys_types::{
@@ -17,17 +33,20 @@ use tokio::{
 /// Messages that the EMA service supports
 #[derive(Debug)]
 pub enum EmaServiceMessage {
-    /// Return the current EMA that other components must use (eg pricing module)
+    /// Return the current EMA that other components must use (eg pricing module).
+    /// It uses the *confirmed* price context to calculate the EMA.
     GetCurrentEmaForPricing {
         response: oneshot::Sender<IrysTokenPrice>,
     },
-    /// Validate that the Oracle prices fall within the expected range
+    /// Validate that the Oracle prices fall within the expected range.
+    /// It uses the optimistic price context to calculate the EMA.
     ValidateOraclePrice {
         block_height: u64,
         oracle_price: IrysTokenPrice,
         response: oneshot::Sender<eyre::Result<PriceStatus>>,
     },
-    /// Validate that the EMA price has been correctly derived
+    /// Validate that the EMA price has been correctly derived.
+    /// It uses the optimistic price context to calculate the EMA.
     ValidateEmaPrice {
         block_height: u64,
         ema_price: IrysTokenPrice,
@@ -40,10 +59,15 @@ pub enum EmaServiceMessage {
         oracle_price: IrysTokenPrice,
         response: oneshot::Sender<eyre::Result<NewBlockEmaResponse>>,
     },
-    /// Supposted to be sent whenever Irys produces a new confirmed block. The EMA service will refrech its cache.
+    /// Sent when a block is *confirmed* by the network. The EMA service will refresh its cache
+    /// of confirmed blocks.
     BlockConfirmed,
-    /// Supposted to be sent whenever Irys produces a new confirmed block. The EMA service will refrech its cache.
-    UpdateCacheBlocking { response: oneshot::Sender<()> },
+    /// Sent when a block is *prevalidated* by the network. The EMA service will refresh its cache
+    /// of prevalidated blocks.
+    NewPrevalidatedBlock {
+        // will return once the cache has been updated.
+        response: oneshot::Sender<()>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -195,7 +219,7 @@ impl Inner {
                 }));
             }
             EmaServiceMessage::BlockConfirmed => {
-                tracing::debug!("new cache update request (async)");
+                tracing::debug!("updating confirmed price cache");
 
                 // Rebuild the entire data cache just like we do at startup.
                 self.confirmed_price_ctx = PriceCacheContext::<Confirmed>::from_chain(
@@ -204,8 +228,8 @@ impl Inner {
                 )
                 .await?;
             }
-            EmaServiceMessage::UpdateCacheBlocking { response } => {
-                tracing::debug!("new cache update request (blocking)");
+            EmaServiceMessage::NewPrevalidatedBlock { response } => {
+                tracing::debug!("updating optimistic price cache");
 
                 // Rebuild the entire data cache just like we do at startup.
                 self.optimistic_price_ctx = PriceCacheContext::<Optimistic>::from_chain(
@@ -221,6 +245,8 @@ impl Inner {
                 oracle_price,
                 response,
             } => {
+                tracing::debug!("validating oracle price");
+
                 let price_status = self
                     .validate_oracle_price(block_height, oracle_price)
                     .await?;
@@ -233,6 +259,8 @@ impl Inner {
                 oracle_price,
                 response,
             } => {
+                tracing::debug!("validating EMA price");
+
                 let status = self
                     .valid_ema_price(block_height, ema_price, oracle_price)
                     .await?;
@@ -258,7 +286,7 @@ impl Inner {
         let temp_price_context = PriceCacheContext::<Optimistic>::from_chain_subset(
             self.block_tree_read_guard.clone(),
             self.blocks_in_interval,
-            // subtract 1 because we want to simulate the price for *before* the block was mined
+            // subtract one because we want to simulate the price for *before* the block was mined
             block_height.saturating_sub(1),
         )
         .await?;
@@ -598,7 +626,7 @@ mod price_cache_context {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::ema_service::tests::genesis_tree;
+        use crate::{block_tree_service::ChainState, ema_service::tests::genesis_tree};
         use rstest::rstest;
 
         #[test_log::test(tokio::test)]
@@ -619,18 +647,31 @@ mod price_cache_context {
             #[case] height_current_ema_predecessor: u64,
         ) {
             // setup
+            use crate::block_tree_service::BlockState;
             let interval = 10;
+            let threshold = height_latest_block / 2;
             let mut blocks = (0..=height_latest_block)
-                .map(|height| IrysBlockHeader {
-                    height,
-                    ..IrysBlockHeader::new_mock_header()
+                .map(|height| {
+                    let block = IrysBlockHeader {
+                        height,
+                        ..IrysBlockHeader::new_mock_header()
+                    };
+
+                    // Determine chain state based on block height
+                    let state = if block.height <= threshold {
+                        ChainState::Onchain
+                    } else {
+                        ChainState::NotOnchain(BlockState::ValidationScheduled)
+                    };
+
+                    (block, state)
                 })
                 .collect::<Vec<_>>();
             let block_tree_guard = genesis_tree(&mut blocks);
 
             // action
             let price_cache =
-                PriceCacheContext::<Confirmed>::from_chain(block_tree_guard, interval)
+                PriceCacheContext::<Optimistic>::from_chain(block_tree_guard, interval)
                     .await
                     .unwrap();
 
@@ -649,11 +690,12 @@ mod price_cache_context {
         #[cfg(test)]
         mod from_canonical_chain_subset_tests {
             use super::*;
+            use crate::block_tree_service::BlockState;
             use crate::ema_service::tests::genesis_tree;
             use rstest::rstest;
 
             /// Parameterized test for from_canonical_chain_subset with varying chain_length, max_height,
-            /// and the expected “interval” blocks. In some cases below, `max_height` is less than the top,
+            /// and the expected "interval" blocks. In some cases below, `max_height` is less than the top,
             /// which can validate that it correctly slices the canonical chain.
             #[test_log::test(tokio::test)]
             #[rstest]
@@ -673,32 +715,59 @@ mod price_cache_context {
                 #[case] height_exp_pricing: u64,
             ) {
                 // Setup
+
                 let blocks_in_interval = 10;
+                let max_confirmed_height = height_chain_max / 2;
                 let mut blocks = (0..=height_chain_max)
-                    .map(|height| IrysBlockHeader {
-                        height,
-                        ..IrysBlockHeader::new_mock_header()
+                    .map(|height| {
+                        let block = IrysBlockHeader {
+                            height,
+                            ..IrysBlockHeader::new_mock_header()
+                        };
+
+                        // Determine chain state based on block height
+                        let state = if block.height <= max_confirmed_height {
+                            ChainState::Onchain
+                        } else {
+                            ChainState::NotOnchain(BlockState::ValidationScheduled)
+                        };
+
+                        (block, state)
                     })
                     .collect::<Vec<_>>();
                 assert_eq!(blocks.len(), (height_chain_max + 1) as usize);
                 let block_tree_guard = genesis_tree(&mut blocks);
 
                 // Action
-                let ctx = PriceCacheContext::<Confirmed>::from_chain_subset(
-                    block_tree_guard,
+                // check optimistic context
+                let optimistic_ctx = PriceCacheContext::<Optimistic>::from_chain_subset(
+                    block_tree_guard.clone(),
                     blocks_in_interval,
                     height_chain_subset_max,
                 )
                 .await
                 .unwrap();
+                let confirmed_ctx = PriceCacheContext::<Confirmed>::from_chain_subset(
+                    block_tree_guard,
+                    max_confirmed_height,
+                    max_confirmed_height,
+                )
+                .await
+                .unwrap();
 
                 // Assert
-                assert_eq!(ctx.block_latest_ema.height, height_exp_latest_ema);
                 assert_eq!(
-                    ctx.block_latest_ema_predecessor.height,
+                    optimistic_ctx.block_latest_ema.height,
+                    height_exp_latest_ema
+                );
+                assert_eq!(
+                    optimistic_ctx.block_latest_ema_predecessor.height,
                     height_exp_latest_ema_pred
                 );
-                assert_eq!(ctx.block_for_pricing.height, height_exp_pricing);
+                assert_eq!(optimistic_ctx.block_for_pricing.height, height_exp_pricing);
+
+                // check confirmed context
+                assert_eq!(confirmed_ctx.block_latest_ema.height, max_confirmed_height);
             }
         }
     }
@@ -707,7 +776,7 @@ mod price_cache_context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_tree_service::{get_canonical_chain, ChainState};
+    use crate::block_tree_service::{get_canonical_chain, BlockTreeCache, ChainState};
     use irys_types::{storage_pricing::TOKEN_SCALE, H256};
     use reth::tasks::TaskManager;
     use rstest::rstest;
@@ -719,8 +788,12 @@ mod tests {
     pub(crate) fn build_genesis_tree_with_n_blocks(
         max_block_height: u64,
     ) -> (BlockTreeReadGuard, Vec<PriceInfo>) {
-        let (mut blocks, prices) = build_tree(0, max_block_height);
-        assert_eq!(blocks.last().unwrap().height, max_block_height);
+        let (blocks, prices) = build_tree(0, max_block_height);
+        let mut blocks = blocks
+            .into_iter()
+            .map(|block| (block, ChainState::Onchain))
+            .collect::<Vec<_>>();
+        assert_eq!(blocks.last().unwrap().0.height, max_block_height);
         (genesis_tree(&mut blocks), prices)
     }
 
@@ -751,17 +824,16 @@ mod tests {
         oracle_price
     }
 
-    pub(crate) fn genesis_tree(blocks: &mut [IrysBlockHeader]) -> BlockTreeReadGuard {
-        use crate::block_tree_service::{BlockTreeCache, ChainState};
+    pub(crate) fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
         let mut block_hash = H256::random();
         let mut iter = blocks.iter_mut();
-        let genesis_block = iter.next().unwrap();
+        let genesis_block = &mut (iter.next().unwrap()).0;
         genesis_block.block_hash = block_hash;
         genesis_block.cumulative_diff = 0.into();
 
-        let mut block_tree_cache = BlockTreeCache::new(genesis_block);
+        let mut block_tree_cache = BlockTreeCache::new(&genesis_block);
         block_tree_cache.mark_tip(&block_hash).unwrap();
-        for block in iter {
+        for (block, state) in iter {
             block.previous_block_hash = block_hash;
             block.cumulative_diff = block.height.into();
             block_hash = H256::random();
@@ -771,7 +843,7 @@ mod tests {
                     block.block_hash.clone(),
                     block,
                     Arc::new(Vec::new()),
-                    ChainState::Onchain,
+                    state.clone(),
                 )
                 .unwrap();
         }
@@ -935,12 +1007,15 @@ mod tests {
                 ..Config::testnet()
             };
             let ctx = TestCtx::setup_with_tree(
-                genesis_tree(&mut [IrysBlockHeader {
-                    height: 0,
-                    oracle_irys_price: config.genesis_token_price,
-                    ema_irys_price: config.genesis_token_price,
-                    ..IrysBlockHeader::new_mock_header()
-                }]),
+                genesis_tree(&mut [(
+                    IrysBlockHeader {
+                        height: 0,
+                        oracle_irys_price: config.genesis_token_price,
+                        ema_irys_price: config.genesis_token_price,
+                        ..IrysBlockHeader::new_mock_header()
+                    },
+                    ChainState::Onchain,
+                )]),
                 vec![PriceInfo {
                     oracle: config.genesis_token_price,
                     ema: config.genesis_token_price,
