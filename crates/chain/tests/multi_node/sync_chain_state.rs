@@ -196,6 +196,7 @@ fn local_test_url(port: &u16) -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
+/// poll info_endpoint until timeout or we get block_index at desired height
 async fn poll_until_fetch_at_block_index_height(
     node_ctx: &TestCtx,
     required_blocks_height: u64,
