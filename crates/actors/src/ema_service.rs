@@ -163,16 +163,12 @@ impl Inner {
                 height_of_new_block,
                 oracle_price,
             } => {
-                if height_of_new_block
-                    != self
-                        .confirmed_price_ctx
-                        .block_previous
-                        .height
-                        .saturating_add(1)
-                {
-                    let _ = response.send(Err(eyre::eyre!(
-                        "EMA Service has not yet been updated with the latest canonical chain"
-                    )));
+                let ctx = &self.optimistic_price_ctx;
+                let next_optimistic_block = ctx.block_previous.height.saturating_add(1);
+                if height_of_new_block != next_optimistic_block {
+                    let _ = response.send(Err(eyre::eyre!(format!(
+                        "EMA Service has not yet been updated with the latest canonical chain {height_of_new_block:}"
+                    ))));
                     return Ok(());
                 }
 
@@ -180,17 +176,16 @@ impl Inner {
                 let capped_oracle_price = bound_in_min_max_range(
                     oracle_price,
                     self.token_price_safe_range,
-                    self.confirmed_price_ctx.block_previous.oracle_irys_price,
+                    ctx.block_previous.oracle_irys_price,
                 );
-                let new_ema = self
-                    .confirmed_price_ctx
-                    .get_ema_for_new_block(self.blocks_in_interval, capped_oracle_price);
+                let new_ema =
+                    ctx.get_ema_for_new_block(self.blocks_in_interval, capped_oracle_price);
 
                 tracing::info!(
                     ?new_ema,
                     ?capped_oracle_price,
-                    prev_predecessor_height = ?self.confirmed_price_ctx.block_latest_ema_predecessor.height,
-                    prev_ema_height = ?self.confirmed_price_ctx.block_latest_ema.height,
+                    prev_predecessor_height = ?ctx.block_latest_ema_predecessor.height,
+                    prev_ema_height = ?ctx.block_latest_ema.height,
                     "computing new EMA"
                 );
 
