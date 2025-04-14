@@ -4105,7 +4105,6 @@ dependencies = [
  "base58",
  "eyre",
  "irys-actors",
- "irys-config",
  "irys-database",
  "irys-reth-node-bridge",
  "irys-storage",
@@ -4117,6 +4116,8 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2 0.5.8",
+ "test-log",
+ "tokio",
  "tracing",
 ]
 

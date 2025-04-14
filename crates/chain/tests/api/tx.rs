@@ -15,6 +15,7 @@ use tracing::{error, info};
 
 #[actix_web::test]
 async fn test_get_tx() -> eyre::Result<()> {
+    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let test_config = Config::testnet();
     let signer = IrysSigner::random_signer(&test_config);
     let mut node = IrysNodeTest::new_genesis(test_config.clone());
@@ -63,6 +64,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     };
 
     let app_state = ApiState {
+        ema_service: ema_tx,
         reth_provider: node.node_ctx.reth_handle.clone(),
         reth_http_url: node
             .node_ctx

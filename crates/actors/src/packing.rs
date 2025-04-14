@@ -18,7 +18,7 @@ use {
 use irys_storage::{ChunkType, StorageModule};
 use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, StorageConfig};
 use reth::tasks::TaskExecutor;
-use tokio::{runtime::Handle, sync::Semaphore, time::sleep};
+use tokio::{sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
 
 #[derive(Debug, Message, Clone)]
@@ -31,19 +31,17 @@ pub struct PackingRequest {
 pub type AtomicPackingJobQueue = Arc<RwLock<VecDeque<PackingRequest>>>;
 pub type PackingJobsBySM = HashMap<usize, AtomicPackingJobQueue>;
 
-pub type PackingSemaphores = HashMap<usize, Arc<Semaphore>>;
+pub type PackingSemaphore = Arc<Semaphore>;
 
 #[derive(Debug, Clone)]
 /// Packing actor state
 pub struct PackingActor {
-    /// used to execute the internal job poll future
-    actix_runtime_handle: Handle,
     /// used to spawn threads to perform packing
     task_executor: TaskExecutor,
     /// list of all the pending packing jobs
     pending_jobs: PackingJobsBySM,
     /// semaphore to control concurrency -- sm_id => semaphore
-    semaphore: PackingSemaphores,
+    semaphore: PackingSemaphore,
     /// packing process configuration
     config: PackingConfig,
 }
@@ -75,22 +73,17 @@ impl PackingConfig {
 impl PackingActor {
     /// creates a new packing actor
     pub fn new(
-        actix_runtime_handle: Handle,
         task_executor: TaskExecutor,
         storage_module_ids: Vec<usize>,
         config: PackingConfig,
     ) -> Self {
-        let semaphore = storage_module_ids
-            .iter()
-            .map(|s| (*s, Arc::new(Semaphore::new(config.concurrency.into()))))
-            .collect();
+        let semaphore = Arc::new(Semaphore::new(config.concurrency.into()));
         let pending_jobs = storage_module_ids
             .iter()
             .map(|s| (*s, Arc::new(RwLock::new(VecDeque::with_capacity(32)))))
             .collect();
 
         Self {
-            actix_runtime_handle,
             task_executor,
             pending_jobs,
             semaphore,
@@ -138,11 +131,16 @@ impl PackingActor {
                 ..
             } = storage_module.storage_config;
             let storage_module_id = storage_module.id;
-            let semaphore = self.semaphore.get(&storage_module_id).unwrap();
+            let semaphore = self.semaphore.clone();
 
             let start_value = *chunk_range.0.start();
             let end_value = *chunk_range.0.end();
-
+            let short_writes_before_sync: u32 = (storage_module
+                .storage_config
+                .min_writes_before_sync
+                .div_ceil(2))
+            .try_into()
+            .expect("Should be able to convert min_writes_before_sync to u32");
             match PACKING_TYPE {
                 PackingType::CPU => {
                     for i in start_value..=end_value {
@@ -151,13 +149,20 @@ impl PackingActor {
                         // whereas CPU will do this permit system
 
                         // TODO: have stateful executor threads / an arena for entropy chunks so we don't have to allocate chunks all over the place when we can just re-use
-                        // TODO: improve this! use wakers instead of polling, allow for work-stealing, use a dedicated thread pool w/ lower priorities etc.
+                        // TODO: improve this! use wakers instead of polling, allow for work-stealing, use a dedicated thread pool w/ lower priorities etc
+                        if i % short_writes_before_sync == 0 {
+                            debug!("triggering sync");
+                            let _ = storage_module.sync_pending_chunks();
+                        }
+
                         let storage_module = storage_module.clone();
                         let semaphore = semaphore.clone();
+
                         // wait for the permit before spawning the thread
                         let permit = semaphore.acquire_owned().await.unwrap();
-                        //debug!(target: "irys::packing", "Packing chunk {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
-                        self.task_executor.spawn_blocking(async move {
+
+                        // debug!(target: "irys::packing", "Packing chunk {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                        self.task_executor.spawn_critical_blocking("packing worker", async move {
                             let mut out = Vec::with_capacity(chunk_size as usize);
                             compute_entropy_chunk(
                                 mining_address,
@@ -170,11 +175,10 @@ impl PackingActor {
                             );
 
                             debug!(target: "irys::packing::progress", "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
+
                             // write the chunk
-                            //debug!(target: "irys::packing", "Writing chunk range {} to SM {}", &i, &storage_module.id);
                             storage_module.write_chunk(PartitionChunkOffset::from(i), out, ChunkType::Entropy);
-                            let _ = storage_module.sync_pending_chunks();
-                            drop(permit); // drop after chunk write so the SM can apply backpressure to packing
+                            drop(permit); // drop after chunk write so the SM can apply backpressure to packing through the internal pending_writes lock write_chunk acquires
                         });
 
                         if i % 1000 == 0 {
@@ -206,7 +210,7 @@ impl PackingActor {
 
                         let storage_module = storage_module.clone();
 
-                        let semaphore = self.semaphore.get(&storage_module_id).unwrap().clone();
+                        let semaphore = semaphore.clone();
                         // wait for the permit before spawning the thread
                         let permit = semaphore.acquire_owned().await.unwrap();
 
@@ -233,7 +237,10 @@ impl PackingActor {
                                         .to_vec(),
                                     ChunkType::Entropy,
                                 );
-                                let _ = storage_module.sync_pending_chunks();
+                                if i % short_writes_before_sync == 0 {
+                                    debug!("triggering sync");
+                                    let _ = storage_module.sync_pending_chunks();
+                                }
                             }
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                         });
@@ -243,6 +250,7 @@ impl PackingActor {
                 _ => unimplemented!(),
             }
 
+            let _ = storage_module.sync_pending_chunks();
             // Remove from queue once complete
             let _ = pending_jobs.write().unwrap().pop_front();
         }
@@ -265,13 +273,16 @@ impl Actor for PackingActor {
     type Context = Context<Self>;
 
     fn start(self) -> actix::Addr<Self> {
-        let keys = self.pending_jobs.keys().cloned().collect::<Vec<usize>>();
+        let keys = self.pending_jobs.keys().copied().collect::<Vec<usize>>();
         for key in keys {
-            self.actix_runtime_handle.spawn(Self::process_jobs(
-                self.clone(),
-                key,
-                self.pending_jobs.get(&key).unwrap().clone(),
-            ));
+            self.task_executor.spawn_critical(
+                "packing controller",
+                Self::process_jobs(
+                    self.clone(),
+                    key,
+                    self.pending_jobs.get(&key).unwrap().clone(),
+                ),
+            );
         }
 
         Context::new().run(self)
@@ -304,7 +315,7 @@ pub struct GetInternals();
 #[derive(Debug, MessageResponse, Clone)]
 pub struct Internals {
     pending_jobs: PackingJobsBySM,
-    semaphore: PackingSemaphores,
+    semaphore: PackingSemaphore,
     config: PackingConfig,
 }
 
@@ -336,19 +347,11 @@ pub async fn wait_for_packing(
                 == 0
             {
                 // try to get all the semaphore permits - this is how we know that the packing is done
-                let _permit =
-                    futures::future::join_all(internals.semaphore.iter().map(|(_, s)| {
-                        s.as_ref().acquire_many(
-                            internals
-                                .config
-                                .concurrency
-                                .try_into()
-                                .expect("Value exceeds u32::MAX"),
-                        )
-                    }))
+                let _permit = internals
+                    .semaphore
+                    .acquire_many(internals.config.concurrency.into())
                     .await
-                    .iter()
-                    .map(|r| r.as_ref().unwrap());
+                    .unwrap();
                 break Some(());
             } else {
                 sleep(Duration::from_millis(100)).await
@@ -361,19 +364,17 @@ pub async fn wait_for_packing(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use actix::Actor as _;
     use irys_packing::capacity_single::compute_entropy_chunk;
-    use irys_storage::{ii, ChunkType, StorageModule, StorageModuleInfo};
+    use irys_storage::{ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
-        partition_chunk_offset_ii, Address, Config, PartitionChunkOffset, PartitionChunkRange,
-        StorageConfig,
+        Address, Config, PartitionChunkOffset, PartitionChunkRange, StorageConfig,
     };
     use reth::tasks::TaskManager;
-    use tokio::runtime::Handle;
 
     use crate::packing::{
         cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingConfig, PackingRequest,
@@ -384,14 +385,21 @@ mod tests {
         // setup
         let mining_address = Address::random();
         let partition_hash = PartitionHash::zero();
+        let num_chunks = 50;
+        let to_pack = 10;
+        let packing_end = num_chunks - to_pack;
+
         let testnet_config = Config {
             num_writes_before_sync: 1,
-            entropy_packing_iterations: 1000,
-            num_chunks_in_partition: 5,
+            entropy_packing_iterations: 1000000,
+            num_chunks_in_partition: num_chunks,
             chunk_size: 32,
+            cpu_packing_concurrency: 1,
             ..Config::testnet()
         };
         let config = PackingConfig::new(&testnet_config);
+
+        use irys_storage::ie;
 
         let infos = vec![StorageModuleInfo {
             id: 0,
@@ -401,9 +409,10 @@ mod tests {
                 ledger_id: None,
                 slot_index: None,
             }),
-            submodules: vec![
-                (partition_chunk_offset_ii!(0, 4), "hdd0-4TB".into()), // 0 to 4 inclusive
-            ],
+            submodules: vec![(
+                irys_types::partition_chunk_offset_ie!(0, num_chunks),
+                "hdd0".into(),
+            )],
         }];
         let storage_config = StorageConfig::new(&testnet_config);
         let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
@@ -418,22 +427,20 @@ mod tests {
 
         let request = PackingRequest {
             storage_module: storage_module.clone(),
-            chunk_range: PartitionChunkRange(partition_chunk_offset_ii!(0, 3)),
+            chunk_range: PartitionChunkRange(irys_types::partition_chunk_offset_ie!(
+                0,
+                packing_end
+            )),
         };
         // Create an instance of the mempool actor
         let task_manager = TaskManager::current();
         let sm_ids = vec![storage_module.id];
-        let packing = PackingActor::new(
-            Handle::current(),
-            task_manager.executor(),
-            sm_ids,
-            config.clone(),
-        );
+        let packing = PackingActor::new(task_manager.executor(), sm_ids, config.clone());
         let packing_addr = packing.start();
 
         // action
         packing_addr.send(request).await?;
-        wait_for_packing(packing_addr, None).await?;
+        wait_for_packing(packing_addr, Some(Duration::from_secs(99999))).await?;
         storage_module.sync_pending_chunks()?;
 
         // assert
@@ -441,17 +448,27 @@ mod tests {
         let intervals = storage_module.get_intervals(ChunkType::Entropy);
         assert_eq!(
             intervals,
-            vec![ii(
+            vec![ie(
                 PartitionChunkOffset::from(0),
-                PartitionChunkOffset::from(3)
+                PartitionChunkOffset::from(packing_end)
             )]
         );
-        let stored_entropy = storage_module.read_chunks(ii(
+
+        let intervals2 = storage_module.get_intervals(ChunkType::Uninitialized);
+        assert_eq!(
+            intervals2,
+            vec![ie(
+                PartitionChunkOffset::from(packing_end),
+                PartitionChunkOffset::from(num_chunks)
+            )]
+        );
+
+        let stored_entropy = storage_module.read_chunks(ie(
             PartitionChunkOffset::from(0),
-            PartitionChunkOffset::from(3),
+            PartitionChunkOffset::from(packing_end),
         ))?;
         // verify the packing
-        for i in 0..=3 {
+        for i in 0..packing_end {
             let chunk = stored_entropy.get(&PartitionChunkOffset::from(i)).unwrap();
 
             let mut out = Vec::with_capacity(storage_config.chunk_size as usize);
