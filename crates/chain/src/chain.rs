@@ -67,10 +67,8 @@ use std::{
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    runtime::{Handle, Runtime},
-    sync::oneshot::{self},
-};
+use tokio::runtime::Runtime;
+use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
@@ -575,7 +573,8 @@ impl IrysNode {
                             reth_shutdown_receiver,
                         ),
                     )
-                    .await;
+                    .await
+                    .inspect_err(|e| error!("Reth thread error: {:?}", &e));
                     debug!("Sending shutdown signal to the main actor thread");
                     let _ = main_actor_thread_shutdown_tx.try_send(());
 
@@ -1009,7 +1008,6 @@ impl IrysNode {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
         let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
         let packing_actor_addr = PackingActor::new(
-            Handle::current(),
             reth_node.task_executor.clone(),
             sm_ids,
             self.packing_config.clone(),
