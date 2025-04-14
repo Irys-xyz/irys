@@ -7,6 +7,7 @@ use crate::types::{GossipError, GossipResult};
 use core::net::SocketAddr;
 use core::time::Duration;
 use irys_types::{BlockHash, ChunkPathHash, GossipData, IrysTransactionId, H256};
+use std::collections::HashSet;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
@@ -111,6 +112,35 @@ impl GossipCache {
         };
 
         Ok(result)
+    }
+
+    pub fn peers_that_have_seen(&self, data: &GossipData) -> GossipResult<HashSet<SocketAddr>> {
+        let result = match data {
+            GossipData::Chunk(unpacked_chunk) => {
+                let chunk_path_hash = unpacked_chunk.chunk_path_hash();
+                let chunks = self
+                    .chunks
+                    .read()
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
+                chunks.get(&chunk_path_hash).cloned().unwrap_or_default()
+            }
+            GossipData::Transaction(transaction) => {
+                let txs = self
+                    .transactions
+                    .read()
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
+                txs.get(&transaction.id).cloned().unwrap_or_default()
+            }
+            GossipData::Block(block) => {
+                let blocks = self
+                    .blocks
+                    .read()
+                    .map_err(|error| GossipError::Cache(error.to_string()))?;
+                blocks.get(&block.block_hash).cloned().unwrap_or_default()
+            }
+        };
+
+        Ok(result.keys().copied().collect())
     }
 
     /// Clean up old entries that are older than the given duration

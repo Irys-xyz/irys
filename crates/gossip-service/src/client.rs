@@ -3,9 +3,12 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::types::{GossipError, GossipResult};
+use actix::Addr;
 use core::time::Duration;
-use irys_database::tables::CompactPeerListItem;
-use irys_types::GossipData;
+use irys_actors::peer_list_service::{
+    DecreasePeerScore, IncreasePeerScore, PeerListService, ScoreDecreaseReason, ScoreIncreaseReason,
+};
+use irys_types::{GossipData, PeerListItem};
 use reqwest::Response;
 use serde::Serialize;
 
@@ -29,11 +32,7 @@ impl GossipClient {
     /// # Errors
     ///
     /// If the peer is offline or the request fails, an error is returned.
-    pub async fn send_data(
-        &self,
-        peer: &CompactPeerListItem,
-        data: &GossipData,
-    ) -> GossipResult<()> {
+    pub async fn send_data(&self, peer: &PeerListItem, data: &GossipData) -> GossipResult<()> {
         Self::check_if_peer_online(peer)?;
         match data {
             GossipData::Chunk(unpacked_chunk) => {
@@ -62,7 +61,7 @@ impl GossipClient {
         Ok(())
     }
 
-    fn check_if_peer_online(peer: &CompactPeerListItem) -> GossipResult<()> {
+    fn check_if_peer_online(peer: &PeerListItem) -> GossipResult<()> {
         if !peer.is_online {
             return Err(GossipError::InvalidPeer("Peer is offline".into()));
         }
@@ -83,35 +82,45 @@ impl GossipClient {
             .map_err(|error| GossipError::Network(error.to_string()))
     }
 
-    /// Check the health of a peer
+    /// Send data to a peer and update their score based on the result
     ///
     /// # Errors
     ///
-    /// If the health check fails or the response is not valid JSON, an error is returned.
-    pub async fn check_health(
+    /// If the peer is offline or the request fails, an error is returned.
+    pub async fn send_data_and_update_score(
         &self,
-        peer: &CompactPeerListItem,
-    ) -> GossipResult<CompactPeerListItem> {
-        let url = format!("http://{}/gossip/health", peer.address.gossip);
-
-        let response = self
-            .client
-            .get(&url)
-            .timeout(self.timeout)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(GossipError::Network(format!(
-                "Health check failed with status: {}",
-                response.status()
-            )));
+        peer: &PeerListItem,
+        data: &GossipData,
+        peer_list_service: &Addr<PeerListService>,
+    ) -> GossipResult<()> {
+        let res = self.send_data(peer, data).await;
+        match res {
+            Ok(()) => {
+                // Successful send, increase score
+                if let Err(e) = peer_list_service
+                    .send(IncreasePeerScore {
+                        peer: peer.address.gossip,
+                        reason: ScoreIncreaseReason::Online,
+                    })
+                    .await
+                {
+                    tracing::error!("Failed to increase peer score: {}", e);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                // Failed to send, decrease score
+                if let Err(e) = peer_list_service
+                    .send(DecreasePeerScore {
+                        peer: peer.address.gossip,
+                        reason: ScoreDecreaseReason::Offline,
+                    })
+                    .await
+                {
+                    tracing::error!("Failed to decrease peer score: {}", e);
+                };
+                Err(error)
+            }
         }
-
-        response
-            .json()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))
     }
 }

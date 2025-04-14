@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Arbitrary, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Arbitrary, PartialEq, Hash)]
 pub struct PeerScore(u16);
 
 impl PeerScore {
@@ -38,7 +38,7 @@ impl PeerScore {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Arbitrary)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Arbitrary, Hash)]
 pub struct PeerListItem {
     pub reputation_score: PeerScore,
     pub response_time: u16,

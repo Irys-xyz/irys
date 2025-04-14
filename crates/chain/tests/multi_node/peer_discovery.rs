@@ -63,6 +63,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),
         mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        peer_list: node.node_ctx.actor_addresses.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: test_config.clone(),
     };

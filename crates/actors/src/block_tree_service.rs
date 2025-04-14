@@ -199,7 +199,7 @@ impl BlockTreeService {
         MempoolService::from_registry().do_send(msg);
         self.service_senders
             .ema
-            .send(EmaServiceMessage::NewConfirmedBlock)
+            .send(EmaServiceMessage::BlockConfirmed)
             .expect("EMA service has unexpectedly become unreachable");
     }
 
@@ -295,44 +295,58 @@ pub struct ValidationResultMessage {
 /// After adding the block, it's scheduled for full validation and the previous
 /// block is marked for storage finalization.
 impl Handler<BlockPreValidatedMessage> for BlockTreeService {
-    type Result = ();
+    type Result = ResponseFuture<eyre::Result<()>>;
+
     fn handle(&mut self, msg: BlockPreValidatedMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        let block = msg.0;
-        let all_txs = msg.1;
-        let block_hash = &block.block_hash;
-        let _finalized_block_hash = block.previous_block_hash;
+        let miner_address = self.miner_address;
+        let ema_service = self.service_senders.ema.clone();
+        let cache = self.cache.clone().expect("cache to be initialised");
 
-        let binding = self.cache.clone().unwrap();
-        let mut cache = binding.write().unwrap();
+        return Box::pin(async move {
+            let block = msg.0;
+            let all_txs = msg.1;
+            let block_hash = &block.block_hash;
+            let _finalized_block_hash = block.previous_block_hash;
+            let mut cache = cache.write().expect("cache lock poisoined");
 
-        // Handle block addition differently based on origin
-        let add_result = if block.miner_address == self.miner_address {
-            // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
-            // extension while full validation is still pending. This prevents blocking
-            // new block production while validation completes.
-            cache.add_validated_block((*block).clone(), BlockState::Unknown, all_txs)
-        } else {
-            // For blocks from peers: Add via standard path requiring validation
-            cache.add_block(&block, all_txs)
-        };
+            // Handle block addition differently based on origin
+            let add_result = if block.miner_address == miner_address {
+                // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
+                // extension while full validation is still pending. This prevents blocking
+                // new block production while validation completes.
+                cache.add_validated_block((*block).clone(), BlockState::Unknown, all_txs)
+            } else {
+                // For blocks from peers: Add via standard path requiring validation
+                cache.add_block(&block, all_txs)
+            };
 
-        if add_result.is_ok() {
-            // Schedule block for full validation regardless of origin
-            let validation_service = ValidationService::from_registry();
-            validation_service.do_send(RequestValidationMessage(block.clone()));
+            if add_result.is_ok() {
+                // Schedule block for full validation regardless of origin
+                let validation_service = ValidationService::from_registry();
+                validation_service.do_send(RequestValidationMessage(block.clone()));
 
-            // Update block state to reflect scheduled validation
-            if cache
-                .mark_block_as_validation_scheduled(block_hash)
-                .is_err()
-            {
-                error!("Unable to mark block as ValidationScheduled");
+                // Update block state to reflect scheduled validation
+                if cache
+                    .mark_block_as_validation_scheduled(block_hash)
+                    .is_err()
+                {
+                    error!("Unable to mark block as ValidationScheduled");
+                }
+                debug!(
+                    "scheduling block for validation: {}",
+                    block_hash.0.to_base58()
+                );
+                // release the lock on `cache` so that the EMA service can acquire it
+                drop(cache);
+
+                // block until EMA service is updated
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                ema_service.send(EmaServiceMessage::NewPrevalidatedBlock { response: tx })?;
+                rx.await?;
             }
-            debug!(
-                "scheduling block for validation: {}",
-                block_hash.0.to_base58()
-            );
-        }
+
+            Ok(())
+        });
     }
 }
 
@@ -1221,6 +1235,41 @@ impl BlockTreeCache {
     }
 }
 
+pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<(H256, u64)>> {
+    let canonical_chain = tokio::task::spawn_blocking(move || {
+        let cache = tree.read();
+
+        let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
+        let mut chain_cache = Vec::with_capacity(
+            blocks_to_collect
+                .try_into()
+                .expect("u64 must fit into usize"),
+        );
+        let mut current = cache.max_cumulative_difficulty.1;
+        tracing::debug!(latest_cache_tip =? current, "updating canonical chain cache");
+
+        while let Some(entry) = cache.blocks.get(&current) {
+            chain_cache.push((current, entry.block.height));
+
+            if blocks_to_collect == 0 {
+                break;
+            }
+            blocks_to_collect -= 1;
+
+            if entry.block.height == 0 {
+                break;
+            } else {
+                current = entry.block.previous_block_hash;
+            }
+        }
+
+        chain_cache.reverse();
+        chain_cache
+    })
+    .await?;
+    Ok(canonical_chain)
+}
+
 /// Returns the canonical chain where the first item in the Vec is the oldest block
 /// Implementation detail: utilises `tokio::task::spawn_blocking`
 pub async fn get_canonical_chain(
@@ -1236,9 +1285,13 @@ pub async fn get_canonical_chain(
 pub async fn get_block(
     block_tree_read_guard: BlockTreeReadGuard,
     block_hash: H256,
-) -> eyre::Result<Option<IrysBlockHeader>> {
+) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
     let res = tokio::task::spawn_blocking(move || {
-        block_tree_read_guard.read().get_block(&block_hash).cloned()
+        block_tree_read_guard
+            .read()
+            .get_block(&block_hash)
+            .cloned()
+            .map(|block| Arc::new(block))
     })
     .await?;
     Ok(res)
