@@ -61,9 +61,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // assert that peer1 node has updated trusted peers
     assert_eq!(&genesis_trusted_peers, &peer_list_items);
 
-    // shut down peer, we have what we need
-    ctx_peer1_node.node.stop().await;
-
     // wait and retry hitting the peer_list endpoint of peer2 node
     let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer2_node).await;
     // assert that peer2 node has updated trusted peers
@@ -78,9 +75,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
 
-    // shut down peer, we have what we need
-    ctx_peer2_node.node.stop().await;
-
     let mut result_genesis = block_index_endpoint_request(
         &local_test_url(&testnet_config_genesis.port),
         0,
@@ -89,9 +83,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
             .expect("expected required_blocks_height to be valid u64"),
     )
     .await;
-
-    //shutdown genesis node, as the peers are no longer going to make http calls to it
-    ctx_genesis_node.node.stop().await;
 
     // compare blocks in indexes from each of the three nodes
     // they should be identical if the sync was a success
@@ -120,6 +111,11 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         "expecting json from peer1 node {:?} to match json from peer2 {:?}",
         block_index_peer1, block_index_peer2
     );
+
+    // shut down peer nodes and then genesis node, we have what we need
+    ctx_peer1_node.node.stop().await;
+    ctx_peer2_node.node.stop().await;
+    ctx_genesis_node.node.stop().await;
 
     Ok(())
 }
