@@ -11,7 +11,7 @@ use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
 
 /// spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
-/// check that the blocks are valid, check that peer1, peer2, and gensis are indeed synced
+/// check that the blocks are valid, check that peer1, peer2, and genesis are indeed synced
 #[test_log::test(actix_web::test)]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let required_blocks_height: usize = 5;
@@ -138,7 +138,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
 
-    //shutdown genesis node, as the peers are no longer going make http calls to it
+    //shutdown genesis node, as the peers are no longer going to make http calls to it
     ctx_genesis_node.node.stop().await;
 
     // compare blocks in indexes from each of the three nodes
