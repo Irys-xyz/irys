@@ -37,6 +37,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     ];
     let testnet_config_genesis = Config {
         port: 8080,
+        gossip_service_port: 8081,
         trusted_peers: genesis_trusted_peers.clone(),
         ..Config::testnet()
     };
