@@ -45,7 +45,7 @@ use irys_storage::{
 };
 
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
+    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, Address,
     CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
     OracleConfig, PartitionChunkRange, PeerListItem, StorageConfig, H256,
 };
@@ -386,7 +386,7 @@ impl IrysNode {
                 .actor_addresses
                 .peer_list
                 .send(AddPeer {
-                    mining_addr: ctx.node_config.mining_signer.address(),
+                    mining_addr: Address::random(),
                     peer: peer_list_entry,
                 })
                 .await
@@ -402,7 +402,6 @@ impl IrysNode {
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
                 ctx.actor_addresses.peer_list.clone(),
-                ctx.node_config.mining_signer.address(),
             )
             .await?;
         }

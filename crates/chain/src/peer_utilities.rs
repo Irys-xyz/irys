@@ -221,7 +221,6 @@ pub async fn sync_state_from_peers(
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
     peer_list_service_addr: Addr<PeerListService>,
-    mining_address: Address,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
@@ -239,7 +238,6 @@ pub async fn sync_state_from_peers(
         &client,
         trusted_peers,
         peer_list_service_addr.clone(),
-        mining_address,
     )
     .await
     {
@@ -308,7 +306,6 @@ pub async fn fetch_and_update_peers(
     client: &awc::Client,
     peers_to_ask: Vec<PeerAddress>,
     peer_list_service_addr: Addr<PeerListService>,
-    mining_address: Address,
 ) -> Option<u64> {
     let futures = peers_to_ask.into_iter().map(|peer| {
         let client = client.clone();
@@ -340,7 +337,7 @@ pub async fn fetch_and_update_peers(
                         };
                         if let Err(e) = peer_list_service_addr
                             .send(AddPeer {
-                                mining_addr: mining_address,
+                                mining_addr: Address::random(),
                                 peer: peer_list_entry,
                             })
                             .await
