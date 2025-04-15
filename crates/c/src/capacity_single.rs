@@ -72,7 +72,6 @@ mod tests {
         capacity_single::{self, SHA_HASH_SIZE},
     };
     use irys_primitives::Address;
-    use irys_types::{Config, CHUNK_SIZE};
     use rand;
     use rand::Rng;
     use std::time::Instant;

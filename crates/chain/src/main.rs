@@ -25,11 +25,18 @@ async fn main() -> eyre::Result<()> {
         });
 
     // load the consesnsus config
-    let consensus = std::fs::read_to_string(config.consensus_cfg)
-        .map(|consensus_cfg| {
-            toml::from_str::<ConsensusConfig>(&consensus_cfg).expect("invalid consensus file")
-        })
-        .expect("consensus cfg does not exist");
+    match config.consensus {
+        irys_types::ConsensusOptions::Path(path_buf) => {
+            let consensus = std::fs::read_to_string(config.consensus)
+                .map(|consensus_cfg| {
+                    toml::from_str::<ConsensusConfig>(&consensus_cfg)
+                        .expect("invalid consensus file")
+                })
+                .expect("consensus cfg does not exist");
+        }
+        irys_types::ConsensusOptions::Testnet => ConsensusConfig::testnet(),
+        irys_types::ConsensusOptions::Custom(consensus_config) => consensus_config.clone(),
+    }
 
     // start the node
     tracing::info!("starting the node");

@@ -18,10 +18,8 @@ pub mod serialization;
 pub mod signature;
 pub mod simple_rng;
 pub mod storage;
-pub mod storage_config;
 pub mod storage_pricing;
 pub mod transaction;
-pub mod vdf_config;
 pub mod version;
 
 pub use block::*;
@@ -42,6 +40,4 @@ pub use nodit::Interval;
 pub use peer_list::*;
 pub use reth_codecs::Compact;
 pub use simple_rng::*;
-pub use storage_config::*;
-pub use vdf_config::*;
 pub use version::*;

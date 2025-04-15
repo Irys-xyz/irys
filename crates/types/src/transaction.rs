@@ -1,6 +1,6 @@
 use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    Config, IrysSignature, Node, Proof, Signature, TxIngressProof, H256,
+    ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -146,7 +146,7 @@ impl IrysTransaction {
 }
 
 impl IrysTransactionHeader {
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &ConsensusConfig) -> Self {
         IrysTransactionHeader {
             id: H256::zero(),
             anchor: H256::zero(),
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn test_irys_transaction_header_rlp_round_trip() {
         // setup
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let mut header = mock_header(&config);
 
         // action
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn test_commitment_transaction_rlp_round_trip() {
         // setup
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let mut header = mock_commitment_tx(&config);
 
         // action
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn test_irys_transaction_header_serde() {
         // Create a sample IrysTransactionHeader
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let original_header = mock_header(&config);
 
         // Serialize the IrysTransactionHeader to JSON
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn test_commitment_transaction_serde() {
         // Create a sample commitment tx
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let original_tx = mock_commitment_tx(&config);
 
         // Serialize the commitment tx to JSON
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn test_tx_encode_and_signing() {
         // setup
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let original_header = mock_header(&config);
         let mut sig_data = Vec::new();
         original_header.encode(&mut sig_data);
@@ -336,7 +336,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size as usize,
+            chunk_size: config.chunk_size,
         };
         let tx = IrysTransaction {
             header: dec,
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn test_commitment_tx_encode_and_signing() {
         // setup
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let original_tx = mock_commitment_tx(&config);
         let mut sig_data = Vec::new();
         original_tx.encode(&mut sig_data);
@@ -361,7 +361,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size as usize,
+            chunk_size: config.chunk_size,
         };
 
         let signed_tx = signer.sign_commitment(original_tx.clone()).unwrap();
@@ -374,7 +374,7 @@ mod tests {
         assert!(signed_tx.is_signature_valid());
     }
 
-    fn mock_header(config: &Config) -> IrysTransactionHeader {
+    fn mock_header(config: &ConsensusConfig) -> IrysTransactionHeader {
         let original_header = IrysTransactionHeader {
             id: H256::from([255u8; 32]),
             anchor: H256::from([1u8; 32]),
@@ -393,7 +393,7 @@ mod tests {
         original_header
     }
 
-    fn mock_commitment_tx(config: &Config) -> CommitmentTransaction {
+    fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
         let original_header = CommitmentTransaction {
             id: H256::from([255u8; 32]),
             anchor: H256::from([1u8; 32]),

@@ -12,176 +12,313 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::{env, net::SocketAddr, path::PathBuf};
 
+/// # Consensus Configuration
+///
+/// Defines the core parameters that govern the Irys network consensus rules.
+/// These parameters determine how the network operates, including pricing,
+/// storage requirements, and data validation mechanisms.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsensusConfig {
+    /// Unique identifier for the blockchain network
     pub chain_id: u64,
 
-    /// defines the range of how much can Oracle token price fluctuate between subsequent blocks
+    /// Defines the acceptable range of token price fluctuation between consecutive blocks
+    /// This helps prevent price manipulation and ensures price stability
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub token_price_safe_range: Amount<Percentage>,
 
-    /// defines the range of how much can Oracle token price fluctuate between subsequent blocks
+    /// The initial price of the Irys token at genesis in USD
+    /// Sets the baseline for all future pricing calculations
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub genesis_price: Amount<(IrysPrice, Usd)>,
 
-    /// The annual cost per storing a single GB of data on Irys
+    /// The annual cost in USD for storing 1GB of data on the Irys network
+    /// Used as the foundation for calculating storage fees
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub annual_cost_per_gb: Amount<(CostPerGb, Usd)>,
 
-    /// A percentage value used in pricing calculations. Accounts for storage hardware getting cheaper as time goes on
+    /// Annual rate at which storage costs are expected to decrease
+    /// Accounts for technological improvements making storage cheaper over time
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub decay_rate: Amount<DecayRate>,
 
+    /// Configuration for the Verifiable Delay Function used in consensus
     pub vdf: VdfConfig,
+
+    /// Size of each data chunk in bytes
     pub chunk_size: u64,
+
+    /// Number of chunks that make up a single partition
     pub num_chunks_in_partition: u64,
+
+    /// Number of chunks that can be recalled in a single operation
     pub num_chunks_in_recall_range: u64,
+
+    /// Number of partitions in each storage slot
     pub num_partitions_per_slot: u64,
 
-    /// How many repliceas are needed for data to be considered as "upgraded to perm storage"
+    /// Minimum number of replicas required for data to be considered permanently stored
+    /// Higher values increase data durability but require more network resources
     pub number_of_ingerss_proofs: u64,
 
-    /// The amount of years for a piece of data to be considered as permanent
+    /// Target number of years data should be preserved on the network
+    /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
 }
 
+/// # Node Configuration
+///
+/// The main configuration for an Irys node, containing all settings needed
+/// to participate in the network. This includes network mode, consensus rules,
+/// pricing parameters, and system resource allocations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeConfig {
+    /// Determines how the node joins and interacts with the network
     pub mode: NodeMode,
 
-    pub consensus_cfg: ConsensusCfg,
+    /// Specifies which consensus rules the node follows
+    pub consensus: ConsensusOptions,
 
+    /// Controls how mining difficulty adjusts over time
     pub difficulty_adjustment: DifficultyAdjustmentConfig,
 
+    /// Settings for the transaction memory pool
     pub mempool: MempoolConfig,
 
+    /// Configuration for Exponential Moving Average price calculations
     pub ema: EmaConfig,
 
+    /// Settings for the price oracle system
     pub oracle: OracleConfig,
 
+    /// Private key used for mining operations
+    /// This key identifies the node and receives mining rewards
     #[serde(
         deserialize_with = "serde_utils::signing_key_from_hex",
         serialize_with = "serde_utils::serializes_signing_key"
     )]
     pub mining_key: k256::ecdsa::SigningKey,
 
+    /// Data storage configuration
     pub storage: StorageConfig,
+
+    /// Fee and pricing settings
     pub pricing: PricingConfig,
+
+    /// Peer-to-peer network communication settings
     pub gossip: GossipConfig,
 
+    /// Data packing and compression settings
     pub packing: PackingConfig,
+
+    /// Cache management configuration
     pub cache: CacheConfig,
+
+    /// HTTP API server configuration
     pub http: HttpConfig,
 }
 
+/// # Node Operation Mode
+///
+/// Defines how the node participates in the network - either as a genesis node
+/// that starts a new network or as a peer that syncs with existing nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeMode {
+    /// Start a new blockchain network as the first node
     Genesis,
+
+    /// Join an existing network by connecting to trusted peers
     PeerSync {
         /// The initial list of peers to contact for block sync
         trusted_peers: Vec<PeerAddress>,
     },
 }
 
+/// # Consensus Configuration Source
+///
+/// Specifies where the node should obtain its consensus rules from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConsensusCfg {
+pub enum ConsensusOptions {
+    /// Load consensus configuration from a file at the specified path
     Path(PathBuf),
+
+    /// Use predefined testnet consensus parameters
     Testnet,
-    Custom,
+
+    /// Use custom consensus parameters defined elsewhere
+    Custom(ConsensusConfig),
 }
 
+/// # Pricing Configuration
+///
+/// Controls how the node calculates fees for storage and other services.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PricingConfig {
-    /// Used in priding calculations. Extra fee percentage toped up by nodes
+    /// Additional fee percentage added by nodes to the base storage cost
+    /// This provides an incentive for nodes to participate in the network
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub fee_percentage: Amount<Percentage>,
 }
 
+/// # Oracle Configuration
+///
+/// Defines how the node obtains and processes external price information.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum OracleConfig {
+    /// A simulated price oracle for testing and development
     Mock {
+        /// Starting price for the token in USD
         #[serde(deserialize_with = "serde_utils::token_amount")]
         initial_price: Amount<(IrysPrice, Usd)>,
+
+        /// How much the price can change between updates
         #[serde(deserialize_with = "serde_utils::percentage_amount")]
         percent_change: Amount<Percentage>,
+
+        /// Number of blocks between price updates
         smoothing_interval: u64,
     },
 }
+
+/// # EMA (Exponential Moving Average) Configuration
+///
+/// Controls how token prices are smoothed over time to reduce volatility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmaConfig {
-    /// Defines how frequently the Irys EMA price should be adjusted
+    /// Number of blocks between EMA price recalculations
+    /// Lower values make prices more responsive, higher values provide more stability
     pub price_adjustment_interval: u64,
 }
+
+/// # VDF (Verifiable Delay Function) Configuration
+///
+/// Settings for the time-delay proof mechanism used in consensus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VdfConfig {
+    /// How often the VDF parameters are reset (in blocks)
     pub vdf_reset_frequency: usize,
+
+    /// Maximum number of threads to use for parallel VDF verification
     pub vdf_parallel_verification_thread_limit: usize,
+
+    /// Number of checkpoints to include in each VDF step
     pub num_checkpoints_in_vdf_step: usize,
+
+    /// Target number of SHA-1 operations per second for VDF calibration
     pub vdf_sha_1s: u64,
 }
 
+/// # Epoch Configuration
+///
+/// Controls the timing and parameters for network epochs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochConfig {
     /// Scaling factor for the capacity projection curve
+    /// Affects how network capacity is calculated and projected
     pub capacity_scalar: u64,
+
+    /// Number of blocks in a single epoch
     pub num_blocks_in_epoch: u64,
+
+    /// Number of epochs between ledger submissions
     pub submit_ledger_epoch_length: u64,
+
+    /// Optional configuration for capacity partitioning
     pub num_capacity_partitions: Option<u64>,
 }
 
+/// # Storage Configuration
+///
+/// Defines how and where the node stores blockchain and user data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// The base directory where to look for artifact data
     #[serde(default = "default_irys_path")]
     pub base_directory: PathBuf,
+
+    /// How many blocks deep a chunk can be migrated
     pub chunk_migration_depth: u32,
+
+    /// Number of write operations before forcing a sync to disk
+    /// Higher values improve performance but increase data loss risk on crashes
     pub num_writes_before_sync: u64,
+
+    /// Number of iterations for entropy packing algorithm
     pub entropy_packing_iterations: u32,
 }
 
+/// # Mempool Configuration
+///
+/// Controls how unconfirmed transactions are managed before inclusion in blocks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MempoolConfig {
+    /// Maximum number of data transactions that can be included in a single block
     pub max_data_txs_per_block: u64,
-    /// the number of block a given anchor (tx or block hash) is valid for.
+
+    /// The number of blocks a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
     pub anchor_expiry_depth: u8,
 }
 
+/// # Gossip Network Configuration
+///
+/// Settings for peer-to-peer communication between nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GossipConfig {
-    /// The IP address of the gossip service
+    /// The IP address the gossip service binds to
     pub gossip_service_bind_ip: SocketAddr,
-    /// The port of the gossip service
+
+    /// The port number the gossip service listens on
     pub gossip_service_port: u16,
 }
 
+/// # Data Packing Configuration
+///
+/// Controls how data is compressed and packed for storage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackingConfig {
-    /// number of packing threads
+    /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,
-    /// GPU kernel batch size
+
+    /// Batch size for GPU-accelerated packing operations
     pub gpu_packing_batch_size: u32,
 }
 
+/// # Cache Configuration
+///
+/// Settings for in-memory caching to improve performance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheConfig {
-    /// number of blocks cache cleaning will lag behind block finalization
+    /// Number of blocks cache cleaning will lag behind block finalization
+    /// Higher values keep more data in cache but use more memory
     pub cache_clean_lag: u8,
 }
 
+/// # HTTP API Configuration
+///
+/// Settings for the node's HTTP server that provides API access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpConfig {
     /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
     pub port: u16,
 }
 
+/// # Difficulty Adjustment Configuration
+///
+/// Controls how mining difficulty changes over time to maintain target block times.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DifficultyAdjustmentConfig {
-    /// Block time in seconds
+    /// Target time between blocks in seconds
     pub block_time: u64,
+
+    /// Number of blocks between difficulty adjustments
     pub difficulty_adjustment_interval: u64,
+
+    /// Maximum factor by which difficulty can increase in a single adjustment
     pub max_difficulty_adjustment_factor: Decimal,
+
+    /// Minimum factor by which difficulty can decrease in a single adjustment
     pub min_difficulty_adjustment_factor: Decimal,
 }
 
@@ -217,8 +354,12 @@ impl ConsensusConfig {
 }
 
 impl NodeConfig {
-    pub fn irys_signer(&self) -> IrysSigner {
-        IrysSigner::from_config(&self)
+    pub fn irys_signer(&self, consensus_config: &ConsensusConfig) -> IrysSigner {
+        IrysSigner {
+            signer: self.mining_key.clone(),
+            chain_id: consensus_config.chain_id,
+            chunk_size: consensus_config.chunk_size,
+        }
     }
 
     pub fn miner_address(&self) -> Address {
@@ -233,7 +374,7 @@ impl NodeConfig {
         const DEFAULT_BLOCK_TIME: u64 = 1;
         Self {
             mode: NodeMode::Genesis,
-            consensus_cfg: ConsensusCfg::Testnet,
+            consensus: ConsensusOptions::Testnet,
             difficulty_adjustment: DifficultyAdjustmentConfig {
                 block_time: DEFAULT_BLOCK_TIME,
                 difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000)
@@ -279,6 +420,32 @@ impl NodeConfig {
             cache: CacheConfig { cache_clean_lag: 2 },
             http: HttpConfig { port: 0 },
         }
+    }
+
+    /// get the storage module directory path
+    pub fn storage_module_dir(&self) -> PathBuf {
+        self.storage.base_directory.join("storage_modules")
+    }
+    /// get the irys consensus data directory path
+    pub fn irys_consensus_data_dir(&self) -> PathBuf {
+        self.storage.base_directory.join("irys_consensus_data")
+    }
+    /// get the reth data directory path
+    pub fn reth_data_dir(&self) -> PathBuf {
+        self.storage.base_directory.join("reth")
+    }
+    /// get the reth log directory path
+    pub fn reth_log_dir(&self) -> PathBuf {
+        self.reth_data_dir().join("logs")
+    }
+    /// get the `block_index` directory path  
+    pub fn block_index_dir(&self) -> PathBuf {
+        self.storage.base_directory.join("block_index")
+    }
+
+    /// get the `vdf_steps` directory path  
+    pub fn vdf_steps_dir(&self) -> PathBuf {
+        self.storage.base_directory.join("vdf_steps")
     }
 }
 
@@ -474,7 +641,7 @@ mod tests {
         // Create the expected config
         let expected_config = NodeConfig {
             mode: NodeMode::Genesis,
-            consensus_cfg: ConsensusCfg::Testnet,
+            consensus: ConsensusOptions::Testnet,
             difficulty_adjustment: DifficultyAdjustmentConfig {
                 block_time: 1,
                 difficulty_adjustment_interval: 100,

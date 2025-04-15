@@ -149,7 +149,7 @@ impl<'de> Deserialize<'de> for IrysSignature {
 mod tests {
     use super::*;
 
-    use crate::{irys::IrysSigner, Config, IrysTransaction, IrysTransactionHeader, H256};
+    use crate::{irys::IrysSigner, ConsensusConfig, IrysTransaction, IrysTransactionHeader, H256};
     use alloy_core::hex::{self};
     use alloy_primitives::Address;
     use k256::ecdsa::SigningKey;
@@ -170,12 +170,12 @@ mod tests {
 
     #[test]
     fn signature_signing_serialization() -> eyre::Result<()> {
-        let testnet_config = Config::testnet();
+        let testnet_config = ConsensusConfig::testnet();
         let irys_signer = IrysSigner {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
             chain_id: testnet_config.chain_id,
-            chunk_size: testnet_config.chunk_size as usize,
+            chunk_size: testnet_config.chunk_size,
         };
 
         let original_header = IrysTransactionHeader {

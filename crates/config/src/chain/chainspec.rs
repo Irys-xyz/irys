@@ -14,7 +14,7 @@ pub struct IrysChainSpecBuilder {
 
 impl IrysChainSpecBuilder {
     /// Construct a new builder from the mainnet chain spec.
-    pub fn from_config(node_config: NodeConfig, consensus_config: &ConsensusConfig) -> Self {
+    pub fn from_config(node_config: &NodeConfig, consensus_config: &ConsensusConfig) -> Self {
         let genesis = IrysBlockHeader {
             oracle_irys_price: consensus_config.genesis_price,
             ema_irys_price: consensus_config.genesis_price,

@@ -455,7 +455,7 @@ mod tests {
             },
         ];
 
-        let config = IrysNodeConfig::default();
+        let config = IrysNodeConfig::new(&node_config, &consensus_config);
         let arc_config = Arc::new(config);
 
         // Make sure the block_index data path exists
