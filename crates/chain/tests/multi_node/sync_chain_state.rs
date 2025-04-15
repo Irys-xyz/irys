@@ -1,12 +1,11 @@
-use crate::utils::mine_blocks;
+use crate::utils::{mine_blocks, IrysNodeTest};
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::peer_utilities::{
     block_index_endpoint_request, info_endpoint_request, peer_list_endpoint_request,
 };
-use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_chain::IrysNodeCtx;
 use irys_database::BlockIndexItem;
-use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
-use irys_types::{Config, PeerAddress};
+use irys_types::{irys::IrysSigner, Config, PeerAddress};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
 
@@ -28,7 +27,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let required_genesis_node_height = required_blocks_height + 2;
 
     // mine x blocks on genesis
-    mine_blocks(&ctx_genesis_node.node, required_genesis_node_height)
+    mine_blocks(&ctx_genesis_node.node_ctx, required_genesis_node_height)
         .await
         .expect("expected many mined blocks");
 
@@ -115,9 +114,12 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     // mine more blocks on genesis node, and see if gossip service brings them to peer2
     let additional_blocks_for_gossip_test: usize = 2;
-    mine_blocks(&ctx_genesis_node.node, additional_blocks_for_gossip_test)
-        .await
-        .expect("expected many mined blocks");
+    mine_blocks(
+        &ctx_genesis_node.node_ctx,
+        additional_blocks_for_gossip_test,
+    )
+    .await
+    .expect("expected many mined blocks");
     let result_peer2 = poll_until_fetch_at_block_index_height(
         &ctx_peer2_node,
         (required_blocks_height + additional_blocks_for_gossip_test)
@@ -151,20 +153,11 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     );
 
     // shut down peer nodes and then genesis node, we have what we need
-    ctx_peer1_node.node.stop().await;
-    ctx_peer2_node.node.stop().await;
-    ctx_genesis_node.node.stop().await;
+    ctx_peer1_node.stop().await;
+    ctx_peer2_node.stop().await;
+    ctx_genesis_node.stop().await;
 
     Ok(())
-}
-
-struct TestCtx {
-    node: IrysNodeCtx,
-    #[expect(
-        dead_code,
-        reason = "to prevent drop() being called and cleaning up resources"
-    )]
-    temp_dir: TempDir,
 }
 
 fn init_peers() -> (Vec<PeerAddress>, Vec<PeerAddress>) {
@@ -216,48 +209,27 @@ fn init_configs(
     )
 }
 
-async fn start_genesis_node(testnet_config_genesis: &Config) -> TestCtx {
-    let ctx_genesis_node = setup_with_config(
-        testnet_config_genesis.clone(),
-        "heavy_sync_chain_state_genesis",
-        true,
-    )
-    .await
-    .expect("found invalid genesis ctx");
+async fn start_genesis_node(testnet_config_genesis: &Config) -> IrysNodeTest<IrysNodeCtx> {
+    let ctx_genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone())
+        .await
+        .start()
+        .await;
     ctx_genesis_node
 }
 
 async fn start_peer_nodes(
     testnet_config_peer1: &Config,
     testnet_config_peer2: &Config,
-) -> (TestCtx, TestCtx) {
-    let ctx_peer1_node = setup_with_config(
-        testnet_config_peer1.clone(),
-        "heavy_sync_chain_state_peer1",
-        false,
-    )
-    .await
-    .expect("found invalid genesis ctx for peer1");
-    let ctx_peer2_node = setup_with_config(
-        testnet_config_peer2.clone(),
-        "heavy_sync_chain_state_peer2",
-        false,
-    )
-    .await
-    .expect("found invalid genesis ctx for peer2");
+) -> (IrysNodeTest<IrysNodeCtx>, IrysNodeTest<IrysNodeCtx>) {
+    let ctx_peer1_node = IrysNodeTest::new(testnet_config_peer1.clone())
+        .await
+        .start()
+        .await;
+    let ctx_peer2_node = IrysNodeTest::new(testnet_config_peer2.clone())
+        .await
+        .start()
+        .await;
     (ctx_peer1_node, ctx_peer2_node)
-}
-
-async fn setup_with_config(
-    mut testnet_config: Config,
-    node_name: &str,
-    genesis: bool,
-) -> eyre::Result<TestCtx> {
-    let temp_dir = temporary_directory(Some(node_name), false);
-    testnet_config.base_directory = temp_dir.path().to_path_buf();
-    let mut irys_node = IrysNode::new(testnet_config.clone(), genesis).await;
-    let node = irys_node.start().await?;
-    Ok(TestCtx { node, temp_dir })
 }
 
 fn local_test_url(port: &u16) -> String {
@@ -266,13 +238,13 @@ fn local_test_url(port: &u16) -> String {
 
 /// poll info_endpoint until timeout or we get block_index at desired height
 async fn poll_until_fetch_at_block_index_height(
-    node_ctx: &TestCtx,
+    node_ctx: &IrysNodeTest<IrysNodeCtx>,
     required_blocks_height: u64,
     max_attempts: u64,
 ) -> Option<awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>>> {
     let mut attempts = 0;
     let mut result_peer = None;
-    let url = local_test_url(&node_ctx.node.config.port);
+    let url = local_test_url(&node_ctx.node_ctx.config.port);
     loop {
         let mut response = info_endpoint_request(&url).await;
 
@@ -294,7 +266,7 @@ async fn poll_until_fetch_at_block_index_height(
         } else {
             result_peer = Some(
                 block_index_endpoint_request(
-                    &local_test_url(&node_ctx.node.config.port),
+                    &local_test_url(&node_ctx.node_ctx.config.port),
                     0,
                     required_blocks_height,
                 )
@@ -306,13 +278,16 @@ async fn poll_until_fetch_at_block_index_height(
 }
 
 // poll peer_list_endpoint until timeout or we get the expected result
-async fn poll_peer_list(trusted_peers: Vec<PeerAddress>, ctx_node: &TestCtx) -> Vec<PeerAddress> {
+async fn poll_peer_list(
+    trusted_peers: Vec<PeerAddress>,
+    ctx_node: &IrysNodeTest<IrysNodeCtx>,
+) -> Vec<PeerAddress> {
     let mut peer_list_items: Vec<PeerAddress> = Vec::new();
     for _ in 0..20 {
         sleep(Duration::from_millis(2000)).await;
 
         let mut peer_results_genesis =
-            peer_list_endpoint_request(&local_test_url(&ctx_node.node.config.port)).await;
+            peer_list_endpoint_request(&local_test_url(&ctx_node.node_ctx.config.port)).await;
 
         peer_list_items = peer_results_genesis
             .json::<Vec<PeerAddress>>()
