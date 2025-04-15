@@ -1,56 +1,53 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
+use crate::peer_utilities::{fetch_genesis_block, sync_state_from_peers};
 use crate::vdf::run_vdf;
-use ::irys_database::{tables::IrysTables, BlockIndex, Initialized};
-use actix::Arbiter;
-use actix::{Actor, Addr, System, SystemRegistry};
+use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
-use irys_actors::block_tree_service::BlockTreeReadGuard;
-use irys_actors::cache_service::ChunkCacheService;
-use irys_actors::ema_service::EmaService;
-use irys_actors::packing::PackingConfig;
-use irys_actors::peer_list_service::PeerListService;
-use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
-use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerActor,
+    block_tree_service::BlockTreeReadGuard,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
+    ema_service::EmaService,
     epoch_service::{EpochServiceActor, EpochServiceConfig, GetPartitionAssignmentsGuardMessage},
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
+    packing::PackingConfig,
     packing::{PackingActor, PackingRequest},
+    peer_list_service::{AddPeer, PeerListService},
+    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    services::ServiceSenders,
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService},
     ActorAddresses, BlockFinalizedMessage,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
-use irys_database::migration::check_db_version_and_run_migrations_if_needed;
 use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx,
+    migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, BlockIndex,
+    Initialized,
 };
 use irys_gossip_service::ServiceHandleWithShutdownSignal;
-use irys_price_oracle::mock_oracle::MockOracle;
-use irys_price_oracle::IrysPriceOracle;
+use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
+
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_storage::{
+    irys_consensus_data_db::open_or_create_irys_consensus_data_db,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
 
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
-    GossipData, StorageConfig, H256,
-};
-use irys_types::{
-    CommitmentTransaction, Config, DifficultyAdjustmentConfig, IrysBlockHeader, OracleConfig,
-    PartitionChunkRange,
+    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, Address,
+    CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
+    OracleConfig, PartitionChunkRange, PeerListItem, StorageConfig, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
@@ -61,13 +58,13 @@ use reth::{
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::{Database as _, HasName, HasTableType};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
-use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
-use std::thread::{self, JoinHandle};
 use std::{
     fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
+    path::PathBuf,
+    sync::atomic::AtomicU64,
     sync::{mpsc, Arc, RwLock},
+    thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::Runtime;
@@ -109,17 +106,6 @@ impl IrysNodeCtx {
     pub fn start_mining(&self) -> eyre::Result<()> {
         // start processing new blocks
         self.actor_addresses.start_mining()?;
-        Ok(())
-    }
-
-    async fn sync_state_from_peers(&self) -> eyre::Result<()> {
-        info!("Discovering peers...");
-        tracing::warn!("not yet implemented");
-
-        info!("Fetching latest blocks...");
-        tracing::warn!("not yet implemented");
-
-        info!("Sync complete.");
         Ok(())
     }
 
@@ -182,7 +168,8 @@ async fn start_reth_node<T: HasName + HasTableType>(
         latest_block,
         random_ports,
     )
-    .await?;
+    .await
+    .expect("expected reth node to have started");
     debug!("Reth node started");
     sender
         .send(node_handle.node.clone())
@@ -208,7 +195,7 @@ pub struct IrysNode {
 
 impl IrysNode {
     /// Creates a new node builder instance.
-    pub fn new(config: Config, is_genesis: bool) -> Self {
+    pub async fn new(config: Config, is_genesis: bool) -> Self {
         let storage_config = StorageConfig::new(&config);
         let irys_node_config = IrysNodeConfig::new(&config);
         let data_exists = Self::blockchain_data_exists(&irys_node_config.base_directory);
@@ -217,14 +204,49 @@ impl IrysNode {
         let difficulty_adjustment_config = DifficultyAdjustmentConfig::new(&config);
         let packing_config = PackingConfig::new(&config);
 
-        // this populates the bas directory
+        // this populates the base directory
         let storage_submodule_config =
             StorageSubmodulesConfig::load(irys_node_config.instance_directory().clone()).unwrap();
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let (_, irys_genesis) = irys_node_config.chainspec_builder.build();
+        let irys_genesis_block: Arc<IrysBlockHeader> = if is_genesis {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+            let irys_genesis = IrysBlockHeader {
+                diff: calculate_initial_difficulty(
+                    &difficulty_adjustment_config,
+                    &storage_config,
+                    // TODO: where does this magic constant come from?
+                    3,
+                )
+                .expect("valid calculated initial difficulty"),
+                timestamp: now.as_millis(),
+                last_diff_timestamp: now.as_millis(),
+                ..irys_genesis
+            };
+            info!(
+                "genesis generated by this node at startup {:?}",
+                &irys_genesis
+            );
+            Arc::new(irys_genesis)
+        } else {
+            info!("fetching genesis block from trusted peer");
+            let awc_client = awc::Client::new();
+            fetch_genesis_block(
+                &config
+                    .trusted_peers
+                    .first()
+                    .expect("expected at least one trusted peer in config")
+                    .api,
+                &awc_client,
+            )
+            .await
+            .expect("expected genesis block from http api")
+        };
+
         IrysNode {
             config,
-            genesis_timestamp: now.as_millis(),
+            genesis_timestamp: irys_genesis_block.timestamp,
             data_exists,
             irys_node_config,
             storage_config,
@@ -256,7 +278,7 @@ impl IrysNode {
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         match (self.data_exists, self.is_genesis) {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
-            (false, true) => {
+            (false, _) => {
                 // special handling for genesis node
                 let commitments = get_genesis_commitments(&self.config);
 
@@ -296,13 +318,13 @@ impl IrysNode {
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             self.config.port,
         ))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
         // if `config.port` == 0, the assigned port will be random (decided by the OS)
         // we re-assign the configuration with the actual port here.
         let random_ports = if self.config.port == 0 {
-            self.config.port = listener
-                .local_addr()
-                .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?
-                .port();
+            self.config.port = local_addr.port();
             true
         } else {
             false
@@ -353,7 +375,36 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
-        ctx.sync_state_from_peers().await?;
+        // load peers from config into our database
+        for peer_address in ctx.config.trusted_peers.clone() {
+            let peer_list_entry = PeerListItem {
+                address: peer_address,
+                ..Default::default()
+            };
+
+            if let Err(e) = ctx
+                .actor_addresses
+                .peer_list
+                .send(AddPeer {
+                    mining_addr: Address::random(),
+                    peer: peer_list_entry,
+                })
+                .await
+            {
+                error!("Unable to send AddPeerMessage message {e}");
+            };
+        }
+
+        // if we are an empty node joining an existing network
+        if !self.data_exists && !self.is_genesis {
+            sync_state_from_peers(
+                ctx.config.trusted_peers.clone(),
+                ctx.actor_addresses.block_discovery_addr.clone(),
+                ctx.actor_addresses.mempool.clone(),
+                ctx.actor_addresses.peer_list.clone(),
+            )
+            .await?;
+        }
 
         Ok(ctx)
     }
@@ -417,7 +468,7 @@ impl IrysNode {
                         // read the latest block info
                         let node_config = Arc::new(node.irys_node_config.clone());
                         let (latest_block_height, block_index, latest_block) =
-                            read_latest_block_data(node_config).await;
+                            read_latest_block_data(node_config.clone()).await;
                         latest_block_height_tx
                             .send(latest_block_height)
                             .expect("to be able to send the latest block height");
@@ -703,7 +754,7 @@ impl IrysNode {
             &block_tree_guard,
             &mempool_service,
             &vdf_steps_guard,
-            block_discovery,
+            block_discovery.clone(),
             price_oracle,
         );
 
@@ -746,6 +797,7 @@ impl IrysNode {
         let irys_node_ctx = IrysNodeCtx {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
+                block_discovery_addr: block_discovery,
                 block_producer: block_producer_addr,
                 packing: packing_actor_addr,
                 mempool: mempool_service.clone(),

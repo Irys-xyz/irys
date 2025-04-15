@@ -16,6 +16,7 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
         price_adjustment_interval,
         ..Config::testnet()
     })
+    .await
     .start()
     .await;
 
@@ -58,6 +59,7 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
         price_adjustment_interval,
         ..Config::testnet()
     })
+    .await
     .start()
     .await;
     // (oracle price, EMA price)
@@ -115,6 +117,7 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
         token_price_safe_range: token_price_safe_range.clone(), // 10% allowed diff from the previous oracle
         ..Config::testnet()
     })
+    .await
     .start()
     .await;
 

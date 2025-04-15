@@ -4,6 +4,7 @@ use irys_actors::block_producer::SolutionFoundMessage;
 use irys_actors::block_tree_service::get_canonical_chain;
 use irys_actors::block_validation;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
+use irys_api_server::create_listener;
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::tx_header_by_txid;
 use irys_packing::capacity_single::compute_entropy_chunk;
@@ -20,6 +21,8 @@ use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::time::sleep;
@@ -132,6 +135,16 @@ pub async fn capacity_chunk_solution(
     }
 }
 
+pub async fn random_port() -> eyre::Result<u16> {
+    let listener = create_listener(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))?;
+    //the assigned port will be random (decided by the OS)
+    let port = listener
+        .local_addr()
+        .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?
+        .port();
+    Ok(port)
+}
+
 // Reasons tx could fail to be added to mempool
 #[derive(Debug)]
 pub enum AddTxError {
@@ -146,26 +159,23 @@ pub struct IrysNodeTest<T = ()> {
     pub temp_dir: TempDir,
 }
 
-impl Default for IrysNodeTest<()> {
-    fn default() -> Self {
-        let config = Config::testnet();
-        Self::new_genesis(config)
-    }
-}
-
 impl IrysNodeTest<()> {
-    pub fn new(config: Config) -> Self {
-        Self::new_inner(config, false)
+    pub async fn default_async() -> Self {
+        let config = Config::testnet();
+        Self::new_genesis(config).await
+    }
+    pub async fn new(config: Config) -> Self {
+        Self::new_inner(config, false).await
     }
 
-    pub fn new_genesis(config: Config) -> Self {
-        Self::new_inner(config, true)
+    pub async fn new_genesis(config: Config) -> Self {
+        Self::new_inner(config, true).await
     }
 
-    fn new_inner(mut config: Config, is_genesis: bool) -> Self {
+    async fn new_inner(mut config: Config, is_genesis: bool) -> Self {
         let temp_dir = temporary_directory(None, false);
         config.base_directory = temp_dir.path().to_path_buf();
-        let cfg = IrysNode::new(config, is_genesis);
+        let cfg = IrysNode::new(config, is_genesis).await;
         Self {
             cfg,
             temp_dir,
@@ -376,11 +386,12 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
-        // this will reload the storage config data too
         let cfg = IrysNode {
             irys_node_config: self.cfg.irys_node_config,
             genesis_timestamp: self.cfg.genesis_timestamp,
-            ..IrysNode::new(self.cfg.config, false)
+            data_exists: true,
+            is_genesis: false,
+            ..self.cfg
         };
         IrysNodeTest {
             node_ctx: (),

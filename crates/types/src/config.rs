@@ -4,6 +4,7 @@ use crate::{
         phantoms::{CostPerGb, DecayRate, IrysPrice, Percentage, Usd},
         Amount,
     },
+    PeerAddress,
 };
 use alloy_primitives::Address;
 use rust_decimal::Decimal;
@@ -42,6 +43,9 @@ pub struct ConsensusConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub is_genesis: bool,
+
+    /// The initial list of peers to contact for block sync
+    pub trusted_peers: Vec<PeerAddress>,
 
     pub consensus_cfg: PathBuf,
 

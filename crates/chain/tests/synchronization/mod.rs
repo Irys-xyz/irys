@@ -15,7 +15,7 @@ use tracing::{debug, info};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
-    let mut node = IrysNodeTest::default();
+    let mut node = IrysNodeTest::default_async().await;
     let main_address = node.cfg.config.miner_address();
     let account1 = IrysSigner::random_signer(&node.cfg.config);
     let var_name = vec![

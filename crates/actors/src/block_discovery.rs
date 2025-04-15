@@ -100,6 +100,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             other => {
                 return Box::pin(async move {
                     Err(eyre::eyre!(
+                        // the previous blocks header was not found in the database
                         "Failed to get block header for hash {}: {:?}",
                         prev_block_hash,
                         other

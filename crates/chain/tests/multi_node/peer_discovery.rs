@@ -33,7 +33,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         ..Config::testnet()
     };
     let signer = IrysSigner::random_signer(&test_config);
-    let mut node = IrysNodeTest::new_genesis(test_config.clone());
+    let mut node = IrysNodeTest::new_genesis(test_config.clone()).await;
     node.cfg.irys_node_config.extend_genesis_accounts(vec![(
         signer.address(),
         GenesisAccount {
@@ -85,11 +85,12 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     // Parse String to JSON
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
-    let peer_list: Vec<SocketAddr> = serde_json::from_str(&body_str).expect("Failed to parse JSON");
+    let peer_list: Vec<PeerAddress> =
+        serde_json::from_str(&body_str).expect("Failed to parse JSON");
     println!("Parsed JSON: {:?}", peer_list);
 
     // Now you can work with the structured data
-    assert!(peer_list.is_empty(), "Peer list should be empty");
+    assert!(!peer_list.is_empty(), "Peer list should not be empty");
 
     // Post a 3 peer requests from different mining addresses, have them report
     // different IP addresses
@@ -159,7 +160,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     // Verify the version response body contains the previously discovered peers
     match peer_response {
         PeerResponse::Accepted(accepted) => {
-            assert_eq!(accepted.peers.len(), 1, "Expected 1 peers");
+            assert!(accepted.peers.len() >= 1, "Expected at least 1 peers");
             assert!(
                 accepted.peers.contains(&PeerAddress {
                     gossip: "127.0.0.1:8080".parse().unwrap(),
@@ -198,7 +199,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     // Verify the version response body contains the previously discovered peers
     match peer_response {
         PeerResponse::Accepted(accepted) => {
-            assert_eq!(accepted.peers.len(), 2, "Expected 2 peers");
+            assert!(accepted.peers.len() >= 2, "Expected at least 2 peers");
             assert!(
                 accepted.peers.contains(&PeerAddress {
                     gossip: "127.0.0.1:8080".parse().unwrap(),
@@ -227,25 +228,23 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let peer_list: Vec<PeerAddress> =
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
     println!("Parsed JSON: {:?}", peer_list);
-
     assert!(
-        peer_list.iter().all(|addr| {
-            vec![
-                PeerAddress {
-                    gossip: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
-                    api: "127.0.0.1:8081".parse::<SocketAddr>().unwrap(),
-                },
-                PeerAddress {
-                    gossip: "127.0.0.2:8080".parse::<SocketAddr>().unwrap(),
-                    api: "127.0.0.2:8081".parse::<SocketAddr>().unwrap(),
-                },
-                PeerAddress {
-                    gossip: "127.0.0.3:8080".parse::<SocketAddr>().unwrap(),
-                    api: "127.0.0.3:8081".parse::<SocketAddr>().unwrap(),
-                },
-            ]
-            .contains(addr)
-        }),
+        vec![
+            PeerAddress {
+                gossip: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
+                api: "127.0.0.1:8081".parse::<SocketAddr>().unwrap(),
+            },
+            PeerAddress {
+                gossip: "127.0.0.2:8080".parse::<SocketAddr>().unwrap(),
+                api: "127.0.0.2:8081".parse::<SocketAddr>().unwrap(),
+            },
+            PeerAddress {
+                gossip: "127.0.0.3:8080".parse::<SocketAddr>().unwrap(),
+                api: "127.0.0.3:8081".parse::<SocketAddr>().unwrap(),
+            },
+        ]
+        .iter()
+        .all(|addr| { peer_list.contains(addr) }),
         "Peer list missing expected addresses"
     );
 

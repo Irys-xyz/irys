@@ -29,7 +29,7 @@ use tracing::info;
 async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
-    let mut node = IrysNodeTest::default();
+    let mut node = IrysNodeTest::default_async().await;
     node.cfg.storage_config = StorageConfig {
         chunk_size: 32,
         num_chunks_in_partition: 1000,

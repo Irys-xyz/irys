@@ -2,10 +2,10 @@ use crate::utils::{mine_block, IrysNodeTest};
 use irys_actors::block_tree_service::get_canonical_chain;
 use std::time::Duration;
 
-#[test_log::test(tokio::test)]
+#[test_log::test(actix_web::test)]
 async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
     // setup
-    let node = IrysNodeTest::default();
+    let node = IrysNodeTest::default_async().await;
 
     // action:
     // 1. start the genesis node;
@@ -25,7 +25,7 @@ async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
     assert_eq!(
         header_1.height,
         chain.last().unwrap().1,
-        "expect only the first manually miend block to be saved"
+        "expect only the first manually mined block to be saved"
     );
     assert_eq!(
         chain.len(),
@@ -45,6 +45,6 @@ async fn heavy_test_can_resume_from_genesis_startup() -> eyre::Result<()> {
 #[test_log::test(tokio::test)]
 #[should_panic(expected = "IrysNodeCtx must be stopped before all instances are dropped")]
 async fn heavy_test_stop_guard() -> () {
-    let node = IrysNodeTest::default().start().await;
+    let node = IrysNodeTest::default_async().await.start().await;
     drop(node);
 }
