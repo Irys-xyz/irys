@@ -1,45 +1,15 @@
 use std::time::Duration;
 
-use crate::{Config, StorageConfig, U256};
-use rust_decimal::Decimal;
+use crate::{ConsensusConfig, DifficultyAdjustmentConfig, U256};
 use rust_decimal_macros::dec;
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct DifficultyAdjustmentConfig {
-    /// Desired block time in seconds.
-    pub target_block_time: u64,
-    /// Number of blocks between difficulty adjustments.
-    pub adjustment_interval: u64,
-    /// Factor for smoothing difficulty adjustments.
-    pub max_adjustment_factor: Decimal,
-    /// Factor for smoothing difficulty adjustments.
-    pub min_adjustment_factor: Decimal,
-    /// Minimum difficulty allowed.
-    pub min_difficulty: U256,
-    /// Maximum difficulty allowed.
-    pub max_difficulty: U256,
-}
-
-impl DifficultyAdjustmentConfig {
-    pub fn new(config: &Config) -> Self {
-        DifficultyAdjustmentConfig {
-            target_block_time: config.block_time,
-            adjustment_interval: config.difficulty_adjustment_interval,
-            max_adjustment_factor: config.max_difficulty_adjustment_factor,
-            min_adjustment_factor: config.min_difficulty_adjustment_factor,
-            min_difficulty: U256::one(), // TODO: make this customizable if desirable
-            max_difficulty: U256::MAX,
-        }
-    }
-}
 
 pub fn calculate_initial_difficulty(
     difficulty_config: &DifficultyAdjustmentConfig,
-    storage_config: &StorageConfig,
+    consensus_config: &ConsensusConfig,
     storage_module_count: u64,
 ) -> eyre::Result<U256> {
-    let hashes_per_sec = storage_config.num_chunks_in_recall_range * storage_module_count;
-    let block_time = difficulty_config.target_block_time;
+    let hashes_per_sec = consensus_config.num_chunks_in_recall_range * storage_module_count;
+    let block_time = difficulty_config.block_time;
 
     eyre::ensure!(
         !(hashes_per_sec == 0 || block_time == 0),
@@ -57,11 +27,11 @@ pub fn calculate_initial_difficulty(
     let probability_per_hash = target / (max_diff / scale); // Divide max first
     let expected_hashes = scale / probability_per_hash;
 
-    println!("Block hashrate: {}", block_hashrate);
-    println!("Initial difficulty: {}", initial_difficulty);
-    println!("Target: {}", target);
-    println!("Probability per hash (×10^-6): {}", probability_per_hash);
-    println!("Expected hashes to find block: {}", expected_hashes);
+    tracing::info!("Block hashrate: {}", block_hashrate);
+    tracing::info!("Initial difficulty: {}", initial_difficulty);
+    tracing::info!("Target: {}", target);
+    tracing::info!("Probability per hash (×10^-6): {}", probability_per_hash);
+    tracing::info!("Expected hashes to find block: {}", expected_hashes);
 
     Ok(initial_difficulty)
 }
@@ -105,7 +75,7 @@ pub fn calculate_difficulty(
     current_diff: U256,
     difficulty_config: &DifficultyAdjustmentConfig,
 ) -> (U256, Option<AdjustmentStats>) {
-    let blocks_between_adjustments = difficulty_config.adjustment_interval as u128;
+    let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval as u128;
 
     // Early return if no difficulty adjustment needed
     if block_height as u128 % blocks_between_adjustments != 0 {
@@ -113,7 +83,7 @@ pub fn calculate_difficulty(
     }
 
     // Calculate times
-    let target_block_time_ms = (difficulty_config.target_block_time * 1000) as u128;
+    let target_block_time_ms = (difficulty_config.block_time * 1000) as u128;
     let target_time_ms = target_block_time_ms * blocks_between_adjustments;
     let actual_time_ms = current_timestamp - last_diff_timestamp;
 
@@ -125,7 +95,7 @@ pub fn calculate_difficulty(
     // Calculate difference
     let percent_diff = actual_block_time.abs_diff(target_block_time).as_millis() * 100
         / target_block_time.as_millis();
-    let min_threshold: u128 = (difficulty_config.min_adjustment_factor * dec![100.0])
+    let min_threshold: u128 = (difficulty_config.min_difficulty_adjustment_factor * dec![100.0])
         .try_into()
         .unwrap();
 
@@ -159,50 +129,38 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use alloy_primitives::Address;
     use openssl::sha;
 
-    use crate::{adjust_difficulty, calculate_initial_difficulty, StorageConfig, H256, U256};
+    use crate::{adjust_difficulty, calculate_initial_difficulty, H256, U256};
 
     use super::DifficultyAdjustmentConfig;
 
     #[test]
     fn test_adjustments() {
-        let config = Config::testnet();
+        let consensus_config = ConsensusConfig::testnet();
         let difficulty_config = DifficultyAdjustmentConfig {
-            target_block_time: 5,              // 5 seconds
-            adjustment_interval: 10,           // every X blocks
-            max_adjustment_factor: dec![4],    // No more than 4x or 1/4th with each adjustment
-            min_adjustment_factor: dec![0.25], // a minimum 25% adjustment threshold
-            min_difficulty: U256::one(),
-            max_difficulty: U256::MAX,
-        };
-
-        let storage_config = StorageConfig {
-            chunk_size: 32,
-            num_chunks_in_partition: 40,
-            num_chunks_in_recall_range: 8,
-            num_partitions_in_slot: 1,
-            miner_address: Address::random(),
-            min_writes_before_sync: 1,
-            entropy_packing_iterations: config.entropy_packing_iterations,
-            chunk_migration_depth: 1, // Testnet / single node config
-            chain_id: config.chain_id,
+            block_time: 5,
+            difficulty_adjustment_interval: 10,
+            max_difficulty_adjustment_factor: dec![4],
+            min_difficulty_adjustment_factor: dec![0.25],
         };
 
         let mut storage_module_count = 3;
 
         let seed = hash_sha256("test".as_bytes());
-        let hashes_per_second = storage_config.num_chunks_in_recall_range * storage_module_count;
+        let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
 
-        let difficulty =
-            calculate_initial_difficulty(&difficulty_config, &storage_config, storage_module_count)
-                .unwrap();
+        let difficulty = calculate_initial_difficulty(
+            &difficulty_config,
+            &consensus_config,
+            storage_module_count,
+        )
+        .unwrap();
 
         let num_blocks = 2000;
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
 
-        let expected = difficulty_config.target_block_time as f64;
+        let expected = difficulty_config.block_time as f64;
         let actual = block_time;
         assert_expected_with_tolerance(expected, actual, 1.0);
         println!(" block time: {:.2?}", seconds_to_duration(block_time));
@@ -210,7 +168,7 @@ mod tests {
         // Lets increase the hashrate by 2x so blocks are coming too quickly
         println!("Double the hash power and verify block_times are half as long");
         storage_module_count = 6;
-        let hashes_per_second = storage_config.num_chunks_in_recall_range * storage_module_count;
+        let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
         println!(" block time: {:.2?}", seconds_to_duration(block_time));
 
@@ -219,7 +177,7 @@ mod tests {
         assert_expected_with_tolerance(expected, actual, 1.0);
 
         println!("Perform a difficulty adjustment with the new block_time");
-        let target_time_ms = (difficulty_config.target_block_time * 1000) as u128;
+        let target_time_ms = (difficulty_config.block_time * 1000) as u128;
         let actual_time_ms = (block_time * 1000.0) as u128;
         let difficulty = adjust_difficulty(difficulty, actual_time_ms, target_time_ms);
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
@@ -231,7 +189,7 @@ mod tests {
 
         println!("Double the hashpower again and expect block_time to half");
         storage_module_count = 12;
-        let hashes_per_second = storage_config.num_chunks_in_recall_range * storage_module_count;
+        let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
         let (new_block_time, seed) =
             simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
         println!(" block time: {:.2?}", seconds_to_duration(new_block_time));
@@ -242,7 +200,7 @@ mod tests {
 
         // The adjustment has over corrected, let it adjust again
         println!("Adjust difficulty to account for hashpower doubling");
-        let target_time_ms = (difficulty_config.target_block_time * 1000) as u128;
+        let target_time_ms = (difficulty_config.block_time * 1000) as u128;
         let actual_time_ms = (new_block_time * 1000.0) as u128;
         let difficulty = adjust_difficulty(difficulty, actual_time_ms, target_time_ms);
         let (new_block_time, seed) =
@@ -255,7 +213,7 @@ mod tests {
 
         println!("Reduce hashpower to 1/4th of previous");
         storage_module_count = 3;
-        let hashes_per_second = storage_config.num_chunks_in_recall_range * storage_module_count;
+        let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
         let (new_block_time, seed) =
             simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
         println!(" block time: {:.2?}", seconds_to_duration(new_block_time));
@@ -265,7 +223,7 @@ mod tests {
         assert_expected_with_tolerance(expected, actual, 1.0);
 
         println!("Apply difficulty adjustment");
-        let target_time_ms = (difficulty_config.target_block_time * 1000) as u128;
+        let target_time_ms = (difficulty_config.block_time * 1000) as u128;
         let actual_time_ms = (new_block_time * 1000.0) as u128;
         let difficulty = adjust_difficulty(difficulty, actual_time_ms, target_time_ms);
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
@@ -276,7 +234,7 @@ mod tests {
         assert_expected_with_tolerance(expected, actual, 1.0);
 
         println!("Apply difficulty adjustment");
-        let target_time_ms = (difficulty_config.target_block_time * 1000) as u128;
+        let target_time_ms = (difficulty_config.block_time * 1000) as u128;
         let actual_time_ms = (block_time * 1000.0) as u128;
         let difficulty = adjust_difficulty(difficulty, actual_time_ms, target_time_ms);
         let (mean, _seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);

@@ -462,7 +462,7 @@ pub struct CombinedBlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::{validate_path, Config, TxIngressProof};
+    use crate::{validate_path, NodeConfig, TxIngressProof};
 
     use super::*;
     use alloy_primitives::Signature;
@@ -710,7 +710,7 @@ mod tests {
     fn test_irys_block_header_signing() {
         // setup
         let mut header = mock_header();
-        let testnet_config = Config::testnet();
+        let testnet_config = NodeConfig::testnet();
         let signer = testnet_config.irys_signer();
 
         // action

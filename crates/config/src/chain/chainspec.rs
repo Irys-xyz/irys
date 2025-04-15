@@ -1,5 +1,5 @@
 use irys_primitives::GenesisAccount;
-use irys_types::{config, Address, IrysBlockHeader};
+use irys_types::{config, Address, ConsensusConfig, IrysBlockHeader, NodeConfig};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder};
 use tracing::debug;
 
@@ -14,12 +14,12 @@ pub struct IrysChainSpecBuilder {
 
 impl IrysChainSpecBuilder {
     /// Construct a new builder from the mainnet chain spec.
-    pub fn from_config(config: &config::Config) -> Self {
+    pub fn from_config(node_config: NodeConfig, consensus_config: &ConsensusConfig) -> Self {
         let genesis = IrysBlockHeader {
-            oracle_irys_price: config.genesis_token_price,
-            ema_irys_price: config.genesis_token_price,
-            miner_address: config.miner_address(),
-            reward_address: config.miner_address(),
+            oracle_irys_price: consensus_config.genesis_price,
+            ema_irys_price: consensus_config.genesis_price,
+            miner_address: node_config.miner_address(),
+            reward_address: node_config.miner_address(),
             height: 0,
             system_ledgers: vec![], // Make sure theres no invalid txids in the system ledger
             // todo: we need a proper genesis block in the config rather than re-using a mock header

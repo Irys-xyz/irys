@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use irys_chain::IrysNode;
-use irys_types::Config;
+use irys_types::{Config, ConsensusConfig, NodeConfig};
 use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
@@ -18,18 +18,22 @@ async fn main() -> eyre::Result<()> {
         .parse::<PathBuf>()
         .expect("file path to be valid");
     let config = std::fs::read_to_string(config)
-        .map(|config_file| toml::from_str::<Config>(&config_file).expect("invalid config file"))
+        .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
         .unwrap_or_else(|_err| {
             tracing::warn!("config file not provided, defaulting to testnet config");
             Config::testnet()
         });
 
-    // check env var to see if we are starting up in Genesis mode
-    let is_genesis = std::env::var("GENESIS").map(|_| true).unwrap_or(false);
+    // load the consesnsus config
+    let consensus = std::fs::read_to_string(config.consensus_cfg)
+        .map(|consensus_cfg| {
+            toml::from_str::<ConsensusConfig>(&consensus_cfg).expect("invalid consensus file")
+        })
+        .expect("consensus cfg does not exist");
 
     // start the node
     tracing::info!("starting the node");
-    let handle = IrysNode::new(config, is_genesis).await.start().await?;
+    let handle = IrysNode::new(config, consensus).start().await?;
     handle.start_mining()?;
 
     // wait for the node to be shut down

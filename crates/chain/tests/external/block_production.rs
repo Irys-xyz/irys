@@ -33,14 +33,14 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     .await;
 
     assert_eq!(
-        node.cfg.config.miner_address(),
+        node.cfg.node_config.miner_address(),
         Address::from_slice(expected_addr.as_slice())
     );
     let account1_address = hex::decode(DEV2_ADDRESS)?;
     let account1 = IrysSigner {
         signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
-        chain_id: node.cfg.config.chain_id,
-        chunk_size: node.cfg.config.chunk_size as usize,
+        chain_id: node.cfg.node_config.chain_id,
+        chunk_size: node.cfg.node_config.chunk_size as usize,
     };
     assert_eq!(
         account1.address(),
@@ -49,7 +49,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
 
     node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
-            node.cfg.config.miner_address(),
+            node.cfg.node_config.miner_address(),
             GenesisAccount {
                 balance: U256::from(690000000000000000_u128),
                 ..Default::default()

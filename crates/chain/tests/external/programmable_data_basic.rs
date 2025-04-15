@@ -44,8 +44,8 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "info");
 
     let mut node = IrysNodeTest::default_async().await;
-    let main_address = node.cfg.config.miner_address();
-    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    let main_address = node.cfg.node_config.miner_address();
+    let account1 = IrysSigner::random_signer(&node.cfg.node_config);
     node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             main_address,
