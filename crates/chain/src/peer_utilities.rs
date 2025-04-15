@@ -3,9 +3,10 @@ use base58::ToBase58;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     mempool_service::{MempoolService, TxIngressMessage},
-    peer_list_service::{AddPeerMessage, PeerListService},
+    peer_list_service::{AddPeer, PeerListService},
 };
 use irys_database::{BlockIndexItem, DataLedger};
+use irys_types::Address;
 
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
@@ -220,6 +221,7 @@ pub async fn sync_state_from_peers(
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
     peer_list_service_addr: Addr<PeerListService>,
+    mining_address: Address,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
@@ -237,6 +239,7 @@ pub async fn sync_state_from_peers(
         &client,
         trusted_peers,
         peer_list_service_addr.clone(),
+        mining_address,
     )
     .await
     {
@@ -305,6 +308,7 @@ pub async fn fetch_and_update_peers(
     client: &awc::Client,
     peers_to_ask: Vec<PeerAddress>,
     peer_list_service_addr: Addr<PeerListService>,
+    mining_address: Address,
 ) -> Option<u64> {
     let futures = peers_to_ask.into_iter().map(|peer| {
         let client = client.clone();
@@ -335,7 +339,10 @@ pub async fn fetch_and_update_peers(
                             ..Default::default()
                         };
                         if let Err(e) = peer_list_service_addr
-                            .send(AddPeerMessage(peer_list_entry))
+                            .send(AddPeer {
+                                mining_addr: mining_address,
+                                peer: peer_list_entry,
+                            })
                             .await
                         {
                             error!("Unable to send AddPeerMessage message {e}");

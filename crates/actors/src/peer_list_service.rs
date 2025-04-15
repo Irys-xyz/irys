@@ -87,27 +87,6 @@ impl SystemService for PeerListService {
     }
 }
 
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
-pub struct AddPeerMessage(pub PeerListItem);
-
-impl Handler<AddPeerMessage> for PeerListService {
-    type Result = ();
-    fn handle(&mut self, msg: AddPeerMessage, _ctx: &mut Self::Context) -> Self::Result {
-        //TODO: What is the purpose of this mining address when adding a peer?
-        let address = Address::random();
-        let db = self.db.as_mut().expect("expected valid db");
-        if let Err(e) = db
-            .update(|tx| insert_peer_list_item(tx, &address, &msg.0))
-            .expect("")
-        {
-            error!("Writing peer to db failed: {e}");
-        }
-
-        ()
-    }
-}
-
 impl PeerListService {
     /// Create a new instance of the peer_list_service actor passing in a reference
     /// counted reference to a `DatabaseEnv`

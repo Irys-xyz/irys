@@ -18,7 +18,7 @@ use irys_actors::{
     mining::PartitionMiningActor,
     packing::PackingConfig,
     packing::{PackingActor, PackingRequest},
-    peer_list_service::{AddPeerMessage, PeerListService},
+    peer_list_service::{AddPeer, PeerListService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationService,
@@ -385,7 +385,10 @@ impl IrysNode {
             if let Err(e) = ctx
                 .actor_addresses
                 .peer_list
-                .send(AddPeerMessage(peer_list_entry))
+                .send(AddPeer {
+                    mining_addr: ctx.node_config.mining_signer.address(),
+                    peer: peer_list_entry,
+                })
                 .await
             {
                 error!("Unable to send AddPeerMessage message {e}");
@@ -399,6 +402,7 @@ impl IrysNode {
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
                 ctx.actor_addresses.peer_list.clone(),
+                ctx.node_config.mining_signer.address(),
             )
             .await?;
         }
