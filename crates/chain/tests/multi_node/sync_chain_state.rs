@@ -14,41 +14,19 @@ use tracing::{debug, error};
 /// check that the blocks are valid, check that peer1, peer2, and genesis are indeed synced
 #[test_log::test(actix_web::test)]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
+    // setup trusted peers connection data
+    let (trusted_peers, genesis_trusted_peers) = init_peers();
+    // setup configs for genesis and nodes
+    let (testnet_config_genesis, testnet_config_peer1, testnet_config_peer2) =
+        init_configs(&genesis_trusted_peers, &trusted_peers);
+    // start genesis node
+    let ctx_genesis_node = start_genesis_node(&testnet_config_genesis).await;
+
     let required_blocks_height: usize = 5;
     // +2 is so genesis is two blocks ahead of the peer nodes, as currently we check the peers index which lags behind
     let required_genesis_node_height = required_blocks_height + 2;
-    let trusted_peers = vec![PeerAddress {
-        api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
-        gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
-    }];
-    let genesis_trusted_peers = vec![
-        PeerAddress {
-            api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
-        },
-        PeerAddress {
-            api: "127.0.0.2:1234".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.2:1235".parse().expect("valid SocketAddr expected"),
-        },
-        PeerAddress {
-            api: "127.0.0.3:1234".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.3:1235".parse().expect("valid SocketAddr expected"),
-        },
-    ];
-    let testnet_config_genesis = Config {
-        port: 8080,
-        gossip_service_port: 8081,
-        trusted_peers: genesis_trusted_peers.clone(),
-        ..Config::testnet()
-    };
-    let ctx_genesis_node = setup_with_config(
-        testnet_config_genesis.clone(),
-        "heavy_sync_chain_state_genesis",
-        true,
-    )
-    .await
-    .expect("found invalid genesis ctx");
-    // mine x blocks
+
+    // mine x blocks on genesis
     mine_blocks(&ctx_genesis_node.node, required_genesis_node_height)
         .await
         .expect("expected many mined blocks");
@@ -58,35 +36,9 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // assert that genesis node is advertising the trusted peers it was given via config
     assert_eq!(&genesis_trusted_peers, &peer_list_items);
 
-    //start two additional peers, instructing them to use the genesis peer as their trusted peer
-
-    //start peer1
-    let testnet_config_peer1 = Config {
-        port: 0, //random port
-        trusted_peers: trusted_peers.clone(),
-        ..Config::testnet()
-    };
-    let ctx_peer1_node = setup_with_config(
-        testnet_config_peer1.clone(),
-        "heavy_sync_chain_state_peer1",
-        false,
-    )
-    .await
-    .expect("found invalid genesis ctx for peer1");
-
-    //start peer2
-    let testnet_config_peer2 = Config {
-        port: 0, //random port
-        trusted_peers,
-        ..Config::testnet()
-    };
-    let ctx_peer2_node = setup_with_config(
-        testnet_config_peer2.clone(),
-        "heavy_sync_chain_state_peer2",
-        false,
-    )
-    .await
-    .expect("found invalid genesis ctx for peer2");
+    // start additional nodes (after we have mined some blocks on genesis)
+    let (ctx_peer1_node, ctx_peer2_node) =
+        start_peer_nodes(&testnet_config_peer1, &testnet_config_peer2).await;
 
     // check the height returned by the peers, and when it is high enough do the api call for the block_index and then shutdown the peer
     // this should expand with the block height
@@ -179,6 +131,87 @@ struct TestCtx {
         reason = "to prevent drop() being called and cleaning up resources"
     )]
     temp_dir: TempDir,
+}
+
+fn init_peers() -> (Vec<PeerAddress>, Vec<PeerAddress>) {
+    let trusted_peers = vec![PeerAddress {
+        api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+        gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+    }];
+    let genesis_trusted_peers = vec![
+        PeerAddress {
+            api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+        },
+        PeerAddress {
+            api: "127.0.0.2:1234".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.2:1235".parse().expect("valid SocketAddr expected"),
+        },
+        PeerAddress {
+            api: "127.0.0.3:1234".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.3:1235".parse().expect("valid SocketAddr expected"),
+        },
+    ];
+    (trusted_peers, genesis_trusted_peers)
+}
+
+fn init_configs(
+    genesis_trusted_peers: &Vec<PeerAddress>,
+    trusted_peers: &Vec<PeerAddress>,
+) -> (Config, Config, Config) {
+    let testnet_config_genesis = Config {
+        port: 8080,
+        gossip_service_port: 8081,
+        trusted_peers: genesis_trusted_peers.clone(),
+        ..Config::testnet()
+    };
+    let testnet_config_peer1 = Config {
+        port: 0, //random port
+        trusted_peers: trusted_peers.clone(),
+        ..Config::testnet()
+    };
+    let testnet_config_peer2 = Config {
+        port: 0, //random port
+        trusted_peers: trusted_peers.clone(),
+        ..Config::testnet()
+    };
+    (
+        testnet_config_genesis,
+        testnet_config_peer1,
+        testnet_config_peer2,
+    )
+}
+
+async fn start_genesis_node(testnet_config_genesis: &Config) -> TestCtx {
+    let ctx_genesis_node = setup_with_config(
+        testnet_config_genesis.clone(),
+        "heavy_sync_chain_state_genesis",
+        true,
+    )
+    .await
+    .expect("found invalid genesis ctx");
+    ctx_genesis_node
+}
+
+async fn start_peer_nodes(
+    testnet_config_peer1: &Config,
+    testnet_config_peer2: &Config,
+) -> (TestCtx, TestCtx) {
+    let ctx_peer1_node = setup_with_config(
+        testnet_config_peer1.clone(),
+        "heavy_sync_chain_state_peer1",
+        false,
+    )
+    .await
+    .expect("found invalid genesis ctx for peer1");
+    let ctx_peer2_node = setup_with_config(
+        testnet_config_peer2.clone(),
+        "heavy_sync_chain_state_peer2",
+        false,
+    )
+    .await
+    .expect("found invalid genesis ctx for peer2");
+    (ctx_peer1_node, ctx_peer2_node)
 }
 
 async fn setup_with_config(
