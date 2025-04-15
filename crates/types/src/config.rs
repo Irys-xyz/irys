@@ -1,9 +1,3 @@
-use std::{env, path::PathBuf};
-
-use alloy_primitives::Address;
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
-
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
@@ -11,95 +5,74 @@ use crate::{
         Amount,
     },
 };
+use alloy_primitives::Address;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use std::{env, net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Config {
-    /// Block time in seconds
-    pub block_time: u64,
-    pub max_data_txs_per_block: u64,
-    pub difficulty_adjustment_interval: u64,
-    pub max_difficulty_adjustment_factor: Decimal,
-    pub min_difficulty_adjustment_factor: Decimal,
+pub struct ConsensusConfig {
+    pub chain_id: u64,
+
+    /// The annual cost per storing a single GB of data on Irys
+    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    pub annual_cost_per_gb: Amount<(CostPerGb, Usd)>,
+
+    /// A percentage value used in pricing calculations. Accounts for storage hardware getting cheaper as time goes on
+    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    pub decay_rate: Amount<DecayRate>,
+
+    pub vdf: VdfConfig,
     pub chunk_size: u64,
     pub num_chunks_in_partition: u64,
     pub num_chunks_in_recall_range: u64,
-    pub vdf_reset_frequency: usize,
-    pub vdf_parallel_verification_thread_limit: usize,
-    pub num_checkpoints_in_vdf_step: usize,
-    pub vdf_sha_1s: u64,
-    pub entropy_packing_iterations: u32,
-    pub chain_id: u64,
-    /// Scaling factor for the capacity projection curve
-    pub capacity_scalar: u64,
-    pub num_blocks_in_epoch: u64,
-    pub submit_ledger_epoch_length: u64,
     pub num_partitions_per_slot: u64,
-    pub num_writes_before_sync: u64,
-    /// If `true`, the ledger will be persisted on disk when the node restarts. Otherwise the
-    /// entire state of the node will reset to genesis upon restart.
-    pub reset_state_on_restart: bool,
-    // Longest chain consensus
-    /// Number of block confirmations required before considering data final.
-    ///
-    /// In Nakamoto consensus, finality is probabilistic based on chain depth:
-    /// - 6 confirmations protects against attackers with <25% hashpower
-    /// - 20 confirmations protects against attackers with <40% hashpower
-    /// - No number of confirmations is secure against attackers with >50% hashpower
-    pub chunk_migration_depth: u32,
+
+    /// How many repliceas are needed for data to be considered as "upgraded to perm storage"
+    pub number_of_ingerss_proofs: u64,
+
+    /// The amount of years for a piece of data to be considered as permanent
+    pub safe_minimum_number_of_years: u64,
+
+    /// defines the range of how much can Oracle token price fluctuate between subsequent blocks
+    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    pub token_price_safe_range: Amount<Percentage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeConfig {
+    pub is_genesis: bool,
+
+    pub consensus_cfg: PathBuf,
+
+    pub difficulty_adjustment: DifficultyAdjustmentConfig,
+
+    pub mempool: EmaConfig,
+
+    pub ema: EmaConfig,
+
+    pub oracle: OracleConfig,
+
     #[serde(
         deserialize_with = "serde_utils::signing_key_from_hex",
         serialize_with = "serde_utils::serializes_signing_key"
     )]
     pub mining_key: k256::ecdsa::SigningKey,
-    // TODO: enable this after fixing option in toml
-    pub num_capacity_partitions: Option<u64>,
-    /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
-    pub port: u16,
-    /// the number of block a given anchor (tx or block hash) is valid for.
-    /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
-    pub anchor_expiry_depth: u8,
-    /// defines the genesis price of the $IRYS, expressed in $USD
-    #[serde(deserialize_with = "serde_utils::token_amount")]
-    pub genesis_token_price: Amount<(IrysPrice, Usd)>,
-    /// defines the range of how much can Oracle token price fluctuate between subsequent blocks
-    #[serde(deserialize_with = "serde_utils::percentage_amount")]
-    pub token_price_safe_range: Amount<Percentage>,
-    /// Defines how frequently the Irys EMA price should be adjusted
-    pub price_adjustment_interval: u64,
-    /// number of blocks cache cleaning will lag behind block finalization
-    pub cache_clean_lag: u8,
-    /// number of packing threads
-    pub cpu_packing_concurrency: u16,
-    /// GPU kernel batch size
-    pub gpu_packing_batch_size: u32,
-    /// Irys price oracle
-    pub oracle_config: OracleConfig,
-    /// The base directory where to look for artifact data
-    #[serde(default = "default_irys_path")]
-    pub base_directory: PathBuf,
-    /// The IP address of the gossip service
-    pub gossip_service_bind_ip: String,
-    /// The port of the gossip service
-    pub gossip_service_port: u16,
-    /// The annual cost per storing a single GB of data on Irys
-    #[serde(deserialize_with = "serde_utils::percentage_amount")]
-    pub annual_cost_per_gb: Amount<(CostPerGb, Usd)>,
-    /// A percentage value used in pricing calculations. Accounts for storage hardware getting cheaper as time goes on
-    #[serde(deserialize_with = "serde_utils::percentage_amount")]
-    pub decay_rate: Amount<DecayRate>,
+
+    pub storage: StorageConfig,
+    pub pricing: PricingConfig,
+    pub gossip: GossipConfig,
+
+    pub packing: PackingConfig,
+    pub cache: CacheConfig,
+    pub http: HttpConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PricingConfig {
     /// Used in priding calculations. Extra fee percentage toped up by nodes
     #[serde(deserialize_with = "serde_utils::percentage_amount")]
     pub fee_percentage: Amount<Percentage>,
-    /// The amount of years for a piece of data to be considered as permanent
-    pub safe_minimum_number_of_years: u64,
-    /// How many repliceas are needed for data to be considered as "upgraded to perm storage"
-    pub number_of_ingerss_proofs: u64,
-}
-
-fn default_irys_path() -> PathBuf {
-    env::current_dir()
-        .expect("Unable to determine working dir, aborting")
-        .join(".irys")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,8 +86,90 @@ pub enum OracleConfig {
         smoothing_interval: u64,
     },
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmaConfig {
+    /// Defines how frequently the Irys EMA price should be adjusted
+    pub price_adjustment_interval: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VdfConfig {
+    pub vdf_reset_frequency: usize,
+    pub vdf_parallel_verification_thread_limit: usize,
+    pub num_checkpoints_in_vdf_step: usize,
+    pub vdf_sha_1s: u64,
+}
 
-impl Config {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochConfig {
+    /// Scaling factor for the capacity projection curve
+    pub capacity_scalar: u64,
+    pub num_blocks_in_epoch: u64,
+    pub submit_ledger_epoch_length: u64,
+    pub num_capacity_partitions: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageConfig {
+    /// The base directory where to look for artifact data
+    #[serde(default = "default_irys_path")]
+    pub base_directory: PathBuf,
+    pub chunk_migration_depth: u32,
+    pub num_writes_before_sync: u64,
+    pub entropy_packing_iterations: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MempoolConfig {
+    pub max_data_txs_per_block: u64,
+    /// the number of block a given anchor (tx or block hash) is valid for.
+    /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
+    pub anchor_expiry_depth: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GossipConfig {
+    /// The IP address of the gossip service
+    pub gossip_service_bind_ip: SocketAddr,
+    /// The port of the gossip service
+    pub gossip_service_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackingConfig {
+    /// number of packing threads
+    pub cpu_packing_concurrency: u16,
+    /// GPU kernel batch size
+    pub gpu_packing_batch_size: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// number of blocks cache cleaning will lag behind block finalization
+    pub cache_clean_lag: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpConfig {
+    /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DifficultyAdjustmentConfig {
+    /// Block time in seconds
+    pub block_time: u64,
+    pub difficulty_adjustment_interval: u64,
+    pub max_difficulty_adjustment_factor: Decimal,
+    pub min_difficulty_adjustment_factor: Decimal,
+}
+
+fn default_irys_path() -> PathBuf {
+    env::current_dir()
+        .expect("Unable to determine working dir, aborting")
+        .join(".irys")
+}
+
+impl NodeConfig {
     pub fn irys_signer(&self) -> IrysSigner {
         IrysSigner::from_config(&self)
     }
@@ -130,7 +185,7 @@ impl Config {
 
         const DEFAULT_BLOCK_TIME: u64 = 1;
 
-        Config {
+        Self {
             block_time: DEFAULT_BLOCK_TIME,
             max_data_txs_per_block: 100,
             difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME)
@@ -319,7 +374,7 @@ mod tests {
         "#;
 
         // Attempt to deserialize the TOML string into a Config
-        let config: Config =
+        let config: NodeConfig =
             toml::from_str(toml_data).expect("Failed to deserialize Config from TOML");
 
         // Basic assertions to verify deserialization succeeded
