@@ -255,8 +255,8 @@ async fn poll_until_fetch_at_block_index_height(
                 "attempt {} checking {}. required_blocks_height > json_response.block_index_height {} > {}",
                 &attempts, &url, required_blocks_height, json_response.block_index_height
             );
-            //wait 5 seconds and try again
-            sleep(Duration::from_millis(5000)).await;
+            //wait one second and try again
+            sleep(Duration::from_millis(1000)).await;
         } else {
             result_peer = Some(
                 block_index_endpoint_request(
