@@ -223,7 +223,7 @@ fn init_configs(
     )
 }
 
-fn add_accounts_to_config(irys_node_config: &mut IrysNodeConfig, account: &IrysSigner) -> () {
+fn add_account_to_config(irys_node_config: &mut IrysNodeConfig, account: &IrysSigner) -> () {
     irys_node_config.extend_genesis_accounts(vec![(
         account.address(),
         GenesisAccount {
@@ -240,7 +240,7 @@ async fn start_genesis_node(
     // init genesis node
     let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone()).await;
     // add accounts with balances to genesis node
-    add_accounts_to_config(&mut genesis_node.cfg.irys_node_config, &account);
+    add_account_to_config(&mut genesis_node.cfg.irys_node_config, &account);
     // start genesis node
     let ctx_genesis_node = genesis_node.start().await;
     ctx_genesis_node
@@ -252,10 +252,10 @@ async fn start_peer_nodes(
     account: &IrysSigner, // account with balance at genesis
 ) -> (IrysNodeTest<IrysNodeCtx>, IrysNodeTest<IrysNodeCtx>) {
     let mut peer1_node = IrysNodeTest::new(testnet_config_peer1.clone()).await;
-    add_accounts_to_config(&mut peer1_node.cfg.irys_node_config, &account);
+    add_account_to_config(&mut peer1_node.cfg.irys_node_config, &account);
     let ctx_peer1_node = peer1_node.start().await;
     let mut peer2_node = IrysNodeTest::new(testnet_config_peer2.clone()).await;
-    add_accounts_to_config(&mut peer2_node.cfg.irys_node_config, &account);
+    add_account_to_config(&mut peer2_node.cfg.irys_node_config, &account);
     let ctx_peer2_node = peer2_node.start().await;
     (ctx_peer1_node, ctx_peer2_node)
 }
