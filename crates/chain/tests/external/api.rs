@@ -29,7 +29,7 @@ async fn external_api() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug,irys_actors::mining=error,irys_actors::packing=error,irys_chain::vdf=off,irys_vdf::vdf_state=off");
 
     let mut testnet_config = Config::testnet();
-    testnet_config.port = 8080; // external test, should never be run concurrently
+    testnet_config.api_port = 8080; // external test, should never be run concurrently
 
     let account1 = IrysSigner::random_signer(&testnet_config);
 
@@ -68,7 +68,7 @@ async fn external_api() -> eyre::Result<()> {
     )
     .await?;
 
-    let http_url = format!("http://127.0.0.1:{}", node.cfg.config.port);
+    let http_url = format!("http://127.0.0.1:{}", node.cfg.config.api_port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -81,7 +81,7 @@ async fn external_api() -> eyre::Result<()> {
         .unwrap();
 
     assert_eq!(response.status(), 200);
-    info!("HTTP server started on port {}", node.cfg.config.port);
+    info!("HTTP server started on port {}", node.cfg.config.api_port);
 
     info!("waiting for tx header...");
 

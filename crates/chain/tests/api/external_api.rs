@@ -20,7 +20,7 @@ use tracing::info;
 async fn heavy_external_api() -> eyre::Result<()> {
     let ctx = IrysNodeTest::default_async().await.start().await;
 
-    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
+    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.api_port);
 
     // FIXME: Test to be updated with future endpoint work
     let mut _response = chunk_endpoint_request(&address).await;

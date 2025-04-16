@@ -4053,6 +4053,7 @@ dependencies = [
  "env_logger",
  "eyre",
  "futures",
+ "irys-api-client",
  "irys-config",
  "irys-database",
  "irys-efficient-sampling",

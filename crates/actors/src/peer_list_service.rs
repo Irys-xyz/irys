@@ -2,11 +2,13 @@ use actix::prelude::*;
 use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
-use irys_types::{Address, DatabaseProvider, PeerAddress, PeerListItem};
+use irys_types::{Address, Config, DatabaseProvider, PeerAddress, PeerListItem, ProtocolVersion, VersionRequest};
+use irys_api_client::IrysApiClient;
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use reth::revm::interpreter::instructions::arithmetic::add;
 use tracing::{debug, error, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -24,6 +26,34 @@ pub struct PeerListService {
     known_peers_cache: HashSet<PeerAddress>,
 
     client: Client,
+    irys_api: IrysApiClient,
+
+    chain_id: u64,
+    miner_address: Address,
+    peer_address: PeerAddress,
+}
+
+impl PeerListService {
+    /// Create a new instance of the peer_list_service actor passing in a reference
+    /// counted reference to a `DatabaseEnv`
+    pub fn new(db: DatabaseProvider, config: &Config) -> Self {
+        println!("service started: peer_list");
+        Self {
+            db: Some(db),
+            gossip_addr_to_mining_addr_map: HashMap::new(),
+            peer_list_cache: HashMap::new(),
+            known_peers_cache: HashSet::new(),
+            client: Client::new(),
+
+            irys_api: IrysApiClient::new(),
+            chain_id: config.chain_id(),
+            miner_address: config.miner_address(),
+            peer_address: PeerAddress {
+                gossip: format!("{}:{}", config.gossip_service_bind_ip, config.gossip_service_port).parse().expect("valid SocketAddr expected"),
+                api: format!("{}:{}", config.api_bind_ip, config.api_port).parse().expect("valid SocketAddr expected")
+            }
+        }
+    }
 }
 
 impl Actor for PeerListService {
@@ -75,6 +105,9 @@ impl Actor for PeerListService {
                 ctx.spawn(fut);
             }
         });
+
+        // Announce yourself to the network
+        ctx.spawn();
     }
 }
 
@@ -87,26 +120,12 @@ impl SystemService for PeerListService {
     }
 }
 
-impl PeerListService {
-    /// Create a new instance of the peer_list_service actor passing in a reference
-    /// counted reference to a `DatabaseEnv`
-    pub fn new(db: DatabaseProvider) -> Self {
-        println!("service started: peer_list");
-        Self {
-            db: Some(db),
-            gossip_addr_to_mining_addr_map: HashMap::new(),
-            peer_list_cache: HashMap::new(),
-            known_peers_cache: HashSet::new(),
-            client: Client::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum PeerListServiceError {
     DatabaseNotConnected,
     Database(DatabaseError),
     HealthCheckFailed(String),
+    PostVersionError(String),
 }
 
 impl From<DatabaseError> for PeerListServiceError {
@@ -223,6 +242,22 @@ impl PeerListService {
                 }
             }
         }
+    }
+
+    async fn announce_yourself_to_address(&self, api_address: SocketAddr) -> Result<(), PeerListServiceError> {
+        // Because we're going to send this future in the message handle response
+        let irys_api = self.irys_api.clone();
+
+        let mut version_request = VersionRequest::default();
+        version_request.mining_address = self.miner_address;
+        version_request.address = self.peer_address;
+        version_request.chain_id = self.chain_id;
+        version_request.user_agent = Some(format!("Irys-Node-{}", env!("CARGO_PKG_VERSION")));
+
+        irys_api.post_version(api_address, version_request).await.map_err(|e| {
+            error!("Failed to announce yourself to address {}: {:?}", api_address, e);
+            PeerListServiceError::PostVersionError(e.to_string())
+        })?;
     }
 }
 
