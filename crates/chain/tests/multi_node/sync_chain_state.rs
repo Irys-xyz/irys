@@ -30,11 +30,10 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     // init genesis node
     let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone()).await;
+    // setup a genesis account
+    let account1 = IrysSigner::random_signer(&testnet_config_genesis);
     // add accounts with balances to genesis node
-    let (_account1, _account2, account3) = add_accounts_to_config(
-        &mut genesis_node.cfg.irys_node_config,
-        &testnet_config_genesis,
-    );
+    add_accounts_to_config(&mut genesis_node.cfg.irys_node_config, &account1);
     // start genesis node
     let ctx_genesis_node = genesis_node.start().await;
 
@@ -44,7 +43,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     // generate a txn and add it to the block...
     sleep(Duration::from_millis(5000)).await; //wait before trying that
-    generate_test_transaction_and_add_to_block(&ctx_genesis_node, account3).await;
+    generate_test_transaction_and_add_to_block(&ctx_genesis_node, &account1).await;
 
     // mine x blocks on genesis
     mine_blocks(&ctx_genesis_node.node_ctx, required_genesis_node_height)
@@ -58,7 +57,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     // start additional nodes (after we have mined some blocks on genesis)
     let (ctx_peer1_node, ctx_peer2_node) =
-        start_peer_nodes(&testnet_config_peer1, &testnet_config_peer2).await;
+        start_peer_nodes(&testnet_config_peer1, &testnet_config_peer2, &account1).await;
 
     // check the height returned by the peers, and when it is high enough do the api call for the block_index and then shutdown the peer
     // this should expand with the block height
@@ -229,37 +228,14 @@ fn init_configs(
     )
 }
 
-fn add_accounts_to_config(
-    irys_node_config: &mut IrysNodeConfig,
-    config: &Config,
-) -> (IrysSigner, IrysSigner, IrysSigner) {
-    let account1 = IrysSigner::random_signer(&config);
-    let account2 = IrysSigner::random_signer(&config);
-    let account3 = IrysSigner::random_signer(&config);
-    irys_node_config.extend_genesis_accounts(vec![
-        (
-            account1.address(),
-            GenesisAccount {
-                balance: U256::from(1),
-                ..Default::default()
-            },
-        ),
-        (
-            account2.address(),
-            GenesisAccount {
-                balance: U256::from(2),
-                ..Default::default()
-            },
-        ),
-        (
-            account3.address(),
-            GenesisAccount {
-                balance: U256::from(1000),
-                ..Default::default()
-            },
-        ),
-    ]);
-    (account1, account2, account3)
+fn add_accounts_to_config(irys_node_config: &mut IrysNodeConfig, account: &IrysSigner) -> () {
+    irys_node_config.extend_genesis_accounts(vec![(
+        account.address(),
+        GenesisAccount {
+            balance: U256::from(1000),
+            ..Default::default()
+        },
+    )]);
 }
 
 async fn start_genesis_node(testnet_config_genesis: &Config) -> IrysNodeTest<IrysNodeCtx> {
@@ -273,15 +249,14 @@ async fn start_genesis_node(testnet_config_genesis: &Config) -> IrysNodeTest<Iry
 async fn start_peer_nodes(
     testnet_config_peer1: &Config,
     testnet_config_peer2: &Config,
+    account: &IrysSigner, // account with balance at genesis
 ) -> (IrysNodeTest<IrysNodeCtx>, IrysNodeTest<IrysNodeCtx>) {
-    let ctx_peer1_node = IrysNodeTest::new(testnet_config_peer1.clone())
-        .await
-        .start()
-        .await;
-    let ctx_peer2_node = IrysNodeTest::new(testnet_config_peer2.clone())
-        .await
-        .start()
-        .await;
+    let mut peer1_node = IrysNodeTest::new(testnet_config_peer1.clone()).await;
+    add_accounts_to_config(&mut peer1_node.cfg.irys_node_config, &account);
+    let ctx_peer1_node = peer1_node.start().await;
+    let mut peer2_node = IrysNodeTest::new(testnet_config_peer2.clone()).await;
+    add_accounts_to_config(&mut peer2_node.cfg.irys_node_config, &account);
+    let ctx_peer2_node = peer2_node.start().await;
     (ctx_peer1_node, ctx_peer2_node)
 }
 
@@ -291,7 +266,7 @@ fn local_test_url(port: &u16) -> String {
 
 async fn generate_test_transaction_and_add_to_block(
     node: &IrysNodeTest<IrysNodeCtx>,
-    account: IrysSigner,
+    account: &IrysSigner,
 ) {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
     let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
