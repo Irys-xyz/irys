@@ -97,8 +97,8 @@ pub async fn fetch_txn(
     peer: &SocketAddr,
     client: &awc::Client,
     txn_id: H256,
-) -> Option<IrysTransactionHeader> {
-    let url = format!("http://{}/v1/tx/{}", peer, txn_id);
+) -> Option<IrysTransaction> {
+    let url = format!("http://{}/v1/tx/{}", peer, txn_id.0.to_base58());
 
     match client.get(url.clone()).send().await {
         Ok(mut response) => {
