@@ -45,6 +45,9 @@ pub struct ConsensusConfig {
     /// Configuration for the Verifiable Delay Function used in consensus
     pub vdf: VdfConfig,
 
+    /// Cache management configuration
+    pub epoch: EpochConfig,
+
     /// Size of each data chunk in bytes
     pub chunk_size: u64,
 

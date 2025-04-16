@@ -31,7 +31,7 @@ use tracing::{debug, error, info};
 // BlockTreeReadGuard
 //------------------------------------------------------------------------------
 
-/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
+/// Wraps the internal `Arc<RwLock<_>>` to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct BlockTreeReadGuard {
     block_tree_cache: Arc<RwLock<BlockTreeCache>>,

@@ -72,13 +72,14 @@ mod tests {
         capacity_single::{self, SHA_HASH_SIZE},
     };
     use irys_primitives::Address;
+    use irys_types::{ConsensusConfig, NodeConfig};
     use rand;
     use rand::Rng;
     use std::time::Instant;
 
     #[test]
     fn test_seed_hash() {
-        let testnet_config = Config::testnet();
+        let testnet_config = ConsensusConfig::testnet();
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
@@ -128,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_compute_entropy_chunk() {
-        let testnet_config = Config::testnet();
+        let testnet_config = NodeConfig::testnet();
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
