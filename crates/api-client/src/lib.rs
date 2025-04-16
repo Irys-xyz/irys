@@ -1,5 +1,5 @@
 use eyre::Result;
-use irys_types::{IrysTransactionHeader, VersionRequest, H256};
+use irys_types::{IrysTransactionHeader, PeerResponse, VersionRequest, H256};
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
@@ -22,11 +22,8 @@ pub trait ApiClient: Send + Sync + Clone {
         tx_ids: &[H256],
     ) -> Result<Vec<Option<IrysTransactionHeader>>>;
 
-    async fn post_version(
-        &self,
-        peer: SocketAddr,
-        version: VersionRequest,
-    );
+    async fn post_version(&self, peer: SocketAddr, version: VersionRequest)
+        -> Result<PeerResponse>;
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
@@ -119,11 +116,19 @@ impl ApiClient for IrysApiClient {
         &self,
         peer: SocketAddr,
         version: VersionRequest,
-    ) -> Result<()> {
-        debug!("Posting version {} to peer {}", version, peer);
+    ) -> Result<PeerResponse> {
         let path = "/v1/version";
-        self.make_request::<(), _>(peer, "POST", path, Some(&version)).await?;
-        Ok(())
+        let response = self
+            .make_request::<PeerResponse, _>(peer, "POST", path, Some(&version))
+            .await;
+        match response {
+            Ok(Some(peer_response)) => Ok(peer_response),
+            Ok(None) => Err(eyre::eyre!("No response from peer")),
+            Err(e) => {
+                error!("Failed to post version: {}", e);
+                Err(e)
+            }
+        }
     }
 }
 

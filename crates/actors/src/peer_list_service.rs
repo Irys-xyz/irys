@@ -1,16 +1,13 @@
 use actix::prelude::*;
-use irys_api_client::IrysApiClient;
+use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
-use irys_types::{
-    Address, Config, DatabaseProvider, PeerAddress, PeerListItem, ProtocolVersion, VersionRequest,
-};
+use irys_types::{Address, Config, DatabaseProvider, PeerAddress, PeerListItem, VersionRequest};
 use reqwest::Client;
-use reth::revm::interpreter::instructions::arithmetic::add;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tracing::{debug, error, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -48,7 +45,7 @@ impl PeerListService {
             client: Client::new(),
 
             irys_api: IrysApiClient::new(),
-            chain_id: config.chain_id(),
+            chain_id: config.chain_id,
             miner_address: config.miner_address(),
             peer_address: PeerAddress {
                 gossip: format!(
@@ -116,7 +113,13 @@ impl Actor for PeerListService {
         });
 
         // Announce yourself to the network
-        ctx.spawn();
+        let version_request = self.create_version_request();
+        let api_client = self.irys_api.clone();
+        let peers_cache = self.known_peers_cache.clone();
+        let announce_fut =
+            Self::announce_yourself_to_all_peers(api_client, version_request, peers_cache)
+                .into_actor(self);
+        ctx.spawn(announce_fut);
     }
 }
 
@@ -253,20 +256,23 @@ impl PeerListService {
         }
     }
 
+    fn create_version_request(&self) -> VersionRequest {
+        VersionRequest {
+            mining_address: self.miner_address,
+            address: self.peer_address,
+            chain_id: self.chain_id,
+            user_agent: Some(format!("Irys-Node-{}", env!("CARGO_PKG_VERSION"))),
+            ..VersionRequest::default()
+        }
+    }
+
     async fn announce_yourself_to_address(
-        &self,
+        api_client: IrysApiClient,
         api_address: SocketAddr,
+        version_request: VersionRequest,
     ) -> Result<(), PeerListServiceError> {
-        // Because we're going to send this future in the message handle response
-        let irys_api = self.irys_api.clone();
-
-        let mut version_request = VersionRequest::default();
-        version_request.mining_address = self.miner_address;
-        version_request.address = self.peer_address;
-        version_request.chain_id = self.chain_id;
-        version_request.user_agent = Some(format!("Irys-Node-{}", env!("CARGO_PKG_VERSION")));
-
-        irys_api
+        // TODO: handle response by announcing yourself to peers
+        let _peer_response = api_client
             .post_version(api_address, version_request)
             .await
             .map_err(|e| {
@@ -276,6 +282,34 @@ impl PeerListService {
                 );
                 PeerListServiceError::PostVersionError(e.to_string())
             })?;
+
+        Ok(())
+    }
+
+    async fn announce_yourself_to_all_peers(
+        api_client: IrysApiClient,
+        version_request: VersionRequest,
+        known_peers_cache: HashSet<PeerAddress>,
+    ) {
+        for peer in known_peers_cache.iter() {
+            match Self::announce_yourself_to_address(
+                api_client.clone(),
+                peer.api,
+                version_request.clone(),
+            )
+            .await
+            {
+                Ok(_peer_response) => {
+                    // TODO: announce yourself to those peers as well
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to announce yourself to address {}: {:?}",
+                        peer.api, e
+                    );
+                }
+            }
+        }
     }
 }
 
