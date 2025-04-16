@@ -189,7 +189,8 @@ pub struct IrysNode {
 
 impl IrysNode {
     /// Creates a new node builder instance.
-    pub async fn new(node_config: NodeConfig, consensus_config: ConsensusConfig) -> Self {
+    pub async fn new(node_config: NodeConfig) -> Self {
+        let consensus = node_config.consensus_config();
         let irys_genesis_block = if node_config.is_genesis {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
             let (_, irys_genesis) =
@@ -255,7 +256,8 @@ impl IrysNode {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
             (false, _) => {
                 // special handling for genesis node
-                let commitments = get_genesis_commitments(&self.node_config);
+                let commitments =
+                    get_genesis_commitments(&self.node_config, &self.consensus_config);
 
                 let mut irys_genesis = IrysBlockHeader {
                     diff: calculate_initial_difficulty(
@@ -269,7 +271,7 @@ impl IrysNode {
                     last_diff_timestamp: self.genesis_timestamp,
                     ..irys_genesis
                 };
-                add_genesis_commitments(&mut irys_genesis, &self.node_config);
+                add_genesis_commitments(&mut irys_genesis, &self.node_config, self.conse);
                 let irys_genesis_block = Arc::new(irys_genesis);
 
                 // special handilng for genesis node
@@ -398,9 +400,7 @@ impl IrysNode {
                 move || {
                     System::new().block_on(async move {
                         // bootstrap genesis
-                        let node_config = Arc::new(node.irys_node_config.clone());
-                        let block_index = BlockIndex::new()
-                            .init(node_config.clone())
+                        let block_index = BlockIndex::new(&node.node_config)
                             .await
                             .expect("initializing a new block index should be doable");
                         let block_index = Arc::new(RwLock::new(block_index));
@@ -441,9 +441,8 @@ impl IrysNode {
                 move || {
                     System::new().block_on(async move {
                         // read the latest block info
-                        let node_config = Arc::new(node.irys_node_config.clone());
                         let (latest_block_height, block_index, latest_block) =
-                            read_latest_block_data(node_config.clone()).await;
+                            read_latest_block_data(&node.node_config, &node.consensus_config).await;
                         latest_block_height_tx
                             .send(latest_block_height)
                             .expect("to be able to send the latest block height");
@@ -1187,7 +1186,8 @@ impl IrysNode {
                 StorageModule::new(
                     &self.irys_node_config.storage_module_dir(),
                     &info,
-                    self.storage_config.clone(),
+                    &self.storage_config,
+                    &self.consensus_config,
                 )
                 // TODO: remove this unwrap
                 .unwrap(),
@@ -1233,14 +1233,14 @@ impl IrysNode {
 }
 
 async fn read_latest_block_data(
-    node_config: Arc<IrysNodeConfig>,
+    node_config: &NodeConfig,
+    consensus_config: &ConsensusConfig,
 ) -> (
     u64,
     Arc<RwLock<BlockIndex<Initialized>>>,
     Arc<IrysBlockHeader>,
 ) {
-    let block_index = BlockIndex::new()
-        .init(node_config.clone())
+    let block_index = BlockIndex::new(node_config)
         .await
         .expect("to init block index");
     let latest_block_index = block_index

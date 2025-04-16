@@ -60,6 +60,9 @@ pub struct ConsensusConfig {
     /// Number of partitions in each storage slot
     pub num_partitions_per_slot: u64,
 
+    /// Number of iterations for entropy packing algorithm
+    pub entropy_packing_iterations: u32,
+
     /// Minimum number of replicas required for data to be considered permanently stored
     /// Higher values increase data durability but require more network resources
     pub number_of_ingerss_proofs: u64,
@@ -78,6 +81,10 @@ pub struct ConsensusConfig {
 pub struct NodeConfig {
     /// Determines how the node joins and interacts with the network
     pub mode: NodeMode,
+
+    /// The base directory where to look for artifact data
+    #[serde(default = "default_irys_path")]
+    pub base_directory: PathBuf,
 
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
@@ -200,16 +207,16 @@ pub struct EmaConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VdfConfig {
     /// How often the VDF parameters are reset (in blocks)
-    pub vdf_reset_frequency: usize,
+    pub reset_frequency: usize,
 
     /// Maximum number of threads to use for parallel VDF verification
-    pub vdf_parallel_verification_thread_limit: usize,
+    pub parallel_verification_thread_limit: usize,
 
     /// Number of checkpoints to include in each VDF step
     pub num_checkpoints_in_vdf_step: usize,
 
     /// Target number of SHA-1 operations per second for VDF calibration
-    pub vdf_sha_1s: u64,
+    pub sha_1s_difficulty: u64,
 }
 
 /// # Epoch Configuration
@@ -234,21 +241,14 @@ pub struct EpochConfig {
 /// # Storage Configuration
 ///
 /// Defines how and where the node stores blockchain and user data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct StorageConfig {
-    /// The base directory where to look for artifact data
-    #[serde(default = "default_irys_path")]
-    pub base_directory: PathBuf,
-
     /// How many blocks deep a chunk can be migrated
     pub chunk_migration_depth: u32,
 
     /// Number of write operations before forcing a sync to disk
     /// Higher values improve performance but increase data loss risk on crashes
     pub num_writes_before_sync: u64,
-
-    /// Number of iterations for entropy packing algorithm
-    pub entropy_packing_iterations: u32,
 }
 
 /// # Mempool Configuration
@@ -332,6 +332,11 @@ fn default_irys_path() -> PathBuf {
 }
 
 impl ConsensusConfig {
+    // This is hardcoded here to be used just by C packing related stuff as it is also hardcoded right now in C sources
+    // TODO: get rid of this hardcoded variable? Otherwise altering the `chunk_size` in the configs may have
+    // discrepancies when using GPU mining
+    pub const CHUNK_SIZE: u64 = 256 * 1024;
+
     pub fn testnet() -> Self {
         Self {
             chain_id: 1270,
@@ -343,15 +348,22 @@ impl ConsensusConfig {
             token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
                 .expect("valid percentage"),
             vdf: VdfConfig {
-                vdf_reset_frequency: 10 * 120,
-                vdf_parallel_verification_thread_limit: 4,
+                reset_frequency: 10 * 120,
+                parallel_verification_thread_limit: 4,
                 num_checkpoints_in_vdf_step: 25,
-                vdf_sha_1s: 7_000,
+                sha_1s_difficulty: 7_000,
             },
-            chunk_size: 256 * 1024,
+            chunk_size: Self::CHUNK_SIZE,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
+            epoch: EpochConfig {
+                capacity_scalar: 100,
+                num_blocks_in_epoch: 100,
+                submit_ledger_epoch_length: 5,
+                num_capacity_partitions: None,
+            },
+            entropy_packing_iterations: 1000,
         }
     }
 }
@@ -362,6 +374,20 @@ impl NodeConfig {
             signer: self.mining_key.clone(),
             chain_id: consensus_config.chain_id,
             chunk_size: consensus_config.chunk_size,
+        }
+    }
+
+    pub fn consensus_config(&self) -> ConsensusConfig {
+        // load the consesnsus config
+        match &self.consensus {
+            ConsensusOptions::Path(path_buf) => std::fs::read_to_string(path_buf)
+                .map(|consensus_cfg| {
+                    toml::from_str::<ConsensusConfig>(&consensus_cfg)
+                        .expect("invalid consensus file")
+                })
+                .expect("consensus cfg does not exist"),
+            ConsensusOptions::Testnet => ConsensusConfig::testnet(),
+            ConsensusOptions::Custom(consensus_config) => consensus_config.clone(),
         }
     }
 
@@ -378,6 +404,7 @@ impl NodeConfig {
         Self {
             mode: NodeMode::Genesis,
             consensus: ConsensusOptions::Testnet,
+            base_directory: default_irys_path(),
             difficulty_adjustment: DifficultyAdjustmentConfig {
                 block_time: DEFAULT_BLOCK_TIME,
                 difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000)
@@ -404,10 +431,8 @@ impl NodeConfig {
             )
             .expect("valid key"),
             storage: StorageConfig {
-                base_directory: default_irys_path(),
                 chunk_migration_depth: 1,
                 num_writes_before_sync: 1,
-                entropy_packing_iterations: 1000,
             },
             pricing: PricingConfig {
                 fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
@@ -427,15 +452,15 @@ impl NodeConfig {
 
     /// get the storage module directory path
     pub fn storage_module_dir(&self) -> PathBuf {
-        self.storage.base_directory.join("storage_modules")
+        self.base_directory.join("storage_modules")
     }
     /// get the irys consensus data directory path
     pub fn irys_consensus_data_dir(&self) -> PathBuf {
-        self.storage.base_directory.join("irys_consensus_data")
+        self.base_directory.join("irys_consensus_data")
     }
     /// get the reth data directory path
     pub fn reth_data_dir(&self) -> PathBuf {
-        self.storage.base_directory.join("reth")
+        self.base_directory.join("reth")
     }
     /// get the reth log directory path
     pub fn reth_log_dir(&self) -> PathBuf {
@@ -443,12 +468,12 @@ impl NodeConfig {
     }
     /// get the `block_index` directory path  
     pub fn block_index_dir(&self) -> PathBuf {
-        self.storage.base_directory.join("block_index")
+        self.base_directory.join("block_index")
     }
 
     /// get the `vdf_steps` directory path  
     pub fn vdf_steps_dir(&self) -> PathBuf {
-        self.storage.base_directory.join("vdf_steps")
+        self.base_directory.join("vdf_steps")
     }
 }
 
@@ -526,7 +551,6 @@ pub mod serde_utils {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k256::ecdsa::SigningKey;
     use rust_decimal_macros::dec;
     use toml;
 
@@ -566,15 +590,22 @@ mod tests {
             genesis_price: Amount::token(dec!(1)).unwrap(),
             token_price_safe_range: Amount::percentage(dec!(1)).unwrap(),
             vdf: VdfConfig {
-                vdf_reset_frequency: 1200,
-                vdf_parallel_verification_thread_limit: 4,
+                reset_frequency: 1200,
+                parallel_verification_thread_limit: 4,
                 num_checkpoints_in_vdf_step: 25,
-                vdf_sha_1s: 7000,
+                sha_1s_difficulty: 7000,
             },
             chunk_size: 262144,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
+            epoch: EpochConfig {
+                capacity_scalar: todo!(),
+                num_blocks_in_epoch: todo!(),
+                submit_ledger_epoch_length: todo!(),
+                num_capacity_partitions: todo!(),
+            },
+            entropy_packing_iterations: 1000,
         };
 
         // Assert the entire struct matches
@@ -645,6 +676,7 @@ mod tests {
         let expected_config = NodeConfig {
             mode: NodeMode::Genesis,
             consensus: ConsensusOptions::Testnet,
+            base_directory: "~/.irys".into(),
             difficulty_adjustment: DifficultyAdjustmentConfig {
                 block_time: 1,
                 difficulty_adjustment_interval: 100,
@@ -669,10 +701,8 @@ mod tests {
             )
             .expect("valid private key"),
             storage: StorageConfig {
-                base_directory: "~/.irys".into(),
                 chunk_migration_depth: 1,
                 num_writes_before_sync: 1,
-                entropy_packing_iterations: 1000,
             },
             pricing: PricingConfig {
                 fee_percentage: Amount::percentage(dec!(0.05)).unwrap(),

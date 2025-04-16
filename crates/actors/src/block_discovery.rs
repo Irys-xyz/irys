@@ -9,7 +9,7 @@ use irys_database::{
 };
 use irys_types::{
     DatabaseProvider, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
-    IrysTransactionHeader, StorageConfig, VDFStepsConfig,
+    IrysTransactionHeader, StorageConfig, VdfConfig,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
@@ -30,7 +30,7 @@ pub struct BlockDiscoveryActor {
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
     /// VDF configuration for the node
-    pub vdf_config: VDFStepsConfig,
+    pub vdf_config: VdfConfig,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Service Senders
@@ -65,7 +65,7 @@ impl BlockDiscoveryActor {
         storage_config: StorageConfig,
         difficulty_config: DifficultyAdjustmentConfig,
         db: DatabaseProvider,
-        vdf_config: VDFStepsConfig,
+        vdf_config: VdfConfig,
         vdf_steps_guard: VdfStepsReadGuard,
         service_senders: ServiceSenders,
         gossip_sender: tokio::sync::mpsc::Sender<GossipData>,

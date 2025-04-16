@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_compute_entropy_chunk() {
-        let testnet_config = NodeConfig::testnet();
+        let consensus_config = ConsensusConfig::testnet();
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
         let chunk_offset = rng.gen_range(1..=1000);
@@ -137,7 +137,7 @@ mod tests {
         rng.fill(&mut partition_hash[..]);
         let iterations = 1_000;
 
-        let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut chunk = Vec::<u8>::with_capacity(consensus_config.chunk_size as usize);
 
         let now = Instant::now();
 
@@ -146,15 +146,15 @@ mod tests {
             chunk_offset,
             partition_hash,
             iterations,
-            testnet_config.chunk_size as usize,
+            consensus_config.chunk_size as usize,
             &mut chunk,
-            testnet_config.chain_id,
+            consensus_config.chain_id,
         );
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
-        let mut c_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
+        let mut c_chunk = Vec::<u8>::with_capacity(consensus_config.chunk_size as usize);
 
         let mining_addr_len = mining_address.len(); // note: might not line up with capacity? that should be fine...
         let partition_hash_len = partition_hash.len();
@@ -164,7 +164,7 @@ mod tests {
         let c_chunk_ptr = c_chunk.as_ptr() as *mut u8;
 
         let now = Instant::now();
-        let chain_id = testnet_config.chain_id;
+        let chain_id = consensus_config.chain_id;
 
         unsafe {
             compute_entropy_chunk(

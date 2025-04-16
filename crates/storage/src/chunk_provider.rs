@@ -1,7 +1,8 @@
 use eyre::OptionExt;
 use irys_database::DataLedger;
 use irys_types::{
-    ChunkFormat, DataRoot, LedgerChunkOffset, PackedChunk, StorageConfig, TxChunkOffset,
+    ChunkFormat, ConsensusConfig, DataRoot, LedgerChunkOffset, PackedChunk, StorageConfig,
+    TxChunkOffset,
 };
 use std::sync::Arc;
 
@@ -17,17 +18,25 @@ pub struct ChunkProvider {
     pub storage_config: StorageConfig,
     /// Collection of storage modules for distributing chunk data
     pub storage_modules: Vec<Arc<StorageModule>>,
+    pub chunk_size: u64,
+    pub num_chunks_in_partition: u64,
+    pub chain_id: u64,
+    pub entropy_packing_iterations: u32,
 }
 
 impl ChunkProvider {
-    /// Creates a new chunk storage actor
-    pub const fn new(
+    pub fn new(
         storage_config: StorageConfig,
         storage_modules: Vec<Arc<StorageModule>>,
+        consensus_config: &ConsensusConfig,
     ) -> Self {
         Self {
+            num_chunks_in_partition: consensus_config.num_chunks_in_partition,
             storage_config,
             storage_modules,
+            chunk_size: consensus_config.chunk_size,
+            chain_id: consensus_config.chain_id,
+            entropy_packing_iterations: consensus_config.entropy_packing_iterations,
         }
     }
 
@@ -139,20 +148,20 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-        partition_chunk_offset_ie, Base64, Config, DataTransactionLedger, LedgerChunkRange,
-        PartitionChunkOffset, UnpackedChunk,
+        partition_chunk_offset_ie, Base64, ConsensusConfig, DataTransactionLedger,
+        LedgerChunkRange, NodeConfig, PartitionChunkOffset, UnpackedChunk,
     };
     use nodit::interval::{ie, ii};
     use rand::Rng as _;
 
     #[test]
     fn get_by_data_tx_offset_test() -> eyre::Result<()> {
-        let testnet_config = Config {
-            num_writes_before_sync: 1,
+        let consensus_config = ConsensusConfig {
             chunk_size: 32,
             num_chunks_in_partition: 100,
-            ..Config::testnet()
+            ..ConsensusConfig::testnet()
         };
+        let node_config = NodeConfig::testnet();
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),
@@ -165,18 +174,20 @@ mod tests {
         let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
 
-        // Override the default StorageModule config for testing
-        let config = StorageConfig::new(&testnet_config);
-
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module = StorageModule::new(&base_path, storage_module_info, config.clone())?;
+        let storage_module = StorageModule::new(
+            &base_path,
+            storage_module_info,
+            &node_config,
+            &consensus_config,
+        )?;
 
-        let data_size = (config.chunk_size as f64 * 2.5).round() as usize;
+        let data_size = (consensus_config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        let irys = IrysSigner::random_signer(&testnet_config);
+        let irys = IrysSigner::random_signer(&consensus_config);
         let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
         let tx = irys.sign_transaction(tx).unwrap();
 
@@ -222,7 +233,11 @@ mod tests {
         }
         storage_module.sync_pending_chunks()?;
 
-        let chunk_provider = ChunkProvider::new(config.clone(), vec![Arc::new(storage_module)]);
+        let chunk_provider = ChunkProvider::new(
+            node_config.storage.clone(),
+            vec![Arc::new(storage_module)],
+            &consensus_config,
+        );
 
         for original_chunk in unpacked_chunks {
             let chunk = chunk_provider
@@ -232,8 +247,8 @@ mod tests {
 
             let unpacked_data = unpack_with_entropy(
                 &packed_chunk,
-                vec![0u8; config.chunk_size as usize],
-                config.chunk_size as usize,
+                vec![0u8; consensus_config.chunk_size as usize],
+                consensus_config.chunk_size as usize,
             );
             let unpacked_chunk = UnpackedChunk {
                 data_root: packed_chunk.data_root,
@@ -243,7 +258,6 @@ mod tests {
                 tx_offset: packed_chunk.tx_offset,
             };
             assert_eq!(original_chunk, unpacked_chunk);
-            // let d_slice = data_bytes[start..start + chunk_size].to_vec();
         }
 
         Ok(())
