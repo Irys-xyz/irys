@@ -2,10 +2,13 @@ use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
 use alloy_core::primitives::ruint::aliases::U256;
 use irys_actors::mempool_service::TxIngressError;
 use irys_api_server::routes::index::NodeInfo;
-use irys_chain::peer_utilities::{
-    block_index_endpoint_request, info_endpoint_request, peer_list_endpoint_request,
+use irys_chain::{
+    peer_utilities::{
+        block_index_endpoint_request, info_endpoint_request, peer_list_endpoint_request,
+    },
+    IrysNodeCtx,
 };
-use irys_chain::IrysNodeCtx;
+use irys_config::IrysNodeConfig;
 use irys_database::BlockIndexItem;
 use irys_types::{irys::IrysSigner, Config, IrysTransaction, PeerAddress};
 use reth_primitives::irys_primitives::IrysTxId;
@@ -24,10 +27,16 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // setup configs for genesis and nodes
     let (testnet_config_genesis, testnet_config_peer1, testnet_config_peer2) =
         init_configs(&genesis_trusted_peers, &trusted_peers);
-    // start genesis node
-    let mut ctx_genesis_node = start_genesis_node(&testnet_config_genesis).await;
+
+    // init genesis node
+    let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone()).await;
     // add accounts with balances to genesis node
-    let (_account1, _account2, account3) = add_accounts_to_config(&mut ctx_genesis_node);
+    let (_account1, _account2, account3) = add_accounts_to_config(
+        &mut genesis_node.cfg.irys_node_config,
+        &testnet_config_genesis,
+    );
+    // start genesis node
+    let ctx_genesis_node = genesis_node.start().await;
 
     let required_blocks_height: usize = 5;
     // +2 is so genesis is two blocks ahead of the peer nodes, as currently we check the peers index which lags behind
@@ -221,12 +230,13 @@ fn init_configs(
 }
 
 fn add_accounts_to_config(
-    node: &mut IrysNodeTest<IrysNodeCtx>,
+    irys_node_config: &mut IrysNodeConfig,
+    config: &Config,
 ) -> (IrysSigner, IrysSigner, IrysSigner) {
-    let account1 = IrysSigner::random_signer(&node.cfg.config);
-    let account2 = IrysSigner::random_signer(&node.cfg.config);
-    let account3 = IrysSigner::random_signer(&node.cfg.config);
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![
+    let account1 = IrysSigner::random_signer(&config);
+    let account2 = IrysSigner::random_signer(&config);
+    let account3 = IrysSigner::random_signer(&config);
+    irys_node_config.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -249,7 +259,6 @@ fn add_accounts_to_config(
             },
         ),
     ]);
-    error!("node_config {:?}", node.cfg.irys_node_config);
     (account1, account2, account3)
 }
 
