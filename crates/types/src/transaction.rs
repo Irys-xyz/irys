@@ -132,7 +132,8 @@ impl IrysTransactionHeader {
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
 pub struct IrysTransaction {
     pub header: IrysTransactionHeader,
-    pub data: Base64,
+    // TODO: make this compatible with stream/iterator data sources
+    pub data: Option<Base64>,
     #[serde(skip)]
     pub chunks: Vec<Node>,
     #[serde(skip)]
