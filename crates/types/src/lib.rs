@@ -6,6 +6,7 @@ pub mod app_state;
 pub mod block;
 pub mod block_production;
 pub mod chunk;
+pub mod chunked;
 pub mod config;
 pub mod difficulty_adjustment_config;
 pub mod gossip;
