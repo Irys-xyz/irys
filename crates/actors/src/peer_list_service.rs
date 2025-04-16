@@ -1,14 +1,16 @@
 use actix::prelude::*;
+use irys_api_client::IrysApiClient;
 use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
-use irys_types::{Address, Config, DatabaseProvider, PeerAddress, PeerListItem, ProtocolVersion, VersionRequest};
-use irys_api_client::IrysApiClient;
+use irys_types::{
+    Address, Config, DatabaseProvider, PeerAddress, PeerListItem, ProtocolVersion, VersionRequest,
+};
 use reqwest::Client;
+use reth::revm::interpreter::instructions::arithmetic::add;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use reth::revm::interpreter::instructions::arithmetic::add;
 use tracing::{debug, error, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -49,9 +51,16 @@ impl PeerListService {
             chain_id: config.chain_id(),
             miner_address: config.miner_address(),
             peer_address: PeerAddress {
-                gossip: format!("{}:{}", config.gossip_service_bind_ip, config.gossip_service_port).parse().expect("valid SocketAddr expected"),
-                api: format!("{}:{}", config.api_bind_ip, config.api_port).parse().expect("valid SocketAddr expected")
-            }
+                gossip: format!(
+                    "{}:{}",
+                    config.gossip_service_bind_ip, config.gossip_service_port
+                )
+                .parse()
+                .expect("valid SocketAddr expected"),
+                api: format!("{}:{}", config.api_bind_ip, config.api_port)
+                    .parse()
+                    .expect("valid SocketAddr expected"),
+            },
         }
     }
 }
@@ -244,7 +253,10 @@ impl PeerListService {
         }
     }
 
-    async fn announce_yourself_to_address(&self, api_address: SocketAddr) -> Result<(), PeerListServiceError> {
+    async fn announce_yourself_to_address(
+        &self,
+        api_address: SocketAddr,
+    ) -> Result<(), PeerListServiceError> {
         // Because we're going to send this future in the message handle response
         let irys_api = self.irys_api.clone();
 
@@ -254,10 +266,16 @@ impl PeerListService {
         version_request.chain_id = self.chain_id;
         version_request.user_agent = Some(format!("Irys-Node-{}", env!("CARGO_PKG_VERSION")));
 
-        irys_api.post_version(api_address, version_request).await.map_err(|e| {
-            error!("Failed to announce yourself to address {}: {:?}", api_address, e);
-            PeerListServiceError::PostVersionError(e.to_string())
-        })?;
+        irys_api
+            .post_version(api_address, version_request)
+            .await
+            .map_err(|e| {
+                error!(
+                    "Failed to announce yourself to address {}: {:?}",
+                    api_address, e
+                );
+                PeerListServiceError::PostVersionError(e.to_string())
+            })?;
     }
 }
 
