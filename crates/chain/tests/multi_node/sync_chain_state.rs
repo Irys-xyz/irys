@@ -27,15 +27,10 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // setup configs for genesis and nodes
     let (testnet_config_genesis, testnet_config_peer1, testnet_config_peer2) =
         init_configs(&genesis_trusted_peers, &trusted_peers);
-
-    // init genesis node
-    let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone()).await;
-    // setup a genesis account
+    // setup a funded account at genesis block
     let account1 = IrysSigner::random_signer(&testnet_config_genesis);
-    // add accounts with balances to genesis node
-    add_accounts_to_config(&mut genesis_node.cfg.irys_node_config, &account1);
-    // start genesis node
-    let ctx_genesis_node = genesis_node.start().await;
+
+    let ctx_genesis_node = start_genesis_node(&testnet_config_genesis, &account1).await;
 
     let required_blocks_height: usize = 5;
     // +2 is so genesis is two blocks ahead of the peer nodes, as currently we check the peers index which lags behind
@@ -55,7 +50,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // assert that genesis node is advertising the trusted peers it was given via config
     assert_eq!(&genesis_trusted_peers, &peer_list_items);
 
-    // start additional nodes (after we have mined some blocks on genesis)
+    // start additional nodes (after we have mined some blocks on genesis node)
     let (ctx_peer1_node, ctx_peer2_node) =
         start_peer_nodes(&testnet_config_peer1, &testnet_config_peer2, &account1).await;
 
@@ -238,11 +233,16 @@ fn add_accounts_to_config(irys_node_config: &mut IrysNodeConfig, account: &IrysS
     )]);
 }
 
-async fn start_genesis_node(testnet_config_genesis: &Config) -> IrysNodeTest<IrysNodeCtx> {
-    let ctx_genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone())
-        .await
-        .start()
-        .await;
+async fn start_genesis_node(
+    testnet_config_genesis: &Config,
+    account: &IrysSigner, // account with balance at genesis
+) -> IrysNodeTest<IrysNodeCtx> {
+    // init genesis node
+    let mut genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone()).await;
+    // add accounts with balances to genesis node
+    add_accounts_to_config(&mut genesis_node.cfg.irys_node_config, &account);
+    // start genesis node
+    let ctx_genesis_node = genesis_node.start().await;
     ctx_genesis_node
 }
 
