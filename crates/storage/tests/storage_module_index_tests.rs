@@ -388,7 +388,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         let mut prev_byte_offset: u64 = 0;
         info!("num chunks in tx: {:?}", tx.proofs.len());
         for (i, proof) in tx.proofs.iter().enumerate() {
-            let chunk_bytes = Base64(tx.data.0[prev_byte_offset as usize..=proof.offset].to_vec());
+            let chunk_bytes = Base64(
+                tx.data.clone().unwrap().0[prev_byte_offset as usize..=proof.offset].to_vec(),
+            );
 
             // verify the chunk length
             assert_eq!(chunk_bytes.len(), consensus_config.chunk_size as usize);

@@ -211,7 +211,7 @@ impl TryInto<PackedChunk> for PartialChunk {
 //     println!("{:?}", serde_json::to_string_pretty(&wrapped));
 // }
 
-/// a chunk binary
+/// An (unpacked) chunk's raw bytes
 /// this type is unsized (i.e not a [u8; N]) as chunks can have variable sizes
 /// either for testing or due to it being the last unpadded chunk
 pub type ChunkBytes = Vec<u8>;

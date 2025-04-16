@@ -1,5 +1,7 @@
 //! Validates merkle tree proofs for Irys transaction data and proof chunks
 
+use crate::chunked::ChunkedIterator;
+use crate::ChunkBytes;
 use crate::H256;
 use alloy_primitives::Address;
 use borsh::BorshDeserialize;
@@ -298,17 +300,23 @@ pub fn validate_chunk(
 }
 
 /// Generates data chunks from which the calculation of root id starts.
-pub fn generate_leaves(data: &Vec<u8>, chunk_size: usize) -> Result<Vec<Node>, Error> {
-    let data_chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
-    generate_leaves_from_chunks(&data_chunks)
+pub fn generate_leaves(
+    data: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+    chunk_size: usize,
+) -> Result<Vec<Node>, Error> {
+    let data_chunks = ChunkedIterator::new(data, chunk_size);
+    generate_leaves_from_chunks(data_chunks)
 }
 
 /// Generates merkle leaves from chunks
-pub fn generate_leaves_from_chunks(chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Error> {
+pub fn generate_leaves_from_chunks(
+    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
-    for chunk in chunks.iter() {
-        let data_hash = hash_sha256(chunk)?;
+    for chunk in chunks {
+        let chunk = chunk?;
+        let data_hash = hash_sha256(&chunk)?;
         let max_byte_range = min_byte_range + &chunk.len();
         let offset = max_byte_range.to_note_vec();
         let id = hash_all_sha256(vec![&data_hash, &offset])?;
@@ -329,7 +337,7 @@ pub fn generate_leaves_from_chunks(chunks: &Vec<&[u8]>) -> Result<Vec<Node>, Err
 /// Generates data chunks from which the calculation of root id starts, including the provided address to interleave into the leaf data hash for ingress proofs
 /// and_regular can be set to re-use the chunk iterator to produce the "standard" leaves, as well as the ingress proof specific ones for when we validate ingress proofs
 pub fn generate_ingress_leaves(
-    chunks: impl Iterator<Item = eyre::Result<Vec<u8>>>,
+    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
     address: Address,
     and_regular: bool,
 ) -> Result<(Vec<Node>, Option<Vec<Node>>), Error> {

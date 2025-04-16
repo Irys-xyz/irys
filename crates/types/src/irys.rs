@@ -121,7 +121,8 @@ impl IrysSigner {
     /// Builds a merkle tree, with a root, including all the proofs for each
     /// chunk.
     fn merklize(&self, data: Vec<u8>, chunk_size: usize) -> Result<IrysTransaction> {
-        let chunks = generate_leaves(&data, chunk_size)?;
+        // TODO: fix the `data` field so we can use "streaming" data sources & remove the clone
+        let chunks = generate_leaves(vec![data.clone()].into_iter().map(Ok), chunk_size)?;
         let root = generate_data_root(chunks.clone())?;
         let data_root = H256(root.id);
         let proofs = resolve_proofs(root, None)?;
@@ -138,7 +139,7 @@ impl IrysSigner {
                 data_root,
                 ..Default::default()
             },
-            data: Base64(data),
+            data: Some(Base64(data)),
             chunks,
             proofs,
             ..Default::default()
