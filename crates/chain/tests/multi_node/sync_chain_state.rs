@@ -1,11 +1,16 @@
-use crate::utils::{mine_blocks, IrysNodeTest};
+use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
+use alloy_core::primitives::ruint::aliases::U256;
+use irys_actors::mempool_service::TxIngressError;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::peer_utilities::{
     block_index_endpoint_request, info_endpoint_request, peer_list_endpoint_request,
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::BlockIndexItem;
-use irys_types::{irys::IrysSigner, Config, PeerAddress};
+use irys_types::{irys::IrysSigner, Config, IrysTransaction, PeerAddress};
+use reth_primitives::irys_primitives::IrysTxId;
+use reth_primitives::GenesisAccount;
+use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
 
@@ -20,11 +25,17 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let (testnet_config_genesis, testnet_config_peer1, testnet_config_peer2) =
         init_configs(&genesis_trusted_peers, &trusted_peers);
     // start genesis node
-    let ctx_genesis_node = start_genesis_node(&testnet_config_genesis).await;
+    let mut ctx_genesis_node = start_genesis_node(&testnet_config_genesis).await;
+
+    //
+    let (_account1, _account2, account3) = add_accounts_to_config(&mut ctx_genesis_node);
 
     let required_blocks_height: usize = 5;
     // +2 is so genesis is two blocks ahead of the peer nodes, as currently we check the peers index which lags behind
     let required_genesis_node_height = required_blocks_height + 2;
+
+    // generate a txn and add it to the block...
+    generate_test_transaction_and_add_to_block(&ctx_genesis_node, account3).await;
 
     // mine x blocks on genesis
     mine_blocks(&ctx_genesis_node.node_ctx, required_genesis_node_height)
@@ -209,6 +220,38 @@ fn init_configs(
     )
 }
 
+fn add_accounts_to_config(
+    node: &mut IrysNodeTest<IrysNodeCtx>,
+) -> (IrysSigner, IrysSigner, IrysSigner) {
+    let account1 = IrysSigner::random_signer(&node.cfg.config);
+    let account2 = IrysSigner::random_signer(&node.cfg.config);
+    let account3 = IrysSigner::random_signer(&node.cfg.config);
+    node.cfg.irys_node_config.extend_genesis_accounts(vec![
+        (
+            account1.address(),
+            GenesisAccount {
+                balance: U256::from(1),
+                ..Default::default()
+            },
+        ),
+        (
+            account2.address(),
+            GenesisAccount {
+                balance: U256::from(2),
+                ..Default::default()
+            },
+        ),
+        (
+            account3.address(),
+            GenesisAccount {
+                balance: U256::from(1000),
+                ..Default::default()
+            },
+        ),
+    ]);
+    (account1, account2, account3)
+}
+
 async fn start_genesis_node(testnet_config_genesis: &Config) -> IrysNodeTest<IrysNodeCtx> {
     let ctx_genesis_node = IrysNodeTest::new_genesis(testnet_config_genesis.clone())
         .await
@@ -234,6 +277,23 @@ async fn start_peer_nodes(
 
 fn local_test_url(port: &u16) -> String {
     format!("http://127.0.0.1:{}", port)
+}
+
+async fn generate_test_transaction_and_add_to_block(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    account: IrysSigner,
+) {
+    let data_bytes = "Test transaction!".as_bytes().to_vec();
+    let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
+    match node.create_submit_data_tx(&account, data_bytes).await {
+        Ok(tx) => {
+            irys_txs.insert(IrysTxId::from_slice(tx.header.id.as_bytes()), tx);
+        }
+        Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
+            panic!("unfunded account error")
+        }
+        Err(e) => panic!("unexpected error {:?}", e),
+    }
 }
 
 /// poll info_endpoint until timeout or we get block_index at desired height
