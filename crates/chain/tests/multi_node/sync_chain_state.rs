@@ -26,8 +26,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         init_configs(&genesis_trusted_peers, &trusted_peers);
     // start genesis node
     let mut ctx_genesis_node = start_genesis_node(&testnet_config_genesis).await;
-
-    //
+    // add accounts with balances to genesis node
     let (_account1, _account2, account3) = add_accounts_to_config(&mut ctx_genesis_node);
 
     let required_blocks_height: usize = 5;
@@ -35,6 +34,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let required_genesis_node_height = required_blocks_height + 2;
 
     // generate a txn and add it to the block...
+    sleep(Duration::from_millis(5000)).await; //wait before trying that
     generate_test_transaction_and_add_to_block(&ctx_genesis_node, account3).await;
 
     // mine x blocks on genesis
@@ -249,6 +249,7 @@ fn add_accounts_to_config(
             },
         ),
     ]);
+    error!("node_config {:?}", node.cfg.irys_node_config);
     (account1, account2, account3)
 }
 
