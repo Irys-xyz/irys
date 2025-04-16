@@ -134,8 +134,8 @@ impl ApiClient for IrysApiClient {
 
 #[cfg(test)]
 mod tests {
-    use irys_types::AcceptedResponse;
     use super::*;
+    use irys_types::AcceptedResponse;
 
     /// Mock implementation of the API client for testing
     #[derive(Default, Clone)]

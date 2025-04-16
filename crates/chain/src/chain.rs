@@ -1326,7 +1326,10 @@ async fn genesis_initialization(
     block_index_service_actor
 }
 
-fn init_peer_list_service(irys_db: &DatabaseProvider, config: &Config) -> (Addr<PeerListService>, Arbiter) {
+fn init_peer_list_service(
+    irys_db: &DatabaseProvider,
+    config: &Config,
+) -> (Addr<PeerListService>, Arbiter) {
     let peer_list_arbiter = Arbiter::new();
     let mut peer_list_service = PeerListService::new(irys_db.clone(), config);
     peer_list_service

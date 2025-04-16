@@ -119,9 +119,12 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 .with_recommended_fillers()
                 .wallet(EthereumWallet::from(signer))
                 .on_http(
-                    format!("http://127.0.0.1:{}/v1/execution-rpc", node.cfg.config.api_port)
-                        .parse()
-                        .unwrap(),
+                    format!(
+                        "http://127.0.0.1:{}/v1/execution-rpc",
+                        node.cfg.config.api_port
+                    )
+                    .parse()
+                    .unwrap(),
                 )
         })
         .collect::<Vec<_>>();

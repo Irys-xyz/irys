@@ -303,7 +303,8 @@ mod tests {
             chunk_migration_depth = 1
             mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
             num_capacity_partitions = 16
-            port = 8080
+            api_bind_ip = "127.0.0.1"
+            api_port = 8080
             anchor_expiry_depth = 10
             genesis_price_valid_for_n_epochs = 2
             genesis_token_price = "1.0"
