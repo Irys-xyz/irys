@@ -134,6 +134,7 @@ impl ApiClient for IrysApiClient {
 
 #[cfg(test)]
 mod tests {
+    use irys_types::AcceptedResponse;
     use super::*;
 
     /// Mock implementation of the API client for testing
@@ -165,6 +166,14 @@ mod tests {
             }
 
             Ok(results)
+        }
+
+        async fn post_version(
+            &self,
+            _peer: SocketAddr,
+            _version: VersionRequest,
+        ) -> Result<PeerResponse> {
+            Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock response
         }
     }
 

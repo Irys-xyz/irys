@@ -515,11 +515,12 @@ mod tests {
     #[actix_rt::test]
     async fn test_add_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db);
+        let mut service = PeerListService::new(db, &config);
         let ctx = &mut Context::new();
 
         // Test adding a new peer
@@ -555,11 +556,12 @@ mod tests {
     #[actix_rt::test]
     async fn test_peer_score_management() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db);
+        let mut service = PeerListService::new(db, &config);
         let ctx = &mut Context::new();
 
         // Add a test peer
@@ -617,11 +619,12 @@ mod tests {
     #[actix_rt::test]
     async fn test_active_peers_request() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db);
+        let mut service = PeerListService::new(db, &config);
         let ctx = &mut Context::new();
 
         // Add multiple peers with different states
@@ -690,11 +693,12 @@ mod tests {
     #[actix_rt::test]
     async fn test_edge_cases() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db);
+        let mut service = PeerListService::new(db, &config);
         let ctx = &mut Context::new();
 
         // Test adding duplicate peer
@@ -756,7 +760,7 @@ mod tests {
             open_or_create_irys_consensus_data_db(&new_temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut empty_service = PeerListService::new(new_test_db);
+        let mut empty_service = PeerListService::new(new_test_db, &config);
 
         let exclude_peers = HashSet::new();
         let active_peers = empty_service.handle(
@@ -772,13 +776,14 @@ mod tests {
     #[actix_rt::test]
     async fn test_periodic_flush() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
 
         // Start the actor system with our service
-        let service = PeerListService::new(db.clone());
+        let service = PeerListService::new(db.clone(), &config);
         let addr = service.start();
 
         // Add a test peer
@@ -823,13 +828,14 @@ mod tests {
     #[actix_rt::test]
     async fn test_load_from_database() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
 
         // Create first service instance and add some peers
-        let mut service = PeerListService::new(db.clone());
+        let mut service = PeerListService::new(db.clone(), &config);
         let ctx = &mut Context::new();
 
         // Add multiple test peers
@@ -867,7 +873,7 @@ mod tests {
             .expect("Failed to flush data");
 
         // Create new service instance that should load from database
-        let mut new_service = PeerListService::new(db);
+        let mut new_service = PeerListService::new(db, &config);
         new_service
             .initialize()
             .expect("Failed to initialize service");
