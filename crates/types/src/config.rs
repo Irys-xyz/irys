@@ -10,7 +10,33 @@ use alloy_primitives::Address;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use std::{env, net::SocketAddr, path::PathBuf};
+use std::{env, net::SocketAddr, ops::Deref, path::PathBuf, sync::Arc};
+
+#[derive(Debug, Clone)]
+pub struct CombinedConfig(Arc<CombinedConfigInner>);
+
+impl CombinedConfig {
+    pub fn new(consensus: ConsensusConfig, node_config: NodeConfig) -> Self {
+        Self(Arc::new(CombinedConfigInner {
+            consensus,
+            node_config,
+        }))
+    }
+}
+
+impl Deref for CombinedConfig {
+    type Target = CombinedConfigInner;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+#[derive(Debug)]
+pub struct CombinedConfigInner {
+    pub consensus: ConsensusConfig,
+    pub node_config: NodeConfig,
+}
 
 /// # Consensus Configuration
 ///

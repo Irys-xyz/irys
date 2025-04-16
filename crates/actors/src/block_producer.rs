@@ -19,8 +19,8 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Address, Base64, DataTransactionLedger, DifficultyAdjustmentConfig,
-    H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature,
-    TxIngressProof, VDFLimiterInfo, H256, U256,
+    EpochConfig, H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData,
+    Signature, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -35,9 +35,7 @@ use crate::{
     block_tree_service::BlockTreeReadGuard,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
-    epoch_service::{
-        EpochServiceActor, EpochServiceConfig, GetPartitionAssignmentMessage, NewEpochMessage,
-    },
+    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage, NewEpochMessage},
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
@@ -74,7 +72,7 @@ pub struct BlockProducerActor {
     /// Get the head of the chain
     pub block_tree_guard: BlockTreeReadGuard,
     /// Epoch config
-    pub epoch_config: EpochServiceConfig,
+    pub epoch_config: EpochConfig,
     /// The Irys price oracle
     pub price_oracle: Arc<IrysPriceOracle>,
 }

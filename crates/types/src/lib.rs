@@ -22,6 +22,8 @@ pub mod storage_pricing;
 pub mod transaction;
 pub mod version;
 
+use std::sync::{atomic::AtomicU64, Arc};
+
 pub use block::*;
 pub use config::*;
 pub use difficulty_adjustment_config::*;
@@ -41,3 +43,5 @@ pub use peer_list::*;
 pub use reth_codecs::Compact;
 pub use simple_rng::*;
 pub use version::*;
+
+pub type AtomicVdfStepNumber = Arc<AtomicU64>;

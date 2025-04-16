@@ -56,8 +56,8 @@ use irys_types::{
     get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash,
-    ConsensusConfig, DataRoot, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PackedChunk,
-    PartitionChunkOffset, PartitionChunkRange, ProofDeserialize, RelativeChunkOffset,
+    CombinedConfig, ConsensusConfig, DataRoot, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
+    PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize, RelativeChunkOffset,
     StorageSyncConfig, TxChunkOffset, TxPath, UnpackedChunk, H256,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
@@ -99,9 +99,7 @@ pub struct StorageModule {
     /// Physical storage locations indexed by chunk ranges
     submodules: SubmoduleMap,
     /// Runtime configuration parameters
-    pub storage_config: StorageSyncConfig,
-    pub consensus_config: ConsensusConfig,
-    pub miner_address: Address,
+    pub config: CombinedConfig,
 }
 
 /// On-disk metadata for StorageModule persistence
@@ -205,17 +203,15 @@ impl StorageModules {
 impl StorageModule {
     /// Initializes a new StorageModule
     pub fn new(
-        base_path: &PathBuf,
         storage_module_info: &StorageModuleInfo,
-        node_config: &NodeConfig,
-        consensus_config: &ConsensusConfig,
+        config: &CombinedConfig,
     ) -> eyre::Result<Self> {
         let mut submodule_map = NoditMap::new();
         let mut global_intervals = StorageIntervals::new();
 
         // Initialize the submodules from the StorageModuleInfo
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
-            let sub_base_path = base_path.join(dir.clone());
+            let sub_base_path = config.node_config.base_directory.join(dir.clone());
 
             println!("{:?}", sub_base_path);
             fs::create_dir_all(&sub_base_path)?; // Ensure the directory exists (for component tests)
@@ -249,7 +245,7 @@ impl StorageModule {
             let params_path = sub_base_path.join("packing_params.toml");
             if params_path.exists() == false {
                 let mut params = PackingParams {
-                    packing_address: node_config.miner_address(),
+                    packing_address: config.node_config.miner_address(),
                     ..Default::default()
                 };
                 if let Some(pa) = storage_module_info.partition_assignment {
@@ -263,9 +259,9 @@ impl StorageModule {
                 let params = PackingParams::from_toml(params_path).expect("packing params to load");
                 let pa = storage_module_info.partition_assignment.unwrap();
                 ensure!(
-                    params.packing_address == node_config.miner_address(),
+                    params.packing_address == config.node_config.miner_address(),
                     "Active mining address: {} does not match partition packing address {}",
-                    node_config.miner_address(),
+                    config.node_config.miner_address(),
                     params.packing_address
                 );
                 ensure!(params.partition_hash == Some(pa.partition_hash),
@@ -318,7 +314,7 @@ impl StorageModule {
             .gaps_untrimmed(partition_chunk_offset_ii!(0, u32::MAX))
             .collect::<Vec<_>>();
         let expected = vec![partition_chunk_offset_ii!(
-            TryInto::<u32>::try_into(consensus_config.num_chunks_in_partition)
+            TryInto::<u32>::try_into(config.consensus.num_chunks_in_partition)
                 .expect("Value exceeds u32::MAX"),
             u32::MAX
         )];
@@ -339,9 +335,7 @@ impl StorageModule {
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
             intervals: Arc::new(RwLock::new(loaded_intervals)),
             submodules: submodule_map,
-            storage_config: node_config.storage.clone(),
-            consensus_config: consensus_config.clone(),
-            miner_address: node_config.miner_address(),
+            config: config.clone(),
         })
     }
 
@@ -1363,12 +1357,8 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module = StorageModule::new(
-            &base_path,
-            storage_module_info,
-            &node_config,
-            &consensus_config,
-        )?;
+        let storage_module =
+            StorageModule::new(storage_module_info, &node_config, &consensus_config)?;
 
         // Verify the packing params file was crated in the submodule
         let params_path = base_path.join("hdd0-4TB").join("packing_params.toml");
@@ -1564,12 +1554,12 @@ mod tests {
             base_directory: base_path,
             storage: StorageSyncConfig {
                 num_writes_before_sync: 10,
-                chunk_migration_depth: 1,
             },
             ..NodeConfig::testnet()
         };
         let consensus_config = ConsensusConfig {
             chunk_size: 32,
+            chunk_migration_depth: 1,
             num_chunks_in_partition: 51,
             ..node_config.consensus_config()
         };
@@ -1577,12 +1567,8 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module = StorageModule::new(
-            &base_path,
-            storage_module_info,
-            &node_config,
-            &consensus_config,
-        )?;
+        let storage_module =
+            StorageModule::new(storage_module_info, &node_config, &consensus_config)?;
 
         // Queue up some entropy chunks in the pending writes queue
         let entropy_bytes = vec![0u8; chunk_size];
@@ -1787,12 +1773,8 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module = StorageModule::new(
-            &base_path,
-            storage_module_info,
-            &node_config,
-            &consensus_config,
-        )?;
+        let storage_module =
+            StorageModule::new(storage_module_info, &node_config, &consensus_config)?;
         let chunk_data = vec![0, 1, 2, 3, 4];
         let data_path = vec![4, 3, 2, 1];
         let tx_path = vec![5, 6, 7, 8];

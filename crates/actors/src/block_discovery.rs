@@ -23,8 +23,8 @@ pub struct BlockDiscoveryActor {
     pub block_index_guard: BlockIndexReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
-    /// Reference to the global consensus config
-    pub consensus_config: ConsensusConfig,
+    /// Reference to the global config
+    pub config: CombinedConfig,
     /// Reference to global difficulty config
     pub difficulty_config: DifficultyAdjustmentConfig,
     /// Database provider for accessing transaction headers and related data.
@@ -60,7 +60,7 @@ impl BlockDiscoveryActor {
     pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
-        consensus_config: ConsensusConfig,
+        config: CombinedConfig,
         difficulty_config: DifficultyAdjustmentConfig,
         db: DatabaseProvider,
         vdf_steps_guard: VdfStepsReadGuard,
@@ -75,7 +75,7 @@ impl BlockDiscoveryActor {
             vdf_steps_guard,
             service_senders,
             gossip_sender,
-            consensus_config,
+            config,
         }
     }
 }

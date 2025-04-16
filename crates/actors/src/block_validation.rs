@@ -448,8 +448,8 @@ mod tests {
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
         epoch_service::{
-            EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
-            GetPartitionAssignmentsGuardMessage, NewEpochMessage,
+            EpochServiceActor, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
+            NewEpochMessage,
         },
         BlockFinalizedMessage,
     };
@@ -485,7 +485,7 @@ mod tests {
         let chunk_size = 32;
         let mut node_config = NodeConfig::testnet();
         node_config.storage.num_writes_before_sync = 1;
-        node_config.base_directory = data_dir.into_path();
+        node_config.base_directory = data_dir.path().to_path_buf();
         let consensus_config = ConsensusConfig {
             chunk_size,
             num_chunks_in_partition: 10,
@@ -504,7 +504,6 @@ mod tests {
         let miner_address = signer.address();
 
         // Create epoch service with random miner address
-        let epoch_config = EpochServiceConfig::new(&consensus_config);
         let block_index = Arc::new(RwLock::new(BlockIndex::new(&node_config).await.unwrap()));
 
         let block_index_actor =
@@ -517,7 +516,7 @@ mod tests {
             .unwrap();
 
         let epoch_service =
-            EpochServiceActor::new(epoch_config.clone(), &consensus_config, block_index_guard);
+            EpochServiceActor::new(&node_config, &consensus_config, block_index_guard);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers

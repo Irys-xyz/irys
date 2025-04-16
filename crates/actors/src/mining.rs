@@ -25,7 +25,6 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug, Clone)]
 pub struct PartitionMiningActor {
     mining_address: Address,
-    _database_provider: DatabaseProvider,
     block_producer_actor: Recipient<SolutionFoundMessage>,
     packing_actor: Recipient<PackingRequest>,
     storage_module: Arc<StorageModule>,
@@ -41,7 +40,7 @@ impl Supervised for PartitionMiningActor {}
 
 impl PartitionMiningActor {
     pub fn new(
-        mining_address: Address,
+        config: CombinedConfig,
         _database_provider: DatabaseProvider,
         block_producer_addr: Recipient<SolutionFoundMessage>,
         packing_actor: Recipient<PackingRequest>,
@@ -51,8 +50,7 @@ impl PartitionMiningActor {
         atomic_global_step_number: AtomicVdfStepNumber,
     ) -> Self {
         Self {
-            mining_address,
-            _database_provider,
+            mining_address: config.node_config.mining_address(),
             block_producer_actor: block_producer_addr,
             packing_actor,
             ranges: Ranges::new(
