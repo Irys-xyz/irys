@@ -4,7 +4,7 @@ use irys_actors::epoch_service::{GetLedgersGuardMessage, GetPartitionAssignments
 use irys_config::StorageSubmodulesConfig;
 use irys_types::Config;
 use irys_types::{
-    partition::PartitionAssignment, DatabaseProvider, IrysBlockHeader, StorageConfig, H256,
+    partition::PartitionAssignment, DatabaseProvider, IrysBlockHeader, StorageSyncConfig, H256,
 };
 use irys_types::{partition_chunk_offset_ie, Address, PartitionChunkOffset};
 use reth_db::Database;
@@ -59,7 +59,7 @@ async fn genesis_test() {
             .unwrap(),
     ));
 
-    let storage_config = StorageConfig::default();
+    let storage_config = StorageSyncConfig::default();
     let block_index_actor =
         BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
     SystemRegistry::set(block_index_actor.clone());
@@ -206,7 +206,7 @@ async fn add_slots_test() {
     let commitments = add_genesis_commitments(&mut genesis_block, &testnet_config);
 
     // Create a storage config for testing
-    let storage_config = StorageConfig {
+    let storage_config = StorageSyncConfig {
         chunk_size: 32,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
@@ -395,7 +395,7 @@ async fn partition_expiration_test() {
     let commitments = add_test_commitments(&mut genesis_block, 5, &testnet_config);
 
     // Create a storage config for testing
-    let storage_config = StorageConfig::new(&testnet_config);
+    let storage_config = StorageSyncConfig::new(&testnet_config);
     let num_chunks_in_partition = storage_config.num_chunks_in_partition;
     let tmp_dir = setup_tracing_and_temp_dir(Some("partition_expiration_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -833,7 +833,7 @@ async fn epoch_blocks_reinitialization_test() {
     };
 
     // Create a storage config for testing
-    let storage_config = StorageConfig {
+    let storage_config = StorageSyncConfig {
         chunk_size: testnet_config.chunk_size,
         num_chunks_in_partition: testnet_config.num_chunks_in_partition,
         num_chunks_in_recall_range: testnet_config.num_chunks_in_recall_range,
@@ -1092,7 +1092,7 @@ async fn partitions_assignment_determinism_test() {
     // TODO: need a test method that pledges X partitions regardless of the storage config
 
     // Create a storage config for testing
-    let storage_config = StorageConfig {
+    let storage_config = StorageSyncConfig {
         chunk_size: 32,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,

@@ -16,7 +16,7 @@ use {
 };
 
 use irys_storage::{ChunkType, StorageModule};
-use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, StorageConfig};
+use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, StorageSyncConfig};
 use reth::tasks::TaskExecutor;
 use tokio::{sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
@@ -125,7 +125,7 @@ impl PackingActor {
 
             let mining_address = assignment.miner_address;
             let partition_hash = assignment.partition_hash;
-            let StorageConfig {
+            let StorageSyncConfig {
                 chunk_size,
                 entropy_packing_iterations,
                 ..
@@ -372,7 +372,7 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
-        Address, Config, PartitionChunkOffset, PartitionChunkRange, StorageConfig,
+        Address, Config, PartitionChunkOffset, PartitionChunkRange, StorageSyncConfig,
     };
     use reth::tasks::TaskManager;
 
@@ -414,7 +414,7 @@ mod tests {
                 "hdd0".into(),
             )],
         }];
-        let storage_config = StorageConfig::new(&testnet_config);
+        let storage_config = StorageSyncConfig::new(&testnet_config);
         let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
         let base_path = tmp_dir.path().to_path_buf();
         // Create a StorageModule with the specified submodules and config

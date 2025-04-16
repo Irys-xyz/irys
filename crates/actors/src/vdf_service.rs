@@ -234,7 +234,7 @@ mod tests {
     };
     use irys_storage::ii;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{H256List, IrysBlockHeader, StorageConfig, H256};
+    use irys_types::{H256List, IrysBlockHeader, StorageSyncConfig, H256};
 
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
@@ -301,7 +301,7 @@ mod tests {
         };
 
         // Create a storage config for testing
-        let storage_config = StorageConfig::new(&testnet_config);
+        let storage_config = StorageSyncConfig::new(&testnet_config);
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("create_state_test"), false);
         let base_path = tmp_dir.path().to_path_buf();

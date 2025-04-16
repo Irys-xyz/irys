@@ -2,7 +2,7 @@ use crate::{calculate_chunks_added, BlockFinalizedMessage};
 use actix::prelude::*;
 use irys_database::{BlockIndex, BlockIndexItem, DataLedger, LedgerIndexItem};
 use irys_types::{
-    ConsensusConfig, IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256,
+    ConsensusConfig, IrysBlockHeader, IrysTransactionHeader, StorageSyncConfig, H256, U256,
 };
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::error;
@@ -130,7 +130,7 @@ impl BlockIndexService {
             return;
         }
 
-        let chunk_size = self.storage_config.chunk_size;
+        let chunk_size = self.chunk_size;
 
         // Extract just the transactions referenced in the submit ledger
         let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();

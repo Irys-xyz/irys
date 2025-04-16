@@ -16,7 +16,7 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, H256List, H256,
 };
-use irys_types::{Config, IrysTransactionHeader, StorageConfig, TxChunkOffset, VDFStepsConfig};
+use irys_types::{Config, IrysTransactionHeader, StorageSyncConfig, TxChunkOffset, VDFStepsConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
@@ -49,7 +49,7 @@ pub async fn capacity_chunk_solution(
     miner_addr: Address,
     vdf_steps_guard: VdfStepsReadGuard,
     vdf_config: &VDFStepsConfig,
-    storage_config: &StorageConfig,
+    storage_config: &StorageSyncConfig,
 ) -> SolutionContext {
     let max_retries = 20;
     let testnet_config = Config::testnet();
@@ -437,7 +437,7 @@ pub async fn future_or_mine_on_timeout<F, T>(
     timeout_duration: Duration,
     vdf_steps_guard: VdfStepsReadGuard,
     vdf_config: &VDFStepsConfig,
-    storage_config: &StorageConfig,
+    storage_config: &StorageSyncConfig,
 ) -> eyre::Result<T>
 where
     F: Future<Output = T> + Unpin,
@@ -586,7 +586,7 @@ pub async fn verify_published_chunk<T, B>(
     app: &T,
     chunk_offset: LedgerChunkOffset,
     expected_bytes: &[u8; 32],
-    storage_config: &StorageConfig,
+    storage_config: &StorageSyncConfig,
 ) where
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
     B: MessageBody,

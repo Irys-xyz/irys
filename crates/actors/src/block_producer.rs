@@ -18,10 +18,9 @@ use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
-    Base64, DataTransactionLedger, DifficultyAdjustmentConfig, H256List, IngressProofsList,
-    IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TxIngressProof, VDFLimiterInfo,
-    H256, U256,
+    next_cumulative_diff, Address, Base64, DataTransactionLedger, DifficultyAdjustmentConfig,
+    H256List, IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature,
+    TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -66,12 +65,10 @@ pub struct BlockProducerActor {
     pub service_senders: ServiceSenders,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
-    /// Storage config
-    pub storage_config: StorageConfig,
+    /// Chunk size
+    pub chunk_size: u64,
     /// Difficulty adjustment parameters for the Irys Protocol
     pub difficulty_config: DifficultyAdjustmentConfig,
-    /// VDF configuration parameters
-    pub vdf_config: VDFStepsConfig,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Get the head of the chain
@@ -120,8 +117,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
-        let difficulty_config = self.difficulty_config;
-        let chunk_size = self.storage_config.chunk_size;
+        let difficulty_config = self.difficulty_config.clone();
+        let chunk_size = self.chunk_size;
         let block_tree_guard = self.block_tree_guard.clone();
         let blocks_in_epoch = self.epoch_config.num_blocks_in_epoch;
         let vdf_steps = self.vdf_steps_guard.clone();

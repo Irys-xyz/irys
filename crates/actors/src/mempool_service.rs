@@ -17,7 +17,7 @@ use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, GossipData,
     IrysTransactionHeader, H256,
 };
-use irys_types::{Config, DataRoot, StorageConfig, U256};
+use irys_types::{Config, DataRoot, StorageSyncConfig, U256};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::transaction::DbTx as _;
@@ -39,7 +39,7 @@ pub struct MempoolService {
     /// The miner's signer instance, used to sign ingress proofs
     signer: Option<IrysSigner>,
     invalid_tx: Vec<H256>,
-    storage_config: StorageConfig,
+    storage_config: StorageSyncConfig,
     anchor_expiry_depth: u64,
     max_data_txs_per_block: u64,
     storage_modules: StorageModuleVec,
@@ -64,7 +64,7 @@ impl MempoolService {
         reth_db: RethDbWrapper,
         task_exec: TaskExecutor,
         signer: IrysSigner,
-        storage_config: StorageConfig,
+        storage_config: StorageSyncConfig,
         storage_modules: StorageModuleVec,
         block_tree_read_guard: BlockTreeReadGuard,
         config: &Config,

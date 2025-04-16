@@ -16,7 +16,7 @@ use rand::Rng;
 use crate::utils::mine_block;
 use crate::utils::IrysNodeTest;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
-use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG, StorageConfig};
+use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG, StorageSyncConfig};
 use k256::ecdsa::SigningKey;
 use reth::rpc::types::TransactionRequest;
 use reth_primitives::GenesisAccount;
@@ -30,7 +30,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
     let mut node = IrysNodeTest::default_async().await;
-    node.cfg.storage_config = StorageConfig {
+    node.cfg.storage_config = StorageSyncConfig {
         chunk_size: 32,
         num_chunks_in_partition: 1000,
         num_chunks_in_recall_range: 2,

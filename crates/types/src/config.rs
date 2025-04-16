@@ -45,11 +45,11 @@ pub struct ConsensusConfig {
     /// Configuration for the Verifiable Delay Function used in consensus
     pub vdf: VdfConfig,
 
-    /// Cache management configuration
-    pub epoch: EpochConfig,
-
     /// Size of each data chunk in bytes
     pub chunk_size: u64,
+
+    /// Defines how many blocks must pass before a block is marked as finalized
+    pub chunk_migration_depth: u32,
 
     /// Number of chunks that make up a single partition
     pub num_chunks_in_partition: u64,
@@ -62,6 +62,9 @@ pub struct ConsensusConfig {
 
     /// Number of iterations for entropy packing algorithm
     pub entropy_packing_iterations: u32,
+
+    /// Cache management configuration
+    pub epoch: EpochConfig,
 
     /// Minimum number of replicas required for data to be considered permanently stored
     /// Higher values increase data durability but require more network resources
@@ -110,7 +113,7 @@ pub struct NodeConfig {
     pub mining_key: k256::ecdsa::SigningKey,
 
     /// Data storage configuration
-    pub storage: StorageConfig,
+    pub storage: StorageSyncConfig,
 
     /// Fee and pricing settings
     pub pricing: PricingConfig,
@@ -222,7 +225,7 @@ pub struct VdfConfig {
 /// # Epoch Configuration
 ///
 /// Controls the timing and parameters for network epochs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct EpochConfig {
     /// Scaling factor for the capacity projection curve
     /// Affects how network capacity is calculated and projected
@@ -238,14 +241,8 @@ pub struct EpochConfig {
     pub num_capacity_partitions: Option<u64>,
 }
 
-/// # Storage Configuration
-///
-/// Defines how and where the node stores blockchain and user data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct StorageConfig {
-    /// How many blocks deep a chunk can be migrated
-    pub chunk_migration_depth: u32,
-
+pub struct StorageSyncConfig {
     /// Number of write operations before forcing a sync to disk
     /// Higher values improve performance but increase data loss risk on crashes
     pub num_writes_before_sync: u64,
@@ -357,6 +354,7 @@ impl ConsensusConfig {
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
+            chunk_migration_depth: 1,
             epoch: EpochConfig {
                 capacity_scalar: 100,
                 num_blocks_in_epoch: 100,
@@ -376,9 +374,10 @@ impl NodeConfig {
             chunk_size: consensus_config.chunk_size,
         }
     }
-
     pub fn consensus_config(&self) -> ConsensusConfig {
-        // load the consesnsus config
+        // load the consensus config
+        // todo: lazy load the consensus config, caching the result for subsequent calls
+
         match &self.consensus {
             ConsensusOptions::Path(path_buf) => std::fs::read_to_string(path_buf)
                 .map(|consensus_cfg| {
@@ -430,8 +429,7 @@ impl NodeConfig {
                     .expect("valid hex"),
             )
             .expect("valid key"),
-            storage: StorageConfig {
-                chunk_migration_depth: 1,
+            storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
             },
             pricing: PricingConfig {
@@ -466,12 +464,12 @@ impl NodeConfig {
     pub fn reth_log_dir(&self) -> PathBuf {
         self.reth_data_dir().join("logs")
     }
-    /// get the `block_index` directory path  
+    /// get the `block_index` directory path
     pub fn block_index_dir(&self) -> PathBuf {
         self.base_directory.join("block_index")
     }
 
-    /// get the `vdf_steps` directory path  
+    /// get the `vdf_steps` directory path
     pub fn vdf_steps_dir(&self) -> PathBuf {
         self.base_directory.join("vdf_steps")
     }
@@ -583,12 +581,10 @@ mod tests {
         // Create the expected config
         let expected_config = ConsensusConfig {
             chain_id: 1270,
+            token_price_safe_range: Amount::percentage(dec!(1)).unwrap(),
+            genesis_price: Amount::token(dec!(1)).unwrap(),
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(),
             decay_rate: Amount::percentage(dec!(0.01)).unwrap(),
-            safe_minimum_number_of_years: 200,
-            number_of_ingerss_proofs: 10,
-            genesis_price: Amount::token(dec!(1)).unwrap(),
-            token_price_safe_range: Amount::percentage(dec!(1)).unwrap(),
             vdf: VdfConfig {
                 reset_frequency: 1200,
                 parallel_verification_thread_limit: 4,
@@ -596,16 +592,19 @@ mod tests {
                 sha_1s_difficulty: 7000,
             },
             chunk_size: 262144,
+            chunk_migration_depth: 1,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
+            entropy_packing_iterations: 1000,
             epoch: EpochConfig {
                 capacity_scalar: todo!(),
                 num_blocks_in_epoch: todo!(),
                 submit_ledger_epoch_length: todo!(),
                 num_capacity_partitions: todo!(),
             },
-            entropy_packing_iterations: 1000,
+            number_of_ingerss_proofs: 10,
+            safe_minimum_number_of_years: 200,
         };
 
         // Assert the entire struct matches
@@ -700,8 +699,7 @@ mod tests {
                     .expect("valid hex"),
             )
             .expect("valid private key"),
-            storage: StorageConfig {
-                chunk_migration_depth: 1,
+            storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
             },
             pricing: PricingConfig {

@@ -8,7 +8,7 @@ use irys_database::{
         CachedChunks, DataRootLRU, IngressProofs, ProgrammableDataCache, ProgrammableDataLRU,
     },
 };
-use irys_types::{Config, DatabaseProvider, GIGABYTE};
+use irys_types::{DatabaseProvider, GIGABYTE};
 use reth::{
     network::metered_poll_nested_stream_with_budget,
     tasks::{shutdown::GracefulShutdown, TaskExecutor},

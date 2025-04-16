@@ -386,7 +386,8 @@ mod tests {
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::{
         app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
-        partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
+        partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageSyncConfig,
+        H256,
     };
     use irys_types::{ledger_chunk_offset_ie, H256List, IrysBlockHeader, LedgerChunkOffset};
     use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
@@ -442,7 +443,7 @@ mod tests {
         //SystemRegistry::set(block_producer_actor_addr);
 
         // Set up the storage geometry for this test
-        let storage_config = StorageConfig {
+        let storage_config = StorageSyncConfig {
             chunk_size,
             num_chunks_in_partition: chunk_count.into(),
             num_chunks_in_recall_range: 2,
@@ -612,7 +613,7 @@ mod tests {
         let database_provider = DatabaseProvider(Arc::new(db));
 
         // Override the default StorageModule config for testing
-        let config = StorageConfig {
+        let config = StorageSyncConfig {
             chunk_size: 32,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2, // Recall range size is 5 chunks

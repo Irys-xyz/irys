@@ -48,7 +48,7 @@ use irys_storage::{
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, Address,
     CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
-    OracleConfig, PartitionChunkRange, PeerListItem, StorageConfig, H256,
+    OracleConfig, PartitionChunkRange, PeerListItem, StorageSyncConfig, H256,
 };
 use irys_types::{ConsensusConfig, NodeConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
@@ -85,7 +85,7 @@ pub struct IrysNodeCtx {
     pub block_tree_guard: BlockTreeReadGuard,
     pub vdf_steps_guard: VdfStepsReadGuard,
     pub vdf_config: VDFStepsConfig,
-    pub storage_config: StorageConfig,
+    pub storage_config: StorageSyncConfig,
     pub service_senders: ServiceSenders,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,

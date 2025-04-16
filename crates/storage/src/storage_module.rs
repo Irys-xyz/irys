@@ -58,7 +58,7 @@ use irys_types::{
     partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash,
     ConsensusConfig, DataRoot, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PackedChunk,
     PartitionChunkOffset, PartitionChunkRange, ProofDeserialize, RelativeChunkOffset,
-    StorageConfig, TxChunkOffset, TxPath, UnpackedChunk, H256,
+    StorageSyncConfig, TxChunkOffset, TxPath, UnpackedChunk, H256,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use openssl::sha;
@@ -99,7 +99,7 @@ pub struct StorageModule {
     /// Physical storage locations indexed by chunk ranges
     submodules: SubmoduleMap,
     /// Runtime configuration parameters
-    pub storage_config: StorageConfig,
+    pub storage_config: StorageSyncConfig,
     pub consensus_config: ConsensusConfig,
     pub miner_address: Address,
 }
@@ -1562,7 +1562,7 @@ mod tests {
         // Override the default StorageModule config for testing
         let node_config = NodeConfig {
             base_directory: base_path,
-            storage: StorageConfig {
+            storage: StorageSyncConfig {
                 num_writes_before_sync: 10,
                 chunk_migration_depth: 1,
             },
