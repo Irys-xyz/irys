@@ -175,7 +175,9 @@ impl BlockIndexService {
             ],
         };
 
-        index.push_item(&block_index_item);
+        index
+            .push_item(&block_index_item)
+            .expect("to be able to push a new block to the block index");
 
         // Block log tracking
         self.block_log.push(BlockLogEntry {

@@ -26,10 +26,9 @@ use irys_actors::{
     packing::{PackingActor, PackingRequest},
     BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
 };
-use irys_config::IrysNodeConfig;
 use irys_database::{
     add_genesis_commitments, add_test_commitments, insert_commitment_tx, open_or_create_db,
-    tables::IrysTables, BlockIndex, DataLedger, Initialized,
+    tables::IrysTables, BlockIndex, DataLedger,
 };
 use irys_storage::{ie, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;

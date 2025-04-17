@@ -40,7 +40,7 @@ impl Supervised for PartitionMiningActor {}
 
 impl PartitionMiningActor {
     pub fn new(
-        config: CombinedConfig,
+        config: &CombinedConfig,
         block_producer_addr: Recipient<SolutionFoundMessage>,
         packing_actor: Recipient<PackingRequest>,
         storage_module: Arc<StorageModule>,
@@ -383,7 +383,10 @@ mod tests {
         partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageSyncConfig,
         H256,
     };
-    use irys_types::{ledger_chunk_offset_ie, H256List, IrysBlockHeader, LedgerChunkOffset};
+    use irys_types::{
+        ledger_chunk_offset_ie, ConsensusConfig, H256List, IrysBlockHeader, LedgerChunkOffset,
+        NodeConfig,
+    };
     use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
     use std::any::Any;
     use std::collections::VecDeque;
@@ -413,10 +416,30 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_solution() {
-        let partition_hash = H256::random();
-        let mining_address = Address::random();
         let chunk_count = 4;
         let chunk_size = 32;
+        let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: chunk_count.into(),
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chunk_migration_depth: 1, // Testnet / single node config
+                chain_id: 1,
+                ..ConsensusConfig::testnet()
+            }),
+            base_directory: base_path.clone(),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+            },
+            ..NodeConfig::testnet()
+        };
+        let config = CombinedConfig::new(node_config);
+
+        let partition_hash = H256::random();
         let chunk_data = [0; 32];
         let data_path = [4, 3, 2, 1];
         let tx_path = [4, 3, 2, 1];
@@ -435,23 +458,11 @@ mod tests {
         let mocked_addr = MockedBlockProducerAddr(recipient);
 
         // Set up the storage geometry for this test
-        let storage_config = StorageSyncConfig {
-            chunk_size,
-            num_chunks_in_partition: chunk_count.into(),
-            num_chunks_in_recall_range: 2,
-            num_partitions_in_slot: 1,
-            miner_address: mining_address,
-            min_writes_before_sync: 1,
-            entropy_packing_iterations: 1,
-            chunk_migration_depth: 1, // Testnet / single node config
-            chain_id: 1,
-        };
-
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
-                miner_address: mining_address,
+                miner_address: config.node_config.miner_address(),
                 ledger_id: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
@@ -465,8 +476,7 @@ mod tests {
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module =
-            Arc::new(StorageModule::new(&base_path, storage_module_info, storage_config).unwrap());
+        let storage_module = Arc::new(StorageModule::new(storage_module_info, &config).unwrap());
 
         // Verify the packing params file was crated in the submodule
         let params_path = base_path.join("hdd0").join("packing_params.toml");
@@ -477,9 +487,7 @@ mod tests {
         storage_module.pack_with_zeros();
 
         let path = temporary_directory(None, false);
-        let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
-
-        let database_provider = DatabaseProvider(Arc::new(db));
+        let _db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         let data_root = H256::random();
         let data_size = chunk_size * chunk_count;
@@ -514,8 +522,7 @@ mod tests {
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
         let partition_mining_actor = PartitionMiningActor::new(
-            mining_address,
-            database_provider.clone(),
+            &config,
             mocked_addr.0,
             packing.start().recipient(),
             storage_module,
@@ -563,7 +570,8 @@ mod tests {
         );
 
         assert_eq!(
-            mining_address, solution.mining_address,
+            config.node_config.miner_address(),
+            solution.mining_address,
             "Not expected partition"
         );
 
@@ -582,7 +590,22 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_recall_range_reinit() {
-        let mining_address = Address::random();
+        let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                num_chunks_in_recall_range: 2, // Recall range size is 5 chunks
+                ..ConsensusConfig::testnet()
+            }),
+            base_directory: base_path.clone(),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+            },
+            ..NodeConfig::testnet()
+        };
+        let config = CombinedConfig::new(node_config);
 
         let partition_hash = H256::random();
 
@@ -590,7 +613,7 @@ mod tests {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: partition_hash.clone(),
-                miner_address: mining_address,
+                miner_address: config.node_config.miner_address(),
                 ledger_id: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
@@ -604,19 +627,9 @@ mod tests {
         let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
         let database_provider = DatabaseProvider(Arc::new(db));
 
-        // Override the default StorageModule config for testing
-        let config = StorageSyncConfig {
-            chunk_size: 32,
-            num_chunks_in_partition: 10,
-            num_chunks_in_recall_range: 2, // Recall range size is 5 chunks
-            miner_address: mining_address.clone(),
-            ..Default::default()
-        };
-
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module =
-            Arc::new(StorageModule::new(&base_path, storage_module_info, config.clone()).unwrap());
+        let storage_module = Arc::new(StorageModule::new(&storage_module_info, &config).unwrap());
 
         let rwlock: RwLock<Option<SolutionContext>> = RwLock::new(None);
         let arc_rwlock = Arc::new(rwlock);
@@ -657,8 +670,7 @@ mod tests {
         }));
 
         let mut partition_mining_actor = PartitionMiningActor::new(
-            mining_address,
-            database_provider.clone(),
+            &config,
             mocked_addr.0,
             packing.start().recipient(),
             storage_module,

@@ -145,7 +145,6 @@ mod tests {
     fn get_by_data_tx_offset_test() -> eyre::Result<()> {
         let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 32,

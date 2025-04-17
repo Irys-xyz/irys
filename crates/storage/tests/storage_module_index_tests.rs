@@ -12,10 +12,10 @@ use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-    partition_chunk_offset_ie, partition_chunk_offset_ii, Base64, ConsensusConfig,
-    DataTransactionLedger, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset,
-    LedgerChunkRange, NodeConfig, PartitionChunkOffset, PartitionChunkRange, TxChunkOffset,
-    UnpackedChunk, H256,
+    partition_chunk_offset_ie, partition_chunk_offset_ii, Base64, CombinedConfig, ConsensusConfig,
+    ConsensusOptions, DataTransactionLedger, IrysTransaction, IrysTransactionHeader,
+    LedgerChunkOffset, LedgerChunkRange, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
+    TxChunkOffset, UnpackedChunk, H256,
 };
 use openssl::sha;
 use reth_db::Database;
@@ -25,15 +25,16 @@ use tracing::info;
 fn tx_path_overlap_tests() -> eyre::Result<()> {
     let mut node_config = NodeConfig::testnet();
     node_config.storage.num_writes_before_sync = 1;
-    node_config.storage.chunk_migration_depth = 1;
-    let consensus_config = ConsensusConfig {
+    node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
         chunk_size: 32,
         num_chunks_in_partition: 20,
+        chunk_migration_depth: 1,
         num_chunks_in_recall_range: 5,
         num_partitions_per_slot: 1,
         entropy_packing_iterations: 1,
         ..node_config.consensus_config()
-    };
+    });
+    let config = CombinedConfig::new(node_config);
 
     // Configure 3 storage modules that are assigned to the submit ledger in
     // slots 0, 1, and 2
@@ -42,7 +43,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
-                miner_address: node_config.miner_address(),
+                miner_address: config.node_config.miner_address(),
                 ledger_id: Some(1),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
@@ -56,7 +57,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             id: 1,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
-                miner_address: node_config.miner_address(),
+                miner_address: config.node_config.miner_address(),
                 ledger_id: Some(1),
                 slot_index: Some(1), // Submit Ledger Slot 1
             }),
@@ -75,7 +76,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             id: 2,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: H256::random(),
-                miner_address: node_config.miner_address(),
+                miner_address: config.node_config.miner_address(),
                 ledger_id: Some(1),
                 slot_index: Some(2), // Submit Ledger Slot 2
             }),
@@ -99,12 +100,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Create a Vec initialized storage modules
     for info in storage_module_infos {
-        let arc_module = Arc::new(StorageModule::new(
-            &base_path,
-            &info,
-            &node_config,
-            &consensus_config,
-        )?);
+        let arc_module = Arc::new(StorageModule::new(&info, &config)?);
         storage_modules.push(arc_module.clone());
         arc_module.pack_with_zeros();
     }
@@ -134,7 +130,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // }
 
     // Loop though all the data_chunks and create wrapper tx for them
-    let signer = node_config.irys_signer(&consensus_config);
+    let signer = config.irys_signer();
     let mut txs: Vec<IrysTransaction> = Vec::new();
 
     for chunks in data_chunks {
@@ -157,12 +153,12 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tx_path = &proof.proof;
 
     // Tx:1 - Base case, write tx index data without any overlaps
-    let num_chunks_in_tx = (proof.offset + 1) as u64 / consensus_config.chunk_size;
+    let num_chunks_in_tx = (proof.offset + 1) as u64 / config.consensus.chunk_size;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         LedgerChunkOffset::from(0),
         &partition_0_range,
         proof.offset as u64,
-        consensus_config.chunk_size,
+        config.consensus.chunk_size,
     );
 
     let data_root = tx_headers[0].data_root;
@@ -197,7 +193,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         start_chunk_offset,
         &partition_0_range,
         bytes_in_tx,
-        consensus_config.chunk_size,
+        config.consensus.chunk_size,
     );
     let tx_path = &proofs[1].proof;
     let data_root = tx_headers[1].data_root;
@@ -241,7 +237,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let data_root = tx_headers[2].data_root;
     let offset = proofs[2].offset as u64;
     let bytes_in_tx =
-        (offset + 1) - (*(tx_ledger_range.end() + 1u64) * consensus_config.chunk_size);
+        (offset + 1) - (*(tx_ledger_range.end() + 1u64) * config.consensus.chunk_size);
     let data_size = tx_headers[2].data_size;
     assert_eq!(bytes_in_tx, data_size);
     let start_chunk_offset = tx_ledger_range.end() + 1u64;
@@ -249,7 +245,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         start_chunk_offset,
         &partition_0_range,
         bytes_in_tx,
-        consensus_config.chunk_size,
+        config.consensus.chunk_size,
     );
     let _ = storage_modules[0].index_transaction_data(
         tx_path.clone(),
@@ -293,14 +289,14 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let data_size = tx_headers[3].data_size;
     let offset = proofs[3].offset as u64;
     let bytes_in_tx =
-        (offset + 1) - (*(tx_ledger_range.end() + 1u64) * consensus_config.chunk_size);
+        (offset + 1) - (*(tx_ledger_range.end() + 1u64) * config.consensus.chunk_size);
     assert_eq!(bytes_in_tx, data_size);
     let start_chunk_offset = tx_ledger_range.end() + 1u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_0_range,
         bytes_in_tx,
-        consensus_config.chunk_size,
+        config.consensus.chunk_size,
     );
     // Update both storage modules with the tx data
     let _ = storage_modules[0].index_transaction_data(
@@ -334,7 +330,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         start_chunk_offset,
         &partition_1_range,
         bytes_in_tx,
-        consensus_config.chunk_size,
+        config.consensus.chunk_size,
     );
 
     verify_tx_path_offsets(submodule4, tx_path_hash, tx_partition_range, &[]);
@@ -350,14 +346,14 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let data_root = tx_headers[4].data_root;
     let data_size = tx_headers[4].data_size;
     let offset = proofs[4].offset as u64;
-    let bytes_in_tx = (offset + 1) - ((*tx_ledger_range.end() + 1) * consensus_config.chunk_size);
+    let bytes_in_tx = (offset + 1) - ((*tx_ledger_range.end() + 1) * config.consensus.chunk_size);
     assert_eq!(bytes_in_tx, data_size);
     let start_chunk_offset = tx_ledger_range.end() + 1u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_1_range,
         bytes_in_tx,
-        consensus_config.chunk_size,
+        config.consensus.chunk_size,
     );
 
     let _ = storage_modules[1].index_transaction_data(
@@ -393,7 +389,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             );
 
             // verify the chunk length
-            assert_eq!(chunk_bytes.len(), consensus_config.chunk_size as usize);
+            assert_eq!(chunk_bytes.len(), config.consensus.chunk_size as usize);
 
             // verify the chunk hash
             let chunk_hash = hash_sha256(&chunk_bytes.0).unwrap();
@@ -419,7 +415,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let mut ledger_offset: LedgerChunkOffset = LedgerChunkOffset::from(0);
     for tx in &txs {
         let data_root = tx.header.data_root;
-        let num_chunks = (tx.header.data_size / consensus_config.chunk_size)
+        let num_chunks = (tx.header.data_size / config.consensus.chunk_size)
             .try_into()
             .expect("Value exceeds u32::MAX");
 

@@ -166,6 +166,12 @@ pub struct NodeConfig {
     pub http: HttpConfig,
 }
 
+impl Into<CombinedConfig> for NodeConfig {
+    fn into(self) -> CombinedConfig {
+        CombinedConfig::new(self)
+    }
+}
+
 /// # Node Operation Mode
 ///
 /// Defines how the node participates in the network - either as a genesis node
