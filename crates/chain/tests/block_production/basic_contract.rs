@@ -21,8 +21,8 @@ sol!(
 #[tokio::test]
 async fn heavy_test_erc20() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async().await;
-    let account1 = IrysSigner::random_signer(&node.cfg.config);
-    let main_address = node.cfg.config.miner_address();
+    let account1 = IrysSigner::random_signer(&node.cfg.node_config);
+    let main_address = node.cfg.node_config.miner_address();
     node.cfg.irys_node_config.extend_genesis_accounts(vec![
         (
             main_address,
@@ -39,7 +39,7 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
             },
         ),
     ]);
-    let signer: PrivateKeySigner = node.cfg.config.mining_key.clone().into();
+    let signer: PrivateKeySigner = node.cfg.node_config.mining_key.clone().into();
     let node = node.start().await;
 
     let alloy_provider = ProviderBuilder::new()

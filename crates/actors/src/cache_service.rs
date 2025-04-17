@@ -8,7 +8,7 @@ use irys_database::{
         CachedChunks, DataRootLRU, IngressProofs, ProgrammableDataCache, ProgrammableDataLRU,
     },
 };
-use irys_types::{Config, DatabaseProvider, GIGABYTE};
+use irys_types::{Config, ConsensusConfig, DatabaseProvider, GIGABYTE};
 use reth::{
     network::metered_poll_nested_stream_with_budget,
     tasks::{shutdown::GracefulShutdown, TaskExecutor},
@@ -75,7 +75,8 @@ impl ChunkCacheService {
     }
 
     fn prune_cache(&self, finalized_height: u64) -> eyre::Result<()> {
-        let prune_height = finalized_height.saturating_sub(u64::from(self.config.cache_clean_lag));
+        let prune_height = finalized_height
+            .saturating_sub(u64::from(self.config.node_config.cache.cache_clean_lag));
         self.prune_data_root_cache(prune_height)?;
         self.prune_pd_cache(prune_height)?;
         let (
@@ -84,8 +85,8 @@ impl ChunkCacheService {
             ingress_proof_count,
         ) = self.db.view_eyre(|tx| {
             Ok((
-                get_cache_size::<CachedChunks, _>(tx, self.config.chunk_size)?,
-                get_cache_size::<ProgrammableDataCache, _>(tx, self.config.chunk_size)?,
+                get_cache_size::<CachedChunks, _>(tx, self.config.consensus.chunk_size)?,
+                get_cache_size::<ProgrammableDataCache, _>(tx, self.config.consensus.chunk_size)?,
                 tx.entries::<IngressProofs>()?,
             ))
         })?;

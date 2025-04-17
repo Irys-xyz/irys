@@ -106,8 +106,8 @@ impl EmaService {
         rx: UnboundedReceiver<EmaServiceMessage>,
         config: &Config,
     ) -> JoinHandle<()> {
-        let blocks_in_interval = config.price_adjustment_interval;
-        let token_price_safe_range = config.token_price_safe_range;
+        let blocks_in_interval = config.consensus.ema.price_adjustment_interval;
+        let token_price_safe_range = config.consensus.token_price_safe_range;
         exec.spawn_critical_with_graceful_shutdown_signal("EMA Service", |shutdown| async move {
             let confirmed_price_ctx = PriceCacheContext::<Confirmed>::from_chain(
                 block_tree_read_guard.clone(),
@@ -777,7 +777,10 @@ mod price_cache_context {
 mod tests {
     use super::*;
     use crate::block_tree_service::{get_canonical_chain, BlockTreeCache, ChainState};
-    use irys_types::{storage_pricing::TOKEN_SCALE, H256};
+    use irys_types::{
+        storage_pricing::TOKEN_SCALE, ConsensusConfig, ConsensusOptions, EmaConfig, NodeConfig,
+        H256,
+    };
     use reth::tasks::TaskManager;
     use rstest::rstest;
     use rust_decimal::Decimal;
@@ -973,10 +976,15 @@ mod tests {
         // setup
         let ctx = TestCtx::setup(
             max_block_height,
-            Config {
-                price_adjustment_interval: 10,
-                ..Config::testnet()
-            },
+            Config::new(NodeConfig {
+                consensus: ConsensusOptions::Custom(ConsensusConfig {
+                    ema: EmaConfig {
+                        price_adjustment_interval: 10,
+                    },
+                    ..ConsensusConfig::testnet()
+                }),
+                ..NodeConfig::testnet()
+            }),
         );
         let desired_block_price = &ctx.prices[price_block_idx];
 
@@ -1002,23 +1010,28 @@ mod tests {
         async fn first_block() {
             // prepare
             let price_adjustment_interval = 10;
-            let config = Config {
-                price_adjustment_interval,
-                ..Config::testnet()
-            };
+            let config = Config::new(NodeConfig {
+                consensus: ConsensusOptions::Custom(ConsensusConfig {
+                    ema: EmaConfig {
+                        price_adjustment_interval,
+                    },
+                    ..ConsensusConfig::testnet()
+                }),
+                ..NodeConfig::testnet()
+            });
             let ctx = TestCtx::setup_with_tree(
                 genesis_tree(&mut [(
                     IrysBlockHeader {
                         height: 0,
-                        oracle_irys_price: config.genesis_token_price,
-                        ema_irys_price: config.genesis_token_price,
+                        oracle_irys_price: config.consensus.genesis_price,
+                        ema_irys_price: config.consensus.genesis_price,
                         ..IrysBlockHeader::new_mock_header()
                     },
                     ChainState::Onchain,
                 )]),
                 vec![PriceInfo {
-                    oracle: config.genesis_token_price,
-                    ema: config.genesis_token_price,
+                    oracle: config.consensus.genesis_price,
+                    ema: config.consensus.genesis_price,
                 }],
                 config,
             );
@@ -1034,7 +1047,10 @@ mod tests {
 
             // assert
             let ema_computed = new_oracle_price
-                .calculate_ema(price_adjustment_interval, ctx.config.genesis_token_price)
+                .calculate_ema(
+                    price_adjustment_interval,
+                    ctx.config.consensus.genesis_price,
+                )
                 .unwrap();
             assert_eq!(ema_computed, ema_response);
             assert_eq!(
@@ -1056,10 +1072,15 @@ mod tests {
             let price_adjustment_interval = 10;
             let ctx = TestCtx::setup(
                 max_height,
-                Config {
-                    price_adjustment_interval,
-                    ..Config::testnet()
-                },
+                Config::new(NodeConfig {
+                    consensus: ConsensusOptions::Custom(ConsensusConfig {
+                        ema: EmaConfig {
+                            price_adjustment_interval,
+                        },
+                        ..ConsensusConfig::testnet()
+                    }),
+                    ..NodeConfig::testnet()
+                }),
             );
             let new_oracle_price = rand_price(max_height);
 
@@ -1101,11 +1122,16 @@ mod tests {
             let token_price_safe_range = Amount::percentage(dec!(0.1)).unwrap();
             let ctx = TestCtx::setup(
                 max_height,
-                Config {
-                    price_adjustment_interval,
-                    token_price_safe_range, // 10%
-                    ..Config::testnet()
-                },
+                Config::new(NodeConfig {
+                    consensus: ConsensusOptions::Custom(ConsensusConfig {
+                        ema: EmaConfig {
+                            price_adjustment_interval,
+                        },
+                        token_price_safe_range,
+                        ..ConsensusConfig::testnet()
+                    }),
+                    ..NodeConfig::testnet()
+                }),
             );
             let price_oracle_latest = ctx.prices.last().unwrap().clone().oracle;
             let mul_outside_of_range = Amount::percentage(dec!(0.101)).unwrap();
@@ -1159,10 +1185,15 @@ mod tests {
             let price_adjustment_interval = 10;
             let ctx = TestCtx::setup(
                 max_height,
-                Config {
-                    price_adjustment_interval,
-                    ..Config::testnet()
-                },
+                Config::new(NodeConfig {
+                    consensus: ConsensusOptions::Custom(ConsensusConfig {
+                        ema: EmaConfig {
+                            price_adjustment_interval,
+                        },
+                        ..ConsensusConfig::testnet()
+                    }),
+                    ..NodeConfig::testnet()
+                }),
             );
 
             // action
@@ -1209,10 +1240,15 @@ mod tests {
             let price_adjustment_interval = 10;
             let ctx = TestCtx::setup(
                 max_block_height,
-                Config {
-                    price_adjustment_interval,
-                    ..Config::testnet()
-                },
+                Config::new(NodeConfig {
+                    consensus: ConsensusOptions::Custom(ConsensusConfig {
+                        ema: EmaConfig {
+                            price_adjustment_interval,
+                        },
+                        ..ConsensusConfig::testnet()
+                    }),
+                    ..NodeConfig::testnet()
+                }),
             );
 
             // action
@@ -1235,10 +1271,15 @@ mod tests {
         let price_adjustment_interval = 10;
         let ctx = TestCtx::setup(
             block_count,
-            Config {
-                price_adjustment_interval,
-                ..Config::testnet()
-            },
+            Config::new(NodeConfig {
+                consensus: ConsensusOptions::Custom(ConsensusConfig {
+                    ema: EmaConfig {
+                        price_adjustment_interval,
+                    },
+                    ..ConsensusConfig::testnet()
+                }),
+                ..NodeConfig::testnet()
+            }),
         );
 
         // Send shutdown signal
@@ -1272,10 +1313,15 @@ mod tests {
         let price_adjustment_interval = 10;
         let ctx = TestCtx::setup(
             initial_block_count,
-            Config {
-                price_adjustment_interval,
-                ..Config::testnet()
-            },
+            Config::new(NodeConfig {
+                consensus: ConsensusOptions::Custom(ConsensusConfig {
+                    ema: EmaConfig {
+                        price_adjustment_interval,
+                    },
+                    ..ConsensusConfig::testnet()
+                }),
+                ..NodeConfig::testnet()
+            }),
         );
 
         // setup -- generate new blocks to be added

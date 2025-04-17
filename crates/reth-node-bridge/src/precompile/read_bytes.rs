@@ -97,7 +97,7 @@ pub fn read_partial_byte_range(
     // this seems weird, but the API is envisioned as each byte range being a tx/region of interest, so these calls would allow for efficient relative indexing.
     bytes_range
         .translate_offset(
-            state_provider.chunk_provider.storage_config.chunk_size,
+            state_provider.chunk_provider.config.consensus.chunk_size,
             offset as u64,
         )
         .map_err(|_| {
@@ -142,29 +142,29 @@ pub fn read_bytes_range(
         chunk_count,
     } = chunk_read_range;
 
-    // coordinate translation time!
-
-    let storage_config = &state_provider.chunk_provider.storage_config;
-
     // TODO: this will error if the partition_index > u64::MAX
     // this is fine for testnet, but will need fixing later.
 
-    let translated_base_chunks_offset =
-        storage_config
-            .num_chunks_in_partition
-            .saturating_mul(partition_index.try_into().map_err(|_| {
-                PrecompileErrors::Error(PrecompileError::Other(format!(
-                    "partition_index {} is out of range (u64)",
-                    partition_index,
-                )))
-            })?);
+    let translated_base_chunks_offset = state_provider
+        .chunk_provider
+        .config
+        .consensus
+        .num_chunks_in_partition
+        .saturating_mul(partition_index.try_into().map_err(|_| {
+            PrecompileErrors::Error(PrecompileError::Other(format!(
+                "partition_index {} is out of range (u64)",
+                partition_index,
+            )))
+        })?);
 
     let translated_chunks_start_offset =
         translated_base_chunks_offset.saturating_add(*offset as u64);
     let translated_chunks_end_offset =
         translated_chunks_start_offset.saturating_add(*chunk_count as u64);
 
-    let mut bytes = Vec::with_capacity((*chunk_count as u64 * storage_config.chunk_size) as usize);
+    let mut bytes = Vec::with_capacity(
+        (*chunk_count as u64 * state_provider.chunk_provider.config.consensus.chunk_size) as usize,
+    );
     for i in translated_chunks_start_offset..translated_chunks_end_offset {
         let chunk = state_provider
             .chunk_provider
@@ -183,9 +183,13 @@ pub fn read_bytes_range(
         // TODO: the mempool should request & unpack PD chunks in advance
         let unpacked_chunk = unpack(
             &chunk,
-            storage_config.entropy_packing_iterations,
-            storage_config.chunk_size as usize,
-            storage_config.chain_id,
+            state_provider
+                .chunk_provider
+                .config
+                .consensus
+                .entropy_packing_iterations,
+            state_provider.chunk_provider.config.consensus.chunk_size as usize,
+            state_provider.chunk_provider.config.consensus.chain_id,
         );
         bytes.extend(unpacked_chunk.bytes.0)
     }
@@ -199,7 +203,9 @@ pub fn read_bytes_range(
         )))
     })?;
 
-    let offset: usize = ((chunk_offset as u64) * storage_config.chunk_size + truncated_byte_offset)
+    let offset: usize = ((chunk_offset as u64)
+        * state_provider.chunk_provider.config.consensus.chunk_size
+        + truncated_byte_offset)
         .try_into()
         .map_err(|_| {
             PrecompileErrors::Error(PrecompileError::Other(format!(

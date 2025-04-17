@@ -39,7 +39,7 @@ async fn heavy_test_mine() {
 #[actix::test]
 async fn heavy_test_mine_tx() {
     let mut irys_node = IrysNodeTest::default_async().await;
-    let account = IrysSigner::random_signer(&irys_node.cfg.config);
+    let account = IrysSigner::random_signer(&irys_node.cfg.node_config);
     irys_node
         .cfg
         .irys_node_config

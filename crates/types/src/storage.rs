@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
 };
 
-use crate::{Config, RelativeChunkOffset};
+use crate::{ConsensusConfig, RelativeChunkOffset};
 use derive_more::{Add, Div, From, Into, Mul, Sub};
 use nodit::{
     interval::{ie, ii},
@@ -393,7 +393,7 @@ pub struct StorageModuleConfig {
 }
 
 impl StorageModuleConfig {
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &ConsensusConfig) -> Self {
         Self {
             directory_path: "/tmp".into(),
             size_bytes: 100 * config.chunk_size,

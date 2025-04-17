@@ -18,10 +18,9 @@ use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
-    Base64, DataTransactionLedger, DifficultyAdjustmentConfig, H256List, IngressProofsList,
-    IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TxIngressProof, VDFLimiterInfo,
-    H256, U256,
+    next_cumulative_diff, Address, Base64, Config, DataTransactionLedger,
+    DifficultyAdjustmentConfig, EpochConfig, H256List, IngressProofsList, IrysBlockHeader,
+    IrysTransactionHeader, PoaData, Signature, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -36,9 +35,7 @@ use crate::{
     block_tree_service::BlockTreeReadGuard,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
-    epoch_service::{
-        EpochServiceActor, EpochServiceConfig, GetPartitionAssignmentMessage, NewEpochMessage,
-    },
+    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage, NewEpochMessage},
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
@@ -66,18 +63,14 @@ pub struct BlockProducerActor {
     pub service_senders: ServiceSenders,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
-    /// Storage config
-    pub storage_config: StorageConfig,
+    ///
+    pub config: Config,
     /// Difficulty adjustment parameters for the Irys Protocol
     pub difficulty_config: DifficultyAdjustmentConfig,
-    /// VDF configuration parameters
-    pub vdf_config: VDFStepsConfig,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Get the head of the chain
     pub block_tree_guard: BlockTreeReadGuard,
-    /// Epoch config
-    pub epoch_config: EpochServiceConfig,
     /// The Irys price oracle
     pub price_oracle: Arc<IrysPriceOracle>,
 }
@@ -120,13 +113,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
-        let difficulty_config = self.difficulty_config;
-        let chunk_size = self.storage_config.chunk_size;
+        let difficulty_config = self.difficulty_config.clone();
         let block_tree_guard = self.block_tree_guard.clone();
-        let blocks_in_epoch = self.epoch_config.num_blocks_in_epoch;
         let vdf_steps = self.vdf_steps_guard.clone();
         let price_oracle = self.price_oracle.clone();
         let ema_service = self.service_senders.ema.clone();
+        let config = self.config.clone();
 
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
@@ -231,7 +223,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             }
 
             // Publish Ledger Transactions
-            let publish_chunks_added = calculate_chunks_added(&publish_txs, chunk_size);
+            let publish_chunks_added = calculate_chunks_added(&publish_txs, config.consensus.chunk_size);
             let publish_max_chunk_offset =  prev_block_header.data_ledgers[DataLedger::Publish].max_chunk_offset + publish_chunks_added;
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
@@ -239,7 +231,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let submit_txs: Vec<IrysTransactionHeader> =
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
 
-            let submit_chunks_added = calculate_chunks_added(&submit_txs, chunk_size);
+            let submit_chunks_added = calculate_chunks_added(&submit_txs, config.consensus.chunk_size);
             let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
 
             let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
@@ -462,7 +454,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // TODO: This really needs to be sent from the block_discovery service
             // and the commitment transactions are pre-verified as stored locally and valid
-            if block_height > 0 && block_height % blocks_in_epoch == 0 {
+            if block_height > 0 && block_height % config.consensus.epoch.num_blocks_in_epoch == 0 {
                 epoch_service_addr.do_send(NewEpochMessage{ epoch_block: block.clone(), commitments: Vec::new() });
             }
 

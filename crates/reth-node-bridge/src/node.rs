@@ -8,7 +8,6 @@ use crate::{
     },
 };
 use clap::{command, Args, Parser};
-use irys_config::IrysNodeConfig;
 use irys_database::db::RethDbWrapper;
 use irys_storage::reth_provider::IrysRethProvider;
 use reth::{
@@ -132,7 +131,7 @@ impl From<RethNodeProvider> for RethNodeHandle {
 pub async fn run_node<T: HasName + HasTableType>(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
-    irys_config: Arc<IrysNodeConfig>,
+    node_config: irys_types::NodeConfig,
     tables: &[T],
     provider: IrysRethProvider,
     latest_block: u64,
@@ -152,9 +151,9 @@ pub async fn run_node<T: HasName + HasTableType>(
         "--http.addr",
         "0.0.0.0",
         "--datadir",
-        format!("{}", irys_config.reth_data_dir().to_str().unwrap()),
+        format!("{}", node_config.reth_data_dir().to_str().unwrap()),
         "--log.file.directory",
-        format!("{}", irys_config.reth_log_dir().to_str().unwrap()),
+        format!("{}", node_config.reth_log_dir().to_str().unwrap()),
         "--log.file.format",
         "json",
         "--log.stdout.format",
@@ -172,12 +171,10 @@ pub async fn run_node<T: HasName + HasTableType>(
     // `instance` is mutually exclusive with random ports
     if random_ports {
         args.push("--with-unused-ports".to_string());
-        if irys_config.instance_number.is_some() {
-            warn!("Reth instance numbers will not be used when port randomisation is enabled")
-        }
+        warn!("Reth instance numbers will not be used when port randomisation is enabled")
     } else {
         args.push("--instance".to_string());
-        args.push(format!("{}", irys_config.instance_number.unwrap_or(1)).to_string())
+        args.push(format!("{}", 1).to_string())
     }
 
     args.insert(0, bp.to_string());
