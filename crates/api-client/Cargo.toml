@@ -12,6 +12,8 @@ tokio.workspace = true
 tracing.workspace = true
 async-trait = "0.1"
 
+[dev-dependencies]
+
 [features]
 default = []
 test-utils = []
