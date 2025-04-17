@@ -320,6 +320,7 @@ async fn poll_until_fetch_at_block_index_height(
                 )
                 .await,
             );
+            break;
         }
     }
     result_peer
