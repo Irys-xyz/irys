@@ -196,6 +196,9 @@ async fn genesis_test() {
 #[actix::test]
 async fn add_slots_test() {
     // Initialize genesis block at height 0
+    // Create a storage config for testing
+    let tmp_dir = setup_tracing_and_temp_dir(Some("add_slots_test"), false);
+    let base_path = tmp_dir.path().to_path_buf();
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     let consensus_config = ConsensusConfig {
         chunk_size: 32,
@@ -213,15 +216,14 @@ async fn add_slots_test() {
         ..ConsensusConfig::testnet()
     };
     let mut testnet_config = NodeConfig::testnet();
+    testnet_config.base_directory = base_path;
     testnet_config.consensus = ConsensusOptions::Custom(consensus_config);
     let testnet_config = Config::new(testnet_config);
     genesis_block.height = 0;
+    let num_blocks_in_epoch = testnet_config.consensus.epoch.num_blocks_in_epoch;
+    let num_chunks_in_partition = testnet_config.consensus.num_chunks_in_partition;
 
     let commitments = add_genesis_commitments(&mut genesis_block, &testnet_config);
-
-    // Create a storage config for testing
-    let tmp_dir = setup_tracing_and_temp_dir(Some("add_slots_test"), false);
-    let base_path = tmp_dir.path().to_path_buf();
 
     let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
         BlockIndex::new(&testnet_config.node_config).await.unwrap(),
@@ -236,7 +238,7 @@ async fn add_slots_test() {
         .await
         .unwrap();
 
-    let mut epoch_service = EpochServiceActor::new(config, &testnet_config, block_index_guard);
+    let mut epoch_service = EpochServiceActor::new(&testnet_config, block_index_guard);
 
     // Process genesis message directly instead of through actor system
     // This allows us to inspect the actor's state after processing
@@ -279,7 +281,7 @@ async fn add_slots_test() {
     }
 
     new_epoch_block.height = num_blocks_in_epoch;
-    new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
+    new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = num_blocks_in_epoch / 2;
 
     let _ = epoch_service.handle(
         NewEpochMessage {
@@ -342,8 +344,8 @@ async fn add_slots_test() {
 
 #[actix::test]
 async fn capacity_projection_tests() {
+    let config = ConsensusConfig::testnet();
     let max_data_parts = 1000;
-    let config = EpochServiceConfig::default();
     for i in (0..max_data_parts).step_by(10) {
         let data_partition_count = i;
         let capacity_count =
@@ -359,31 +361,35 @@ async fn capacity_projection_tests() {
 #[actix::test]
 async fn partition_expiration_test() {
     // Initialize genesis block at height 0
+    let tmp_dir = setup_tracing_and_temp_dir(Some("partition_expiration_test"), false);
+    let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;
     let chunk_count = 10;
-    let testnet_config = Config {
+    let consensus_config = ConsensusConfig {
         chunk_size,
         num_chunks_in_partition: chunk_count,
         num_chunks_in_recall_range: 2,
         num_partitions_per_slot: 1,
-        num_writes_before_sync: 1,
         chunk_migration_depth: 1,
-        capacity_scalar: 100,
-        submit_ledger_epoch_length: 2,
-        num_blocks_in_epoch: 5,
-        ..Config::testnet()
+        epoch: EpochConfig {
+            capacity_scalar: 100,
+            submit_ledger_epoch_length: 2,
+            num_blocks_in_epoch: 5,
+            num_capacity_partitions: None,
+        },
+        ..ConsensusConfig::testnet()
     };
-    let mining_address = testnet_config.miner_address();
+    let mut config = NodeConfig::testnet();
+    config.base_directory = base_path;
+    config.consensus = ConsensusOptions::Custom(consensus_config);
+    let config = Config::new(config);
 
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
-    let commitments = add_test_commitments(&mut genesis_block, 5, &testnet_config);
+    let commitments = add_test_commitments(&mut genesis_block, 5, &config);
 
     // Create a storage config for testing
-    let storage_config = StorageSyncConfig::new(&testnet_config);
-    let num_chunks_in_partition = storage_config.num_chunks_in_partition;
-    let tmp_dir = setup_tracing_and_temp_dir(Some("partition_expiration_test"), false);
-    let base_path = tmp_dir.path().to_path_buf();
+    let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
 
     let num_blocks_in_epoch = testnet_config.num_blocks_in_epoch;
 
