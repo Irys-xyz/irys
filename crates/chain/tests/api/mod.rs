@@ -1,10 +1,10 @@
 use irys_database::DataLedger;
 
 mod api;
+mod client;
 mod external_api;
 mod pricing_endpoint;
 mod tx;
-mod client;
 
 pub async fn client_request(
     url: &str,
