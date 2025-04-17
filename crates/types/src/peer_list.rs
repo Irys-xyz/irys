@@ -55,6 +55,7 @@ impl Default for PeerListItem {
             address: PeerAddress {
                 gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                 api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+                reth_peering_tcp: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
             },
             last_seen: Utc::now().timestamp_millis() as u64,
             is_online: false,
@@ -140,12 +141,12 @@ impl Compact for PeerListItem {
         buf.put_u16(self.response_time);
         size += 2;
 
-        // Encode socket address
-        let gossip_address_size = encode_address(&self.address.gossip, buf);
-        size += gossip_address_size;
+        // Encode socket addresses
+        size += encode_address(&self.address.gossip, buf);
 
-        let api_address_size = encode_address(&self.address.api, buf);
-        size += api_address_size;
+        size += encode_address(&self.address.api, buf);
+
+        size += encode_address(&self.address.reth_peering_tcp, buf);
 
         // Encode last_seen
         buf.put_u64(self.last_seen);
@@ -173,6 +174,10 @@ impl Compact for PeerListItem {
                     address: PeerAddress {
                         gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                         api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+                        reth_peering_tcp: SocketAddr::V4(SocketAddrV4::new(
+                            Ipv4Addr::new(0, 0, 0, 0),
+                            0,
+                        )),
                     },
                     last_seen: 0,
                     is_online: false,
@@ -188,9 +193,13 @@ impl Compact for PeerListItem {
         let (api_address, consumed) = decode_address(&buf[total_consumed..]);
         total_consumed += consumed;
 
+        let (reth_peering_tcp, consumed) = decode_address(&buf[total_consumed..]);
+        total_consumed += consumed;
+
         let address = PeerAddress {
             gossip: gossip_address,
             api: api_address,
+            reth_peering_tcp,
         };
 
         // Read last_seen if available
@@ -217,5 +226,29 @@ impl Compact for PeerListItem {
             },
             &buf[total_consumed.min(buf.len())..],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{peer_list::*, *};
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+    #[test]
+    fn peer_list_item_compact_roundtrip() {
+        let peer_list_item = PeerListItem::default();
+        let mut buf = bytes::BytesMut::with_capacity(30);
+        peer_list_item.to_compact(&mut buf);
+        let (decoded, _) = PeerListItem::from_compact(&buf[..], buf.len());
+        assert_eq!(peer_list_item, decoded);
+    }
+
+    #[test]
+    fn address_encode_roundtrip() {
+        let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0));
+        let mut buf = bytes::BytesMut::with_capacity(30);
+        encode_address(&address, &mut buf);
+        let (decoded, _) = decode_address(&buf[..]);
+        assert_eq!(address, decoded);
     }
 }

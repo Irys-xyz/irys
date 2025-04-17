@@ -186,6 +186,9 @@ impl Config {
             trusted_peers: vec![PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+                reth_peering_tcp: "127.0.0.1:30303"
+                    .parse()
+                    .expect("valid SocketAddr expected"),
             }],
             gossip_service_bind_ip: "127.0.0.1".into(),
             gossip_service_port: 0,
