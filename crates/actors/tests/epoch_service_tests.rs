@@ -2,11 +2,14 @@ use actix::{Actor, Context, Handler};
 use base58::ToBase58;
 use irys_actors::epoch_service::{GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage};
 use irys_config::StorageSubmodulesConfig;
-use irys_types::Config;
 use irys_types::{
     partition::PartitionAssignment, DatabaseProvider, IrysBlockHeader, StorageSyncConfig, H256,
 };
-use irys_types::{partition_chunk_offset_ie, Address, PartitionChunkOffset};
+use irys_types::{
+    partition_chunk_offset_ie, Address, ConsensusOptions, EpochConfig, NodeConfig,
+    PartitionChunkOffset,
+};
+use irys_types::{Config, ConsensusConfig};
 use reth_db::Database;
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
@@ -19,7 +22,7 @@ use actix::{actors::mocker::Mocker, Addr, Arbiter, Recipient, SystemRegistry};
 use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
 use irys_actors::{
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-    epoch_service::{EpochServiceActor, EpochServiceConfig, NewEpochMessage},
+    epoch_service::{EpochServiceActor, NewEpochMessage},
 };
 use irys_actors::{
     mining::PartitionMiningActor,
@@ -41,26 +44,19 @@ async fn genesis_test() {
     // Initialize genesis block at height 0
 
     use irys_actors::epoch_service::GetLedgersGuardMessage;
+    use irys_types::NodeConfig;
     let mut genesis_block = IrysBlockHeader::new_mock_header();
-    let testnet_config = Config::testnet();
+    let testnet_config = NodeConfig::testnet().into();
     genesis_block.height = 0;
     let commitments = add_genesis_commitments(&mut genesis_block, &testnet_config);
 
     // Create epoch service with random miner address
-    let config = EpochServiceConfig::new(&testnet_config);
-    let arc_config = Arc::new(IrysNodeConfig::default());
-    let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
-        BlockIndex::default()
-            .reset(&arc_config.clone())
-            .unwrap()
-            .init(arc_config.clone())
-            .await
-            .unwrap(),
+    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
+        BlockIndex::new(&testnet_config.node_config).await.unwrap(),
     ));
 
-    let storage_config = StorageSyncConfig::default();
     let block_index_actor =
-        BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+        BlockIndexService::new(block_index.clone(), &testnet_config.consensus).start();
     SystemRegistry::set(block_index_actor.clone());
 
     let block_index_guard = block_index_actor
@@ -68,9 +64,8 @@ async fn genesis_test() {
         .await
         .unwrap();
 
-    let mut epoch_service =
-        EpochServiceActor::new(config.clone(), &testnet_config, block_index_guard);
-    let miner_address = config.storage_config.miner_address;
+    let mut epoch_service = EpochServiceActor::new(&testnet_config, block_index_guard);
+    let miner_address = testnet_config.node_config.miner_address();
 
     // Process genesis message directly instead of through actor system
     // This allows us to inspect the actor's state after processing
@@ -97,11 +92,11 @@ async fn genesis_test() {
 
         assert_eq!(
             pub_slots[0].partitions.len() as u64,
-            config.storage_config.num_partitions_in_slot
+            testnet_config.consensus.num_partitions_per_slot
         );
         assert_eq!(
             sub_slots[0].partitions.len() as u64,
-            config.storage_config.num_partitions_in_slot
+            testnet_config.consensus.num_partitions_per_slot
         );
 
         // Verify data partition assignments match _PUBLISH_ ledger slots
@@ -125,7 +120,7 @@ async fn genesis_test() {
             }
             assert_eq!(
                 slot.partitions.len(),
-                config.storage_config.num_partitions_in_slot as usize
+                testnet_config.consensus.num_partitions_per_slot as usize
             );
         }
 
@@ -150,7 +145,7 @@ async fn genesis_test() {
             }
             assert_eq!(
                 slot.partitions.len(),
-                config.storage_config.num_partitions_in_slot as usize
+                testnet_config.consensus.num_partitions_per_slot as usize
             );
         }
     }
@@ -160,7 +155,10 @@ async fn genesis_test() {
         let pa = epoch_service.partition_assignments.read().unwrap();
         let data_partition_count = pa.data_partitions.len() as u64;
         let expected_partitions = data_partition_count
-            + EpochServiceActor::get_num_capacity_partitions(data_partition_count, &config);
+            + EpochServiceActor::get_num_capacity_partitions(
+                data_partition_count,
+                &testnet_config.consensus,
+            );
         assert_eq!(
             epoch_service.all_active_partitions.len(),
             expected_partitions as usize
@@ -199,50 +197,38 @@ async fn genesis_test() {
 async fn add_slots_test() {
     // Initialize genesis block at height 0
     let mut genesis_block = IrysBlockHeader::new_mock_header();
-    let testnet_config = Config::testnet();
+    let consensus_config = ConsensusConfig {
+        chunk_size: 32,
+        num_chunks_in_partition: 10,
+        num_chunks_in_recall_range: 2,
+        num_partitions_per_slot: 1,
+        chunk_migration_depth: 1, // Testnet / single node config
+        chain_id: 333,
+        epoch: EpochConfig {
+            capacity_scalar: 100,
+            num_blocks_in_epoch: 100,
+            num_capacity_partitions: Some(123),
+            submit_ledger_epoch_length: 5,
+        },
+        ..ConsensusConfig::testnet()
+    };
+    let mut testnet_config = NodeConfig::testnet();
+    testnet_config.consensus = ConsensusOptions::Custom(consensus_config);
+    let testnet_config = Config::new(testnet_config);
     genesis_block.height = 0;
 
     let commitments = add_genesis_commitments(&mut genesis_block, &testnet_config);
 
     // Create a storage config for testing
-    let storage_config = StorageSyncConfig {
-        chunk_size: 32,
-        num_chunks_in_partition: 10,
-        num_chunks_in_recall_range: 2,
-        num_partitions_in_slot: 1,
-        miner_address: Address::random(),
-        min_writes_before_sync: 1,
-        entropy_packing_iterations: testnet_config.entropy_packing_iterations,
-        chunk_migration_depth: 1, // Testnet / single node config
-        chain_id: 333,
-    };
-    let num_chunks_in_partition = storage_config.num_chunks_in_partition;
     let tmp_dir = setup_tracing_and_temp_dir(Some("add_slots_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
 
-    let config = EpochServiceConfig {
-        capacity_scalar: 100,
-        num_blocks_in_epoch: 100,
-        num_capacity_partitions: Some(123),
-        storage_config: storage_config.clone(),
-    };
-    let num_blocks_in_epoch = config.num_blocks_in_epoch;
-
-    let arc_config = Arc::new(IrysNodeConfig {
-        base_directory: base_path.clone(),
-        ..IrysNodeConfig::default()
-    });
-
-    let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
-        BlockIndex::default()
-            .reset(&arc_config.clone())
-            .unwrap()
-            .init(arc_config.clone())
-            .await
-            .unwrap(),
+    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
+        BlockIndex::new(&testnet_config.node_config).await.unwrap(),
     ));
 
-    let block_index_actor = BlockIndexService::new(block_index.clone(), storage_config).start();
+    let block_index_actor =
+        BlockIndexService::new(block_index.clone(), &testnet_config.consensus).start();
     SystemRegistry::set(block_index_actor.clone());
 
     let block_index_guard = block_index_actor

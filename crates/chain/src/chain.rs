@@ -937,8 +937,7 @@ impl IrysNode {
         let mut arbiters = Vec::new();
         for sm in storage_modules {
             let partition_mining_actor = PartitionMiningActor::new(
-                self.node_config.miner_address(),
-                irys_db.clone(),
+                &self.config,
                 block_producer_addr.clone().recipient(),
                 packing_actor_addr.clone().recipient(),
                 sm.clone(),
@@ -1047,7 +1046,6 @@ impl IrysNode {
         let block_discovery_actor = BlockDiscoveryActor {
             block_index_guard: block_index_guard.clone(),
             partition_assignments_guard: partition_assignments_guard.clone(),
-            difficulty_config: self.config.consensus.difficulty_adjustment.clone(),
             db: irys_db.clone(),
             config: self.config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
@@ -1072,8 +1070,7 @@ impl IrysNode {
             block_index_guard.clone(),
             partition_assignments_guard.clone(),
             vdf_steps_guard.clone(),
-            self.storage_config.clone(),
-            self.vdf_config.clone(),
+            &self.config,
         );
         let validation_arbiter = Arbiter::new();
         let validation_service =
@@ -1130,11 +1127,9 @@ impl IrysNode {
             irys_db.clone(),
             reth_db.clone(),
             reth_node.task_executor.clone(),
-            node_config.mining_signer.clone(),
-            self.storage_config.clone(),
             storage_modules.clone(),
             block_tree_guard.clone(),
-            &self.node_config,
+            &self.config,
             gossip_tx,
         );
         let mempool_arbiter = Arbiter::new();
@@ -1195,11 +1190,7 @@ impl IrysNode {
         ),
         eyre::Error,
     > {
-        let mut epoch_service = EpochServiceActor::new(
-            self.epoch_config.clone(),
-            &self.node_config,
-            block_index_guard.clone(),
-        );
+        let mut epoch_service = EpochServiceActor::new(&self.config, block_index_guard.clone());
         let storage_module_infos = epoch_service
             .initialize(irys_db, self.storage_submodule_config.clone())
             .await?;
