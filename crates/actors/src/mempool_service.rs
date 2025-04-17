@@ -263,11 +263,11 @@ impl Handler<TxIngressMessage> for MempoolService {
 
         // Validate the transaction signature
         if tx.is_signature_valid() {
-            println!("Signature is valid");
+            info!("Signature is valid");
             self.valid_tx.insert(tx.id, tx.clone());
         } else {
             self.invalid_tx.push(tx.id);
-            println!("Signature is NOT valid");
+            warn!("Signature is NOT valid");
             return Err(TxIngressError::InvalidSignature);
         }
 
