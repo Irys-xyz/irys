@@ -266,8 +266,8 @@ impl PeerListService {
         }
     }
 
-    async fn announce_yourself_to_address(
-        api_client: IrysApiClient,
+    async fn announce_yourself_to_address<T: ApiClient>(
+        api_client: T,
         api_address: SocketAddr,
         version_request: VersionRequest,
     ) -> Result<(), PeerListServiceError> {
@@ -286,8 +286,8 @@ impl PeerListService {
         Ok(())
     }
 
-    async fn announce_yourself_to_all_peers(
-        api_client: IrysApiClient,
+    async fn announce_yourself_to_all_peers<T: ApiClient>(
+        api_client: T,
         version_request: VersionRequest,
         known_peers_cache: HashSet<PeerAddress>,
     ) {
@@ -478,12 +478,16 @@ impl Handler<KnownPeersRequest> for PeerListService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_api_client::test_utils::CountingMockClient;
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
+    use irys_types::VersionRequest;
+    use std::collections::HashSet;
     use std::net::IpAddr;
     use std::str::FromStr;
     use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     fn create_test_peer(
         mining_addr: &str,
@@ -918,5 +922,38 @@ mod tests {
             known_peers.contains(&peer2.address),
             "Known peers should contain peer 2"
         );
+    }
+
+    #[actix_rt::test]
+    async fn test_announce_yourself_to_all_peers() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_client = CountingMockClient {
+            calls: calls.clone(),
+        };
+
+        let (_mining1, peer1) = create_test_peer(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            9001,
+            true,
+            None,
+        );
+        let (_mining2, peer2) = create_test_peer(
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            9002,
+            true,
+            None,
+        );
+        let known_peers: HashSet<_> = vec![peer1.address.clone(), peer2.address.clone()]
+            .into_iter()
+            .collect();
+        let version_request = VersionRequest::default();
+
+        PeerListService::announce_yourself_to_all_peers(mock_client, version_request, known_peers)
+            .await;
+
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert!(calls.contains(&peer1.address.api));
+        assert!(calls.contains(&peer2.address.api));
     }
 }

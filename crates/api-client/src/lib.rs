@@ -132,6 +132,47 @@ impl ApiClient for IrysApiClient {
     }
 }
 
+#[cfg(feature = "test-utils")]
+pub mod test_utils {
+    use super::*;
+    use async_trait::async_trait;
+    use irys_types::AcceptedResponse;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[derive(Default, Clone)]
+    pub struct CountingMockClient {
+        pub calls: Arc<Mutex<Vec<std::net::SocketAddr>>>,
+    }
+
+    #[async_trait]
+    impl ApiClient for CountingMockClient {
+        async fn get_transaction(
+            &self,
+            _peer: std::net::SocketAddr,
+            _tx_id: H256,
+        ) -> eyre::Result<Option<IrysTransactionHeader>> {
+            Ok(None)
+        }
+        async fn get_transactions(
+            &self,
+            _peer: std::net::SocketAddr,
+            _tx_ids: &[H256],
+        ) -> eyre::Result<Vec<Option<IrysTransactionHeader>>> {
+            Ok(vec![])
+        }
+        async fn post_version(
+            &self,
+            peer: std::net::SocketAddr,
+            _version: VersionRequest,
+        ) -> eyre::Result<PeerResponse> {
+            let mut calls = self.calls.lock().await;
+            calls.push(peer);
+            Ok(PeerResponse::Accepted(AcceptedResponse::default()))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
