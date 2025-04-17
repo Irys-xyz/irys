@@ -70,7 +70,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let node = node.start().await;
     let _reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
-    let http_url = format!("http://127.0.0.1:{}", node.cfg.config.port);
+    let http_url = format!("http://127.0.0.1:{}", node.cfg.config.api_port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -119,9 +119,12 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 .with_recommended_fillers()
                 .wallet(EthereumWallet::from(signer))
                 .on_http(
-                    format!("http://127.0.0.1:{}/v1/execution-rpc", node.cfg.config.port)
-                        .parse()
-                        .unwrap(),
+                    format!(
+                        "http://127.0.0.1:{}/v1/execution-rpc",
+                        node.cfg.config.api_port
+                    )
+                    .parse()
+                    .unwrap(),
                 )
         })
         .collect::<Vec<_>>();

@@ -1,8 +1,9 @@
 use actix::prelude::*;
+use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
-use irys_types::{Address, DatabaseProvider, PeerAddress, PeerListItem};
+use irys_types::{Address, Config, DatabaseProvider, PeerAddress, PeerListItem, VersionRequest};
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -24,6 +25,41 @@ pub struct PeerListService {
     known_peers_cache: HashSet<PeerAddress>,
 
     client: Client,
+    irys_api: IrysApiClient,
+
+    chain_id: u64,
+    miner_address: Address,
+    peer_address: PeerAddress,
+}
+
+impl PeerListService {
+    /// Create a new instance of the peer_list_service actor passing in a reference
+    /// counted reference to a `DatabaseEnv`
+    pub fn new(db: DatabaseProvider, config: &Config) -> Self {
+        println!("service started: peer_list");
+        Self {
+            db: Some(db),
+            gossip_addr_to_mining_addr_map: HashMap::new(),
+            peer_list_cache: HashMap::new(),
+            known_peers_cache: HashSet::new(),
+            client: Client::new(),
+
+            irys_api: IrysApiClient::new(),
+            chain_id: config.chain_id,
+            miner_address: config.miner_address(),
+            peer_address: PeerAddress {
+                gossip: format!(
+                    "{}:{}",
+                    config.gossip_service_bind_ip, config.gossip_service_port
+                )
+                .parse()
+                .expect("valid SocketAddr expected"),
+                api: format!("{}:{}", config.api_bind_ip, config.api_port)
+                    .parse()
+                    .expect("valid SocketAddr expected"),
+            },
+        }
+    }
 }
 
 impl Actor for PeerListService {
@@ -75,6 +111,15 @@ impl Actor for PeerListService {
                 ctx.spawn(fut);
             }
         });
+
+        // Announce yourself to the network
+        let version_request = self.create_version_request();
+        let api_client = self.irys_api.clone();
+        let peers_cache = self.known_peers_cache.clone();
+        let announce_fut =
+            Self::announce_yourself_to_all_peers(api_client, version_request, peers_cache)
+                .into_actor(self);
+        ctx.spawn(announce_fut);
     }
 }
 
@@ -87,26 +132,12 @@ impl SystemService for PeerListService {
     }
 }
 
-impl PeerListService {
-    /// Create a new instance of the peer_list_service actor passing in a reference
-    /// counted reference to a `DatabaseEnv`
-    pub fn new(db: DatabaseProvider) -> Self {
-        println!("service started: peer_list");
-        Self {
-            db: Some(db),
-            gossip_addr_to_mining_addr_map: HashMap::new(),
-            peer_list_cache: HashMap::new(),
-            known_peers_cache: HashSet::new(),
-            client: Client::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum PeerListServiceError {
     DatabaseNotConnected,
     Database(DatabaseError),
     HealthCheckFailed(String),
+    PostVersionError(String),
 }
 
 impl From<DatabaseError> for PeerListServiceError {
@@ -220,6 +251,62 @@ impl PeerListService {
                 // Don't propagate inactive peers
                 if !peer_item.reputation_score.is_active() {
                     self.known_peers_cache.remove(&peer_item.address);
+                }
+            }
+        }
+    }
+
+    fn create_version_request(&self) -> VersionRequest {
+        VersionRequest {
+            mining_address: self.miner_address,
+            address: self.peer_address,
+            chain_id: self.chain_id,
+            user_agent: Some(format!("Irys-Node-{}", env!("CARGO_PKG_VERSION"))),
+            ..VersionRequest::default()
+        }
+    }
+
+    async fn announce_yourself_to_address<T: ApiClient>(
+        api_client: T,
+        api_address: SocketAddr,
+        version_request: VersionRequest,
+    ) -> Result<(), PeerListServiceError> {
+        // TODO: handle response by announcing yourself to peers
+        let _peer_response = api_client
+            .post_version(api_address, version_request)
+            .await
+            .map_err(|e| {
+                error!(
+                    "Failed to announce yourself to address {}: {:?}",
+                    api_address, e
+                );
+                PeerListServiceError::PostVersionError(e.to_string())
+            })?;
+
+        Ok(())
+    }
+
+    async fn announce_yourself_to_all_peers<T: ApiClient>(
+        api_client: T,
+        version_request: VersionRequest,
+        known_peers_cache: HashSet<PeerAddress>,
+    ) {
+        for peer in known_peers_cache.iter() {
+            match Self::announce_yourself_to_address(
+                api_client.clone(),
+                peer.api,
+                version_request.clone(),
+            )
+            .await
+            {
+                Ok(_peer_response) => {
+                    // TODO: announce yourself to those peers as well
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to announce yourself to address {}: {:?}",
+                        peer.api, e
+                    );
                 }
             }
         }
@@ -391,12 +478,16 @@ impl Handler<KnownPeersRequest> for PeerListService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_api_client::test_utils::CountingMockClient;
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
+    use irys_types::VersionRequest;
+    use std::collections::HashSet;
     use std::net::IpAddr;
     use std::str::FromStr;
     use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     fn create_test_peer(
         mining_addr: &str,
@@ -428,11 +519,12 @@ mod tests {
     #[actix_rt::test]
     async fn test_add_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db);
+        let mut service = PeerListService::new(db, &config);
         let ctx = &mut Context::new();
 
         // Test adding a new peer
@@ -468,11 +560,12 @@ mod tests {
     #[actix_rt::test]
     async fn test_peer_score_management() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db);
+        let mut service = PeerListService::new(db, &config);
         let ctx = &mut Context::new();
 
         // Add a test peer
@@ -530,11 +623,12 @@ mod tests {
     #[actix_rt::test]
     async fn test_active_peers_request() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db);
+        let mut service = PeerListService::new(db, &config);
         let ctx = &mut Context::new();
 
         // Add multiple peers with different states
@@ -603,11 +697,12 @@ mod tests {
     #[actix_rt::test]
     async fn test_edge_cases() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db);
+        let mut service = PeerListService::new(db, &config);
         let ctx = &mut Context::new();
 
         // Test adding duplicate peer
@@ -669,7 +764,7 @@ mod tests {
             open_or_create_irys_consensus_data_db(&new_temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut empty_service = PeerListService::new(new_test_db);
+        let mut empty_service = PeerListService::new(new_test_db, &config);
 
         let exclude_peers = HashSet::new();
         let active_peers = empty_service.handle(
@@ -685,13 +780,14 @@ mod tests {
     #[actix_rt::test]
     async fn test_periodic_flush() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
 
         // Start the actor system with our service
-        let service = PeerListService::new(db.clone());
+        let service = PeerListService::new(db.clone(), &config);
         let addr = service.start();
 
         // Add a test peer
@@ -736,13 +832,14 @@ mod tests {
     #[actix_rt::test]
     async fn test_load_from_database() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
 
         // Create first service instance and add some peers
-        let mut service = PeerListService::new(db.clone());
+        let mut service = PeerListService::new(db.clone(), &config);
         let ctx = &mut Context::new();
 
         // Add multiple test peers
@@ -780,7 +877,7 @@ mod tests {
             .expect("Failed to flush data");
 
         // Create new service instance that should load from database
-        let mut new_service = PeerListService::new(db);
+        let mut new_service = PeerListService::new(db, &config);
         new_service
             .initialize()
             .expect("Failed to initialize service");
@@ -825,5 +922,38 @@ mod tests {
             known_peers.contains(&peer2.address),
             "Known peers should contain peer 2"
         );
+    }
+
+    #[actix_rt::test]
+    async fn test_announce_yourself_to_all_peers() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_client = CountingMockClient {
+            calls: calls.clone(),
+        };
+
+        let (_mining1, peer1) = create_test_peer(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            9001,
+            true,
+            None,
+        );
+        let (_mining2, peer2) = create_test_peer(
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            9002,
+            true,
+            None,
+        );
+        let known_peers: HashSet<_> = vec![peer1.address.clone(), peer2.address.clone()]
+            .into_iter()
+            .collect();
+        let version_request = VersionRequest::default();
+
+        PeerListService::announce_yourself_to_all_peers(mock_client, version_request, known_peers)
+            .await;
+
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert!(calls.contains(&peer1.address.api));
+        assert!(calls.contains(&peer2.address.api));
     }
 }

@@ -10,7 +10,7 @@ use irys_types::U256;
 async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().await.start().await;
-    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
+    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.api_port);
     let data_size_bytes = ctx.cfg.config.chunk_size * 5;
     let expected_price = {
         let cost_per_gb = ctx
@@ -60,7 +60,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
 async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().await.start().await;
-    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
+    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.api_port);
     let data_size_bytes = 4_u64;
     let expected_price = {
         let cost_per_gb = ctx
@@ -111,7 +111,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
 async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().await.start().await;
-    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
+    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.api_port);
     let data_size_bytes = ctx.cfg.config.chunk_size + 1;
     let expected_price = {
         let cost_per_gb = ctx

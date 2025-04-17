@@ -50,7 +50,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     )
     .await?;
 
-    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.port);
+    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.api_port);
 
     // server should be running
     // check with request to `/v1/info`

@@ -1,5 +1,5 @@
 use eyre::Result;
-use irys_types::{IrysTransactionHeader, H256};
+use irys_types::{IrysTransactionHeader, PeerResponse, VersionRequest, H256};
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
@@ -21,10 +21,13 @@ pub trait ApiClient: Send + Sync + Clone {
         peer: SocketAddr,
         tx_ids: &[H256],
     ) -> Result<Vec<Option<IrysTransactionHeader>>>;
+
+    async fn post_version(&self, peer: SocketAddr, version: VersionRequest)
+        -> Result<PeerResponse>;
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct IrysApiClient {
     client: Client,
 }
@@ -89,7 +92,7 @@ impl ApiClient for IrysApiClient {
         tx_id: H256,
     ) -> Result<Option<IrysTransactionHeader>> {
         debug!("Fetching transaction {} from peer {}", tx_id, peer);
-        let path = format!("/tx/{}", tx_id);
+        let path = format!("/v1/tx/{}", tx_id);
         self.make_request(peer, "GET", &path, None::<&()>).await
     }
 
@@ -108,11 +111,72 @@ impl ApiClient for IrysApiClient {
 
         Ok(results)
     }
+
+    async fn post_version(
+        &self,
+        peer: SocketAddr,
+        version: VersionRequest,
+    ) -> Result<PeerResponse> {
+        let path = "/v1/version";
+        let response = self
+            .make_request::<PeerResponse, _>(peer, "POST", path, Some(&version))
+            .await;
+        match response {
+            Ok(Some(peer_response)) => Ok(peer_response),
+            Ok(None) => Err(eyre::eyre!("No response from peer")),
+            Err(e) => {
+                error!("Failed to post version: {}", e);
+                Err(e)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "test-utils")]
+pub mod test_utils {
+    use super::*;
+    use async_trait::async_trait;
+    use irys_types::AcceptedResponse;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[derive(Default, Clone)]
+    pub struct CountingMockClient {
+        pub calls: Arc<Mutex<Vec<std::net::SocketAddr>>>,
+    }
+
+    #[async_trait]
+    impl ApiClient for CountingMockClient {
+        async fn get_transaction(
+            &self,
+            _peer: std::net::SocketAddr,
+            _tx_id: H256,
+        ) -> eyre::Result<Option<IrysTransactionHeader>> {
+            Ok(None)
+        }
+        async fn get_transactions(
+            &self,
+            _peer: std::net::SocketAddr,
+            _tx_ids: &[H256],
+        ) -> eyre::Result<Vec<Option<IrysTransactionHeader>>> {
+            Ok(vec![])
+        }
+        async fn post_version(
+            &self,
+            peer: std::net::SocketAddr,
+            _version: VersionRequest,
+        ) -> eyre::Result<PeerResponse> {
+            let mut calls = self.calls.lock().await;
+            calls.push(peer);
+            Ok(PeerResponse::Accepted(AcceptedResponse::default()))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_types::AcceptedResponse;
 
     /// Mock implementation of the API client for testing
     #[derive(Default, Clone)]
@@ -143,6 +207,14 @@ mod tests {
             }
 
             Ok(results)
+        }
+
+        async fn post_version(
+            &self,
+            _peer: SocketAddr,
+            _version: VersionRequest,
+        ) -> Result<PeerResponse> {
+            Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock response
         }
     }
 

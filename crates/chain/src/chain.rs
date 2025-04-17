@@ -110,7 +110,7 @@ impl IrysNodeCtx {
     }
 
     pub fn get_port(&self) -> u16 {
-        self.config.port
+        self.config.api_port
     }
 }
 
@@ -316,15 +316,15 @@ impl IrysNode {
         // we create the listener here so we know the port before we start passing around `config`
         let listener = create_listener(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            self.config.port,
+            self.config.api_port,
         ))?;
         let local_addr = listener
             .local_addr()
             .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
         // if `config.port` == 0, the assigned port will be random (decided by the OS)
         // we re-assign the configuration with the actual port here.
-        let random_ports = if self.config.port == 0 {
-            self.config.port = local_addr.port();
+        let random_ports = if self.config.api_port == 0 {
+            self.config.api_port = local_addr.port();
             true
         } else {
             false
@@ -692,7 +692,7 @@ impl IrysNode {
         );
 
         // Spawn peer list service
-        let (peer_list_service, peer_list_arbiter) = init_peer_list_service(&irys_db);
+        let (peer_list_service, peer_list_arbiter) = init_peer_list_service(&irys_db, &self.config);
 
         // Spawn the mempool service
         let (mempool_service, mempool_arbiter) = self.init_mempools_service(
@@ -1326,9 +1326,12 @@ async fn genesis_initialization(
     block_index_service_actor
 }
 
-fn init_peer_list_service(irys_db: &DatabaseProvider) -> (Addr<PeerListService>, Arbiter) {
+fn init_peer_list_service(
+    irys_db: &DatabaseProvider,
+    config: &Config,
+) -> (Addr<PeerListService>, Arbiter) {
     let peer_list_arbiter = Arbiter::new();
-    let mut peer_list_service = PeerListService::new(irys_db.clone());
+    let mut peer_list_service = PeerListService::new(irys_db.clone(), config);
     peer_list_service
         .initialize()
         .expect("to initialize peer_list_service");
