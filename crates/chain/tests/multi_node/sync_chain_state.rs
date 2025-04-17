@@ -126,16 +126,15 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         block_index_peer1, block_index_peer2
     );
 
-    // mine more blocks on genesis node, and see if gossip service brings them to peer2
+    debug!("STARTUP SEQUENCE ASSERTS WERE A SUCCESS. TO GET HERE TAKES 2 MINUTES");
+
+    // mine more blocks on peer2 node, and see if gossip service brings them to genesis
     let additional_blocks_for_gossip_test: usize = 2;
-    mine_blocks(
-        &ctx_genesis_node.node_ctx,
-        additional_blocks_for_gossip_test,
-    )
-    .await
-    .expect("expected many mined blocks");
-    let result_peer2 = poll_until_fetch_at_block_index_height(
-        &ctx_peer2_node,
+    mine_blocks(&ctx_peer2_node.node_ctx, additional_blocks_for_gossip_test)
+        .await
+        .expect("expected many mined blocks");
+    let result_genesis = poll_until_fetch_at_block_index_height(
+        &ctx_genesis_node,
         (required_blocks_height + additional_blocks_for_gossip_test)
             .try_into()
             .expect("expected required_blocks_height to be valid u64"),
@@ -143,8 +142,8 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
 
-    let mut result_genesis = block_index_endpoint_request(
-        &local_test_url(&testnet_config_genesis.port),
+    let mut result_peer2 = block_index_endpoint_request(
+        &local_test_url(&testnet_config_peer2.port),
         0,
         required_blocks_height
             .try_into()
@@ -152,11 +151,11 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
     let block_index_genesis = result_genesis
+        .expect("expected a client response from peer2")
         .json::<Vec<BlockIndexItem>>()
         .await
         .expect("expected a valid json deserialize");
     let block_index_peer2 = result_peer2
-        .expect("expected a client response from peer2")
         .json::<Vec<BlockIndexItem>>()
         .await
         .expect("expected a valid json deserialize");
