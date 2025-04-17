@@ -196,7 +196,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     .await;
 
     let mut result_peer2 = block_index_endpoint_request(
-        &local_test_url(&testnet_config_peer2.port),
+        &local_test_url(&testnet_config_peer2.api_port),
         0,
         required_blocks_height
             .try_into()
@@ -240,7 +240,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     .await;
 
     let mut result_genesis = block_index_endpoint_request(
-        &local_test_url(&testnet_config_genesis.port),
+        &local_test_url(&testnet_config_genesis.api_port),
         0,
         required_blocks_height
             .try_into()
