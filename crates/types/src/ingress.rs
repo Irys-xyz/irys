@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::irys::IrysSigner;
 
-use crate::{generate_data_root, generate_ingress_leaves, DataRoot, IrysSignature, Node, H256};
+use crate::{
+    generate_data_root, generate_ingress_leaves, ChunkBytes, DataRoot, IrysSignature, Node, H256,
+};
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact)]
 pub struct IngressProof {
     pub signature: IrysSignature,
@@ -32,7 +34,7 @@ impl Decompress for IngressProof {
 }
 
 pub fn generate_ingress_proof_tree(
-    chunks: impl Iterator<Item = eyre::Result<Vec<u8>>>,
+    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
     address: Address,
     and_regular: bool,
 ) -> eyre::Result<(Node, Option<Node>)> {
@@ -48,7 +50,7 @@ pub fn generate_ingress_proof_tree(
 pub fn generate_ingress_proof(
     signer: IrysSigner,
     data_root: DataRoot,
-    chunks: impl Iterator<Item = eyre::Result<Vec<u8>>>,
+    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
 ) -> eyre::Result<IngressProof> {
     let (root, _) = generate_ingress_proof_tree(chunks, signer.address(), false)?;
     let proof: [u8; 32] = root.id;
@@ -70,7 +72,7 @@ pub fn generate_ingress_proof(
 
 pub fn verify_ingress_proof(
     proof: IngressProof,
-    chunks: impl Iterator<Item = eyre::Result<Vec<u8>>>,
+    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
 ) -> eyre::Result<bool> {
     let mut hasher = sha::Sha256::new();
     hasher.update(&proof.proof.0);
@@ -119,7 +121,10 @@ mod tests {
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
         let signer = IrysSigner::random_signer(&testnet_config);
-        let leaves = generate_leaves(&data_bytes, testnet_config.chunk_size as usize)?;
+        let leaves = generate_leaves(
+            vec![data_bytes].into_iter().map(Ok),
+            testnet_config.chunk_size as usize,
+        )?;
         let interleave_value = signer.address();
         let interleave_hash = hash_sha256(&interleave_value.0 .0)?;
 
@@ -144,7 +149,11 @@ mod tests {
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Build a merkle tree and data_root from the chunks
-        let leaves = generate_leaves(&data_bytes, testnet_config.chunk_size as usize).unwrap();
+        let leaves = generate_leaves(
+            vec![data_bytes.clone()].into_iter().map(Ok),
+            testnet_config.chunk_size as usize,
+        )
+        .unwrap();
         let root = generate_data_root(leaves)?;
         let data_root = H256(root.id);
 
