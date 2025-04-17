@@ -126,7 +126,11 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         block_index_peer1, block_index_peer2
     );
 
-    debug!("STARTUP SEQUENCE ASSERTS WERE A SUCCESS. TO GET HERE TAKES 2 MINUTES");
+    debug!("STARTUP SEQUENCE ASSERTS WERE A SUCCESS. TO GET HERE TAKES ~2 MINUTES");
+
+    /*
+    // BEGIN TESTING BLOCK GOSSIP FROM PEER2 to GENESIS
+     */
 
     // mine more blocks on peer2 node, and see if gossip service brings them to genesis
     let additional_blocks_for_gossip_test: usize = 2;
@@ -164,6 +168,50 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         "expecting json from genesis node {:?} to match json from peer2 {:?}",
         block_index_genesis, block_index_peer2
     );
+
+    /*
+    // BEGIN TESTING BLOCK GOSSIP FROM GENESIS to PEER2
+     */
+
+    // mine more blocks on genesis node, and see if gossip service brings them to peer2
+    /*let additional_blocks_for_gossip_test: usize = 2;
+    mine_blocks(
+        &ctx_genesis_node.node_ctx,
+        additional_blocks_for_gossip_test,
+    )
+    .await
+    .expect("expected many mined blocks");
+    let result_peer2 = poll_until_fetch_at_block_index_height(
+        &ctx_peer2_node,
+        (required_blocks_height + additional_blocks_for_gossip_test)
+            .try_into()
+            .expect("expected required_blocks_height to be valid u64"),
+        20,
+    )
+    .await;
+
+    let mut result_genesis = block_index_endpoint_request(
+        &local_test_url(&testnet_config_genesis.port),
+        0,
+        required_blocks_height
+            .try_into()
+            .expect("expected required_blocks_height to be valid u64"),
+    )
+    .await;
+    let block_index_genesis = result_genesis
+        .json::<Vec<BlockIndexItem>>()
+        .await
+        .expect("expected a valid json deserialize");
+    let block_index_peer2 = result_peer2
+        .expect("expected a client response from peer2")
+        .json::<Vec<BlockIndexItem>>()
+        .await
+        .expect("expected a valid json deserialize");
+    assert_eq!(
+        block_index_genesis, block_index_peer2,
+        "expecting json from genesis node {:?} to match json from peer2 {:?}",
+        block_index_genesis, block_index_peer2
+    );*/
 
     // shut down peer nodes and then genesis node, we have what we need
     ctx_peer1_node.stop().await;
