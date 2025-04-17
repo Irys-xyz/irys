@@ -132,6 +132,55 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // BEGIN TESTING BLOCK GOSSIP FROM PEER2 to GENESIS
      */
 
+    //TEST: generate a txn on peer2, and then continue mining on genesis to see if the txn is picked up in the next block via gossip
+    let txn = generate_test_transaction_and_add_to_block(&ctx_peer2_node, &account1).await;
+    error!("txn we are looking for on genesis: {:?}", txn);
+
+    sleep(Duration::from_millis(5000)).await;
+    // mine block on genesis
+    mine_blocks(&ctx_genesis_node.node_ctx, 1)
+        .await
+        .expect("expected one mined block on genesis node");
+
+    sleep(Duration::from_millis(1000000)).await;
+
+    let result_genesis = poll_until_fetch_at_block_index_height(
+        &ctx_genesis_node,
+        (required_blocks_height + 1)
+            .try_into()
+            .expect("expected required_blocks_height to be valid u64"),
+        20,
+    )
+    .await;
+    let result_peer2 = poll_until_fetch_at_block_index_height(
+        &ctx_peer2_node,
+        (required_blocks_height + 1)
+            .try_into()
+            .expect("expected required_blocks_height to be valid u64"),
+        20,
+    )
+    .await;
+
+    let block_index_genesis = result_genesis
+        .expect("expected a client response from genesis")
+        .json::<Vec<BlockIndexItem>>()
+        .await
+        .expect("expected a valid json deserialize");
+    let block_index_peer2 = result_peer2
+        .expect("expected a client response from peer2")
+        .json::<Vec<BlockIndexItem>>()
+        .await
+        .expect("expected a valid json deserialize");
+
+    error!("block_index_genesis: {:?}", block_index_genesis);
+    error!("block_index_peer2: {:?}", block_index_peer2);
+
+    assert_eq!(
+        block_index_genesis, block_index_peer2,
+        "expecting json from genesis node {:?} to match json from peer2 {:?}",
+        block_index_genesis, block_index_peer2
+    );
+
     // mine more blocks on peer2 node, and see if gossip service brings them to genesis
     let additional_blocks_for_gossip_test: usize = 2;
     mine_blocks(&ctx_peer2_node.node_ctx, additional_blocks_for_gossip_test)
