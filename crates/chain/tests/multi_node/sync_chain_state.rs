@@ -386,7 +386,7 @@ async fn poll_until_fetch_at_block_index_height(
 ) -> Option<awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>>> {
     let mut attempts = 0;
     let mut result_peer = None;
-    let url = local_test_url(&node_ctx.node.config.api_port);
+    let url = local_test_url(&node_ctx.node_ctx.config.api_port);
     loop {
         let mut response = info_endpoint_request(&url).await;
 
@@ -411,7 +411,7 @@ async fn poll_until_fetch_at_block_index_height(
         } else {
             result_peer = Some(
                 block_index_endpoint_request(
-                    &local_test_url(&node_ctx.node.config.api_port),
+                    &local_test_url(&node_ctx.node_ctx.config.api_port),
                     0,
                     required_blocks_height,
                 )
@@ -433,7 +433,7 @@ async fn poll_peer_list(
         sleep(Duration::from_millis(2000)).await;
 
         let mut peer_results_genesis =
-            peer_list_endpoint_request(&local_test_url(&ctx_node.node.config.api_port)).await;
+            peer_list_endpoint_request(&local_test_url(&ctx_node.node_ctx.config.api_port)).await;
 
         peer_list_items = peer_results_genesis
             .json::<Vec<PeerAddress>>()
