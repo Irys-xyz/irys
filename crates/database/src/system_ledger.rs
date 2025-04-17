@@ -1,8 +1,8 @@
 use irys_config::StorageSubmodulesConfig;
 use irys_primitives::CommitmentType;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, Compact, ConsensusConfig, H256List, IrysBlockHeader,
-    NodeConfig, SystemTransactionLedger, H256,
+    irys::IrysSigner, CombinedConfig, CommitmentTransaction, Compact, ConsensusConfig, H256List,
+    IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256,
 };
 use serde::{Deserialize, Serialize};
 
@@ -114,11 +114,8 @@ fn create_pledge_commitment_transaction(
 /// # Panics
 /// Panics if fewer than 3 storage submodules are configured, as this is below
 /// the minimum required for network operation
-pub fn get_genesis_commitments(
-    node_config: &NodeConfig,
-    consensus_config: &ConsensusConfig,
-) -> Vec<CommitmentTransaction> {
-    let base_dir = node_config.base_directory.clone();
+pub fn get_genesis_commitments(config: &CombinedConfig) -> Vec<CommitmentTransaction> {
+    let base_dir = config.node_config.base_directory.clone();
 
     // Load the submodule paths from the storage_submodules.toml config
     let storage_submodule_config = StorageSubmodulesConfig::load(base_dir.clone()).unwrap();
@@ -128,7 +125,7 @@ pub fn get_genesis_commitments(
         panic!("There must be at least 3 submodules paths to initiate network genesis");
     }
 
-    let signer = node_config.irys_signer(&consensus_config);
+    let signer = config.irys_signer();
 
     // Create a stake commitment tx for the genesis block producer.
     let stake_commitment = CommitmentTransaction {
@@ -199,10 +196,9 @@ fn get_or_create_commitment_ledger(
 /// Returns the list of commitment transactions.
 pub fn add_genesis_commitments(
     genesis_block: &mut IrysBlockHeader,
-    node_config: &NodeConfig,
-    consensus_config: &ConsensusConfig,
+    config: &CombinedConfig,
 ) -> Vec<CommitmentTransaction> {
-    let commitments = get_genesis_commitments(&node_config, &consensus_config);
+    let commitments = get_genesis_commitments(&config);
     let commitment_ledger = get_or_create_commitment_ledger(genesis_block);
 
     // Add the commitment txids to the commitment ledger one by one
@@ -239,10 +235,9 @@ pub fn add_genesis_commitments(
 pub fn add_test_commitments(
     block_header: &mut IrysBlockHeader,
     pledge_count: u8,
-    node_config: &NodeConfig,
-    consensus_config: &ConsensusConfig,
+    config: &CombinedConfig,
 ) -> Vec<CommitmentTransaction> {
-    let signer = node_config.irys_signer(&consensus_config);
+    let signer = config.irys_signer();
     let mut commitments: Vec<CommitmentTransaction> = Vec::new();
     let mut anchor = H256::random();
 

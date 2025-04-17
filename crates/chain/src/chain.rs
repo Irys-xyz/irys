@@ -188,12 +188,10 @@ pub struct IrysNode {
 
 impl IrysNode {
     /// Creates a new node builder instance.
-    pub async fn new(node_config: NodeConfig) -> Self {
-        let consensus = node_config.consensus_config();
+    pub async fn new(combined_config: CombinedConfig) -> Self {
         let irys_genesis_block = if node_config.is_genesis {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-            let (_, irys_genesis) =
-                IrysChainSpecBuilder::from_config(&node_config, &consensus_config).build();
+            let (_, irys_genesis) = IrysChainSpecBuilder::from_config(&combined_config).build();
 
             let irys_genesis = IrysBlockHeader {
                 diff: calculate_initial_difficulty(
@@ -228,9 +226,8 @@ impl IrysNode {
         };
 
         IrysNode {
-            node_config: config,
             genesis_timestamp: irys_genesis_block.timestamp,
-            consensus_config,
+            config: combined_config,
         }
     }
 
@@ -255,8 +252,7 @@ impl IrysNode {
             (true, true) => eyre::bail!("You cannot start a genesis chain with existing data"),
             (false, _) => {
                 // special handling for genesis node
-                let commitments =
-                    get_genesis_commitments(&self.node_config, &self.consensus_config);
+                let commitments = get_genesis_commitments(&self.config);
 
                 let mut irys_genesis = IrysBlockHeader {
                     diff: calculate_initial_difficulty(
@@ -270,7 +266,7 @@ impl IrysNode {
                     last_diff_timestamp: self.genesis_timestamp,
                     ..irys_genesis
                 };
-                add_genesis_commitments(&mut irys_genesis, &self.node_config, self.conse);
+                add_genesis_commitments(&mut irys_genesis, &self.config);
                 let irys_genesis_block = Arc::new(irys_genesis);
 
                 // special handilng for genesis node
@@ -1004,16 +1000,14 @@ impl IrysNode {
         let block_producer_arbiter = Arbiter::new();
         let block_producer_actor = BlockProducerActor {
             db: irys_db.clone(),
+            config: self.config.clone(),
             mempool_addr: mempool_service.clone(),
             block_discovery_addr: block_discovery,
             epoch_service: epoch_service_actor.clone(),
             reth_provider: reth_node.clone(),
-            storage_config: self.storage_config.clone(),
             difficulty_config: self.difficulty_adjustment_config.clone(),
-            vdf_config: self.vdf_config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
-            epoch_config: self.epoch_config.clone(),
             price_oracle,
             service_senders: service_senders.clone(),
         };
@@ -1053,10 +1047,9 @@ impl IrysNode {
         let block_discovery_actor = BlockDiscoveryActor {
             block_index_guard: block_index_guard.clone(),
             partition_assignments_guard: partition_assignments_guard.clone(),
-            storage_config: self.storage_config.clone(),
-            difficulty_config: self.difficulty_adjustment_config.clone(),
+            difficulty_config: self.config.consensus.difficulty_adjustment.clone(),
             db: irys_db.clone(),
-            vdf_config: self.vdf_config.clone(),
+            config: self.config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
             gossip_sender,
@@ -1182,14 +1175,9 @@ impl IrysNode {
         let mut storage_modules = Vec::new();
         for info in storage_module_infos {
             let arc_module = Arc::new(
-                StorageModule::new(
-                    &self.irys_node_config.storage_module_dir(),
-                    &info,
-                    &self.storage_config,
-                    &self.consensus_config,
-                )
-                // TODO: remove this unwrap
-                .unwrap(),
+                StorageModule::new(&info, &self.config)
+                    // TODO: remove this unwrap
+                    .unwrap(),
             );
             storage_modules.push(arc_module.clone());
         }

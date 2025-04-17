@@ -13,11 +13,12 @@ use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
+use irys_types::CombinedConfig;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, GossipData,
     IrysTransactionHeader, H256,
 };
-use irys_types::{Config, DataRoot, StorageSyncConfig, U256};
+use irys_types::{DataRoot, U256};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::transaction::DbTx as _;
@@ -26,25 +27,29 @@ use reth_db::Database as _;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, error, info, warn};
+
 /// The Mempool oversees pending transactions and validation of incoming tx.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct MempoolService {
-    irys_db: Option<DatabaseProvider>,
-    reth_db: Option<RethDbWrapper>,
+    irys_db: DatabaseProvider,
+    reth_db: RethDbWrapper,
     /// Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
     /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
     /// instead of the actor executor runtime, while also providing some `QoL`
-    task_exec: Option<TaskExecutor>,
+    task_exec: TaskExecutor,
     /// The miner's signer instance, used to sign ingress proofs
-    signer: Option<IrysSigner>,
     invalid_tx: Vec<H256>,
-    storage_config: StorageSyncConfig,
-    anchor_expiry_depth: u64,
-    max_data_txs_per_block: u64,
+    config: CombinedConfig,
     storage_modules: StorageModuleVec,
-    block_tree_read_guard: Option<BlockTreeReadGuard>,
-    gossip_tx: Option<tokio::sync::mpsc::Sender<GossipData>>,
+    block_tree_read_guard: BlockTreeReadGuard,
+    gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
+}
+
+impl Default for MempoolService {
+    fn default() -> Self {
+        unimplemented!("don't rely on the default implementation of the `MempoolService`");
+    }
 }
 
 impl Actor for MempoolService {
@@ -63,27 +68,22 @@ impl MempoolService {
         irys_db: DatabaseProvider,
         reth_db: RethDbWrapper,
         task_exec: TaskExecutor,
-        signer: IrysSigner,
-        storage_config: StorageSyncConfig,
         storage_modules: StorageModuleVec,
         block_tree_read_guard: BlockTreeReadGuard,
-        config: &Config,
+        config: &CombinedConfig,
         gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         info!("service started");
         Self {
-            irys_db: Some(irys_db),
-            reth_db: Some(reth_db),
+            irys_db,
+            reth_db,
             valid_tx: BTreeMap::new(),
             invalid_tx: Vec::new(),
-            signer: Some(signer),
-            task_exec: Some(task_exec),
-            storage_config,
+            task_exec,
+            config: config.clone(),
             storage_modules,
-            max_data_txs_per_block: config.max_data_txs_per_block,
-            anchor_expiry_depth: config.anchor_expiry_depth.into(),
-            block_tree_read_guard: Some(block_tree_read_guard),
-            gossip_tx: Some(gossip_tx),
+            block_tree_read_guard,
+            gossip_tx,
         }
     }
 }
@@ -173,10 +173,6 @@ impl Handler<TxIngressMessage> for MempoolService {
     type Result = Result<(), TxIngressError>;
 
     fn handle(&mut self, tx_msg: TxIngressMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        if self.irys_db.is_none() || self.reth_db.is_none() {
-            return Err(TxIngressError::ServiceUninitialized);
-        }
-
         let tx = &tx_msg.0;
         debug!(
             "received tx {:?} (data_root {:?})",
@@ -190,43 +186,38 @@ impl Handler<TxIngressMessage> for MempoolService {
             return Err(TxIngressError::Skipped);
         }
 
-        let db = self
+        let read_tx = &self
             .irys_db
-            .clone()
-            .ok_or(TxIngressError::ServiceUninitialized)?;
-        let read_tx = &db.tx().map_err(|_| TxIngressError::DatabaseError)?; // we use `&` here to make this a `temporary`, which means rust will automatically drop it when we're done using it, instead of at the end of a block like usual
-        let reth_db = self
+            .tx()
+            .map_err(|_| TxIngressError::DatabaseError)?; // we use `&` here to make this a `temporary`, which means rust will automatically drop it when we're done using it, instead of at the end of a block like usual
+        let read_reth_tx = &self
             .reth_db
-            .clone()
-            .ok_or(TxIngressError::ServiceUninitialized)?;
-        let read_reth_tx = &reth_db.tx().map_err(|_| TxIngressError::DatabaseError)?;
+            .tx()
+            .map_err(|_| TxIngressError::DatabaseError)?;
 
         // validate the `anchor` value
         // it should be a block hash for a known, confirmed block (TODO: add tx hash support!)
 
-        let canon_chain = self
-            .block_tree_read_guard
-            .clone()
-            .ok_or(TxIngressError::ServiceUninitialized)?
-            .read()
-            .get_canonical_chain();
+        let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
 
         let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
             "unable to get canonical chain from block tree".to_owned(),
         ))?;
 
+        let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
         match irys_database::block_header_by_hash(read_tx, &tx.anchor, false) {
             // note: we use addition here as it's safer
-            Ok(Some(hdr)) if hdr.height + self.anchor_expiry_depth >= *latest_height => {
+            Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= *latest_height => {
                 debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id);
                 // update any associated ingress proofs
                 if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
-                    let new_expiry = hdr.height + self.anchor_expiry_depth;
+                    let new_expiry = hdr.height + anchor_expiry_depth;
                     debug!(
                         "Updating ingress proof for data root {} expiry from {} -> {}",
                         &tx.data_root, &old_expiry.last_height, &new_expiry
                     );
-                    db.update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
+                    self.irys_db
+                        .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
                         .map_err(|e| {
                             error!(
                                 "Error updating ingress proof expiry for {} - {}",
@@ -269,7 +260,7 @@ impl Handler<TxIngressMessage> for MempoolService {
 
         // Cache the data_root in the database
 
-        let _ = db.update_eyre(|db_tx| {
+        let _ = self.irys_db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, tx)?;
             irys_database::insert_tx_header(db_tx, tx)?;
             Ok(())
@@ -279,7 +270,7 @@ impl Handler<TxIngressMessage> for MempoolService {
         let gossip_data = GossipData::Transaction(tx.clone());
 
         let _ = tokio::task::spawn(async move {
-            if let Err(error) = gossip_sender.unwrap().send(gossip_data).await {
+            if let Err(error) = gossip_sender.send(gossip_data).await {
                 tracing::error!("Failed to send gossip data: {:?}", error);
             }
         });
@@ -295,21 +286,13 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // TODO: maintain a shared read transaction so we have read isolation
         let chunk: UnpackedChunk = chunk_msg.0;
 
-        if self.irys_db.is_none()
-            || self.task_exec.is_none()
-            || self.signer.is_none()
-            || self.reth_db.is_none()
-        {
-            return Err(ChunkIngressError::Other(
-                "mempool_service not initialized".to_owned(),
-            ));
-        }
-
-        info!( data_root=?chunk.data_root, number=?chunk.tx_offset, "Processing chunk");
-        let db = self.irys_db.clone().unwrap();
+        info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
 
         // Check to see if we have a cached data_root for this chunk
-        let read_tx = db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
+        let read_tx = self
+            .irys_db
+            .tx()
+            .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let candidate_sms = self
             .storage_modules
@@ -351,7 +334,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // Next validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
         let root_hash = chunk.data_root.0;
-        let target_offset = u128::from(chunk.end_byte_offset(self.storage_config.chunk_size));
+        let target_offset = u128::from(chunk.end_byte_offset(self.config.consensus.chunk_size));
         let path_buff = &chunk.data_path;
 
         info!(
@@ -371,7 +354,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // data_path is valid but the chunk size doesn't mach the protocols
         // consensus size, then the data_root is actually invalid and no future
         // chunks from that data_root should be ingressed.
-        let chunk_size = self.storage_config.chunk_size;
+        let chunk_size = self.config.consensus.chunk_size;
 
         // Is this chunk index any of the chunks before the last in the tx?
         let num_chunks_in_tx = data_size.div_ceil(chunk_size);
@@ -405,7 +388,8 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         // TODO: fix all these unwraps!
         // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
 
-        db.update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
+        self.irys_db
+            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         for sm in &self.storage_modules {
@@ -441,7 +425,10 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         };
 
         // check if we have all the chunks for this tx
-        let read_tx = db.tx().map_err(|_| ChunkIngressError::DatabaseError)?;
+        let read_tx = self
+            .irys_db
+            .tx()
+            .map_err(|_| ChunkIngressError::DatabaseError)?;
 
         let mut cursor = read_tx
             .cursor_dup_read::<CachedChunksIndex>()
@@ -462,22 +449,17 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             // we *should* have all the chunks
             // dispatch a ingress proof task
 
-            let canon_chain = self
-                .block_tree_read_guard
-                .clone()
-                .ok_or(ChunkIngressError::ServiceUninitialized)?
-                .read()
-                .get_canonical_chain();
+            let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
 
             let (_, latest_height, _, _) = canon_chain
                 .0
                 .last()
                 .ok_or(ChunkIngressError::ServiceUninitialized)?;
 
-            let db = self.irys_db.clone().unwrap();
-            let signer = self.signer.clone().unwrap();
+            let db = self.irys_db.clone();
+            let signer = self.config.irys_signer();
             let latest_height = *latest_height;
-            self.task_exec.clone().unwrap().spawn_blocking(async move {
+            self.task_exec.clone().spawn_blocking(async move {
                 generate_ingress_proof(db.clone(), root_hash, data_size, chunk_size, signer)
                     // TODO: handle results instead of unwrapping
                     .unwrap();
@@ -499,7 +481,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         let gossip_data = GossipData::Chunk(chunk);
 
         let _ = tokio::task::spawn(async move {
-            if let Err(error) = gossip_sender.unwrap().send(gossip_data).await {
+            if let Err(error) = gossip_sender.send(gossip_data).await {
                 tracing::error!("Failed to send gossip data: {:?}", error);
             }
         });
@@ -517,7 +499,7 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
     type Result = Vec<IrysTransactionHeader>;
 
     fn handle(&mut self, _msg: GetBestMempoolTxs, _ctx: &mut Self::Context) -> Self::Result {
-        let reth_db = self.reth_db.clone().unwrap();
+        let reth_db = self.reth_db.clone();
         let mut fees_spent_per_address = HashMap::new();
 
         // TODO sort by fee
@@ -538,7 +520,14 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
                 };
                 valid
             })
-            .take(self.max_data_txs_per_block.try_into().unwrap())
+            .take(
+                self.config
+                    .node_config
+                    .mempool
+                    .max_data_txs_per_block
+                    .try_into()
+                    .expect("valid u64"),
+            )
             .map(|(_, header)| header.clone())
             .collect()
     }
@@ -548,11 +537,6 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
     type Result = eyre::Result<()>;
     fn handle(&mut self, msg: BlockConfirmedMessage, _ctx: &mut Context<Self>) -> Self::Result {
         || -> eyre::Result<()> {
-            let db = self.irys_db.clone().ok_or_else(|| {
-                error!("mempool_service is uninitialized");
-                eyre!("mempool_service is uninitialized")
-            })?;
-
             // Access the block header through msg.0
             let block = &msg.0;
             let all_txs = &msg.1;
@@ -569,7 +553,8 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
             // ingress proofs around longer to account for re-orgs, but for now
             // we just remove them.
             if !published_txids.is_empty() {
-                let mut_tx = db
+                let mut_tx = self
+                    .irys_db
                     .tx_mut()
                     .map_err(|e| {
                         error!("Failed to create mdbx transaction: {}", e);
@@ -652,10 +637,6 @@ impl Handler<TxExistenceQuery> for MempoolService {
     type Result = Result<bool, TxIngressError>;
 
     fn handle(&mut self, tx_msg: TxExistenceQuery, _ctx: &mut Context<Self>) -> Self::Result {
-        if self.irys_db.is_none() {
-            return Err(TxIngressError::ServiceUninitialized);
-        }
-
         if self.valid_tx.contains_key(&tx_msg.0) {
             return Ok(true);
         }
@@ -665,16 +646,15 @@ impl Handler<TxExistenceQuery> for MempoolService {
             return Ok(true);
         }
 
-        let read_tx = &self
+        let read_tx = self
             .irys_db
             .as_ref()
-            .ok_or(TxIngressError::ServiceUninitialized)?
             .tx()
             .map_err(|_| TxIngressError::DatabaseError)?;
 
         let txid = tx_msg.0;
         let tx_header =
-            tx_header_by_txid(read_tx, &txid).map_err(|_| TxIngressError::DatabaseError)?;
+            tx_header_by_txid(&read_tx, &txid).map_err(|_| TxIngressError::DatabaseError)?;
 
         Ok(tx_header.is_some())
     }

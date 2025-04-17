@@ -16,11 +16,20 @@ use std::{env, net::SocketAddr, ops::Deref, path::PathBuf, sync::Arc};
 pub struct CombinedConfig(Arc<CombinedConfigInner>);
 
 impl CombinedConfig {
-    pub fn new(consensus: ConsensusConfig, node_config: NodeConfig) -> Self {
+    pub fn new(node_config: NodeConfig) -> Self {
+        let consensus = node_config.consensus_config();
         Self(Arc::new(CombinedConfigInner {
             consensus,
             node_config,
         }))
+    }
+
+    pub fn irys_signer(&self) -> IrysSigner {
+        IrysSigner {
+            signer: self.node_config.mining_key.clone(),
+            chain_id: self.consensus.chain_id,
+            chunk_size: self.consensus.chunk_size,
+        }
     }
 }
 
@@ -47,6 +56,9 @@ pub struct CombinedConfigInner {
 pub struct ConsensusConfig {
     /// Unique identifier for the blockchain network
     pub chain_id: u64,
+
+    /// Controls how mining difficulty adjusts over time
+    pub difficulty_adjustment: DifficultyAdjustmentConfig,
 
     /// Defines the acceptable range of token price fluctuation between consecutive blocks
     /// This helps prevent price manipulation and ensures price stability
@@ -92,6 +104,9 @@ pub struct ConsensusConfig {
     /// Cache management configuration
     pub epoch: EpochConfig,
 
+    /// Configuration for Exponential Moving Average price calculations
+    pub ema: EmaConfig,
+
     /// Minimum number of replicas required for data to be considered permanently stored
     /// Higher values increase data durability but require more network resources
     pub number_of_ingerss_proofs: u64,
@@ -118,14 +133,8 @@ pub struct NodeConfig {
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
 
-    /// Controls how mining difficulty adjusts over time
-    pub difficulty_adjustment: DifficultyAdjustmentConfig,
-
     /// Settings for the transaction memory pool
     pub mempool: MempoolConfig,
-
-    /// Configuration for Exponential Moving Average price calculations
-    pub ema: EmaConfig,
 
     /// Settings for the price oracle system
     pub oracle: OracleConfig,
@@ -361,6 +370,8 @@ impl ConsensusConfig {
     pub const CHUNK_SIZE: u64 = 256 * 1024;
 
     pub fn testnet() -> Self {
+        const DEFAULT_BLOCK_TIME: u64 = 1;
+
         Self {
             chain_id: 1270,
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
@@ -388,18 +399,22 @@ impl ConsensusConfig {
                 num_capacity_partitions: None,
             },
             entropy_packing_iterations: 1000,
+            difficulty_adjustment: DifficultyAdjustmentConfig {
+                block_time: DEFAULT_BLOCK_TIME,
+                difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000)
+                    .div_ceil(DEFAULT_BLOCK_TIME)
+                    * 14,
+                max_difficulty_adjustment_factor: dec!(4),
+                min_difficulty_adjustment_factor: dec!(0.25),
+            },
+            ema: EmaConfig {
+                price_adjustment_interval: 10,
+            },
         }
     }
 }
 
 impl NodeConfig {
-    pub fn irys_signer(&self, consensus_config: &ConsensusConfig) -> IrysSigner {
-        IrysSigner {
-            signer: self.mining_key.clone(),
-            chain_id: consensus_config.chain_id,
-            chunk_size: consensus_config.chunk_size,
-        }
-    }
     pub fn consensus_config(&self) -> ConsensusConfig {
         // load the consensus config
         // todo: lazy load the consensus config, caching the result for subsequent calls
@@ -425,25 +440,13 @@ impl NodeConfig {
         use k256::ecdsa::SigningKey;
         use rust_decimal_macros::dec;
 
-        const DEFAULT_BLOCK_TIME: u64 = 1;
         Self {
             mode: NodeMode::Genesis,
-            consensus: ConsensusOptions::Testnet,
+            consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
             base_directory: default_irys_path(),
-            difficulty_adjustment: DifficultyAdjustmentConfig {
-                block_time: DEFAULT_BLOCK_TIME,
-                difficulty_adjustment_interval: (24u64 * 60 * 60 * 1000)
-                    .div_ceil(DEFAULT_BLOCK_TIME)
-                    * 14,
-                max_difficulty_adjustment_factor: dec!(4),
-                min_difficulty_adjustment_factor: dec!(0.25),
-            },
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
                 anchor_expiry_depth: 10,
-            },
-            ema: EmaConfig {
-                price_adjustment_interval: 10,
             },
             oracle: OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
@@ -593,6 +596,9 @@ mod tests {
             num_chunks_in_recall_range = 2
             num_partitions_per_slot = 1
 
+            [ema]
+            price_adjustment_interval = 10
+
             [vdf]
             vdf_reset_frequency = 1200
             vdf_parallel_verification_thread_limit = 4
@@ -607,6 +613,15 @@ mod tests {
         // Create the expected config
         let expected_config = ConsensusConfig {
             chain_id: 1270,
+            difficulty_adjustment: DifficultyAdjustmentConfig {
+                block_time: 1,
+                difficulty_adjustment_interval: 100,
+                max_difficulty_adjustment_factor: dec!(4),
+                min_difficulty_adjustment_factor: dec!(0.25),
+            },
+            ema: EmaConfig {
+                price_adjustment_interval: 10,
+            },
             token_price_safe_range: Amount::percentage(dec!(1)).unwrap(),
             genesis_price: Amount::token(dec!(1)).unwrap(),
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(),
@@ -656,9 +671,6 @@ mod tests {
             [mempool]
             max_data_txs_per_block = 20
 
-            [ema]
-            price_adjustment_interval = 10
-
             [oracle]
             type = "mock"
             initial_price = 1
@@ -702,18 +714,9 @@ mod tests {
             mode: NodeMode::Genesis,
             consensus: ConsensusOptions::Testnet,
             base_directory: "~/.irys".into(),
-            difficulty_adjustment: DifficultyAdjustmentConfig {
-                block_time: 1,
-                difficulty_adjustment_interval: 100,
-                max_difficulty_adjustment_factor: dec!(4),
-                min_difficulty_adjustment_factor: dec!(0.25),
-            },
             mempool: MempoolConfig {
                 max_data_txs_per_block: 20,
                 anchor_expiry_depth: 10,
-            },
-            ema: EmaConfig {
-                price_adjustment_interval: 10,
             },
             oracle: OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1.0)).unwrap(),

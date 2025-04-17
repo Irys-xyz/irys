@@ -8,8 +8,8 @@ use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
 use irys_types::{
-    ConsensusConfig, DatabaseProvider, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
-    IrysTransactionHeader, StorageSyncConfig, VdfConfig,
+    CombinedConfig, ConsensusConfig, DatabaseProvider, DifficultyAdjustmentConfig, GossipData,
+    IrysBlockHeader, IrysTransactionHeader, StorageSyncConfig, VdfConfig,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
@@ -25,8 +25,6 @@ pub struct BlockDiscoveryActor {
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Reference to the global config
     pub config: CombinedConfig,
-    /// Reference to global difficulty config
-    pub difficulty_config: DifficultyAdjustmentConfig,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
     /// Store last VDF Steps
@@ -61,7 +59,6 @@ impl BlockDiscoveryActor {
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
         config: CombinedConfig,
-        difficulty_config: DifficultyAdjustmentConfig,
         db: DatabaseProvider,
         vdf_steps_guard: VdfStepsReadGuard,
         service_senders: ServiceSenders,
@@ -70,7 +67,6 @@ impl BlockDiscoveryActor {
         Self {
             block_index_guard,
             partition_assignments_guard,
-            difficulty_config,
             db,
             vdf_steps_guard,
             service_senders,
@@ -218,9 +214,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let block_index_guard = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = BlockTreeService::from_registry();
-        let consensus_config = self.consensus_config.clone();
-        let difficulty_config = self.difficulty_config.clone();
-        let vdf_config = self.consensus_config.vdf.clone();
+        let config = self.config.clone();
         let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();
         let ema_service_sender = self.service_senders.ema.clone();
@@ -235,20 +229,14 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         let gossip_sender = self.gossip_sender.clone();
         Box::pin(async move {
-            let block_header_clone = new_block_header.clone(); // Clone before moving
-
             info!("Pre-validating block");
             let validation_future = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
                     block_header,
                     previous_block_header,
-                    block_index_guard,
                     partitions_guard,
-                    consensus_config,
-                    difficulty_config,
-                    vdf_config,
+                    config,
                     vdf_steps_guard,
-                    block_header_clone.miner_address, // Use clone in validation
                     ema_service_sender,
                 )
             });

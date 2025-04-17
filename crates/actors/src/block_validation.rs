@@ -10,8 +10,8 @@ use irys_database::DataLedger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
 use irys_types::{
-    calculate_difficulty, next_cumulative_diff, validate_path, Address, ConsensusConfig,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, VdfConfig, H256,
+    calculate_difficulty, next_cumulative_diff, validate_path, Address, CombinedConfig,
+    ConsensusConfig, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::vdf_state::VdfStepsReadGuard;
@@ -22,13 +22,9 @@ use tracing::{debug, info};
 pub async fn prevalidate_block(
     block: IrysBlockHeader,
     previous_block: IrysBlockHeader,
-    _block_index_guard: BlockIndexReadGuard,
-    _partitions_guard: PartitionAssignmentsReadGuard,
-    consensus_config: ConsensusConfig,
-    difficulty_config: DifficultyAdjustmentConfig,
-    vdf_config: VdfConfig,
+    partitions_guard: PartitionAssignmentsReadGuard,
+    config: CombinedConfig,
     steps_guard: VdfStepsReadGuard,
-    _miner_address: Address,
     ema_serviece_sendr: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     debug!(
@@ -61,7 +57,11 @@ pub async fn prevalidate_block(
     );
 
     // Check the difficulty
-    difficulty_is_valid(&block, &previous_block, &difficulty_config)?;
+    difficulty_is_valid(
+        &block,
+        &previous_block,
+        &config.consensus.difficulty_adjustment,
+    )?;
 
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
@@ -77,7 +77,7 @@ pub async fn prevalidate_block(
         "cumulative_difficulty_is_valid",
     );
 
-    check_poa_data_expiration(&block.poa, &_partitions_guard)?;
+    check_poa_data_expiration(&block.poa, &partitions_guard)?;
     debug!("poa data not expired");
 
     // Check the solution_hash
@@ -89,7 +89,7 @@ pub async fn prevalidate_block(
     );
 
     // Recall range check
-    recall_recall_range_is_valid(&block, &consensus_config, &steps_guard)?;
+    recall_recall_range_is_valid(&block, &config.consensus, &steps_guard)?;
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -97,7 +97,7 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config).await?;
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -480,6 +480,17 @@ mod tests {
 
     async fn init() -> (TempDir, TestContext) {
         let data_dir = temporary_directory(Some("block_validation_tests"), false);
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 100,
+                ..ConsensusConfig::testnet()
+            }),
+            base_directory: data_dir.path().to_path_buf(),
+            ..NodeConfig::testnet()
+        };
+        let config = CombinedConfig::new(node_config);
+
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
         let chunk_size = 32;
@@ -496,11 +507,10 @@ mod tests {
             ..node_config.consensus_config()
         };
 
-        let commitments =
-            add_genesis_commitments(&mut genesis_block, &node_config, &consensus_config);
+        let commitments = add_genesis_commitments(&mut genesis_block, &config);
 
         let arc_genesis = Arc::new(genesis_block);
-        let signer = node_config.irys_signer(&consensus_config);
+        let signer = config.irys_signer();
         let miner_address = signer.address();
 
         // Create epoch service with random miner address
@@ -515,8 +525,7 @@ mod tests {
             .await
             .unwrap();
 
-        let epoch_service =
-            EpochServiceActor::new(&node_config, &consensus_config, block_index_guard);
+        let epoch_service = EpochServiceActor::new(&config, block_index_guard);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers

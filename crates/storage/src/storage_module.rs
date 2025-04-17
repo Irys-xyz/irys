@@ -379,8 +379,8 @@ impl StorageModule {
             .and_then(|part| part.slot_index)
             .map(|slot_index| {
                 let start_offset =
-                    slot_index as u64 * self.consensus_config.num_chunks_in_partition;
-                let end_offset = start_offset + self.consensus_config.num_chunks_in_partition;
+                    slot_index as u64 * self.config.consensus.num_chunks_in_partition;
+                let end_offset = start_offset + self.config.consensus.num_chunks_in_partition;
                 (start_offset..end_offset).contains(&*chunk_offset)
             })
             .unwrap_or(false)
@@ -405,7 +405,7 @@ impl StorageModule {
     /// The sync threshold is configured via `min_writes_before_sync` to optimize
     /// disk writes and minimize fragmentation.
     pub fn sync_pending_chunks(&self) -> eyre::Result<()> {
-        let threshold = self.storage_config.num_writes_before_sync;
+        let threshold = self.config.node_config.storage.num_writes_before_sync;
         let arc = self.pending_writes.clone();
 
         // First use read lock to check if we have work to do
@@ -624,7 +624,7 @@ impl StorageModule {
             .unwrap();
 
         // Calculate file offset and prepare buffer
-        let chunk_size = self.consensus_config.chunk_size;
+        let chunk_size = self.config.consensus.chunk_size;
         let file_offset = *(chunk_offset - interval.start()) as u64 * chunk_size;
         let mut buf = vec![0u8; chunk_size as usize];
 
@@ -941,7 +941,7 @@ impl StorageModule {
                 let proof = get_leaf_proof(&path_buff)?;
                 // -1 as it starts with 0
                 let chunk_offset =
-                    (proof.offset() as u64).div_ceil(self.consensus_config.chunk_size) - 1;
+                    (proof.offset() as u64).div_ceil(self.config.consensus.chunk_size) - 1;
 
                 Ok((
                     data_root,
@@ -966,7 +966,7 @@ impl StorageModule {
             bytes: Base64::from(chunk_info.0),
             partition_offset,
             tx_offset: chunk_offset,
-            packing_address: self.miner_address,
+            packing_address: self.config.node_config.miner_address(),
             partition_hash: self.partition_hash().unwrap(),
         }))
     }
@@ -1022,7 +1022,7 @@ impl StorageModule {
         bytes: Vec<u8>,
         chunk_type: ChunkType,
     ) -> eyre::Result<()> {
-        let chunk_size = self.consensus_config.chunk_size;
+        let chunk_size = self.config.consensus.chunk_size;
         // Get the correct submodule reference based on chunk_offset
         let (interval, submodule) = self.get_submodule_for_offset(chunk_offset).unwrap();
 
@@ -1062,8 +1062,8 @@ impl StorageModule {
     pub fn get_storage_module_ledger_range(&self) -> eyre::Result<LedgerChunkRange> {
         if let Some(part_assign) = self.partition_assignment {
             if let Some(slot_index) = part_assign.slot_index {
-                let start = slot_index as u64 * self.consensus_config.num_chunks_in_partition;
-                let end = start + self.consensus_config.num_chunks_in_partition;
+                let start = slot_index as u64 * self.config.consensus.num_chunks_in_partition;
+                let end = start + self.config.consensus.num_chunks_in_partition;
                 return Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)));
             } else {
                 return Err(eyre::eyre!("Ledger slot not assigned!"));
@@ -1119,8 +1119,8 @@ impl StorageModule {
 
     /// Test utility function to mark a StorageModule as packed
     pub fn pack_with_zeros(&self) {
-        let entropy_bytes = vec![0u8; self.consensus_config.chunk_size as usize];
-        for chunk_offset in 0..self.consensus_config.num_chunks_in_partition as u32 {
+        let entropy_bytes = vec![0u8; self.config.consensus.chunk_size as usize];
+        for chunk_offset in 0..self.config.consensus.num_chunks_in_partition as u32 {
             self.write_chunk(
                 PartitionChunkOffset::from(chunk_offset),
                 entropy_bytes.clone(),
@@ -1304,17 +1304,17 @@ pub fn find_invalid_packing_starts(sm: Arc<StorageModule>) -> Vec<PartitionChunk
 
 pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::Result<bool> {
     let chunk = sm.read_chunk_internal(PartitionChunkOffset::from(point))?;
-    let chunk_size = sm.consensus_config.chunk_size;
+    let chunk_size = sm.config.consensus.chunk_size;
     let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
 
     compute_entropy_chunk(
-        sm.miner_address,
+        sm.config.node_config.miner_address(),
         point as u64,
         sm.partition_hash().unwrap().0,
-        sm.consensus_config.entropy_packing_iterations,
+        sm.config.consensus.entropy_packing_iterations,
         chunk_size.try_into()?,
         &mut out,
-        sm.consensus_config.chain_id,
+        sm.config.consensus.chain_id,
     );
 
     Ok(out == chunk)
@@ -1342,23 +1342,22 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
+        let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-
         let node_config = NodeConfig {
-            base_directory: base_path,
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 20,
+                ..ConsensusConfig::testnet()
+            }),
+            base_directory: base_path.clone(),
             ..NodeConfig::testnet()
         };
-        let consensus_config = ConsensusConfig {
-            chunk_size: 32,
-            num_chunks_in_partition: 20,
-            ..node_config.consensus_config()
-        };
+        let config = CombinedConfig::new(node_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module =
-            StorageModule::new(storage_module_info, &node_config, &consensus_config)?;
+        let storage_module = StorageModule::new(storage_module_info, &config)?;
 
         // Verify the packing params file was crated in the submodule
         let params_path = base_path.join("hdd0-4TB").join("packing_params.toml");
@@ -1546,29 +1545,27 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
+        let tmp_dir = setup_tracing_and_temp_dir(Some("pending_writes_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-
-        // Override the default StorageModule config for testing
         let node_config = NodeConfig {
-            base_directory: base_path,
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 51,
+                chunk_migration_depth: 1,
+                ..ConsensusConfig::testnet()
+            }),
             storage: StorageSyncConfig {
                 num_writes_before_sync: 10,
             },
+            base_directory: base_path.clone(),
             ..NodeConfig::testnet()
         };
-        let consensus_config = ConsensusConfig {
-            chunk_size: 32,
-            chunk_migration_depth: 1,
-            num_chunks_in_partition: 51,
-            ..node_config.consensus_config()
-        };
-        let chunk_size = consensus_config.chunk_size as usize;
+        let config = CombinedConfig::new(node_config);
+        let chunk_size = config.consensus.chunk_size as usize;
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module =
-            StorageModule::new(storage_module_info, &node_config, &consensus_config)?;
+        let storage_module = StorageModule::new(storage_module_info, &config)?;
 
         // Queue up some entropy chunks in the pending writes queue
         let entropy_bytes = vec![0u8; chunk_size];
@@ -1760,21 +1757,20 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-
         let node_config = NodeConfig {
-            base_directory: base_path,
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 5,
+                num_chunks_in_partition: 5,
+                ..ConsensusConfig::testnet()
+            }),
+            base_directory: base_path.clone(),
             ..NodeConfig::testnet()
         };
-        let consensus_config = ConsensusConfig {
-            chunk_size: 5,
-            num_chunks_in_partition: 5,
-            ..node_config.consensus_config()
-        };
+        let config = CombinedConfig::new(node_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module =
-            StorageModule::new(storage_module_info, &node_config, &consensus_config)?;
+        let storage_module = StorageModule::new(storage_module_info, &config)?;
         let chunk_data = vec![0, 1, 2, 3, 4];
         let data_path = vec![4, 3, 2, 1];
         let tx_path = vec![5, 6, 7, 8];

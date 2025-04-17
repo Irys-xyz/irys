@@ -15,8 +15,8 @@ use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{
-    partition_chunk_offset_ie, Address, AtomicVdfStepNumber, H256List, LedgerChunkOffset,
-    PartitionChunkOffset, PartitionChunkRange,
+    partition_chunk_offset_ie, Address, AtomicVdfStepNumber, CombinedConfig, H256List,
+    LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
@@ -24,7 +24,7 @@ use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct PartitionMiningActor {
-    mining_address: Address,
+    config: CombinedConfig,
     block_producer_actor: Recipient<SolutionFoundMessage>,
     packing_actor: Recipient<PackingRequest>,
     storage_module: Arc<StorageModule>,
@@ -41,7 +41,6 @@ impl Supervised for PartitionMiningActor {}
 impl PartitionMiningActor {
     pub fn new(
         config: CombinedConfig,
-        _database_provider: DatabaseProvider,
         block_producer_addr: Recipient<SolutionFoundMessage>,
         packing_actor: Recipient<PackingRequest>,
         storage_module: Arc<StorageModule>,
@@ -50,12 +49,12 @@ impl PartitionMiningActor {
         atomic_global_step_number: AtomicVdfStepNumber,
     ) -> Self {
         Self {
-            mining_address: config.node_config.mining_address(),
+            config: config.clone(),
             block_producer_actor: block_producer_addr,
             packing_actor,
             ranges: Ranges::new(
-                (storage_module.storage_config.num_chunks_in_partition
-                    / storage_module.storage_config.num_chunks_in_recall_range)
+                (config.consensus.num_chunks_in_partition
+                    / config.consensus.num_chunks_in_recall_range)
                     .try_into()
                     .expect("Recall ranges number exceeds usize representation"),
             ),
@@ -126,14 +125,11 @@ impl PartitionMiningActor {
         };
 
         // Pick a random recall range in the partition using efficient sampling
-        let recall_range_index =
-            { self.get_recall_range(vdf_step, &mining_seed, &partition_hash)? };
-
-        let config = &self.storage_module.storage_config;
+        let recall_range_index = self.get_recall_range(vdf_step, &mining_seed, &partition_hash)?;
 
         // Starting chunk index within partition
-        let start_chunk_offset =
-            (recall_range_index as u32).saturating_mul(config.num_chunks_in_recall_range as u32);
+        let start_chunk_offset = (recall_range_index as u32)
+            .saturating_mul(self.config.consensus.num_chunks_in_recall_range as u32);
 
         // info!(
         //     "Recall range index {} start chunk index {}",
@@ -142,7 +138,7 @@ impl PartitionMiningActor {
 
         let read_range = partition_chunk_offset_ie!(
             start_chunk_offset,
-            start_chunk_offset + config.num_chunks_in_recall_range as u32
+            start_chunk_offset + self.config.consensus.num_chunks_in_recall_range as u32
         );
 
         // haven't tested this, but it looks correct
@@ -195,7 +191,7 @@ impl PartitionMiningActor {
                     "Solution Found - partition_id: {}, ledger_offset: {}/{}, range_offset: {}/{}",
                     self.storage_module.id,
                     partition_chunk_offset,
-                    config.num_chunks_in_partition,
+                    self.config.consensus.num_chunks_in_partition,
                     index,
                     chunks.len()
                 );
@@ -204,7 +200,7 @@ impl PartitionMiningActor {
                     partition_hash,
                     chunk_offset: *partition_chunk_offset,
                     recall_chunk_index: index as u32,
-                    mining_address: self.mining_address,
+                    mining_address: self.config.node_config.miner_address(),
                     tx_path, // capacity partitions have no tx_path nor data_path
                     data_path,
                     chunk: chunk_bytes.clone(),
@@ -437,8 +433,6 @@ mod tests {
         let block_producer_actor_addr: Addr<BlockProducerMockActor> = mocked_block_producer.start();
         let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
         let mocked_addr = MockedBlockProducerAddr(recipient);
-
-        //SystemRegistry::set(block_producer_actor_addr);
 
         // Set up the storage geometry for this test
         let storage_config = StorageSyncConfig {
