@@ -363,7 +363,7 @@ fn local_test_url(port: &u16) -> String {
 async fn generate_test_transaction_and_add_to_block(
     node: &IrysNodeTest<IrysNodeCtx>,
     account: &IrysSigner,
-) {
+) -> HashMap<IrysTxId, irys_types::IrysTransaction> {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
     let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
     match node.create_submit_data_tx(&account, data_bytes).await {
@@ -375,6 +375,7 @@ async fn generate_test_transaction_and_add_to_block(
         }
         Err(e) => panic!("unexpected error {:?}", e),
     }
+    irys_txs
 }
 
 /// poll info_endpoint until timeout or we get block_index at desired height
