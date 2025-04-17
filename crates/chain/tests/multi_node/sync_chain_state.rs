@@ -294,7 +294,10 @@ async fn poll_until_fetch_at_block_index_height(
         let mut response = info_endpoint_request(&url).await;
 
         if max_attempts < attempts {
-            error!("peer never fully synced");
+            error!(
+                "peer never fully synced to height {}",
+                required_blocks_height
+            );
             break;
         } else {
             attempts += 1;
