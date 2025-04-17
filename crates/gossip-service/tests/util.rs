@@ -16,8 +16,8 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     Base64, Config, DatabaseProvider, GossipData, IrysBlockHeader, IrysTransaction,
-    IrysTransactionHeader, PeerAddress, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk,
-    H256,
+    IrysTransactionHeader, NodeConfig, PeerAddress, PeerListItem, PeerScore, TxChunkOffset,
+    UnpackedChunk, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
@@ -394,8 +394,9 @@ fn random_free_port() -> u16 {
 /// Can panic
 #[must_use]
 pub fn generate_test_tx() -> IrysTransaction {
-    let testnet_config = Config::testnet();
-    let account1 = IrysSigner::random_signer(&testnet_config);
+    let testnet_config = NodeConfig::testnet();
+    let config = Config::new(testnet_config);
+    let account1 = IrysSigner::random_signer(&config.consensus);
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
     // post a tx, mine a block
