@@ -1,7 +1,7 @@
 use eyre::OptionExt;
 use irys_database::DataLedger;
 use irys_types::{
-    ChunkFormat, CombinedConfig, ConsensusConfig, DataRoot, LedgerChunkOffset, PackedChunk,
+    ChunkFormat, Config, ConsensusConfig, DataRoot, LedgerChunkOffset, PackedChunk,
     StorageSyncConfig, TxChunkOffset,
 };
 use std::sync::Arc;
@@ -16,11 +16,11 @@ use base58::ToBase58;
 pub struct ChunkProvider {
     /// Collection of storage modules for distributing chunk data
     pub storage_modules: Vec<Arc<StorageModule>>,
-    pub config: CombinedConfig,
+    pub config: Config,
 }
 
 impl ChunkProvider {
-    pub fn new(combined_config: CombinedConfig, storage_modules: Vec<Arc<StorageModule>>) -> Self {
+    pub fn new(combined_config: Config, storage_modules: Vec<Arc<StorageModule>>) -> Self {
         Self {
             config: combined_config,
             storage_modules,
@@ -154,7 +154,7 @@ mod tests {
             base_directory: base_path.clone(),
             ..NodeConfig::testnet()
         };
-        let config = CombinedConfig::new(node_config);
+        let config = Config::new(node_config);
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),

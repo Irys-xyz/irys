@@ -13,7 +13,7 @@ use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_
 use {irys_packing::capacity_pack_range_cuda_c, irys_types::split_interval};
 
 use irys_storage::{ChunkType, StorageModule};
-use irys_types::{CombinedConfig, PartitionChunkOffset, PartitionChunkRange, StorageSyncConfig};
+use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, StorageSyncConfig};
 use reth::tasks::TaskExecutor;
 use tokio::{sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
@@ -57,7 +57,7 @@ pub struct PackingConfig {
 }
 
 impl PackingConfig {
-    pub fn new(config: &CombinedConfig) -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
             poll_duration: Duration::from_millis(1000),
             concurrency: config.node_config.packing.cpu_packing_concurrency,
@@ -370,7 +370,7 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
-        CombinedConfig, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
+        Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
         StorageSyncConfig,
     };
     use reth::tasks::TaskManager;
@@ -406,7 +406,7 @@ mod tests {
             base_directory: base_path.clone(),
             ..NodeConfig::testnet()
         };
-        let config = CombinedConfig::new(node_config);
+        let config = Config::new(node_config);
         let packing_config = PackingConfig::new(&config);
 
         let infos = vec![StorageModuleInfo {

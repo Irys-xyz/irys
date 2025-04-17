@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 use std::{env, net::SocketAddr, ops::Deref, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Clone)]
-pub struct CombinedConfig(Arc<CombinedConfigInner>);
+pub struct Config(Arc<CombinedConfigInner>);
 
-impl CombinedConfig {
+impl Config {
     pub fn new(node_config: NodeConfig) -> Self {
         let consensus = node_config.consensus_config();
         Self(Arc::new(CombinedConfigInner {
@@ -33,7 +33,7 @@ impl CombinedConfig {
     }
 }
 
-impl Deref for CombinedConfig {
+impl Deref for Config {
     type Target = CombinedConfigInner;
 
     fn deref(&self) -> &Self::Target {
@@ -166,9 +166,9 @@ pub struct NodeConfig {
     pub http: HttpConfig,
 }
 
-impl Into<CombinedConfig> for NodeConfig {
-    fn into(self) -> CombinedConfig {
-        CombinedConfig::new(self)
+impl Into<Config> for NodeConfig {
+    fn into(self) -> Config {
+        Config::new(self)
     }
 }
 

@@ -18,7 +18,7 @@ use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, Address, Base64, CombinedConfig, DataTransactionLedger,
+    next_cumulative_diff, Address, Base64, Config, DataTransactionLedger,
     DifficultyAdjustmentConfig, EpochConfig, H256List, IngressProofsList, IrysBlockHeader,
     IrysTransactionHeader, PoaData, Signature, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
@@ -64,7 +64,7 @@ pub struct BlockProducerActor {
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
     ///
-    pub config: CombinedConfig,
+    pub config: Config,
     /// Difficulty adjustment parameters for the Irys Protocol
     pub difficulty_config: DifficultyAdjustmentConfig,
     /// Store last VDF Steps

@@ -1,7 +1,7 @@
 use irys_config::StorageSubmodulesConfig;
 use irys_primitives::CommitmentType;
 use irys_types::{
-    irys::IrysSigner, CombinedConfig, CommitmentTransaction, Compact, ConsensusConfig, H256List,
+    irys::IrysSigner, Config, CommitmentTransaction, Compact, ConsensusConfig, H256List,
     IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256,
 };
 use serde::{Deserialize, Serialize};
@@ -114,7 +114,7 @@ fn create_pledge_commitment_transaction(
 /// # Panics
 /// Panics if fewer than 3 storage submodules are configured, as this is below
 /// the minimum required for network operation
-pub fn get_genesis_commitments(config: &CombinedConfig) -> Vec<CommitmentTransaction> {
+pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
     let base_dir = config.node_config.base_directory.clone();
 
     // Load the submodule paths from the storage_submodules.toml config
@@ -196,7 +196,7 @@ fn get_or_create_commitment_ledger(
 /// Returns the list of commitment transactions.
 pub fn add_genesis_commitments(
     genesis_block: &mut IrysBlockHeader,
-    config: &CombinedConfig,
+    config: &Config,
 ) -> Vec<CommitmentTransaction> {
     let commitments = get_genesis_commitments(&config);
     let commitment_ledger = get_or_create_commitment_ledger(genesis_block);
@@ -235,7 +235,7 @@ pub fn add_genesis_commitments(
 pub fn add_test_commitments(
     block_header: &mut IrysBlockHeader,
     pledge_count: u8,
-    config: &CombinedConfig,
+    config: &Config,
 ) -> Vec<CommitmentTransaction> {
     let signer = config.irys_signer();
     let mut commitments: Vec<CommitmentTransaction> = Vec::new();

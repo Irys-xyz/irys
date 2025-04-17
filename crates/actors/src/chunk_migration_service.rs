@@ -7,7 +7,7 @@ use irys_database::{
 };
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    app_state::DatabaseProvider, Base64, CombinedConfig, DataRoot, DataTransactionLedger,
+    app_state::DatabaseProvider, Base64, Config, DataRoot, DataTransactionLedger,
     IrysBlockHeader, IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
     StorageSyncConfig, TxChunkOffset, UnpackedChunk, H256,
 };
@@ -33,7 +33,7 @@ pub struct ChunkMigrationService {
     /// Tracks block boundaries and offsets for locating chunks in ledgers
     pub block_index: Option<Arc<RwLock<BlockIndex>>>,
     /// Configuration parameters for storage system
-    pub config: CombinedConfig,
+    pub config: Config,
     /// Collection of storage modules for distributing chunk data
     pub storage_modules: Vec<Arc<StorageModule>>,
     /// Persistent database for storing chunk metadata and indices
@@ -55,7 +55,7 @@ impl Actor for ChunkMigrationService {
 impl ChunkMigrationService {
     pub fn new(
         block_index: Arc<RwLock<BlockIndex>>,
-        config: CombinedConfig,
+        config: Config,
         storage_modules: Vec<Arc<StorageModule>>,
         db: DatabaseProvider,
         service_senders: ServiceSenders,

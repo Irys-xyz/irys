@@ -11,7 +11,7 @@ use irys_types::{
     DatabaseProvider, IrysBlockHeader, SimpleRNG, StorageSyncConfig, H256,
 };
 use irys_types::{
-    partition_chunk_offset_ie, Address, CombinedConfig, CommitmentTransaction, ConsensusConfig,
+    partition_chunk_offset_ie, Address, Config, CommitmentTransaction, ConsensusConfig,
     IrysTransactionId, NodeConfig, PartitionChunkOffset,
 };
 use irys_types::{EpochConfig, H256List};
@@ -151,7 +151,7 @@ pub struct EpochServiceActor {
     /// List of partition hashes not yet assigned to a mining address
     pub unassigned_partitions: Vec<PartitionHash>,
     /// Current partition & ledger parameters
-    pub config: CombinedConfig,
+    pub config: Config,
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
     /// Computed commitment state
@@ -333,7 +333,7 @@ impl Handler<Stop> for EpochServiceActor {
 
 impl EpochServiceActor {
     /// Create a new instance of the epoch service actor
-    pub fn new(config: &CombinedConfig, block_index_guard: BlockIndexReadGuard) -> Self {
+    pub fn new(config: &Config, block_index_guard: BlockIndexReadGuard) -> Self {
         Self {
             last_epoch_hash: H256::zero(),
             ledgers: Arc::new(RwLock::new(Ledgers::new(&config.consensus))),

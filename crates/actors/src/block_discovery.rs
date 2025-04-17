@@ -8,7 +8,7 @@ use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
 use irys_types::{
-    CombinedConfig, ConsensusConfig, DatabaseProvider, DifficultyAdjustmentConfig, GossipData,
+    Config, ConsensusConfig, DatabaseProvider, DifficultyAdjustmentConfig, GossipData,
     IrysBlockHeader, IrysTransactionHeader, StorageSyncConfig, VdfConfig,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
@@ -24,7 +24,7 @@ pub struct BlockDiscoveryActor {
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Reference to the global config
-    pub config: CombinedConfig,
+    pub config: Config,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
     /// Store last VDF Steps
@@ -58,7 +58,7 @@ impl BlockDiscoveryActor {
     pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
-        config: CombinedConfig,
+        config: Config,
         db: DatabaseProvider,
         vdf_steps_guard: VdfStepsReadGuard,
         service_senders: ServiceSenders,

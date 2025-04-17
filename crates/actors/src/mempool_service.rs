@@ -13,7 +13,7 @@ use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
-use irys_types::CombinedConfig;
+use irys_types::Config;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, GossipData,
     IrysTransactionHeader, H256,
@@ -40,7 +40,7 @@ pub struct MempoolService {
     task_exec: TaskExecutor,
     /// The miner's signer instance, used to sign ingress proofs
     invalid_tx: Vec<H256>,
-    config: CombinedConfig,
+    config: Config,
     storage_modules: StorageModuleVec,
     block_tree_read_guard: BlockTreeReadGuard,
     gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
@@ -70,7 +70,7 @@ impl MempoolService {
         task_exec: TaskExecutor,
         storage_modules: StorageModuleVec,
         block_tree_read_guard: BlockTreeReadGuard,
-        config: &CombinedConfig,
+        config: &Config,
         gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         info!("service started");

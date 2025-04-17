@@ -50,7 +50,7 @@ use irys_types::{
     CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
     OracleConfig, PartitionChunkRange, PeerListItem, StorageSyncConfig, H256,
 };
-use irys_types::{CombinedConfig, ConsensusConfig, NodeConfig};
+use irys_types::{Config, ConsensusConfig, NodeConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
     builder::FullNode,
@@ -182,13 +182,13 @@ async fn start_reth_node<T: HasName + HasTableType>(
 /// Builder pattern for configuring and bootstrapping an Irys blockchain node.
 #[derive(Clone)]
 pub struct IrysNode {
-    pub config: CombinedConfig,
+    pub config: Config,
     pub genesis_timestamp: u128,
 }
 
 impl IrysNode {
     /// Creates a new node builder instance.
-    pub async fn new(combined_config: CombinedConfig) -> Self {
+    pub async fn new(combined_config: Config) -> Self {
         let irys_genesis_block = if node_config.is_genesis {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
             let (_, irys_genesis) = IrysChainSpecBuilder::from_config(&combined_config).build();

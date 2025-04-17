@@ -10,7 +10,7 @@ use irys_database::DataLedger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
 use irys_types::{
-    calculate_difficulty, next_cumulative_diff, validate_path, Address, CombinedConfig,
+    calculate_difficulty, next_cumulative_diff, validate_path, Address, Config,
     ConsensusConfig, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
@@ -23,7 +23,7 @@ pub async fn prevalidate_block(
     block: IrysBlockHeader,
     previous_block: IrysBlockHeader,
     partitions_guard: PartitionAssignmentsReadGuard,
-    config: CombinedConfig,
+    config: Config,
     steps_guard: VdfStepsReadGuard,
     ema_serviece_sendr: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
@@ -489,7 +489,7 @@ mod tests {
             base_directory: data_dir.path().to_path_buf(),
             ..NodeConfig::testnet()
         };
-        let config = CombinedConfig::new(node_config);
+        let config = Config::new(node_config);
 
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;

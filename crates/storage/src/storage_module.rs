@@ -56,7 +56,7 @@ use irys_types::{
     get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash,
-    CombinedConfig, ConsensusConfig, DataRoot, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
+    Config, ConsensusConfig, DataRoot, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
     PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize, RelativeChunkOffset,
     StorageSyncConfig, TxChunkOffset, TxPath, UnpackedChunk, H256,
 };
@@ -99,7 +99,7 @@ pub struct StorageModule {
     /// Physical storage locations indexed by chunk ranges
     submodules: SubmoduleMap,
     /// Runtime configuration parameters
-    pub config: CombinedConfig,
+    pub config: Config,
 }
 
 /// On-disk metadata for StorageModule persistence
@@ -204,7 +204,7 @@ impl StorageModule {
     /// Initializes a new StorageModule
     pub fn new(
         storage_module_info: &StorageModuleInfo,
-        config: &CombinedConfig,
+        config: &Config,
     ) -> eyre::Result<Self> {
         let mut submodule_map = NoditMap::new();
         let mut global_intervals = StorageIntervals::new();
@@ -1353,7 +1353,7 @@ mod tests {
             base_directory: base_path.clone(),
             ..NodeConfig::testnet()
         };
-        let config = CombinedConfig::new(node_config);
+        let config = Config::new(node_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
@@ -1560,7 +1560,7 @@ mod tests {
             base_directory: base_path.clone(),
             ..NodeConfig::testnet()
         };
-        let config = CombinedConfig::new(node_config);
+        let config = Config::new(node_config);
         let chunk_size = config.consensus.chunk_size as usize;
 
         // Create a StorageModule with the specified submodules and config
@@ -1766,7 +1766,7 @@ mod tests {
             base_directory: base_path.clone(),
             ..NodeConfig::testnet()
         };
-        let config = CombinedConfig::new(node_config);
+        let config = Config::new(node_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];

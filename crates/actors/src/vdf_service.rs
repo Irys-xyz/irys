@@ -1,7 +1,7 @@
 use actix::prelude::*;
 use futures::future::join_all;
 use irys_database::block_header_by_hash;
-use irys_types::{block_production::Seed, CombinedConfig, DatabaseProvider, IrysBlockHeader};
+use irys_types::{block_production::Seed, Config, DatabaseProvider, IrysBlockHeader};
 use irys_vdf::vdf_state::{AtomicVdfState, VdfState, VdfStepsReadGuard};
 use reth_db::Database;
 use std::{
@@ -24,7 +24,7 @@ impl VdfService {
     pub fn new(
         block_index: BlockIndexReadGuard,
         db: DatabaseProvider,
-        config: &CombinedConfig,
+        config: &Config,
     ) -> Self {
         let vdf_state = create_state(block_index, db, &config);
 
@@ -48,7 +48,7 @@ impl VdfService {
 fn create_state(
     block_index: BlockIndexReadGuard,
     db: DatabaseProvider,
-    config: &CombinedConfig,
+    config: &Config,
 ) -> VdfState {
     let capacity = calc_capacity(config);
 
@@ -103,7 +103,7 @@ fn create_state(
 async fn create_state_parallel(
     block_index: BlockIndexReadGuard,
     db: DatabaseProvider,
-    config: &CombinedConfig,
+    config: &Config,
 ) -> VdfState {
     let capacity = calc_capacity(config);
 
@@ -164,7 +164,7 @@ async fn create_state_parallel(
     };
 }
 
-pub fn calc_capacity(config: &CombinedConfig) -> usize {
+pub fn calc_capacity(config: &Config) -> usize {
     const DEFAULT_CAPACITY: usize = 10_000;
     let capacity = std::cmp::max(
         DEFAULT_CAPACITY,
@@ -304,7 +304,7 @@ mod tests {
             num_chunks_in_recall_range: 800,
             ..ConsensusConfig::testnet()
         };
-        let combined_config = CombinedConfig::new(NodeConfig {
+        let combined_config = Config::new(NodeConfig {
             base_directory: base_path,
             consensus: ConsensusOptions::Custom(consensus_config),
             ..NodeConfig::testnet()

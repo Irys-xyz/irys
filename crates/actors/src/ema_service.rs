@@ -20,7 +20,7 @@ use futures::future::Either;
 use irys_types::{
     is_ema_recalculation_block, previous_ema_recalculation_block_height,
     storage_pricing::{phantoms::Percentage, Amount},
-    CombinedConfig, IrysBlockHeader, IrysTokenPrice,
+    Config, IrysBlockHeader, IrysTokenPrice,
 };
 use price_cache_context::{ChainStrategy, Confirmed, Optimistic, PriceCacheContext};
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
@@ -104,7 +104,7 @@ impl EmaService {
         exec: &TaskExecutor,
         block_tree_read_guard: BlockTreeReadGuard,
         rx: UnboundedReceiver<EmaServiceMessage>,
-        config: &CombinedConfig,
+        config: &Config,
     ) -> JoinHandle<()> {
         let blocks_in_interval = config.consensus.ema.price_adjustment_interval;
         let token_price_safe_range = config.consensus.token_price_safe_range;
@@ -860,7 +860,7 @@ mod tests {
     )]
     struct TestCtx {
         guard: BlockTreeReadGuard,
-        config: CombinedConfig,
+        config: Config,
         task_manager: TaskManager,
         task_executor: TaskExecutor,
         ema_sender: UnboundedSender<EmaServiceMessage>,
@@ -874,7 +874,7 @@ mod tests {
     }
 
     impl TestCtx {
-        fn setup(max_block_height: u64, config: CombinedConfig) -> Self {
+        fn setup(max_block_height: u64, config: Config) -> Self {
             let (block_tree_guard, prices) = build_genesis_tree_with_n_blocks(max_block_height);
             let task_manager = TaskManager::new(tokio::runtime::Handle::current());
             let task_executor = task_manager.executor();
@@ -944,7 +944,7 @@ mod tests {
         fn setup_with_tree(
             block_tree_guard: BlockTreeReadGuard,
             prices: Vec<PriceInfo>,
-            config: CombinedConfig,
+            config: Config,
         ) -> Self {
             let task_manager = TaskManager::new(tokio::runtime::Handle::current());
             let task_executor = task_manager.executor();
@@ -976,7 +976,7 @@ mod tests {
         // setup
         let ctx = TestCtx::setup(
             max_block_height,
-            CombinedConfig::new(NodeConfig {
+            Config::new(NodeConfig {
                 consensus: ConsensusOptions::Custom(ConsensusConfig {
                     ema: EmaConfig {
                         price_adjustment_interval: 10,
@@ -1010,7 +1010,7 @@ mod tests {
         async fn first_block() {
             // prepare
             let price_adjustment_interval = 10;
-            let config = CombinedConfig::new(NodeConfig {
+            let config = Config::new(NodeConfig {
                 consensus: ConsensusOptions::Custom(ConsensusConfig {
                     ema: EmaConfig {
                         price_adjustment_interval,
@@ -1072,7 +1072,7 @@ mod tests {
             let price_adjustment_interval = 10;
             let ctx = TestCtx::setup(
                 max_height,
-                CombinedConfig::new(NodeConfig {
+                Config::new(NodeConfig {
                     consensus: ConsensusOptions::Custom(ConsensusConfig {
                         ema: EmaConfig {
                             price_adjustment_interval,
@@ -1122,7 +1122,7 @@ mod tests {
             let token_price_safe_range = Amount::percentage(dec!(0.1)).unwrap();
             let ctx = TestCtx::setup(
                 max_height,
-                CombinedConfig::new(NodeConfig {
+                Config::new(NodeConfig {
                     consensus: ConsensusOptions::Custom(ConsensusConfig {
                         ema: EmaConfig {
                             price_adjustment_interval,
@@ -1185,7 +1185,7 @@ mod tests {
             let price_adjustment_interval = 10;
             let ctx = TestCtx::setup(
                 max_height,
-                CombinedConfig::new(NodeConfig {
+                Config::new(NodeConfig {
                     consensus: ConsensusOptions::Custom(ConsensusConfig {
                         ema: EmaConfig {
                             price_adjustment_interval,
@@ -1240,7 +1240,7 @@ mod tests {
             let price_adjustment_interval = 10;
             let ctx = TestCtx::setup(
                 max_block_height,
-                CombinedConfig::new(NodeConfig {
+                Config::new(NodeConfig {
                     consensus: ConsensusOptions::Custom(ConsensusConfig {
                         ema: EmaConfig {
                             price_adjustment_interval,
@@ -1271,7 +1271,7 @@ mod tests {
         let price_adjustment_interval = 10;
         let ctx = TestCtx::setup(
             block_count,
-            CombinedConfig::new(NodeConfig {
+            Config::new(NodeConfig {
                 consensus: ConsensusOptions::Custom(ConsensusConfig {
                     ema: EmaConfig {
                         price_adjustment_interval,
@@ -1313,7 +1313,7 @@ mod tests {
         let price_adjustment_interval = 10;
         let ctx = TestCtx::setup(
             initial_block_count,
-            CombinedConfig::new(NodeConfig {
+            Config::new(NodeConfig {
                 consensus: ConsensusOptions::Custom(ConsensusConfig {
                     ema: EmaConfig {
                         price_adjustment_interval,

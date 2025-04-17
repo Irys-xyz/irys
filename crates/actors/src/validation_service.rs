@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use actix::{Actor, Context, Handler, Message, Supervised, WrapFuture};
 use actix::{AsyncContext, SystemService};
-use irys_types::{CombinedConfig, IrysBlockHeader, StorageSyncConfig};
+use irys_types::{Config, IrysBlockHeader, StorageSyncConfig};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::vdf_steps_are_valid;
 use tracing::error;
@@ -23,7 +23,7 @@ pub struct ValidationService {
     /// VDF steps read guard
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Reference to global config for node
-    pub config: CombinedConfig,
+    pub config: Config,
 }
 
 impl Default for ValidationService {
@@ -38,7 +38,7 @@ impl ValidationService {
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
         vdf_steps_guard: VdfStepsReadGuard,
-        config: &CombinedConfig,
+        config: &Config,
     ) -> Self {
         Self {
             block_index_guard,

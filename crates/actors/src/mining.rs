@@ -15,8 +15,8 @@ use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{
-    partition_chunk_offset_ie, Address, AtomicVdfStepNumber, CombinedConfig, H256List,
-    LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange,
+    partition_chunk_offset_ie, Address, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
+    PartitionChunkOffset, PartitionChunkRange,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
@@ -24,7 +24,7 @@ use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct PartitionMiningActor {
-    config: CombinedConfig,
+    config: Config,
     block_producer_actor: Recipient<SolutionFoundMessage>,
     packing_actor: Recipient<PackingRequest>,
     storage_module: Arc<StorageModule>,
@@ -40,7 +40,7 @@ impl Supervised for PartitionMiningActor {}
 
 impl PartitionMiningActor {
     pub fn new(
-        config: &CombinedConfig,
+        config: &Config,
         block_producer_addr: Recipient<SolutionFoundMessage>,
         packing_actor: Recipient<PackingRequest>,
         storage_module: Arc<StorageModule>,
@@ -437,7 +437,7 @@ mod tests {
             },
             ..NodeConfig::testnet()
         };
-        let config = CombinedConfig::new(node_config);
+        let config = Config::new(node_config);
 
         let partition_hash = H256::random();
         let chunk_data = [0; 32];
@@ -605,7 +605,7 @@ mod tests {
             },
             ..NodeConfig::testnet()
         };
-        let config = CombinedConfig::new(node_config);
+        let config = Config::new(node_config);
 
         let partition_hash = H256::random();
 

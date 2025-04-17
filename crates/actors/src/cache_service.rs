@@ -8,7 +8,7 @@ use irys_database::{
         CachedChunks, DataRootLRU, IngressProofs, ProgrammableDataCache, ProgrammableDataLRU,
     },
 };
-use irys_types::{CombinedConfig, ConsensusConfig, DatabaseProvider, GIGABYTE};
+use irys_types::{Config, ConsensusConfig, DatabaseProvider, GIGABYTE};
 use reth::{
     network::metered_poll_nested_stream_with_budget,
     tasks::{shutdown::GracefulShutdown, TaskExecutor},
@@ -35,7 +35,7 @@ pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
 
 #[derive(Debug)]
 pub struct ChunkCacheService {
-    pub config: CombinedConfig,
+    pub config: Config,
     pub db: DatabaseProvider,
     pub msg_rx: UnboundedReceiver<CacheServiceAction>,
     pub shutdown: GracefulShutdown,
@@ -46,7 +46,7 @@ impl ChunkCacheService {
         exec: &TaskExecutor,
         db: DatabaseProvider,
         rx: UnboundedReceiver<CacheServiceAction>,
-        config: CombinedConfig,
+        config: Config,
     ) -> JoinHandle<()> {
         exec.spawn_critical_with_graceful_shutdown_signal("Cache Service", |shutdown| async move {
             let cache_service = ChunkCacheService {

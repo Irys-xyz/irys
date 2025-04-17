@@ -1,5 +1,5 @@
 use irys_primitives::GenesisAccount;
-use irys_types::{config, Address, CombinedConfig, ConsensusConfig, IrysBlockHeader, NodeConfig};
+use irys_types::{config, Address, Config, ConsensusConfig, IrysBlockHeader, NodeConfig};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder};
 use tracing::debug;
 
@@ -14,7 +14,7 @@ pub struct IrysChainSpecBuilder {
 
 impl IrysChainSpecBuilder {
     /// Construct a new builder from the mainnet chain spec.
-    pub fn from_config(config: &CombinedConfig) -> Self {
+    pub fn from_config(config: &Config) -> Self {
         let genesis = IrysBlockHeader {
             oracle_irys_price: config.consensus.genesis_price,
             ema_irys_price: config.consensus.genesis_price,

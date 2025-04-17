@@ -12,7 +12,7 @@ use irys_storage::*;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-    partition_chunk_offset_ie, partition_chunk_offset_ii, Base64, CombinedConfig, ConsensusConfig,
+    partition_chunk_offset_ie, partition_chunk_offset_ii, Base64, Config, ConsensusConfig,
     ConsensusOptions, DataTransactionLedger, IrysTransaction, IrysTransactionHeader,
     LedgerChunkOffset, LedgerChunkRange, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
     TxChunkOffset, UnpackedChunk, H256,
@@ -34,7 +34,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         entropy_packing_iterations: 1,
         ..node_config.consensus_config()
     });
-    let config = CombinedConfig::new(node_config);
+    let config = Config::new(node_config);
 
     // Configure 3 storage modules that are assigned to the submit ledger in
     // slots 0, 1, and 2
