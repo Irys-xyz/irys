@@ -297,18 +297,18 @@ fn init_configs(
     trusted_peers: &Vec<PeerAddress>,
 ) -> (Config, Config, Config) {
     let testnet_config_genesis = Config {
-        port: 8080,
+        api_port: 8080,
         gossip_service_port: 8081,
         trusted_peers: genesis_trusted_peers.clone(),
         ..Config::testnet()
     };
     let testnet_config_peer1 = Config {
-        port: 0, //random port
+        api_port: 0, //random port
         trusted_peers: trusted_peers.clone(),
         ..Config::testnet()
     };
     let testnet_config_peer2 = Config {
-        port: 0, //random port
+        api_port: 0, //random port
         trusted_peers: trusted_peers.clone(),
         ..Config::testnet()
     };
