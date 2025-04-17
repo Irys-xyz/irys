@@ -92,7 +92,7 @@ impl ApiClient for IrysApiClient {
         tx_id: H256,
     ) -> Result<Option<IrysTransactionHeader>> {
         debug!("Fetching transaction {} from peer {}", tx_id, peer);
-        let path = format!("/v1/tx/{}", tx_id);
+        let path = format!("/tx/{}", tx_id);
         self.make_request(peer, "GET", &path, None::<&()>).await
     }
 
@@ -117,7 +117,7 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         version: VersionRequest,
     ) -> Result<PeerResponse> {
-        let path = "/v1/version";
+        let path = "/version";
         let response = self
             .make_request::<PeerResponse, _>(peer, "POST", path, Some(&version))
             .await;

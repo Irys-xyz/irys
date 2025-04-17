@@ -76,6 +76,7 @@ test-log.workspace = true
 rstest.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
+semver.workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["alloy-sol-types", "alloy-contract"]
