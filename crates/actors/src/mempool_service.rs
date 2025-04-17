@@ -254,6 +254,10 @@ impl Handler<TxIngressMessage> for MempoolService {
             .map_err(|_| TxIngressError::DatabaseError)?
             < U256::from(tx_msg.0.total_fee())
         {
+            error!(
+                "unfunded balance from irys_database::get_account_balance({:?},{:?})",
+                read_reth_tx, tx_msg.0.signer
+            );
             return Err(TxIngressError::Unfunded);
         }
 
