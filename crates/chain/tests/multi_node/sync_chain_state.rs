@@ -37,7 +37,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let required_genesis_node_height = required_blocks_height + 2;
 
     // generate a txn and add it to the block...
-    sleep(Duration::from_millis(5000)).await; //wait before trying that
     generate_test_transaction_and_add_to_block(&ctx_genesis_node, &account1).await;
 
     // mine x blocks on genesis
