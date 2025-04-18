@@ -9,7 +9,7 @@ use irys_actors::{
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
-    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    broadcast_mining_service::BroadcastMiningService,
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
     ema_service::EmaService,
@@ -44,6 +44,7 @@ use irys_storage::{
     ChunkProvider, ChunkType, StorageModule,
 };
 
+use irys_types::U256;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, Address,
     CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
@@ -775,14 +776,8 @@ impl IrysNode {
             &block_producer_addr,
             &atomic_global_step_number,
             &packing_actor_addr,
+            latest_block.diff
         );
-
-        // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
-        tokio::task::yield_now().await;
-
-        broadcast_mining_actor
-            .send(BroadcastDifficultyUpdate(latest_block.clone()))
-            .await?;
 
         // set up the vdf thread
         let vdf_thread_handler = self.init_vdf_thread(
@@ -967,6 +962,7 @@ impl IrysNode {
         block_producer_addr: &actix::Addr<BlockProducerActor>,
         atomic_global_step_number: &Arc<AtomicU64>,
         packing_actor_addr: &actix::Addr<PackingActor>,
+        initial_difficulty: U256
     ) -> (Vec<actix::Addr<PartitionMiningActor>>, Vec<Arbiter>) {
         let mut part_actors = Vec::new();
         let mut arbiters = Vec::new();
@@ -980,6 +976,7 @@ impl IrysNode {
                 false, // do not start mining automatically
                 vdf_steps_guard.clone(),
                 atomic_global_step_number.clone(),
+                initial_difficulty,
             );
             let part_arbiter = Arbiter::new();
             let partition_mining_actor =
