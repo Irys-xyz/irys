@@ -776,6 +776,10 @@ impl IrysNode {
             &atomic_global_step_number,
             &packing_actor_addr,
         );
+
+        // Yield to let actors process their mailboxes (and subscribe to the mining_broadcaster)
+        tokio::task::yield_now().await;
+
         broadcast_mining_actor
             .send(BroadcastDifficultyUpdate(latest_block.clone()))
             .await?;
