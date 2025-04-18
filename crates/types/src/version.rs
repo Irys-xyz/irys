@@ -148,6 +148,7 @@ impl Default for VersionRequest {
 pub struct PeerAddress {
     pub gossip: SocketAddr,
     pub api: SocketAddr,
+    pub reth_peering_tcp: SocketAddr,
 }
 
 impl Default for PeerAddress {
@@ -155,6 +156,7 @@ impl Default for PeerAddress {
         Self {
             gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8081),
+            reth_peering_tcp: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 30303),
         }
     }
 }
