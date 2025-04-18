@@ -931,7 +931,7 @@ mod tests {
     async fn test_announce_yourself_to_all_peers() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mock_client = CountingMockClient {
-            calls: calls.clone(),
+            post_version_calls: calls.clone(),
         };
 
         let (_mining1, peer1) = create_test_peer(

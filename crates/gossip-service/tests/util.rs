@@ -204,6 +204,14 @@ impl ApiClient for StubApiClient {
     ) -> Result<PeerResponse> {
         Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock re sponse
     }
+
+    async fn post_transaction(
+        &self,
+        _api_address: SocketAddr,
+        _transaction: IrysTransactionHeader,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl Default for StubApiClient {

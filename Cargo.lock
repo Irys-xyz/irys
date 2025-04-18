@@ -4087,6 +4087,7 @@ name = "irys-api-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base58",
  "eyre",
  "irys-types",
  "reqwest 0.12.15",
