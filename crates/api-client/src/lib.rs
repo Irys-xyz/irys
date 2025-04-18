@@ -4,7 +4,7 @@ use irys_types::{IrysTransactionHeader, PeerResponse, VersionRequest, H256};
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
-use tracing::{debug, error};
+use tracing::error;
 
 /// Trait defining the interface for the API client
 #[async_trait::async_trait]
