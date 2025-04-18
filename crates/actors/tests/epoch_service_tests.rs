@@ -373,6 +373,7 @@ async fn capacity_projection_tests() {
 
 #[actix::test]
 async fn partition_expiration_test() {
+    std::env::set_var("RUST_LOG", "debug");
     // Initialize genesis block at height 0
     let chunk_size = 32;
     let chunk_count = 10;
@@ -646,11 +647,28 @@ async fn partition_expiration_test() {
 
     let _ = epoch_service_actor
         .send(NewEpochMessage {
+            epoch_block: new_epoch_block.clone().into(),
+            commitments: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    new_epoch_block.height = (testnet_config.submit_ledger_epoch_length + 2) * num_blocks_in_epoch;
+    let _ = epoch_service_actor
+        .send(NewEpochMessage {
             epoch_block: new_epoch_block.into(),
             commitments: Vec::new(),
         })
         .await
         .unwrap();
+
+    let ledgers_guard = epoch_service_actor
+        .send(GetLedgersGuardMessage)
+        .await
+        .unwrap();
+    let ledgers = ledgers_guard.read();
+    debug!("{:#?}", ledgers);
+    drop(ledgers);
 
     // busypoll the solution context rwlock
     let mut max_pools = 10;
@@ -827,6 +845,7 @@ async fn partition_expiration_test() {
 
 #[actix::test]
 async fn epoch_blocks_reinitialization_test() {
+    std::env::set_var("RUST_LOG", "debug");
     let testnet_config = Config {
         chunk_size: 32,
         ..Config::testnet()
@@ -977,7 +996,7 @@ async fn epoch_blocks_reinitialization_test() {
 
     // index and store in db blocks
     let mut height = 1;
-    while height <= (testnet_config.submit_ledger_epoch_length + 1) * num_blocks_in_epoch {
+    while height <= (testnet_config.submit_ledger_epoch_length + 2) * num_blocks_in_epoch {
         new_epoch_block.height = height;
         new_epoch_block.block_hash = H256::random();
 
@@ -1019,7 +1038,7 @@ async fn epoch_blocks_reinitialization_test() {
         let pub_slots = ledgers.get_slots(DataLedger::Publish);
         let sub_slots = ledgers.get_slots(DataLedger::Submit);
         assert_eq!(pub_slots.len(), 1);
-        assert_eq!(sub_slots.len(), 5); // TODO: check slot 2 expired, 3 new slots added
+        assert_eq!(sub_slots.len(), 4); // TODO: check slot 1 expired, 3 new slots added
     }
 
     //            +---+
@@ -1078,6 +1097,7 @@ async fn epoch_blocks_reinitialization_test() {
 
 #[actix::test]
 async fn partitions_assignment_determinism_test() {
+    std::env::set_var("RUST_LOG", "debug");
     let testnet_config = Config {
         submit_ledger_epoch_length: 2,
         ..Config::testnet()
@@ -1196,7 +1216,7 @@ async fn partitions_assignment_determinism_test() {
         height += 1;
     }
 
-    // pa_read_guard.read().print_assignments();
+    pa_read_guard.read().print_assignments();
     // debug!(
     //     "\nAll Partitions({})\n{}",
     //     &epoch_service.all_active_partitions.len(),
@@ -1273,14 +1293,14 @@ async fn partitions_assignment_determinism_test() {
         panic!("Should have an assignment");
     };
 
-    let submit_slot_15 = H256::from_base58("AtGjnuZ1EKmp8sP1FT3aMPbJWCY8tdEoksVFDB6PKXr1");
+    let submit_slot_7 = H256::from_base58("AtGjnuZ1EKmp8sP1FT3aMPbJWCY8tdEoksVFDB6PKXr1");
 
     if let Some(submit_assignment) = epoch_service
         .partition_assignments
         .read()
         .unwrap()
         .data_partitions
-        .get(&submit_slot_15)
+        .get(&submit_slot_7)
     {
         assert_eq!(
             submit_assignment.ledger_id,
@@ -1289,8 +1309,8 @@ async fn partitions_assignment_determinism_test() {
         );
         assert_eq!(
             submit_assignment.slot_index,
-            Some(15),
-            "Should be assigned to slot 15"
+            Some(7),
+            "Should be assigned to slot 7"
         );
     } else {
         panic!("Should have an assignment");

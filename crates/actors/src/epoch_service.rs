@@ -535,7 +535,8 @@ impl EpochServiceActor {
                 let mut ledgers = self.ledgers.write().unwrap();
                 for ledger in DataLedger::iter() {
                     debug!("Allocating 1 slot for {:?}", &ledger);
-                    num_data_partitions += ledgers[ledger].allocate_slots(1);
+                    num_data_partitions +=
+                        ledgers[ledger].allocate_slots(1, new_epoch_block.height);
                 }
             }
 
@@ -598,7 +599,7 @@ impl EpochServiceActor {
             {
                 let mut ledgers = self.ledgers.write().unwrap();
                 debug!("Allocating {} slots for ledger {:?}", &part_slots, &ledger);
-                ledgers[ledger].allocate_slots(part_slots);
+                ledgers[ledger].allocate_slots(part_slots, new_epoch_block.height);
             }
         }
     }
