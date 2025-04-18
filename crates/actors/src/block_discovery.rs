@@ -274,6 +274,10 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         .await??;
 
                     // Send the block to the gossip bus
+                    tracing::trace!(
+                        "sending block to bus: block height {:?}",
+                        &new_block_header.height
+                    );
                     if let Err(error) = gossip_sender
                         .send(GossipData::Block(new_block_header.as_ref().clone()))
                         .await

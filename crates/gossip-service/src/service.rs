@@ -206,6 +206,7 @@ impl GossipService {
         data: &GossipData,
         peer_list_service: &Addr<PeerListService>,
     ) -> GossipResult<()> {
+        tracing::trace!("GOSSIP BROADCASTING DATA");
         let exclude_peers = match original_source {
             GossipSource::Internal => HashSet::new(),
             GossipSource::External(addr) => {
@@ -223,6 +224,8 @@ impl GossipService {
             })
             .await
             .map_err(|err| GossipError::Internal(InternalGossipError::Unknown(err.to_string())))?;
+
+        tracing::trace!("BROADCASTING DATA TO {:?} PEERS", peers.len());
 
         peers.shuffle(&mut rand::thread_rng());
 

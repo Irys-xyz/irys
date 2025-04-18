@@ -28,7 +28,7 @@ use reth_db::{
 use reth_db::{HasName, HasTableType, PlainAccountState};
 use reth_node_metrics::recorder::install_prometheus_recorder;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
 /// necessary. Read/Write mode.
@@ -274,6 +274,7 @@ pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Res
 
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
 pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U256> {
+    error!("balance check on address: {:?}", address);
     Ok(tx
         .get::<PlainAccountState>(address)?
         .map(|a| U256::from_little_endian(a.balance.as_le_slice()))

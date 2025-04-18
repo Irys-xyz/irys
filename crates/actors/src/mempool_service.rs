@@ -254,16 +254,20 @@ impl Handler<TxIngressMessage> for MempoolService {
             .map_err(|_| TxIngressError::DatabaseError)?
             < U256::from(tx_msg.0.total_fee())
         {
+            error!(
+                "unfunded balance from irys_database::get_account_balance({:?},{:?})",
+                read_reth_tx, tx_msg.0.signer
+            );
             return Err(TxIngressError::Unfunded);
         }
 
         // Validate the transaction signature
         if tx.is_signature_valid() {
-            println!("Signature is valid");
+            info!("Signature is valid");
             self.valid_tx.insert(tx.id, tx.clone());
         } else {
             self.invalid_tx.push(tx.id);
-            println!("Signature is NOT valid");
+            warn!("Signature is NOT valid");
             return Err(TxIngressError::InvalidSignature);
         }
 
