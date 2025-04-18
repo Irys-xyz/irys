@@ -51,10 +51,6 @@ impl PartitionMiningActor {
         atomic_global_step_number: AtomicVdfStepNumber,
         initial_difficulty: U256,
     ) -> Self {
-        debug!(
-            "Creating partition mining actor for partition {}",
-            storage_module.id
-        );
         Self {
             mining_address,
             _database_provider,
@@ -239,12 +235,6 @@ impl Actor for PartitionMiningActor {
     fn started(&mut self, ctx: &mut Context<Self>) {
         let broadcaster = BroadcastMiningService::from_registry();
         broadcaster.do_send(Subscribe(ctx.address()));
-        debug!(
-            "Partition mining {} hash {} address {:?} send subscription to broadcaster",
-            self.storage_module.id,
-            self.storage_module.partition_hash().unwrap(),
-            ctx.address()
-        );
     }
 
     fn stopping(&mut self, ctx: &mut Context<Self>) -> Running {

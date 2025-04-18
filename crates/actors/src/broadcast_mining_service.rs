@@ -69,12 +69,7 @@ impl Handler<Subscribe> for BroadcastMiningService {
     type Result = ();
 
     fn handle(&mut self, msg: Subscribe, _: &mut Context<Self>) {
-
-        self.subscribers.push(msg.0.clone());
-        debug!(
-            "Broadcast Mining subscribed address: {:?}",
-            msg.0.clone(),
-        );
+        self.subscribers.push(msg.0);
     }
 }
 
