@@ -50,14 +50,14 @@ pub struct PeerListItem {
 impl Default for PeerListItem {
     fn default() -> Self {
         Self {
-            reputation_score: PeerScore(0),
+            reputation_score: PeerScore(PeerScore::INITIAL),
             response_time: 0,
             address: PeerAddress {
                 gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                 api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
             },
             last_seen: Utc::now().timestamp_millis() as u64,
-            is_online: false,
+            is_online: true,
         }
     }
 }
