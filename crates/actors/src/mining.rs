@@ -676,7 +676,7 @@ mod tests {
             false,
             vdf_steps_guard.clone(),
             atomic_global_step_number,
-            U256::zero()
+            U256::zero(),
         );
 
         let range = partition_mining_actor

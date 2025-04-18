@@ -776,7 +776,7 @@ impl IrysNode {
             &block_producer_addr,
             &atomic_global_step_number,
             &packing_actor_addr,
-            latest_block.diff
+            latest_block.diff,
         );
 
         // set up the vdf thread
@@ -962,7 +962,7 @@ impl IrysNode {
         block_producer_addr: &actix::Addr<BlockProducerActor>,
         atomic_global_step_number: &Arc<AtomicU64>,
         packing_actor_addr: &actix::Addr<PackingActor>,
-        initial_difficulty: U256
+        initial_difficulty: U256,
     ) -> (Vec<actix::Addr<PartitionMiningActor>>, Vec<Arbiter>) {
         let mut part_actors = Vec::new();
         let mut arbiters = Vec::new();

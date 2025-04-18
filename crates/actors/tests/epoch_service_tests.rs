@@ -2,11 +2,11 @@ use actix::{Actor, Context, Handler};
 use base58::ToBase58;
 use irys_actors::epoch_service::{GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage};
 use irys_config::StorageSubmodulesConfig;
-use irys_types::{Config, U256};
 use irys_types::{
     partition::PartitionAssignment, DatabaseProvider, IrysBlockHeader, StorageConfig, H256,
 };
 use irys_types::{partition_chunk_offset_ie, Address, PartitionChunkOffset};
+use irys_types::{Config, U256};
 use reth_db::Database;
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
