@@ -3,12 +3,12 @@ use actix::{Actor, ActorContext, Context, Handler, Message, MessageResponse};
 use base58::ToBase58;
 use eyre::{Error, Result};
 use irys_config::StorageSubmodulesConfig;
-use irys_database::{block_header_by_hash, commitment_tx_by_txid, data_ledger::*, SystemLedger};
+use irys_database::{data_ledger::*, SystemLedger};
 use irys_primitives::CommitmentStatus;
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    DatabaseProvider, IrysBlockHeader, SimpleRNG, StorageConfig, H256,
+    IrysBlockHeader, SimpleRNG, StorageConfig, H256,
 };
 use irys_types::{
     partition_chunk_offset_ie, Address, CommitmentTransaction, IrysTransactionId,
@@ -16,7 +16,6 @@ use irys_types::{
 };
 use irys_types::{Config, H256List};
 use openssl::sha;
-use reth_db::Database;
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, RwLock, RwLockReadGuard},
@@ -24,7 +23,6 @@ use std::{
 
 use tracing::{debug, error, trace, warn};
 
-use crate::block_index_service::BlockIndexReadGuard;
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
 use crate::services::Stop;
 
@@ -54,6 +52,9 @@ impl EpochServiceConfig {
     }
 }
 
+//==============================================================================
+// PartitionAssignments
+//------------------------------------------------------------------------------
 /// A state struct that can be wrapped with Arc<`RwLock`<>> to provide parallel read access
 #[derive(Debug)]
 pub struct PartitionAssignments {
@@ -144,6 +145,15 @@ impl PartitionAssignments {
 }
 
 //==============================================================================
+// EpochReplayData
+//------------------------------------------------------------------------------
+#[derive(Debug)]
+pub struct EpochReplayData {
+    pub epoch_block: IrysBlockHeader,
+    pub commitments: Vec<CommitmentTransaction>,
+}
+
+//==============================================================================
 // CommitmentState
 //------------------------------------------------------------------------------
 #[derive(Debug, Default, Clone)]
@@ -178,8 +188,6 @@ pub struct EpochServiceActor {
     pub unassigned_partitions: Vec<PartitionHash>,
     /// Current partition & ledger parameters
     pub config: EpochServiceConfig,
-    /// Read only view of the block index
-    pub block_index_guard: BlockIndexReadGuard,
     /// Computed commitment state
     commitment_state: Arc<RwLock<CommitmentState>>,
 }
@@ -193,6 +201,7 @@ impl Actor for EpochServiceActor {
 #[rtype(result = "Result<(),EpochServiceError>")]
 pub struct NewEpochMessage {
     pub epoch_block: Arc<IrysBlockHeader>,
+    pub previous_epoch_block: Option<IrysBlockHeader>,
     pub commitments: Vec<CommitmentTransaction>,
 }
 
@@ -200,9 +209,14 @@ impl Handler<NewEpochMessage> for EpochServiceActor {
     type Result = Result<(), EpochServiceError>;
     fn handle(&mut self, msg: NewEpochMessage, _ctx: &mut Self::Context) -> Self::Result {
         let new_epoch_block = msg.epoch_block;
-        let commitments = msg.commitments;
+        let new_epoch_commitments = msg.commitments;
+        let previous_epoch_block = msg.previous_epoch_block;
 
-        self.perform_epoch_tasks(new_epoch_block, commitments)?;
+        self.perform_epoch_tasks(
+            &previous_epoch_block,
+            &new_epoch_block,
+            new_epoch_commitments,
+        )?;
 
         Ok(())
     }
@@ -215,12 +229,14 @@ pub enum EpochServiceError {
     InternalError,
     /// Attempted to do epoch tasks on a block that was not an epoch block
     NotAnEpochBlock,
+    /// Provided an incorrect previous epoch block
+    IncorrectPreviousEpochBlock,
+    /// Validation of commitments failed
+    InvalidCommitments,
 }
-
 //==============================================================================
 // LedgersReadGuard
 //------------------------------------------------------------------------------
-
 /// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct LedgersReadGuard {
@@ -331,7 +347,6 @@ impl Handler<GetCommitmentStateGuardMessage> for EpochServiceActor {
 //==============================================================================
 // EpochServiceActor implementation
 //------------------------------------------------------------------------------
-
 /// Retrieve partition assignment (ledger and its relative offset) for a partition
 #[derive(Message, Debug)]
 #[rtype(result = "Option<PartitionAssignment>")]
@@ -359,11 +374,7 @@ impl Handler<Stop> for EpochServiceActor {
 
 impl EpochServiceActor {
     /// Create a new instance of the epoch service actor
-    pub fn new(
-        epoch_config: EpochServiceConfig,
-        config: &Config,
-        block_index_guard: BlockIndexReadGuard,
-    ) -> Self {
+    pub fn new(epoch_config: EpochServiceConfig, config: &Config) -> Self {
         Self {
             last_epoch_hash: H256::zero(),
             ledgers: Arc::new(RwLock::new(Ledgers::new(config))),
@@ -371,78 +382,23 @@ impl EpochServiceActor {
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
             config: epoch_config,
-            block_index_guard,
             commitment_state: Default::default(),
         }
     }
 
-    pub async fn initialize(
+    pub fn initialize(
         &mut self,
-        db: &DatabaseProvider,
+        genesis_block: IrysBlockHeader,
+        commitments: Vec<CommitmentTransaction>,
         storage_module_config: StorageSubmodulesConfig,
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
-        let mut block_index = 0;
+        Self::validate_commitments(&genesis_block, &commitments)?;
 
-        // Loop though all the epoch blocks, starting with genesis (block_index = 0)
-        loop {
-            let block_height = {
-                self.block_index_guard
-                    .read()
-                    .get_item(block_index)
-                    .map(|block| block.clone())
-                    .clone()
-            };
-
-            match block_height {
-                Some(b) => {
-                    let tx = &db.tx().expect("to create readonly mdbx tx");
-                    let block_header = block_header_by_hash(tx, &b.block_hash, false)
-                        .unwrap()
-                        .expect(&format!(
-                            "to find the block header at height {}",
-                            block_index
-                        ));
-
-                    // Get the commitments_ledger from the block
-                    let commitments_ledger = block_header
-                        .system_ledgers
-                        .iter()
-                        .find(|b| b.ledger_id == SystemLedger::Commitment);
-
-                    // Build a list of CommitmentTransactions from the commitments ledger txids
-                    let mut commitments: Vec<CommitmentTransaction> = Vec::new();
-                    if let Some(commitments_ledger) = commitments_ledger {
-                        for commitment_txid in commitments_ledger.tx_ids.iter() {
-                            let commitment_tx = commitment_tx_by_txid(tx, commitment_txid)
-                                .expect("getting commitment tx should succeed");
-                            if let Some(commitment_tx) = commitment_tx {
-                                commitments.push(commitment_tx);
-                            } else {
-                                return Err(eyre::eyre!(
-                                    "Commitment missing in database {:?}",
-                                    commitment_txid.0.to_base58()
-                                ));
-                            }
-                        }
-                    }
-
-                    // Process epoch tasks with the block header and commitments
-                    match self.perform_epoch_tasks(Arc::new(block_header), commitments) {
-                        Ok(_) => debug!(?block_index, "Processed epoch block"),
-                        Err(e) => {
-                            self.print_items(self.block_index_guard.clone(), db.clone());
-                            return Err(eyre::eyre!("Error performing epoch tasks {:?}", e));
-                        }
-                    }
-                    block_index += TryInto::<usize>::try_into(self.config.num_blocks_in_epoch)
-                        .expect("Number of blocks in epoch is too large!");
-                }
-                None => {
-                    debug!(
-                        "Could not recover block at index during epoch service initialization {block_index:?}"
-                    );
-                    break;
-                }
+        match self.perform_epoch_tasks(&None, &genesis_block, commitments) {
+            Ok(_) => debug!("Processed genesis epoch block"),
+            Err(e) => {
+                // self.print_items(self.block_index_guard.clone(), db.clone());
+                return Err(eyre::eyre!("Error performing genesis epoch tasks {:?}", e));
             }
         }
 
@@ -452,52 +408,114 @@ impl EpochServiceActor {
         Ok(storage_module_info)
     }
 
-    fn print_items(&self, block_index_guard: BlockIndexReadGuard, db: DatabaseProvider) {
-        let rg = block_index_guard.read();
-        let tx = db.tx().unwrap();
-        for i in 0..rg.num_blocks() {
-            let item = rg.get_item(i as usize).unwrap();
-            let block_hash = item.block_hash;
-            let block = block_header_by_hash(&tx, &block_hash, false)
-                .unwrap()
-                .unwrap();
-            debug!(
-                "index: {} height: {} hash: {}",
-                i,
-                block.height,
-                block_hash.0.to_base58()
-            );
+    pub fn replay_epoch_data(
+        &mut self,
+        epoch_replay_data: Vec<EpochReplayData>,
+        storage_module_config: StorageSubmodulesConfig,
+    ) -> eyre::Result<Vec<StorageModuleInfo>> {
+        // Initialize as None for the first iteration
+        let mut previous_epoch_block: Option<IrysBlockHeader> = None;
+
+        for replay_data in epoch_replay_data {
+            let block_header = replay_data.epoch_block;
+            let commitments = replay_data.commitments;
+
+            match self.perform_epoch_tasks(&previous_epoch_block, &block_header, commitments) {
+                Ok(_) => debug!("Processed replay epoch block"),
+                Err(e) => {
+                    return Err(eyre::eyre!("Error performing epoch tasks {:?}", e));
+                }
+            }
+
+            // Store the owned block_header, not a reference
+            previous_epoch_block = Some(block_header);
         }
+
+        let storage_module_info =
+            self.map_storage_modules_to_partition_assignments(storage_module_config);
+
+        Ok(storage_module_info)
+    }
+
+    fn validate_commitments(
+        block_header: &IrysBlockHeader,
+        commitments: &Vec<CommitmentTransaction>,
+    ) -> eyre::Result<()> {
+        // Extract the commitments ledger from the system ledgers in the epoch block
+        let commitments_ledger = block_header
+            .system_ledgers
+            .iter()
+            .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+        // Verify that each commitment transaction ID referenced in the commitments ledger has a
+        // corresponding commitment transaction in the replay data
+        if let Some(commitments_ledger) = commitments_ledger {
+            for txid in commitments_ledger.tx_ids.iter() {
+                // If we can't find the commitment transaction for a referenced txid, return an error
+                if commitments.iter().find(|c| c.id == *txid).is_none() {
+                    return Err(eyre::eyre!(
+                        "Missing commitment transaction {} for block {}",
+                        txid.0.to_base58(),
+                        block_header.block_hash.0.to_base58()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn is_epoch_block(&self, block_header: &IrysBlockHeader) -> Result<(), EpochServiceError> {
+        if block_header.height % self.config.num_blocks_in_epoch != 0 {
+            error!(
+                "Not an epoch block height: {} num_blocks_in_epoch: {}",
+                block_header.height, self.config.num_blocks_in_epoch
+            );
+            return Err(EpochServiceError::NotAnEpochBlock);
+        }
+        Ok(())
     }
 
     /// Main worker function
     pub fn perform_epoch_tasks(
         &mut self,
-        new_epoch_block: Arc<IrysBlockHeader>,
-        commitments: Vec<CommitmentTransaction>,
+        previous_epoch_block: &Option<IrysBlockHeader>,
+        new_epoch_block: &IrysBlockHeader,
+        new_epoch_commitments: Vec<CommitmentTransaction>,
     ) -> Result<(), EpochServiceError> {
-        // Validate this is an epoch block height
-        if new_epoch_block.height % self.config.num_blocks_in_epoch != 0 {
-            error!(
-                "Not an epoch block height: {} num_blocks_in_epoch: {}",
-                new_epoch_block.height, self.config.num_blocks_in_epoch
-            );
-            return Err(EpochServiceError::NotAnEpochBlock);
+        // Validate the epoch blocks
+        self.is_epoch_block(new_epoch_block)?;
+
+        // Skip previous block validation for genesis block (height 0)
+        if new_epoch_block.height <= self.config.num_blocks_in_epoch {
+            // Continue with validation logic for commitments
+        } else {
+            // For non-genesis blocks, previous epoch block must exist and have correct height
+            let prev_block = previous_epoch_block
+                .as_ref()
+                .ok_or(EpochServiceError::IncorrectPreviousEpochBlock)?;
+
+            // Validate the previous epoch block is the correct height
+            if prev_block.height + self.config.num_blocks_in_epoch != new_epoch_block.height {
+                return Err(EpochServiceError::IncorrectPreviousEpochBlock);
+            }
         }
+
+        // Validate the commitments
+        Self::validate_commitments(&new_epoch_block, &new_epoch_commitments)
+            .map_err(|_| EpochServiceError::InvalidCommitments)?;
 
         debug!(
             "Performing epoch tasks for {} ({})",
             &new_epoch_block.block_hash, &new_epoch_block.height
         );
 
-        // These commitment tx must be pre-validated
-        self.compute_commitment_state(commitments);
+        self.compute_commitment_state(new_epoch_commitments);
 
-        self.try_genesis_init(&new_epoch_block);
+        self.try_genesis_init(new_epoch_block);
 
-        self.expire_term_ledger_slots(&new_epoch_block);
+        self.allocate_additional_ledger_slots(previous_epoch_block, new_epoch_block);
 
-        self.allocate_additional_ledger_slots(&new_epoch_block);
+        self.expire_term_ledger_slots(new_epoch_block);
 
         self.backfill_missing_partitions();
 
@@ -575,10 +593,17 @@ impl EpochServiceActor {
     fn expire_term_ledger_slots(&self, new_epoch_block: &IrysBlockHeader) {
         let epoch_height = new_epoch_block.height;
         let expired_hashes: Vec<H256>;
-        {
-            let mut ledgers = self.ledgers.write().unwrap();
-            expired_hashes = ledgers.get_expired_partition_hashes(epoch_height);
+
+        let mut ledgers = self.ledgers.write().unwrap();
+        expired_hashes = ledgers.get_expired_partition_hashes(epoch_height);
+        drop(ledgers);
+
+        // Return early if there's no more work to do
+        if expired_hashes.is_empty() {
+            return;
         }
+
+        debug!("Expiring Hashes: {:?}", expired_hashes);
 
         let mining_broadcaster_addr = BroadcastMiningService::from_registry();
         mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
@@ -593,14 +618,18 @@ impl EpochServiceActor {
 
     /// Loops though all the ledgers both perm and term, checking to see if any
     /// require additional ledger slots added to accommodate data ingress.
-    fn allocate_additional_ledger_slots(&self, new_epoch_block: &IrysBlockHeader) {
+    fn allocate_additional_ledger_slots(
+        &self,
+        previous_epoch_block: &Option<IrysBlockHeader>,
+        new_epoch_block: &IrysBlockHeader,
+    ) {
         for ledger in DataLedger::iter() {
-            let part_slots = self.calculate_additional_slots(new_epoch_block, ledger);
-            {
-                let mut ledgers = self.ledgers.write().unwrap();
-                debug!("Allocating {} slots for ledger {:?}", &part_slots, &ledger);
-                ledgers[ledger].allocate_slots(part_slots, new_epoch_block.height);
-            }
+            let part_slots =
+                self.calculate_additional_slots(previous_epoch_block, new_epoch_block, ledger);
+            let mut ledgers = self.ledgers.write().unwrap();
+            debug!("Allocating {} slots for ledger {:?}", &part_slots, &ledger);
+            ledgers[ledger].allocate_slots(part_slots, new_epoch_block.height);
+            drop(ledgers);
         }
     }
 
@@ -752,15 +781,13 @@ impl EpochServiceActor {
         let mut pa = self.partition_assignments.write().unwrap();
         // Convert data partition to capacity partition if it exists
         if let Some(mut assignment) = pa.data_partitions.remove(&partition_hash) {
-            {
-                // Remove the partition hash from the slots state
-                let ledger: DataLedger =
-                    DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
-                let partition_hash = assignment.partition_hash;
-                let slot_index = assignment.slot_index.unwrap();
-                let mut write = self.ledgers.write().unwrap();
-                write.remove_partition_from_slot(ledger, slot_index, &partition_hash);
-            }
+            // Remove the partition hash from the slots state
+            let ledger: DataLedger = DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
+            let partition_hash = assignment.partition_hash;
+            let slot_index = assignment.slot_index.unwrap();
+            let mut write = self.ledgers.write().unwrap();
+            write.remove_partition_from_slot(ledger, slot_index, &partition_hash);
+            drop(write);
 
             // Clear ledger assignment
             assignment.ledger_id = None;
@@ -793,55 +820,55 @@ impl EpochServiceActor {
         }
     }
 
-    /// For a given ledger indicated by `Ledger`, calculate the number of
-    /// partition slots to add to the ledger based on remaining capacity
-    /// and data ingress this epoch
+    /// Calculate partition slots to add to a ledger based on current utilization and growth rate
+    ///
+    /// This function implements the dynamic capacity management algorithm with two strategies:
+    /// 1. Threshold-based: Adds slots when current utilization approaches capacity limit
+    /// 2. Growth-based: Adds slots based on data ingress rate from previous epoch
+    ///
+    /// @param previous_epoch_block Optional header from previous epoch for growth calculation (can be None if genesis block is previous)
+    /// @param new_epoch_block Current epoch header containing ledger state
+    /// @param ledger Target data ledger to evaluate for expansion
+    /// @return Number of partition slots to add
     fn calculate_additional_slots(
         &self,
+        previous_epoch_block: &Option<IrysBlockHeader>,
         new_epoch_block: &IrysBlockHeader,
         ledger: DataLedger,
     ) -> u64 {
-        let num_slots: u64;
-        {
-            let ledgers = self.ledgers.read().unwrap();
-            let ledger = &ledgers[ledger];
-            num_slots = ledger.slot_count() as u64;
-        }
-        let partition_chunk_count = self.config.storage_config.num_chunks_in_partition;
-        let max_chunk_capacity = num_slots * partition_chunk_count;
+        // Get current ledger state
+        let ledgers = self.ledgers.read().unwrap();
+        let data_ledger = &ledgers[ledger];
+        let num_slots = data_ledger.slot_count() as u64;
+        drop(ledgers);
+
+        let num_chunks_in_partition = self.config.storage_config.num_chunks_in_partition;
+        let max_ledger_capacity = num_slots * num_chunks_in_partition;
         let ledger_size = new_epoch_block.data_ledgers[ledger].max_chunk_offset;
 
-        // Add capacity slots if ledger usage exceeds 50% of partition size from max capacity
-        let add_capacity_threshold = max_chunk_capacity.saturating_sub(partition_chunk_count / 2);
+        // STRATEGY 1: Threshold-based capacity expansion
+        // Add slots when utilization reaches within half partition of max capacity
+        let add_capacity_threshold =
+            max_ledger_capacity.saturating_sub(num_chunks_in_partition / 2);
+
         let mut slots_to_add: u64 = 0;
         if ledger_size >= add_capacity_threshold {
-            // Add 1 slot for buffer plus enough slots to handle size above threshold
-            let excess = ledger_size.saturating_sub(max_chunk_capacity);
-            slots_to_add = 1 + (excess / partition_chunk_count);
-
-            // Check if we need to add an additional slot for excess > half of
-            // the partition size
-            if excess % partition_chunk_count >= partition_chunk_count / 2 {
-                slots_to_add += 1;
-            }
+            slots_to_add = 2;
         }
 
-        // Compute Data uploaded to the ledger last epoch
+        // STRATEGY 2: Growth-based capacity expansion
+        // Add slots proportional to data ingress rate from previous epoch
         if new_epoch_block.height >= self.config.num_blocks_in_epoch {
-            let rg = self.block_index_guard.read();
-            let previous_epoch_block_height: usize = (new_epoch_block.height
-                - self.config.num_blocks_in_epoch)
-                .try_into()
-                .expect("Height is too large!");
-            let last_epoch_block = rg.get_item(previous_epoch_block_height).expect(&format!(
-                "Needed previous epoch block with height {} is not available in block index!",
-                previous_epoch_block_height
-            ));
-            let data_added = ledger_size - last_epoch_block.ledgers[ledger].max_chunk_offset;
-            slots_to_add += u64::div_ceil(
-                data_added,
-                self.config.storage_config.num_chunks_in_partition,
-            );
+            let previous_ledger_size = previous_epoch_block
+                .as_ref()
+                .map_or(0, |prev| prev.data_ledgers[ledger].max_chunk_offset);
+
+            let data_added = ledger_size - previous_ledger_size;
+
+            // If data added exceeds a full partition, scale capacity proportionally
+            if data_added > num_chunks_in_partition {
+                slots_to_add += u64::div_ceil(data_added, num_chunks_in_partition);
+            }
         }
 
         slots_to_add

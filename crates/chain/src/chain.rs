@@ -32,6 +32,7 @@ use irys_database::{
     migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, BlockIndex,
     Initialized,
 };
+use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
 use irys_gossip_service::ServiceHandleWithShutdownSignal;
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 
@@ -728,6 +729,7 @@ impl IrysNode {
         let (block_discovery, block_discovery_arbiter) = self.init_block_discovery_service(
             &irys_db,
             &service_senders,
+            &epoch_service_actor,
             &block_index_guard,
             partition_assignments_guard,
             &vdf_steps_guard,
@@ -1076,6 +1078,7 @@ impl IrysNode {
         &self,
         irys_db: &DatabaseProvider,
         service_senders: &ServiceSenders,
+        epoch_service: &Addr<EpochServiceActor>,
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
@@ -1091,6 +1094,8 @@ impl IrysNode {
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
             gossip_sender,
+            epoch_service: epoch_service.clone(),
+            epoch_config: self.epoch_config.clone(),
         };
         let block_discovery_arbiter = Arbiter::new();
         let block_discovery =
@@ -1234,14 +1239,51 @@ impl IrysNode {
         ),
         eyre::Error,
     > {
-        let mut epoch_service = EpochServiceActor::new(
-            self.epoch_config.clone(),
-            &self.config,
-            block_index_guard.clone(),
-        );
-        let storage_module_infos = epoch_service
-            .initialize(irys_db, self.storage_submodule_config.clone())
-            .await?;
+        // TODO: Refactor this function to reduce database queries and block index lookups.
+        // Consider accepting the genesis block and its commitments as direct parameters
+        // rather than retrieving them from storage, especially when these values can
+        // already known by the caller. This would improve efficiency and simplify the
+        // function's responsibilities. -DMac
+
+        // Get the genesis block
+        let genesis_item = block_index_guard
+            .read()
+            .get_item(0)
+            .expect("To read genesis item ")
+            .clone();
+
+        let genesis_block = irys_db
+            .view(|tx| block_header_by_hash(tx, &genesis_item.block_hash, false))
+            .unwrap()
+            .unwrap()
+            .expect("to retrieve genesis block form db");
+
+        // Extract the Commitment ledger from the epoch block
+        let commitments_ledger = genesis_block
+            .system_ledgers
+            .iter()
+            .find(|b| b.ledger_id == SystemLedger::Commitment)
+            .expect("commitments ledger to be present");
+
+        // Get the genesis commitment tx
+        let read_tx = irys_db.tx().expect("to create a database read tx");
+        let commitments = commitments_ledger
+            .tx_ids
+            .iter()
+            .map(|txid| {
+                commitment_tx_by_txid(&read_tx, txid).and_then(|opt| {
+                    opt.ok_or_else(|| eyre::eyre!("No commitment tx found for txid {:?}", txid))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("to be able to retrieve all of the commitment tx headers locally");
+
+        let mut epoch_service = EpochServiceActor::new(self.epoch_config.clone(), &self.config);
+        let storage_module_infos = epoch_service.initialize(
+            genesis_block,
+            commitments,
+            self.storage_submodule_config.clone(),
+        )?;
         let epoch_service_actor = epoch_service.start();
         Ok((storage_module_infos, epoch_service_actor))
     }

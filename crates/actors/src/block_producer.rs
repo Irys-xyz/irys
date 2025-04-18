@@ -36,9 +36,7 @@ use crate::{
     block_tree_service::BlockTreeReadGuard,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
-    epoch_service::{
-        EpochServiceActor, EpochServiceConfig, GetPartitionAssignmentMessage, NewEpochMessage,
-    },
+    epoch_service::{EpochServiceActor, EpochServiceConfig, GetPartitionAssignmentMessage},
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
@@ -305,6 +303,21 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             ema_service.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
             let ema_irys_price = rx.await??;
 
+            // Update the last_epoch_hash field, which tracks the most recent epoch boundary
+            // 
+            // The logic works as follows:
+            // 1. Start with the previous block's last_epoch_hash as default
+            // 2. Special case: At the first block after an epoch boundary (block_height % blocks_in_epoch == 1),
+            //    update last_epoch_hash to point to the epoch block itself (prev_block_hash)
+            // 3. This creates a chain of references where each block knows which epoch it belongs to,
+            //    and which block marked the beginning of that epoch
+            let mut last_epoch_hash = prev_block_header.last_epoch_hash;
+
+            // If this is the first block following an epoch boundary block
+            if block_height > 0 && block_height % blocks_in_epoch == 1 {
+                // Record the hash of the epoch block (previous block) as our epoch reference
+                last_epoch_hash = prev_block_hash;
+            }
             // build a new block header
             let mut irys_block = IrysBlockHeader {
                 block_hash,
@@ -313,8 +326,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 cumulative_diff: cumulative_difficulty,
                 last_diff_timestamp,
                 solution_hash: solution.solution_hash,
-                previous_solution_hash: H256::zero(),
-                last_epoch_hash: H256::random(),
+                previous_solution_hash: prev_block_header.solution_hash,
+                last_epoch_hash,
                 chunk_hash: poa_chunk_hash,
                 previous_block_hash: prev_block_hash,
                 previous_cumulative_diff: prev_block_header.cumulative_diff,
@@ -458,12 +471,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
-            }
-
-            // TODO: This really needs to be sent from the block_discovery service
-            // and the commitment transactions are pre-verified as stored locally and valid
-            if block_height > 0 && block_height % blocks_in_epoch == 0 {
-                epoch_service_addr.do_send(NewEpochMessage{ epoch_block: block.clone(), commitments: Vec::new() });
             }
 
             info!("Finished producing block {}, ({})", &block_hash.0.to_base58(),&block_height);
