@@ -5,11 +5,11 @@ use irys_actors::epoch_service::{
 };
 
 use irys_config::StorageSubmodulesConfig;
-use irys_types::Config;
 use irys_types::{
     partition::PartitionAssignment, DatabaseProvider, IrysBlockHeader, StorageConfig, H256,
 };
 use irys_types::{partition_chunk_offset_ie, Address, PartitionChunkOffset};
+use irys_types::{Config, U256};
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use tokio::time::sleep;
@@ -430,6 +430,7 @@ async fn partition_expiration_and_repacking_test() {
             true, // do not start mining automatically
             vdf_steps_guard.clone(),
             atomic_global_step_number.clone(),
+            U256::zero(),
         );
 
         let part_arbiter = Arbiter::new();
