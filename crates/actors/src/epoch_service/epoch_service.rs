@@ -1,5 +1,5 @@
 use actix::SystemService;
-use actix::{Actor, ActorContext, Context, Handler, Message, MessageResponse};
+use actix::{Actor, Context};
 use base58::ToBase58;
 use eyre::{Error, Result};
 use irys_config::StorageSubmodulesConfig;
@@ -8,170 +8,24 @@ use irys_primitives::CommitmentStatus;
 use irys_storage::{ie, StorageModuleInfo};
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    IrysBlockHeader, SimpleRNG, StorageConfig, H256,
+    IrysBlockHeader, SimpleRNG, H256,
 };
-use irys_types::{
-    partition_chunk_offset_ie, Address, CommitmentTransaction, IrysTransactionId,
-    PartitionChunkOffset,
-};
+use irys_types::{partition_chunk_offset_ie, Address, CommitmentTransaction, PartitionChunkOffset};
 use irys_types::{Config, H256List};
 use openssl::sha;
 use std::{
-    collections::{BTreeMap, VecDeque},
-    sync::{Arc, RwLock, RwLockReadGuard},
+    collections::VecDeque,
+    sync::{Arc, RwLock},
 };
 
 use tracing::{debug, error, trace, warn};
 
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
-use crate::services::Stop;
 
-/// Allows for overriding of the consensus parameters for ledgers and partitions
-#[derive(Debug, Clone, Default)]
-pub struct EpochServiceConfig {
-    /// Capacity partitions are allocated on a logarithmic curve, this scalar
-    /// shifts the curve on the Y axis. Allowing there to be more or less
-    /// capacity partitions relative to data partitions.
-    pub capacity_scalar: u64,
-    /// The length of an epoch denominated in block heights
-    pub num_blocks_in_epoch: u64,
-    /// Sets the minimum number of capacity partitions for the protocol.
-    pub num_capacity_partitions: Option<u64>,
-    /// Reference to global storage config for node
-    pub storage_config: StorageConfig,
-}
-
-impl EpochServiceConfig {
-    pub fn new(config: &Config) -> Self {
-        Self {
-            capacity_scalar: config.capacity_scalar,
-            num_blocks_in_epoch: config.num_blocks_in_epoch,
-            num_capacity_partitions: config.num_capacity_partitions,
-            storage_config: StorageConfig::new(config),
-        }
-    }
-}
-
-//==============================================================================
-// PartitionAssignments
-//------------------------------------------------------------------------------
-/// A state struct that can be wrapped with Arc<`RwLock`<>> to provide parallel read access
-#[derive(Debug)]
-pub struct PartitionAssignments {
-    /// Active data partition state mapped by partition hash
-    pub data_partitions: BTreeMap<PartitionHash, PartitionAssignment>,
-    /// Available capacity partitions mapped by partition hash
-    pub capacity_partitions: BTreeMap<PartitionHash, PartitionAssignment>,
-}
-
-/// Implementation helper functions
-impl Default for PartitionAssignments {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PartitionAssignments {
-    /// Initialize a new `PartitionAssignments` state wrapper struct
-    pub fn new() -> Self {
-        Self {
-            data_partitions: BTreeMap::new(),
-            capacity_partitions: BTreeMap::new(),
-        }
-    }
-
-    /// Retrieves a `PartitionAssignment` by partition hash if it exists
-    pub fn get_assignment(&self, partition_hash: H256) -> Option<PartitionAssignment> {
-        self.data_partitions
-            .get(&partition_hash)
-            .copied()
-            .or(self.capacity_partitions.get(&partition_hash).copied())
-    }
-
-    // TODO: convert to Display impl for PartitionAssignments
-    pub fn print_assignments(&self) {
-        debug!(
-            "Partition Assignments ({}):",
-            self.data_partitions.len() + self.capacity_partitions.len()
-        );
-
-        // List Publish ledger assignments, ordered by index
-        let mut publish_assignments: Vec<_> = self
-            .data_partitions
-            .iter()
-            .filter(|(_, a)| a.ledger_id == Some(DataLedger::Publish as u32))
-            .collect();
-        publish_assignments.sort_unstable_by(|(_, a1), (_, a2)| a1.slot_index.cmp(&a2.slot_index));
-
-        for (hash, assignment) in publish_assignments {
-            let ledger = DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
-            debug!(
-                "{:?}[{}] {} miner: {}",
-                ledger,
-                assignment.slot_index.unwrap(),
-                hash.0.to_base58(),
-                assignment.miner_address
-            );
-        }
-
-        // List Submit ledger assignments, ordered by index
-        let mut submit_assignments: Vec<_> = self
-            .data_partitions
-            .iter()
-            .filter(|(_, a)| a.ledger_id == Some(DataLedger::Submit as u32))
-            .collect();
-        submit_assignments.sort_unstable_by(|(_, a1), (_, a2)| a1.slot_index.cmp(&a2.slot_index));
-        for (hash, assignment) in submit_assignments {
-            let ledger = DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
-            debug!(
-                "{:?}[{}] {} miner: {}",
-                ledger,
-                assignment.slot_index.unwrap(),
-                hash.0.to_base58(),
-                assignment.miner_address
-            );
-        }
-
-        // List capacity ledger assignments, ordered by hash (natural ordering)
-        for (index, (hash, assignment)) in self.capacity_partitions.iter().enumerate() {
-            debug!(
-                "Capacity[{}] {} miner: {}",
-                index,
-                hash.0.to_base58(),
-                assignment.miner_address
-            );
-        }
-    }
-}
-
-//==============================================================================
-// EpochReplayData
-//------------------------------------------------------------------------------
-#[derive(Debug)]
-pub struct EpochReplayData {
-    pub epoch_block: IrysBlockHeader,
-    pub commitments: Vec<CommitmentTransaction>,
-}
-
-//==============================================================================
-// CommitmentState
-//------------------------------------------------------------------------------
-#[derive(Debug, Default, Clone)]
-pub struct CommitmentStateEntry {
-    id: IrysTransactionId,
-    commitment_status: CommitmentStatus,
-    partition_hash: Option<H256>,
-    signer: Address,
-    /// Irys token amount in atomic units
-    #[allow(dead_code)]
-    amount: u64,
-}
-
-#[derive(Debug, Default)]
-pub struct CommitmentState {
-    pub stake_commitments: BTreeMap<Address, CommitmentStateEntry>,
-    pub pledge_commitments: BTreeMap<Address, Vec<CommitmentStateEntry>>,
-}
+use super::{
+    CommitmentState, CommitmentStateEntry, EpochReplayData, EpochServiceConfig,
+    PartitionAssignments,
+};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug)]
@@ -189,37 +43,11 @@ pub struct EpochServiceActor {
     /// Current partition & ledger parameters
     pub config: EpochServiceConfig,
     /// Computed commitment state
-    commitment_state: Arc<RwLock<CommitmentState>>,
+    pub(super) commitment_state: Arc<RwLock<CommitmentState>>,
 }
 
 impl Actor for EpochServiceActor {
     type Context = Context<Self>;
-}
-
-/// Sent when a new epoch block is reached (and at genesis)
-#[derive(Message, Debug)]
-#[rtype(result = "Result<(),EpochServiceError>")]
-pub struct NewEpochMessage {
-    pub epoch_block: Arc<IrysBlockHeader>,
-    pub previous_epoch_block: Option<IrysBlockHeader>,
-    pub commitments: Vec<CommitmentTransaction>,
-}
-
-impl Handler<NewEpochMessage> for EpochServiceActor {
-    type Result = Result<(), EpochServiceError>;
-    fn handle(&mut self, msg: NewEpochMessage, _ctx: &mut Self::Context) -> Self::Result {
-        let new_epoch_block = msg.epoch_block;
-        let new_epoch_commitments = msg.commitments;
-        let previous_epoch_block = msg.previous_epoch_block;
-
-        self.perform_epoch_tasks(
-            &previous_epoch_block,
-            &new_epoch_block,
-            new_epoch_commitments,
-        )?;
-
-        Ok(())
-    }
 }
 
 /// Reasons why the epoch service actors epoch tasks might fail
@@ -233,143 +61,6 @@ pub enum EpochServiceError {
     IncorrectPreviousEpochBlock,
     /// Validation of commitments failed
     InvalidCommitments,
-}
-//==============================================================================
-// LedgersReadGuard
-//------------------------------------------------------------------------------
-/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
-#[derive(Debug, Clone, MessageResponse)]
-pub struct LedgersReadGuard {
-    ledgers: Arc<RwLock<Ledgers>>,
-}
-
-impl LedgersReadGuard {
-    /// Creates a new `ReadGuard` for Ledgers
-    pub const fn new(ledgers: Arc<RwLock<Ledgers>>) -> Self {
-        Self { ledgers }
-    }
-
-    /// Accessor method to get a read guard for Ledgers
-    pub fn read(&self) -> RwLockReadGuard<'_, Ledgers> {
-        self.ledgers.read().unwrap()
-    }
-}
-
-/// Retrieve a read only reference to the ledger partition assignments
-#[derive(Message, Debug)]
-#[rtype(result = "LedgersReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
-pub struct GetLedgersGuardMessage;
-
-impl Handler<GetLedgersGuardMessage> for EpochServiceActor {
-    type Result = LedgersReadGuard; // Return guard directly
-
-    fn handle(&mut self, _msg: GetLedgersGuardMessage, _ctx: &mut Self::Context) -> Self::Result {
-        LedgersReadGuard::new(Arc::clone(&self.ledgers))
-    }
-}
-
-//==============================================================================
-// PartitionAssignmentsReadGuard
-//------------------------------------------------------------------------------
-/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
-#[derive(Debug, Clone, MessageResponse)]
-pub struct PartitionAssignmentsReadGuard {
-    partition_assignments: Arc<RwLock<PartitionAssignments>>,
-}
-
-impl PartitionAssignmentsReadGuard {
-    /// Creates a new `ReadGuard` for Ledgers
-    pub const fn new(partition_assignments: Arc<RwLock<PartitionAssignments>>) -> Self {
-        Self {
-            partition_assignments,
-        }
-    }
-
-    /// Accessor method to get a read guard for Ledgers
-    pub fn read(&self) -> RwLockReadGuard<'_, PartitionAssignments> {
-        self.partition_assignments.read().unwrap()
-    }
-}
-
-/// Retrieve a read only reference to the ledger partition assignments
-#[derive(Message, Debug)]
-#[rtype(result = "PartitionAssignmentsReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
-pub struct GetPartitionAssignmentsGuardMessage;
-
-impl Handler<GetPartitionAssignmentsGuardMessage> for EpochServiceActor {
-    type Result = PartitionAssignmentsReadGuard; // Return guard directly
-
-    fn handle(
-        &mut self,
-        _msg: GetPartitionAssignmentsGuardMessage,
-        _ctx: &mut Self::Context,
-    ) -> Self::Result {
-        PartitionAssignmentsReadGuard::new(self.partition_assignments.clone())
-    }
-}
-
-//==============================================================================
-// CommitmentStateReadGuard
-//------------------------------------------------------------------------------
-/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
-#[derive(Debug, Clone, MessageResponse)]
-pub struct CommitmentStateReadGuard {
-    commitment_state: Arc<RwLock<CommitmentState>>,
-}
-
-impl CommitmentStateReadGuard {
-    /// Creates a new `ReadGuard` for the CommitmentState
-    pub const fn new(commitment_state: Arc<RwLock<CommitmentState>>) -> Self {
-        Self { commitment_state }
-    }
-
-    /// Accessor method to get a ReadGuard for the CommitmentState
-    pub fn read(&self) -> RwLockReadGuard<'_, CommitmentState> {
-        self.commitment_state.read().unwrap()
-    }
-}
-
-/// Retrieve a read only reference to the commitment state
-#[derive(Message, Debug)]
-#[rtype(result = "CommitmentStateReadGuard")] // Remove MessageResult wrapper since type implements MessageResponse
-pub struct GetCommitmentStateGuardMessage;
-
-impl Handler<GetCommitmentStateGuardMessage> for EpochServiceActor {
-    type Result = CommitmentStateReadGuard; // Return guard directly
-    fn handle(
-        &mut self,
-        _msg: GetCommitmentStateGuardMessage,
-        _ctx: &mut Self::Context,
-    ) -> Self::Result {
-        CommitmentStateReadGuard::new(self.commitment_state.clone())
-    }
-}
-//==============================================================================
-// EpochServiceActor implementation
-//------------------------------------------------------------------------------
-/// Retrieve partition assignment (ledger and its relative offset) for a partition
-#[derive(Message, Debug)]
-#[rtype(result = "Option<PartitionAssignment>")]
-pub struct GetPartitionAssignmentMessage(pub PartitionHash);
-
-impl Handler<GetPartitionAssignmentMessage> for EpochServiceActor {
-    type Result = Option<PartitionAssignment>;
-    fn handle(
-        &mut self,
-        msg: GetPartitionAssignmentMessage,
-        _ctx: &mut Self::Context,
-    ) -> Self::Result {
-        let pa = self.partition_assignments.read().unwrap();
-        pa.get_assignment(msg.0)
-    }
-}
-
-impl Handler<Stop> for EpochServiceActor {
-    type Result = ();
-
-    fn handle(&mut self, _msg: Stop, ctx: &mut Self::Context) {
-        ctx.stop();
-    }
 }
 
 impl EpochServiceActor {
@@ -397,7 +88,6 @@ impl EpochServiceActor {
         match self.perform_epoch_tasks(&None, &genesis_block, commitments) {
             Ok(_) => debug!("Processed genesis epoch block"),
             Err(e) => {
-                // self.print_items(self.block_index_guard.clone(), db.clone());
                 return Err(eyre::eyre!("Error performing genesis epoch tasks {:?}", e));
             }
         }

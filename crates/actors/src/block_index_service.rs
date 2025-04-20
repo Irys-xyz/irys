@@ -154,7 +154,7 @@ impl BlockIndexService {
     /// * `block` - The finalized block header to be added
     /// * `all_txs` - Complete list of transaction headers, where the first `n` entries
     ///               correspond to the submit ledger's transaction IDs
-    fn add_finalized_block(
+    pub fn add_finalized_block(
         &mut self,
         block: &Arc<IrysBlockHeader>,
         all_txs: &Arc<Vec<IrysTransactionHeader>>,

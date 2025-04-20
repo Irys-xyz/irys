@@ -3,6 +3,7 @@ use crate::peer_utilities::{fetch_genesis_block, sync_state_from_peers};
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
+use irys_actors::EpochReplayData;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -32,7 +33,6 @@ use irys_database::{
     migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, BlockIndex,
     Initialized,
 };
-use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
 use irys_gossip_service::ServiceHandleWithShutdownSignal;
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 
@@ -1236,51 +1236,19 @@ impl IrysNode {
         ),
         eyre::Error,
     > {
-        // TODO: Refactor this function to reduce database queries and block index lookups.
-        // Consider accepting the genesis block and its commitments as direct parameters
-        // rather than retrieving them from storage, especially when these values can
-        // already known by the caller. This would improve efficiency and simplify the
-        // function's responsibilities. -DMac
-
-        // Get the genesis block
-        let genesis_item = block_index_guard
-            .read()
-            .get_item(0)
-            .expect("To read genesis item ")
-            .clone();
-
-        let genesis_block = irys_db
-            .view(|tx| block_header_by_hash(tx, &genesis_item.block_hash, false))
-            .unwrap()
-            .unwrap()
-            .expect("to retrieve genesis block form db");
-
-        // Extract the Commitment ledger from the epoch block
-        let commitments_ledger = genesis_block
-            .system_ledgers
-            .iter()
-            .find(|b| b.ledger_id == SystemLedger::Commitment)
-            .expect("commitments ledger to be present");
-
-        // Get the genesis commitment tx
-        let read_tx = irys_db.tx().expect("to create a database read tx");
-        let commitments = commitments_ledger
-            .tx_ids
-            .iter()
-            .map(|txid| {
-                commitment_tx_by_txid(&read_tx, txid).and_then(|opt| {
-                    opt.ok_or_else(|| eyre::eyre!("No commitment tx found for txid {:?}", txid))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .expect("to be able to retrieve all of the commitment tx headers locally");
+        let epoch_service_config = EpochServiceConfig::new(&self.config);
+        let (genesis_block, commitments, epoch_replay_data) =
+            EpochReplayData::query_replay_data(irys_db, block_index_guard, &epoch_service_config)?;
 
         let mut epoch_service = EpochServiceActor::new(self.epoch_config.clone(), &self.config);
-        let storage_module_infos = epoch_service.initialize(
+        let _storage_module_infos = epoch_service.initialize(
             genesis_block,
             commitments,
             self.storage_submodule_config.clone(),
         )?;
+
+        let storage_module_infos = epoch_service
+            .replay_epoch_data(epoch_replay_data, self.storage_submodule_config.clone())?;
         let epoch_service_actor = epoch_service.start();
         Ok((storage_module_infos, epoch_service_actor))
     }

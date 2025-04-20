@@ -116,6 +116,8 @@ impl BlockIndex<Initialized> {
     }
 
     /// Retrieves a [`BlockIndexItem`] from the block index by block height
+    /// TODO: Convert this to take a u64 so every caller doesn't have to cast
+    /// to usize
     pub fn get_item(&self, block_height: usize) -> Option<&BlockIndexItem> {
         self.items.get(block_height)
     }
