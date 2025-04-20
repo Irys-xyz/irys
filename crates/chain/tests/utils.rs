@@ -341,7 +341,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .block_index_guard
             .read()
-            .get_item(height as usize)
+            .get_item(height)
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
             .and_then(|block| {
                 self.node_ctx

@@ -290,8 +290,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         .await??;
 
                     // Is this an epoch block?
-                    let block_height = new_block_header.height as usize;
-                    let blocks_in_epoch = epoch_config.num_blocks_in_epoch as usize;
+                    let block_height = new_block_header.height;
+                    let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
                     if block_height > 0 && block_height % blocks_in_epoch == 0 {
                         // Look up the previous epoch block
                         let block_item = block_index_guard2

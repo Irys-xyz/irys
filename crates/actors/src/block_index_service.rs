@@ -44,7 +44,7 @@ impl BlockIndexReadGuard {
         let rg = self.read();
         let tx = db.tx().unwrap();
         for i in 0..rg.num_blocks() {
-            let item = rg.get_item(i as usize).unwrap();
+            let item = rg.get_item(i).unwrap();
             let block_hash = item.block_hash;
             let block = block_header_by_hash(&tx, &block_hash, false)
                 .unwrap()
@@ -185,9 +185,7 @@ impl BlockIndexService {
             if index.num_blocks() == 0 && block.height == 0 {
                 (0, sub_chunks_added)
             } else {
-                let prev_block = index
-                    .get_item((block.height.saturating_sub(1)) as usize)
-                    .unwrap();
+                let prev_block = index.get_item(block.height.saturating_sub(1)).unwrap();
                 (
                     prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
                     prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
@@ -279,7 +277,7 @@ impl Handler<GetLatestBlockIndexMessage> for BlockIndexService {
 
         let binding = self.block_index.clone().unwrap();
         let bi = binding.read().unwrap();
-        let block_height = bi.num_blocks().max(1) as usize - 1;
+        let block_height = bi.num_blocks().max(1) - 1;
         Some(bi.get_item(block_height)?.clone())
     }
 }

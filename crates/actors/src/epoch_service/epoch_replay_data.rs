@@ -52,7 +52,7 @@ impl EpochReplayData {
 
             // Get the block hash from the block index
             let block_item = block_index
-                .get_item(block_height as usize)
+                .get_item(block_height)
                 .expect("Expected block index to contain an item at the epoch block height");
 
             // Retrieve the block header from the database
