@@ -3,15 +3,15 @@ use crate::peer_utilities::{fetch_genesis_block, sync_state_from_peers};
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
-use irys_actors::reth_service::GetPeeringInfoMessage;
 use irys_actors::EpochReplayData;
+use irys_actors::reth_service::GetPeeringInfoMessage;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
-    broadcast_mining_service::BroadcastMiningService,
+    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
     ema_service::EmaService,
@@ -44,6 +44,7 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
+
 use irys_types::U256;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, Address,
