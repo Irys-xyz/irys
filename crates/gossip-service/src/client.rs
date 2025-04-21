@@ -33,9 +33,15 @@ impl GossipClient {
     ///
     /// If the peer is offline or the request fails, an error is returned.
     pub async fn send_data(&self, peer: &PeerListItem, data: &GossipData) -> GossipResult<()> {
+        tracing::trace!("CHECKING IF PEER ONLINE: {:?}", peer);
         Self::check_if_peer_online(peer)?;
         match data {
             GossipData::Chunk(unpacked_chunk) => {
+                tracing::trace!(
+                    "GOSSIP POSTING to {:?} DATA to: {:?}",
+                    format!("http://{}/gossip/chunk", peer.address.gossip),
+                    unpacked_chunk
+                );
                 self.send_data_internal(
                     format!("http://{}/gossip/chunk", peer.address.gossip),
                     unpacked_chunk,
@@ -43,6 +49,11 @@ impl GossipClient {
                 .await?;
             }
             GossipData::Transaction(irys_transaction_header) => {
+                tracing::trace!(
+                    "GOSSIP POSTING to {:?} DATA to: {:?}",
+                    format!("http://{}/gossip/transaction", peer.address.gossip),
+                    irys_transaction_header
+                );
                 self.send_data_internal(
                     format!("http://{}/gossip/transaction", peer.address.gossip),
                     irys_transaction_header,
@@ -50,6 +61,11 @@ impl GossipClient {
                 .await?;
             }
             GossipData::Block(irys_block_header) => {
+                tracing::trace!(
+                    "GOSSIP POSTING to {:?} DATA to: {:?}",
+                    format!("http://{}/gossip/block", peer.address.gossip),
+                    irys_block_header
+                );
                 self.send_data_internal(
                     format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,

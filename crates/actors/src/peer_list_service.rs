@@ -417,11 +417,14 @@ impl Handler<ActivePeersRequest> for PeerListService {
 
     fn handle(&mut self, msg: ActivePeersRequest, _ctx: &mut Self::Context) -> Self::Result {
         let mut peers: Vec<PeerListItem> = self.peer_list_cache.values().cloned().collect();
+        tracing::trace!("ActivePeersRequest: {} peers before retain()", peers.len());
+        tracing::trace!("ActivePeersRequest: peers {:?})", peers);
         peers.retain(|peer| {
             !msg.exclude_peers.contains(&peer.address.gossip)
                 && peer.reputation_score.is_active()
                 && peer.is_online
         });
+        tracing::trace!("ActivePeersRequest: {} peers after retain()", peers.len());
         peers.sort_by_key(|peer| peer.reputation_score.get());
         peers.reverse();
 
@@ -928,7 +931,7 @@ mod tests {
     async fn test_announce_yourself_to_all_peers() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mock_client = CountingMockClient {
-            calls: calls.clone(),
+            post_version_calls: calls.clone(),
         };
 
         let (_mining1, peer1) = create_test_peer(

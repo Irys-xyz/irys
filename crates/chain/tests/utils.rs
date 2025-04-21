@@ -310,6 +310,17 @@ impl IrysNodeTest<IrysNodeCtx> {
         };
     }
 
+    pub fn create_signed_data_tx(
+        &self,
+        account: &IrysSigner,
+        data: Vec<u8>,
+    ) -> Result<IrysTransaction, AddTxError> {
+        let tx = account
+            .create_transaction(data, None)
+            .map_err(AddTxError::CreateTx)?;
+        account.sign_transaction(tx).map_err(AddTxError::CreateTx)
+    }
+
     pub fn get_tx_header(&self, tx_id: &H256) -> eyre::Result<IrysTransactionHeader> {
         match self
             .node_ctx

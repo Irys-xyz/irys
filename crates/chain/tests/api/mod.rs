@@ -1,6 +1,7 @@
 use irys_database::DataLedger;
 
 mod api;
+mod client;
 mod external_api;
 mod pricing_endpoint;
 mod tx;

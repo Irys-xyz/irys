@@ -5,17 +5,14 @@ use irys_actors::{
     mempool_service::{MempoolService, TxIngressMessage},
     peer_list_service::{AddPeer, PeerListService},
 };
+use irys_api_server::routes::tx::IrysTransaction;
 use irys_database::{BlockIndexItem, DataLedger};
-use irys_types::Address;
-
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
+use irys_types::Address;
 
-use irys_types::{
-    block::CombinedBlockHeader, IrysBlockHeader, IrysTransactionHeader, PeerAddress, PeerListItem,
-    H256,
-};
+use irys_types::{block::CombinedBlockHeader, IrysBlockHeader, PeerAddress, PeerListItem, H256};
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
@@ -97,18 +94,14 @@ pub async fn fetch_txn(
     peer: &SocketAddr,
     client: &awc::Client,
     txn_id: H256,
-) -> Option<IrysTransactionHeader> {
-    let url = format!("http://{}/v1/tx/{}", peer, txn_id);
+) -> Option<IrysTransaction> {
+    let url = format!("http://{}/v1/tx/{}", peer, txn_id.0.to_base58());
 
     match client.get(url.clone()).send().await {
         Ok(mut response) => {
             if response.status().is_success() {
-                match response.json::<Vec<IrysTransactionHeader>>().await {
-                    Ok(txn) => {
-                        //info!("Synced txn {} from {}", txn_id, &url);
-                        let txn_header = txn.first().expect("valid txnid").clone();
-                        Some(txn_header)
-                    }
+                match response.json::<IrysTransaction>().await {
+                    Ok(txn) => Some(txn),
                     Err(e) => {
                         let msg = format!("Error reading body from {}: {}", &url, e);
                         warn!(msg);
@@ -273,9 +266,15 @@ pub async fn sync_state_from_peers(
             //add txns from block to txn db
             for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
                 let tx_ingress_msg = TxIngressMessage(
-                    fetch_txn(&peer.api, &client, *tx)
+                    match fetch_txn(&peer.api, &client, *tx)
                         .await
-                        .expect("valid txn from http GET"),
+                        .expect("valid txn from http GET")
+                    {
+                        IrysTransaction::Commitment(_c) => {
+                            panic!("not implemented commitment txns")
+                        }
+                        IrysTransaction::Storage(s) => s,
+                    },
                 );
                 if let Err(e) = mempool_addr.send(tx_ingress_msg).await {
                     error!("Error sending txn {:?} to mempool: {}", tx, e);

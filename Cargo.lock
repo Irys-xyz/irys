@@ -4087,6 +4087,7 @@ name = "irys-api-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base58",
  "eyre",
  "irys-types",
  "reqwest 0.12.15",
@@ -4186,6 +4187,7 @@ dependencies = [
  "rstest",
  "rust_decimal",
  "rust_decimal_macros",
+ "semver 1.0.24",
  "serde_json",
  "sha2 0.10.8",
  "test-fuzz",
