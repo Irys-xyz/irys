@@ -10,6 +10,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
+use crate::reth_service::RethServiceActor;
+
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
@@ -291,6 +293,7 @@ impl PeerListService {
         version_request: VersionRequest,
         known_peers_cache: HashSet<PeerAddress>,
     ) {
+        let reth_service = RethServiceActor::from_registry();
         for peer in known_peers_cache.iter() {
             match Self::announce_yourself_to_address(
                 api_client.clone(),
@@ -301,6 +304,10 @@ impl PeerListService {
             {
                 Ok(_peer_response) => {
                     // TODO: announce yourself to those peers as well
+                    let _ = reth_service
+                        .send(peer.execution)
+                        .await
+                        .inspect_err(|e| error!("Failed to connect to reth peer {}", &e));
                 }
                 Err(e) => {
                     error!(
