@@ -17,6 +17,56 @@ use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
 
+#[test_log::test(actix_web::test)]
+async fn heavy_test_p2p() -> eyre::Result<()> {
+    let mut testnet_config_genesis = Config::testnet();
+    testnet_config_genesis.trusted_peers = vec![];
+    let account1 = IrysSigner::random_signer(&testnet_config_genesis);
+    let genesis = start_genesis_node(&testnet_config_genesis, &account1).await;
+    tracing::info!("peer info: {:?}", &genesis.node_ctx.config.reth_peer_info);
+    let genesis_peer_address = PeerAddress {
+        gossip: format!(
+            "{}:{}",
+            genesis.node_ctx.config.gossip_service_bind_ip,
+            genesis.node_ctx.config.gossip_service_port
+        )
+        .parse()
+        .expect("valid SocketAddr expected"),
+        api: format!(
+            "{}:{}",
+            genesis.node_ctx.config.api_bind_ip, genesis.node_ctx.config.api_port
+        )
+        .parse()
+        .expect("valid SocketAddr expected"),
+        execution: genesis.node_ctx.config.reth_peer_info,
+    };
+
+    let (peer1, peer2) = start_peer_nodes(
+        &Config {
+            trusted_peers: vec![genesis_peer_address],
+            ..Config::testnet()
+        },
+        &Config {
+            trusted_peers: vec![genesis_peer_address],
+            ..Config::testnet()
+        },
+        &account1,
+    )
+    .await;
+    tracing::info!(
+        "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
+        &genesis.node_ctx.config.reth_peer_info,
+        &peer1.node_ctx.config.reth_peer_info,
+        &peer2.node_ctx.config.reth_peer_info
+    );
+
+    peer1.stop().await;
+    peer2.stop().await;
+    genesis.stop().await;
+
+    Ok(())
+}
+
 /// 1. spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
 /// 2. check that the blocks are valid, check that peer1, peer2, and genesis are indeed synced
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
