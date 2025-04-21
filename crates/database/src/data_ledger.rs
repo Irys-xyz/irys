@@ -84,6 +84,10 @@ impl TermLedger {
 
         // Collect indices of slots to expire
         for (idx, slot) in self.slots.iter().enumerate() {
+            if idx == self.slots.len() - 1 {
+                // Never expire the last slot in a ledger
+                continue;
+            }
             if slot.last_height <= expiry_height && !slot.is_expired {
                 expired_indices.push(idx);
             }
@@ -107,7 +111,7 @@ pub trait LedgerCore {
     fn ledger_id(&self) -> u32;
 
     /// Adds slots to the ledger, reserving space for partitions
-    fn allocate_slots(&mut self, slots: u64) -> u64;
+    fn allocate_slots(&mut self, slots: u64, height: u64) -> u64;
 
     /// Get the slot needs for the ledger, returning a vector of (slot index, number of partitions needed)
     fn get_slot_needs(&self) -> Vec<(usize, usize)>;
@@ -122,13 +126,13 @@ impl LedgerCore for PermanentLedger {
     fn ledger_id(&self) -> u32 {
         self.ledger_id
     }
-    fn allocate_slots(&mut self, slots: u64) -> u64 {
+    fn allocate_slots(&mut self, slots: u64, height: u64) -> u64 {
         let mut num_partitions_added = 0;
         for _ in 0..slots {
             self.slots.push(LedgerSlot {
                 partitions: Vec::new(),
                 is_expired: false,
-                last_height: 0,
+                last_height: height,
             });
             num_partitions_added += self.num_partitions_per_slot;
         }
@@ -156,19 +160,27 @@ impl LedgerCore for PermanentLedger {
 }
 
 impl LedgerCore for TermLedger {
+    /// Get total slot count for capacity planning and chunk allocation decisions
+    ///
+    /// Returns the total number of slots (both expired and active) in the term ledger.
+    /// This count is critical for:
+    /// 1. Tracking maximum theoretical storage capacity over time
+    /// 2. Determining when to allocate additional slots based on data ingress rate
+    /// 3. Comparing against max_chunk_offset to assess if we're approaching capacity
+    ///    (within half a partition of maximum) and need to add additional slots
     fn slot_count(&self) -> usize {
-        self.slots.iter().filter(|slot| !slot.is_expired).count()
+        self.slots.len() as usize
     }
     fn ledger_id(&self) -> u32 {
         self.ledger_id
     }
-    fn allocate_slots(&mut self, slots: u64) -> u64 {
+    fn allocate_slots(&mut self, slots: u64, height: u64) -> u64 {
         let mut num_partitions_added = 0;
         for _ in 0..slots {
             self.slots.push(LedgerSlot {
                 partitions: Vec::new(),
                 is_expired: false,
-                last_height: 0,
+                last_height: height,
             });
             num_partitions_added += self.num_partitions_per_slot;
         }

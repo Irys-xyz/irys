@@ -534,17 +534,12 @@ mod tests {
             BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
         SystemRegistry::set(block_index_actor.clone());
 
-        let block_index_guard = block_index_actor
-            .send(GetBlockIndexGuardMessage)
-            .await
-            .unwrap();
-
-        let epoch_service =
-            EpochServiceActor::new(epoch_config.clone(), &testnet_config, block_index_guard);
+        let epoch_service = EpochServiceActor::new(epoch_config.clone(), &testnet_config);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers
         let msg = NewEpochMessage {
+            previous_epoch_block: None,
             epoch_block: arc_genesis.clone(),
             commitments,
         };

@@ -1,6 +1,10 @@
 use crate::{
-    block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeService,
-    block_validation::prevalidate_block, epoch_service::PartitionAssignmentsReadGuard,
+    block_index_service::BlockIndexReadGuard,
+    block_tree_service::BlockTreeService,
+    block_validation::prevalidate_block,
+    epoch_service::{
+        EpochServiceActor, EpochServiceConfig, NewEpochMessage, PartitionAssignmentsReadGuard,
+    },
     services::ServiceSenders,
 };
 use actix::prelude::*;
@@ -8,8 +12,8 @@ use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
 use irys_types::{
-    DatabaseProvider, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
-    IrysTransactionHeader, StorageConfig, VDFStepsConfig,
+    CommitmentTransaction, DatabaseProvider, DifficultyAdjustmentConfig, GossipData,
+    IrysBlockHeader, IrysTransactionHeader, StorageConfig, VDFStepsConfig,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
@@ -19,6 +23,10 @@ use tracing::info;
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockDiscoveryActor {
+    /// Tracks the global state of partition assignments on the protocol
+    pub epoch_service: Addr<EpochServiceActor>,
+    /// Reference to epoch config to determine epoch length
+    pub epoch_config: EpochServiceConfig,
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
@@ -68,6 +76,8 @@ impl BlockDiscoveryActor {
         vdf_config: VDFStepsConfig,
         vdf_steps_guard: VdfStepsReadGuard,
         service_senders: ServiceSenders,
+        epoch_service: Addr<EpochServiceActor>,
+        epoch_config: EpochServiceConfig,
         gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         Self {
@@ -80,6 +90,8 @@ impl BlockDiscoveryActor {
             vdf_steps_guard,
             service_senders,
             gossip_sender,
+            epoch_service,
+            epoch_config,
         }
     }
 }
@@ -194,9 +206,10 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             .find(|b| b.ledger_id == SystemLedger::Commitment);
 
         // Validate commitments (if there are some)
+        let mut commitments: Vec<CommitmentTransaction> = Vec::new();
         if let Some(commitment_ledger) = commitments_ledger {
             let read_tx = self.db.tx().expect("to create a database read tx");
-            let _commitment_txs = commitment_ledger
+            commitments = commitment_ledger
                 .tx_ids
                 .iter()
                 .map(|txid| {
@@ -220,6 +233,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         // Block header pre-validation
         //------------------------------------
         let block_index_guard = self.block_index_guard.clone();
+        let block_index_guard2 = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = BlockTreeService::from_registry();
         let storage_config = self.storage_config.clone();
@@ -229,6 +243,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let db = self.db.clone();
         let ema_service_sender = self.service_senders.ema.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
+        let epoch_service = self.epoch_service.clone();
+        let epoch_config = self.epoch_config.clone();
 
         info!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
@@ -272,6 +288,30 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             Arc::new(all_txs),
                         ))
                         .await??;
+
+                    // Is this an epoch block?
+                    let block_height = new_block_header.height;
+                    let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
+                    if block_height > 0 && block_height % blocks_in_epoch == 0 {
+                        // Look up the previous epoch block
+                        let block_item = block_index_guard2
+                            .read()
+                            .get_item(block_height - blocks_in_epoch)
+                            .expect("previous epoch block to be in block index")
+                            .clone();
+
+                        let previous_epoch_block = db
+                            .view(|tx| block_header_by_hash(tx, &block_item.block_hash, false))
+                            .unwrap()
+                            .expect("previous epoch block to be in database");
+
+                        // Send the NewEpochMessage referencing the current and previous epoch blocks
+                        epoch_service.do_send(NewEpochMessage {
+                            previous_epoch_block,
+                            epoch_block: new_block_header.clone(),
+                            commitments,
+                        });
+                    }
 
                     // Send the block to the gossip bus
                     tracing::trace!(

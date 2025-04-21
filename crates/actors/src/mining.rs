@@ -49,6 +49,7 @@ impl PartitionMiningActor {
         start_mining: bool,
         steps_guard: VdfStepsReadGuard,
         atomic_global_step_number: AtomicVdfStepNumber,
+        initial_difficulty: U256,
     ) -> Self {
         Self {
             mining_address,
@@ -63,7 +64,7 @@ impl PartitionMiningActor {
             ),
             storage_module,
             should_mine: start_mining,
-            difficulty: U256::zero(),
+            difficulty: initial_difficulty,
             steps_guard,
             atomic_global_step_number,
         }
@@ -194,12 +195,13 @@ impl PartitionMiningActor {
 
             if test_solution >= self.difficulty {
                 info!(
-                    "Solution Found - partition_id: {}, ledger_offset: {}/{}, range_offset: {}/{}",
+                    "Solution Found - partition_id: {}, ledger_offset: {}/{}, range_offset: {}/{} difficulty {}",
                     self.storage_module.id,
                     partition_chunk_offset,
                     config.num_chunks_in_partition,
                     index,
-                    chunks.len()
+                    chunks.len(),
+                    self.difficulty
                 );
 
                 let solution = SolutionContext {
@@ -302,7 +304,8 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
     fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {
         let new_diff = msg.0.diff;
         debug!(
-            "updating difficulty target: from {} to {} (diff: {})",
+            "updating difficulty target in partition miner {}: from {} to {} (diff: {})",
+            &self.storage_module.id,
             &self.difficulty,
             &new_diff,
             &self.difficulty.abs_diff(new_diff)
@@ -529,6 +532,7 @@ mod tests {
             true,
             vdf_steps_guard.clone(),
             atomic_global_step_number,
+            U256::zero(),
         );
 
         let seed: Seed = Seed(H256::random());
@@ -672,6 +676,7 @@ mod tests {
             false,
             vdf_steps_guard.clone(),
             atomic_global_step_number,
+            U256::zero(),
         );
 
         let range = partition_mining_actor

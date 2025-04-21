@@ -4,11 +4,11 @@ use crate::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::BlockIndexService,
     block_producer::BlockProducerActor,
-    epoch_service::EpochServiceActor,
     mempool_service::MempoolService,
     mining::{MiningControl, PartitionMiningActor},
     packing::PackingActor,
     peer_list_service::PeerListService,
+    EpochServiceActor,
 };
 
 /// Serves as a kind of app state that can be passed into actix web to allow
