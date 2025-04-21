@@ -4485,6 +4485,7 @@ dependencies = [
  "reth-db",
  "reth-db-api",
  "reth-primitives",
+ "reth-transaction-pool",
  "rstest",
  "rust_decimal",
  "rust_decimal_macros",

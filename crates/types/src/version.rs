@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use crate::Arbitrary;
+use crate::{Arbitrary, RethPeerInfo};
 use alloy_primitives::Address;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -148,7 +148,7 @@ impl Default for VersionRequest {
 pub struct PeerAddress {
     pub gossip: SocketAddr,
     pub api: SocketAddr,
-    pub reth_peering_tcp: SocketAddr,
+    pub execution: RethPeerInfo,
 }
 
 impl Default for PeerAddress {
@@ -156,7 +156,7 @@ impl Default for PeerAddress {
         Self {
             gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8081),
-            reth_peering_tcp: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 30303),
+            execution: RethPeerInfo::default(),
         }
     }
 }

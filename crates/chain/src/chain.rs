@@ -3,6 +3,7 @@ use crate::peer_utilities::{fetch_genesis_block, sync_state_from_peers};
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
+use irys_actors::reth_service::GetPeeringInfoMessage;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -34,7 +35,6 @@ use irys_database::{
 };
 use irys_gossip_service::ServiceHandleWithShutdownSignal;
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
-
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
@@ -43,7 +43,6 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
-
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, Address,
     CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
@@ -60,7 +59,7 @@ use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_me
 use reth_db::{Database as _, HasName, HasTableType};
 use std::{
     fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
+    net::TcpListener,
     path::PathBuf,
     sync::atomic::AtomicU64,
     sync::{mpsc, Arc, RwLock},
@@ -314,10 +313,9 @@ impl IrysNode {
         let task_manager = TaskManager::new(tokio_runtime.handle().clone());
 
         // we create the listener here so we know the port before we start passing around `config`
-        let listener = create_listener(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            self.config.api_port,
-        ))?;
+        let listener = create_listener(
+            format!("{}:{}", self.config.api_bind_ip, self.config.api_port).parse()?,
+        )?;
         let local_addr = listener
             .local_addr()
             .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
@@ -461,7 +459,7 @@ impl IrysNode {
             .name("actor-main-thread".to_string())
             .stack_size(32 * 1024 * 1024)
             .spawn({
-                let node = (*self).clone();
+                let mut node = (*self).clone();
                 let irys_provider = irys_provider.clone();
                 move || {
                     System::new().block_on(async move {
@@ -600,7 +598,7 @@ impl IrysNode {
     }
 
     async fn init_services(
-        &self,
+        &mut self,
         reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
         vdf_shutdown_receiver: std::sync::mpsc::Receiver<()>,
         reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
@@ -629,17 +627,13 @@ impl IrysNode {
 
         // start services
         let (service_senders, receivers) = ServiceSenders::new();
-        let _handle = ChunkCacheService::spawn_service(
-            &task_exec,
-            irys_db.clone(),
-            receivers.chunk_cache,
-            self.config.clone(),
-        );
-        debug!("Chunk cache initiailsed");
 
         // start reth service
         let (reth_service_actor, reth_arbiter) = init_reth_service(&irys_db, &reth_node);
         debug!("Reth Service Actor initiailsed");
+        // Get the correct Reth peer info
+        let reth_peering = reth_service_actor.send(GetPeeringInfoMessage {}).await??;
+        self.config.reth_peer_info = reth_peering;
 
         // update reth service about the latest block data it must use
         reth_service_actor
@@ -650,6 +644,14 @@ impl IrysNode {
             })
             .await??;
         debug!("Reth Service Actor updated about fork choice");
+
+        let _handle = ChunkCacheService::spawn_service(
+            &task_exec,
+            irys_db.clone(),
+            receivers.chunk_cache,
+            self.config.clone(),
+        );
+        debug!("Chunk cache initiailsed");
 
         let block_index_guard = block_index_service_actor
             .send(GetBlockIndexGuardMessage)

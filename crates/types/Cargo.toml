@@ -20,6 +20,7 @@ derive_more = { version = "2.0.1", features = [
 	"from",
 	"into",
 ], default-features = true }
+reth-transaction-pool.workspace=true
 eyre = "0.6.8"
 fixed-hash = "0.8.0" # TODO: if removing the dependency, ensure you also remove the [features] dev = [] section above.
 rand = "0.8.5"

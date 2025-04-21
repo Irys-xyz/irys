@@ -21,7 +21,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
                 ctx.cfg.config.safe_minimum_number_of_years,
                 ctx.cfg.config.decay_rate,
             )?
-            .replica_count(ctx.cfg.config.number_of_ingerss_proofs)?;
+            .replica_count(ctx.cfg.config.number_of_ingress_proofs)?;
 
         cost_per_gb
             .base_network_fee(
@@ -71,7 +71,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
                 ctx.cfg.config.safe_minimum_number_of_years,
                 ctx.cfg.config.decay_rate,
             )?
-            .replica_count(ctx.cfg.config.number_of_ingerss_proofs)?;
+            .replica_count(ctx.cfg.config.number_of_ingress_proofs)?;
 
         cost_per_gb
             .base_network_fee(
@@ -122,7 +122,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
                 ctx.cfg.config.safe_minimum_number_of_years,
                 ctx.cfg.config.decay_rate,
             )?
-            .replica_count(ctx.cfg.config.number_of_ingerss_proofs)?;
+            .replica_count(ctx.cfg.config.number_of_ingress_proofs)?;
 
         cost_per_gb
             .base_network_fee(

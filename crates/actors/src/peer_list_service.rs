@@ -43,7 +43,6 @@ impl PeerListService {
             peer_list_cache: HashMap::new(),
             known_peers_cache: HashSet::new(),
             client: Client::new(),
-
             irys_api: IrysApiClient::new(),
             chain_id: config.chain_id,
             miner_address: config.miner_address(),
@@ -57,6 +56,7 @@ impl PeerListService {
                 api: format!("{}:{}", config.api_bind_ip, config.api_port)
                     .parse()
                     .expect("valid SocketAddr expected"),
+                execution: config.reth_peer_info,
             },
         }
     }
@@ -507,6 +507,7 @@ mod tests {
         let peer_addr = PeerAddress {
             gossip: gossip_addr,
             api: api_addr,
+            execution: RethPeerInfo::default(),
         };
 
         let peer = PeerListItem {
