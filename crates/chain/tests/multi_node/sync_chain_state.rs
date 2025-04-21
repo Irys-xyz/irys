@@ -10,7 +10,7 @@ use irys_chain::{
 };
 use irys_config::IrysNodeConfig;
 use irys_database::BlockIndexItem;
-use irys_types::{irys::IrysSigner, Config, IrysTransaction, PeerAddress};
+use irys_types::{irys::IrysSigner, Config, IrysTransaction, PeerAddress, RethPeerInfo};
 use reth_primitives::irys_primitives::IrysTxId;
 use reth_primitives::GenesisAccount;
 use std::collections::HashMap;
@@ -274,19 +274,23 @@ fn init_peers() -> (Vec<PeerAddress>, Vec<PeerAddress>) {
     let trusted_peers = vec![PeerAddress {
         api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
         gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+        execution: RethPeerInfo::default(),
     }];
     let genesis_trusted_peers = vec![
         PeerAddress {
             api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
         },
         PeerAddress {
             api: "127.0.0.2:1234".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.2:1235".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
         },
         PeerAddress {
             api: "127.0.0.3:1234".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.3:1235".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
         },
     ];
     (trusted_peers, genesis_trusted_peers)

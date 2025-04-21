@@ -12,7 +12,7 @@ use actix_web::{
 use alloy_core::primitives::U256;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_types::{build_user_agent, irys::IrysSigner, PeerResponse, VersionRequest};
+use irys_types::{build_user_agent, irys::IrysSigner, PeerResponse, RethPeerInfo, VersionRequest};
 use irys_types::{Config, PeerAddress};
 use reth_primitives::GenesisAccount;
 
@@ -101,6 +101,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         address: PeerAddress {
             gossip: "127.0.0.1:8080".parse().expect("valid socket address"),
             api: "127.0.0.1:8081".parse().expect("valid socket address"),
+            execution: RethPeerInfo::default(),
         },
         user_agent: Some(build_user_agent("miner1", "0.1.0")),
         ..Default::default()
@@ -164,7 +165,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
             assert!(
                 accepted.peers.contains(&PeerAddress {
                     gossip: "127.0.0.1:8080".parse().unwrap(),
-                    api: "127.0.0.1:8081".parse().unwrap()
+                    api: "127.0.0.1:8081".parse().unwrap(),
+                    execution: RethPeerInfo::default()
                 }),
                 "Missing expected peer 127.0.0.1:8080"
             );
@@ -179,6 +181,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         address: PeerAddress {
             gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
             api: "127.0.0.3:8081".parse().expect("valid socket address"),
+            execution: RethPeerInfo::default(),
         },
         user_agent: Some(build_user_agent("miner3", "0.1.0")),
         ..Default::default()
@@ -203,14 +206,16 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
             assert!(
                 accepted.peers.contains(&PeerAddress {
                     gossip: "127.0.0.1:8080".parse().unwrap(),
-                    api: "127.0.0.1:8081".parse().unwrap()
+                    api: "127.0.0.1:8081".parse().unwrap(),
+                    execution: RethPeerInfo::default()
                 }),
                 "Missing expected peer 127.0.0.1:8080"
             );
             assert!(
                 accepted.peers.contains(&PeerAddress {
                     gossip: "127.0.0.2:8080".parse().unwrap(),
-                    api: "127.0.0.2:8081".parse().unwrap()
+                    api: "127.0.0.2:8081".parse().unwrap(),
+                    execution: RethPeerInfo::default()
                 }),
                 "Missing expected peer 127.0.0.2:8080"
             );
@@ -233,14 +238,17 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
             PeerAddress {
                 gossip: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
                 api: "127.0.0.1:8081".parse::<SocketAddr>().unwrap(),
+                execution: RethPeerInfo::default()
             },
             PeerAddress {
                 gossip: "127.0.0.2:8080".parse::<SocketAddr>().unwrap(),
                 api: "127.0.0.2:8081".parse::<SocketAddr>().unwrap(),
+                execution: RethPeerInfo::default()
             },
             PeerAddress {
                 gossip: "127.0.0.3:8080".parse::<SocketAddr>().unwrap(),
                 api: "127.0.0.3:8081".parse::<SocketAddr>().unwrap(),
+                execution: RethPeerInfo::default()
             },
         ]
         .iter()

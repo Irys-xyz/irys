@@ -485,7 +485,7 @@ mod tests {
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
-    use irys_types::VersionRequest;
+    use irys_types::{RethPeerInfo, VersionRequest};
     use std::collections::HashSet;
     use std::net::IpAddr;
     use std::str::FromStr;
