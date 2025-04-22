@@ -87,7 +87,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                     .parse()
                     .expect("valid SocketAddr expected"),
                 execution: config.reth_peer_info,
-                mining_address: Address::ZERO,
+                mining_address: config.miner_address(),
             },
         }
     }
