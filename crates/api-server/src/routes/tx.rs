@@ -135,6 +135,13 @@ pub fn get_transaction(
         })
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TxOffset {
+    #[serde(default, with = "u64_stringify")]
+    pub data_start_offset: u64,
+}
+
 // Modified to work only with storage transactions
 pub async fn get_tx_local_start_offset(
     state: web::Data<ApiState>,
@@ -171,7 +178,27 @@ pub async fn get_tx_local_start_offset(
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub struct TxOffset {
+pub struct TxStatus {
     #[serde(default, with = "u64_stringify")]
-    pub data_start_offset: u64,
+    pub confirmations: u64,
+}
+
+pub async fn get_tx_status(
+    state: web::Data<ApiState>,
+    path: web::Path<H256>,
+) -> Result<Json<TxStatus>, ApiError> {
+    let tx_id: H256 = path.into_inner();
+    info!("Get tx by tx_id: {}", tx_id);
+    get_tx_status_internal(&state, tx_id).map(web::Json)
+}
+
+pub fn get_tx_status_internal(
+    _state: &web::Data<ApiState>,
+    _tx_id: H256,
+) -> Result<TxStatus, ApiError> {
+    // let block_index_read = state.block_index.read();
+    // block_index_read.items.iter().find(|i| i.ledgers.iter().find(|li| li.tx_root));
+
+    // todo!();
+    Ok(TxStatus { confirmations: 50 })
 }
