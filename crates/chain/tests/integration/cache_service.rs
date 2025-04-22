@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;

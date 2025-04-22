@@ -2905,7 +2905,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f2c92ceda6ceec50f43169f9ee8424fe2db276791afde7b2cd8bc084cb376ab"
 dependencies = [
  "log",
- "regex",
 ]
 
 [[package]]
@@ -2917,7 +2916,6 @@ dependencies = [
  "anstream",
  "anstyle",
  "env_filter",
- "humantime",
  "log",
 ]
 
@@ -4050,7 +4048,6 @@ dependencies = [
  "alloy-rpc-types-engine",
  "assert_matches",
  "base58",
- "env_logger",
  "eyre",
  "futures",
  "irys-api-client",
@@ -4206,7 +4203,6 @@ dependencies = [
  "clap",
  "color-eyre",
  "eyre",
- "irys-config",
  "irys-database",
  "irys-types",
  "reth-node-core",
@@ -4361,7 +4357,6 @@ dependencies = [
  "eyre",
  "futures",
  "futures-util",
- "irys-config",
  "irys-database",
  "irys-packing",
  "irys-primitives",
