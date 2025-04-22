@@ -403,6 +403,7 @@ impl IrysNode {
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
                 ctx.actor_addresses.peer_list.clone(),
+                ctx.config.miner_address(),
             )
             .await?;
         }
