@@ -118,6 +118,7 @@ pub fn parse_user_agent(user_agent: &str) -> Option<(String, String, String, Str
 pub struct VersionRequest {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
+    pub mining_address: Address,
     pub chain_id: u64,
     pub address: PeerAddress,
     pub timestamp: u64,
@@ -128,6 +129,7 @@ impl Default for VersionRequest {
     fn default() -> Self {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0
+            mining_address: Address::ZERO,
             protocol_version: ProtocolVersion::default(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)

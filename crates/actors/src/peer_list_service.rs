@@ -335,6 +335,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
 
     fn create_version_request(&self) -> VersionRequest {
         VersionRequest {
+            mining_address: self.miner_address,
             address: self.peer_address,
             chain_id: self.chain_id,
             user_agent: Some(format!("Irys-Node-{}", env!("CARGO_PKG_VERSION"))),
