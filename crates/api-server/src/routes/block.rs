@@ -42,9 +42,7 @@ pub async fn get_block(
             state
                 .block_index
                 .read()
-                .get_item(height.try_into().map_err(|_| ApiError::Internal {
-                    err: String::from("Block height out of range"),
-                })?)
+                .get_item(height)
                 .ok_or(ApiError::ErrNoId {
                     id: path.to_string(),
                     err: String::from("Invalid block height"),

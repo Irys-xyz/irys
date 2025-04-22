@@ -36,7 +36,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         },
     ];
     let testnet_config_genesis = Config {
-        port: 8080,
+        api_port: 8080,
         gossip_service_port: 8081,
         trusted_peers: genesis_trusted_peers.clone(),
         ..Config::testnet()
@@ -62,7 +62,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     //start peer1
     let testnet_config_peer1 = Config {
-        port: 0, //random port
+        api_port: 0, //random port
         trusted_peers: trusted_peers.clone(),
         ..Config::testnet()
     };
@@ -76,7 +76,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     //start peer2
     let testnet_config_peer2 = Config {
-        port: 0, //random port
+        api_port: 0, //random port
         trusted_peers,
         ..Config::testnet()
     };
@@ -130,7 +130,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     ctx_peer2_node.node.stop().await;
 
     let mut result_genesis = block_index_endpoint_request(
-        &local_test_url(&testnet_config_genesis.port),
+        &local_test_url(&testnet_config_genesis.api_port),
         0,
         required_blocks_height
             .try_into()
@@ -205,7 +205,7 @@ async fn poll_until_fetch_at_block_index_height(
 ) -> Option<awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>>> {
     let mut attempts = 0;
     let mut result_peer = None;
-    let url = local_test_url(&node_ctx.node.config.port);
+    let url = local_test_url(&node_ctx.node.config.api_port);
     loop {
         let mut response = info_endpoint_request(&url).await;
 
@@ -227,7 +227,7 @@ async fn poll_until_fetch_at_block_index_height(
         } else {
             result_peer = Some(
                 block_index_endpoint_request(
-                    &local_test_url(&node_ctx.node.config.port),
+                    &local_test_url(&node_ctx.node.config.api_port),
                     0,
                     required_blocks_height,
                 )
@@ -245,7 +245,7 @@ async fn poll_peer_list(trusted_peers: Vec<PeerAddress>, ctx_node: &TestCtx) -> 
         sleep(Duration::from_millis(2000)).await;
 
         let mut peer_results_genesis =
-            peer_list_endpoint_request(&local_test_url(&ctx_node.node.config.port)).await;
+            peer_list_endpoint_request(&local_test_url(&ctx_node.node.config.api_port)).await;
 
         peer_list_items = peer_results_genesis
             .json::<Vec<PeerAddress>>()

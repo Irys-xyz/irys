@@ -252,7 +252,7 @@ fn get_block_range(
     // start of this new block from the previous block.
     let index_reader = block_index.read().unwrap();
     let start_chunk_offset = if block.height > 0 {
-        let prev_item = index_reader.get_item(block.height as usize - 1).unwrap();
+        let prev_item = index_reader.get_item(block.height - 1).unwrap();
         prev_item.ledgers[ledger].max_chunk_offset
     } else {
         0

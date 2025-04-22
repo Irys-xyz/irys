@@ -110,7 +110,7 @@ pub struct IrysBlockHeader {
     /// The solution hash of the previous block in the chain.
     pub previous_solution_hash: H256,
 
-    /// The solution hash of the last epoch block
+    /// The block hash of the last epoch block
     pub last_epoch_hash: H256,
 
     /// `SHA-256` hash of the PoA chunk (unencoded) bytes.

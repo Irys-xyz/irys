@@ -15,9 +15,9 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    Base64, Config, DatabaseProvider, GossipData, IrysBlockHeader, IrysTransaction,
-    IrysTransactionHeader, NodeConfig, PeerAddress, PeerListItem, PeerScore, TxChunkOffset,
-    UnpackedChunk, H256,
+    AcceptedResponse, Base64, Config, DatabaseProvider, GossipData, IrysBlockHeader,
+    IrysTransaction, IrysTransactionHeader, PeerAddress, PeerListItem, PeerResponse, PeerScore,
+    TxChunkOffset, UnpackedChunk, VersionRequest, H256
 };
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
@@ -196,6 +196,22 @@ impl ApiClient for StubApiClient {
 
         Ok(results)
     }
+
+    async fn post_version(
+        &self,
+        _api_address: SocketAddr,
+        _version: VersionRequest,
+    ) -> Result<PeerResponse> {
+        Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock re sponse
+    }
+
+    async fn post_transaction(
+        &self,
+        _api_address: SocketAddr,
+        _transaction: IrysTransactionHeader,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl Default for StubApiClient {
@@ -248,12 +264,13 @@ impl GossipServiceTestFixture {
     pub fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
+        let config = Config::testnet();
         let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
 
-        let peer_service = PeerListService::new(db.clone());
+        let peer_service = PeerListService::new(db.clone(), &config);
         let peer_list = peer_service.start();
 
         let (gossip_sender, _rx) = mpsc::channel(100);

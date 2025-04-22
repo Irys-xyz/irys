@@ -29,7 +29,7 @@ async fn external_api() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug,irys_actors::mining=error,irys_actors::packing=error,irys_chain::vdf=off,irys_vdf::vdf_state=off");
 
     let mut testnet_config = Config::testnet();
-    testnet_config.port = 8080; // external test, should never be run concurrently
+    testnet_config.api_port = 8080; // external test, should never be run concurrently
 
     let account1 = IrysSigner::random_signer(&testnet_config);
 

@@ -94,7 +94,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         .on_http(
             format!(
                 "http://127.0.0.1:{}/v1/execution-rpc",
-                node.node_ctx.config.port
+                node.node_ctx.config.api_port
             )
             .parse()?,
         );
@@ -123,7 +123,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         precompile_address
     );
 
-    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.port);
+    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.api_port);
 
     // server should be running
     // check with request to `/v1/info`

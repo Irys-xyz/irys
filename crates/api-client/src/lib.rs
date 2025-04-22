@@ -1,9 +1,10 @@
+use base58::ToBase58;
 use eyre::Result;
-use irys_types::{IrysTransactionHeader, H256};
+use irys_types::{IrysTransactionHeader, PeerResponse, VersionRequest, H256};
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
-use tracing::{debug, error};
+use tracing::error;
 
 /// Trait defining the interface for the API client
 #[async_trait::async_trait]
@@ -15,16 +16,28 @@ pub trait ApiClient: Send + Sync + Clone {
         tx_id: H256,
     ) -> Result<Option<IrysTransactionHeader>>;
 
+    /// Post a transaction header to a node
+    async fn post_transaction(
+        &self,
+        peer: SocketAddr,
+        transaction: IrysTransactionHeader,
+    ) -> Result<()>;
+
     /// Fetch multiple transaction headers by their IDs from a peer
     async fn get_transactions(
         &self,
         peer: SocketAddr,
         tx_ids: &[H256],
     ) -> Result<Vec<Option<IrysTransactionHeader>>>;
+
+    /// Post a version request to a peer. Version request contains protocol version and peer
+    /// information.
+    async fn post_version(&self, peer: SocketAddr, version: VersionRequest)
+        -> Result<PeerResponse>;
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct IrysApiClient {
     client: Client,
 }
@@ -44,7 +57,6 @@ impl IrysApiClient {
         body: Option<&B>,
     ) -> Result<Option<T>> {
         let url = format!("http://{}/v1{}", peer, path);
-        debug!("Making {} request to {}", method, url);
 
         let mut request = match method {
             "GET" => self.client.get(&url),
@@ -61,6 +73,9 @@ impl IrysApiClient {
 
         match status {
             StatusCode::OK => {
+                if response.content_length().unwrap_or(0) == 0 {
+                    return Ok(None);
+                }
                 let body = response.json::<T>().await?;
                 Ok(Some(body))
             }
@@ -88,9 +103,29 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         tx_id: H256,
     ) -> Result<Option<IrysTransactionHeader>> {
-        debug!("Fetching transaction {} from peer {}", tx_id, peer);
-        let path = format!("/tx/{}", tx_id);
+        // IMPORTANT: You have to keep the debug format here, since normal to_string of H256
+        //  encodes just first 4 and last 4 bytes with a placeholder in the middle
+        let path = format!("/tx/{}", tx_id.0.to_base58());
         self.make_request(peer, "GET", &path, None::<&()>).await
+    }
+
+    async fn post_transaction(
+        &self,
+        peer: SocketAddr,
+        transaction: IrysTransactionHeader,
+    ) -> Result<()> {
+        let path = "/tx";
+        let response = self
+            .make_request::<(), _>(peer, "POST", path, Some(&transaction))
+            .await;
+
+        match response {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                error!("Failed to post transaction: {}", e);
+                Err(e)
+            }
+        }
     }
 
     async fn get_transactions(
@@ -98,7 +133,6 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         tx_ids: &[H256],
     ) -> Result<Vec<Option<IrysTransactionHeader>>> {
-        debug!("Fetching {} transactions from peer {}", tx_ids.len(), peer);
         let mut results = Vec::with_capacity(tx_ids.len());
 
         for &tx_id in tx_ids {
@@ -108,11 +142,80 @@ impl ApiClient for IrysApiClient {
 
         Ok(results)
     }
+
+    async fn post_version(
+        &self,
+        peer: SocketAddr,
+        version: VersionRequest,
+    ) -> Result<PeerResponse> {
+        let path = "/version";
+        let response = self
+            .make_request::<PeerResponse, _>(peer, "POST", path, Some(&version))
+            .await;
+        match response {
+            Ok(Some(peer_response)) => Ok(peer_response),
+            Ok(None) => Err(eyre::eyre!("No response from peer")),
+            Err(e) => {
+                error!("Failed to post version: {}", e);
+                Err(e)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "test-utils")]
+pub mod test_utils {
+    use super::*;
+    use async_trait::async_trait;
+    use irys_types::AcceptedResponse;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[derive(Default, Clone)]
+    pub struct CountingMockClient {
+        pub post_version_calls: Arc<Mutex<Vec<std::net::SocketAddr>>>,
+    }
+
+    #[async_trait]
+    impl ApiClient for CountingMockClient {
+        async fn get_transaction(
+            &self,
+            _peer: std::net::SocketAddr,
+            _tx_id: H256,
+        ) -> eyre::Result<Option<IrysTransactionHeader>> {
+            Ok(None)
+        }
+        async fn get_transactions(
+            &self,
+            _peer: std::net::SocketAddr,
+            _tx_ids: &[H256],
+        ) -> eyre::Result<Vec<Option<IrysTransactionHeader>>> {
+            Ok(vec![])
+        }
+        async fn post_version(
+            &self,
+            peer: std::net::SocketAddr,
+            _version: VersionRequest,
+        ) -> eyre::Result<PeerResponse> {
+            let mut calls = self.post_version_calls.lock().await;
+            calls.push(peer);
+            Ok(PeerResponse::Accepted(AcceptedResponse::default()))
+        }
+
+        async fn post_transaction(
+            &self,
+            _peer: std::net::SocketAddr,
+            _transaction: IrysTransactionHeader,
+        ) -> eyre::Result<()> {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_types::AcceptedResponse;
 
     /// Mock implementation of the API client for testing
     #[derive(Default, Clone)]
@@ -143,6 +246,22 @@ mod tests {
             }
 
             Ok(results)
+        }
+
+        async fn post_version(
+            &self,
+            _peer: SocketAddr,
+            _version: VersionRequest,
+        ) -> Result<PeerResponse> {
+            Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock response
+        }
+
+        async fn post_transaction(
+            &self,
+            _peer: SocketAddr,
+            _tx: IrysTransactionHeader,
+        ) -> Result<()> {
+            Ok(())
         }
     }
 

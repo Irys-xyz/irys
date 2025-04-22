@@ -246,7 +246,7 @@ impl BlockTreeService {
         let binding = self.block_index_guard.clone().unwrap();
         let bi = binding.read();
         if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
-            let finalized = bi.get_item(finalized_height as usize).unwrap();
+            let finalized = bi.get_item(finalized_height).unwrap();
             if finalized.block_hash == finalized_hash {
                 return;
             }
@@ -572,7 +572,7 @@ impl BlockTreeCache {
         let end = block_index.num_blocks();
 
         // Initialize cache with the start block
-        let start_block_hash = block_index.get_item(start as usize).unwrap().block_hash;
+        let start_block_hash = block_index.get_item(start).unwrap().block_hash;
         let start_block = block_header_by_hash(&tx, &start_block_hash, false)
             .unwrap()
             .unwrap();
@@ -585,10 +585,7 @@ impl BlockTreeCache {
 
         // Add remaining blocks
         for block_height in (start + 1)..end {
-            let block_hash = block_index
-                .get_item(block_height as usize)
-                .unwrap()
-                .block_hash;
+            let block_hash = block_index.get_item(block_height).unwrap().block_hash;
             let block = block_header_by_hash(&tx, &block_hash, false)
                 .unwrap()
                 .unwrap();

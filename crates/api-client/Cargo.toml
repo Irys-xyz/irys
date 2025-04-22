@@ -11,3 +11,8 @@ serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 async-trait = "0.1"
+base58.workspace = true
+
+[features]
+default = []
+test-utils = []

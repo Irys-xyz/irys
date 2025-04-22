@@ -81,7 +81,7 @@ pub async fn prevalidate_block(
     debug!("poa data not expired");
 
     // Check the solution_hash
-    solution_hash_is_valid(&block)?;
+    solution_hash_is_valid(&block, &previous_block)?;
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -249,22 +249,24 @@ pub fn cumulative_difficulty_is_valid(
 }
 
 /// Checks to see if the `solution_hash` exceeds the difficulty threshold
+/// of the previous block
 ///
 /// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
-pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
+pub fn solution_hash_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> eyre::Result<()> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
 
-    let previous_solution_diff = hash_to_number(&block.previous_solution_hash.0);
-
-    if solution_diff >= previous_solution_diff {
+    if solution_diff >= previous_block.diff {
         Ok(())
     } else {
         Err(eyre::eyre!(
             "Invalid solution_hash - expected difficulty >={}, got {} (diff: {})",
-            &block.diff,
+            &previous_block.diff,
             &solution_diff,
-            &block.diff.abs_diff(solution_diff)
+            &previous_block.diff.abs_diff(solution_diff)
         ))
     }
 }
@@ -530,6 +532,7 @@ mod tests {
 
         // Tell the epoch service to initialize the ledgers
         let msg = NewEpochMessage {
+            previous_epoch_block: None,
             epoch_block: arc_genesis.clone(),
             commitments,
         };

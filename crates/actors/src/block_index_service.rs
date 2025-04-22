@@ -1,11 +1,17 @@
 use crate::{calculate_chunks_added, BlockFinalizedMessage};
 use actix::prelude::*;
-use irys_database::{BlockIndex, BlockIndexItem, DataLedger, LedgerIndexItem};
-use irys_types::{
-    ConsensusConfig, IrysBlockHeader, IrysTransactionHeader, StorageSyncConfig, H256, U256,
+use base58::ToBase58;
+use irys_database::{
+    block_header_by_hash, BlockIndex, BlockIndexItem, DataLedger, LedgerIndexItem,
 };
+use irys_types::{
+    ConsensusConfig,
+    DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageSyncConfig, H256, U256,
+,
+};
+use reth_db::Database;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
-use tracing::error;
+use tracing::{debug, error};
 
 //==============================================================================
 // BlockIndexReadGuard
@@ -26,6 +32,35 @@ impl BlockIndexReadGuard {
     /// Accessor method to get a read guard for Ledgers
     pub fn read(&self) -> RwLockReadGuard<'_, BlockIndex> {
         self.block_index_data.read().unwrap()
+    }
+
+    /// Debug utility to validate block index integrity
+    ///
+    /// Iterates through all items in the block index and verifies that each entry's
+    /// position matches its block height, detecting potential synchronization issues.
+    /// This helps identify corrupted index state where the array position doesn't
+    /// match the expected block height, which would indicate data inconsistency.
+    ///
+    /// @param db Database provider for accessing the blockchain data
+    pub fn print_items(&self, db: DatabaseProvider) {
+        let rg = self.read();
+        let tx = db.tx().unwrap();
+        for i in 0..rg.num_blocks() {
+            let item = rg.get_item(i).unwrap();
+            let block_hash = item.block_hash;
+            let block = block_header_by_hash(&tx, &block_hash, false)
+                .unwrap()
+                .unwrap();
+            debug!(
+                "index: {} height: {} hash: {}",
+                i,
+                block.height,
+                block_hash.0.to_base58()
+            );
+            if i != block.height {
+                error!("Block index and height do not match!");
+            }
+        }
     }
 }
 
@@ -120,7 +155,7 @@ impl BlockIndexService {
     /// * `block` - The finalized block header to be added
     /// * `all_txs` - Complete list of transaction headers, where the first `n` entries
     ///               correspond to the submit ledger's transaction IDs
-    fn add_finalized_block(
+    pub fn add_finalized_block(
         &mut self,
         block: &Arc<IrysBlockHeader>,
         all_txs: &Arc<Vec<IrysTransactionHeader>>,
@@ -151,9 +186,7 @@ impl BlockIndexService {
             if index.num_blocks() == 0 && block.height == 0 {
                 (0, sub_chunks_added)
             } else {
-                let prev_block = index
-                    .get_item((block.height.saturating_sub(1)) as usize)
-                    .unwrap();
+                let prev_block = index.get_item(block.height.saturating_sub(1)).unwrap();
                 (
                     prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
                     prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
@@ -247,7 +280,7 @@ impl Handler<GetLatestBlockIndexMessage> for BlockIndexService {
 
         let binding = self.block_index.clone().unwrap();
         let bi = binding.read().unwrap();
-        let block_height = bi.num_blocks().max(1) as usize - 1;
+        let block_height = bi.num_blocks().max(1) - 1;
         Some(bi.get_item(block_height)?.clone())
     }
 }
