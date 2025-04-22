@@ -120,7 +120,7 @@ async fn create_state_parallel(
             let join = task::spawn_blocking(move || {
                 let block_hash = block_index
                     .read()
-                    .get_item(block.try_into().expect("usize overflow"))
+                    .get_item(block)
                     .map(|item| item.block_hash)
                     .expect("Error getting block hash");
                 db.view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))

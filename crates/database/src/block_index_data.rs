@@ -116,8 +116,15 @@ impl BlockIndex<Initialized> {
     }
 
     /// Retrieves a [`BlockIndexItem`] from the block index by block height
-    pub fn get_item(&self, block_height: usize) -> Option<&BlockIndexItem> {
-        self.items.get(block_height)
+    pub fn get_item(&self, block_height: u64) -> Option<&BlockIndexItem> {
+        // Check if block_height can fit into a usize
+        let index = if block_height <= usize::MAX as u64 {
+            block_height as usize
+        } else {
+            return None; // Block height too large for this platform
+        };
+
+        self.items.get(index)
     }
 
     /// Retrieves the most recent [`BlockIndexItem`] from the block index by block height
@@ -160,7 +167,7 @@ impl BlockIndex<Initialized> {
         &self,
         ledger: DataLedger,
         chunk_offset: u64,
-    ) -> Result<(usize, &BlockIndexItem)> {
+    ) -> Result<(u64, &BlockIndexItem)> {
         let result = self.items.binary_search_by(|item| {
             if chunk_offset < item.ledgers[ledger as usize].max_chunk_offset {
                 std::cmp::Ordering::Greater
@@ -177,11 +184,11 @@ impl BlockIndex<Initialized> {
             Err(pos) => pos,
         };
 
-        Ok((index, &self.items[index]))
+        Ok((index as u64, &self.items[index]))
     }
 
     pub fn print_items(&self) {
-        for height in 0..self.num_blocks() as usize {
+        for height in 0..self.num_blocks() {
             println!(
                 "height: {} hash: {}",
                 height,

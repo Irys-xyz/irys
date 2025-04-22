@@ -3,13 +3,14 @@ use crate::peer_utilities::{fetch_genesis_block, sync_state_from_peers};
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
+use irys_actors::EpochReplayData;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
-    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    broadcast_mining_service::BroadcastMiningService,
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
     ema_service::EmaService,
@@ -44,6 +45,7 @@ use irys_storage::{
     ChunkProvider, ChunkType, StorageModule,
 };
 
+use irys_types::U256;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, Address,
     CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
@@ -728,6 +730,7 @@ impl IrysNode {
         let (block_discovery, block_discovery_arbiter) = self.init_block_discovery_service(
             &irys_db,
             &service_senders,
+            &epoch_service_actor,
             &block_index_guard,
             partition_assignments_guard,
             &vdf_steps_guard,
@@ -775,10 +778,8 @@ impl IrysNode {
             &block_producer_addr,
             &atomic_global_step_number,
             &packing_actor_addr,
+            latest_block.diff,
         );
-        broadcast_mining_actor
-            .send(BroadcastDifficultyUpdate(latest_block.clone()))
-            .await?;
 
         // set up the vdf thread
         let vdf_thread_handler = self.init_vdf_thread(
@@ -804,6 +805,7 @@ impl IrysNode {
                 block_index: block_index_service_actor,
                 epoch_service: epoch_service_actor,
                 peer_list: peer_list_service.clone(),
+                reth: reth_service_actor,
             },
             reth_handle: reth_node.clone(),
             db: irys_db.clone(),
@@ -963,6 +965,7 @@ impl IrysNode {
         block_producer_addr: &actix::Addr<BlockProducerActor>,
         atomic_global_step_number: &Arc<AtomicU64>,
         packing_actor_addr: &actix::Addr<PackingActor>,
+        initial_difficulty: U256,
     ) -> (Vec<actix::Addr<PartitionMiningActor>>, Vec<Arbiter>) {
         let mut part_actors = Vec::new();
         let mut arbiters = Vec::new();
@@ -976,6 +979,7 @@ impl IrysNode {
                 false, // do not start mining automatically
                 vdf_steps_guard.clone(),
                 atomic_global_step_number.clone(),
+                initial_difficulty,
             );
             let part_arbiter = Arbiter::new();
             let partition_mining_actor =
@@ -1072,6 +1076,7 @@ impl IrysNode {
         &self,
         irys_db: &DatabaseProvider,
         service_senders: &ServiceSenders,
+        epoch_service: &Addr<EpochServiceActor>,
         block_index_guard: &BlockIndexReadGuard,
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
@@ -1087,6 +1092,8 @@ impl IrysNode {
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
             gossip_sender,
+            epoch_service: epoch_service.clone(),
+            epoch_config: self.epoch_config.clone(),
         };
         let block_discovery_arbiter = Arbiter::new();
         let block_discovery =
@@ -1230,14 +1237,19 @@ impl IrysNode {
         ),
         eyre::Error,
     > {
-        let mut epoch_service = EpochServiceActor::new(
-            self.epoch_config.clone(),
-            &self.config,
-            block_index_guard.clone(),
-        );
+        let epoch_service_config = EpochServiceConfig::new(&self.config);
+        let (genesis_block, commitments, epoch_replay_data) =
+            EpochReplayData::query_replay_data(irys_db, block_index_guard, &epoch_service_config)?;
+
+        let mut epoch_service = EpochServiceActor::new(self.epoch_config.clone(), &self.config);
+        let _storage_module_infos = epoch_service.initialize(
+            genesis_block,
+            commitments,
+            self.storage_submodule_config.clone(),
+        )?;
+
         let storage_module_infos = epoch_service
-            .initialize(irys_db, self.storage_submodule_config.clone())
-            .await?;
+            .replay_epoch_data(epoch_replay_data, self.storage_submodule_config.clone())?;
         let epoch_service_actor = epoch_service.start();
         Ok((storage_module_infos, epoch_service_actor))
     }
