@@ -14,7 +14,7 @@ use alloy_core::primitives::U256;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
 use irys_types::{build_user_agent, irys::IrysSigner, PeerResponse, RethPeerInfo, VersionRequest};
-use irys_types::{Config, PeerAddress};
+use irys_types::{Address, Config, PeerAddress};
 use reth_primitives::GenesisAccount;
 use tracing::{debug, error};
 
@@ -96,7 +96,6 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     // different IP addresses
     let miner_signer_1 = IrysSigner::random_signer(&test_config);
     let version_request = VersionRequest {
-        mining_address: miner_signer_1.address(),
         chain_id: miner_signer_1.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.1:8080".parse().expect("valid socket address"),
@@ -104,7 +103,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
             execution: RethPeerInfo {
                 peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
                 peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
-            }
+            },
+            mining_address: miner_signer_1.address(),
         },
         user_agent: Some(build_user_agent("miner1", "0.1.0")),
         ..Default::default()
@@ -138,7 +138,6 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let version_json = serde_json::json!({
         "version": "0.1.0",
         "protocol_version": "V1",
-        "mining_address": miner_signer_2.address(),
         "chain_id": miner_signer_2.chain_id,
         "address": {
             "gossip": "127.0.0.2:8080",
@@ -146,7 +145,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
             "execution": {
                 "peering_tcp_addr": "127.0.0.2:8082",
                 "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-            }
+            },
+            "mining_address": miner_signer_2.address(),
         },
         "user_agent": build_user_agent("miner2", "0.1.0"),
         "timestamp": timestamp
@@ -176,7 +176,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                     execution: RethPeerInfo {
                         peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
                         peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
-                    }
+                    },
+                    mining_address: Address::with_last_byte(1),
                 }),
                 "Missing expected peer 127.0.0.1:8080"
             );
@@ -186,7 +187,6 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     let miner_signer_3 = IrysSigner::random_signer(&test_config);
     let version_request = VersionRequest {
-        mining_address: miner_signer_3.address(),
         chain_id: miner_signer_3.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
@@ -194,7 +194,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
             execution: RethPeerInfo {
                 peering_tcp_addr: "127.0.0.3:8082".parse().unwrap(),
                 peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
-            }
+            },
+            mining_address: miner_signer_3.address(),
         },
         user_agent: Some(build_user_agent("miner3", "0.1.0")),
         ..Default::default()
@@ -223,7 +224,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                     execution: RethPeerInfo {
                         peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
                         peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
-                    }
+                    },
+                    mining_address: Address::with_last_byte(1),
                 }),
                 "Missing expected peer 127.0.0.1:8080"
             );
@@ -234,7 +236,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                     execution: RethPeerInfo {
                         peering_tcp_addr: "127.0.0.2:8082".parse().unwrap(),
                         peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
-                    }
+                    },
+                    mining_address: Address::with_last_byte(2),
                 }),
                 "Missing expected peer 127.0.0.2:8080"
             );
@@ -260,7 +263,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 execution: RethPeerInfo {
                     peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
                     peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
-                }
+                },
+                mining_address: Address::with_last_byte(1),
             },
             PeerAddress {
                 gossip: "127.0.0.2:8080".parse::<SocketAddr>().unwrap(),
@@ -268,7 +272,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 execution: RethPeerInfo {
                     peering_tcp_addr: "127.0.0.2:8082".parse().unwrap(),
                     peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
-                }
+                },
+                mining_address: Address::with_last_byte(2),
             },
             PeerAddress {
                 gossip: "127.0.0.3:8080".parse::<SocketAddr>().unwrap(),
@@ -276,7 +281,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 execution: RethPeerInfo {
                     peering_tcp_addr: "127.0.0.3:8082".parse().unwrap(),
                     peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
-                }
+                },
+                mining_address: Address::with_last_byte(3),
             },
         ]
         .iter()

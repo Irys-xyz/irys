@@ -189,6 +189,7 @@ impl Config {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
+                mining_address: Address::ZERO,
             }],
             gossip_service_bind_ip: "127.0.0.1".into(),
             gossip_service_port: 0,

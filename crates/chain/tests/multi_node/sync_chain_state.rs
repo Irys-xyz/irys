@@ -10,7 +10,7 @@ use irys_chain::{
 };
 use irys_config::IrysNodeConfig;
 use irys_database::BlockIndexItem;
-use irys_types::{irys::IrysSigner, Config, IrysTransaction, PeerAddress, RethPeerInfo};
+use irys_types::{irys::IrysSigner, Address, Config, IrysTransaction, PeerAddress, RethPeerInfo};
 use reth_primitives::irys_primitives::IrysTxId;
 use reth_primitives::GenesisAccount;
 use std::collections::HashMap;
@@ -39,6 +39,7 @@ async fn heavy_test_p2p() -> eyre::Result<()> {
         .parse()
         .expect("valid SocketAddr expected"),
         execution: genesis.node_ctx.config.reth_peer_info,
+        mining_address: Address::ZERO,
     };
 
     let (peer1, peer2) = start_peer_nodes(
@@ -325,22 +326,26 @@ fn init_peers() -> (Vec<PeerAddress>, Vec<PeerAddress>) {
         api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
         gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
         execution: RethPeerInfo::default(),
+        mining_address: Address::ZERO,
     }];
     let genesis_trusted_peers = vec![
         PeerAddress {
             api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
+            mining_address: Address::ZERO,
         },
         PeerAddress {
             api: "127.0.0.2:1234".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.2:1235".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
+            mining_address: Address::with_last_byte(1),
         },
         PeerAddress {
             api: "127.0.0.3:1234".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.3:1235".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
+            mining_address: Address::with_last_byte(2),
         },
     ];
     (trusted_peers, genesis_trusted_peers)
