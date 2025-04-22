@@ -109,9 +109,10 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf_step() {
-        let config = Config::testnet();
+        let config = Config::new(NodeConfig::testnet());
         let mut hasher = Sha256::new();
-        let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+        let mut checkpoints: Vec<H256> =
+            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
         let mut hash: H256 = H256::random();
         let original_hash = hash;
         let mut salt: U256 = U256::from(10);
@@ -119,16 +120,14 @@ mod tests {
 
         init_tracing();
 
-        let config = VDFStepsConfig::new(&config);
-
-        debug!("VDF difficulty: {}", config.vdf_difficulty);
+        debug!("VDF difficulty: {}", config.consensus.vdf.sha_1s_difficulty);
         let now = Instant::now();
         vdf_sha(
             &mut hasher,
             &mut salt,
             &mut hash,
-            config.num_checkpoints_in_vdf_step,
-            config.vdf_difficulty,
+            config.consensus.vdf.num_checkpoints_in_vdf_step,
+            config.consensus.vdf.sha_1s_difficulty,
             &mut checkpoints,
         );
         let elapsed = now.elapsed();
@@ -138,8 +137,8 @@ mod tests {
         let checkpoints2 = vdf_sha_verification(
             original_salt,
             original_hash,
-            config.num_checkpoints_in_vdf_step,
-            config.vdf_difficulty as usize,
+            config.consensus.vdf.num_checkpoints_in_vdf_step,
+            config.consensus.vdf.sha_1s_difficulty as usize,
         );
         let elapsed = now.elapsed();
         debug!("vdf original code verification: {:.2?}", elapsed);
@@ -149,13 +148,13 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf_service() {
-        let mut config = Config::testnet();
-        config.vdf_reset_frequency = 2;
-        config.vdf_sha_1s = 1;
+        let mut config = NodeConfig::testnet();
+        config.consensus.get_mut().vdf.reset_frequency = 2;
+        config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new(config);
+
         let seed = H256::random();
         let reset_seed = H256::random();
-
-        let vdf_config = VDFStepsConfig::new(&config);
 
         init_tracing();
 
@@ -165,24 +164,26 @@ mod tests {
         SystemRegistry::set(vdf_service.clone());
         let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();
 
-        let vdf_config2 = vdf_config.clone();
         let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
-        let vdf_thread_handler = std::thread::spawn(move || {
-            run_vdf(
-                vdf_config2,
-                0,
-                seed,
-                reset_seed,
-                new_seed_rx,
-                shutdown_rx,
-                broadcast_mining_service,
-                vdf_service,
-                atomic_global_step_number,
-            )
+        let vdf_thread_handler = std::thread::spawn({
+            let config = config.clone();
+            move || {
+                run_vdf(
+                    &config.consensus.vdf,
+                    0,
+                    seed,
+                    reset_seed,
+                    new_seed_rx,
+                    shutdown_rx,
+                    broadcast_mining_service,
+                    vdf_service,
+                    atomic_global_step_number,
+                )
+            }
         });
 
         // wait for some vdf steps
@@ -200,20 +201,23 @@ mod tests {
 
         // calculate last step checkpoints
         let mut hasher = Sha256::new();
-        let mut salt = U256::from(step_number_to_salt_number(&vdf_config, step_num - 1_u64));
+        let mut salt = U256::from(step_number_to_salt_number(
+            &config.consensus.vdf,
+            step_num - 1_u64,
+        ));
         let mut seed = steps[2];
 
         let mut checkpoints: Vec<H256> =
-            vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
-        if step_num > 0 && (step_num - 1) % vdf_config.vdf_reset_frequency as u64 == 0 {
+            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+        if step_num > 0 && (step_num - 1) % config.consensus.vdf.reset_frequency as u64 == 0 {
             seed = apply_reset_seed(seed, reset_seed);
         }
         vdf_sha(
             &mut hasher,
             &mut salt,
             &mut seed,
-            vdf_config.num_checkpoints_in_vdf_step,
-            vdf_config.vdf_difficulty,
+            config.consensus.vdf.num_checkpoints_in_vdf_step,
+            config.consensus.vdf.sha_1s_difficulty,
             &mut checkpoints,
         );
 
@@ -228,7 +232,7 @@ mod tests {
         };
 
         assert!(
-            vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_steps).is_ok(),
+            vdf_steps_are_valid(&vdf_info, &config.consensus.vdf, vdf_steps).is_ok(),
             "Invalid VDF"
         );
 

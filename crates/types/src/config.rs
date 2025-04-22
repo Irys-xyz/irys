@@ -14,6 +14,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::{env, ops::Deref, path::PathBuf, sync::Arc};
 
+/// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
 pub struct Config(Arc<CombinedConfigInner>);
 

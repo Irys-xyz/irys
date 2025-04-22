@@ -7,7 +7,9 @@ use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, routes::tx::IrysTransaction, ApiState};
 use irys_database::database;
-use irys_types::{irys::IrysSigner, CommitmentTransaction, Config, IrysTransactionHeader, H256};
+use irys_types::{
+    irys::IrysSigner, CommitmentTransaction, IrysTransactionHeader, NodeConfig, H256,
+};
 use reth_db::Database;
 use reth_primitives::GenesisAccount;
 use tokio::time::Duration;
@@ -16,17 +18,19 @@ use tracing::{error, info};
 #[actix_web::test]
 async fn test_get_tx() -> eyre::Result<()> {
     let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
-    let test_config = Config::testnet();
-    let signer = IrysSigner::random_signer(&test_config);
-    let mut node = IrysNodeTest::new_genesis(test_config.clone()).await;
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![(
+    let mut config = NodeConfig::testnet();
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![(
         signer.address(),
         GenesisAccount {
             balance: U256::from(690000000000000000_u128),
             ..Default::default()
         },
     )]);
-    let node = node.start().await;
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .await
+        .start()
+        .await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
@@ -78,7 +82,7 @@ async fn test_get_tx() -> eyre::Result<()> {
         mempool: node.node_ctx.actor_addresses.mempool.clone(),
         peer_list: node.node_ctx.actor_addresses.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
-        config: test_config,
+        config: config.into(),
     };
 
     // Start the actix webserver

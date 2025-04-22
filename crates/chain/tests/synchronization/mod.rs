@@ -3,8 +3,8 @@ use alloy_eips::BlockNumberOrTag;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
-use irys_types::irys::IrysSigner;
 use irys_types::IrysTransactionHeader;
+use irys_types::{irys::IrysSigner, NodeConfig};
 
 use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
 use reth::rpc::eth::EthApiServer;
@@ -13,12 +13,12 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-// #[test_log::test(actix_web::test)]
+#[test_log::test(actix_web::test)]
 async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
-    let mut node = IrysNodeTest::default_async().await;
-    let main_address = node.cfg.miner_address();
-    let account1 = IrysSigner::random_signer(&node.cfg.consensus_config());
-    let extend_accounts = vec![
+    let mut config = NodeConfig::testnet();
+    let account1 = IrysSigner::random_signer(&config.consensus_config());
+    let main_address = config.miner_address();
+    config.consensus.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -33,14 +33,11 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
                 ..Default::default()
             },
         ),
-    ];
-    node.cfg
-        .consensus
-        .custom()
-        .reth
-        .genesis
-        .extend_genesis_accounts(extend_accounts);
-    let node = node.start().await;
+    ]);
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .await
+        .start()
+        .await;
 
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
@@ -48,7 +45,10 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     )
     .await?;
 
-    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.api_port);
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.port
+    );
 
     // server should be running
     // check with request to `/v1/info`
