@@ -8,6 +8,7 @@ use crate::{
     mining::{MiningControl, PartitionMiningActor},
     packing::PackingActor,
     peer_list_service::PeerListService,
+    reth_service::RethServiceActor,
     EpochServiceActor,
 };
 
@@ -23,6 +24,7 @@ pub struct ActorAddresses {
     pub block_index: Addr<BlockIndexService>,
     pub epoch_service: Addr<EpochServiceActor>,
     pub peer_list: Addr<PeerListService>,
+    pub reth: Addr<RethServiceActor>,
 }
 
 impl ActorAddresses {
