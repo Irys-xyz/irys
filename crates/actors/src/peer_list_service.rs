@@ -45,18 +45,21 @@ impl PeerListService {
             client: Client::new(),
 
             irys_api: IrysApiClient::new(),
-            chain_id: config.chain_id,
-            miner_address: config.miner_address(),
+            chain_id: config.consensus.chain_id,
+            miner_address: config.node_config.miner_address(),
             peer_address: PeerAddress {
                 gossip: format!(
                     "{}:{}",
-                    config.gossip_service_bind_ip, config.gossip_service_port
+                    config.node_config.gossip.bind_ip, config.node_config.gossip.port
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),
-                api: format!("{}:{}", config.api_bind_ip, config.api_port)
-                    .parse()
-                    .expect("valid SocketAddr expected"),
+                api: format!(
+                    "{}:{}",
+                    config.node_config.gossip.bind_ip, config.node_config.gossip.port
+                )
+                .parse()
+                .expect("valid SocketAddr expected"),
             },
         }
     }

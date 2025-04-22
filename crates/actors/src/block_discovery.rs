@@ -2,9 +2,7 @@ use crate::{
     block_index_service::BlockIndexReadGuard,
     block_tree_service::BlockTreeService,
     block_validation::prevalidate_block,
-    epoch_service::{
-        EpochServiceActor, EpochServiceConfig, NewEpochMessage, PartitionAssignmentsReadGuard,
-    },
+    epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
 };
 use actix::prelude::*;
@@ -12,8 +10,8 @@ use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
 use irys_types::{
-    Config, ConsensusConfig, DatabaseProvider, DifficultyAdjustmentConfig, GossipData,
-    IrysBlockHeader, IrysTransactionHeader, StorageSyncConfig, VdfConfig,
+    CommitmentTransaction, Config, ConsensusConfig, DatabaseProvider, DifficultyAdjustmentConfig,
+    GossipData, IrysBlockHeader, IrysTransactionHeader, StorageSyncConfig, VdfConfig,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
@@ -25,8 +23,6 @@ use tracing::info;
 pub struct BlockDiscoveryActor {
     /// Tracks the global state of partition assignments on the protocol
     pub epoch_service: Addr<EpochServiceActor>,
-    /// Reference to epoch config to determine epoch length
-    pub epoch_config: EpochServiceConfig,
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
@@ -71,7 +67,6 @@ impl BlockDiscoveryActor {
         vdf_steps_guard: VdfStepsReadGuard,
         service_senders: ServiceSenders,
         epoch_service: Addr<EpochServiceActor>,
-        epoch_config: EpochServiceConfig,
         gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         Self {
@@ -233,7 +228,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let ema_service_sender = self.service_senders.ema.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_service = self.epoch_service.clone();
-        let epoch_config = self.epoch_config.clone();
+        let epoch_config = self.config.consensus.epoch.clone();
 
         info!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,

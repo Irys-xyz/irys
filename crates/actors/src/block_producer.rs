@@ -305,7 +305,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let mut last_epoch_hash = prev_block_header.last_epoch_hash;
 
             // If this is the first block following an epoch boundary block
-            if block_height > 0 && block_height % blocks_in_epoch == 1 {
+            if block_height > 0 && block_height % config.consensus.epoch.num_blocks_in_epoch == 1 {
                 // Record the hash of the epoch block (previous block) as our epoch reference
                 last_epoch_hash = prev_block_hash;
             }

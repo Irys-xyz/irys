@@ -5,9 +5,8 @@ use irys_database::{
     block_header_by_hash, BlockIndex, BlockIndexItem, DataLedger, LedgerIndexItem,
 };
 use irys_types::{
-    ConsensusConfig,
-    DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageSyncConfig, H256, U256,
-,
+    ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageSyncConfig,
+    H256, U256,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock, RwLockReadGuard};

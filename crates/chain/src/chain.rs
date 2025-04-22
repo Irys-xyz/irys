@@ -667,7 +667,7 @@ impl IrysNode {
             EmaService::spawn_service(&task_exec, block_tree_guard.clone(), receivers.ema, &config);
 
         // Spawn peer list service
-        let (peer_list_service, peer_list_arbiter) = init_peer_list_service(&irys_db, &self.config);
+        let (peer_list_service, peer_list_arbiter) = init_peer_list_service(&irys_db, &config);
 
         // Spawn the mempool service
         let (mempool_service, mempool_arbiter) = Self::init_mempools_service(
@@ -1064,7 +1064,6 @@ impl IrysNode {
             service_senders: service_senders.clone(),
             gossip_sender,
             epoch_service: epoch_service.clone(),
-            epoch_config: self.epoch_config.clone(),
         };
         let block_discovery_arbiter = Arbiter::new();
         let block_discovery =
@@ -1190,26 +1189,24 @@ impl IrysNode {
         config: &Config,
         irys_db: &DatabaseProvider,
         block_index_guard: &BlockIndexReadGuard,
-    ) -> Result<
-        (
-            Vec<irys_storage::StorageModuleInfo>,
-            actix::Addr<EpochServiceActor>,
-        ),
-        eyre::Error,
-    > {
-        let epoch_service_config = EpochServiceConfig::new(&self.config);
+    ) -> eyre::Result<(
+        Vec<irys_storage::StorageModuleInfo>,
+        actix::Addr<EpochServiceActor>,
+    )> {
         let (genesis_block, commitments, epoch_replay_data) =
-            EpochReplayData::query_replay_data(irys_db, block_index_guard, &epoch_service_config)?;
+            EpochReplayData::query_replay_data(irys_db, block_index_guard, &config)?;
 
-        let mut epoch_service = EpochServiceActor::new(self.epoch_config.clone(), &self.config);
+        let storage_submodule_config =
+            StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
+        let mut epoch_service = EpochServiceActor::new(&config);
         let _storage_module_infos = epoch_service.initialize(
             genesis_block,
             commitments,
-            self.storage_submodule_config.clone(),
+            storage_submodule_config.clone(),
         )?;
 
-        let storage_module_infos = epoch_service
-            .replay_epoch_data(epoch_replay_data, self.storage_submodule_config.clone())?;
+        let storage_module_infos =
+            epoch_service.replay_epoch_data(epoch_replay_data, storage_submodule_config)?;
         let epoch_service_actor = epoch_service.start();
         Ok((storage_module_infos, epoch_service_actor))
     }

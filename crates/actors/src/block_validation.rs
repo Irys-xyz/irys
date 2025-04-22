@@ -10,8 +10,8 @@ use irys_database::DataLedger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
 use irys_types::{
-    calculate_difficulty, next_cumulative_diff, validate_path, Address, Config,
-    ConsensusConfig, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
+    calculate_difficulty, next_cumulative_diff, validate_path, Address, Config, ConsensusConfig,
+    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::vdf_state::VdfStepsReadGuard;
@@ -522,12 +522,7 @@ mod tests {
             BlockIndexService::new(block_index.clone(), &consensus_config).start();
         SystemRegistry::set(block_index_actor.clone());
 
-        let block_index_guard = block_index_actor
-            .send(GetBlockIndexGuardMessage)
-            .await
-            .unwrap();
-
-        let epoch_service = EpochServiceActor::new(&config, block_index_guard);
+        let epoch_service = EpochServiceActor::new(&config);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers

@@ -10,7 +10,10 @@ use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     IrysBlockHeader, SimpleRNG, H256,
 };
-use irys_types::{partition_chunk_offset_ie, Address, CommitmentTransaction, PartitionChunkOffset};
+use irys_types::{
+    partition_chunk_offset_ie, Address, CommitmentTransaction, ConsensusConfig,
+    PartitionChunkOffset,
+};
 use irys_types::{Config, H256List};
 use openssl::sha;
 use std::{
@@ -22,10 +25,7 @@ use tracing::{debug, error, trace, warn};
 
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
 
-use super::{
-    CommitmentState, CommitmentStateEntry, EpochReplayData, EpochServiceConfig,
-    PartitionAssignments,
-};
+use super::{CommitmentState, CommitmentStateEntry, EpochReplayData, PartitionAssignments};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug)]
@@ -41,7 +41,7 @@ pub struct EpochServiceActor {
     /// List of partition hashes not yet assigned to a mining address
     pub unassigned_partitions: Vec<PartitionHash>,
     /// Current partition & ledger parameters
-    pub config: EpochServiceConfig,
+    pub config: Config,
     /// Computed commitment state
     pub(super) commitment_state: Arc<RwLock<CommitmentState>>,
 }
@@ -65,14 +65,14 @@ pub enum EpochServiceError {
 
 impl EpochServiceActor {
     /// Create a new instance of the epoch service actor
-    pub fn new(epoch_config: EpochServiceConfig, config: &Config) -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
             last_epoch_hash: H256::zero(),
             ledgers: Arc::new(RwLock::new(Ledgers::new(&config.consensus))),
             partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
-            config: epoch_config,
+            config: config.clone(),
             commitment_state: Default::default(),
         }
     }
@@ -155,10 +155,10 @@ impl EpochServiceActor {
     }
 
     fn is_epoch_block(&self, block_header: &IrysBlockHeader) -> Result<(), EpochServiceError> {
-        if block_header.height % self.config.num_blocks_in_epoch != 0 {
+        if block_header.height % self.config.consensus.epoch.num_blocks_in_epoch != 0 {
             error!(
                 "Not an epoch block height: {} num_blocks_in_epoch: {}",
-                block_header.height, self.config.num_blocks_in_epoch
+                block_header.height, self.config.consensus.epoch.num_blocks_in_epoch
             );
             return Err(EpochServiceError::NotAnEpochBlock);
         }
@@ -176,7 +176,7 @@ impl EpochServiceActor {
         self.is_epoch_block(new_epoch_block)?;
 
         // Skip previous block validation for genesis block (height 0)
-        if new_epoch_block.height <= self.config.num_blocks_in_epoch {
+        if new_epoch_block.height <= self.config.consensus.epoch.num_blocks_in_epoch {
             // Continue with validation logic for commitments
         } else {
             // For non-genesis blocks, previous epoch block must exist and have correct height
@@ -185,7 +185,9 @@ impl EpochServiceActor {
                 .ok_or(EpochServiceError::IncorrectPreviousEpochBlock)?;
 
             // Validate the previous epoch block is the correct height
-            if prev_block.height + self.config.num_blocks_in_epoch != new_epoch_block.height {
+            if prev_block.height + self.config.consensus.epoch.num_blocks_in_epoch
+                != new_epoch_block.height
+            {
                 return Err(EpochServiceError::IncorrectPreviousEpochBlock);
             }
         }
@@ -531,7 +533,7 @@ impl EpochServiceActor {
         let num_slots = data_ledger.slot_count() as u64;
         drop(ledgers);
 
-        let num_chunks_in_partition = self.config.storage_config.num_chunks_in_partition;
+        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
         let max_ledger_capacity = num_slots * num_chunks_in_partition;
         let ledger_size = new_epoch_block.data_ledgers[ledger].max_chunk_offset;
 
@@ -547,7 +549,7 @@ impl EpochServiceActor {
 
         // STRATEGY 2: Growth-based capacity expansion
         // Add slots proportional to data ingress rate from previous epoch
-        if new_epoch_block.height >= self.config.num_blocks_in_epoch {
+        if new_epoch_block.height >= self.config.consensus.epoch.num_blocks_in_epoch {
             let previous_ledger_size = previous_epoch_block
                 .as_ref()
                 .map_or(0, |prev| prev.data_ledgers[ledger].max_chunk_offset);
