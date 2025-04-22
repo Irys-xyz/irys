@@ -8,11 +8,11 @@ use crate::{
 };
 use alloy_primitives::Address;
 use reth_chainspec::{Chain, ChainHardforks, ChainSpecBuilder};
-use reth_primitives::{Genesis, GenesisAccount};
+use reth_primitives::{constants::ETHEREUM_BLOCK_GAS_LIMIT, Genesis, GenesisAccount};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use std::{env, ops::Deref, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, env, ops::Deref, path::PathBuf, sync::Arc};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -409,6 +409,7 @@ impl ConsensusConfig {
 
     pub fn testnet() -> Self {
         const DEFAULT_BLOCK_TIME: u64 = 1;
+        const IRYS_TESTNET_CHAIN_ID: u64 = 1270;
 
         Self {
             chain_id: 1270,
@@ -448,7 +449,41 @@ impl ConsensusConfig {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
-            reth: todo!(),
+            reth: RethChainSpec {
+                chain: Chain::from_id(IRYS_TESTNET_CHAIN_ID),
+                genesis: Genesis {
+                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT,
+                    alloc: {
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            Address::from_slice(
+                                hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
+                                    .unwrap()
+                                    .as_slice(),
+                            ),
+                            GenesisAccount {
+                                balance: alloy_primitives::U256::from(690000000000000000_u128),
+                                ..Default::default()
+                            },
+                        );
+                        map.insert(
+                            Address::from_slice(
+                                hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
+                                    .unwrap()
+                                    .as_slice(),
+                            ),
+                            GenesisAccount {
+                                balance: alloy_primitives::U256::from(
+                                    1_000_000_000_000_000_000_000_000_u128,
+                                ),
+                                ..Default::default()
+                            },
+                        );
+                        map
+                    },
+                    ..Default::default()
+                },
+            },
         }
     }
 }
@@ -624,26 +659,7 @@ mod tests {
     #[test]
     fn test_deserialize_consensus_config_from_toml() {
         let toml_data = r#"
-            chain_id = 1270
-            annual_cost_per_gb = 0.01
-            decay_rate = 0.01
-            safe_minimum_number_of_years = 200
-            number_of_ingerss_proofs = 10
-            genesis_price = 1.0
-            token_price_safe_range = 1.0
-            chunk_size = 262144
-            num_chunks_in_partition = 10
-            num_chunks_in_recall_range = 2
-            num_partitions_per_slot = 1
-
-            [ema]
-            price_adjustment_interval = 10
-
-            [vdf]
-            vdf_reset_frequency = 1200
-            vdf_parallel_verification_thread_limit = 4
-            num_checkpoints_in_vdf_step = 25
-            vdf_sha_1s = 7000
+        
         "#;
 
         // Deserialize the TOML string into a ConsensusConfig
@@ -679,14 +695,35 @@ mod tests {
             num_partitions_per_slot: 1,
             entropy_packing_iterations: 1000,
             epoch: EpochConfig {
-                capacity_scalar: todo!(),
-                num_blocks_in_epoch: todo!(),
-                submit_ledger_epoch_length: todo!(),
-                num_capacity_partitions: todo!(),
+                capacity_scalar: 100,
+                num_blocks_in_epoch: 100,
+                submit_ledger_epoch_length: 5,
+                num_capacity_partitions: None,
             },
             number_of_ingerss_proofs: 10,
             safe_minimum_number_of_years: 200,
-            reth: todo!(),
+            reth: RethChainSpec {
+                chain: Chain::from_id(123),
+                genesis: Genesis {
+                    gas_limit: 100,
+                    alloc: {
+                        let mut map = BTreeMap::new();
+                        map.insert(
+                            Address::from_slice(
+                                hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
+                                    .unwrap()
+                                    .as_slice(),
+                            ),
+                            GenesisAccount {
+                                balance: alloy_primitives::U256::from(1),
+                                ..Default::default()
+                            },
+                        );
+                        map
+                    },
+                    ..Default::default()
+                },
+            },
         };
 
         // Assert the entire struct matches
@@ -696,54 +733,7 @@ mod tests {
     #[test]
     fn test_deserialize_config_from_toml() {
         let toml_data = r#"
-            mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
-
-            [mode]
-            type = "genesis"
-
-            [consensus_cfg]
-            type = "testnet"
-
-            [difficulty_adjustment]
-            max_adjustment_factor = 4
-            min_adjustment_factor = 0.25
-            adjustment_interval = 100
-
-            [mempool]
-            max_data_txs_per_block = 20
-
-            [oracle]
-            type = "mock"
-            initial_price = 1
-            percent_change = 0.01
-            smoothing_interval = 15
-
-            [storage]
-            base_directory = "~/.irys"
-            chunk_size = 262144
-            num_chunks_in_partition = 10
-            num_chunks_in_recall_range = 2
-            num_partitions_per_slot = 1
-            number_of_ingerss_proofs = 10
-            safe_minimum_number_of_years = 200
-
-            [pricing]
-            fee_percentage = 0.05
-
-            [gossip]
-            service_bind_ip = "127.0.0.1"
-            service_port = 8081
-
-            [packing]
-            cpu_concurrency = 4
-            gpu_batch_size = 1024
-
-            [cache]
-            clean_lag = 2
-
-            [http]
-            port = 8080
-
+        
         "#;
 
         // Deserialize the TOML string into a NodeConfig
