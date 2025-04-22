@@ -511,12 +511,17 @@ impl NodeConfig {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn testnet() -> Self {
+        use std::{net::SocketAddr, str::FromStr};
+
         use k256::ecdsa::SigningKey;
         use rust_decimal_macros::dec;
 
         Self {
             mode: NodeMode::Genesis,
-            trusted_peers: vec![],
+            trusted_peers: vec![PeerAddress {
+                gossip: SocketAddr::from_str("127.0.0.1:8081").unwrap(),
+                api: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
+            }],
             consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
             base_directory: default_irys_path(),
             mempool: MempoolConfig {

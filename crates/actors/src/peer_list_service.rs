@@ -36,7 +36,7 @@ impl PeerListService {
     /// Create a new instance of the peer_list_service actor passing in a reference
     /// counted reference to a `DatabaseEnv`
     pub fn new(db: DatabaseProvider, config: &Config) -> Self {
-        println!("service started: peer_list");
+        tracing::info!("service started: peer_list");
         Self {
             db: Some(db),
             gossip_addr_to_mining_addr_map: HashMap::new(),

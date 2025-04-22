@@ -363,37 +363,36 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
+
         // load peers from config into our database
-        if let NodeMode::PeerSync = &ctx.config.node_config.mode {
-            for peer_address in ctx.config.node_config.trusted_peers.iter() {
-                let peer_list_entry = PeerListItem {
-                    address: peer_address.clone(),
-                    ..Default::default()
-                };
+        for peer_address in ctx.config.node_config.trusted_peers.iter() {
+            let peer_list_entry = PeerListItem {
+                address: peer_address.clone(),
+                ..Default::default()
+            };
 
-                if let Err(e) = ctx
-                    .actor_addresses
-                    .peer_list
-                    .send(AddPeer {
-                        mining_addr: Address::random(),
-                        peer: peer_list_entry,
-                    })
-                    .await
-                {
-                    error!("Unable to send AddPeerMessage message {e}");
-                };
-            }
+            if let Err(e) = ctx
+                .actor_addresses
+                .peer_list
+                .send(AddPeer {
+                    mining_addr: Address::random(),
+                    peer: peer_list_entry,
+                })
+                .await
+            {
+                error!("Unable to send AddPeerMessage message {e}");
+            };
+        }
 
-            // if we are an empty node joining an existing network
-            if !self.data_exists {
-                sync_state_from_peers(
-                    ctx.config.node_config.trusted_peers.clone(),
-                    ctx.actor_addresses.block_discovery_addr.clone(),
-                    ctx.actor_addresses.mempool.clone(),
-                    ctx.actor_addresses.peer_list.clone(),
-                )
-                .await?;
-            }
+        // if we are an empty node joining an existing network
+        if !self.data_exists && !matches!(self.config.node_config.mode, NodeMode::Genesis) {
+            sync_state_from_peers(
+                ctx.config.node_config.trusted_peers.clone(),
+                ctx.actor_addresses.block_discovery_addr.clone(),
+                ctx.actor_addresses.mempool.clone(),
+                ctx.actor_addresses.peer_list.clone(),
+            )
+            .await?;
         }
 
         Ok(ctx)
