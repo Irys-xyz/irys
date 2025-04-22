@@ -1,4 +1,4 @@
-use crate::{Compact, PeerAddress};
+use crate::{Address, Compact, PeerAddress};
 use actix::Message;
 use arbitrary::Arbitrary;
 use bytes::Buf;
@@ -58,6 +58,7 @@ impl Default for PeerListItem {
                 gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                 api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                 execution: RethPeerInfo::default(),
+                mining_address: Address::ZERO,
             },
             last_seen: Utc::now().timestamp_millis() as u64,
             is_online: true,
@@ -235,6 +236,7 @@ impl Compact for PeerListItem {
                         gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                         api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                         execution: RethPeerInfo::default(),
+                        mining_address: Address::ZERO,
                     },
                     last_seen: 0,
                     is_online: false,
@@ -257,6 +259,7 @@ impl Compact for PeerListItem {
             gossip: gossip_address,
             api: api_address,
             execution: reth_peer_info,
+            mining_address: Address::ZERO,
         };
 
         // Read last_seen if available

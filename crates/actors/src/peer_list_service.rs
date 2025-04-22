@@ -87,6 +87,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                     .parse()
                     .expect("valid SocketAddr expected"),
                 execution: config.reth_peer_info,
+                mining_address: config.miner_address(),
             },
         }
     }
@@ -334,7 +335,6 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
 
     fn create_version_request(&self) -> VersionRequest {
         VersionRequest {
-            mining_address: self.miner_address,
             address: self.peer_address,
             chain_id: self.chain_id,
             user_agent: Some(format!("Irys-Node-{}", env!("CARGO_PKG_VERSION"))),
@@ -744,6 +744,7 @@ mod tests {
             gossip: gossip_addr,
             api: api_addr,
             execution: RethPeerInfo::default(),
+            mining_address: mining_addr,
         };
 
         let peer = PeerListItem {
@@ -1240,6 +1241,7 @@ mod tests {
             gossip: initial_gossip_addr,
             api: initial_api_addr,
             execution: RethPeerInfo::default(),
+            mining_address: Address::ZERO,
         };
 
         let initial_peer = PeerListItem {
@@ -1276,6 +1278,7 @@ mod tests {
             gossip: new_gossip_addr,
             api: new_api_addr,
             execution: RethPeerInfo::default(),
+            mining_address: Address::with_last_byte(1),
         };
 
         let updated_peer = PeerListItem {

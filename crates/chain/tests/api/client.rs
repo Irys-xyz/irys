@@ -4,7 +4,8 @@ use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    AcceptedResponse, PeerAddress, PeerResponse, ProtocolVersion, RethPeerInfo, VersionRequest,
+    AcceptedResponse, Address, PeerAddress, PeerResponse, ProtocolVersion, RethPeerInfo,
+    VersionRequest,
 };
 use semver::Version;
 use std::net::{IpAddr, SocketAddr};
@@ -26,6 +27,7 @@ async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: So
             gossip: SocketAddr::from_str("127.0.0.1:8081").unwrap(),
             api: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
             execution: RethPeerInfo::default(),
+            mining_address: Address::ZERO,
         }],
         timestamp: 1744920031378,
         message: Some("Welcome to the network ".to_string()),
