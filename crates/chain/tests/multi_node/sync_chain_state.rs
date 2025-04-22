@@ -387,8 +387,8 @@ fn init_configs() -> (Config, Config, Config, Vec<PeerAddress>, Vec<PeerAddress>
         testnet_config_genesis,
         testnet_config_peer1,
         testnet_config_peer2,
-        genesis_trusted_peers,
         trusted_peers,
+        genesis_trusted_peers,
     )
 }
 
