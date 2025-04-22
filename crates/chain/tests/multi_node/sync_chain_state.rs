@@ -338,6 +338,7 @@ fn init_configs() -> (Config, Config, Config, Vec<PeerAddress>, Vec<PeerAddress>
     };
     let mut testnet_config_peer1 = Config {
         api_port: 0, //random port
+        gossip_service_port: 8083,
         mining_key: SigningKey::from_slice(
             &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d1")
                 .expect("valid hex"),
@@ -347,6 +348,7 @@ fn init_configs() -> (Config, Config, Config, Vec<PeerAddress>, Vec<PeerAddress>
     };
     let mut testnet_config_peer2 = Config {
         api_port: 0, //random port
+        gossip_service_port: 8085,
         mining_key: SigningKey::from_slice(
             &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d2")
                 .expect("valid hex"),
@@ -368,14 +370,14 @@ fn init_configs() -> (Config, Config, Config, Vec<PeerAddress>, Vec<PeerAddress>
             mining_address: testnet_config_genesis.miner_address(),
         },
         PeerAddress {
-            api: "127.0.0.2:1234".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.2:1235".parse().expect("valid SocketAddr expected"),
+            api: "127.0.0.1:8082".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.1:8083".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
             mining_address: testnet_config_peer1.miner_address(),
         },
         PeerAddress {
-            api: "127.0.0.3:1234".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.3:1235".parse().expect("valid SocketAddr expected"),
+            api: "127.0.0.1:8084".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.1:8085".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
             mining_address: testnet_config_peer2.miner_address(),
         },
