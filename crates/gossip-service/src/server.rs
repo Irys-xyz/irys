@@ -140,7 +140,6 @@ where
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone,
 {
-    tracing::debug!("Gossip data received: {:?}", irys_block_header_json);
     let mut peer = match check_peer(&server.peer_list, &req).await {
         Ok(peer_address) => peer_address,
         Err(error_response) => return error_response,
@@ -173,7 +172,6 @@ where
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone,
 {
-    tracing::debug!("Gossip data received: {:?}", irys_transaction_header_json);
     let mut peer = match check_peer(&server.peer_list, &req).await {
         Ok(peer_address) => peer_address,
         Err(error_response) => return error_response,
@@ -207,7 +205,6 @@ where
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone,
 {
-    tracing::debug!("Gossip data received: {:?}", unpacked_chunk_json);
     let mut peer = match check_peer(&server.peer_list, &req).await {
         Ok(peer_address) => peer_address,
         Err(error_response) => return error_response,

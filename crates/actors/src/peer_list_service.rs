@@ -31,6 +31,8 @@ pub struct PeerListServiceWithClient<T: ApiClient + 'static + Unpin + Default> {
     peer_list_cache: HashMap<Address, PeerListItem>,
     known_peers_cache: HashSet<PeerAddress>,
 
+    currently_running_announcements: HashSet<SocketAddr>,
+
     gossip_client: Client,
     irys_api_client: T,
 
@@ -67,6 +69,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
             gossip_addr_to_mining_addr_map: HashMap::new(),
             peer_list_cache: HashMap::new(),
             known_peers_cache: HashSet::new(),
+            currently_running_announcements: HashSet::new(),
             gossip_client: Client::new(),
             irys_api_client,
             chain_id: config.chain_id,
@@ -274,6 +277,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                     self.update_peer_address(mining_addr, peer_address);
                     true
                 } else {
+                    debug!("Peer does not need updating");
                     false
                 }
             } else {
@@ -347,6 +351,21 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                 );
                 PeerListServiceError::PostVersionError(e.to_string())
             })?;
+
+        match peer_service_address
+            .send(AnnounceFinished {
+                peer_api_address: api_address,
+            })
+            .await
+        {
+            Ok(()) => {}
+            Err(mailbox_error) => {
+                error!(
+                    "Failed to send RemovePotentialPeer message to peer service: {:?}",
+                    mailbox_error
+                );
+            }
+        };
 
         match peer_response {
             PeerResponse::Accepted(accepted_peers) => {
@@ -596,6 +615,7 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<AddPeer> for PeerListServ
     type Result = ();
 
     fn handle(&mut self, msg: AddPeer, ctx: &mut Self::Context) -> Self::Result {
+        debug!("AddPeer message received: {:?}", msg.peer);
         let peer_api_addr = msg.peer.address.api;
         let is_updated = self.add_peer(msg.mining_addr, msg.peer);
         let peer_service_addr = ctx.address();
@@ -643,10 +663,22 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
 
     fn handle(&mut self, msg: NewPotentialPeer, ctx: &mut Self::Context) -> Self::Result {
         let already_in_cache = self.known_peers_cache.contains(&msg.peer_address);
-        let needs_announce = msg.force_announce || !already_in_cache;
+        let already_announcing = self
+            .currently_running_announcements
+            .contains(&msg.peer_address.api);
+
+        let announcing_or_in_cache = already_announcing || already_in_cache;
+
+        let needs_announce = msg.force_announce || !announcing_or_in_cache;
         let peer_service_addr = ctx.address();
 
         if needs_announce {
+            debug!(
+                "Need to announce yourself to peer {:?}",
+                msg.peer_address.api
+            );
+            self.currently_running_announcements
+                .insert(msg.peer_address.api);
             let version_request = self.create_version_request();
             let handshake_task = Self::announce_yourself_to_address_task(
                 self.irys_api_client.clone(),
@@ -656,6 +688,24 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
             );
             ctx.spawn(handshake_task.into_actor(self));
         }
+    }
+}
+
+/// Handle potential new peer
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct AnnounceFinished {
+    pub peer_api_address: SocketAddr,
+}
+
+impl<T: ApiClient + 'static + Unpin + Default> Handler<AnnounceFinished>
+    for PeerListServiceWithClient<T>
+{
+    type Result = ();
+
+    fn handle(&mut self, msg: AnnounceFinished, _ctx: &mut Self::Context) -> Self::Result {
+        self.currently_running_announcements
+            .remove(&msg.peer_api_address);
     }
 }
 
@@ -1311,6 +1361,97 @@ mod tests {
         assert!(
             calls.contains(&peer.address.api),
             "Should have called the peer's API address"
+        );
+    }
+
+    #[actix_rt::test]
+    async fn should_prevent_infinite_handshake_loop() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create a mock client to track API calls
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_client = CountingMockClient {
+            post_version_calls: calls.clone(),
+        };
+
+        // Create the service with our mock client instead of the real one
+        let service =
+            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let service_addr = service.start();
+
+        // Create a test peer
+        let (mining_addr, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+
+        // Add the peer which should trigger announce_yourself_to_address_task
+        service_addr
+            .send(AddPeer {
+                mining_addr,
+                peer: peer.clone(),
+            })
+            .await
+            .expect("send peer");
+
+        // Send a NewPotentialPeer message for the same peer while an announcement is already running
+        service_addr
+            .send(NewPotentialPeer {
+                peer_address: peer.address.clone(),
+                force_announce: false,
+            })
+            .await
+            .expect("send NewPotentialPeer");
+
+        // Even though we sent two messages that could trigger a handshake,
+        // the currently_running_announcements tracking should prevent duplicate calls
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        {
+            let calls_guard = calls.lock().await;
+            assert_eq!(
+                calls_guard.len(),
+                1,
+                "Should have made only one API call despite multiple triggers"
+            );
+            assert!(
+                calls_guard.contains(&peer.address.api),
+                "Should have called the peer's API address"
+            );
+        }
+
+        // Now let's simulate the announcement finishing
+        service_addr
+            .send(AnnounceFinished {
+                peer_api_address: peer.address.api,
+            })
+            .await
+            .expect("send AnnounceFinished");
+
+        // Now we can force a new announcement
+        service_addr
+            .send(NewPotentialPeer {
+                peer_address: peer.address.clone(),
+                force_announce: true,
+            })
+            .await
+            .expect("send NewPotentialPeer with force");
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Now we should have two calls
+        let calls = calls.lock().await;
+        assert_eq!(
+            calls.len(),
+            2,
+            "Should make another API call after announcement finished"
         );
     }
 }
