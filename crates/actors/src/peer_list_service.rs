@@ -28,6 +28,7 @@ pub struct PeerListServiceWithClient<T: ApiClient + 'static + Unpin + Default> {
     db: Option<DatabaseProvider>,
 
     gossip_addr_to_mining_addr_map: HashMap<IpAddr, Address>,
+    api_addr_to_mining_addr_map: HashMap<SocketAddr, Address>,
     peer_list_cache: HashMap<Address, PeerListItem>,
     known_peers_cache: HashSet<PeerAddress>,
 
@@ -67,6 +68,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         Self {
             db: Some(db),
             gossip_addr_to_mining_addr_map: HashMap::new(),
+            api_addr_to_mining_addr_map: HashMap::new(),
             peer_list_cache: HashMap::new(),
             known_peers_cache: HashSet::new(),
             currently_running_announcements: HashSet::new(),
@@ -252,6 +254,8 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                 .insert(new_address.gossip.ip(), mining_addr);
             self.known_peers_cache.remove(&old_address);
             self.known_peers_cache.insert(old_address);
+            self.api_addr_to_mining_addr_map.remove(&old_address.api);
+            self.api_addr_to_mining_addr_map.insert(new_address.api, mining_addr);
         }
     }
 
@@ -264,6 +268,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
             self.peer_list_cache.insert(mining_addr, peer);
             self.gossip_addr_to_mining_addr_map
                 .insert(gossip_addr.ip(), mining_addr);
+            self.api_addr_to_mining_addr_map.insert(peer_address.api, mining_addr);
             self.known_peers_cache.insert(peer_address);
             true
         } else {
@@ -372,7 +377,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                 for peer in accepted_peers.peers {
                     match peer_service_address
                         .send(NewPotentialPeer {
-                            peer_address: peer,
+                            api_address: peer.api,
                             force_announce: false,
                         })
                         .await
@@ -652,7 +657,7 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<KnownPeersRequest>
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub struct NewPotentialPeer {
-    pub peer_address: PeerAddress,
+    pub api_address: SocketAddr,
     pub force_announce: bool,
 }
 
@@ -662,10 +667,10 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
     type Result = ();
 
     fn handle(&mut self, msg: NewPotentialPeer, ctx: &mut Self::Context) -> Self::Result {
-        let already_in_cache = self.known_peers_cache.contains(&msg.peer_address);
+        let already_in_cache = self.api_addr_to_mining_addr_map.contains_key(&msg.api_address);
         let already_announcing = self
             .currently_running_announcements
-            .contains(&msg.peer_address.api);
+            .contains(&msg.api_address);
 
         let announcing_or_in_cache = already_announcing || already_in_cache;
 
@@ -674,15 +679,15 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
         if needs_announce {
             debug!(
                 "Need to announce yourself to peer {:?}",
-                msg.peer_address.api
+                msg.api_address
             );
             self.currently_running_announcements
-                .insert(msg.peer_address.api);
+                .insert(msg.api_address);
             let version_request = self.create_version_request();
             let peer_service_addr = ctx.address();
             let handshake_task = Self::announce_yourself_to_address_task(
                 self.irys_api_client.clone(),
-                msg.peer_address.api,
+                msg.api_address,
                 version_request,
                 peer_service_addr,
             );
@@ -1404,7 +1409,7 @@ mod tests {
         // Send a NewPotentialPeer message for the same peer while an announcement is already running
         service_addr
             .send(NewPotentialPeer {
-                peer_address: peer.address.clone(),
+                api_address: peer.address.api,
                 force_announce: false,
             })
             .await
@@ -1438,7 +1443,7 @@ mod tests {
         // Now we can force a new announcement
         service_addr
             .send(NewPotentialPeer {
-                peer_address: peer.address.clone(),
+                api_address: peer.address.api,
                 force_announce: true,
             })
             .await
