@@ -16,8 +16,8 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, Config, DatabaseProvider, GossipData, IrysBlockHeader,
-    IrysTransaction, IrysTransactionHeader, PeerAddress, PeerListItem, PeerResponse, PeerScore,
-    TxChunkOffset, UnpackedChunk, VersionRequest, H256
+    IrysTransaction, IrysTransactionHeader, NodeConfig, PeerAddress, PeerListItem, PeerResponse,
+    PeerScore, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
@@ -264,7 +264,7 @@ impl GossipServiceTestFixture {
     pub fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
-        let config = Config::testnet();
+        let config = NodeConfig::testnet().into();
         let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");

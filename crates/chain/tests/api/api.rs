@@ -43,8 +43,8 @@ async fn api_end_to_end_test(chunk_size: usize) {
     let entropy_packing_iterations = 1_000;
     let mut config = NodeConfig::testnet();
     let main_signer = IrysSigner::random_signer(&config.consensus_config());
-    config.consensus.custom_mut().chunk_size = chunk_size.try_into().unwrap();
-    config.consensus.custom_mut().entropy_packing_iterations = entropy_packing_iterations;
+    config.consensus.get_mut().chunk_size = chunk_size.try_into().unwrap();
+    config.consensus.get_mut().entropy_packing_iterations = entropy_packing_iterations;
     config.consensus.extend_genesis_accounts(vec![(
         main_signer.address(),
         GenesisAccount {

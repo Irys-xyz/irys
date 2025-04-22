@@ -58,11 +58,11 @@ async fn check_transaction_endpoints(
     let (_header, _payload) = mine_block(&ctx.node_ctx).await.unwrap().unwrap();
 
     let tx = ctx
-        .create_signed_data_tx(&ctx.node_ctx.node_config.mining_signer, vec![1, 2, 3])
+        .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
         .unwrap();
     let tx_id = tx.header.id;
     let tx_2 = ctx
-        .create_signed_data_tx(&ctx.node_ctx.node_config.mining_signer, vec![4, 5, 6])
+        .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![4, 5, 6])
         .unwrap();
     let tx_2_id = tx_2.header.id;
 
@@ -103,7 +103,7 @@ async fn heavy_api_client_all_endpoints_should_work() {
 
     let api_address = SocketAddr::new(
         IpAddr::from_str("127.0.0.1").unwrap(),
-        ctx.node_ctx.config.api_port,
+        ctx.node_ctx.config.node_config.http.port,
     );
     let api_client = IrysApiClient::new();
 

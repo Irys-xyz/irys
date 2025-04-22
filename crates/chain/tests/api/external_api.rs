@@ -68,7 +68,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
         perm_fee: Some(200),
         ledger_id: 1,
         bundle_format: None,
-        chain_id: ctx.node_ctx.config.chain_id,
+        chain_id: ctx.node_ctx.config.consesnsus.chain_id,
         version: 0,
         ingress_proofs: None,
         signature: Signature::test_signature().into(),

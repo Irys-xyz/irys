@@ -221,11 +221,11 @@ impl ConsensusOptions {
         &mut self,
         accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
     ) {
-        let config = self.custom_mut();
+        let config = self.get_mut();
         config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
     }
 
-    pub fn custom_mut(&mut self) -> &mut ConsensusConfig {
+    pub fn get_mut(&mut self) -> &mut ConsensusConfig {
         let Self::Custom(config) = self else {
             panic!("only support mutating custom configs");
         };

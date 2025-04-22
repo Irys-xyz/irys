@@ -181,9 +181,6 @@ impl IrysNodeTest<()> {
         let temp_dir = temporary_directory(None, false);
         config.base_directory = temp_dir.path().to_path_buf();
 
-        // this allows us to more easily override the consensus config in tests
-        config.consensus = ConsensusOptions::Custom(config.consensus_config());
-
         Self {
             cfg: config,
             temp_dir,

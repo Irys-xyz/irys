@@ -10,26 +10,30 @@ use irys_types::U256;
 async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().await.start().await;
-    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
-    let data_size_bytes = ctx.cfg.node_config.chunk_size * 5;
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.port
+    );
+    let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size * 5;
     let expected_price = {
         let cost_per_gb = ctx
-            .cfg
-            .node_config
+            .node_ctx
+            .config
+            .consensus
             .annual_cost_per_gb
             .cost_per_replica(
-                ctx.cfg.node_config.safe_minimum_number_of_years,
-                ctx.cfg.node_config.decay_rate,
+                ctx.node_ctx.config.consensus.safe_minimum_number_of_years,
+                ctx.node_ctx.config.consensus.decay_rate,
             )?
-            .replica_count(ctx.cfg.node_config.number_of_ingerss_proofs)?;
+            .replica_count(ctx.node_ctx.config.consensus.number_of_ingerss_proofs)?;
 
         cost_per_gb
             .base_network_fee(
                 U256::from(data_size_bytes),
                 // node just started up, using genesis ema price
-                ctx.cfg.node_config.genesis_token_price,
+                ctx.node_ctx.config.consensus.genesis_price,
             )?
-            .add_multiplier(ctx.cfg.node_config.fee_percentage)?
+            .add_multiplier(ctx.node_ctx.config.node_config.pricing.fee_percentage)?
     };
 
     // action
@@ -48,7 +52,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         }
     );
     assert!(
-        data_size_bytes > ctx.cfg.node_config.chunk_size,
+        data_size_bytes > ctx.node_ctx.config.consensus.chunk_size,
         "for the test to be accurate, the requested size must be larger to the configs chunk size"
     );
 
@@ -60,27 +64,31 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
 async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().await.start().await;
-    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.api_port);
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.port
+    );
     let data_size_bytes = 4_u64;
     let expected_price = {
         let cost_per_gb = ctx
-            .cfg
-            .node_config
+            .node_ctx
+            .config
+            .consensus
             .annual_cost_per_gb
             .cost_per_replica(
-                ctx.cfg.node_config.safe_minimum_number_of_years,
-                ctx.cfg.node_config.decay_rate,
+                ctx.node_ctx.config.consensus.safe_minimum_number_of_years,
+                ctx.node_ctx.config.consensus.decay_rate,
             )?
-            .replica_count(ctx.cfg.node_config.number_of_ingerss_proofs)?;
+            .replica_count(ctx.node_ctx.config.consensus.number_of_ingerss_proofs)?;
 
         cost_per_gb
             .base_network_fee(
                 // the original data_size_bytes is too small to fill up a whole chunk
-                U256::from(ctx.cfg.node_config.chunk_size),
+                U256::from(ctx.node_ctx.config.consensus.chunk_size),
                 // node just started up, using genesis ema price
-                ctx.cfg.node_config.genesis_token_price,
+                ctx.node_ctx.config.consensus.genesis_price,
             )?
-            .add_multiplier(ctx.cfg.node_config.fee_percentage)?
+            .add_multiplier(ctx.node_ctx.config.node_config.pricing.fee_percentage)?
     };
 
     // action
@@ -95,11 +103,11 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
         PriceInfo {
             cost_in_irys: expected_price.amount,
             ledger: 0,
-            bytes: ctx.cfg.node_config.chunk_size,
+            bytes: ctx.node_ctx.config.consensus.chunk_size,
         }
     );
     assert!(
-        data_size_bytes < ctx.cfg.node_config.chunk_size,
+        data_size_bytes < ctx.node_ctx.config.consensus.chunk_size,
         "for the test to be accurate, the requested size must be smaller to the configs chunk size"
     );
 
@@ -111,27 +119,31 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
 async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().await.start().await;
-    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
-    let data_size_bytes = ctx.cfg.node_config.chunk_size + 1;
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.port
+    );
+    let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size + 1;
     let expected_price = {
         let cost_per_gb = ctx
-            .cfg
-            .node_config
+            .node_ctx
+            .config
+            .consensus
             .annual_cost_per_gb
             .cost_per_replica(
-                ctx.cfg.node_config.safe_minimum_number_of_years,
-                ctx.cfg.node_config.decay_rate,
+                ctx.node_ctx.config.consensus.safe_minimum_number_of_years,
+                ctx.node_ctx.config.consensus.decay_rate,
             )?
-            .replica_count(ctx.cfg.node_config.number_of_ingerss_proofs)?;
+            .replica_count(ctx.node_ctx.config.consensus.number_of_ingerss_proofs)?;
 
         cost_per_gb
             .base_network_fee(
                 // round to the chunk size boundary
-                U256::from(ctx.cfg.node_config.chunk_size * 2),
+                U256::from(ctx.node_ctx.config.consensus.chunk_size * 2),
                 // node just started up, using genesis ema price
-                ctx.cfg.node_config.genesis_token_price,
+                ctx.node_ctx.config.consensus.genesis_price,
             )?
-            .add_multiplier(ctx.cfg.node_config.fee_percentage)?
+            .add_multiplier(ctx.node_ctx.config.node_config.pricing.fee_percentage)?
     };
 
     // action
@@ -146,10 +158,10 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
         PriceInfo {
             cost_in_irys: expected_price.amount,
             ledger: 0,
-            bytes: ctx.cfg.node_config.chunk_size * 2,
+            bytes: ctx.node_ctx.config.consensus.chunk_size * 2,
         }
     );
-    assert_ne!(data_size_bytes, ctx.cfg.node_config.chunk_size, "for the test to be accurate, the requested size must not be equal to the configs chunk size");
+    assert_ne!(data_size_bytes, ctx.node_ctx.config.consensus.chunk_size, "for the test to be accurate, the requested size must not be equal to the configs chunk size");
 
     ctx.node_ctx.stop().await;
     Ok(())
