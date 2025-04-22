@@ -39,6 +39,12 @@ pub struct PeerListServiceWithClient<T: ApiClient + 'static + Unpin + Default> {
     peer_address: PeerAddress,
 }
 
+// impl<T> Default for PeerListServiceWithClient<T> {
+//     fn default() -> Self {
+//         PeerListService::
+//     }
+// }
+
 impl PeerListServiceWithClient<IrysApiClient> {
     /// Create a new instance of the peer_list_service actor passing in a reference-counted
     /// reference to a `DatabaseEnv`
@@ -85,6 +91,8 @@ impl<T: ApiClient + 'static + Unpin + Default> Actor for PeerListServiceWithClie
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
+        let peer_service_address = ctx.address();
+
         ctx.run_interval(FLUSH_INTERVAL, |act, _ctx| match act.flush() {
             Ok(()) => {}
             Err(e) => {
@@ -135,9 +143,13 @@ impl<T: ApiClient + 'static + Unpin + Default> Actor for PeerListServiceWithClie
         let version_request = self.create_version_request();
         let api_client = self.irys_api_client.clone();
         let peers_cache = self.known_peers_cache.clone();
-        let announce_fut =
-            Self::announce_yourself_to_all_peers(api_client, version_request, peers_cache)
-                .into_actor(self);
+        let announce_fut = Self::announce_yourself_to_all_peers(
+            api_client,
+            version_request,
+            peers_cache,
+            peer_service_address,
+        )
+        .into_actor(self);
         ctx.spawn(announce_fut);
     }
 }
@@ -323,8 +335,8 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         api_client: T,
         api_address: SocketAddr,
         version_request: VersionRequest,
+        peer_service_address: Addr<PeerListServiceWithClient<T>>,
     ) -> Result<(), PeerListServiceError> {
-        // TODO: handle response by announcing yourself to peers
         let peer_response = api_client
             .post_version(api_address, version_request)
             .await
@@ -338,28 +350,50 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
 
         match peer_response {
             PeerResponse::Accepted(accepted_peers) => {
-                let new_peers = accepted_peers.peers;
-            }
-            PeerResponse::Rejected(rejected_response) => {
-                return Err(PeerListServiceError::PeerHandshakeRejected(
-                    rejected_response,
-                ))
-            }
-        }
+                for peer in accepted_peers.peers {
+                    match peer_service_address
+                        .send(NewPotentialPeer {
+                            peer_address: peer,
+                            force_announce: false,
+                        })
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(mailbox_error) => {
+                            error!(
+                                "Failed to send NewPotentialPeer message to peer service: {:?}",
+                                mailbox_error
+                            );
+                        }
+                    }
+                }
 
-        Ok(())
+                Ok(())
+            }
+            PeerResponse::Rejected(rejected_response) => Err(
+                PeerListServiceError::PeerHandshakeRejected(rejected_response),
+            ),
+        }
     }
 
     async fn announce_yourself_to_address_task(
         api_client: T,
         api_address: SocketAddr,
         version_request: VersionRequest,
+        peer_list_service_address: Addr<PeerListServiceWithClient<T>>,
     ) {
         debug!(
             "Announcing yourself to address {} with version request: {:?}",
             api_address, version_request
         );
-        match Self::announce_yourself_to_address(api_client, api_address, version_request).await {
+        match Self::announce_yourself_to_address(
+            api_client,
+            api_address,
+            version_request,
+            peer_list_service_address,
+        )
+        .await
+        {
             Ok(()) => {}
             Err(e) => {
                 error!(
@@ -374,6 +408,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         api_client: T,
         version_request: VersionRequest,
         known_peers_cache: HashSet<PeerAddress>,
+        peer_service_address: Addr<PeerListServiceWithClient<T>>,
     ) {
         let reth_service = RethServiceActor::from_registry();
         for peer in known_peers_cache.iter() {
@@ -381,6 +416,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                 api_client.clone(),
                 peer.api,
                 version_request.clone(),
+                peer_service_address.clone(),
             )
             .await
             {
@@ -562,6 +598,7 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<AddPeer> for PeerListServ
     fn handle(&mut self, msg: AddPeer, ctx: &mut Self::Context) -> Self::Result {
         let peer_api_addr = msg.peer.address.api;
         let is_updated = self.add_peer(msg.mining_addr, msg.peer);
+        let peer_service_addr = ctx.address();
 
         if is_updated {
             let version_request = self.create_version_request();
@@ -569,13 +606,14 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<AddPeer> for PeerListServ
                 self.irys_api_client.clone(),
                 peer_api_addr,
                 version_request,
+                peer_service_addr,
             );
             ctx.spawn(handshake_task.into_actor(self));
         }
     }
 }
 
-/// Add peer to the peer list
+/// Request a list of peers
 #[derive(Message, Debug)]
 #[rtype(result = "Vec<PeerAddress>")]
 pub struct KnownPeersRequest;
@@ -587,6 +625,37 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<KnownPeersRequest>
 
     fn handle(&mut self, _msg: KnownPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
         self.known_peers_cache.iter().cloned().collect()
+    }
+}
+
+/// Handle potential new peer
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct NewPotentialPeer {
+    pub peer_address: PeerAddress,
+    pub force_announce: bool,
+}
+
+impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
+    for PeerListServiceWithClient<T>
+{
+    type Result = ();
+
+    fn handle(&mut self, msg: NewPotentialPeer, ctx: &mut Self::Context) -> Self::Result {
+        let already_in_cache = self.known_peers_cache.contains(&msg.peer_address);
+        let needs_announce = msg.force_announce || !already_in_cache;
+        let peer_service_addr = ctx.address();
+
+        if needs_announce {
+            let version_request = self.create_version_request();
+            let handshake_task = Self::announce_yourself_to_address_task(
+                self.irys_api_client.clone(),
+                msg.peer_address.api,
+                version_request,
+                peer_service_addr,
+            );
+            ctx.spawn(handshake_task.into_actor(self));
+        }
     }
 }
 
@@ -1042,10 +1111,21 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_announce_yourself_to_all_peers() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create first service instance and add some peers
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mock_client = CountingMockClient {
             post_version_calls: calls.clone(),
         };
+        let peer_list_service =
+            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client.clone());
+        let addr = peer_list_service.start();
 
         let (_mining1, peer1) = create_test_peer(
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1068,6 +1148,7 @@ mod tests {
             mock_client,
             version_request,
             known_peers,
+            addr,
         )
         .await;
 
