@@ -4276,6 +4276,7 @@ dependencies = [
  "actix",
  "actix-web",
  "async-trait",
+ "base58",
  "eyre",
  "irys-actors",
  "irys-api-client",

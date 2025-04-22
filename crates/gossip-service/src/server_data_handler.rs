@@ -9,6 +9,7 @@ use irys_actors::mempool_service::{
 use irys_api_client::ApiClient;
 use irys_types::{GossipData, IrysBlockHeader, IrysTransactionHeader, UnpackedChunk, H256};
 use std::sync::Arc;
+use base58::ToBase58;
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
@@ -186,7 +187,7 @@ where
         tracing::debug!(
             "Gossip block received from peer {}: {:?}",
             source_address,
-            irys_block_header.block_hash
+            irys_block_header.block_hash.0.to_base58()
         );
 
         // Get all transaction IDs from the block

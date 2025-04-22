@@ -670,7 +670,6 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
         let announcing_or_in_cache = already_announcing || already_in_cache;
 
         let needs_announce = msg.force_announce || !announcing_or_in_cache;
-        let peer_service_addr = ctx.address();
 
         if needs_announce {
             debug!(
@@ -680,6 +679,7 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
             self.currently_running_announcements
                 .insert(msg.peer_address.api);
             let version_request = self.create_version_request();
+            let peer_service_addr = ctx.address();
             let handshake_task = Self::announce_yourself_to_address_task(
                 self.irys_api_client.clone(),
                 msg.peer_address.api,
