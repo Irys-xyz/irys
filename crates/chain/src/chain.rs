@@ -387,7 +387,7 @@ impl IrysNode {
                 .actor_addresses
                 .peer_list
                 .send(AddPeer {
-                    mining_addr: Address::random(),
+                    mining_addr: peer_list_entry.address.mining_address,
                     peer: peer_list_entry,
                 })
                 .await
