@@ -15,9 +15,27 @@ use tracing::{debug, error, warn};
 
 use crate::reth_service::RethServiceActor;
 
+async fn send_message_and_print_error<T, A, R>(message: T, address: Addr<A>)
+where
+    T: Message<Result = R> + Send + 'static,
+    R: Send,
+    A: Actor<Context = Context<A>> + Handler<T>,
+{
+    match address.send(message).await {
+        Ok(_) => {}
+        Err(mailbox_error) => {
+            error!(
+                "Failed to send message to peer service: {:?}",
+                mailbox_error
+            );
+        }
+    }
+}
+
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
+const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 pub type PeerListService = PeerListServiceWithClient<IrysApiClient>;
 
@@ -40,13 +58,9 @@ pub struct PeerListServiceWithClient<T: ApiClient + 'static + Unpin + Default> {
     chain_id: u64,
     miner_address: Address,
     peer_address: PeerAddress,
-}
 
-// impl<T> Default for PeerListServiceWithClient<T> {
-//     fn default() -> Self {
-//         PeerListService::
-//     }
-// }
+    trusted_peers_api_addresses: HashSet<SocketAddr>,
+}
 
 impl PeerListServiceWithClient<IrysApiClient> {
     /// Create a new instance of the peer_list_service actor passing in a reference-counted
@@ -89,6 +103,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                 execution: config.reth_peer_info,
                 mining_address: config.miner_address(),
             },
+            trusted_peers_api_addresses: config.trusted_peers.iter().map(|p| p.api).collect(),
         }
     }
 }
@@ -145,6 +160,14 @@ impl<T: ApiClient + 'static + Unpin + Default> Actor for PeerListServiceWithClie
             }
         });
 
+        // Initiate the trusted peers handshake
+        let trusted_peers_handshake_task = Self::trusted_peers_handshake_task(
+            peer_service_address.clone(),
+            self.trusted_peers_api_addresses.clone(),
+        )
+        .into_actor(self);
+        ctx.spawn(trusted_peers_handshake_task);
+
         // Announce yourself to the network
         let version_request = self.create_version_request();
         let api_client = self.irys_api_client.clone();
@@ -153,7 +176,7 @@ impl<T: ApiClient + 'static + Unpin + Default> Actor for PeerListServiceWithClie
             api_client,
             version_request,
             peers_cache,
-            peer_service_address,
+            peer_service_address.clone(),
         )
         .into_actor(self);
         ctx.spawn(announce_fut);
@@ -243,6 +266,31 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
             .get(&address.ip())
             .cloned()?;
         self.peer_list_cache.get(&mining_address).cloned()
+    }
+
+    async fn trusted_peers_handshake_task(
+        peer_service_address: Addr<PeerListServiceWithClient<T>>,
+        trusted_peers_api_addresses: HashSet<SocketAddr>,
+    ) {
+        let peer_service_address = peer_service_address.clone();
+
+        for peer_api_address in trusted_peers_api_addresses {
+            match peer_service_address
+                .send(NewPotentialPeer {
+                    api_address: peer_api_address,
+                    force_announce: true,
+                })
+                .await
+            {
+                Ok(()) => {}
+                Err(mailbox_error) => {
+                    error!(
+                        "Failed to send NewPotentialPeer message to peer service: {:?}",
+                        mailbox_error
+                    );
+                }
+            };
+        }
     }
 
     fn update_peer_address(&mut self, mining_addr: Address, new_address: PeerAddress) {
@@ -348,7 +396,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         version_request: VersionRequest,
         peer_service_address: Addr<PeerListServiceWithClient<T>>,
     ) -> Result<(), PeerListServiceError> {
-        let peer_response = api_client
+        let peer_response_result = api_client
             .post_version(api_address, version_request)
             .await
             .map_err(|e| {
@@ -357,43 +405,37 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                     api_address, e
                 );
                 PeerListServiceError::PostVersionError(e.to_string())
-            })?;
+            });
 
-        match peer_service_address
-            .send(AnnounceFinished {
-                peer_api_address: api_address,
-            })
-            .await
-        {
-            Ok(()) => {}
-            Err(mailbox_error) => {
-                error!(
-                    "Failed to send RemovePotentialPeer message to peer service: {:?}",
-                    mailbox_error
-                );
+        let peer_response = match peer_response_result {
+            Ok(peer_response) => {
+                send_message_and_print_error(
+                    AnnounceFinished::success(api_address),
+                    peer_service_address.clone(),
+                )
+                .await;
+                Ok(peer_response)
             }
-        };
+            Err(error) => {
+                // This is likely due to the networking error, we need to retry later
+                send_message_and_print_error(
+                    AnnounceFinished::retry(api_address),
+                    peer_service_address.clone(),
+                )
+                .await;
+                Err(error)
+            }
+        }?;
 
         match peer_response {
             PeerResponse::Accepted(accepted_peers) => {
                 for peer in accepted_peers.peers {
-                    match peer_service_address
-                        .send(NewPotentialPeer {
-                            api_address: peer.api,
-                            force_announce: false,
-                        })
-                        .await
-                    {
-                        Ok(()) => {}
-                        Err(mailbox_error) => {
-                            error!(
-                                "Failed to send NewPotentialPeer message to peer service: {:?}",
-                                mailbox_error
-                            );
-                        }
-                    }
+                    send_message_and_print_error(
+                        NewPotentialPeer::new(peer.api),
+                        peer_service_address.clone(),
+                    )
+                    .await;
                 }
-
                 Ok(())
             }
             PeerResponse::Rejected(rejected_response) => Err(
@@ -663,6 +705,22 @@ pub struct NewPotentialPeer {
     pub force_announce: bool,
 }
 
+impl NewPotentialPeer {
+    pub fn new(api_address: SocketAddr) -> Self {
+        Self {
+            api_address,
+            force_announce: false,
+        }
+    }
+
+    pub fn force_announce(api_address: SocketAddr) -> Self {
+        Self {
+            api_address,
+            force_announce: true,
+        }
+    }
+}
+
 impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
     for PeerListServiceWithClient<T>
 {
@@ -701,6 +759,26 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
 #[rtype(result = "()")]
 pub struct AnnounceFinished {
     pub peer_api_address: SocketAddr,
+    pub success: bool,
+    pub retry: bool,
+}
+
+impl AnnounceFinished {
+    pub fn retry(api_address: SocketAddr) -> Self {
+        Self {
+            peer_api_address: api_address,
+            success: false,
+            retry: true,
+        }
+    }
+
+    pub fn success(api_address: SocketAddr) -> Self {
+        Self {
+            peer_api_address: api_address,
+            success: true,
+            retry: false,
+        }
+    }
 }
 
 impl<T: ApiClient + 'static + Unpin + Default> Handler<AnnounceFinished>
@@ -708,9 +786,17 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<AnnounceFinished>
 {
     type Result = ();
 
-    fn handle(&mut self, msg: AnnounceFinished, _ctx: &mut Self::Context) -> Self::Result {
-        self.currently_running_announcements
-            .remove(&msg.peer_api_address);
+    fn handle(&mut self, msg: AnnounceFinished, ctx: &mut Self::Context) -> Self::Result {
+        if !msg.success && msg.retry {
+            let message = NewPotentialPeer::new(msg.peer_api_address);
+            ctx.run_later(PEER_HANDSHAKE_RETRY_INTERVAL, move |service, ctx| {
+                let address = ctx.address();
+                ctx.spawn(send_message_and_print_error(message, address).into_actor(service));
+            });
+        } else {
+            self.currently_running_announcements
+                .remove(&msg.peer_api_address);
+        }
     }
 }
 
@@ -1439,6 +1525,8 @@ mod tests {
         service_addr
             .send(AnnounceFinished {
                 peer_api_address: peer.address.api,
+                success: true,
+                retry: false,
             })
             .await
             .expect("send AnnounceFinished");
@@ -1460,6 +1548,69 @@ mod tests {
             calls.len(),
             2,
             "Should make another API call after announcement finished"
+        );
+    }
+
+    #[actix_rt::test]
+    async fn test_initial_handshake_with_trusted_peers() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+
+        // Create trusted peers for configuration
+        let trusted_peer1 = PeerAddress {
+            gossip: "127.0.0.1:9001".parse().expect("valid SocketAddr expected"),
+            api: "127.0.0.1:9002".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
+            mining_address: Address::from_str("0x1111111111111111111111111111111111111111")
+                .expect("Invalid mining address"),
+        };
+
+        let trusted_peer2 = PeerAddress {
+            gossip: "127.0.0.1:9003".parse().expect("valid SocketAddr expected"),
+            api: "127.0.0.1:9004".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
+            mining_address: Address::from_str("0x2222222222222222222222222222222222222222")
+                .expect("Invalid mining address"),
+        };
+
+        // Create config with trusted peers
+        let mut config = Config::testnet();
+        config.trusted_peers = vec![trusted_peer1.clone(), trusted_peer2.clone()];
+
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create a mock client to track API calls
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_client = CountingMockClient {
+            post_version_calls: calls.clone(),
+        };
+
+        // Create and start the service with our mock client
+        let service =
+            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let _service_addr = service.start();
+
+        // Give time for handshake to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify handshake calls were made to all trusted peers
+        let api_calls = calls.lock().await;
+        assert_eq!(
+            api_calls.len(),
+            2,
+            "Should have made API calls to all trusted peers"
+        );
+
+        assert!(
+            api_calls.contains(&trusted_peer1.api),
+            "Should have called the first trusted peer's API address"
+        );
+
+        assert!(
+            api_calls.contains(&trusted_peer2.api),
+            "Should have called the second trusted peer's API address"
         );
     }
 }

@@ -47,7 +47,7 @@ use irys_storage::{
 
 use irys_types::U256;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig, Address,
+    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
     CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
     OracleConfig, PartitionChunkRange, PeerListItem, StorageConfig, H256,
 };
