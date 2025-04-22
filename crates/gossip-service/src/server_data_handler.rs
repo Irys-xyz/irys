@@ -1,6 +1,7 @@
 use crate::types::{tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError};
 use crate::{GossipCache, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
+use base58::ToBase58;
 use core::net::SocketAddr;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::{
@@ -9,7 +10,6 @@ use irys_actors::mempool_service::{
 use irys_api_client::ApiClient;
 use irys_types::{GossipData, IrysBlockHeader, IrysTransactionHeader, UnpackedChunk, H256};
 use std::sync::Arc;
-use base58::ToBase58;
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]

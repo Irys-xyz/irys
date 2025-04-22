@@ -255,7 +255,8 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
             self.known_peers_cache.remove(&old_address);
             self.known_peers_cache.insert(old_address);
             self.api_addr_to_mining_addr_map.remove(&old_address.api);
-            self.api_addr_to_mining_addr_map.insert(new_address.api, mining_addr);
+            self.api_addr_to_mining_addr_map
+                .insert(new_address.api, mining_addr);
         }
     }
 
@@ -268,7 +269,8 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
             self.peer_list_cache.insert(mining_addr, peer);
             self.gossip_addr_to_mining_addr_map
                 .insert(gossip_addr.ip(), mining_addr);
-            self.api_addr_to_mining_addr_map.insert(peer_address.api, mining_addr);
+            self.api_addr_to_mining_addr_map
+                .insert(peer_address.api, mining_addr);
             self.known_peers_cache.insert(peer_address);
             true
         } else {
@@ -667,7 +669,9 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
     type Result = ();
 
     fn handle(&mut self, msg: NewPotentialPeer, ctx: &mut Self::Context) -> Self::Result {
-        let already_in_cache = self.api_addr_to_mining_addr_map.contains_key(&msg.api_address);
+        let already_in_cache = self
+            .api_addr_to_mining_addr_map
+            .contains_key(&msg.api_address);
         let already_announcing = self
             .currently_running_announcements
             .contains(&msg.api_address);
@@ -677,12 +681,8 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
         let needs_announce = msg.force_announce || !announcing_or_in_cache;
 
         if needs_announce {
-            debug!(
-                "Need to announce yourself to peer {:?}",
-                msg.api_address
-            );
-            self.currently_running_announcements
-                .insert(msg.api_address);
+            debug!("Need to announce yourself to peer {:?}", msg.api_address);
+            self.currently_running_announcements.insert(msg.api_address);
             let version_request = self.create_version_request();
             let peer_service_addr = ctx.address();
             let handshake_task = Self::announce_yourself_to_address_task(
