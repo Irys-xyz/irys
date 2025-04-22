@@ -139,6 +139,9 @@ pub struct NodeConfig {
     /// Determines how the node joins and interacts with the network
     pub mode: NodeMode,
 
+    /// The initial list of peers to contact for block sync
+    pub trusted_peers: Vec<PeerAddress>,
+
     /// The base directory where to look for artifact data
     #[serde(default = "default_irys_path")]
     pub base_directory: PathBuf,
@@ -195,10 +198,7 @@ pub enum NodeMode {
     Genesis,
 
     /// Join an existing network by connecting to trusted peers
-    PeerSync {
-        /// The initial list of peers to contact for block sync
-        trusted_peers: Vec<PeerAddress>,
-    },
+    PeerSync,
 }
 
 /// # Consensus Configuration Source
@@ -480,6 +480,7 @@ impl NodeConfig {
 
         Self {
             mode: NodeMode::Genesis,
+            trusted_peers: vec![],
             consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
             base_directory: default_irys_path(),
             mempool: MempoolConfig {
@@ -751,8 +752,9 @@ mod tests {
         // Create the expected config
         let expected_config = NodeConfig {
             mode: NodeMode::Genesis,
-            consensus: ConsensusOptions::Testnet,
+            trusted_peers: vec![],
             base_directory: "~/.irys".into(),
+            consensus: ConsensusOptions::Testnet,
             mempool: MempoolConfig {
                 max_data_txs_per_block: 20,
                 anchor_expiry_depth: 10,

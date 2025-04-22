@@ -168,7 +168,10 @@ impl IrysNodeTest<()> {
         let config = NodeConfig::testnet();
         Self::new_genesis(config).await
     }
-    pub async fn new(config: NodeConfig) -> Self {
+
+    /// Start a new test node in peer-sync mode
+    pub async fn new(mut config: NodeConfig) -> Self {
+        config.mode = NodeMode::PeerSync;
         Self::new_inner(config).await
     }
 
@@ -399,9 +402,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
         let cfg = NodeConfig {
-            mode: NodeMode::PeerSync {
-                trusted_peers: Vec::new(),
-            },
+            mode: NodeMode::PeerSync,
             ..self.cfg
         };
         IrysNodeTest {

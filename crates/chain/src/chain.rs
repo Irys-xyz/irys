@@ -231,11 +231,13 @@ impl IrysNode {
                 );
                 Arc::new(irys_genesis)
             }
-            NodeMode::PeerSync { trusted_peers } => {
+            NodeMode::PeerSync => {
                 info!("fetching genesis block from trusted peer");
                 let awc_client = awc::Client::new();
                 fetch_genesis_block(
-                    &trusted_peers
+                    &config
+                        .node_config
+                        .trusted_peers
                         .first()
                         .expect("expected at least one trusted peer in config")
                         .api,
@@ -273,7 +275,7 @@ impl IrysNode {
         // figure out the init mode
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         match (self.data_exists, &self.config.node_config.mode) {
-            (true, NodeMode::Genesis) => {
+            (true, NodeMode::Genesis { .. }) => {
                 eyre::bail!("You cannot start a genesis chain with existing data")
             }
             (false, _) => {
@@ -362,8 +364,8 @@ impl IrysNode {
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
         // load peers from config into our database
-        if let NodeMode::PeerSync { trusted_peers } = &ctx.config.node_config.mode {
-            for peer_address in trusted_peers.iter() {
+        if let NodeMode::PeerSync = &ctx.config.node_config.mode {
+            for peer_address in ctx.config.node_config.trusted_peers.iter() {
                 let peer_list_entry = PeerListItem {
                     address: peer_address.clone(),
                     ..Default::default()
@@ -385,7 +387,7 @@ impl IrysNode {
             // if we are an empty node joining an existing network
             if !self.data_exists {
                 sync_state_from_peers(
-                    trusted_peers.clone(),
+                    ctx.config.node_config.trusted_peers.clone(),
                     ctx.actor_addresses.block_discovery_addr.clone(),
                     ctx.actor_addresses.mempool.clone(),
                     ctx.actor_addresses.peer_list.clone(),
