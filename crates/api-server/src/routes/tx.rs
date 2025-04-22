@@ -191,7 +191,7 @@ pub async fn get_tx_is_promoted(
     path: web::Path<H256>,
 ) -> Result<Json<IsPromoted>, ApiError> {
     let tx_id: H256 = path.into_inner();
-    info!("Get tx by tx_id: {}", tx_id);
+    info!("Get tx_is_promoted by tx_id: {}", tx_id);
     let tx_header = get_storage_transaction(&state, tx_id)?;
 
     Ok(web::Json(IsPromoted {
