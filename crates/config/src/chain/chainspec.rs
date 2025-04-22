@@ -1,5 +1,4 @@
-use irys_primitives::GenesisAccount;
-use irys_types::{config, Address, Config, ConsensusConfig, IrysBlockHeader, NodeConfig};
+use irys_types::{Config, IrysBlockHeader};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder};
 use tracing::debug;
 
@@ -27,8 +26,8 @@ impl IrysChainSpecBuilder {
         };
         Self {
             reth_builder: ChainSpecBuilder {
-                chain: Some(IRYS_TESTNET.chain),
-                genesis: Some(IRYS_TESTNET.genesis.clone()),
+                chain: Some(config.consensus.reth.chain.clone()),
+                genesis: Some(config.consensus.reth.genesis.clone()),
                 hardforks: IRYS_TESTNET.hardforks.clone(),
             },
             genesis,
@@ -42,21 +41,5 @@ impl IrysChainSpecBuilder {
         genesis.evm_block_hash = cs.genesis_hash();
         debug!("EVM genesis block hash: {}", &genesis.evm_block_hash);
         (cs, genesis)
-    }
-
-    /// extend the genesis accounts
-    pub fn extend_accounts(
-        &mut self,
-        accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
-    ) -> &mut Self {
-        let new_genesis = self
-            .reth_builder
-            .genesis
-            .as_ref()
-            .unwrap()
-            .clone()
-            .extend_accounts(accounts);
-        self.reth_builder = self.reth_builder.clone().genesis(new_genesis);
-        self
     }
 }

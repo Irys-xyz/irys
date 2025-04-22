@@ -6,7 +6,7 @@ use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
-use irys_types::{irys::IrysSigner, Address, Config};
+use irys_types::{irys::IrysSigner, Address, Config, NodeConfig};
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
 use reth_primitives::GenesisAccount;
@@ -28,15 +28,13 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 async fn external_api() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug,irys_actors::mining=error,irys_actors::packing=error,irys_chain::vdf=off,irys_vdf::vdf_state=off");
 
-    let mut testnet_config = Config::testnet();
-    testnet_config.api_port = 8080; // external test, should never be run concurrently
+    let mut testnet_config = NodeConfig::testnet();
+    testnet_config.http.port = 8080; // external test, should never be run concurrently
 
-    let account1 = IrysSigner::random_signer(&testnet_config);
-
+    let account1 = IrysSigner::random_signer(&testnet_config.consensus_config());
     let mut node = IrysNodeTest::new_genesis(testnet_config.clone()).await;
-    let main_address = node.cfg.irys_node_config.mining_signer.address();
-
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![
+    let main_address = node.cfg.miner_address();
+    node.cfg.consensus.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -68,7 +66,10 @@ async fn external_api() -> eyre::Result<()> {
     )
     .await?;
 
-    let http_url = format!("http://127.0.0.1:{}", node.cfg.config.node_config.http.port);
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.port
+    );
 
     // server should be running
     // check with request to `/v1/info`
@@ -154,9 +155,6 @@ async fn external_api() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await?
     .unwrap();

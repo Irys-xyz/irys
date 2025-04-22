@@ -7,16 +7,12 @@ use crate::{
     PeerAddress,
 };
 use alloy_primitives::Address;
+use reth_chainspec::{Chain, ChainHardforks, ChainSpecBuilder};
+use reth_primitives::{Genesis, GenesisAccount};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use std::{
-    env,
-    net::SocketAddr,
-    ops::{Deref, DerefMut},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{env, ops::Deref, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub struct Config(Arc<CombinedConfigInner>);
@@ -62,6 +58,9 @@ pub struct CombinedConfigInner {
 pub struct ConsensusConfig {
     /// Unique identifier for the blockchain network
     pub chain_id: u64,
+
+    /// Reth chain spec for the reth genesis
+    pub reth: RethChainSpec,
 
     /// Controls how mining difficulty adjusts over time
     pub difficulty_adjustment: DifficultyAdjustmentConfig,
@@ -120,6 +119,14 @@ pub struct ConsensusConfig {
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RethChainSpec {
+    /// The type of chain.
+    pub chain: Chain,
+    /// Genesis block.
+    pub genesis: Genesis,
 }
 
 /// # Node Configuration
@@ -207,6 +214,24 @@ pub enum ConsensusOptions {
 
     /// Use custom consensus parameters defined elsewhere
     Custom(ConsensusConfig),
+}
+
+impl ConsensusOptions {
+    pub fn extend_genesis_accounts(
+        &mut self,
+        accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
+    ) {
+        let config = self.custom_mut();
+        config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
+    }
+
+    pub fn custom_mut(&mut self) -> &mut ConsensusConfig {
+        let Self::Custom(config) = self else {
+            panic!("only support mutating custom configs");
+        };
+
+        config
+    }
 }
 
 /// # Pricing Configuration
@@ -422,6 +447,7 @@ impl ConsensusConfig {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
+            reth: todo!(),
         }
     }
 }
@@ -658,6 +684,7 @@ mod tests {
             },
             number_of_ingerss_proofs: 10,
             safe_minimum_number_of_years: 200,
+            reth: todo!(),
         };
 
         // Assert the entire struct matches

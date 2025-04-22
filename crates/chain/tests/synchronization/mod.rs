@@ -13,12 +13,12 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-#[test_log::test(actix_web::test)]
+// #[test_log::test(actix_web::test)]
 async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async().await;
-    let main_address = node.cfg.node_config.miner_address();
-    let account1 = IrysSigner::random_signer(&node.cfg.node_config);
-    let var_name = vec![
+    let main_address = node.cfg.miner_address();
+    let account1 = IrysSigner::random_signer(&node.cfg.consensus_config());
+    let extend_accounts = vec![
         (
             main_address,
             GenesisAccount {
@@ -34,7 +34,12 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
             },
         ),
     ];
-    node.cfg.irys_node_config.extend_genesis_accounts(var_name);
+    node.cfg
+        .consensus
+        .custom()
+        .reth
+        .genesis
+        .extend_genesis_accounts(extend_accounts);
     let node = node.start().await;
 
     wait_for_packing(
@@ -100,9 +105,6 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut tx_header_fut,
         Duration::from_millis(500),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await?;
 

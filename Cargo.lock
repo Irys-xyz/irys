@@ -4481,6 +4481,7 @@ dependencies = [
  "nodit",
  "openssl",
  "rand",
+ "reth-chainspec",
  "reth-codecs",
  "reth-db",
  "reth-db-api",
