@@ -7,9 +7,9 @@ use irys_database::{
 };
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    app_state::DatabaseProvider, Base64, Config, DataRoot, DataTransactionLedger,
-    IrysBlockHeader, IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
-    StorageSyncConfig, TxChunkOffset, UnpackedChunk, H256,
+    app_state::DatabaseProvider, Base64, Config, DataRoot, DataTransactionLedger, IrysBlockHeader,
+    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, StorageSyncConfig,
+    TxChunkOffset, UnpackedChunk, H256,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock};

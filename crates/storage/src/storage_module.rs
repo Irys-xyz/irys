@@ -55,9 +55,9 @@ use irys_types::{
     app_state::DatabaseProvider,
     get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
-    partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash,
-    Config, ConsensusConfig, DataRoot, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
-    PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize, RelativeChunkOffset,
+    partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config,
+    ConsensusConfig, DataRoot, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PackedChunk,
+    PartitionChunkOffset, PartitionChunkRange, ProofDeserialize, RelativeChunkOffset,
     StorageSyncConfig, TxChunkOffset, TxPath, UnpackedChunk, H256,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
@@ -202,10 +202,7 @@ impl StorageModules {
 
 impl StorageModule {
     /// Initializes a new StorageModule
-    pub fn new(
-        storage_module_info: &StorageModuleInfo,
-        config: &Config,
-    ) -> eyre::Result<Self> {
+    pub fn new(storage_module_info: &StorageModuleInfo, config: &Config) -> eyre::Result<Self> {
         let mut submodule_map = NoditMap::new();
         let mut global_intervals = StorageIntervals::new();
 
