@@ -809,6 +809,7 @@ impl IrysNode {
                 block_index: block_index_service_actor,
                 epoch_service: epoch_service_actor,
                 peer_list: peer_list_service.clone(),
+                reth: reth_service_actor,
             },
             reth_handle: reth_node.clone(),
             db: irys_db.clone(),
