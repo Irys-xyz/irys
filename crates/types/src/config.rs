@@ -10,7 +10,13 @@ use alloy_primitives::Address;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use std::{env, net::SocketAddr, ops::Deref, path::PathBuf, sync::Arc};
+use std::{
+    env,
+    net::SocketAddr,
+    ops::{Deref, DerefMut},
+    path::PathBuf,
+    sync::Arc,
+};
 
 #[derive(Debug, Clone)]
 pub struct Config(Arc<CombinedConfigInner>);
@@ -308,10 +314,10 @@ pub struct MempoolConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GossipConfig {
     /// The IP address the gossip service binds to
-    pub gossip_service_bind_ip: SocketAddr,
+    pub bind_ip: String,
 
     /// The port number the gossip service listens on
-    pub gossip_service_port: u16,
+    pub port: u16,
 }
 
 /// # Data Packing Configuration
@@ -471,8 +477,8 @@ impl NodeConfig {
                 fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
             },
             gossip: GossipConfig {
-                gossip_service_bind_ip: "127.0.0.1".parse().expect("valid IP address"),
-                gossip_service_port: 0,
+                bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                port: 0,
             },
             packing: PackingConfig {
                 cpu_packing_concurrency: 4,
@@ -741,8 +747,8 @@ mod tests {
                 fee_percentage: Amount::percentage(dec!(0.05)).unwrap(),
             },
             gossip: GossipConfig {
-                gossip_service_bind_ip: "127.0.0.1".parse().unwrap(),
-                gossip_service_port: 8081,
+                bind_ip: "127.0.0.1".parse().unwrap(),
+                port: 8081,
             },
             packing: PackingConfig {
                 cpu_packing_concurrency: 4,

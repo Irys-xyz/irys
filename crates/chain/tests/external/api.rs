@@ -68,7 +68,7 @@ async fn external_api() -> eyre::Result<()> {
     )
     .await?;
 
-    let http_url = format!("http://127.0.0.1:{}", node.cfg.node_config.port);
+    let http_url = format!("http://127.0.0.1:{}", node.cfg.config.node_config.http.port);
 
     // server should be running
     // check with request to `/v1/info`
@@ -81,7 +81,7 @@ async fn external_api() -> eyre::Result<()> {
         .unwrap();
 
     assert_eq!(response.status(), 200);
-    info!("HTTP server started on port {}", node.cfg.node_config.port);
+    info!("HTTP server started {}", http_url);
 
     info!("waiting for tx header...");
 

@@ -29,7 +29,7 @@ async fn main() -> eyre::Result<()> {
 
     // start the node
     tracing::info!("starting the node");
-    let handle = IrysNode::new(config).start().await?;
+    let handle = IrysNode::new(config).await?.start().await?;
     handle.start_mining()?;
 
     // wait for the node to be shut down

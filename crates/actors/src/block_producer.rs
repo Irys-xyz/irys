@@ -63,10 +63,8 @@ pub struct BlockProducerActor {
     pub service_senders: ServiceSenders,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
-    ///
+    /// Global config
     pub config: Config,
-    /// Difficulty adjustment parameters for the Irys Protocol
-    pub difficulty_config: DifficultyAdjustmentConfig,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Get the head of the chain
@@ -113,7 +111,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
-        let difficulty_config = self.difficulty_config.clone();
         let block_tree_guard = self.block_tree_guard.clone();
         let vdf_steps = self.vdf_steps_guard.clone();
         let price_oracle = self.price_oracle.clone();
@@ -243,7 +240,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let current_difficulty = prev_block_header.diff;
             let mut is_difficulty_updated = false;
             let block_height = prev_block_header.height + 1;
-            let (diff, stats) = calculate_difficulty(block_height, last_diff_timestamp, current_timestamp, current_difficulty, &difficulty_config);
+            let (diff, stats) = calculate_difficulty(block_height, last_diff_timestamp, current_timestamp, current_difficulty, &config.consensus.difficulty_adjustment);
 
             // Did an adjustment happen?
             if let Some(stats) = stats {

@@ -20,9 +20,9 @@ pub struct ChunkProvider {
 }
 
 impl ChunkProvider {
-    pub fn new(combined_config: Config, storage_modules: Vec<Arc<StorageModule>>) -> Self {
+    pub fn new(config: Config, storage_modules: Vec<Arc<StorageModule>>) -> Self {
         Self {
-            config: combined_config,
+            config,
             storage_modules,
         }
     }

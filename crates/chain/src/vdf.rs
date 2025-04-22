@@ -3,11 +3,7 @@ use irys_actors::{
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     vdf_service::{VdfSeed, VdfService},
 };
-use irys_types::{
-    block_production::Seed,
-    vdf_config::{AtomicVdfStepNumber, VDFStepsConfig},
-    H256List, H256, U256,
-};
+use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::Receiver;
@@ -15,7 +11,7 @@ use std::time::Instant;
 use tracing::{debug, info};
 
 pub fn run_vdf(
-    config: VDFStepsConfig,
+    config: &irys_types::VdfConfig,
     global_step_number: u64,
     seed: H256,
     initial_reset_seed: H256,
@@ -34,7 +30,7 @@ pub fn run_vdf(
         "VDF thread started at global_step_number: {}",
         global_step_number
     );
-    let nonce_limiter_reset_frequency = config.vdf_reset_frequency as u64;
+    let nonce_limiter_reset_frequency = config.reset_frequency as u64;
 
     loop {
         let now = Instant::now();
@@ -46,7 +42,7 @@ pub fn run_vdf(
             &mut salt,
             &mut hash,
             config.num_checkpoints_in_vdf_step,
-            config.vdf_difficulty,
+            config.sha_1s_difficulty,
             &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints ?
         );
 
