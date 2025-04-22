@@ -178,27 +178,23 @@ pub async fn get_tx_local_start_offset(
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub struct TxStatus {
-    #[serde(default, with = "u64_stringify")]
-    pub confirmations: u64,
+pub struct IsPromoted {
+    promoted: bool,
 }
 
-pub async fn get_tx_status(
+// TODO: REMOVE ME ONCE WE HAVE A GATEWAY
+/// Returns whether or not a transaction has been promoted
+/// by checking if the ingress_proofs field of the tx's header is `Some`,
+///  which only occurs when it's been promoted.
+pub async fn get_tx_is_promoted(
     state: web::Data<ApiState>,
     path: web::Path<H256>,
-) -> Result<Json<TxStatus>, ApiError> {
+) -> Result<Json<IsPromoted>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx by tx_id: {}", tx_id);
-    get_tx_status_internal(&state, tx_id).map(web::Json)
-}
+    let tx_header = get_storage_transaction(&state, tx_id)?;
 
-pub fn get_tx_status_internal(
-    _state: &web::Data<ApiState>,
-    _tx_id: H256,
-) -> Result<TxStatus, ApiError> {
-    // let block_index_read = state.block_index.read();
-    // block_index_read.items.iter().find(|i| i.ledgers.iter().find(|li| li.tx_root));
-
-    // todo!();
-    Ok(TxStatus { confirmations: 50 })
+    Ok(web::Json(IsPromoted {
+        promoted: tx_header.ingress_proofs.is_some(),
+    }))
 }
