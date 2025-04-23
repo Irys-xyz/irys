@@ -315,26 +315,6 @@ impl IrysNode {
             .build()?;
         let task_manager = TaskManager::new(tokio_runtime.handle().clone());
 
-        // we create the listener here so we know the port before we start passing around `config`
-        let listener = create_listener(
-            format!(
-                "{}:{}",
-                self.config.node_config.http.bind_ip, self.config.node_config.http.port
-            )
-            .parse()?,
-        )?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
-        // if `config.port` == 0, the assigned port will be random (decided by the OS)
-        // we re-assign the configuration with the actual port here.
-        let random_ports = if self.config.node_config.http.port == 0 {
-            self.config.node_config.http.port = local_addr.port();
-            true
-        } else {
-            false
-        };
-
         // Common node startup logic (common for genesis and peer mode nodes)
         // There are a lot of cross dependencies between reth and irys components, the channels mediate the comms
         let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
