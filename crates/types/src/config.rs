@@ -7,7 +7,7 @@ use crate::{
     PeerAddress,
 };
 use alloy_primitives::Address;
-use reth_chainspec::{Chain, ChainHardforks, ChainSpecBuilder};
+use reth_chainspec::Chain;
 use reth_primitives::{constants::ETHEREUM_BLOCK_GAS_LIMIT, Genesis, GenesisAccount};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -127,7 +127,7 @@ pub struct ConsensusConfig {
 
     /// Minimum number of replicas required for data to be considered permanently stored
     /// Higher values increase data durability but require more network resources
-    pub number_of_ingerss_proofs: u64,
+    pub number_of_ingress_proofs: u64,
 
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
@@ -437,7 +437,7 @@ impl ConsensusConfig {
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
             decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
             safe_minimum_number_of_years: 200,
-            number_of_ingerss_proofs: 10,
+            number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             vdf: VdfConfig {
@@ -727,7 +727,7 @@ mod tests {
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1
         entropy_packing_iterations = 1000
-        number_of_ingerss_proofs = 10
+        number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
         token_price_safe_range = 1.0
         genesis_price = 1
