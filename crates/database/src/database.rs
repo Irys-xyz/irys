@@ -274,7 +274,7 @@ pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Res
 
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
 pub fn get_account_balance<T: DbTx>(tx: &T, address: Address) -> eyre::Result<U256> {
-    error!("balance check on address: {:?}", address);
+    trace!("balance check on address: {:?}", address);
     Ok(tx
         .get::<PlainAccountState>(address)?
         .map(|a| U256::from_little_endian(a.balance.as_le_slice()))
