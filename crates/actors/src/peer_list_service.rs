@@ -3,10 +3,7 @@ use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
-use irys_types::{
-    Address, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse, RejectedResponse,
-    VersionRequest,
-};
+use irys_types::{build_user_agent, Address, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse, RejectedResponse, VersionRequest};
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -395,7 +392,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
             mining_address: self.miner_address,
             address: self.peer_address,
             chain_id: self.chain_id,
-            user_agent: Some(format!("Irys-Node-{}", env!("CARGO_PKG_VERSION"))),
+            user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
             ..VersionRequest::default()
         }
     }
