@@ -593,7 +593,12 @@ impl IrysNode {
         debug!("Reth Service Actor initiailsed");
         // Get the correct Reth peer info
         let reth_peering = reth_service_actor.send(GetPeeringInfoMessage {}).await??;
-        config.node_config.reth_peer_info = reth_peering;
+
+        // overwrite config as we now have reth peering information
+        // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
+        let mut node_config = config.node_config.clone();
+        node_config.reth_peer_info = reth_peering;
+        let config = Config::new(node_config);
 
         // update reth service about the latest block data it must use
         reth_service_actor
@@ -686,7 +691,7 @@ impl IrysNode {
 
         // spawn block discovery
         let (block_discovery, block_discovery_arbiter) = Self::init_block_discovery_service(
-            config,
+            &config,
             &irys_db,
             &service_senders,
             &epoch_service_actor,
@@ -732,7 +737,7 @@ impl IrysNode {
 
         // set up storage modules
         let (part_actors, part_arbiters) = Self::init_partition_mining_actor(
-            config,
+            &config,
             &storage_modules,
             &vdf_steps_guard,
             &block_producer_addr,
