@@ -3,10 +3,7 @@
 use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_chain::IrysNodeCtx;
-use irys_types::{
-    AcceptedResponse, Address, PeerAddress, PeerResponse, ProtocolVersion, RethPeerInfo,
-    VersionRequest,
-};
+use irys_types::{AcceptedResponse, PeerResponse, ProtocolVersion, VersionRequest};
 use semver::Version;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
