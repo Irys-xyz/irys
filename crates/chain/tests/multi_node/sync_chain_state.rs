@@ -62,13 +62,13 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     testnet_config_peer1.http.port = 0;
     testnet_config_peer1.trusted_peers = trusted_peers.clone();
     testnet_config_peer1.mode = NodeMode::PeerSync;
-    let ctx_peer1_node = IrysNodeTest::new_genesis(testnet_config_peer1.clone())
+    let ctx_peer1_node = IrysNodeTest::new(testnet_config_peer1.clone())
         .await
         .start()
         .await;
 
     //start peer2
-    let ctx_peer2_node = IrysNodeTest::new_genesis(testnet_config_peer1.clone())
+    let ctx_peer2_node = IrysNodeTest::new(testnet_config_peer1.clone())
         .await
         .start()
         .await;
