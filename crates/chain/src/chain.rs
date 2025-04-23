@@ -20,7 +20,7 @@ use irys_actors::{
     mining::PartitionMiningActor,
     packing::PackingConfig,
     packing::{PackingActor, PackingRequest},
-    peer_list_service::{AddPeer, PeerListService},
+    peer_list_service::PeerListService,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationService,
@@ -49,7 +49,7 @@ use irys_types::U256;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
     CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
-    OracleConfig, PartitionChunkRange, PeerListItem, StorageConfig, H256,
+    OracleConfig, PartitionChunkRange, StorageConfig, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
@@ -383,8 +383,6 @@ impl IrysNode {
                 ctx.config.trusted_peers.clone(),
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
-                ctx.actor_addresses.peer_list.clone(),
-                ctx.config.miner_address(),
             )
             .await?;
         }

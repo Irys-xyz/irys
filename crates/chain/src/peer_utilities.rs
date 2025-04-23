@@ -3,16 +3,13 @@ use base58::ToBase58;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     mempool_service::{MempoolService, TxIngressMessage},
-    peer_list_service::{AddPeer, PeerListService},
 };
 use irys_api_server::routes::tx::IrysTransaction;
 use irys_database::{BlockIndexItem, DataLedger};
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
-use irys_types::Address;
-
-use irys_types::{block::CombinedBlockHeader, IrysBlockHeader, PeerAddress, PeerListItem, H256};
+use irys_types::{block::CombinedBlockHeader, IrysBlockHeader, PeerAddress, H256};
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
@@ -213,8 +210,6 @@ pub async fn sync_state_from_peers(
     trusted_peers: Vec<PeerAddress>,
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
-    peer_list_service_addr: Addr<PeerListService>,
-    miner_address: Address,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
@@ -231,8 +226,6 @@ pub async fn sync_state_from_peers(
         peers.clone(),
         &client,
         trusted_peers,
-        peer_list_service_addr.clone(),
-        miner_address,
     )
     .await
     {
@@ -306,14 +299,11 @@ pub async fn fetch_and_update_peers(
     peers: Arc<tokio::sync::Mutex<Vec<PeerAddress>>>,
     client: &awc::Client,
     peers_to_ask: Vec<PeerAddress>,
-    peer_list_service_addr: Addr<PeerListService>,
-    miner_address: Address,
 ) -> Option<u64> {
     let futures = peers_to_ask.into_iter().map(|peer| {
         let client = client.clone();
         let peers = peers.clone();
         let url = format!("http://{}/v1/peer_list", peer.api);
-        let peer_list_service_addr = peer_list_service_addr.clone();
 
         async move {
             match client.get(url.clone()).send().await {
@@ -333,19 +323,6 @@ pub async fn fetch_and_update_peers(
                             continue;
                         }
                         peers_guard.push(p);
-                        let peer_list_entry = PeerListItem {
-                            address: p,
-                            ..Default::default()
-                        };
-                        if let Err(e) = peer_list_service_addr
-                            .send(AddPeer {
-                                mining_addr: miner_address,
-                                peer: peer_list_entry,
-                            })
-                            .await
-                        {
-                            error!("Unable to send AddPeerMessage message {e}");
-                        };
                         added += 1;
                     }
                     error!("Got {} peers from {}", &added, peer.api);
