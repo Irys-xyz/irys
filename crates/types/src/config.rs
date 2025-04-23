@@ -538,10 +538,6 @@ impl NodeConfig {
 
         Self {
             mode: NodeMode::Genesis,
-            trusted_peers: vec![PeerAddress {
-                gossip: SocketAddr::from_str("127.0.0.1:8081").unwrap(),
-                api: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
-            }],
             consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
             base_directory: default_irys_path(),
             mempool: MempoolConfig {
@@ -561,7 +557,6 @@ impl NodeConfig {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
             },
-            base_directory: default_irys_path(),
             trusted_peers: vec![PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
