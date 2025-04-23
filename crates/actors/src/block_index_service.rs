@@ -5,8 +5,7 @@ use irys_database::{
     block_header_by_hash, BlockIndex, BlockIndexItem, DataLedger, LedgerIndexItem,
 };
 use irys_types::{
-    ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageSyncConfig,
-    H256, U256,
+    ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, H256, U256,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
@@ -96,7 +95,6 @@ pub struct BlockIndexService {
     block_index: Option<Arc<RwLock<BlockIndex>>>,
     block_log: Vec<BlockLogEntry>,
     num_blocks: u64,
-    chain_id: u64,
     chunk_size: u64,
 }
 
@@ -133,7 +131,6 @@ impl BlockIndexService {
             block_index: Some(block_index),
             block_log: Vec::new(),
             num_blocks: 0,
-            chain_id: consensus_config.chain_id,
             chunk_size: consensus_config.chunk_size,
         }
     }

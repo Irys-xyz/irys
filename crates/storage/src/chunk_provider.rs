@@ -1,9 +1,6 @@
 use eyre::OptionExt;
 use irys_database::DataLedger;
-use irys_types::{
-    ChunkFormat, Config, ConsensusConfig, DataRoot, LedgerChunkOffset, PackedChunk,
-    StorageSyncConfig, TxChunkOffset,
-};
+use irys_types::{ChunkFormat, Config, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset};
 use std::sync::Arc;
 
 use tracing::debug;

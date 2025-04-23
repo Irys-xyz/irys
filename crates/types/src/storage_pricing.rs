@@ -12,7 +12,6 @@ use core::{fmt::Debug, marker::PhantomData};
 use eyre::{ensure, eyre, Result};
 use reth_codecs::Compact;
 pub use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 /// 1.0 in 18-decimal fixed point. little endian encoded.

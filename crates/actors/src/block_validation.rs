@@ -477,6 +477,7 @@ mod tests {
         pub partition_hash: H256,
         pub partition_assignment: PartitionAssignment,
         pub consensus_config: ConsensusConfig,
+        #[allow(dead_code)]
         pub node_config: NodeConfig,
     }
 

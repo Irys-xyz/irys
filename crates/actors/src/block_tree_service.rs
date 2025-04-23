@@ -22,7 +22,7 @@ use eyre::ensure;
 use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, DataLedger};
 use irys_types::{
     Address, BlockHash, ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionId, StorageSyncConfig, H256, U256,
+    IrysTransactionId, H256, U256,
 };
 use reth_db::{transaction::DbTx, Database as _};
 use tracing::{debug, error, info};

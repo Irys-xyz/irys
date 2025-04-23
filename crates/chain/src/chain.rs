@@ -48,10 +48,9 @@ use irys_storage::{
 use irys_types::U256;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, Address, CommitmentTransaction,
-    GossipData, IrysBlockHeader, OracleConfig, PartitionChunkRange, PeerListItem,
-    StorageSyncConfig, H256,
+    GossipData, IrysBlockHeader, OracleConfig, PartitionChunkRange, PeerListItem, H256,
 };
-use irys_types::{Config, ConsensusConfig, NodeConfig, NodeMode};
+use irys_types::{Config, NodeConfig, NodeMode};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
     builder::FullNode,

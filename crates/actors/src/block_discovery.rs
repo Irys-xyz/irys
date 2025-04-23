@@ -10,8 +10,8 @@ use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
 use irys_types::{
-    CommitmentTransaction, Config, ConsensusConfig, DatabaseProvider, DifficultyAdjustmentConfig,
-    GossipData, IrysBlockHeader, IrysTransactionHeader, StorageSyncConfig, VdfConfig,
+    CommitmentTransaction, Config, DatabaseProvider, GossipData, IrysBlockHeader,
+    IrysTransactionHeader,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
@@ -218,7 +218,6 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         //====================================
         // Block header pre-validation
         //------------------------------------
-        let block_index_guard = self.block_index_guard.clone();
         let block_index_guard2 = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = BlockTreeService::from_registry();

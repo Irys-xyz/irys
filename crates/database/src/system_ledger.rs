@@ -1,8 +1,8 @@
 use irys_config::StorageSubmodulesConfig;
 use irys_primitives::CommitmentType;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, Compact, Config, ConsensusConfig, H256List,
-    IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256,
+    irys::IrysSigner, CommitmentTransaction, Compact, Config, H256List, IrysBlockHeader,
+    SystemTransactionLedger, H256,
 };
 use serde::{Deserialize, Serialize};
 

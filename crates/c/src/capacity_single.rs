@@ -72,7 +72,7 @@ mod tests {
         capacity_single::{self, SHA_HASH_SIZE},
     };
     use irys_primitives::Address;
-    use irys_types::{ConsensusConfig, NodeConfig};
+    use irys_types::ConsensusConfig;
     use rand;
     use rand::Rng;
     use std::time::Instant;

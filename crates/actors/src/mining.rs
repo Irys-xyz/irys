@@ -11,11 +11,10 @@ use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr;
 use irys_efficient_sampling::Ranges;
 use irys_storage::{ie, ii, StorageModule};
-use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{
-    partition_chunk_offset_ie, Address, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
+    partition_chunk_offset_ie, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
     PartitionChunkOffset, PartitionChunkRange,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
@@ -382,9 +381,8 @@ mod tests {
     use irys_storage::{ie, PackingParams, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::{
-        app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
-        partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageSyncConfig,
-        H256,
+        block_production::SolutionContext, chunk::UnpackedChunk, partition::PartitionAssignment,
+        storage::LedgerChunkRange, StorageSyncConfig, H256,
     };
     use irys_types::{
         ledger_chunk_offset_ie, ConsensusConfig, H256List, IrysBlockHeader, LedgerChunkOffset,
@@ -622,11 +620,6 @@ mod tests {
                 (partition_chunk_offset_ie!(0, 10), "hdd0".into()), // 10 chunks
             ],
         }];
-
-        let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
-        let base_path = tmp_dir.path().to_path_buf();
-        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
-        let database_provider = DatabaseProvider(Arc::new(db));
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];

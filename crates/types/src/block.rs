@@ -462,7 +462,7 @@ pub struct CombinedBlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::{validate_path, Config, ConsensusConfig, NodeConfig, TxIngressProof};
+    use crate::{validate_path, Config, NodeConfig, TxIngressProof};
 
     use super::*;
     use alloy_primitives::Signature;

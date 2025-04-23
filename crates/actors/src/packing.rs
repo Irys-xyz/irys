@@ -13,7 +13,7 @@ use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_
 use {irys_packing::capacity_pack_range_cuda_c, irys_types::split_interval};
 
 use irys_storage::{ChunkType, StorageModule};
-use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, StorageSyncConfig};
+use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange};
 use reth::tasks::TaskExecutor;
 use tokio::{sync::Semaphore, time::sleep};
 use tracing::{debug, warn};
@@ -428,8 +428,6 @@ mod tests {
                 "hdd0".into(),
             )],
         }];
-        let tmp_dir = setup_tracing_and_temp_dir(Some("test_packing_actor"), false);
-        let base_path = tmp_dir.path().to_path_buf();
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
         let storage_module = Arc::new(StorageModule::new(storage_module_info, &config)?);

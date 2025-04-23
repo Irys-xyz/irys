@@ -5,10 +5,9 @@ use irys_actors::epoch_service::{
 };
 
 use irys_config::StorageSubmodulesConfig;
-use irys_types::{partition::PartitionAssignment, DatabaseProvider, IrysBlockHeader, H256};
+use irys_types::{partition::PartitionAssignment, IrysBlockHeader, H256};
 use irys_types::{
-    partition_chunk_offset_ie, Address, ConsensusConfig, ConsensusOptions, EpochConfig,
-    PartitionChunkOffset,
+    partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
 };
 use irys_types::{Config, U256};
 use std::collections::VecDeque;
@@ -30,10 +29,7 @@ use irys_actors::{
     packing::{PackingActor, PackingRequest},
     BlockFinalizedMessage, BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
 };
-use irys_database::{
-    add_genesis_commitments, add_test_commitments, open_or_create_db, tables::IrysTables,
-    BlockIndex, DataLedger,
-};
+use irys_database::{add_genesis_commitments, add_test_commitments, BlockIndex, DataLedger};
 use irys_storage::{ie, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::NodeConfig;
@@ -337,9 +333,6 @@ async fn partition_expiration_and_repacking_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
 
     // Create epoch service
-    let db_env = open_or_create_db(&tmp_dir, IrysTables::ALL, None).unwrap();
-    let db = DatabaseProvider(Arc::new(db_env));
-
     let storage_module_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
     let mut epoch_service = EpochServiceActor::new(&config);
     let storage_module_infos = epoch_service
@@ -704,9 +697,6 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
-    let database_provider = DatabaseProvider(Arc::new(db));
-
     let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
         BlockIndex::new(&config.node_config).await.unwrap(),
     ));
@@ -714,10 +704,6 @@ async fn epoch_blocks_reinitialization_test() {
     let block_index_actor = BlockIndexService::new(block_index.clone(), &config.consensus).start();
     SystemRegistry::set(block_index_actor.clone());
 
-    let block_index_guard = block_index_actor
-        .send(GetBlockIndexGuardMessage)
-        .await
-        .unwrap();
     let mut epoch_service = EpochServiceActor::new(&config);
 
     // Process genesis message directly instead of through actor system

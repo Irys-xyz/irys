@@ -56,9 +56,9 @@ use irys_types::{
     get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config,
-    ConsensusConfig, DataRoot, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PackedChunk,
-    PartitionChunkOffset, PartitionChunkRange, ProofDeserialize, RelativeChunkOffset,
-    StorageSyncConfig, TxChunkOffset, TxPath, UnpackedChunk, H256,
+    DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset,
+    PartitionChunkRange, ProofDeserialize, RelativeChunkOffset, TxChunkOffset, TxPath,
+    UnpackedChunk, H256,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use openssl::sha;
@@ -1324,7 +1324,10 @@ pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::R
 mod tests {
     use super::*;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{ledger_chunk_offset_ii, partition_chunk_offset_ii, TxChunkOffset, H256};
+    use irys_types::{
+        ledger_chunk_offset_ii, partition_chunk_offset_ii, ConsensusConfig, NodeConfig,
+        StorageSyncConfig, TxChunkOffset, H256,
+    };
     use nodit::interval::ii;
 
     #[test]
