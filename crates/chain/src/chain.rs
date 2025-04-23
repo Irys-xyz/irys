@@ -376,25 +376,6 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
-        // load peers from config into our database
-        for peer_address in ctx.config.trusted_peers.clone() {
-            let peer_list_entry = PeerListItem {
-                address: peer_address,
-                ..Default::default()
-            };
-
-            if let Err(e) = ctx
-                .actor_addresses
-                .peer_list
-                .send(AddPeer {
-                    mining_addr: peer_list_entry.address.mining_address,
-                    peer: peer_list_entry,
-                })
-                .await
-            {
-                error!("Unable to send AddPeerMessage message {e}");
-            };
-        }
 
         // if we are an empty node joining an existing network
         if !self.data_exists && !self.is_genesis {

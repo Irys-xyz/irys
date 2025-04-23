@@ -79,7 +79,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         testnet_config_genesis,
         testnet_config_peer1,
         testnet_config_peer2,
-        trusted_peers,
+        _trusted_peers,
         genesis_trusted_peers,
     ) = init_configs();
     // setup a funded account at genesis block
