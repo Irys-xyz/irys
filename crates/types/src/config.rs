@@ -664,72 +664,81 @@ mod tests {
     #[test]
     fn test_deserialize_consensus_config_from_toml() {
         let toml_data = r#"
-        
+        chain_id = 1270
+        chunk_size = 262144
+        chunk_migration_depth = 1
+        num_chunks_in_partition = 10
+        num_chunks_in_recall_range = 2
+        num_partitions_per_slot = 1
+        entropy_packing_iterations = 1000
+        number_of_ingerss_proofs = 10
+        safe_minimum_number_of_years = 200
+
+        [reth]
+        chain = 1270
+
+        [reth.genesis]
+        nonce = "0x0"
+        timestamp = "0x0"
+        extraData = "0x"
+        gasLimit = "0x1c9c380"
+        difficulty = "0x0"
+        mixHash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+        coinbase = "0x0000000000000000000000000000000000000000"
+
+        [reth.genesis.config]
+        chainId = 1
+        daoForkSupport = false
+        terminalTotalDifficultyPassed = false
+
+        [reth.genesis.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
+        balance = "0x9935f581f050000"
+
+        [reth.genesis.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
+        balance = "0xd3c21bcecceda1000000"
+
+        [difficulty_adjustment]
+        block_time = 1
+        difficulty_adjustment_interval = 1209600000
+        max_difficulty_adjustment_factor = "4"
+        min_difficulty_adjustment_factor = "0.25"
+
+        [token_price_safe_range]
+        amount = "1000000"
+
+        [genesis_price]
+        amount = "1000000000000000000"
+
+        [annual_cost_per_gb]
+        amount = "10000000000000000"
+
+        [decay_rate]
+        amount = "10000"
+
+        [vdf]
+        reset_frequency = 1200
+        parallel_verification_thread_limit = 4
+        num_checkpoints_in_vdf_step = 25
+        sha_1s_difficulty = 7000
+
+        [epoch]
+        capacity_scalar = 100
+        num_blocks_in_epoch = 100
+        submit_ledger_epoch_length = 5
+
+        [ema]
+        price_adjustment_interval = 10
         "#;
 
-        // Deserialize the TOML string into a ConsensusConfig
-        let config: ConsensusConfig =
-            toml::from_str(toml_data).expect("Failed to deserialize ConsensusConfig from TOML");
-
         // Create the expected config
-        let expected_config = ConsensusConfig {
-            chain_id: 1270,
-            difficulty_adjustment: DifficultyAdjustmentConfig {
-                block_time: 1,
-                difficulty_adjustment_interval: 100,
-                max_difficulty_adjustment_factor: dec!(4),
-                min_difficulty_adjustment_factor: dec!(0.25),
-            },
-            ema: EmaConfig {
-                price_adjustment_interval: 10,
-            },
-            token_price_safe_range: Amount::percentage(dec!(1)).unwrap(),
-            genesis_price: Amount::token(dec!(1)).unwrap(),
-            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(),
-            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),
-            vdf: VdfConfig {
-                reset_frequency: 1200,
-                parallel_verification_thread_limit: 4,
-                num_checkpoints_in_vdf_step: 25,
-                sha_1s_difficulty: 7000,
-            },
-            chunk_size: 262144,
-            chunk_migration_depth: 1,
-            num_chunks_in_partition: 10,
-            num_chunks_in_recall_range: 2,
-            num_partitions_per_slot: 1,
-            entropy_packing_iterations: 1000,
-            epoch: EpochConfig {
-                capacity_scalar: 100,
-                num_blocks_in_epoch: 100,
-                submit_ledger_epoch_length: 5,
-                num_capacity_partitions: None,
-            },
-            number_of_ingerss_proofs: 10,
-            safe_minimum_number_of_years: 200,
-            reth: RethChainSpec {
-                chain: Chain::from_id(123),
-                genesis: Genesis {
-                    gas_limit: 100,
-                    alloc: {
-                        let mut map = BTreeMap::new();
-                        map.insert(
-                            Address::from_slice(
-                                hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
-                                    .unwrap()
-                                    .as_slice(),
-                            ),
-                            GenesisAccount {
-                                balance: alloy_primitives::U256::from(1),
-                                ..Default::default()
-                            },
-                        );
-                        map
-                    },
-                    ..Default::default()
-                },
-            },
-        };
+        let expected_config = ConsensusConfig::testnet();
+        let expected_toml_data = toml::to_string(&expected_config).unwrap();
+        // for debugging purposes
+        println!("{}", expected_toml_data);
+
+        // Deserialize the TOML string into a ConsensusConfig
+        let config =
+            toml::from_str::<ConsensusConfig>(toml_data).expect("Failed to deserialize ConsensusConfig from TOML");
 
         // Assert the entire struct matches
         assert_eq!(config, expected_config);
@@ -738,50 +747,60 @@ mod tests {
     #[test]
     fn test_deserialize_config_from_toml() {
         let toml_data = r#"
-        
+        mode = "Genesis"
+        base_directory = "~/.tmp/.irys"
+        consensus = "Testnet"
+        mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+
+        [[trusted_peers]]
+        gossip = "127.0.0.1:8081"
+        api = "127.0.0.1:8080"
+
+        [mempool]
+        max_data_txs_per_block = 100
+        anchor_expiry_depth = 10
+
+        [oracle]
+        type = "mock"
+        smoothing_interval = 15
+
+        [oracle.initial_price]
+        amount = "1000000000000000000"
+
+        [oracle.percent_change]
+        amount = "10000"
+
+        [storage]
+        num_writes_before_sync = 1
+
+        [pricing.fee_percentage]
+        amount = "10000"
+
+        [gossip]
+        bind_ip = "127.0.0.1"
+        port = 0
+
+        [packing]
+        cpu_packing_concurrency = 4
+        gpu_packing_batch_size = 1024
+
+        [cache]
+        cache_clean_lag = 2
+
+        [http]
+        port = 0
         "#;
+        // Create the expected config
+        let mut expected_config = NodeConfig::testnet();
+        expected_config.consensus = ConsensusOptions::Testnet;
+        expected_config.base_directory = PathBuf::from("~/.tmp/.irys");
+        let expected_toml_data = toml::to_string(&expected_config).unwrap();
+        // for debugging purposes
+        println!("{}", expected_toml_data);
 
         // Deserialize the TOML string into a NodeConfig
-        let config: NodeConfig =
-            toml::from_str(toml_data).expect("Failed to deserialize NodeConfig from TOML");
-
-        // Create the expected config
-        let expected_config = NodeConfig {
-            mode: NodeMode::Genesis,
-            trusted_peers: vec![],
-            base_directory: "~/.irys".into(),
-            consensus: ConsensusOptions::Testnet,
-            mempool: MempoolConfig {
-                max_data_txs_per_block: 20,
-                anchor_expiry_depth: 10,
-            },
-            oracle: OracleConfig::Mock {
-                initial_price: Amount::token(dec!(1.0)).unwrap(),
-                percent_change: Amount::percentage(dec!(0.01)).unwrap(),
-                smoothing_interval: 15,
-            },
-            mining_key: k256::ecdsa::SigningKey::from_slice(
-                &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
-                    .expect("valid hex"),
-            )
-            .expect("valid private key"),
-            storage: StorageSyncConfig {
-                num_writes_before_sync: 1,
-            },
-            pricing: PricingConfig {
-                fee_percentage: Amount::percentage(dec!(0.05)).unwrap(),
-            },
-            gossip: GossipConfig {
-                bind_ip: "127.0.0.1".parse().unwrap(),
-                port: 8081,
-            },
-            packing: PackingConfig {
-                cpu_packing_concurrency: 4,
-                gpu_packing_batch_size: 1024,
-            },
-            cache: CacheConfig { cache_clean_lag: 2 },
-            http: HttpConfig { port: 8080 },
-        };
+        let config =
+            toml::from_str::<NodeConfig>(toml_data).expect("Failed to deserialize NodeConfig from TOML");
 
         // Assert the entire struct matches
         assert_eq!(config, expected_config);
