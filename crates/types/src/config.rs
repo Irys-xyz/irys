@@ -536,8 +536,6 @@ impl NodeConfig {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn testnet() -> Self {
-        use std::{net::SocketAddr, str::FromStr};
-
         use k256::ecdsa::SigningKey;
         use rust_decimal_macros::dec;
 
@@ -566,7 +564,6 @@ impl NodeConfig {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
-                mining_address: Address::ZERO,
             }],
             pricing: PricingConfig {
                 fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),

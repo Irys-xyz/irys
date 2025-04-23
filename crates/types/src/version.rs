@@ -149,7 +149,6 @@ pub struct PeerAddress {
     pub gossip: SocketAddr,
     pub api: SocketAddr,
     pub execution: RethPeerInfo,
-    pub mining_address: Address,
 }
 
 impl Default for PeerAddress {
@@ -158,7 +157,6 @@ impl Default for PeerAddress {
             gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8081),
             execution: RethPeerInfo::default(),
-            mining_address: Address::ZERO,
         }
     }
 }

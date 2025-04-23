@@ -3,7 +3,10 @@ use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
-use irys_types::{build_user_agent, Address, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse, RejectedResponse, VersionRequest};
+use irys_types::{
+    build_user_agent, Address, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse,
+    RejectedResponse, VersionRequest,
+};
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -53,7 +56,7 @@ pub struct PeerListServiceWithClient<T: ApiClient + 'static + Unpin + Default> {
     irys_api_client: T,
 
     chain_id: u64,
-    miner_address: Address,
+    mining_address: Address,
     peer_address: PeerAddress,
 
     trusted_peers_api_addresses: HashSet<SocketAddr>,
@@ -86,7 +89,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
             gossip_client: Client::new(),
             irys_api_client,
             chain_id: config.consensus.chain_id,
-            miner_address: config.node_config.miner_address(),
+            mining_address: config.node_config.miner_address(),
             peer_address: PeerAddress {
                 gossip: format!(
                     "{}:{}",
@@ -101,7 +104,6 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                 .parse()
                 .expect("valid SocketAddr expected"),
                 execution: config.node_config.reth_peer_info,
-                mining_address: config.node_config.miner_address(),
             },
             trusted_peers_api_addresses: config
                 .node_config
@@ -389,7 +391,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
 
     fn create_version_request(&self) -> VersionRequest {
         VersionRequest {
-            mining_address: self.miner_address,
+            mining_address: self.mining_address,
             address: self.peer_address,
             chain_id: self.chain_id,
             user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
@@ -881,7 +883,6 @@ mod tests {
             gossip: gossip_addr,
             api: api_addr,
             execution: RethPeerInfo::default(),
-            mining_address: mining_addr,
         };
 
         let peer = PeerListItem {
@@ -1383,7 +1384,6 @@ mod tests {
             gossip: initial_gossip_addr,
             api: initial_api_addr,
             execution: RethPeerInfo::default(),
-            mining_address: Address::ZERO,
         };
 
         let initial_peer = PeerListItem {
@@ -1420,7 +1420,6 @@ mod tests {
             gossip: new_gossip_addr,
             api: new_api_addr,
             execution: RethPeerInfo::default(),
-            mining_address: Address::with_last_byte(1),
         };
 
         let updated_peer = PeerListItem {
@@ -1772,16 +1771,12 @@ mod tests {
             gossip: "127.0.0.1:9001".parse().expect("valid SocketAddr expected"),
             api: "127.0.0.1:9002".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
-            mining_address: Address::from_str("0x1111111111111111111111111111111111111111")
-                .expect("Invalid mining address"),
         };
 
         let trusted_peer2 = PeerAddress {
             gossip: "127.0.0.1:9003".parse().expect("valid SocketAddr expected"),
             api: "127.0.0.1:9004".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
-            mining_address: Address::from_str("0x2222222222222222222222222222222222222222")
-                .expect("Invalid mining address"),
         };
 
         // Create config with trusted peers

@@ -1,4 +1,4 @@
-use crate::{Address, Compact, PeerAddress};
+use crate::{Compact, PeerAddress};
 use actix::Message;
 use arbitrary::Arbitrary;
 use bytes::Buf;
@@ -58,7 +58,6 @@ impl Default for PeerListItem {
                 gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                 api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                 execution: RethPeerInfo::default(),
-                mining_address: Address::ZERO,
             },
             last_seen: Utc::now().timestamp_millis() as u64,
             is_online: true,
@@ -206,8 +205,6 @@ impl Compact for PeerListItem {
 
         size += self.address.execution.to_compact(buf);
 
-        size += self.address.mining_address.to_compact(buf);
-
         // Encode last_seen
         buf.put_u64(self.last_seen);
         size += 8;
@@ -238,7 +235,6 @@ impl Compact for PeerListItem {
                         gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                         api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
                         execution: RethPeerInfo::default(),
-                        mining_address: Address::ZERO,
                     },
                     last_seen: 0,
                     is_online: false,
@@ -256,13 +252,11 @@ impl Compact for PeerListItem {
         // let (reth_peering_tcp, consumed) = decode_address(&buf[total_consumed..]);
         let (reth_peer_info, buf) = RethPeerInfo::from_compact(&buf, buf.len());
         // total_consumed += consumed;
-        let (mining_address, buf) = Address::from_compact(&buf, buf.len());
 
         let address = PeerAddress {
             gossip: gossip_address,
             api: api_address,
             execution: reth_peer_info,
-            mining_address,
         };
 
         // Read last_seen if available

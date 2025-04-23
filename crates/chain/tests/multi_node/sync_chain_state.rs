@@ -10,8 +10,8 @@ use irys_chain::{
 };
 use irys_database::BlockIndexItem;
 use irys_types::{
-    irys::IrysSigner, Address, Config, GossipConfig, HttpConfig, IrysTransaction, NodeConfig,
-    NodeMode, PeerAddress, RethPeerInfo,
+    irys::IrysSigner, Config, GossipConfig, HttpConfig, IrysTransaction, NodeConfig, NodeMode,
+    PeerAddress, RethPeerInfo,
 };
 use k256::ecdsa::SigningKey;
 use reth_primitives::irys_primitives::IrysTxId;
@@ -45,7 +45,6 @@ async fn heavy_test_p2p() -> eyre::Result<()> {
         .parse()
         .expect("valid SocketAddr expected"),
         execution: genesis.node_ctx.config.node_config.reth_peer_info,
-        mining_address: Address::ZERO,
     };
 
     let (peer1, peer2) = start_peer_nodes(
@@ -401,26 +400,22 @@ fn init_configs() -> (
         api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
         gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
         execution: RethPeerInfo::default(),
-        mining_address: testnet_config_genesis.miner_address(),
     }];
     let genesis_trusted_peers = vec![
         PeerAddress {
             api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
-            mining_address: testnet_config_genesis.miner_address(),
         },
         PeerAddress {
             api: "127.0.0.1:8082".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.1:8083".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
-            mining_address: testnet_config_peer1.miner_address(),
         },
         PeerAddress {
             api: "127.0.0.1:8084".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.1:8085".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
-            mining_address: testnet_config_peer2.miner_address(),
         },
     ];
     testnet_config_peer1.trusted_peers = trusted_peers.clone();

@@ -104,7 +104,6 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
                 peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
             },
-            mining_address: miner_signer_1.address(),
         },
         mining_address: miner_signer_1.address(),
         user_agent: Some(build_user_agent("miner1", "0.1.0")),
@@ -179,7 +178,6 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                         peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
                         peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
                     },
-                    mining_address: miner_signer_1.address(),
                 }),
                 "Missing expected peer 127.0.0.1:8080"
             );
@@ -197,7 +195,6 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 peering_tcp_addr: "127.0.0.3:8082".parse().unwrap(),
                 peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
             },
-            mining_address: miner_signer_3.address(),
         },
         mining_address: miner_signer_3.address(),
         user_agent: Some(build_user_agent("miner3", "0.1.0")),
@@ -228,7 +225,6 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                         peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
                         peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
                     },
-                    mining_address: miner_signer_1.address(),
                 }),
                 "Missing expected peer 127.0.0.1:8080"
             );
@@ -240,7 +236,6 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                         peering_tcp_addr: "127.0.0.2:8082".parse().unwrap(),
                         peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
                     },
-                    mining_address: miner_signer_2.address(),
                 }),
                 "Missing expected peer 127.0.0.2:8080"
             );
@@ -267,7 +262,6 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                     peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
                     peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
                 },
-                mining_address: miner_signer_1.address(),
             },
             PeerAddress {
                 gossip: "127.0.0.2:8080".parse::<SocketAddr>().unwrap(),
@@ -276,7 +270,6 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                     peering_tcp_addr: "127.0.0.2:8082".parse().unwrap(),
                     peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
                 },
-                mining_address: miner_signer_2.address(),
             },
             PeerAddress {
                 gossip: "127.0.0.3:8080".parse::<SocketAddr>().unwrap(),
@@ -285,7 +278,6 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                     peering_tcp_addr: "127.0.0.3:8082".parse().unwrap(),
                     peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
                 },
-                mining_address: miner_signer_3.address(),
             },
         ]
         .iter()
