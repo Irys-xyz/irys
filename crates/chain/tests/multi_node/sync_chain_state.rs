@@ -110,8 +110,8 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // so we expect one peer, and we expect it to have the mining_address of the genesis node
     assert_eq!(1, peer_list_items.len());
     assert_eq!(
-        genesis_trusted_peers[0].mining_address,
-        peer_list_items[0].mining_address
+        genesis_trusted_peers[0].api.ip(),
+        peer_list_items[0].api.ip()
     );
 
     testnet_config_peer1.http.port = 0;
