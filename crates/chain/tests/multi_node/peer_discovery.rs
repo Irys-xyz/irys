@@ -14,7 +14,6 @@ use alloy_core::primitives::U256;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
 use irys_types::{build_user_agent, irys::IrysSigner, NodeConfig, PeerAddress, PeerResponse, RethPeerInfo, VersionRequest};
-use irys_types::{Config, PeerAddress};
 use reth_primitives::GenesisAccount;
 use tracing::{debug, error};
 
