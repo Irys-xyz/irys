@@ -605,13 +605,6 @@ impl IrysNode {
 
         // start services
         let (service_senders, receivers) = ServiceSenders::new();
-        let _handle = ChunkCacheService::spawn_service(
-            &task_exec,
-            irys_db.clone(),
-            receivers.chunk_cache,
-            config.clone(),
-        );
-        debug!("Chunk cache initiailsed");
 
         // start reth service
         let (reth_service_actor, reth_arbiter) = init_reth_service(&irys_db, &reth_node);
