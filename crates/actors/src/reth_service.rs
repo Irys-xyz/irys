@@ -5,8 +5,13 @@ use actix::{
 use eyre::{eyre, OptionExt};
 use irys_database::database;
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
-use irys_types::{DatabaseProvider, H256};
-use reth::{primitives::BlockNumberOrTag, revm::primitives::B256, rpc::eth::EthApiServer as _};
+use irys_types::{DatabaseProvider, RethPeerInfo, H256};
+use reth::{
+    network::{NetworkInfo as _, Peers},
+    primitives::BlockNumberOrTag,
+    revm::primitives::B256,
+    rpc::eth::EthApiServer as _,
+};
 use reth_db::Database as _;
 use tracing::{debug, error, info};
 
@@ -213,5 +218,40 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
                 std::process::abort();
             }),
         ))
+    }
+}
+
+type ConnectToPeerMessage = RethPeerInfo;
+
+impl Handler<ConnectToPeerMessage> for RethServiceActor {
+    type Result = eyre::Result<()>;
+
+    fn handle(&mut self, msg: ConnectToPeerMessage, _ctx: &mut Self::Context) -> Self::Result {
+        Ok(self
+            .handle
+            .clone()
+            .ok_or_eyre("reth service uninitialized")?
+            .network
+            .add_peer(msg.peer_id, msg.peering_tcp_addr))
+    }
+}
+
+#[derive(Message, Debug, Clone, Copy)]
+#[rtype(result = "eyre::Result<RethPeerInfo>")]
+pub struct GetPeeringInfoMessage {}
+
+impl Handler<GetPeeringInfoMessage> for RethServiceActor {
+    type Result = eyre::Result<RethPeerInfo>;
+
+    fn handle(&mut self, _: GetPeeringInfoMessage, _ctx: &mut Self::Context) -> Self::Result {
+        let handle = self
+            .handle
+            .clone()
+            .ok_or_eyre("reth service uninitialized")?;
+        // TODO: we need to store the external socketaddr somewhere and use that instead
+        Ok(RethPeerInfo {
+            peer_id: *handle.network.peer_id(),
+            peering_tcp_addr: handle.network.local_addr().clone(),
+        })
     }
 }

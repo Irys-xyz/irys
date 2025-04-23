@@ -3,48 +3,91 @@ use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
-use irys_types::{Address, Config, DatabaseProvider, PeerAddress, PeerListItem, VersionRequest};
+use irys_types::{
+    Address, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse, RejectedResponse,
+    VersionRequest,
+};
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
+use crate::reth_service::RethServiceActor;
+
+async fn send_message_and_print_error<T, A, R>(message: T, address: Addr<A>)
+where
+    T: Message<Result = R> + Send + 'static,
+    R: Send,
+    A: Actor<Context = Context<A>> + Handler<T>,
+{
+    match address.send(message).await {
+        Ok(_) => {}
+        Err(mailbox_error) => {
+            error!(
+                "Failed to send message to peer service: {:?}",
+                mailbox_error
+            );
+        }
+    }
+}
+
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
+const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+pub type PeerListService = PeerListServiceWithClient<IrysApiClient>;
 
 #[derive(Debug, Default)]
-pub struct PeerListService {
+pub struct PeerListServiceWithClient<T: ApiClient + 'static + Unpin + Default> {
     /// Reference to the node database
     #[allow(dead_code)]
     db: Option<DatabaseProvider>,
 
     gossip_addr_to_mining_addr_map: HashMap<IpAddr, Address>,
+    api_addr_to_mining_addr_map: HashMap<SocketAddr, Address>,
     peer_list_cache: HashMap<Address, PeerListItem>,
     known_peers_cache: HashSet<PeerAddress>,
 
-    client: Client,
-    irys_api: IrysApiClient,
+    currently_running_announcements: HashSet<SocketAddr>,
+
+    gossip_client: Client,
+    irys_api_client: T,
 
     chain_id: u64,
     miner_address: Address,
     peer_address: PeerAddress,
+
+    trusted_peers_api_addresses: HashSet<SocketAddr>,
 }
 
-impl PeerListService {
-    /// Create a new instance of the peer_list_service actor passing in a reference
-    /// counted reference to a `DatabaseEnv`
+impl PeerListServiceWithClient<IrysApiClient> {
+    /// Create a new instance of the peer_list_service actor passing in a reference-counted
+    /// reference to a `DatabaseEnv`
     pub fn new(db: DatabaseProvider, config: &Config) -> Self {
         println!("service started: peer_list");
+        Self::new_with_custom_api_client(db, config, IrysApiClient::new())
+    }
+}
+
+impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
+    /// Create a new instance of the peer_list_service actor passing in a reference-counted
+    /// reference to a `DatabaseEnv`
+    pub fn new_with_custom_api_client(
+        db: DatabaseProvider,
+        config: &Config,
+        irys_api_client: T,
+    ) -> Self {
         Self {
             db: Some(db),
             gossip_addr_to_mining_addr_map: HashMap::new(),
+            api_addr_to_mining_addr_map: HashMap::new(),
             peer_list_cache: HashMap::new(),
             known_peers_cache: HashSet::new(),
-            client: Client::new(),
-
-            irys_api: IrysApiClient::new(),
+            currently_running_announcements: HashSet::new(),
+            gossip_client: Client::new(),
+            irys_api_client,
             chain_id: config.chain_id,
             miner_address: config.miner_address(),
             peer_address: PeerAddress {
@@ -57,15 +100,20 @@ impl PeerListService {
                 api: format!("{}:{}", config.api_bind_ip, config.api_port)
                     .parse()
                     .expect("valid SocketAddr expected"),
+                execution: config.reth_peer_info,
+                mining_address: config.miner_address(),
             },
+            trusted_peers_api_addresses: config.trusted_peers.iter().map(|p| p.api).collect(),
         }
     }
 }
 
-impl Actor for PeerListService {
+impl<T: ApiClient + 'static + Unpin + Default> Actor for PeerListServiceWithClient<T> {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
+        let peer_service_address = ctx.address();
+
         ctx.run_interval(FLUSH_INTERVAL, |act, _ctx| match act.flush() {
             Ok(()) => {}
             Err(e) => {
@@ -91,7 +139,7 @@ impl Actor for PeerListService {
             for (mining_addr, peer, gossip_addr) in inactive_peers {
                 // Clone the peer address to use in the async block
                 let peer_address = peer.address.clone();
-                let client = act.client.clone();
+                let client = act.gossip_client.clone();
                 // Create the future that does the health check
                 let fut = async move { check_health(peer_address, client).await }
                     .into_actor(act)
@@ -112,21 +160,33 @@ impl Actor for PeerListService {
             }
         });
 
+        // Initiate the trusted peers handshake
+        let trusted_peers_handshake_task = Self::trusted_peers_handshake_task(
+            peer_service_address.clone(),
+            self.trusted_peers_api_addresses.clone(),
+        )
+        .into_actor(self);
+        ctx.spawn(trusted_peers_handshake_task);
+
         // Announce yourself to the network
         let version_request = self.create_version_request();
-        let api_client = self.irys_api.clone();
+        let api_client = self.irys_api_client.clone();
         let peers_cache = self.known_peers_cache.clone();
-        let announce_fut =
-            Self::announce_yourself_to_all_peers(api_client, version_request, peers_cache)
-                .into_actor(self);
+        let announce_fut = Self::announce_yourself_to_all_peers(
+            api_client,
+            version_request,
+            peers_cache,
+            peer_service_address.clone(),
+        )
+        .into_actor(self);
         ctx.spawn(announce_fut);
     }
 }
 
 /// Allows this actor to live in the the service registry
-impl Supervised for PeerListService {}
+impl<T: ApiClient + 'static + Unpin + Default> Supervised for PeerListServiceWithClient<T> {}
 
-impl SystemService for PeerListService {
+impl<T: ApiClient + 'static + Unpin + Default> SystemService for PeerListServiceWithClient<T> {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("service started: peer_list");
     }
@@ -138,6 +198,7 @@ pub enum PeerListServiceError {
     Database(DatabaseError),
     HealthCheckFailed(String),
     PostVersionError(String),
+    PeerHandshakeRejected(RejectedResponse),
 }
 
 impl From<DatabaseError> for PeerListServiceError {
@@ -158,7 +219,7 @@ pub enum ScoreIncreaseReason {
     ValidData,
 }
 
-impl PeerListService {
+impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
     /// Initialize the peer list service
     ///
     /// # Errors
@@ -189,7 +250,9 @@ impl PeerListService {
         if let Some(db) = &self.db {
             db.update(|tx| {
                 for (addr, peer) in self.peer_list_cache.iter() {
+                    debug!("Inserting peer {:?} into the database", addr);
                     insert_peer_list_item(tx, addr, peer).map_err(PeerListServiceError::from)?;
+                    debug!("Flushing peer list cache: {:?}", peer);
                 }
                 Ok(())
             })
@@ -207,17 +270,82 @@ impl PeerListService {
         self.peer_list_cache.get(&mining_address).cloned()
     }
 
-    fn add_peer(&mut self, mining_addr: Address, peer: PeerListItem) {
+    async fn trusted_peers_handshake_task(
+        peer_service_address: Addr<PeerListServiceWithClient<T>>,
+        trusted_peers_api_addresses: HashSet<SocketAddr>,
+    ) {
+        let peer_service_address = peer_service_address.clone();
+
+        for peer_api_address in trusted_peers_api_addresses {
+            match peer_service_address
+                .send(NewPotentialPeer {
+                    api_address: peer_api_address,
+                    force_announce: true,
+                })
+                .await
+            {
+                Ok(()) => {}
+                Err(mailbox_error) => {
+                    error!(
+                        "Failed to send NewPotentialPeer message to peer service: {:?}",
+                        mailbox_error
+                    );
+                }
+            };
+        }
+    }
+
+    fn update_peer_address(&mut self, mining_addr: Address, new_address: PeerAddress) {
+        if let Some(peer) = self.peer_list_cache.get_mut(&mining_addr) {
+            let old_address = peer.address;
+            peer.address = new_address;
+            self.gossip_addr_to_mining_addr_map
+                .remove(&old_address.gossip.ip());
+            self.gossip_addr_to_mining_addr_map
+                .insert(new_address.gossip.ip(), mining_addr);
+            self.known_peers_cache.remove(&old_address);
+            self.known_peers_cache.insert(old_address);
+            self.api_addr_to_mining_addr_map.remove(&old_address.api);
+            self.api_addr_to_mining_addr_map
+                .insert(new_address.api, mining_addr);
+        }
+    }
+
+    /// Add a peer to the peer list. Returns true if the peer was added, false if it already exists.
+    fn add_peer(&mut self, mining_addr: Address, peer: PeerListItem) -> bool {
         let gossip_addr = peer.address.gossip;
         let peer_address = peer.address.clone();
 
         if !self.peer_list_cache.contains_key(&mining_addr) {
+            debug!("Adding peer {:?} to the peer list", mining_addr);
             self.peer_list_cache.insert(mining_addr, peer);
             self.gossip_addr_to_mining_addr_map
                 .insert(gossip_addr.ip(), mining_addr);
+            self.api_addr_to_mining_addr_map
+                .insert(peer_address.api, mining_addr);
             self.known_peers_cache.insert(peer_address);
+            true
         } else {
-            warn!("Peer {:?} already exists in the peer list, adding it again will override previous data", mining_addr);
+            debug!(
+                "Peer {:?} already exists in the peer list, checking if the address needs updating",
+                mining_addr
+            );
+            if let Some(existing_peer) = self.peer_list_cache.get_mut(&mining_addr) {
+                if existing_peer.address != peer_address {
+                    debug!("Peer address mismatch, updating to new address");
+                    self.update_peer_address(mining_addr, peer_address);
+                    true
+                } else {
+                    debug!("Peer does not need updating");
+                    false
+                }
+            } else {
+                warn!(
+                    "Peer {:?} is not found in the peer list cache, which shouldn't happen",
+                    mining_addr
+                );
+                false
+            }
         }
     }
 
@@ -266,13 +394,13 @@ impl PeerListService {
         }
     }
 
-    async fn announce_yourself_to_address<T: ApiClient>(
+    async fn announce_yourself_to_address(
         api_client: T,
         api_address: SocketAddr,
         version_request: VersionRequest,
+        peer_service_address: Addr<PeerListServiceWithClient<T>>,
     ) -> Result<(), PeerListServiceError> {
-        // TODO: handle response by announcing yourself to peers
-        let _peer_response = api_client
+        let peer_response_result = api_client
             .post_version(api_address, version_request)
             .await
             .map_err(|e| {
@@ -281,26 +409,95 @@ impl PeerListService {
                     api_address, e
                 );
                 PeerListServiceError::PostVersionError(e.to_string())
-            })?;
+            });
 
-        Ok(())
+        let peer_response = match peer_response_result {
+            Ok(peer_response) => {
+                send_message_and_print_error(
+                    AnnounceFinished::success(api_address),
+                    peer_service_address.clone(),
+                )
+                .await;
+                Ok(peer_response)
+            }
+            Err(error) => {
+                // This is likely due to the networking error, we need to retry later
+                send_message_and_print_error(
+                    AnnounceFinished::retry(api_address),
+                    peer_service_address.clone(),
+                )
+                .await;
+                Err(error)
+            }
+        }?;
+
+        match peer_response {
+            PeerResponse::Accepted(accepted_peers) => {
+                for peer in accepted_peers.peers {
+                    send_message_and_print_error(
+                        NewPotentialPeer::new(peer.api),
+                        peer_service_address.clone(),
+                    )
+                    .await;
+                }
+                Ok(())
+            }
+            PeerResponse::Rejected(rejected_response) => Err(
+                PeerListServiceError::PeerHandshakeRejected(rejected_response),
+            ),
+        }
     }
 
-    async fn announce_yourself_to_all_peers<T: ApiClient>(
+    async fn announce_yourself_to_address_task(
+        api_client: T,
+        api_address: SocketAddr,
+        version_request: VersionRequest,
+        peer_list_service_address: Addr<PeerListServiceWithClient<T>>,
+    ) {
+        debug!(
+            "Announcing yourself to address {} with version request: {:?}",
+            api_address, version_request
+        );
+        match Self::announce_yourself_to_address(
+            api_client,
+            api_address,
+            version_request,
+            peer_list_service_address,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                error!(
+                    "Failed to announce yourself to address {}: {:?}",
+                    api_address, e
+                );
+            }
+        }
+    }
+
+    async fn announce_yourself_to_all_peers(
         api_client: T,
         version_request: VersionRequest,
         known_peers_cache: HashSet<PeerAddress>,
+        peer_service_address: Addr<PeerListServiceWithClient<T>>,
     ) {
+        let reth_service = RethServiceActor::from_registry();
         for peer in known_peers_cache.iter() {
             match Self::announce_yourself_to_address(
                 api_client.clone(),
                 peer.api,
                 version_request.clone(),
+                peer_service_address.clone(),
             )
             .await
             {
                 Ok(_peer_response) => {
                     // TODO: announce yourself to those peers as well
+                    let _ = reth_service
+                        .send(peer.execution)
+                        .await
+                        .inspect_err(|e| error!("Failed to connect to reth peer {}", &e));
                 }
                 Err(e) => {
                     error!(
@@ -349,7 +546,9 @@ pub enum PeerListEntryRequest {
     GossipSocketAddress(SocketAddr),
 }
 
-impl Handler<PeerListEntryRequest> for PeerListService {
+impl<T: ApiClient + 'static + Unpin + Default> Handler<PeerListEntryRequest>
+    for PeerListServiceWithClient<T>
+{
     type Result = Option<PeerListItem>;
 
     fn handle(&mut self, msg: PeerListEntryRequest, _ctx: &mut Self::Context) -> Self::Result {
@@ -369,7 +568,9 @@ pub struct DecreasePeerScore {
     pub reason: ScoreDecreaseReason,
 }
 
-impl Handler<DecreasePeerScore> for PeerListService {
+impl<T: ApiClient + 'static + Unpin + Default> Handler<DecreasePeerScore>
+    for PeerListServiceWithClient<T>
+{
     type Result = ();
 
     fn handle(&mut self, msg: DecreasePeerScore, _ctx: &mut Self::Context) -> Self::Result {
@@ -385,7 +586,9 @@ pub struct IncreasePeerScore {
     pub reason: ScoreIncreaseReason,
 }
 
-impl Handler<IncreasePeerScore> for PeerListService {
+impl<T: ApiClient + 'static + Unpin + Default> Handler<IncreasePeerScore>
+    for PeerListServiceWithClient<T>
+{
     type Result = ();
 
     fn handle(&mut self, msg: IncreasePeerScore, _ctx: &mut Self::Context) -> Self::Result {
@@ -412,7 +615,9 @@ pub struct ActivePeersRequest {
     pub exclude_peers: HashSet<SocketAddr>,
 }
 
-impl Handler<ActivePeersRequest> for PeerListService {
+impl<T: ApiClient + 'static + Unpin + Default> Handler<ActivePeersRequest>
+    for PeerListServiceWithClient<T>
+{
     type Result = Vec<PeerListItem>;
 
     fn handle(&mut self, msg: ActivePeersRequest, _ctx: &mut Self::Context) -> Self::Result {
@@ -441,7 +646,9 @@ impl Handler<ActivePeersRequest> for PeerListService {
 #[rtype(result = "Result<(), PeerListServiceError>")]
 pub struct FlushRequest;
 
-impl Handler<FlushRequest> for PeerListService {
+impl<T: ApiClient + 'static + Unpin + Default> Handler<FlushRequest>
+    for PeerListServiceWithClient<T>
+{
     type Result = Result<(), PeerListServiceError>;
 
     fn handle(&mut self, _msg: FlushRequest, _ctx: &mut Self::Context) -> Self::Result {
@@ -457,24 +664,146 @@ pub struct AddPeer {
     pub peer: PeerListItem,
 }
 
-impl Handler<AddPeer> for PeerListService {
+impl<T: ApiClient + 'static + Unpin + Default> Handler<AddPeer> for PeerListServiceWithClient<T> {
     type Result = ();
 
-    fn handle(&mut self, msg: AddPeer, _ctx: &mut Self::Context) -> Self::Result {
-        self.add_peer(msg.mining_addr, msg.peer)
+    fn handle(&mut self, msg: AddPeer, ctx: &mut Self::Context) -> Self::Result {
+        debug!("AddPeer message received: {:?}", msg.peer);
+        let peer_api_addr = msg.peer.address.api;
+        let is_updated = self.add_peer(msg.mining_addr, msg.peer);
+        let peer_service_addr = ctx.address();
+
+        if is_updated {
+            let version_request = self.create_version_request();
+            let handshake_task = Self::announce_yourself_to_address_task(
+                self.irys_api_client.clone(),
+                peer_api_addr,
+                version_request,
+                peer_service_addr,
+            );
+            ctx.spawn(handshake_task.into_actor(self));
+        }
     }
 }
 
-/// Add peer to the peer list
+/// Request a list of peers
 #[derive(Message, Debug)]
 #[rtype(result = "Vec<PeerAddress>")]
 pub struct KnownPeersRequest;
 
-impl Handler<KnownPeersRequest> for PeerListService {
+impl<T: ApiClient + 'static + Unpin + Default> Handler<KnownPeersRequest>
+    for PeerListServiceWithClient<T>
+{
     type Result = Vec<PeerAddress>;
 
     fn handle(&mut self, _msg: KnownPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
         self.known_peers_cache.iter().cloned().collect()
+    }
+}
+
+/// Handle potential new peer
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct NewPotentialPeer {
+    pub api_address: SocketAddr,
+    pub force_announce: bool,
+}
+
+impl NewPotentialPeer {
+    pub fn new(api_address: SocketAddr) -> Self {
+        Self {
+            api_address,
+            force_announce: false,
+        }
+    }
+
+    pub fn force_announce(api_address: SocketAddr) -> Self {
+        Self {
+            api_address,
+            force_announce: true,
+        }
+    }
+}
+
+impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
+    for PeerListServiceWithClient<T>
+{
+    type Result = ();
+
+    fn handle(&mut self, msg: NewPotentialPeer, ctx: &mut Self::Context) -> Self::Result {
+        debug!("NewPotentialPeer message received: {:?}", msg.api_address);
+        let already_in_cache = self
+            .api_addr_to_mining_addr_map
+            .contains_key(&msg.api_address);
+        let already_announcing = self
+            .currently_running_announcements
+            .contains(&msg.api_address);
+
+        debug!("Already announcing: {:?}", already_announcing);
+        debug!("Already in cache: {:?}", already_in_cache);
+        let announcing_or_in_cache = already_announcing || already_in_cache;
+
+        let needs_announce = msg.force_announce || !announcing_or_in_cache;
+
+        if needs_announce {
+            debug!("Need to announce yourself to peer {:?}", msg.api_address);
+            self.currently_running_announcements.insert(msg.api_address);
+            let version_request = self.create_version_request();
+            let peer_service_addr = ctx.address();
+            let handshake_task = Self::announce_yourself_to_address_task(
+                self.irys_api_client.clone(),
+                msg.api_address,
+                version_request,
+                peer_service_addr,
+            );
+            ctx.spawn(handshake_task.into_actor(self));
+        }
+    }
+}
+
+/// Handle potential new peer
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct AnnounceFinished {
+    pub peer_api_address: SocketAddr,
+    pub success: bool,
+    pub retry: bool,
+}
+
+impl AnnounceFinished {
+    pub fn retry(api_address: SocketAddr) -> Self {
+        Self {
+            peer_api_address: api_address,
+            success: false,
+            retry: true,
+        }
+    }
+
+    pub fn success(api_address: SocketAddr) -> Self {
+        Self {
+            peer_api_address: api_address,
+            success: true,
+            retry: false,
+        }
+    }
+}
+
+impl<T: ApiClient + 'static + Unpin + Default> Handler<AnnounceFinished>
+    for PeerListServiceWithClient<T>
+{
+    type Result = ();
+
+    fn handle(&mut self, msg: AnnounceFinished, ctx: &mut Self::Context) -> Self::Result {
+        if !msg.success && msg.retry {
+            let message = NewPotentialPeer::new(msg.peer_api_address);
+            ctx.run_later(PEER_HANDSHAKE_RETRY_INTERVAL, move |service, ctx| {
+                let address = ctx.address();
+                ctx.spawn(send_message_and_print_error(message, address).into_actor(service));
+            });
+        } else {
+            self.currently_running_announcements
+                .remove(&msg.peer_api_address);
+        }
     }
 }
 
@@ -485,7 +814,7 @@ mod tests {
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
-    use irys_types::VersionRequest;
+    use irys_types::{RethPeerInfo, VersionRequest};
     use std::collections::HashSet;
     use std::net::IpAddr;
     use std::str::FromStr;
@@ -507,6 +836,8 @@ mod tests {
         let peer_addr = PeerAddress {
             gossip: gossip_addr,
             api: api_addr,
+            execution: RethPeerInfo::default(),
+            mining_address: mining_addr,
         };
 
         let peer = PeerListItem {
@@ -527,7 +858,7 @@ mod tests {
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db, &config);
+        let mut service = PeerListServiceWithClient::new(db, &config);
         let ctx = &mut Context::new();
 
         // Test adding a new peer
@@ -568,7 +899,7 @@ mod tests {
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db, &config);
+        let mut service = PeerListServiceWithClient::new(db, &config);
         let ctx = &mut Context::new();
 
         // Add a test peer
@@ -631,7 +962,7 @@ mod tests {
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db, &config);
+        let mut service = PeerListServiceWithClient::new(db, &config);
         let ctx = &mut Context::new();
 
         // Add multiple peers with different states
@@ -705,7 +1036,7 @@ mod tests {
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListService::new(db, &config);
+        let mut service = PeerListServiceWithClient::new(db, &config);
         let ctx = &mut Context::new();
 
         // Test adding duplicate peer
@@ -767,7 +1098,7 @@ mod tests {
             open_or_create_irys_consensus_data_db(&new_temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut empty_service = PeerListService::new(new_test_db, &config);
+        let mut empty_service = PeerListServiceWithClient::new(new_test_db, &config);
 
         let exclude_peers = HashSet::new();
         let active_peers = empty_service.handle(
@@ -788,9 +1119,11 @@ mod tests {
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
+        let mock_client = CountingMockClient::default();
 
         // Start the actor system with our service
-        let service = PeerListService::new(db.clone(), &config);
+        let service =
+            PeerListServiceWithClient::new_with_custom_api_client(db.clone(), &config, mock_client);
         let addr = service.start();
 
         // Add a test peer
@@ -842,7 +1175,7 @@ mod tests {
         ));
 
         // Create first service instance and add some peers
-        let mut service = PeerListService::new(db.clone(), &config);
+        let mut service = PeerListServiceWithClient::new(db.clone(), &config);
         let ctx = &mut Context::new();
 
         // Add multiple test peers
@@ -880,7 +1213,7 @@ mod tests {
             .expect("Failed to flush data");
 
         // Create new service instance that should load from database
-        let mut new_service = PeerListService::new(db, &config);
+        let mut new_service = PeerListServiceWithClient::new(db, &config);
         new_service
             .initialize()
             .expect("Failed to initialize service");
@@ -929,10 +1262,23 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_announce_yourself_to_all_peers() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let mut config = Config::testnet();
+        config.trusted_peers = vec![];
+
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create first service instance and add some peers
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mock_client = CountingMockClient {
             post_version_calls: calls.clone(),
         };
+        let peer_list_service =
+            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client.clone());
+        let addr = peer_list_service.start();
 
         let (_mining1, peer1) = create_test_peer(
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -951,12 +1297,335 @@ mod tests {
             .collect();
         let version_request = VersionRequest::default();
 
-        PeerListService::announce_yourself_to_all_peers(mock_client, version_request, known_peers)
-            .await;
+        PeerListServiceWithClient::announce_yourself_to_all_peers(
+            mock_client,
+            version_request,
+            known_peers,
+            addr,
+        )
+        .await;
 
         let calls = calls.lock().await;
         assert_eq!(calls.len(), 2);
         assert!(calls.contains(&peer1.address.api));
         assert!(calls.contains(&peer2.address.api));
+    }
+
+    #[actix_rt::test]
+    async fn test_update_address_in_add_peer() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = Config::testnet();
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+        let mut service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            CountingMockClient::default(),
+        );
+        let ctx = &mut Context::new();
+
+        // Add initial peer
+        let mining_addr = Address::from_str("0x1234567890123456789012345678901234567890")
+            .expect("Invalid mining address");
+
+        let initial_ip = IpAddr::from_str("127.0.0.1").expect("Invalid IP");
+        let initial_gossip_addr = SocketAddr::new(initial_ip, 8080);
+        let initial_api_addr = SocketAddr::new(initial_ip, 8081);
+
+        let initial_peer_addr = PeerAddress {
+            gossip: initial_gossip_addr,
+            api: initial_api_addr,
+            execution: RethPeerInfo::default(),
+            mining_address: Address::ZERO,
+        };
+
+        let initial_peer = PeerListItem {
+            address: initial_peer_addr.clone(),
+            reputation_score: PeerScore::new(50),
+            response_time: 100,
+            last_seen: 123,
+            is_online: true,
+        };
+
+        // Add the initial peer
+        service.handle(
+            AddPeer {
+                mining_addr,
+                peer: initial_peer,
+            },
+            ctx,
+        );
+
+        // Verify the peer was added
+        let initial_result = service.handle(
+            PeerListEntryRequest::GossipSocketAddress(initial_gossip_addr),
+            ctx,
+        );
+        assert!(initial_result.is_some());
+        assert_eq!(initial_result.unwrap().address, initial_peer_addr);
+
+        // Create a new peer with the same mining address but different network addresses
+        let new_ip = IpAddr::from_str("192.168.1.1").expect("Invalid IP");
+        let new_gossip_addr = SocketAddr::new(new_ip, 9090);
+        let new_api_addr = SocketAddr::new(new_ip, 9091);
+
+        let new_peer_addr = PeerAddress {
+            gossip: new_gossip_addr,
+            api: new_api_addr,
+            execution: RethPeerInfo::default(),
+            mining_address: Address::with_last_byte(1),
+        };
+
+        let updated_peer = PeerListItem {
+            address: new_peer_addr.clone(),
+            reputation_score: PeerScore::new(50),
+            response_time: 100,
+            last_seen: 123,
+            is_online: true,
+        };
+
+        // Update the peer with new address
+        service.handle(
+            AddPeer {
+                mining_addr,
+                peer: updated_peer,
+            },
+            ctx,
+        );
+
+        // Verify the peer address was updated
+        let updated_result = service.handle(
+            PeerListEntryRequest::GossipSocketAddress(new_gossip_addr),
+            ctx,
+        );
+        assert!(
+            updated_result.is_some(),
+            "Should find peer with new gossip address"
+        );
+        assert_eq!(
+            updated_result.unwrap().address,
+            new_peer_addr,
+            "Peer address should be updated"
+        );
+
+        // The old address should no longer be associated with this peer
+        let old_result = service.handle(
+            PeerListEntryRequest::GossipSocketAddress(initial_gossip_addr),
+            ctx,
+        );
+        assert!(
+            old_result.is_none(),
+            "Should not find peer with old gossip address"
+        );
+    }
+
+    #[actix_rt::test]
+    async fn should_perform_handshake_when_adding_a_peer() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let mut config = Config::testnet();
+        config.trusted_peers = vec![];
+
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create a mock client to track API calls
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_client = CountingMockClient {
+            post_version_calls: calls.clone(),
+        };
+
+        // Create the service with our mock client instead of the real one
+        let service =
+            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let service_addr = service.start();
+
+        // Create a test peer
+        let (mining_addr, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+
+        // Add the peer which should trigger announce_yourself_to_address_task
+        service_addr
+            .send(AddPeer {
+                mining_addr,
+                peer: peer.clone(),
+            })
+            .await
+            .expect("send peer");
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Verify the API call was made to the peer's API address
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), 1, "Should have made one API call");
+        assert!(
+            calls.contains(&peer.address.api),
+            "Should have called the peer's API address"
+        );
+    }
+
+    #[actix_rt::test]
+    async fn should_prevent_infinite_handshake_loop() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let mut config = Config::testnet();
+        config.trusted_peers = vec![];
+
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create a mock client to track API calls
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_client = CountingMockClient {
+            post_version_calls: calls.clone(),
+        };
+
+        // Create the service with our mock client instead of the real one
+        let service =
+            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let service_addr = service.start();
+
+        // Create a test peer
+        let (mining_addr, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+
+        // Add the peer which should trigger announce_yourself_to_address_task
+        service_addr
+            .send(AddPeer {
+                mining_addr,
+                peer: peer.clone(),
+            })
+            .await
+            .expect("send peer");
+
+        // Send a NewPotentialPeer message for the same peer while an announcement is already running
+        service_addr
+            .send(NewPotentialPeer {
+                api_address: peer.address.api,
+                force_announce: false,
+            })
+            .await
+            .expect("send NewPotentialPeer");
+
+        // Even though we sent two messages that could trigger a handshake,
+        // the currently_running_announcements tracking should prevent duplicate calls
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        {
+            let calls_guard = calls.lock().await;
+            assert_eq!(
+                calls_guard.len(),
+                1,
+                "Should have made only one API call despite multiple triggers"
+            );
+            assert!(
+                calls_guard.contains(&peer.address.api),
+                "Should have called the peer's API address"
+            );
+        }
+
+        // Now let's simulate the announcement finishing
+        service_addr
+            .send(AnnounceFinished {
+                peer_api_address: peer.address.api,
+                success: true,
+                retry: false,
+            })
+            .await
+            .expect("send AnnounceFinished");
+
+        // Now we can force a new announcement
+        service_addr
+            .send(NewPotentialPeer {
+                api_address: peer.address.api,
+                force_announce: true,
+            })
+            .await
+            .expect("send NewPotentialPeer with force");
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Now we should have two calls
+        let calls = calls.lock().await;
+        assert_eq!(
+            calls.len(),
+            2,
+            "Should make another API call after announcement finished"
+        );
+    }
+
+    #[actix_rt::test]
+    async fn test_initial_handshake_with_trusted_peers() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+
+        // Create trusted peers for configuration
+        let trusted_peer1 = PeerAddress {
+            gossip: "127.0.0.1:9001".parse().expect("valid SocketAddr expected"),
+            api: "127.0.0.1:9002".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
+            mining_address: Address::from_str("0x1111111111111111111111111111111111111111")
+                .expect("Invalid mining address"),
+        };
+
+        let trusted_peer2 = PeerAddress {
+            gossip: "127.0.0.1:9003".parse().expect("valid SocketAddr expected"),
+            api: "127.0.0.1:9004".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
+            mining_address: Address::from_str("0x2222222222222222222222222222222222222222")
+                .expect("Invalid mining address"),
+        };
+
+        // Create config with trusted peers
+        let mut config = Config::testnet();
+        config.trusted_peers = vec![trusted_peer1.clone(), trusted_peer2.clone()];
+
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create a mock client to track API calls
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_client = CountingMockClient {
+            post_version_calls: calls.clone(),
+        };
+
+        // Create and start the service with our mock client
+        let service =
+            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let _service_addr = service.start();
+
+        // Give time for handshake to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify handshake calls were made to all trusted peers
+        let api_calls = calls.lock().await;
+        assert_eq!(
+            api_calls.len(),
+            2,
+            "Should have made API calls to all trusted peers"
+        );
+
+        assert!(
+            api_calls.contains(&trusted_peer1.api),
+            "Should have called the first trusted peer's API address"
+        );
+
+        assert!(
+            api_calls.contains(&trusted_peer2.api),
+            "Should have called the second trusted peer's API address"
+        );
     }
 }

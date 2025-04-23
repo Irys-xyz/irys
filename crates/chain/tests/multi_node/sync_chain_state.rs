@@ -10,23 +10,78 @@ use irys_chain::{
 };
 use irys_config::IrysNodeConfig;
 use irys_database::BlockIndexItem;
-use irys_types::{irys::IrysSigner, Config, IrysTransaction, PeerAddress};
+use irys_types::{irys::IrysSigner, Address, Config, IrysTransaction, PeerAddress, RethPeerInfo};
+use k256::ecdsa::SigningKey;
 use reth_primitives::irys_primitives::IrysTxId;
 use reth_primitives::GenesisAccount;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
 
+#[test_log::test(actix_web::test)]
+async fn heavy_test_p2p() -> eyre::Result<()> {
+    let mut testnet_config_genesis = Config::testnet();
+    testnet_config_genesis.trusted_peers = vec![];
+    let account1 = IrysSigner::random_signer(&testnet_config_genesis);
+    let genesis = start_genesis_node(&testnet_config_genesis, &account1).await;
+    tracing::info!("peer info: {:?}", &genesis.node_ctx.config.reth_peer_info);
+    let genesis_peer_address = PeerAddress {
+        gossip: format!(
+            "{}:{}",
+            genesis.node_ctx.config.gossip_service_bind_ip,
+            genesis.node_ctx.config.gossip_service_port
+        )
+        .parse()
+        .expect("valid SocketAddr expected"),
+        api: format!(
+            "{}:{}",
+            genesis.node_ctx.config.api_bind_ip, genesis.node_ctx.config.api_port
+        )
+        .parse()
+        .expect("valid SocketAddr expected"),
+        execution: genesis.node_ctx.config.reth_peer_info,
+        mining_address: Address::ZERO,
+    };
+
+    let (peer1, peer2) = start_peer_nodes(
+        &Config {
+            trusted_peers: vec![genesis_peer_address],
+            ..Config::testnet()
+        },
+        &Config {
+            trusted_peers: vec![genesis_peer_address],
+            ..Config::testnet()
+        },
+        &account1,
+    )
+    .await;
+    tracing::info!(
+        "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
+        &genesis.node_ctx.config.reth_peer_info,
+        &peer1.node_ctx.config.reth_peer_info,
+        &peer2.node_ctx.config.reth_peer_info
+    );
+
+    peer1.stop().await;
+    peer2.stop().await;
+    genesis.stop().await;
+
+    Ok(())
+}
+
 /// 1. spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
 /// 2. check that the blocks are valid, check that peer1, peer2, and genesis are indeed synced
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
 #[test_log::test(actix_web::test)]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
-    // setup trusted peers connection data
-    let (trusted_peers, genesis_trusted_peers) = init_peers();
-    // setup configs for genesis and nodes
-    let (testnet_config_genesis, testnet_config_peer1, testnet_config_peer2) =
-        init_configs(&genesis_trusted_peers, &trusted_peers);
+    // setup trusted peers connection data and configs for genesis and nodes
+    let (
+        testnet_config_genesis,
+        testnet_config_peer1,
+        testnet_config_peer2,
+        _trusted_peers,
+        genesis_trusted_peers,
+    ) = init_configs();
     // setup a funded account at genesis block
     let account1 = IrysSigner::random_signer(&testnet_config_genesis);
 
@@ -270,52 +325,72 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     Ok(())
 }
 
-fn init_peers() -> (Vec<PeerAddress>, Vec<PeerAddress>) {
+fn init_configs() -> (Config, Config, Config, Vec<PeerAddress>, Vec<PeerAddress>) {
+    let mut testnet_config_genesis = Config {
+        api_port: 8080,
+        gossip_service_port: 8081,
+        mining_key: SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                .expect("valid hex"),
+        )
+        .expect("valid key"),
+        ..Config::testnet()
+    };
+    let mut testnet_config_peer1 = Config {
+        api_port: 0, //random port
+        gossip_service_port: 8083,
+        mining_key: SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d1")
+                .expect("valid hex"),
+        )
+        .expect("valid key"),
+        ..Config::testnet()
+    };
+    let mut testnet_config_peer2 = Config {
+        api_port: 0, //random port
+        gossip_service_port: 8085,
+        mining_key: SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d2")
+                .expect("valid hex"),
+        )
+        .expect("valid key"),
+        ..Config::testnet()
+    };
     let trusted_peers = vec![PeerAddress {
         api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
         gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+        execution: RethPeerInfo::default(),
+        mining_address: testnet_config_genesis.miner_address(),
     }];
     let genesis_trusted_peers = vec![
         PeerAddress {
             api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
+            mining_address: testnet_config_genesis.miner_address(),
         },
         PeerAddress {
-            api: "127.0.0.2:1234".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.2:1235".parse().expect("valid SocketAddr expected"),
+            api: "127.0.0.1:8082".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.1:8083".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
+            mining_address: testnet_config_peer1.miner_address(),
         },
         PeerAddress {
-            api: "127.0.0.3:1234".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.3:1235".parse().expect("valid SocketAddr expected"),
+            api: "127.0.0.1:8084".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.1:8085".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo::default(),
+            mining_address: testnet_config_peer2.miner_address(),
         },
     ];
-    (trusted_peers, genesis_trusted_peers)
-}
-
-fn init_configs(
-    genesis_trusted_peers: &Vec<PeerAddress>,
-    trusted_peers: &Vec<PeerAddress>,
-) -> (Config, Config, Config) {
-    let testnet_config_genesis = Config {
-        api_port: 8080,
-        gossip_service_port: 8081,
-        trusted_peers: genesis_trusted_peers.clone(),
-        ..Config::testnet()
-    };
-    let testnet_config_peer1 = Config {
-        api_port: 0, //random port
-        trusted_peers: trusted_peers.clone(),
-        ..Config::testnet()
-    };
-    let testnet_config_peer2 = Config {
-        api_port: 0, //random port
-        trusted_peers: trusted_peers.clone(),
-        ..Config::testnet()
-    };
+    testnet_config_peer1.trusted_peers = trusted_peers.clone();
+    testnet_config_peer2.trusted_peers = trusted_peers.clone();
+    testnet_config_genesis.trusted_peers = genesis_trusted_peers.clone();
     (
         testnet_config_genesis,
         testnet_config_peer1,
         testnet_config_peer2,
+        trusted_peers,
+        genesis_trusted_peers,
     )
 }
 

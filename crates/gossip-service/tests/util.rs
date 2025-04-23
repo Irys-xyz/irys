@@ -17,7 +17,7 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, Config, DatabaseProvider, GossipData, IrysBlockHeader,
     IrysTransaction, IrysTransactionHeader, PeerAddress, PeerListItem, PeerResponse, PeerScore,
-    TxChunkOffset, UnpackedChunk, VersionRequest, H256,
+    RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
@@ -238,6 +238,7 @@ pub struct GossipServiceTestFixture {
     pub temp_dir: TempDir,
     pub gossip_port: u16,
     pub api_port: u16,
+    pub execution: RethPeerInfo,
     pub db: DatabaseProvider,
     pub mining_address: Address,
     pub mempool: Addr<MempoolStub>,
@@ -297,6 +298,7 @@ impl GossipServiceTestFixture {
             temp_dir,
             gossip_port,
             api_port,
+            execution: RethPeerInfo::default(),
             db,
             mining_address: Address::random(),
             mempool: mempool_stub_addr,
@@ -353,6 +355,8 @@ impl GossipServiceTestFixture {
             address: PeerAddress {
                 gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), self.gossip_port),
                 api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), self.api_port),
+                execution: self.execution,
+                mining_address: Address::ZERO,
             },
             last_seen: 0,
             is_online: true,
@@ -386,6 +390,8 @@ impl GossipServiceTestFixture {
             address: PeerAddress {
                 gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.gossip_port),
                 api: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.api_port),
+                execution: other.execution,
+                mining_address: Address::ZERO,
             },
             reputation_score: score,
             is_online: true,

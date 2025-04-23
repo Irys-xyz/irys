@@ -77,7 +77,7 @@ async fn cost_of_perm_storage(
             state.config.safe_minimum_number_of_years,
             state.config.decay_rate,
         )?
-        .replica_count(state.config.number_of_ingerss_proofs)?;
+        .replica_count(state.config.number_of_ingress_proofs)?;
 
     // calculate the cost of storing the bytes
     let price_with_network_reward = cost_per_gb

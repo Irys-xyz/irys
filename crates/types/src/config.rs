@@ -10,7 +10,7 @@ use crate::{
         phantoms::{CostPerGb, DecayRate, IrysPrice, Percentage, Usd},
         Amount,
     },
-    PeerAddress,
+    PeerAddress, RethPeerInfo,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,7 +98,9 @@ pub struct Config {
     /// The amount of years for a piece of data to be considered as permanent
     pub safe_minimum_number_of_years: u64,
     /// How many repliceas are needed for data to be considered as "upgraded to perm storage"
-    pub number_of_ingerss_proofs: u64,
+    pub number_of_ingress_proofs: u64,
+    #[serde(default)]
+    pub reth_peer_info: RethPeerInfo,
 }
 
 fn default_irys_path() -> PathBuf {
@@ -186,6 +188,8 @@ impl Config {
             trusted_peers: vec![PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+                execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
+                mining_address: Address::ZERO,
             }],
             gossip_service_bind_ip: "127.0.0.1".into(),
             gossip_service_port: 0,
@@ -193,7 +197,8 @@ impl Config {
             decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
             fee_percentage: Amount::percentage(dec!(0.05)).unwrap(), // 5%
             safe_minimum_number_of_years: 200,
-            number_of_ingerss_proofs: 10,
+            number_of_ingress_proofs: 10,
+            reth_peer_info: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
         }
     }
 }
@@ -278,6 +283,11 @@ mod tests {
     use toml;
 
     #[test]
+    fn t() {
+        print!("{}", toml::to_string(&Config::testnet()).unwrap());
+    }
+
+    #[test]
     fn test_deserialize_config_from_toml() {
         let toml_data = r#"
             block_time = 10
@@ -314,14 +324,14 @@ mod tests {
             gpu_packing_batch_size = 1024
             cache_clean_lag = 2
             base_directory = "~/.irys"
-            trusted_peers = [{api = "127.0.0.1:8080", gossip = "127.0.0.1:8081"}]
+            trusted_peers = [{ api = "127.0.0.1:8080", gossip = "127.0.0.1:8081", execution = { peering_tcp_addr = "127.0.0.1:30303", peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" }}]
             gossip_service_bind_ip = "127.0.0.1"
             gossip_service_port = 8081
             annual_cost_per_gb = "0.01"
             decay_rate = "0.01"
             fee_percentage = "0.05"
             safe_minimum_number_of_years = 200
-            number_of_ingerss_proofs = 10
+            number_of_ingress_proofs = 10
 
             [oracle_config]
             type = "mock"

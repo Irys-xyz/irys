@@ -3,7 +3,7 @@
 use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_chain::IrysNodeCtx;
-use irys_types::{AcceptedResponse, PeerAddress, PeerResponse, ProtocolVersion, VersionRequest};
+use irys_types::{AcceptedResponse, PeerResponse, ProtocolVersion, VersionRequest};
 use semver::Version;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -20,10 +20,7 @@ async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: So
             build: Default::default(),
         },
         protocol_version: ProtocolVersion::V1,
-        peers: vec![PeerAddress {
-            gossip: SocketAddr::from_str("127.0.0.1:8081").unwrap(),
-            api: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
-        }],
+        peers: vec![],
         timestamp: 1744920031378,
         message: Some("Welcome to the network ".to_string()),
     };

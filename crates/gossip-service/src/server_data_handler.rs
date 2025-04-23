@@ -1,6 +1,7 @@
 use crate::types::{tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError};
 use crate::{GossipCache, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
+use base58::ToBase58;
 use core::net::SocketAddr;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::{
@@ -186,7 +187,7 @@ where
         tracing::debug!(
             "Gossip block received from peer {}: {:?}",
             source_address,
-            irys_block_header.block_hash
+            irys_block_header.block_hash.0.to_base58()
         );
 
         // Get all transaction IDs from the block
