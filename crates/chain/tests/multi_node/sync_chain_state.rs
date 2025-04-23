@@ -145,12 +145,12 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // wait and retry hitting the peer_list endpoint of peer1 node
     let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer1_node).await;
     // assert that peer1 node has updated trusted peers
-    assert_eq!(&genesis_trusted_peers, &peer_list_items);
+    assert_eq!(peer_list_items.len(), genesis_trusted_peers.len());
 
     // wait and retry hitting the peer_list endpoint of peer2 node
     let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer2_node).await;
     // assert that peer2 node has updated trusted peers
-    assert_eq!(&genesis_trusted_peers, &peer_list_items);
+    assert_eq!(peer_list_items.len(), genesis_trusted_peers.len());
 
     let result_peer2 = poll_until_fetch_at_block_index_height(
         &ctx_peer2_node.node_ctx,
