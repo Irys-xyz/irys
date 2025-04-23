@@ -78,7 +78,6 @@ async fn cost_of_perm_storage(
             state.config.consensus.safe_minimum_number_of_years,
             state.config.consensus.decay_rate,
         )?
-        .replica_count(state.config.number_of_ingress_proofs)?;
         .replica_count(state.config.consensus.number_of_ingress_proofs)?;
 
     // calculate the cost of storing the bytes
