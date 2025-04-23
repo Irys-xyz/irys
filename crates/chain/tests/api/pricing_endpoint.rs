@@ -25,7 +25,6 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
                 ctx.node_ctx.config.consensus.safe_minimum_number_of_years,
                 ctx.node_ctx.config.consensus.decay_rate,
             )?
-            .replica_count(ctx.cfg.config.number_of_ingress_proofs)?;
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
         cost_per_gb
@@ -80,7 +79,6 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
                 ctx.node_ctx.config.consensus.safe_minimum_number_of_years,
                 ctx.node_ctx.config.consensus.decay_rate,
             )?
-            .replica_count(ctx.cfg.config.number_of_ingress_proofs)?;
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
         cost_per_gb
@@ -136,7 +134,6 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
                 ctx.node_ctx.config.consensus.safe_minimum_number_of_years,
                 ctx.node_ctx.config.consensus.decay_rate,
             )?
-            .replica_count(ctx.cfg.config.number_of_ingress_proofs)?;
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
         cost_per_gb
