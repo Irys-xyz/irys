@@ -19,7 +19,7 @@ use actix_web::{
     App,
 };
 use base58::ToBase58;
-use irys_types::{Config, TxChunkOffset};
+use irys_types::TxChunkOffset;
 use reth_primitives::GenesisAccount;
 
 use crate::utils::IrysNodeTest;

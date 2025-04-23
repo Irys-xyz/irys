@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use irys_chain::IrysNode;
-use irys_types::{ConsensusConfig, NodeConfig};
+use irys_types::NodeConfig;
 use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};

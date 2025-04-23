@@ -5,7 +5,7 @@ use irys_actors::{
     block_tree_service::{get_block, get_canonical_chain},
     ema_service::EmaServiceMessage,
 };
-use irys_types::{storage_pricing::Amount, Config, NodeConfig, OracleConfig};
+use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
 use rust_decimal_macros::dec;
 
 #[test_log::test(tokio::test)]

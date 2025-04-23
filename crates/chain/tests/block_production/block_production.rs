@@ -7,7 +7,7 @@ use alloy_signer_local::LocalSigner;
 use eyre::eyre;
 use irys_actors::mempool_service::TxIngressError;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
-use irys_types::{irys::IrysSigner, Config, IrysTransaction, NodeConfig};
+use irys_types::{irys::IrysSigner, IrysTransaction, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use reth_primitives::{

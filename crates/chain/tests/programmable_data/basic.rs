@@ -12,7 +12,7 @@ use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_types::{irys::IrysSigner, Address};
-use irys_types::{Base64, Config, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
+use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 
 use k256::ecdsa::SigningKey;
 use reth::rpc::eth::EthApiServer;
@@ -69,9 +69,10 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
             },
         ),
     ]);
-    let mut irys_node = IrysNodeTest::new_genesis(testnet_config).await;
-
-    let node = irys_node.start().await;
+    let node = IrysNodeTest::new_genesis(testnet_config)
+        .await
+        .start()
+        .await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),

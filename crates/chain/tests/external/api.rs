@@ -6,7 +6,7 @@ use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
-use irys_types::{irys::IrysSigner, Address, Config, NodeConfig};
+use irys_types::{irys::IrysSigner, Address, NodeConfig};
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
 use reth_primitives::GenesisAccount;

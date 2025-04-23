@@ -17,9 +17,7 @@ use rand::Rng;
 use crate::utils::mine_block;
 use crate::utils::IrysNodeTest;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
-use irys_types::{
-    irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG, StorageSyncConfig,
-};
+use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG};
 use k256::ecdsa::SigningKey;
 use reth::rpc::types::TransactionRequest;
 use reth_primitives::GenesisAccount;

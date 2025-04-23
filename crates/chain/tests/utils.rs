@@ -16,10 +16,7 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, Address, H256List, H256,
 };
-use irys_types::{
-    Config, ConsensusConfig, ConsensusOptions, IrysTransactionHeader, NodeConfig, NodeMode,
-    StorageSyncConfig, TxChunkOffset,
-};
+use irys_types::{Config, IrysTransactionHeader, NodeConfig, NodeMode, TxChunkOffset};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use reth::rpc::types::engine::ExecutionPayloadEnvelopeV1Irys;
@@ -29,7 +26,6 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::time::sleep;
-use tracing::debug;
 use tracing::info;
 
 use std::collections::HashMap;

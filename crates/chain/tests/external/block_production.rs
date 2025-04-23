@@ -3,9 +3,7 @@ use std::time::Duration;
 use alloy_core::primitives::{TxHash, U256};
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
-use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, Address, Config, NodeConfig,
-};
+use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
 use reth_db::Database as _;
