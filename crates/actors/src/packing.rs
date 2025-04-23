@@ -186,8 +186,10 @@ impl PackingActor {
                 }
                 #[cfg(feature = "nvidia")]
                 PackingType::CUDA => {
+                    let chunk_size = storage_module.config.consensus.chunk_size;
                     assert_eq!(
-                        chunk_size, CHUNK_SIZE,
+                        chunk_size,
+                        irys_types::ConsensusConfig::CHUNK_SIZE,
                         "Chunk size is not aligned with C code"
                     );
 
@@ -221,9 +223,9 @@ impl PackingActor {
                                 mining_address,
                                 start as u64,
                                 partition_hash,
-                                Some(entropy_packing_iterations),
+                                Some(storage_module.config.consensus.entropy_packing_iterations),
                                 &mut out,
-                                entropy_packing_iterations,
+                                storage_module.config.consensus.entropy_packing_iterations,
                                 self.config.chain_id,
                             );
                             for i in 0..num_chunks {
@@ -241,7 +243,11 @@ impl PackingActor {
                             }
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                         });
-                        debug!(target: "irys::packing::update", "CUDA Packed chunks {} - {} for SM {} partition_hash {} mining_address {} iterations {}", start, end, &storage_module_id, &partition_hash, &mining_address, &entropy_packing_iterations);
+                        debug!(
+                            target: "irys::packing::update",
+                            ?start, ?end, ?storage_module_id, ?partition_hash, ?mining_address, ?storage_module.config.consensus.entropy_packing_iterations,
+                            "CUDA Packed chunks"
+                        );
                     }
                 }
                 _ => unimplemented!(),
