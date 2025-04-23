@@ -812,8 +812,6 @@ mod tests {
         reset_state_on_restart = false
         chunk_migration_depth = 1
         num_capacity_partitions = 16
-        api_bind_ip = "127.0.0.1"
-        api_port = 8080
         anchor_expiry_depth = 10
         genesis_price_valid_for_n_epochs = 2
         genesis_token_price = "1.0"
@@ -859,6 +857,10 @@ mod tests {
         bind_ip = "127.0.0.1"
         port = 0
 
+        [reth_peer_info]
+        peering_tcp_addr = "0.0.0.0:0"
+        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
         [packing]
         cpu_packing_concurrency = 4
         gpu_packing_batch_size = 1024
@@ -867,12 +869,17 @@ mod tests {
         cache_clean_lag = 2
 
         [http]
+        bind_ip = "127.0.0.1"
         port = 0
         "#;
         // Create the expected config
         let mut expected_config = NodeConfig::testnet();
         expected_config.consensus = ConsensusOptions::Testnet;
         expected_config.base_directory = PathBuf::from("~/.tmp/.irys");
+        expected_config.trusted_peers.get_mut(0).unwrap().execution = RethPeerInfo {
+            peering_tcp_addr: "127.0.0.1:30303".parse().unwrap(),
+            peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
+        };
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
         // for debugging purposes
         println!("{}", expected_toml_data);
