@@ -417,7 +417,7 @@ mod tests {
         }))
     }
 
-    #[actix_rt::test]
+    #[test_log::test(actix_rt::test)]
     async fn test_solution() {
         let chunk_count = 4;
         let chunk_size = 32;
@@ -473,9 +473,6 @@ mod tests {
                 (partition_chunk_offset_ie!(0, chunk_count), "hdd0".into()), // 0 to 3 inclusive, 4 chunks
             ],
         }];
-
-        let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
-        let base_path = tmp_dir.path().to_path_buf();
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];

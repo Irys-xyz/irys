@@ -3,10 +3,9 @@ use irys_api_server::routes::index::NodeInfo;
 use irys_chain::peer_utilities::{
     block_index_endpoint_request, info_endpoint_request, peer_list_endpoint_request,
 };
-use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_chain::IrysNodeCtx;
 use irys_database::BlockIndexItem;
-use irys_testing_utils::utils::{tempfile::TempDir, temporary_directory};
-use irys_types::{Config, NodeConfig, NodeMode, PeerAddress};
+use irys_types::{NodeConfig, NodeMode, PeerAddress};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error};
 

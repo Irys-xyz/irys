@@ -21,8 +21,11 @@ use openssl::sha;
 use reth_db::Database;
 use tracing::info;
 
-#[test]
+#[test_log::test(test)]
 fn tx_path_overlap_tests() -> eyre::Result<()> {
+    let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
+    let base_path = tmp_dir.path().to_path_buf();
+    info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
     let mut node_config = NodeConfig::testnet();
     node_config.storage.num_writes_before_sync = 1;
     node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
@@ -34,6 +37,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         entropy_packing_iterations: 1,
         ..node_config.consensus_config()
     });
+    node_config.base_directory = base_path.clone();
     let config = Config::new(node_config);
 
     // Configure 3 storage modules that are assigned to the submit ledger in
@@ -91,10 +95,6 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             ],
         },
     ];
-
-    let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
-    let base_path = tmp_dir.path().to_path_buf();
-    info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
 
     let mut storage_modules: Vec<Arc<StorageModule>> = Vec::new();
 
