@@ -28,7 +28,7 @@ use reth_db::{
 use reth_db::{HasName, HasTableType, PlainAccountState};
 use reth_node_metrics::recorder::install_prometheus_recorder;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
 /// necessary. Read/Write mode.
