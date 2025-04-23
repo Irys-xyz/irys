@@ -207,41 +207,43 @@ impl PackingActor {
                             &start, &end, &num_chunks
                         );
 
-                        let storage_module = storage_module.clone();
-
                         let semaphore = semaphore.clone();
                         // wait for the permit before spawning the thread
                         let permit = semaphore.acquire_owned().await.unwrap();
-
-                        self.task_executor.spawn_blocking(async move {
-                            let mut out: Vec<u8> = Vec::with_capacity(
-                                (num_chunks * chunk_size as u32).try_into().unwrap(),
-                            );
-
-                            capacity_pack_range_cuda_c(
-                                num_chunks,
-                                mining_address,
-                                start as u64,
-                                partition_hash,
-                                Some(storage_module.config.consensus.entropy_packing_iterations),
-                                &mut out,
-                                storage_module.config.consensus.entropy_packing_iterations,
-                                self.config.chain_id,
-                            );
-                            for i in 0..num_chunks {
-                                storage_module.write_chunk(
-                                    (start + i).into(),
-                                    out[(i * chunk_size as u32) as usize
-                                        ..((i + 1) * chunk_size as u32) as usize]
-                                        .to_vec(),
-                                    ChunkType::Entropy,
+                        self.task_executor.spawn_blocking({
+                            let storage_module = storage_module.clone();
+                            async move {
+                                let mut out: Vec<u8> = Vec::with_capacity(
+                                    (num_chunks * chunk_size as u32).try_into().unwrap(),
                                 );
-                                if i % short_writes_before_sync == 0 {
-                                    debug!("triggering sync");
-                                    let _ = storage_module.sync_pending_chunks();
+
+                                capacity_pack_range_cuda_c(
+                                    num_chunks,
+                                    mining_address,
+                                    start as u64,
+                                    partition_hash,
+                                    Some(
+                                        storage_module.config.consensus.entropy_packing_iterations,
+                                    ),
+                                    &mut out,
+                                    storage_module.config.consensus.entropy_packing_iterations,
+                                    self.config.chain_id,
+                                );
+                                for i in 0..num_chunks {
+                                    storage_module.write_chunk(
+                                        (start + i).into(),
+                                        out[(i * chunk_size as u32) as usize
+                                            ..((i + 1) * chunk_size as u32) as usize]
+                                            .to_vec(),
+                                        ChunkType::Entropy,
+                                    );
+                                    if i % short_writes_before_sync == 0 {
+                                        debug!("triggering sync");
+                                        let _ = storage_module.sync_pending_chunks();
+                                    }
                                 }
+                                drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                             }
-                            drop(permit); // drop after chunk write so the SM can apply backpressure to packing
                         });
                         debug!(
                             target: "irys::packing::update",
