@@ -20,7 +20,7 @@ use tracing::{debug, error};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_p2p() -> eyre::Result<()> {
-    let mut testnet_config_genesis = Config::testnet();
+    let mut testnet_config_genesis = ConsensusConfig::testnet();
     testnet_config_genesis.trusted_peers = vec![];
     let account1 = IrysSigner::random_signer(&testnet_config_genesis);
     let genesis = start_genesis_node(&testnet_config_genesis, &account1).await;
