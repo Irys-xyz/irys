@@ -11,7 +11,7 @@ test-utils = []
 alloy-primitives.workspace = true
 actix.workspace = true
 base58.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs"] }
 reth-node-metrics.workspace = true
 irys-config.workspace = true
 reth-db.workspace = true
@@ -31,6 +31,7 @@ test-fuzz.workspace = true
 
 [dev-dependencies]
 irys-config = { workspace = true, features = ["test-utils"] }
+test-log.workspace = true
 
 [lints]
 workspace = true

@@ -309,28 +309,34 @@ fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use super::BlockIndex;
+    use super::*;
     use crate::{data_ledger::DataLedger, BlockBounds, BlockIndexItem, LedgerIndexItem};
+    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::H256;
-    use tokio::{fs::File, io::AsyncWriteExt};
+    use std::fs::{self, File};
 
-    pub async fn save_block_index(
+    fn save_block_index(
         block_index_items: &[BlockIndexItem],
-        file_path: &Path,
+        config: &NodeConfig,
     ) -> eyre::Result<()> {
-        tokio::fs::create_dir_all(&file_path).await?;
-        let mut file = File::create(file_path).await?;
+        fs::create_dir_all(&config.block_index_dir())?;
+        let path = config.block_index_dir().join(FILE_NAME);
+        let mut file = File::create(path)?;
         for item in block_index_items {
             let bytes = item.to_bytes();
-            file.write_all(&bytes).await?;
+            file.write_all(&bytes)?;
         }
         Ok(())
     }
 
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     async fn read_and_write_block_index() -> eyre::Result<()> {
+        let tmp_dir = setup_tracing_and_temp_dir(Some("read_and_write_block_index"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        let mut node_config = NodeConfig::testnet();
+        node_config.base_directory = base_path;
+
         let block_items = vec![
             BlockIndexItem {
                 block_hash: H256::random(),
@@ -376,10 +382,7 @@ mod tests {
             },
         ];
 
-        let node_config = NodeConfig::testnet();
-
-        let file_path = node_config.block_index_dir().join(FILE_NAME);
-        save_block_index(&block_items, &file_path).await?;
+        save_block_index(&block_items, &node_config)?;
 
         // Load the items from disk
         let block_index = BlockIndex::new(&node_config).await?;
