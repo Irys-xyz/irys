@@ -13,7 +13,10 @@ use actix_web::{
 use alloy_core::primitives::U256;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_types::{build_user_agent, irys::IrysSigner, NodeConfig, PeerAddress, PeerResponse, RethPeerInfo, VersionRequest};
+use irys_types::{
+    build_user_agent, irys::IrysSigner, NodeConfig, PeerAddress, PeerResponse, RethPeerInfo,
+    VersionRequest,
+};
 use reth_primitives::GenesisAccount;
 use tracing::{debug, error};
 
@@ -21,6 +24,7 @@ use tracing::{debug, error};
 async fn heavy_peer_discovery() -> eyre::Result<()> {
     let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
+    config.trusted_peers = vec![];
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
     config.consensus.get_mut().num_chunks_in_recall_range = 2;
