@@ -1,5 +1,6 @@
 use actix::Addr;
 use base58::ToBase58;
+use irys_actors::peer_list_service::{PeerListService, WaitForActivePeer};
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     mempool_service::{MempoolService, TxIngressMessage},
@@ -210,6 +211,7 @@ pub async fn sync_state_from_peers(
     trusted_peers: Vec<PeerAddress>,
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
+    peer_service_addr: Addr<PeerListService>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
@@ -222,11 +224,7 @@ pub async fn sync_state_from_peers(
         Arc::new(Mutex::new(VecDeque::new()));
 
     info!("Discovering peers...");
-    if let Some(new_peers_found) =
-        fetch_and_update_peers(peers.clone(), &client, trusted_peers).await
-    {
-        info!("Discovered {new_peers_found} new peers");
-    }
+    peer_service_addr.send(WaitForActivePeer).await?;
 
     info!("Downloading block index...");
     let peers_guard = peers.lock().await;

@@ -46,9 +46,8 @@ use irys_storage::{
 
 use irys_types::U256;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, Address, CommitmentTransaction,
-    Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader, NodeConfig, NodeMode,
-    OracleConfig, PartitionChunkRange, PeerListItem, VdfConfig, H256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, CommitmentTransaction, Config,
+    GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, H256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
@@ -369,6 +368,7 @@ impl IrysNode {
                 ctx.config.node_config.trusted_peers.clone(),
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
+                ctx.actor_addresses.peer_list.clone(),
             )
             .await?;
         }

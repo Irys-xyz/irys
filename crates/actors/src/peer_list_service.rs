@@ -4,8 +4,8 @@ use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
 use irys_types::{
-    Address, Config, ConsensusConfig, DatabaseProvider, NodeConfig, PeerAddress, PeerListItem,
-    PeerResponse, RejectedResponse, VersionRequest,
+    Address, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse, RejectedResponse,
+    VersionRequest,
 };
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
@@ -258,9 +258,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         if let Some(db) = &self.db {
             db.update(|tx| {
                 for (addr, peer) in self.peer_list_cache.iter() {
-                    debug!("Inserting peer {:?} into the database", addr);
                     insert_peer_list_item(tx, addr, peer).map_err(PeerListServiceError::from)?;
-                    debug!("Flushing peer list cache: {:?}", peer);
                 }
                 Ok(())
             })
@@ -812,6 +810,47 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<AnnounceFinished>
             self.currently_running_announcements
                 .remove(&msg.peer_api_address);
         }
+    }
+}
+
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct WaitForActivePeer;
+
+impl<T: ApiClient + 'static + Unpin + Default> Handler<WaitForActivePeer>
+    for PeerListServiceWithClient<T>
+{
+    type Result = ResponseActFuture<Self, ()>;
+
+    fn handle(&mut self, _msg: WaitForActivePeer, ctx: &mut Self::Context) -> Self::Result {
+        // First check if we already have active peers
+        if !self.peer_list_cache.is_empty() {
+            return Box::pin(fut::ready(()));
+        }
+
+        // If not, create a future that will complete when a peer becomes available
+        let addr = ctx.address();
+        Box::pin(
+            async move {
+                loop {
+                    // Check for active peers every second
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+
+                    let active_peers = addr
+                        .send(ActivePeersRequest {
+                            truncate: None,
+                            exclude_peers: HashSet::new(),
+                        })
+                        .await
+                        .unwrap_or_default();
+
+                    if !active_peers.is_empty() {
+                        break;
+                    }
+                }
+            }
+            .into_actor(self),
+        )
     }
 }
 
@@ -1575,6 +1614,156 @@ mod tests {
             2,
             "Should make another API call after announcement finished"
         );
+    }
+
+    #[actix_rt::test]
+    async fn test_wait_for_active_peer() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let mut node_config = NodeConfig::testnet();
+        node_config.trusted_peers = vec![];
+        let config = Config::new(node_config);
+
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create the service with an empty peer list (no trusted peers)
+        let mock_client = CountingMockClient::default();
+        let service =
+            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let service_addr = service.start();
+
+        // Verify we don't have any peers
+        let active_peers = service_addr
+            .send(ActivePeersRequest {
+                truncate: None,
+                exclude_peers: HashSet::new(),
+            })
+            .await
+            .expect("send active peers request");
+
+        assert!(active_peers.is_empty(), "Should start with no active peers");
+
+        // Create a test peer to add later
+        let (mining_addr, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+
+        // Start two tasks in parallel
+        // 1. Send WaitForActivePeer and await the result
+        let wait_task = tokio::spawn({
+            let service_addr = service_addr.clone();
+            async move {
+                // Send WaitForActivePeer message which should only resolve when a peer becomes available
+                service_addr
+                    .send(WaitForActivePeer)
+                    .await
+                    .expect("send wait message");
+                debug!("WaitForActivePeer message resolved");
+            }
+        });
+
+        // 2. Wait a bit and then add a peer
+        let add_task = tokio::spawn({
+            let service_addr = service_addr.clone();
+            let peer = peer.clone();
+            async move {
+                // Wait a bit to ensure the other task is waiting
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                debug!("Adding peer");
+                service_addr
+                    .send(AddPeer { mining_addr, peer })
+                    .await
+                    .expect("send add peer message");
+            }
+        });
+
+        // Wait for both tasks to complete
+        tokio::try_join!(wait_task, add_task).expect("tasks should complete successfully");
+
+        // Verify we now have a peer
+        let active_peers = service_addr
+            .send(ActivePeersRequest {
+                truncate: None,
+                exclude_peers: HashSet::new(),
+            })
+            .await
+            .expect("send active peers request");
+
+        assert_eq!(active_peers.len(), 1, "Should have one active peer");
+        assert_eq!(
+            active_peers[0].address, peer.address,
+            "Should be the peer we added"
+        );
+    }
+
+    #[actix_rt::test]
+    async fn test_wait_for_active_peer_no_peers() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let mut node_config = NodeConfig::testnet();
+        node_config.trusted_peers = vec![];
+        let config = Config::new(node_config);
+
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create the service with an empty peer list (no trusted peers)
+        let mock_client = CountingMockClient::default();
+        let service =
+            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let service_addr = service.start();
+
+        // Verify we don't have any peers
+        let active_peers = service_addr
+            .send(ActivePeersRequest {
+                truncate: None,
+                exclude_peers: HashSet::new(),
+            })
+            .await
+            .expect("send active peers request");
+
+        assert!(active_peers.is_empty(), "Should start with no active peers");
+
+        // Use a short timeout to verify that WaitForActivePeer doesn't resolve
+        // We expect this task to timeout since no peers will be added
+        let wait_task = tokio::spawn({
+            let service_addr = service_addr.clone();
+            async move {
+                let wait_result = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    service_addr.send(WaitForActivePeer),
+                )
+                .await;
+
+                // The timeout should expire before WaitForActivePeer resolves
+                match wait_result {
+                    Ok(_) => panic!("WaitForActivePeer should not have resolved without peers"),
+                    Err(_timeout_error) => {
+                        debug!("Expected timeout occurred. WaitForActivePeer did not resolve as expected.");
+                    }
+                }
+            }
+        });
+
+        // Wait for the task to complete (it should timeout)
+        wait_task.await.expect("wait task should complete");
+
+        // Verify we still have no peers
+        let active_peers = service_addr
+            .send(ActivePeersRequest {
+                truncate: None,
+                exclude_peers: HashSet::new(),
+            })
+            .await
+            .expect("send active peers request");
+
+        assert!(active_peers.is_empty(), "Should still have no active peers");
     }
 
     #[actix_rt::test]
