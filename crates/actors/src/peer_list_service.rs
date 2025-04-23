@@ -103,13 +103,15 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),
-                api: format!("{}:{}", config.api_bind_ip, config.api_port)
-                    .parse()
-                    .expect("valid SocketAddr expected"),
-                execution: config.reth_peer_info,
-                mining_address: config.miner_address(),
+                execution: config.consensus.reth_peer_info,
+                mining_address: config.node_config.miner_address(),
             },
-            trusted_peers_api_addresses: config.trusted_peers.iter().map(|p| p.api).collect(),
+            trusted_peers_api_addresses: config
+                .node_config
+                .trusted_peers
+                .iter()
+                .map(|p| p.api)
+                .collect(),
         }
     }
 }

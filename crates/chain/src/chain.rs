@@ -629,7 +629,7 @@ impl IrysNode {
             &task_exec,
             irys_db.clone(),
             receivers.chunk_cache,
-            self.config.clone(),
+            config.clone(),
         );
         debug!("Chunk cache initiailsed");
 
