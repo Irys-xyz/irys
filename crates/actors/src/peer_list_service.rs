@@ -4,8 +4,8 @@ use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
 use irys_types::{
-    Address, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse, RejectedResponse,
-    VersionRequest,
+    Address, Config, ConsensusConfig, DatabaseProvider, NodeConfig, PeerAddress, PeerListItem,
+    PeerResponse, RejectedResponse, VersionRequest,
 };
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};

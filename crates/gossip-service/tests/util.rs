@@ -16,8 +16,8 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, Config, DatabaseProvider, GossipData, IrysBlockHeader,
-    IrysTransaction, IrysTransactionHeader, PeerAddress, PeerListItem, PeerResponse, PeerScore,
-    RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
+    IrysTransaction, IrysTransactionHeader, NodeConfig, PeerAddress, PeerListItem, PeerResponse,
+    PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;

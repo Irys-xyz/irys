@@ -10,7 +10,10 @@ use irys_chain::{
 };
 use irys_config::IrysNodeConfig;
 use irys_database::BlockIndexItem;
-use irys_types::{irys::IrysSigner, Address, Config, IrysTransaction, PeerAddress, RethPeerInfo, NodeConfig, NodeMode};
+use irys_types::{
+    irys::IrysSigner, Address, ConsensusConfig, IrysTransaction, NodeConfig, NodeMode, PeerAddress,
+    RethPeerInfo,
+};
 use k256::ecdsa::SigningKey;
 use reth_primitives::irys_primitives::IrysTxId;
 use reth_primitives::GenesisAccount;

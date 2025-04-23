@@ -16,13 +16,15 @@ use irys_actors::{
     epoch_service::{EpochServiceActor, GetPartitionAssignmentsGuardMessage},
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
-    packing::{PackingActor, PackingRequest, PackingConfig},
+    packing::{PackingActor, PackingConfig, PackingRequest},
     peer_list_service::PeerListService,
-    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor, GetPeeringInfoMessage},
+    reth_service::{
+        BlockHashType, ForkChoiceUpdateMessage, GetPeeringInfoMessage, RethServiceActor,
+    },
     services::ServiceSenders,
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService},
-    ActorAddresses, BlockFinalizedMessage, EpochReplayData
+    ActorAddresses, BlockFinalizedMessage, EpochReplayData,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
@@ -44,11 +46,10 @@ use irys_storage::{
 
 use irys_types::U256;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, vdf_config::VDFStepsConfig,
-    Address, CommitmentTransaction, Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
-    OracleConfig, PartitionChunkRange, PeerListItem, StorageConfig, H256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, Address, CommitmentTransaction,
+    Config, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader, NodeConfig, NodeMode,
+    OracleConfig, PartitionChunkRange, PeerListItem, VdfConfig, H256,
 };
-use irys_types::{Config, NodeConfig, NodeMode};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
     builder::FullNode,
@@ -61,6 +62,7 @@ use reth_db::{Database as _, HasName, HasTableType};
 use std::{
     fs,
     net::TcpListener,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::atomic::AtomicU64,
     sync::{mpsc, Arc, RwLock},
