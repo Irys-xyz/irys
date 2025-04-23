@@ -611,7 +611,7 @@ impl IrysNode {
         debug!("Reth Service Actor initiailsed");
         // Get the correct Reth peer info
         let reth_peering = reth_service_actor.send(GetPeeringInfoMessage {}).await??;
-        self.config.reth_peer_info = reth_peering;
+        config.consensus.reth_peer_info = reth_peering;
 
         // update reth service about the latest block data it must use
         reth_service_actor

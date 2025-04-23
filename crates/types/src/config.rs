@@ -132,6 +132,8 @@ pub struct ConsensusConfig {
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
+
+    pub reth_peer_info: RethPeerInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +508,7 @@ impl ConsensusConfig {
                     ..Default::default()
                 },
             },
+            reth_peer_info: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
         }
     }
 }
