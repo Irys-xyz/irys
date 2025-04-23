@@ -103,7 +103,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),
-                execution: config.consensus.reth_peer_info,
+                execution: config.node_config.reth_peer_info,
                 mining_address: config.node_config.miner_address(),
             },
             trusted_peers_api_addresses: config
