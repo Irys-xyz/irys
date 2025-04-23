@@ -1271,8 +1271,9 @@ mod tests {
     #[actix_rt::test]
     async fn test_announce_yourself_to_all_peers() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let mut config = Config::new(NodeConfig::testnet());
-        config.trusted_peers = vec![];
+        let mut node_config = NodeConfig::testnet();
+        node_config.trusted_peers = vec![];
+        let config = Config::new(node_config);
 
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
@@ -1598,8 +1599,9 @@ mod tests {
         };
 
         // Create config with trusted peers
-        let mut config = ConsensusConfig::testnet();
-        config.trusted_peers = vec![trusted_peer1.clone(), trusted_peer2.clone()];
+        let mut node_config = NodeConfig::testnet();
+        node_config.trusted_peers = vec![trusted_peer1.clone(), trusted_peer2.clone()];
+        let config = Config::new(node_config);
 
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
