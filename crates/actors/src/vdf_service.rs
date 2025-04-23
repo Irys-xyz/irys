@@ -164,7 +164,7 @@ pub fn calc_capacity(config: &Config) -> usize {
     const DEFAULT_CAPACITY: usize = 10_000;
     let capacity = std::cmp::max(
         DEFAULT_CAPACITY,
-        (config.num_chunks_in_partition / config.num_chunks_in_recall_range)
+        (config.consensus.num_chunks_in_partition / config.consensus.num_chunks_in_recall_range)
             .try_into()
             .unwrap(),
     );
@@ -228,13 +228,12 @@ mod tests {
     use std::time::Instant;
 
     use actix::SystemRegistry;
-    use irys_config::IrysNodeConfig;
-    use irys_database::{
-        open_or_create_db, tables::IrysTables, BlockIndex, DataLedger, Initialized,
-    };
+    use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, DataLedger};
     use irys_storage::ii;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{H256List, IrysBlockHeader, StorageConfig, H256};
+    use irys_types::{
+        ConsensusConfig, ConsensusOptions, H256List, IrysBlockHeader, NodeConfig, H256,
+    };
 
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
@@ -245,7 +244,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf() {
-        let testnet_config = Config::testnet();
+        let testnet_config = NodeConfig::testnet().into();
         let service = VdfService::from_capacity(calc_capacity(&testnet_config));
         service.vdf_state.write().unwrap().seeds = VecDeque::with_capacity(4);
         service.vdf_state.write().unwrap().max_seeds_num = 4;
@@ -294,37 +293,27 @@ mod tests {
     #[ignore = "benchmark test"]
     #[actix_rt::test]
     async fn test_create_state_performance() {
-        let testnet_config = Config {
-            num_chunks_in_partition: 51_872_000, // testnet.toml numbers
-            num_chunks_in_recall_range: 800,
-            ..Config::testnet()
-        };
-
-        // Create a storage config for testing
-        let storage_config = StorageConfig::new(&testnet_config);
-
         let tmp_dir = setup_tracing_and_temp_dir(Some("create_state_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-
+        let consensus_config = ConsensusConfig {
+            num_chunks_in_partition: 51_872_000, // testnet.toml numbers
+            num_chunks_in_recall_range: 800,
+            ..ConsensusConfig::testnet()
+        };
+        let combined_config = Config::new(NodeConfig {
+            base_directory: base_path,
+            consensus: ConsensusOptions::Custom(consensus_config),
+            ..NodeConfig::testnet()
+        });
         let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
         let database_provider = DatabaseProvider(Arc::new(db));
 
-        let arc_config = Arc::new(IrysNodeConfig {
-            base_directory: base_path.clone(),
-            ..IrysNodeConfig::default()
-        });
-
-        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
-            BlockIndex::default()
-                .reset(&arc_config.clone())
-                .unwrap()
-                .init(arc_config.clone())
-                .await
-                .unwrap(),
+        let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
+            BlockIndex::new(&combined_config.node_config).await.unwrap(),
         ));
 
         let block_index_actor =
-            BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+            BlockIndexService::new(block_index.clone(), &combined_config.consensus).start();
         SystemRegistry::set(block_index_actor.clone());
 
         let block_index_guard = block_index_actor
@@ -338,7 +327,7 @@ mod tests {
         let now = Instant::now();
         // index and store in db blocks
         let mut height = 0;
-        let capacity = calc_capacity(&testnet_config) as u64;
+        let capacity = calc_capacity(&combined_config) as u64;
         while height <= capacity {
             new_epoch_block.height = height;
             new_epoch_block.previous_block_hash = new_epoch_block.block_hash;
@@ -365,14 +354,14 @@ mod tests {
         let vdf_state = create_state(
             block_index_guard.clone(),
             database_provider.clone(),
-            &testnet_config,
+            &combined_config,
         );
         let elapsed = now.elapsed();
         println!("VdfService vdf steps initialization time: {:.2?}", elapsed);
 
         let now = Instant::now();
         let vdf_state_parallel =
-            create_state_parallel(block_index_guard, database_provider, &testnet_config).await;
+            create_state_parallel(block_index_guard, database_provider, &combined_config).await;
         let elapsed = now.elapsed();
         println!(
             "VdfService vdf steps initialization time in parallel: {:.2?}",

@@ -19,10 +19,10 @@ use crate::{
 use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::ensure;
-use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, DataLedger, Initialized};
+use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, DataLedger};
 use irys_types::{
-    Address, BlockHash, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionId, StorageConfig, H256, U256,
+    Address, BlockHash, ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
+    IrysTransactionId, H256, U256,
 };
 use reth_db::{transaction::DbTx, Database as _};
 use tracing::{debug, error, info};
@@ -31,7 +31,7 @@ use tracing::{debug, error, info};
 // BlockTreeReadGuard
 //------------------------------------------------------------------------------
 
-/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
+/// Wraps the internal `Arc<RwLock<_>>` to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct BlockTreeReadGuard {
     block_tree_cache: Arc<RwLock<BlockTreeCache>>,
@@ -83,7 +83,7 @@ pub struct BlockTreeService {
     /// Read view of the `block_index`
     pub block_index_guard: Option<BlockIndexReadGuard>,
     /// Global storage config
-    pub storage_config: StorageConfig,
+    pub consensus_config: ConsensusConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
 }
@@ -111,10 +111,10 @@ impl BlockTreeService {
     /// Initializes a `BlockTreeActor` without a `block_producer` address
     pub fn new(
         db: DatabaseProvider,
-        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+        block_index: Arc<RwLock<BlockIndex>>,
         miner_address: &Address,
         block_index_guard: BlockIndexReadGuard,
-        storage_config: StorageConfig,
+        consensus_config: ConsensusConfig,
         service_senders: ServiceSenders,
     ) -> Self {
         let cache = BlockTreeCache::initialize_from_list(block_index, db.clone());
@@ -124,7 +124,7 @@ impl BlockTreeService {
             cache: Some(Arc::new(RwLock::new(cache))),
             miner_address: *miner_address,
             block_index_guard: Some(block_index_guard),
-            storage_config,
+            consensus_config,
             service_senders,
         }
     }
@@ -212,7 +212,7 @@ impl BlockTreeService {
         arc_block: &Arc<IrysBlockHeader>,
         cache: &BlockTreeCache,
     ) {
-        let migration_depth = self.storage_config.chunk_migration_depth as usize;
+        let migration_depth = self.consensus_config.chunk_migration_depth as usize;
 
         // Skip if block isn't deep enough for finalization
         if arc_block.height <= migration_depth as u64 {
@@ -556,7 +556,7 @@ impl BlockTreeCache {
     /// The most recent block in the list is marked as the tip.
     /// The input blocks must be sorted in descending order, from newest to oldest.
     pub fn initialize_from_list(
-        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+        block_index: Arc<RwLock<BlockIndex>>,
         db: DatabaseProvider,
     ) -> Self {
         let block_index = block_index.read().unwrap();

@@ -265,7 +265,7 @@ impl GossipServiceTestFixture {
     pub fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
-        let config = Config::testnet();
+        let config = NodeConfig::testnet().into();
         let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
@@ -417,8 +417,9 @@ fn random_free_port() -> u16 {
 /// Can panic
 #[must_use]
 pub fn generate_test_tx() -> IrysTransaction {
-    let testnet_config = Config::testnet();
-    let account1 = IrysSigner::random_signer(&testnet_config);
+    let testnet_config = NodeConfig::testnet();
+    let config = Config::new(testnet_config);
+    let account1 = IrysSigner::random_signer(&config.consensus);
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
     // post a tx, mine a block

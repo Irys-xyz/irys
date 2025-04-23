@@ -1,4 +1,4 @@
-use irys_config::{IrysNodeConfig, StorageSubmodulesConfig};
+use irys_config::StorageSubmodulesConfig;
 use irys_primitives::CommitmentType;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, Compact, Config, H256List, IrysBlockHeader,
@@ -93,6 +93,7 @@ fn create_pledge_commitment_transaction(
 
     pledge_tx
 }
+
 /// Generates commitment transactions for genesis block
 ///
 /// Creates a stake commitment for the genesis block producer, followed by pledge
@@ -114,8 +115,7 @@ fn create_pledge_commitment_transaction(
 /// Panics if fewer than 3 storage submodules are configured, as this is below
 /// the minimum required for network operation
 pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
-    let irys_node_config = IrysNodeConfig::new(config);
-    let base_dir = irys_node_config.instance_directory();
+    let base_dir = config.node_config.base_directory.clone();
 
     // Load the submodule paths from the storage_submodules.toml config
     let storage_submodule_config = StorageSubmodulesConfig::load(base_dir.clone()).unwrap();
@@ -125,7 +125,7 @@ pub fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
         panic!("There must be at least 3 submodules paths to initiate network genesis");
     }
 
-    let signer = IrysSigner::from_config(config);
+    let signer = config.irys_signer();
 
     // Create a stake commitment tx for the genesis block producer.
     let stake_commitment = CommitmentTransaction {
@@ -198,8 +198,7 @@ pub fn add_genesis_commitments(
     genesis_block: &mut IrysBlockHeader,
     config: &Config,
 ) -> Vec<CommitmentTransaction> {
-    let commitments = get_genesis_commitments(config);
-
+    let commitments = get_genesis_commitments(&config);
     let commitment_ledger = get_or_create_commitment_ledger(genesis_block);
 
     // Add the commitment txids to the commitment ledger one by one
@@ -238,7 +237,7 @@ pub fn add_test_commitments(
     pledge_count: u8,
     config: &Config,
 ) -> Vec<CommitmentTransaction> {
-    let signer = IrysSigner::from_config(config);
+    let signer = config.irys_signer();
     let mut commitments: Vec<CommitmentTransaction> = Vec::new();
     let mut anchor = H256::random();
 

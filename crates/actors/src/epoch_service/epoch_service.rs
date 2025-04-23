@@ -10,7 +10,10 @@ use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     IrysBlockHeader, SimpleRNG, H256,
 };
-use irys_types::{partition_chunk_offset_ie, Address, CommitmentTransaction, PartitionChunkOffset};
+use irys_types::{
+    partition_chunk_offset_ie, Address, CommitmentTransaction, ConsensusConfig,
+    PartitionChunkOffset,
+};
 use irys_types::{Config, H256List};
 use openssl::sha;
 use std::{
@@ -22,10 +25,7 @@ use tracing::{debug, error, trace, warn};
 
 use crate::broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration};
 
-use super::{
-    CommitmentState, CommitmentStateEntry, EpochReplayData, EpochServiceConfig,
-    PartitionAssignments,
-};
+use super::{CommitmentState, CommitmentStateEntry, EpochReplayData, PartitionAssignments};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug)]
@@ -41,7 +41,7 @@ pub struct EpochServiceActor {
     /// List of partition hashes not yet assigned to a mining address
     pub unassigned_partitions: Vec<PartitionHash>,
     /// Current partition & ledger parameters
-    pub config: EpochServiceConfig,
+    pub config: Config,
     /// Computed commitment state
     pub(super) commitment_state: Arc<RwLock<CommitmentState>>,
 }
@@ -65,14 +65,14 @@ pub enum EpochServiceError {
 
 impl EpochServiceActor {
     /// Create a new instance of the epoch service actor
-    pub fn new(epoch_config: EpochServiceConfig, config: &Config) -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
             last_epoch_hash: H256::zero(),
-            ledgers: Arc::new(RwLock::new(Ledgers::new(config))),
+            ledgers: Arc::new(RwLock::new(Ledgers::new(&config.consensus))),
             partition_assignments: Arc::new(RwLock::new(PartitionAssignments::new())),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
-            config: epoch_config,
+            config: config.clone(),
             commitment_state: Default::default(),
         }
     }
@@ -155,10 +155,10 @@ impl EpochServiceActor {
     }
 
     fn is_epoch_block(&self, block_header: &IrysBlockHeader) -> Result<(), EpochServiceError> {
-        if block_header.height % self.config.num_blocks_in_epoch != 0 {
+        if block_header.height % self.config.consensus.epoch.num_blocks_in_epoch != 0 {
             error!(
                 "Not an epoch block height: {} num_blocks_in_epoch: {}",
-                block_header.height, self.config.num_blocks_in_epoch
+                block_header.height, self.config.consensus.epoch.num_blocks_in_epoch
             );
             return Err(EpochServiceError::NotAnEpochBlock);
         }
@@ -176,7 +176,7 @@ impl EpochServiceActor {
         self.is_epoch_block(new_epoch_block)?;
 
         // Skip previous block validation for genesis block (height 0)
-        if new_epoch_block.height <= self.config.num_blocks_in_epoch {
+        if new_epoch_block.height <= self.config.consensus.epoch.num_blocks_in_epoch {
             // Continue with validation logic for commitments
         } else {
             // For non-genesis blocks, previous epoch block must exist and have correct height
@@ -185,7 +185,9 @@ impl EpochServiceActor {
                 .ok_or(EpochServiceError::IncorrectPreviousEpochBlock)?;
 
             // Validate the previous epoch block is the correct height
-            if prev_block.height + self.config.num_blocks_in_epoch != new_epoch_block.height {
+            if prev_block.height + self.config.consensus.epoch.num_blocks_in_epoch
+                != new_epoch_block.height
+            {
                 return Err(EpochServiceError::IncorrectPreviousEpochBlock);
             }
         }
@@ -250,7 +252,7 @@ impl EpochServiceActor {
 
             // Calculate the total number of capacity partitions
             let projected_capacity_parts =
-                Self::get_num_capacity_partitions(num_data_partitions, &self.config);
+                Self::get_num_capacity_partitions(num_data_partitions, &self.config.consensus);
 
             // Determine the number of capacity partitions to create
             // We take the greater of:
@@ -258,6 +260,8 @@ impl EpochServiceActor {
             // 2. The projected number calculated from data partitions
             self.add_capacity_partitions(std::cmp::max(
                 self.config
+                    .consensus
+                    .epoch
                     .num_capacity_partitions
                     .unwrap_or(projected_capacity_parts),
                 projected_capacity_parts,
@@ -334,7 +338,7 @@ impl EpochServiceActor {
             let pa = self.partition_assignments.read().unwrap();
             let num_data_partitions = pa.data_partitions.len() as u64;
             let num_capacity_partitions =
-                Self::get_num_capacity_partitions(num_data_partitions, &self.config);
+                Self::get_num_capacity_partitions(num_data_partitions, &self.config.consensus);
             total_parts = num_capacity_partitions + num_data_partitions;
         }
 
@@ -426,16 +430,13 @@ impl EpochServiceActor {
 
     /// Computes active capacity partitions available for pledges based on
     /// data partitions and scaling factor
-    pub fn get_num_capacity_partitions(
-        num_data_partitions: u64,
-        config: &EpochServiceConfig,
-    ) -> u64 {
+    pub fn get_num_capacity_partitions(num_data_partitions: u64, config: &ConsensusConfig) -> u64 {
         // Every ledger needs at least one slot filled with data partitions
-        let min_count = DataLedger::ALL.len() as u64 * config.storage_config.num_partitions_in_slot;
+        let min_count = DataLedger::ALL.len() as u64 * config.num_partitions_per_slot;
         let base_count = std::cmp::max(num_data_partitions, min_count);
         let log_10 = (base_count as f64).log10();
         let trunc = truncate_to_3_decimals(log_10);
-        let scaled = truncate_to_3_decimals(trunc * config.capacity_scalar as f64);
+        let scaled = truncate_to_3_decimals(trunc * config.epoch.capacity_scalar as f64);
 
         truncate_to_3_decimals(scaled).ceil() as u64
     }
@@ -532,7 +533,7 @@ impl EpochServiceActor {
         let num_slots = data_ledger.slot_count() as u64;
         drop(ledgers);
 
-        let num_chunks_in_partition = self.config.storage_config.num_chunks_in_partition;
+        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
         let max_ledger_capacity = num_slots * num_chunks_in_partition;
         let ledger_size = new_epoch_block.data_ledgers[ledger].max_chunk_offset;
 
@@ -548,7 +549,7 @@ impl EpochServiceActor {
 
         // STRATEGY 2: Growth-based capacity expansion
         // Add slots proportional to data ingress rate from previous epoch
-        if new_epoch_block.height >= self.config.num_blocks_in_epoch {
+        if new_epoch_block.height >= self.config.consensus.epoch.num_blocks_in_epoch {
             let previous_ledger_size = previous_epoch_block
                 .as_ref()
                 .map_or(0, |prev| prev.data_ledgers[ledger].max_chunk_offset);
@@ -794,11 +795,11 @@ impl EpochServiceActor {
         &self,
         storage_module_config: StorageSubmodulesConfig,
     ) -> Vec<StorageModuleInfo> {
-        let miner_address = self.config.storage_config.miner_address;
+        let miner_address = self.config.node_config.miner_address();
         // Retrieve all partition assignments for the current miner
         let miner_assignments = self.get_partition_assignments(miner_address);
 
-        let num_chunks_in_partition = self.config.storage_config.num_chunks_in_partition as u32;
+        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition as u32;
         let pa = self.partition_assignments.read().unwrap();
         let sm_paths = storage_module_config.submodule_paths;
 

@@ -5,7 +5,7 @@ use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use irys_types::irys::IrysSigner;
+use irys_types::{irys::IrysSigner, NodeConfig};
 use reth_primitives::GenesisAccount;
 use tracing::info;
 
@@ -20,10 +20,10 @@ sol!(
 );
 #[tokio::test]
 async fn heavy_test_erc20() -> eyre::Result<()> {
-    let mut node = IrysNodeTest::default_async().await;
-    let account1 = IrysSigner::random_signer(&node.cfg.config);
-    let main_address = node.cfg.config.miner_address();
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![
+    let mut config = NodeConfig::testnet();
+    let account1 = IrysSigner::random_signer(&config.consensus_config());
+    let main_address = config.miner_address();
+    config.consensus.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -39,8 +39,12 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
             },
         ),
     ]);
-    let signer: PrivateKeySigner = node.cfg.config.mining_key.clone().into();
-    let node = node.start().await;
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .await
+        .start()
+        .await;
+
+    let signer: PrivateKeySigner = node.cfg.mining_key.clone().into();
 
     let alloy_provider = ProviderBuilder::new()
         .with_recommended_fillers()
@@ -48,7 +52,7 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
         .on_http(
             format!(
                 "http://127.0.0.1:{}/v1/execution-rpc",
-                node.node_ctx.config.api_port
+                node.node_ctx.config.node_config.http.port
             )
             .parse()?,
         );
@@ -59,9 +63,6 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut deploy_fut,
         Duration::from_millis(2_000),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await??;
 
@@ -77,9 +78,6 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut transfer_receipt_fut,
         Duration::from_millis(2_000),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await??;
 

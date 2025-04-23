@@ -1,5 +1,5 @@
 use alloy_core::primitives::U256;
-use irys_types::irys::IrysSigner;
+use irys_types::{irys::IrysSigner, NodeConfig};
 use reth_primitives::GenesisAccount;
 use tracing::info;
 
@@ -38,19 +38,19 @@ async fn heavy_test_mine() {
 
 #[actix::test]
 async fn heavy_test_mine_tx() {
-    let mut irys_node = IrysNodeTest::default_async().await;
-    let account = IrysSigner::random_signer(&irys_node.cfg.config);
-    irys_node
-        .cfg
-        .irys_node_config
-        .extend_genesis_accounts(vec![(
-            account.address(),
-            GenesisAccount {
-                balance: U256::from(1000),
-                ..Default::default()
-            },
-        )]);
-    let irys_node = irys_node.start().await;
+    let mut config = NodeConfig::testnet();
+    let account = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![(
+        account.address(),
+        GenesisAccount {
+            balance: U256::from(1000),
+            ..Default::default()
+        },
+    )]);
+    let irys_node = IrysNodeTest::new_genesis(config.clone())
+        .await
+        .start()
+        .await;
 
     let height = irys_node.get_height().await;
     let data = "Hello, world!".as_bytes().to_vec();

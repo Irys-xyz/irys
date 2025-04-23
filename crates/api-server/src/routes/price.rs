@@ -28,7 +28,7 @@ pub async fn get_price(
     state: web::Data<ApiState>,
 ) -> ActixResult<HttpResponse> {
     let (ledger, bytes_to_store) = path.into_inner();
-    let chunk_size = state.config.chunk_size;
+    let chunk_size = state.config.consensus.chunk_size;
 
     // Convert ledger to enum, or bail out with an HTTP 400
     let data_ledger =
@@ -72,17 +72,19 @@ async fn cost_of_perm_storage(
     // NOTE: this value can be memoised because it is deterministic based on the config
     let cost_per_gb = state
         .config
+        .consensus
         .annual_cost_per_gb
         .cost_per_replica(
-            state.config.safe_minimum_number_of_years,
-            state.config.decay_rate,
+            state.config.consensus.safe_minimum_number_of_years,
+            state.config.consensus.decay_rate,
         )?
         .replica_count(state.config.number_of_ingress_proofs)?;
+        .replica_count(state.config.consensus.number_of_ingress_proofs)?;
 
     // calculate the cost of storing the bytes
     let price_with_network_reward = cost_per_gb
         .base_network_fee(U256::from(bytes_to_store), current_ema)?
-        .add_multiplier(state.config.fee_percentage)?;
+        .add_multiplier(state.config.node_config.pricing.fee_percentage)?;
 
     Ok(price_with_network_reward)
 }

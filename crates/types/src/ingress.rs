@@ -109,14 +109,14 @@ mod tests {
 
     use crate::{
         generate_data_root, generate_leaves, hash_sha256, ingress::verify_ingress_proof,
-        irys::IrysSigner, Config, H256,
+        irys::IrysSigner, ConsensusConfig, H256,
     };
 
     use super::generate_ingress_proof;
 
     #[test]
     fn interleave_test() -> eyre::Result<()> {
-        let testnet_config = Config::testnet();
+        let testnet_config = ConsensusConfig::testnet();
         let data_size = (testnet_config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn basic() -> eyre::Result<()> {
         // Create some random data
-        let testnet_config = Config::testnet();
+        let testnet_config = ConsensusConfig::testnet();
         let data_size = (testnet_config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);

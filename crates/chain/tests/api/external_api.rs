@@ -20,7 +20,10 @@ use tracing::info;
 async fn heavy_external_api() -> eyre::Result<()> {
     let ctx = IrysNodeTest::default_async().await.start().await;
 
-    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.api_port);
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.port
+    );
 
     // FIXME: Test to be updated with future endpoint work
     let mut _response = chunk_endpoint_request(&address).await;
@@ -68,7 +71,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
         perm_fee: Some(200),
         ledger_id: 1,
         bundle_format: None,
-        chain_id: ctx.node_ctx.config.chain_id,
+        chain_id: ctx.node_ctx.config.consensus.chain_id,
         version: 0,
         ingress_proofs: None,
         signature: Signature::test_signature().into(),

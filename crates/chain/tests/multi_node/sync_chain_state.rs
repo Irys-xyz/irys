@@ -10,7 +10,7 @@ use irys_chain::{
 };
 use irys_config::IrysNodeConfig;
 use irys_database::BlockIndexItem;
-use irys_types::{irys::IrysSigner, Address, Config, IrysTransaction, PeerAddress, RethPeerInfo};
+use irys_types::{irys::IrysSigner, Address, Config, IrysTransaction, PeerAddress, RethPeerInfo, NodeConfig, NodeMode};
 use k256::ecdsa::SigningKey;
 use reth_primitives::irys_primitives::IrysTxId;
 use reth_primitives::GenesisAccount;
@@ -100,9 +100,14 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         .expect("expected many mined blocks");
 
     // wait and retry hitting the peer_list endpoint of genesis node
-    let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_genesis_node).await;
+    let peer_list_items =
+        poll_peer_list(genesis_trusted_peers.clone(), &ctx_genesis_node.node_ctx).await;
     // assert that genesis node is advertising the trusted peers it was given via config
     assert_eq!(&genesis_trusted_peers, &peer_list_items);
+  
+    testnet_config_peer1.http.port = 0;
+    testnet_config_peer1.trusted_peers = trusted_peers.clone();
+    testnet_config_peer1.mode = NodeMode::PeerSync;
 
     // start additional nodes (after we have mined some blocks on genesis node)
     let (ctx_peer1_node, ctx_peer2_node) =
@@ -116,7 +121,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let max_attempts = max_attempts * 3;
 
     let result_peer1 = poll_until_fetch_at_block_index_height(
-        &ctx_peer1_node,
+        &ctx_peer1_node.node_ctx,
         required_blocks_height
             .try_into()
             .expect("expected required_blocks_height to be valid u64"),
@@ -125,17 +130,19 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     .await;
 
     // wait and retry hitting the peer_list endpoint of peer1 node
-    let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer1_node).await;
+    let peer_list_items =
+        poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer1_node.node_ctx).await;
     // assert that peer1 node has updated trusted peers
     assert_eq!(&genesis_trusted_peers, &peer_list_items);
 
     // wait and retry hitting the peer_list endpoint of peer2 node
-    let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer2_node).await;
+    let peer_list_items =
+        poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer2_node.node_ctx).await;
     // assert that peer2 node has updated trusted peers
     assert_eq!(&genesis_trusted_peers, &peer_list_items);
 
     let result_peer2 = poll_until_fetch_at_block_index_height(
-        &ctx_peer2_node,
+        &ctx_peer2_node.node_ctx,
         required_blocks_height
             .try_into()
             .expect("expected required_blocks_height to be valid u64"),
@@ -144,7 +151,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     .await;
 
     let mut result_genesis = block_index_endpoint_request(
-        &local_test_url(&testnet_config_genesis.api_port),
+        &local_test_url(&testnet_config_genesis.http.port),
         0,
         required_blocks_height
             .try_into()
@@ -334,6 +341,8 @@ fn init_configs() -> (Config, Config, Config, Vec<PeerAddress>, Vec<PeerAddress>
                 .expect("valid hex"),
         )
         .expect("valid key"),
+        http.port: 8080,
+        mode: NodeMode::Genesis,
         ..Config::testnet()
     };
     let mut testnet_config_peer1 = Config {
@@ -344,6 +353,8 @@ fn init_configs() -> (Config, Config, Config, Vec<PeerAddress>, Vec<PeerAddress>
                 .expect("valid hex"),
         )
         .expect("valid key"),
+        http.port: 0,
+        mode: NodeMode::PeerSync,
         ..Config::testnet()
     };
     let mut testnet_config_peer2 = Config {
@@ -354,6 +365,8 @@ fn init_configs() -> (Config, Config, Config, Vec<PeerAddress>, Vec<PeerAddress>
                 .expect("valid hex"),
         )
         .expect("valid key"),
+        http.port: 0,
+        mode: NodeMode::PeerSync,
         ..Config::testnet()
     };
     let trusted_peers = vec![PeerAddress {
@@ -455,13 +468,13 @@ async fn generate_test_transaction_and_add_to_block(
 
 /// poll info_endpoint until timeout or we get block_index at desired height
 async fn poll_until_fetch_at_block_index_height(
-    node_ctx: &IrysNodeTest<IrysNodeCtx>,
+    node_ctx: &IrysNodeCtx,
     required_blocks_height: u64,
     max_attempts: u64,
 ) -> Option<awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>>> {
     let mut attempts = 0;
     let mut result_peer = None;
-    let url = local_test_url(&node_ctx.node_ctx.config.api_port);
+    let url = local_test_url(&node_ctx.config.node_config.http.port);
     loop {
         let mut response = info_endpoint_request(&url).await;
 
@@ -486,7 +499,7 @@ async fn poll_until_fetch_at_block_index_height(
         } else {
             result_peer = Some(
                 block_index_endpoint_request(
-                    &local_test_url(&node_ctx.node_ctx.config.api_port),
+                    &local_test_url(&node_ctx.config.node_config.http.port),
                     0,
                     required_blocks_height,
                 )

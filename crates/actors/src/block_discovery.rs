@@ -2,9 +2,7 @@ use crate::{
     block_index_service::BlockIndexReadGuard,
     block_tree_service::BlockTreeService,
     block_validation::prevalidate_block,
-    epoch_service::{
-        EpochServiceActor, EpochServiceConfig, NewEpochMessage, PartitionAssignmentsReadGuard,
-    },
+    epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
 };
 use actix::prelude::*;
@@ -12,8 +10,8 @@ use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
 use irys_types::{
-    CommitmentTransaction, DatabaseProvider, DifficultyAdjustmentConfig, GossipData,
-    IrysBlockHeader, IrysTransactionHeader, StorageConfig, VDFStepsConfig,
+    CommitmentTransaction, Config, DatabaseProvider, GossipData, IrysBlockHeader,
+    IrysTransactionHeader,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
@@ -25,20 +23,14 @@ use tracing::info;
 pub struct BlockDiscoveryActor {
     /// Tracks the global state of partition assignments on the protocol
     pub epoch_service: Addr<EpochServiceActor>,
-    /// Reference to epoch config to determine epoch length
-    pub epoch_config: EpochServiceConfig,
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
-    /// Reference to global storage config for node
-    pub storage_config: StorageConfig,
-    /// Reference to global difficulty config
-    pub difficulty_config: DifficultyAdjustmentConfig,
+    /// Reference to the global config
+    pub config: Config,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
-    /// VDF configuration for the node
-    pub vdf_config: VDFStepsConfig,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Service Senders
@@ -70,28 +62,22 @@ impl BlockDiscoveryActor {
     pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
-        storage_config: StorageConfig,
-        difficulty_config: DifficultyAdjustmentConfig,
+        config: Config,
         db: DatabaseProvider,
-        vdf_config: VDFStepsConfig,
         vdf_steps_guard: VdfStepsReadGuard,
         service_senders: ServiceSenders,
         epoch_service: Addr<EpochServiceActor>,
-        epoch_config: EpochServiceConfig,
         gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         Self {
             block_index_guard,
             partition_assignments_guard,
-            storage_config,
-            difficulty_config,
             db,
-            vdf_config,
             vdf_steps_guard,
             service_senders,
             gossip_sender,
+            config,
             epoch_service,
-            epoch_config,
         }
     }
 }
@@ -232,19 +218,16 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         //====================================
         // Block header pre-validation
         //------------------------------------
-        let block_index_guard = self.block_index_guard.clone();
         let block_index_guard2 = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = BlockTreeService::from_registry();
-        let storage_config = self.storage_config.clone();
-        let difficulty_config = self.difficulty_config;
-        let vdf_config = self.vdf_config.clone();
+        let config = self.config.clone();
         let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();
         let ema_service_sender = self.service_senders.ema.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_service = self.epoch_service.clone();
-        let epoch_config = self.epoch_config.clone();
+        let epoch_config = self.config.consensus.epoch.clone();
 
         info!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
@@ -255,20 +238,14 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         let gossip_sender = self.gossip_sender.clone();
         Box::pin(async move {
-            let block_header_clone = new_block_header.clone(); // Clone before moving
-
             info!("Pre-validating block");
             let validation_future = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
                     block_header,
                     previous_block_header,
-                    block_index_guard,
                     partitions_guard,
-                    storage_config,
-                    difficulty_config,
-                    vdf_config,
+                    config,
                     vdf_steps_guard,
-                    block_header_clone.miner_address, // Use clone in validation
                     ema_service_sender,
                 )
             });

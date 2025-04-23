@@ -2,10 +2,10 @@ use crate::{calculate_chunks_added, BlockFinalizedMessage};
 use actix::prelude::*;
 use base58::ToBase58;
 use irys_database::{
-    block_header_by_hash, BlockIndex, BlockIndexItem, DataLedger, Initialized, LedgerIndexItem,
+    block_header_by_hash, BlockIndex, BlockIndexItem, DataLedger, LedgerIndexItem,
 };
 use irys_types::{
-    DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, StorageConfig, H256, U256,
+    ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, H256, U256,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
@@ -18,17 +18,17 @@ use tracing::{debug, error};
 /// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct BlockIndexReadGuard {
-    block_index_data: Arc<RwLock<BlockIndex<Initialized>>>,
+    block_index_data: Arc<RwLock<BlockIndex>>,
 }
 
 impl BlockIndexReadGuard {
     /// Creates a new `ReadGuard` for Ledgers
-    pub const fn new(block_index_data: Arc<RwLock<BlockIndex<Initialized>>>) -> Self {
+    pub const fn new(block_index_data: Arc<RwLock<BlockIndex>>) -> Self {
         Self { block_index_data }
     }
 
     /// Accessor method to get a read guard for Ledgers
-    pub fn read(&self) -> RwLockReadGuard<'_, BlockIndex<Initialized>> {
+    pub fn read(&self) -> RwLockReadGuard<'_, BlockIndex> {
         self.block_index_data.read().unwrap()
     }
 
@@ -92,10 +92,10 @@ impl Handler<GetBlockIndexGuardMessage> for BlockIndexService {
 /// allowing it to receive to actix messages and update its state.
 #[derive(Debug, Default)]
 pub struct BlockIndexService {
-    block_index: Option<Arc<RwLock<BlockIndex<Initialized>>>>,
+    block_index: Option<Arc<RwLock<BlockIndex>>>,
     block_log: Vec<BlockLogEntry>,
     num_blocks: u64,
-    storage_config: StorageConfig,
+    chunk_size: u64,
 }
 
 /// Allows this actor to live in the the local service registry
@@ -126,15 +126,12 @@ impl Actor for BlockIndexService {
 impl BlockIndexService {
     /// Create a new instance of the mempool actor passing in a reference
     /// counted reference to a `DatabaseEnv`
-    pub fn new(
-        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
-        storage_config: StorageConfig,
-    ) -> Self {
+    pub fn new(block_index: Arc<RwLock<BlockIndex>>, consensus_config: &ConsensusConfig) -> Self {
         Self {
             block_index: Some(block_index),
             block_log: Vec::new(),
             num_blocks: 0,
-            storage_config,
+            chunk_size: consensus_config.chunk_size,
         }
     }
 
@@ -164,7 +161,7 @@ impl BlockIndexService {
             return;
         }
 
-        let chunk_size = self.storage_config.chunk_size;
+        let chunk_size = self.chunk_size;
 
         // Extract just the transactions referenced in the submit ledger
         let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
@@ -207,7 +204,9 @@ impl BlockIndexService {
             ],
         };
 
-        index.push_item(&block_index_item);
+        index
+            .push_item(&block_index_item)
+            .expect("to be able to push a new block to the block index");
 
         // Block log tracking
         self.block_log.push(BlockLogEntry {

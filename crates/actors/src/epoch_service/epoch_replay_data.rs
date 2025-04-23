@@ -2,10 +2,8 @@ use std::collections::VecDeque;
 
 use crate::block_index_service::BlockIndexReadGuard;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
-use irys_types::{CommitmentTransaction, DatabaseProvider, IrysBlockHeader};
+use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader};
 use reth_db::Database;
-
-use super::EpochServiceConfig;
 
 #[derive(Debug)]
 /// Represents the epoch block and its associated commitment transactions
@@ -25,14 +23,14 @@ impl EpochReplayData {
     /// # Arguments
     /// * `db` - Database access provider
     /// * `block_index_guard` - Read guard for the block index
-    /// * `epoch_service_config` - Configuration for epoch parameters
+    /// * `config` - Configuration for epoch parameters
     ///
     /// # Returns
     /// * Tuple containing the genesis block, genesis commitments, and vector of subsequent epoch data
     pub fn query_replay_data(
         db: &DatabaseProvider,
         block_index_guard: &BlockIndexReadGuard,
-        epoch_service_config: &EpochServiceConfig,
+        config: &Config,
     ) -> eyre::Result<(
         IrysBlockHeader,
         Vec<CommitmentTransaction>,
@@ -41,7 +39,7 @@ impl EpochReplayData {
         let block_index = block_index_guard.read();
 
         // Calculate how many epoch blocks should exist in the chain
-        let num_blocks_in_epoch = epoch_service_config.num_blocks_in_epoch;
+        let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
         let num_blocks = block_index.num_blocks();
         let num_epoch_blocks = (num_blocks / num_blocks_in_epoch) as u64 + 1;
         let mut replay_data: VecDeque<EpochReplayData> = VecDeque::new();

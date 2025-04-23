@@ -1,4 +1,4 @@
-use irys_types::{Compact, Config, DataTransactionLedger, H256};
+use irys_types::{Compact, ConsensusConfig, DataTransactionLedger, H256};
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 /// Manages the global ledger state within the epoch service, tracking:
@@ -45,7 +45,7 @@ pub struct TermLedger {
 
 impl PermanentLedger {
     /// Constructs a permanent ledger, always with `Ledger::Publish` as the id
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &ConsensusConfig) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: DataLedger::Publish as u32,
@@ -56,12 +56,12 @@ impl PermanentLedger {
 
 impl TermLedger {
     /// Creates a term ledger with specified index and duration
-    pub fn new(ledger: DataLedger, config: &Config) -> Self {
+    pub fn new(ledger: DataLedger, config: &ConsensusConfig) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: ledger as u32,
-            epoch_length: config.submit_ledger_epoch_length,
-            num_blocks_in_epoch: config.num_blocks_in_epoch,
+            epoch_length: config.epoch.submit_ledger_epoch_length,
+            num_blocks_in_epoch: config.epoch.num_blocks_in_epoch,
             num_partitions_per_slot: config.num_partitions_per_slot,
         }
     }
@@ -290,7 +290,7 @@ pub struct Ledgers {
 
 impl Ledgers {
     /// Instantiate a Ledgers struct with the correct Ledgers
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &ConsensusConfig) -> Self {
         Self {
             perm: PermanentLedger::new(config),
             term: vec![TermLedger::new(DataLedger::Submit, config)],

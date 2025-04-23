@@ -1,5 +1,5 @@
 use eyre::Result;
-use irys_types::{H256List, SimpleRNG, StorageConfig, H256};
+use irys_types::{ConsensusConfig, H256List, SimpleRNG, H256};
 use openssl::sha;
 use std::collections::HashMap;
 use tracing::{debug, info};
@@ -159,7 +159,7 @@ pub fn get_recall_range(
 }
 
 /// Get last step number where ranges were reinitialized
-pub fn reset_step_number(step_num: u64, config: &StorageConfig) -> u64 {
+pub fn reset_step_number(step_num: u64, config: &ConsensusConfig) -> u64 {
     let num_recall_ranges_in_partition = num_recall_ranges_in_partition(config);
     reset_step(step_num, num_recall_ranges_in_partition)
 }
@@ -168,7 +168,7 @@ pub fn reset_step(step_num: u64, num_recall_ranges_in_partition: u64) -> u64 {
     ((step_num - 1) / num_recall_ranges_in_partition) * num_recall_ranges_in_partition + 1
 }
 
-pub fn num_recall_ranges_in_partition(config: &StorageConfig) -> u64 {
+pub fn num_recall_ranges_in_partition(config: &ConsensusConfig) -> u64 {
     config.num_chunks_in_partition / config.num_chunks_in_recall_range
 }
 

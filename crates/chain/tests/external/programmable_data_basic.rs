@@ -9,7 +9,7 @@ use irys_actors::mempool_service::GetBestMempoolTxs;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
-use irys_types::{irys::IrysSigner, Address};
+use irys_types::{irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth_db::transaction::DbTx;
 use reth_db::Database as _;
@@ -43,10 +43,10 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "info");
 
-    let mut node = IrysNodeTest::default_async().await;
-    let main_address = node.cfg.config.miner_address();
-    let account1 = IrysSigner::random_signer(&node.cfg.config);
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![
+    let mut config = NodeConfig::testnet();
+    let account1 = IrysSigner::random_signer(&config.consensus_config());
+    let main_address = config.miner_address();
+    config.consensus.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -69,7 +69,10 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = node.start().await;
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .await
+        .start()
+        .await;
     node.node_ctx.actor_addresses.stop_mining()?;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
@@ -91,7 +94,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         .on_http(
             format!(
                 "http://127.0.0.1:{}/v1/execution-rpc",
-                node.node_ctx.config.api_port
+                node.node_ctx.config.node_config.http.port
             )
             .parse()?,
         );
@@ -105,9 +108,6 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut deploy_fut,
         Duration::from_millis(500),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await??;
 
@@ -120,7 +120,10 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         precompile_address
     );
 
-    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.api_port);
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.port
+    );
 
     // server should be running
     // check with request to `/v1/info`
@@ -206,9 +209,6 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await?
     .unwrap();

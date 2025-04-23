@@ -13,7 +13,7 @@ use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
 use irys_database::DataLedger;
 use irys_database::{tables::IngressProofs, walk_all};
-use irys_types::Config;
+use irys_types::NodeConfig;
 use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
 use reth_db::Database as _;
 use reth_primitives::GenesisAccount;
@@ -25,21 +25,18 @@ use tracing::info;
 #[test_log::test(actix_web::test)]
 async fn heavy_double_root_data_promotion_test() {
     let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = NodeConfig::testnet();
     let chunk_size = 32; // 32 byte chunks
-    let testnet_config = Config {
-        chunk_size: chunk_size as u64,
-        num_chunks_in_partition: 10,
-        num_chunks_in_recall_range: 2,
-        num_partitions_per_slot: 1,
-        num_writes_before_sync: 1,
-        entropy_packing_iterations: 1_000,
-        chunk_migration_depth: 1, // Testnet / single node config
-        ..Config::testnet()
-    };
-    let signer = IrysSigner::random_signer(&testnet_config);
-    let signer2 = IrysSigner::random_signer(&testnet_config);
-    let mut node = IrysNodeTest::new_genesis(testnet_config.clone()).await;
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![
+    config.consensus.get_mut().chunk_size = chunk_size;
+    config.consensus.get_mut().num_chunks_in_partition = 10;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.storage.num_writes_before_sync = 1;
+    config.consensus.get_mut().entropy_packing_iterations = 1_000;
+    config.consensus.get_mut().chunk_migration_depth = 1; // Testnet / single node config
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    let signer2 = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![
         (
             signer.address(),
             GenesisAccount {
@@ -55,7 +52,10 @@ async fn heavy_double_root_data_promotion_test() {
             },
         ),
     ]);
-    let node = node.start().await;
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .await
+        .start()
+        .await;
 
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
@@ -82,7 +82,7 @@ async fn heavy_double_root_data_promotion_test() {
         mempool: node.node_ctx.actor_addresses.mempool.clone(),
         peer_list: node.node_ctx.actor_addresses.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
-        config: testnet_config,
+        config: config.into(),
     };
 
     // Initialize the app
@@ -327,7 +327,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node.node_ctx.storage_config,
+        &node.node_ctx.config,
     )
     .await;
 
@@ -337,7 +337,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node.node_ctx.storage_config,
+        &node.node_ctx.config,
     )
     .await;
 
@@ -347,7 +347,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node.node_ctx.storage_config,
+        &node.node_ctx.config,
     )
     .await;
 
@@ -535,7 +535,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node.node_ctx.storage_config,
+        &node.node_ctx.config,
     )
     .await;
 
@@ -545,7 +545,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node.node_ctx.storage_config,
+        &node.node_ctx.config,
     )
     .await;
 
@@ -555,7 +555,7 @@ async fn heavy_double_root_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &node.node_ctx.storage_config,
+        &node.node_ctx.config,
     )
     .await;
 

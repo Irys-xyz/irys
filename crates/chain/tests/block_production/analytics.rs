@@ -9,6 +9,7 @@ use alloy_provider::Provider;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::LocalSigner;
 use alloy_signer_local::PrivateKeySigner;
+use irys_types::NodeConfig;
 use irys_types::TxChunkOffset;
 use irys_types::UnpackedChunk;
 use rand::Rng;
@@ -16,7 +17,7 @@ use rand::Rng;
 use crate::utils::mine_block;
 use crate::utils::IrysNodeTest;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
-use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG, StorageConfig};
+use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG};
 use k256::ecdsa::SigningKey;
 use reth::rpc::types::TransactionRequest;
 use reth_primitives::GenesisAccount;
@@ -29,22 +30,18 @@ use tracing::info;
 async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
-    let mut node = IrysNodeTest::default_async().await;
-    node.cfg.storage_config = StorageConfig {
-        chunk_size: 32,
-        num_chunks_in_partition: 1000,
-        num_chunks_in_recall_range: 2,
-        num_partitions_in_slot: 1,
-        miner_address: node.cfg.config.miner_address(),
-        min_writes_before_sync: 1,
-        entropy_packing_iterations: 1_000,
-        chunk_migration_depth: 1, // Testnet / single node config
-        chain_id: node.cfg.config.chain_id,
-    };
-    let account1 = IrysSigner::random_signer(&node.cfg.config);
-    let account2 = IrysSigner::random_signer(&node.cfg.config);
-    let account3 = IrysSigner::random_signer(&node.cfg.config);
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().chunk_size = 32;
+    config.consensus.get_mut().num_chunks_in_partition = 1000;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.storage.num_writes_before_sync = 1;
+    config.consensus.get_mut().entropy_packing_iterations = 1_000;
+    config.consensus.get_mut().chunk_migration_depth = 1; // Testnet / single node confi;
+    let account1 = IrysSigner::random_signer(&config.consensus_config());
+    let account2 = IrysSigner::random_signer(&config.consensus_config());
+    let account3 = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -67,10 +64,16 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = node.start().await;
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .await
+        .start()
+        .await;
     let _reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
-    let http_url = format!("http://127.0.0.1:{}", node.cfg.config.api_port);
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.port
+    );
 
     // server should be running
     // check with request to `/v1/info`
@@ -121,7 +124,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 .on_http(
                     format!(
                         "http://127.0.0.1:{}/v1/execution-rpc",
-                        node.cfg.config.api_port
+                        node.node_ctx.config.node_config.http.port
                     )
                     .parse()
                     .unwrap(),
@@ -151,7 +154,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 gas: Some(21000),
                 value: Some(U256::from(simple_rng.next_range(20_000))),
                 nonce: Some(alloy_provider.get_transaction_count(a.address()).await?),
-                chain_id: Some(node.cfg.config.chain_id),
+                chain_id: Some(node.node_ctx.config.consensus.chain_id),
                 ..Default::default()
             };
 
