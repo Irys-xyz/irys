@@ -20,7 +20,7 @@ use tracing::{debug, info};
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let mut config = NodeConfig::testnet();
     config.consensus.get_mut().chunk_size = 32;
-    config.consensus.get_mut().chunk_migration_depth = 32;
+    config.consensus.get_mut().chunk_migration_depth = 2;
     let main_address = config.miner_address();
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![
