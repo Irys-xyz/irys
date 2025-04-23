@@ -563,14 +563,6 @@ impl NodeConfig {
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
                 mining_address: Address::ZERO,
             }],
-            gossip_service_bind_ip: "127.0.0.1".into(),
-            gossip_service_port: 0,
-            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
-            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
-            fee_percentage: Amount::percentage(dec!(0.05)).unwrap(), // 5%
-            safe_minimum_number_of_years: 200,
-            number_of_ingress_proofs: 10,
-            reth_peer_info: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
             pricing: PricingConfig {
                 fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
             },
