@@ -250,7 +250,9 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         if let Some(db) = &self.db {
             db.update(|tx| {
                 for (addr, peer) in self.peer_list_cache.iter() {
+                    debug!("Inserting peer {:?} into the database", addr);
                     insert_peer_list_item(tx, addr, peer).map_err(PeerListServiceError::from)?;
+                    debug!("Flushing peer list cache: {:?}", peer);
                 }
                 Ok(())
             })
@@ -315,6 +317,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         let peer_address = peer.address.clone();
 
         if !self.peer_list_cache.contains_key(&mining_addr) {
+            debug!("Adding peer {:?} to the peer list", mining_addr);
             self.peer_list_cache.insert(mining_addr, peer);
             self.gossip_addr_to_mining_addr_map
                 .insert(gossip_addr.ip(), mining_addr);
@@ -1113,9 +1116,11 @@ mod tests {
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
+        let mock_client = CountingMockClient::default();
 
         // Start the actor system with our service
-        let service = PeerListServiceWithClient::new(db.clone(), &config);
+        let service =
+            PeerListServiceWithClient::new_with_custom_api_client(db.clone(), &config, mock_client);
         let addr = service.start();
 
         // Add a test peer
@@ -1255,7 +1260,9 @@ mod tests {
     #[actix_rt::test]
     async fn test_announce_yourself_to_all_peers() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = Config::testnet();
+        let mut config = Config::testnet();
+        config.trusted_peers = vec![];
+
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1414,7 +1421,9 @@ mod tests {
     #[actix_rt::test]
     async fn should_perform_handshake_when_adding_a_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = Config::testnet();
+        let mut config = Config::testnet();
+        config.trusted_peers = vec![];
+
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1462,7 +1471,9 @@ mod tests {
     #[actix_rt::test]
     async fn should_prevent_infinite_handshake_loop() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = Config::testnet();
+        let mut config = Config::testnet();
+        config.trusted_peers = vec![];
+
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),

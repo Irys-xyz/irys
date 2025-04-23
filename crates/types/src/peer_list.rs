@@ -206,6 +206,8 @@ impl Compact for PeerListItem {
 
         size += self.address.execution.to_compact(buf);
 
+        size += self.address.mining_address.to_compact(buf);
+
         // Encode last_seen
         buf.put_u64(self.last_seen);
         size += 8;
@@ -254,12 +256,13 @@ impl Compact for PeerListItem {
         // let (reth_peering_tcp, consumed) = decode_address(&buf[total_consumed..]);
         let (reth_peer_info, buf) = RethPeerInfo::from_compact(&buf, buf.len());
         // total_consumed += consumed;
+        let (mining_address, buf) = Address::from_compact(&buf, buf.len());
 
         let address = PeerAddress {
             gossip: gossip_address,
             api: api_address,
             execution: reth_peer_info,
-            mining_address: Address::ZERO,
+            mining_address,
         };
 
         // Read last_seen if available
