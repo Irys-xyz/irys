@@ -731,6 +731,7 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
     type Result = ();
 
     fn handle(&mut self, msg: NewPotentialPeer, ctx: &mut Self::Context) -> Self::Result {
+        debug!("NewPotentialPeer message received: {:?}", msg.api_address);
         let already_in_cache = self
             .api_addr_to_mining_addr_map
             .contains_key(&msg.api_address);
@@ -738,6 +739,8 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
             .currently_running_announcements
             .contains(&msg.api_address);
 
+        debug!("Already announcing: {:?}", already_announcing);
+        debug!("Already in cache: {:?}", already_in_cache);
         let announcing_or_in_cache = already_announcing || already_in_cache;
 
         let needs_announce = msg.force_announce || !announcing_or_in_cache;
