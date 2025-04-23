@@ -23,12 +23,7 @@ async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: So
             build: Default::default(),
         },
         protocol_version: ProtocolVersion::V1,
-        peers: vec![PeerAddress {
-            gossip: SocketAddr::from_str("127.0.0.1:8081").unwrap(),
-            api: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
-            execution: RethPeerInfo::default(),
-            mining_address: Address::ZERO,
-        }],
+        peers: vec![],
         timestamp: 1744920031378,
         message: Some("Welcome to the network ".to_string()),
     };
