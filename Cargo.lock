@@ -4477,6 +4477,7 @@ dependencies = [
  "modular-bitfield",
  "nodit",
  "openssl",
+ "pretty_assertions",
  "rand",
  "reth-chainspec",
  "reth-codecs",

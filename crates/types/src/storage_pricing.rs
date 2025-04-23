@@ -132,9 +132,21 @@ impl<T: std::fmt::Debug> Amount<T> {
     /// Assumes that the U256 value is small enough to fit into a u128.
     #[tracing::instrument(err)]
     pub fn token_to_decimal(&self) -> Result<Decimal> {
+        self.amount_to_decimal(TOKEN_SCALE, TOKEN_SCALE_NATIVE)
+    }
+
+    /// Helper to convert a U256 (with 6 decimals) into a `Decimal` for assertions.
+    /// Assumes that the U256 value is small enough to fit into a u128.
+    #[tracing::instrument(err)]
+    pub fn percentage_to_decimal(&self) -> Result<Decimal> {
+        self.amount_to_decimal(BPS_SCALE, BPS_SCALE_NATIVE)
+    }
+
+    #[tracing::instrument(err)]
+    fn amount_to_decimal(&self, scale: U256, scale_native: u64) -> Result<Decimal> {
         // Compute the integer and fractional parts.
-        let quotient = safe_div(self.amount, TOKEN_SCALE)?;
-        let remainder = safe_mod(self.amount, TOKEN_SCALE)?;
+        let quotient = safe_div(self.amount, scale)?;
+        let remainder = safe_mod(self.amount, scale)?;
 
         // Convert quotient and remainder to u128.
         let quotient: u128 = u128::try_from(quotient).expect("quotient fits in u128");
@@ -142,9 +154,9 @@ impl<T: std::fmt::Debug> Amount<T> {
 
         // Build the Decimal value:
         // The quotient represents the integer part,
-        // while the remainder scaled by 1e-18 is the fractional part.
+        // while the remainder scaled by 1e-`scal_native` is the fractional part.
         let remainder = Decimal::from(remainder)
-            .checked_div(dec!(1000000000000000000))
+            .checked_div(Decimal::from(scale_native))
             .ok_or_else(|| {
                 eyre::eyre!(
                     "scaling back remainder {remainder} decimal from 1e-18 cannot be computed"

@@ -68,22 +68,34 @@ pub struct ConsensusConfig {
 
     /// Defines the acceptable range of token price fluctuation between consecutive blocks
     /// This helps prevent price manipulation and ensures price stability
-    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    #[serde(
+        deserialize_with = "serde_utils::percentage_amount",
+        serialize_with = "serde_utils::serializes_percentage_amount"
+    )]
     pub token_price_safe_range: Amount<Percentage>,
 
     /// The initial price of the Irys token at genesis in USD
     /// Sets the baseline for all future pricing calculations
-    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
     pub genesis_price: Amount<(IrysPrice, Usd)>,
 
     /// The annual cost in USD for storing 1GB of data on the Irys network
     /// Used as the foundation for calculating storage fees
-    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
     pub annual_cost_per_gb: Amount<(CostPerGb, Usd)>,
 
     /// Annual rate at which storage costs are expected to decrease
     /// Accounts for technological improvements making storage cheaper over time
-    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    #[serde(
+        deserialize_with = "serde_utils::percentage_amount",
+        serialize_with = "serde_utils::serializes_percentage_amount"
+    )]
     pub decay_rate: Amount<DecayRate>,
 
     /// Configuration for the Verifiable Delay Function used in consensus
@@ -242,7 +254,10 @@ impl ConsensusOptions {
 pub struct PricingConfig {
     /// Additional fee percentage added by nodes to the base storage cost
     /// This provides an incentive for nodes to participate in the network
-    #[serde(deserialize_with = "serde_utils::percentage_amount")]
+    #[serde(
+        deserialize_with = "serde_utils::percentage_amount",
+        serialize_with = "serde_utils::serializes_percentage_amount"
+    )]
     pub fee_percentage: Amount<Percentage>,
 }
 
@@ -255,11 +270,17 @@ pub enum OracleConfig {
     /// A simulated price oracle for testing and development
     Mock {
         /// Starting price for the token in USD
-        #[serde(deserialize_with = "serde_utils::token_amount")]
+        #[serde(
+            deserialize_with = "serde_utils::token_amount",
+            serialize_with = "serde_utils::serializes_token_amount"
+        )]
         initial_price: Amount<(IrysPrice, Usd)>,
 
         /// How much the price can change between updates
-        #[serde(deserialize_with = "serde_utils::percentage_amount")]
+        #[serde(
+            deserialize_with = "serde_utils::percentage_amount",
+            serialize_with = "serde_utils::serializes_percentage_amount"
+        )]
         percent_change: Amount<Percentage>,
 
         /// Number of blocks between price updates
@@ -417,9 +438,8 @@ impl ConsensusConfig {
             decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
             safe_minimum_number_of_years: 200,
             number_of_ingerss_proofs: 10,
-            genesis_price: Amount::token(rust_decimal_macros::dec!(1)).expect("valid token amount"),
-            token_price_safe_range: Amount::percentage(rust_decimal_macros::dec!(1))
-                .expect("valid percentage"),
+            genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
+            token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             vdf: VdfConfig {
                 reset_frequency: 10 * 120,
                 parallel_verification_thread_limit: 4,
@@ -591,8 +611,8 @@ pub mod serde_utils {
 
     use crate::storage_pricing::Amount;
 
-    /// deserialize the token amount from a string.
-    /// The string is expected to be in a format of "1.42".
+    /// deserialize the token amount from a float.
+    /// The float is expected to be in a format of 1.42.
     pub fn token_amount<'de, T: std::fmt::Debug, D>(deserializer: D) -> Result<Amount<T>, D::Error>
     where
         D: Deserializer<'de>,
@@ -621,8 +641,8 @@ pub mod serde_utils {
     where
         D: Deserializer<'de>,
     {
-        let raw_string = f64::deserialize(deserializer)?;
-        let decimal = Decimal::try_from(raw_string).map_err(serde::de::Error::custom)?;
+        let raw_float = f64::deserialize(deserializer)?;
+        let decimal = Decimal::try_from(raw_float).map_err(serde::de::Error::custom)?;
         let amount = dec_to_amount(decimal).map_err(serde::de::Error::custom)?;
         Ok(amount)
     }
@@ -653,12 +673,48 @@ pub mod serde_utils {
         let hex_string = hex::encode(key_bytes);
         serializer.serialize_str(&hex_string)
     }
+
+    pub fn serializes_token_amount<S, T>(
+        amount: &Amount<T>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        T: std::fmt::Debug,
+    {
+        // Convert to bytes and then hex-encode
+        let decimal = amount
+            .token_to_decimal()
+            .map_err(serde::ser::Error::custom)?;
+        let float: f64 = decimal
+            .try_into()
+            .expect("decimal to be convertible to a f64");
+        serializer.serialize_f64(float)
+    }
+
+    pub fn serializes_percentage_amount<S, T>(
+        amount: &Amount<T>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        T: std::fmt::Debug,
+    {
+        // Convert to bytes and then hex-encode
+        let decimal = amount
+            .percentage_to_decimal()
+            .map_err(serde::ser::Error::custom)?;
+        let float: f64 = decimal
+            .try_into()
+            .expect("decimal to be convertible to a f64");
+        serializer.serialize_f64(float)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use pretty_assertions::assert_eq;
     use toml;
 
     #[test]
@@ -673,6 +729,10 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingerss_proofs = 10
         safe_minimum_number_of_years = 200
+        token_price_safe_range = 1.0
+        genesis_price = 1
+        annual_cost_per_gb = 0.01
+        decay_rate = 0.01
 
         [reth]
         chain = 1270
@@ -700,20 +760,8 @@ mod tests {
         [difficulty_adjustment]
         block_time = 1
         difficulty_adjustment_interval = 1209600000
-        max_difficulty_adjustment_factor = "4"
-        min_difficulty_adjustment_factor = "0.25"
-
-        [token_price_safe_range]
-        amount = "1000000"
-
-        [genesis_price]
-        amount = "1000000000000000000"
-
-        [annual_cost_per_gb]
-        amount = "10000000000000000"
-
-        [decay_rate]
-        amount = "10000"
+        max_difficulty_adjustment_factor = 4
+        min_difficulty_adjustment_factor = 0.25
 
         [vdf]
         reset_frequency = 1200
@@ -737,8 +785,8 @@ mod tests {
         println!("{}", expected_toml_data);
 
         // Deserialize the TOML string into a ConsensusConfig
-        let config =
-            toml::from_str::<ConsensusConfig>(toml_data).expect("Failed to deserialize ConsensusConfig from TOML");
+        let config = toml::from_str::<ConsensusConfig>(toml_data)
+            .expect("Failed to deserialize ConsensusConfig from TOML");
 
         // Assert the entire struct matches
         assert_eq!(config, expected_config);
@@ -762,19 +810,15 @@ mod tests {
 
         [oracle]
         type = "mock"
+        initial_price = 1.0
+        percent_change = 0.01
         smoothing_interval = 15
-
-        [oracle.initial_price]
-        amount = "1000000000000000000"
-
-        [oracle.percent_change]
-        amount = "10000"
 
         [storage]
         num_writes_before_sync = 1
 
-        [pricing.fee_percentage]
-        amount = "10000"
+        [pricing]
+        fee_percentage = 0.01
 
         [gossip]
         bind_ip = "127.0.0.1"
@@ -799,8 +843,8 @@ mod tests {
         println!("{}", expected_toml_data);
 
         // Deserialize the TOML string into a NodeConfig
-        let config =
-            toml::from_str::<NodeConfig>(toml_data).expect("Failed to deserialize NodeConfig from TOML");
+        let config = toml::from_str::<NodeConfig>(toml_data)
+            .expect("Failed to deserialize NodeConfig from TOML");
 
         // Assert the entire struct matches
         assert_eq!(config, expected_config);

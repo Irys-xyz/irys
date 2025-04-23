@@ -53,6 +53,7 @@ reth-chainspec.workspace = true
 [dev-dependencies]
 test-fuzz.workspace = true
 rstest.workspace = true
+pretty_assertions.workspace = true
 
 [build-dependencies]
 build-print = "0"
