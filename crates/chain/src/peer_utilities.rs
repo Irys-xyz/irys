@@ -222,12 +222,8 @@ pub async fn sync_state_from_peers(
         Arc::new(Mutex::new(VecDeque::new()));
 
     info!("Discovering peers...");
-    if let Some(new_peers_found) = fetch_and_update_peers(
-        peers.clone(),
-        &client,
-        trusted_peers,
-    )
-    .await
+    if let Some(new_peers_found) =
+        fetch_and_update_peers(peers.clone(), &client, trusted_peers).await
     {
         info!("Discovered {new_peers_found} new peers");
     }
