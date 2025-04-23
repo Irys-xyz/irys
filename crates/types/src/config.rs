@@ -394,6 +394,8 @@ pub struct CacheConfig {
 /// Settings for the node's HTTP server that provides API access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpConfig {
+    /// The IP address the HTTP service binds to
+    pub bind_ip: String,
     /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
     pub port: u16,
 }
@@ -575,7 +577,10 @@ impl NodeConfig {
                 gpu_packing_batch_size: 1024,
             },
             cache: CacheConfig { cache_clean_lag: 2 },
-            http: HttpConfig { port: 0 },
+            http: HttpConfig {
+                bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                port: 0,
+            },
         }
     }
 

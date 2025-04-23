@@ -35,7 +35,7 @@ async fn heavy_test_p2p() -> eyre::Result<()> {
         .expect("valid SocketAddr expected"),
         api: format!(
             "{}:{}",
-            genesis.node_ctx.config.api_bind_ip, genesis.node_ctx.config.api_port
+            genesis.node_ctx.config.http.bind_ip, genesis.node_ctx.config.http.port
         )
         .parse()
         .expect("valid SocketAddr expected"),
@@ -341,7 +341,6 @@ fn init_configs() -> (Config, Config, Config, Vec<PeerAddress>, Vec<PeerAddress>
                 .expect("valid hex"),
         )
         .expect("valid key"),
-        http.port: 8080,
         mode: NodeMode::Genesis,
         ..Config::testnet()
     };
@@ -353,7 +352,6 @@ fn init_configs() -> (Config, Config, Config, Vec<PeerAddress>, Vec<PeerAddress>
                 .expect("valid hex"),
         )
         .expect("valid key"),
-        http.port: 0,
         mode: NodeMode::PeerSync,
         ..Config::testnet()
     };
@@ -365,7 +363,6 @@ fn init_configs() -> (Config, Config, Config, Vec<PeerAddress>, Vec<PeerAddress>
                 .expect("valid hex"),
         )
         .expect("valid key"),
-        http.port: 0,
         mode: NodeMode::PeerSync,
         ..Config::testnet()
     };

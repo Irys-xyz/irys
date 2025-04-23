@@ -315,15 +315,19 @@ impl IrysNode {
 
         // we create the listener here so we know the port before we start passing around `config`
         let listener = create_listener(
-            format!("{}:{}", self.config.api_bind_ip, self.config.api_port).parse()?,
+            format!(
+                "{}:{}",
+                self.config.node_config.http.bind_ip, self.config.node_config.http.port
+            )
+            .parse()?,
         )?;
         let local_addr = listener
             .local_addr()
             .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
         // if `config.port` == 0, the assigned port will be random (decided by the OS)
         // we re-assign the configuration with the actual port here.
-        let random_ports = if self.config.api_port == 0 {
-            self.config.api_port = local_addr.port();
+        let random_ports = if self.config.node_config.http.port == 0 {
+            self.config.node_config.http.port = local_addr.port();
             true
         } else {
             false

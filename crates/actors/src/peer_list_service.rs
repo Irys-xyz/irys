@@ -99,7 +99,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                 .expect("valid SocketAddr expected"),
                 api: format!(
                     "{}:{}",
-                    config.node_config.gossip.bind_ip, config.node_config.gossip.port
+                    config.node_config.http.bind_ip, config.node_config.http.port
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),
