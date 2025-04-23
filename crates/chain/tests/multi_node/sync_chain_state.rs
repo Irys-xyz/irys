@@ -371,11 +371,11 @@ fn init_configs() -> (
         http: HttpConfig {
             // Use random port
             port: 0,
-            bind_ip: "127.0.0.2".to_string(),
+            bind_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
             port: 8083,
-            bind_ip: "127.0.0.2".to_string(),
+            bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
             &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d1")
@@ -388,11 +388,11 @@ fn init_configs() -> (
     let mut testnet_config_peer2 = NodeConfig {
         http: HttpConfig {
             port: 0,
-            bind_ip: "127.0.0.3".to_string(),
+            bind_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
             port: 8085,
-            bind_ip: "127.0.0.3".to_string(),
+            bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
             &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d2")
