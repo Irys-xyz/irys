@@ -655,7 +655,8 @@ impl IrysNode {
             EmaService::spawn_service(&task_exec, block_tree_guard.clone(), receivers.ema, &config);
 
         // Spawn peer list service
-        let (peer_list_service, peer_list_arbiter) = init_peer_list_service(&irys_db, &config);
+        let (peer_list_service, peer_list_arbiter) =
+            init_peer_list_service(&irys_db, &config, reth_service_actor.clone());
 
         // Spawn the mempool service
         let (mempool_service, mempool_arbiter) = Self::init_mempools_service(
@@ -1280,9 +1281,11 @@ async fn genesis_initialization(
 fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
+    reth_service_addr: Addr<RethServiceActor>,
 ) -> (Addr<PeerListService>, Arbiter) {
     let peer_list_arbiter = Arbiter::new();
     let mut peer_list_service = PeerListService::new(irys_db.clone(), config);
+    peer_list_service.set_reth_service(reth_service_addr);
     peer_list_service
         .initialize()
         .expect("to initialize peer_list_service");

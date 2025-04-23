@@ -60,6 +60,8 @@ pub struct PeerListServiceWithClient<T: ApiClient + 'static + Unpin + Default> {
     peer_address: PeerAddress,
 
     trusted_peers_api_addresses: HashSet<SocketAddr>,
+
+    reth_service_addr: Option<Addr<RethServiceActor>>,
 }
 
 impl PeerListServiceWithClient<IrysApiClient> {
@@ -111,6 +113,8 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                 .iter()
                 .map(|p| p.api)
                 .collect(),
+
+            reth_service_addr: None,
         }
     }
 }
@@ -251,6 +255,10 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         }
 
         Ok(())
+    }
+
+    pub fn set_reth_service(&mut self, reth_service: Addr<RethServiceActor>) {
+        self.reth_service_addr = Some(reth_service);
     }
 
     fn flush(&self) -> Result<(), PeerListServiceError> {
@@ -675,6 +683,7 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<AddPeer> for PeerListServ
     fn handle(&mut self, msg: AddPeer, ctx: &mut Self::Context) -> Self::Result {
         debug!("AddPeer message received: {:?}", msg.peer);
         let peer_api_addr = msg.peer.address.api;
+        let reth_peer_info = msg.peer.address.execution;
         let is_updated = self.add_peer(msg.mining_addr, msg.peer);
         let peer_service_addr = ctx.address();
 
@@ -687,6 +696,37 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<AddPeer> for PeerListServ
                 peer_service_addr,
             );
             ctx.spawn(handshake_task.into_actor(self));
+            if let Some(reth_service_addr) = &self.reth_service_addr {
+                let future = reth_service_addr.send(reth_peer_info);
+                let reth_task = async move {
+                    match future.await {
+                        Ok(res) => {
+                            match res {
+                                Ok(()) => {
+                                    debug!(
+                                        "Successfully connected to reth peer: {:?}",
+                                        reth_peer_info
+                                    );
+                                }
+                                Err(reth_error) => {
+                                    error!(
+                                        "Failed to connect to reth peer: {}",
+                                        reth_error.to_string()
+                                    );
+                                }
+                            }
+                            debug!("Successfully connected to reth peer");
+                        }
+                        Err(mailbox_error) => {
+                            error!("Failed to connect to reth peer: {}", mailbox_error);
+                        }
+                    }
+                }
+                .into_actor(self);
+                ctx.spawn(reth_task);
+            } else {
+                warn!("Reth service address is not set in the peer list service");
+            }
         }
     }
 }
