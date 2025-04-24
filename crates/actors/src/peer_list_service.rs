@@ -5,7 +5,7 @@ use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
 use irys_types::{
     build_user_agent, Address, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse,
-    RejectedResponse, VersionRequest,
+    RejectedResponse, RethPeerInfo, VersionRequest,
 };
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
@@ -37,10 +37,14 @@ const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
-pub type PeerListService = PeerListServiceWithClient<IrysApiClient>;
+pub type PeerListService = PeerListServiceWithClient<IrysApiClient, RethServiceActor>;
 
 #[derive(Debug, Default)]
-pub struct PeerListServiceWithClient<T: ApiClient + 'static + Unpin + Default> {
+pub struct PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
     /// Reference to the node database
     #[allow(dead_code)]
     db: Option<DatabaseProvider>,
@@ -61,25 +65,34 @@ pub struct PeerListServiceWithClient<T: ApiClient + 'static + Unpin + Default> {
 
     trusted_peers_api_addresses: HashSet<SocketAddr>,
 
-    reth_service_addr: Option<Addr<RethServiceActor>>,
+    reth_service_addr: Option<Addr<R>>,
 }
 
-impl PeerListServiceWithClient<IrysApiClient> {
+impl PeerListServiceWithClient<IrysApiClient, RethServiceActor> {
     /// Create a new instance of the peer_list_service actor passing in a reference-counted
     /// reference to a `DatabaseEnv`
-    pub fn new(db: DatabaseProvider, config: &Config) -> Self {
+    pub fn new(
+        db: DatabaseProvider,
+        config: &Config,
+        reth_service_addr: Addr<RethServiceActor>,
+    ) -> Self {
         tracing::info!("service started: peer_list");
-        Self::new_with_custom_api_client(db, config, IrysApiClient::new())
+        Self::new_with_custom_api_client(db, config, IrysApiClient::new(), reth_service_addr)
     }
 }
 
-impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
+impl<T, R> PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
     /// Create a new instance of the peer_list_service actor passing in a reference-counted
     /// reference to a `DatabaseEnv`
     pub fn new_with_custom_api_client(
         db: DatabaseProvider,
         config: &Config,
         irys_api_client: T,
+        reth_actor: Addr<R>,
     ) -> Self {
         Self {
             db: Some(db),
@@ -114,12 +127,16 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
                 .map(|p| p.api)
                 .collect(),
 
-            reth_service_addr: None,
+            reth_service_addr: Some(reth_actor),
         }
     }
 }
 
-impl<T: ApiClient + 'static + Unpin + Default> Actor for PeerListServiceWithClient<T> {
+impl<T, R> Actor for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
@@ -195,9 +212,18 @@ impl<T: ApiClient + 'static + Unpin + Default> Actor for PeerListServiceWithClie
 }
 
 /// Allows this actor to live in the the service registry
-impl<T: ApiClient + 'static + Unpin + Default> Supervised for PeerListServiceWithClient<T> {}
+impl<T, R> Supervised for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+}
 
-impl<T: ApiClient + 'static + Unpin + Default> SystemService for PeerListServiceWithClient<T> {
+impl<T, R> SystemService for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>> + Default,
+{
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
         println!("service started: peer_list");
     }
@@ -230,7 +256,11 @@ pub enum ScoreIncreaseReason {
     ValidData,
 }
 
-impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
+impl<T, R> PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
     /// Initialize the peer list service
     ///
     /// # Errors
@@ -257,10 +287,6 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         Ok(())
     }
 
-    pub fn set_reth_service(&mut self, reth_service: Addr<RethServiceActor>) {
-        self.reth_service_addr = Some(reth_service);
-    }
-
     fn flush(&self) -> Result<(), PeerListServiceError> {
         if let Some(db) = &self.db {
             db.update(|tx| {
@@ -284,7 +310,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
     }
 
     async fn trusted_peers_handshake_task(
-        peer_service_address: Addr<PeerListServiceWithClient<T>>,
+        peer_service_address: Addr<PeerListServiceWithClient<T, R>>,
         trusted_peers_api_addresses: HashSet<SocketAddr>,
     ) {
         let peer_service_address = peer_service_address.clone();
@@ -411,7 +437,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         api_client: T,
         api_address: SocketAddr,
         version_request: VersionRequest,
-        peer_service_address: Addr<PeerListServiceWithClient<T>>,
+        peer_service_address: Addr<PeerListServiceWithClient<T, R>>,
     ) -> Result<(), PeerListServiceError> {
         let peer_response_result = api_client
             .post_version(api_address, version_request)
@@ -465,7 +491,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         api_client: T,
         api_address: SocketAddr,
         version_request: VersionRequest,
-        peer_list_service_address: Addr<PeerListServiceWithClient<T>>,
+        peer_list_service_address: Addr<PeerListServiceWithClient<T, R>>,
     ) {
         debug!(
             "Announcing yourself to address {} with version request: {:?}",
@@ -493,7 +519,7 @@ impl<T: ApiClient + 'static + Unpin + Default> PeerListServiceWithClient<T> {
         api_client: T,
         version_request: VersionRequest,
         known_peers_cache: HashSet<PeerAddress>,
-        peer_service_address: Addr<PeerListServiceWithClient<T>>,
+        peer_service_address: Addr<PeerListServiceWithClient<T, R>>,
     ) {
         let reth_service = RethServiceActor::from_registry();
         for peer in known_peers_cache.iter() {
@@ -559,8 +585,10 @@ pub enum PeerListEntryRequest {
     GossipSocketAddress(SocketAddr),
 }
 
-impl<T: ApiClient + 'static + Unpin + Default> Handler<PeerListEntryRequest>
-    for PeerListServiceWithClient<T>
+impl<T, R> Handler<PeerListEntryRequest> for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Option<PeerListItem>;
 
@@ -581,8 +609,10 @@ pub struct DecreasePeerScore {
     pub reason: ScoreDecreaseReason,
 }
 
-impl<T: ApiClient + 'static + Unpin + Default> Handler<DecreasePeerScore>
-    for PeerListServiceWithClient<T>
+impl<T, R> Handler<DecreasePeerScore> for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
 
@@ -599,8 +629,10 @@ pub struct IncreasePeerScore {
     pub reason: ScoreIncreaseReason,
 }
 
-impl<T: ApiClient + 'static + Unpin + Default> Handler<IncreasePeerScore>
-    for PeerListServiceWithClient<T>
+impl<T, R> Handler<IncreasePeerScore> for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
 
@@ -628,8 +660,10 @@ pub struct ActivePeersRequest {
     pub exclude_peers: HashSet<SocketAddr>,
 }
 
-impl<T: ApiClient + 'static + Unpin + Default> Handler<ActivePeersRequest>
-    for PeerListServiceWithClient<T>
+impl<T, R> Handler<ActivePeersRequest> for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Vec<PeerListItem>;
 
@@ -659,8 +693,10 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<ActivePeersRequest>
 #[rtype(result = "Result<(), PeerListServiceError>")]
 pub struct FlushRequest;
 
-impl<T: ApiClient + 'static + Unpin + Default> Handler<FlushRequest>
-    for PeerListServiceWithClient<T>
+impl<T, R> Handler<FlushRequest> for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Result<(), PeerListServiceError>;
 
@@ -677,7 +713,11 @@ pub struct AddPeer {
     pub peer: PeerListItem,
 }
 
-impl<T: ApiClient + 'static + Unpin + Default> Handler<AddPeer> for PeerListServiceWithClient<T> {
+impl<T, R> Handler<AddPeer> for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
     type Result = ();
 
     fn handle(&mut self, msg: AddPeer, ctx: &mut Self::Context) -> Self::Result {
@@ -736,8 +776,10 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<AddPeer> for PeerListServ
 #[rtype(result = "Vec<PeerAddress>")]
 pub struct KnownPeersRequest;
 
-impl<T: ApiClient + 'static + Unpin + Default> Handler<KnownPeersRequest>
-    for PeerListServiceWithClient<T>
+impl<T, R> Handler<KnownPeersRequest> for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Vec<PeerAddress>;
 
@@ -770,8 +812,10 @@ impl NewPotentialPeer {
     }
 }
 
-impl<T: ApiClient + 'static + Unpin + Default> Handler<NewPotentialPeer>
-    for PeerListServiceWithClient<T>
+impl<T, R> Handler<NewPotentialPeer> for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
 
@@ -833,8 +877,10 @@ impl AnnounceFinished {
     }
 }
 
-impl<T: ApiClient + 'static + Unpin + Default> Handler<AnnounceFinished>
-    for PeerListServiceWithClient<T>
+impl<T, R> Handler<AnnounceFinished> for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
 
@@ -856,8 +902,10 @@ impl<T: ApiClient + 'static + Unpin + Default> Handler<AnnounceFinished>
 #[rtype(result = "()")]
 pub struct WaitForActivePeer;
 
-impl<T: ApiClient + 'static + Unpin + Default> Handler<WaitForActivePeer>
-    for PeerListServiceWithClient<T>
+impl<T, R> Handler<WaitForActivePeer> for PeerListServiceWithClient<T, R>
+where
+    T: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ResponseActFuture<Self, ()>;
 
@@ -907,6 +955,71 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
+    /// MockRethServiceActor for testing
+    #[derive(Default)]
+    struct MockRethServiceActor {
+        received_peers: Vec<RethPeerInfo>,
+        response: Option<eyre::Result<()>>,
+    }
+
+    impl MockRethServiceActor {
+        fn new() -> Self {
+            Self {
+                received_peers: Vec::new(),
+                response: None,
+            }
+        }
+
+        /// Create a new mock that will return an error when called
+        fn with_error(error_message: &str) -> Self {
+            Self {
+                received_peers: Vec::new(),
+                response: Some(Err(eyre::eyre!(error_message.to_string()))),
+            }
+        }
+
+        /// Create a new mock that will return success when called
+        fn with_success() -> Self {
+            Self {
+                received_peers: Vec::new(),
+                response: Some(Ok(())),
+            }
+        }
+
+        /// Get a clone of the received peers vector
+        fn get_received_peers(&self) -> Vec<RethPeerInfo> {
+            self.received_peers.clone()
+        }
+    }
+
+    impl Actor for MockRethServiceActor {
+        type Context = Context<Self>;
+    }
+
+    impl Handler<RethPeerInfo> for MockRethServiceActor {
+        type Result = eyre::Result<()>;
+
+        fn handle(&mut self, msg: RethPeerInfo, ctx: &mut Self::Context) -> Self::Result {
+            let peer_info = msg;
+
+            self.received_peers.push(peer_info);
+
+            self.response.take().unwrap_or(Ok(()))
+        }
+    }
+
+    #[derive(Message, Debug)]
+    #[rtype(result = "Vec<RethPeerInfo>")]
+    struct MockGetPeersRequest;
+
+    impl Handler<MockGetPeersRequest> for MockRethServiceActor {
+        type Result = Vec<RethPeerInfo>;
+
+        fn handle(&mut self, msg: MockGetPeersRequest, ctx: &mut Self::Context) -> Self::Result {
+            self.get_received_peers()
+        }
+    }
+
     fn create_test_peer(
         mining_addr: &str,
         gossip_port: u16,
@@ -943,7 +1056,21 @@ mod tests {
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListServiceWithClient::new(db, &config);
+
+        // Create a mock reth service actor
+        let mock_reth_actor = MockRethServiceActor::new();
+        let reth_actor = mock_reth_actor.start();
+
+        // Use our custom mock client
+        let mock_api_client = CountingMockClient::default();
+
+        // Create service with our mocks
+        let mut service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_api_client,
+            reth_actor,
+        );
         let ctx = &mut Context::new();
 
         // Test adding a new peer
@@ -984,7 +1111,15 @@ mod tests {
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListServiceWithClient::new(db, &config);
+        let mock_client = CountingMockClient::default();
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
+        let mut service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client,
+            mock_addr,
+        );
         let ctx = &mut Context::new();
 
         // Add a test peer
@@ -1047,7 +1182,15 @@ mod tests {
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListServiceWithClient::new(db, &config);
+        let mock_client = CountingMockClient::default();
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
+        let mut service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client,
+            mock_addr,
+        );
         let ctx = &mut Context::new();
 
         // Add multiple peers with different states
@@ -1121,7 +1264,15 @@ mod tests {
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut service = PeerListServiceWithClient::new(db, &config);
+        let mock_client = CountingMockClient::default();
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
+        let mut service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client,
+            mock_addr,
+        );
         let ctx = &mut Context::new();
 
         // Test adding duplicate peer
@@ -1183,7 +1334,15 @@ mod tests {
             open_or_create_irys_consensus_data_db(&new_temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
-        let mut empty_service = PeerListServiceWithClient::new(new_test_db, &config);
+        let mock_client = CountingMockClient::default();
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
+        let mut empty_service = PeerListServiceWithClient::new_with_custom_api_client(
+            new_test_db,
+            &config,
+            mock_client,
+            mock_addr,
+        );
 
         let exclude_peers = HashSet::new();
         let active_peers = empty_service.handle(
@@ -1205,10 +1364,16 @@ mod tests {
                 .expect("can't open temp dir"),
         ));
         let mock_client = CountingMockClient::default();
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
 
         // Start the actor system with our service
-        let service =
-            PeerListServiceWithClient::new_with_custom_api_client(db.clone(), &config, mock_client);
+        let service = PeerListServiceWithClient::new_with_custom_api_client(
+            db.clone(),
+            &config,
+            mock_client,
+            mock_addr,
+        );
         let addr = service.start();
 
         // Add a test peer
@@ -1259,8 +1424,16 @@ mod tests {
                 .expect("can't open temp dir"),
         ));
 
+        let mock_client = CountingMockClient::default();
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
         // Create first service instance and add some peers
-        let mut service = PeerListServiceWithClient::new(db.clone(), &config);
+        let mut service = PeerListServiceWithClient::new_with_custom_api_client(
+            db.clone(),
+            &config,
+            mock_client,
+            mock_addr,
+        );
         let ctx = &mut Context::new();
 
         // Add multiple test peers
@@ -1297,8 +1470,17 @@ mod tests {
             .handle(FlushRequest, ctx)
             .expect("Failed to flush data");
 
+        let mock_client = CountingMockClient::default();
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
+
         // Create new service instance that should load from database
-        let mut new_service = PeerListServiceWithClient::new(db, &config);
+        let mut new_service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client,
+            mock_addr,
+        );
         new_service
             .initialize()
             .expect("Failed to initialize service");
@@ -1362,8 +1544,14 @@ mod tests {
         let mock_client = CountingMockClient {
             post_version_calls: calls.clone(),
         };
-        let peer_list_service =
-            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client.clone());
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
+        let peer_list_service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client.clone(),
+            mock_addr,
+        );
         let addr = peer_list_service.start();
 
         let (_mining1, peer1) = create_test_peer(
@@ -1405,10 +1593,13 @@ mod tests {
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
         ));
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
         let mut service = PeerListServiceWithClient::new_with_custom_api_client(
             db,
             &config,
             CountingMockClient::default(),
+            mock_addr,
         );
         let ctx = &mut Context::new();
 
@@ -1506,6 +1697,77 @@ mod tests {
     }
 
     #[actix_rt::test]
+    async fn test_reth_actor_receives_reth_peer_info() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = NodeConfig::testnet().into();
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create a mock reth service actor to track calls
+        let mock_reth_actor = MockRethServiceActor::with_success();
+        let reth_actor = mock_reth_actor.start();
+
+        // Create mock api client
+        let mock_api_client = CountingMockClient::default();
+
+        // Create service with our mocks
+        let service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_api_client,
+            reth_actor.clone(),
+        );
+        let service_addr = service.start();
+
+        // Create a test peer with a specific RethPeerInfo
+        let mining_addr = Address::from_str("0x1234567890123456789012345678901234567890")
+            .expect("Invalid mining address");
+
+        let test_reth_peer_info = RethPeerInfo {
+            peering_tcp_addr: "192.168.1.100:30303".parse().unwrap(),
+            peer_id: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".parse().unwrap()
+        };
+
+        let peer = PeerListItem {
+            address: PeerAddress {
+                gossip: "127.0.0.1:8080".parse().unwrap(),
+                api: "127.0.0.1:8081".parse().unwrap(),
+                execution: test_reth_peer_info.clone(),
+            },
+            reputation_score: PeerScore::new(50),
+            response_time: 100,
+            last_seen: 123,
+            is_online: true,
+        };
+
+        // Add the peer to the service
+        service_addr
+            .send(AddPeer { mining_addr, peer })
+            .await
+            .expect("Failed to send AddPeer message");
+
+        // Give some time for async processing
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Check if the reth actor received the correct RethPeerInfo
+        let received_peers = reth_actor
+            .send(MockGetPeersRequest)
+            .await
+            .expect("Failed to send message");
+        assert_eq!(
+            received_peers.len(),
+            1,
+            "RethServiceActor should have received exactly one peer"
+        );
+        assert_eq!(
+            received_peers[0], test_reth_peer_info,
+            "RethServiceActor received incorrect peer info"
+        );
+    }
+
+    #[actix_rt::test]
     async fn should_perform_handshake_when_adding_a_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let mut node_config = NodeConfig::testnet();
@@ -1522,10 +1784,16 @@ mod tests {
         let mock_client = CountingMockClient {
             post_version_calls: calls.clone(),
         };
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
 
         // Create the service with our mock client instead of the real one
-        let service =
-            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client,
+            mock_addr,
+        );
         let service_addr = service.start();
 
         // Create a test peer
@@ -1573,10 +1841,16 @@ mod tests {
         let mock_client = CountingMockClient {
             post_version_calls: calls.clone(),
         };
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
 
         // Create the service with our mock client instead of the real one
-        let service =
-            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client,
+            mock_addr,
+        );
         let service_addr = service.start();
 
         // Create a test peer
@@ -1666,8 +1940,14 @@ mod tests {
 
         // Create the service with an empty peer list (no trusted peers)
         let mock_client = CountingMockClient::default();
-        let service =
-            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
+        let service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client,
+            mock_addr,
+        );
         let service_addr = service.start();
 
         // Verify we don't have any peers
@@ -1751,8 +2031,14 @@ mod tests {
 
         // Create the service with an empty peer list (no trusted peers)
         let mock_client = CountingMockClient::default();
-        let service =
-            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
+        let service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client,
+            mock_addr,
+        );
         let service_addr = service.start();
 
         // Verify we don't have any peers
@@ -1834,10 +2120,16 @@ mod tests {
         let mock_client = CountingMockClient {
             post_version_calls: calls.clone(),
         };
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
 
         // Create and start the service with our mock client
-        let service =
-            PeerListServiceWithClient::new_with_custom_api_client(db, &config, mock_client);
+        let service = PeerListServiceWithClient::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client,
+            mock_addr,
+        );
         let _service_addr = service.start();
 
         // Give time for handshake to process
