@@ -258,6 +258,7 @@ impl Default for GossipServiceTestFixture {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct MockRethServiceActor {}
 
 impl Actor for MockRethServiceActor {
