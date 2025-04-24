@@ -6,6 +6,7 @@
     clippy::module_name_repetitions,
     reason = "I don't know how to name it"
 )]
+use crate::block_pool_service::BlockPoolService;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
@@ -22,8 +23,8 @@ use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::TxExistenceQuery;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
 use irys_actors::peer_list_service::{ActivePeersRequest, PeerListServiceWithClient};
-use irys_api_client::{ApiClient, IrysApiClient};
-use irys_types::{GossipData, PeerListItem, RethPeerInfo};
+use irys_api_client::ApiClient;
+use irys_types::{DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashSet;
@@ -147,7 +148,8 @@ impl GossipService {
         block_discovery: Addr<B>,
         api_client: A,
         task_executor: &TaskExecutor,
-        peer_list: Addr<PeerListServiceWithClient<IrysApiClient, R>>,
+        peer_list: Addr<PeerListServiceWithClient<A, R>>,
+        db: DatabaseProvider,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         M: Handler<TxIngressMessage>
@@ -155,15 +157,26 @@ impl GossipService {
             + Handler<TxExistenceQuery>
             + Actor<Context = Context<M>>,
         B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-        A: ApiClient + Clone + 'static,
+        A: ApiClient + Clone + 'static + Unpin + Default,
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     {
         tracing::debug!("Staring gossip service");
 
+        // TODO: get the db
+        let block_pool_service = BlockPoolService::new_with_client(
+            db,
+            api_client.clone(),
+            peer_list.clone(),
+            block_discovery.clone(),
+        );
+        let arbiter = actix::Arbiter::new();
+        let block_pool_addr =
+            BlockPoolService::start_in_arbiter(&arbiter.handle(), |_| block_pool_service);
+
         let server_data_handler = GossipServerDataHandler {
             mempool,
-            block_discovery,
-            api_client,
+            block_pool: block_pool_addr,
+            api_client: api_client.clone(),
             cache: Arc::clone(&self.cache),
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
@@ -187,7 +200,7 @@ impl GossipService {
             mempool_data_receiver,
             Arc::clone(&service),
             task_executor,
-            peer_list,
+            peer_list.clone(),
         );
 
         let gossip_service_handle = spawn_main_task(
@@ -196,19 +209,21 @@ impl GossipService {
             cache_pruning_task_handle,
             broadcast_task_handle,
             task_executor,
+            arbiter,
         );
 
         Ok(gossip_service_handle)
     }
 
-    async fn broadcast_data<R>(
+    async fn broadcast_data<A, R>(
         &self,
         original_source: GossipSource,
         data: &GossipData,
-        peer_list_service: &Addr<PeerListServiceWithClient<IrysApiClient, R>>,
+        peer_list_service: &Addr<PeerListServiceWithClient<A, R>>,
     ) -> GossipResult<()>
     where
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+        A: ApiClient + Clone + 'static + Unpin + Default,
     {
         tracing::trace!("GOSSIP BROADCASTING DATA");
         let exclude_peers = match original_source {
@@ -306,14 +321,15 @@ fn spawn_cache_pruning_task(
     )
 }
 
-fn spawn_broadcast_task<R>(
+fn spawn_broadcast_task<R, A>(
     mut mempool_data_receiver: mpsc::Receiver<GossipData>,
     service: Arc<GossipService>,
     task_executor: &TaskExecutor,
-    peer_list_service: Addr<PeerListServiceWithClient<IrysApiClient, R>>,
+    peer_list_service: Addr<PeerListServiceWithClient<A, R>>,
 ) -> ServiceHandleWithShutdownSignal
 where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    A: ApiClient + Clone + 'static + Unpin + Default,
 {
     ServiceHandleWithShutdownSignal::spawn(
         "gossip broadcast",
@@ -353,6 +369,7 @@ fn spawn_main_task(
     mut cache_pruning_task_handle: ServiceHandleWithShutdownSignal,
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,
     task_executor: &TaskExecutor,
+    block_pool_arbiter: actix::Arbiter,
 ) -> ServiceHandleWithShutdownSignal {
     ServiceHandleWithShutdownSignal::spawn(
         "gossip main",
@@ -421,6 +438,7 @@ fn spawn_main_task(
                     tracing::warn!("Gossip service shutdown error: {}", error);
                 }
             };
+            block_pool_arbiter.stop();
         },
         task_executor,
     )

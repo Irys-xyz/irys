@@ -4277,6 +4277,7 @@ dependencies = [
  "eyre",
  "irys-actors",
  "irys-api-client",
+ "irys-database",
  "irys-primitives",
  "irys-storage",
  "irys-testing-utils",

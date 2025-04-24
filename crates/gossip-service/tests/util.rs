@@ -6,7 +6,7 @@ use irys_actors::mempool_service::{
     ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
 };
 use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
-use irys_api_client::{ApiClient, IrysApiClient};
+use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
 use irys_gossip_service::GossipService;
 use irys_primitives::Address;
@@ -242,7 +242,7 @@ pub struct GossipServiceTestFixture {
     pub db: DatabaseProvider,
     pub mining_address: Address,
     pub mempool: Addr<MempoolStub>,
-    pub peer_list: Addr<PeerListServiceWithClient<IrysApiClient, MockRethServiceActor>>,
+    pub peer_list: Addr<PeerListServiceWithClient<StubApiClient, MockRethServiceActor>>,
     pub block_discovery: Addr<BlockDiscoveryStub>,
     pub mempool_txs: Arc<RwLock<Vec<TxIngressMessage>>>,
     pub mempool_chunks: Arc<RwLock<Vec<ChunkIngressMessage>>>,
@@ -289,9 +289,10 @@ impl GossipServiceTestFixture {
         let mock_reth_service = MockRethServiceActor {};
         let reth_service_addr = mock_reth_service.start();
 
-        let peer_service = PeerListServiceWithClient::new_with_custom_reth_service(
+        let peer_service = PeerListServiceWithClient::new_with_custom_api_client(
             db.clone(),
             &config,
+            StubApiClient::new(),
             reth_service_addr,
         );
         let peer_list = peer_service.start();
@@ -354,15 +355,14 @@ impl GossipServiceTestFixture {
         };
         let block_discovery_stub_addr = block_discovery_stub.start();
 
-        let api_client = self.api_client.clone();
-
         let service_handle = gossip_service
             .run(
                 mempool_stub_addr,
                 block_discovery_stub_addr,
-                api_client,
+                self.api_client.clone(),
                 &self.task_executor,
                 self.peer_list.clone(),
+                self.db.clone(),
             )
             .expect("failed to run gossip service");
 

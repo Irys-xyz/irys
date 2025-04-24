@@ -21,6 +21,7 @@ actix.workspace = true
 serde = { workspace = true }
 reth-tasks = { workspace = true }
 base58.workspace = true
+irys-database.workspace = true
 
 [dev-dependencies]
 irys-testing-utils.workspace = true

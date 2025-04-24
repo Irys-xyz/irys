@@ -9,7 +9,7 @@ use irys_actors::peer_list_service::{
     DecreasePeerScore, IncreasePeerScore, PeerListServiceWithClient, ScoreDecreaseReason,
     ScoreIncreaseReason,
 };
-use irys_api_client::IrysApiClient;
+use irys_api_client::ApiClient;
 use irys_types::{GossipData, PeerListItem, RethPeerInfo};
 use reqwest::Response;
 use serde::Serialize;
@@ -105,14 +105,15 @@ impl GossipClient {
     /// # Errors
     ///
     /// If the peer is offline or the request fails, an error is returned.
-    pub async fn send_data_and_update_score<R>(
+    pub async fn send_data_and_update_score<R, A>(
         &self,
         peer: &PeerListItem,
         data: &GossipData,
-        peer_list_service: &Addr<PeerListServiceWithClient<IrysApiClient, R>>,
+        peer_list_service: &Addr<PeerListServiceWithClient<A, R>>,
     ) -> GossipResult<()>
     where
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+        A: ApiClient + Clone + 'static + Unpin + Default,
     {
         let res = self.send_data(peer, data).await;
         match res {

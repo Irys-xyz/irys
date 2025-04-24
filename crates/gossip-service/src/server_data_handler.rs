@@ -1,3 +1,4 @@
+use crate::block_pool_service::{AddBlock, BlockPoolService};
 use crate::types::{tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError};
 use crate::{GossipCache, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
@@ -8,53 +9,58 @@ use irys_actors::mempool_service::{
     ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
 };
 use irys_api_client::ApiClient;
-use irys_types::{GossipData, IrysBlockHeader, IrysTransactionHeader, UnpackedChunk, H256};
+use irys_types::{
+    GossipData, IrysBlockHeader, IrysTransactionHeader, RethPeerInfo, UnpackedChunk, H256,
+};
 use std::sync::Arc;
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub struct GossipServerDataHandler<M, B, A>
+pub struct GossipServerDataHandler<M, B, A, R>
 where
     M: Handler<TxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Clone + 'static,
+    A: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     pub mempool: Addr<M>,
-    pub block_discovery: Addr<B>,
+    pub block_pool: Addr<BlockPoolService<A, R, B>>,
     pub cache: Arc<GossipCache>,
     pub api_client: A,
 }
 
-impl<M, B, A> Clone for GossipServerDataHandler<M, B, A>
+impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
 where
     M: Handler<TxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Clone,
+    A: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     fn clone(&self) -> Self {
         Self {
             mempool: self.mempool.clone(),
-            block_discovery: self.block_discovery.clone(),
+            block_pool: self.block_pool.clone(),
             cache: Arc::clone(&self.cache),
             api_client: self.api_client.clone(),
         }
     }
 }
 
-impl<M, B, A> GossipServerDataHandler<M, B, A>
+impl<M, B, A, R> GossipServerDataHandler<M, B, A, R>
 where
     M: Handler<TxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Clone,
+    A: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     pub(crate) async fn handle_chunk(
         &self,
@@ -294,8 +300,10 @@ where
             &GossipData::Block(irys_block_header.clone()),
         )?;
 
-        self.block_discovery
-            .send(BlockDiscoveredMessage(Arc::new(irys_block_header)))
+        self.block_pool
+            .send(AddBlock {
+                header: irys_block_header,
+            })
             .await
             .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
             .map_err(|error_report| GossipError::unknown(&error_report))?;

@@ -17,7 +17,7 @@ use irys_actors::mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngr
 use irys_actors::peer_list_service::{
     DecreasePeerScore, PeerListEntryRequest, PeerListServiceWithClient,
 };
-use irys_api_client::{ApiClient, IrysApiClient};
+use irys_api_client::ApiClient;
 use irys_types::{
     IrysBlockHeader, IrysTransactionHeader, PeerListItem, RethPeerInfo, UnpackedChunk,
 };
@@ -30,11 +30,11 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Clone + 'static,
+    A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
-    data_handler: GossipServerDataHandler<M, B, A>,
-    peer_list: Addr<PeerListServiceWithClient<IrysApiClient, R>>,
+    data_handler: GossipServerDataHandler<M, B, A, R>,
+    peer_list: Addr<PeerListServiceWithClient<A, R>>,
 }
 
 impl<M, B, A, R> Clone for GossipServer<M, B, A, R>
@@ -44,7 +44,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Clone + 'static,
+    A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     fn clone(&self) -> Self {
@@ -62,12 +62,12 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Clone + 'static,
+    A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     pub const fn new(
-        gossip_server_data_handler: GossipServerDataHandler<M, B, A>,
-        peer_list: Addr<PeerListServiceWithClient<IrysApiClient, R>>,
+        gossip_server_data_handler: GossipServerDataHandler<M, B, A, R>,
+        peer_list: Addr<PeerListServiceWithClient<A, R>>,
     ) -> Self {
         Self {
             data_handler: gossip_server_data_handler,
@@ -106,12 +106,13 @@ where
     }
 }
 
-async fn check_peer<R>(
-    peer_service_addr: &Addr<PeerListServiceWithClient<IrysApiClient, R>>,
+async fn check_peer<R, A>(
+    peer_service_addr: &Addr<PeerListServiceWithClient<A, R>>,
     req: &actix_web::HttpRequest,
 ) -> Result<PeerListItem, HttpResponse>
 where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    A: ApiClient + Clone + 'static + Unpin + Default,
 {
     let Some(peer_address) = req.peer_addr() else {
         tracing::debug!("Failed to get peer address from gossip post request");
@@ -148,7 +149,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Clone,
+    A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     let mut peer = match check_peer(&server.peer_list, &req).await {
@@ -181,7 +182,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Clone,
+    A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     let mut peer = match check_peer(&server.peer_list, &req).await {
@@ -215,7 +216,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Clone,
+    A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     let mut peer = match check_peer(&server.peer_list, &req).await {
@@ -247,7 +248,7 @@ where
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Clone,
+    A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     let Some(peer_addr) = req.peer_addr() else {
@@ -267,12 +268,13 @@ where
     }
 }
 
-async fn handle_invalid_data<R>(
+async fn handle_invalid_data<R, A>(
     peer: &mut PeerListItem,
     error: &GossipError,
-    peer_list_service: &Addr<PeerListServiceWithClient<IrysApiClient, R>>,
+    peer_list_service: &Addr<PeerListServiceWithClient<A, R>>,
 ) where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    A: ApiClient + Clone + 'static + Unpin + Default,
 {
     if let GossipError::InvalidData(_) = error {
         if let Err(error) = peer_list_service

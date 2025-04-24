@@ -46,7 +46,6 @@ where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     /// Reference to the node database
-    #[allow(dead_code)]
     db: Option<DatabaseProvider>,
 
     gossip_addr_to_mining_addr_map: HashMap<IpAddr, Address>,
