@@ -134,6 +134,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let max_attempts = max_attempts * 3;
 
     let result_peer1 = poll_until_fetch_at_block_index_height(
+        "peer1".to_owned(),
         &ctx_peer1_node.node_ctx,
         required_blocks_height
             .try_into()
@@ -153,6 +154,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     assert_eq!(peer_list_items.len(), genesis_trusted_peers.len());
 
     let result_peer2 = poll_until_fetch_at_block_index_height(
+        "peer2".to_owned(),
         &ctx_peer2_node.node_ctx,
         required_blocks_height
             .try_into()
@@ -215,6 +217,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         .expect("expected one mined block on genesis node");
 
     let result_genesis = poll_until_fetch_at_block_index_height(
+        "genesis".to_owned(),
         &ctx_genesis_node.node_ctx,
         (required_blocks_height + 1)
             .try_into()
@@ -223,6 +226,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
     let result_peer2 = poll_until_fetch_at_block_index_height(
+        "peer2".to_owned(),
         &ctx_peer2_node.node_ctx,
         (required_blocks_height + 1)
             .try_into()
@@ -304,6 +308,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     .expect("expected many mined blocks");
     //now see if the block makes its way to peer2 via gossip service
     let result_peer2 = poll_until_fetch_at_block_index_height(
+        "peer2".to_owned(),
         &ctx_peer2_node.node_ctx,
         (required_blocks_height + additional_blocks_for_gossip_test)
             .try_into()
@@ -497,6 +502,7 @@ async fn generate_test_transaction_and_add_to_block(
 
 /// poll info_endpoint until timeout or we get block_index at desired height
 async fn poll_until_fetch_at_block_index_height(
+    node_name: String,
     node_ctx: &IrysNodeCtx,
     required_blocks_height: u64,
     max_attempts: u64,
@@ -509,8 +515,8 @@ async fn poll_until_fetch_at_block_index_height(
 
         if max_attempts < attempts {
             error!(
-                "peer never fully synced to height {}",
-                required_blocks_height
+                "{} never fully synced to height {}",
+                node_name, required_blocks_height
             );
             break;
         } else {
