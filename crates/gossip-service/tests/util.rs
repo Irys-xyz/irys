@@ -5,8 +5,8 @@ use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::{
     ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
 };
-use irys_actors::peer_list_service::{AddPeer, PeerListService};
-use irys_api_client::ApiClient;
+use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
+use irys_api_client::{ApiClient, IrysApiClient};
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
 use irys_gossip_service::GossipService;
 use irys_primitives::Address;
@@ -242,7 +242,7 @@ pub struct GossipServiceTestFixture {
     pub db: DatabaseProvider,
     pub mining_address: Address,
     pub mempool: Addr<MempoolStub>,
-    pub peer_list: Addr<PeerListService>,
+    pub peer_list: Addr<PeerListServiceWithClient<IrysApiClient, MockRethServiceActor>>,
     pub block_discovery: Addr<BlockDiscoveryStub>,
     pub mempool_txs: Arc<RwLock<Vec<TxIngressMessage>>>,
     pub mempool_chunks: Arc<RwLock<Vec<ChunkIngressMessage>>>,
@@ -255,6 +255,20 @@ pub struct GossipServiceTestFixture {
 impl Default for GossipServiceTestFixture {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct MockRethServiceActor {}
+
+impl Actor for MockRethServiceActor {
+    type Context = Context<Self>;
+}
+
+impl Handler<RethPeerInfo> for MockRethServiceActor {
+    type Result = eyre::Result<()>;
+
+    fn handle(&mut self, _msg: RethPeerInfo, _ctx: &mut Self::Context) -> Self::Result {
+        Ok(())
     }
 }
 
@@ -271,7 +285,14 @@ impl GossipServiceTestFixture {
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
 
-        let peer_service = PeerListService::new(db.clone(), &config);
+        let mock_reth_service = MockRethServiceActor {};
+        let reth_service_addr = mock_reth_service.start();
+
+        let peer_service = PeerListServiceWithClient::new_with_custom_reth_service(
+            db.clone(),
+            &config,
+            reth_service_addr,
+        );
         let peer_list = peer_service.start();
 
         let (gossip_sender, _rx) = mpsc::channel(100);

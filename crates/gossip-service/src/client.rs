@@ -3,12 +3,14 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::types::{GossipError, GossipResult};
-use actix::Addr;
+use actix::{Actor, Addr, Context, Handler};
 use core::time::Duration;
 use irys_actors::peer_list_service::{
-    DecreasePeerScore, IncreasePeerScore, PeerListService, ScoreDecreaseReason, ScoreIncreaseReason,
+    DecreasePeerScore, IncreasePeerScore, PeerListServiceWithClient, ScoreDecreaseReason,
+    ScoreIncreaseReason,
 };
-use irys_types::{GossipData, PeerListItem};
+use irys_api_client::IrysApiClient;
+use irys_types::{GossipData, PeerListItem, RethPeerInfo};
 use reqwest::Response;
 use serde::Serialize;
 
@@ -103,12 +105,15 @@ impl GossipClient {
     /// # Errors
     ///
     /// If the peer is offline or the request fails, an error is returned.
-    pub async fn send_data_and_update_score(
+    pub async fn send_data_and_update_score<R>(
         &self,
         peer: &PeerListItem,
         data: &GossipData,
-        peer_list_service: &Addr<PeerListService>,
-    ) -> GossipResult<()> {
+        peer_list_service: &Addr<PeerListServiceWithClient<IrysApiClient, R>>,
+    ) -> GossipResult<()>
+    where
+        R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    {
         let res = self.send_data(peer, data).await;
         match res {
             Ok(()) => {

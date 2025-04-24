@@ -81,6 +81,20 @@ impl PeerListServiceWithClient<IrysApiClient, RethServiceActor> {
     }
 }
 
+impl<R> PeerListServiceWithClient<IrysApiClient, R>
+where
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+    pub fn new_with_custom_reth_service(
+        db: DatabaseProvider,
+        config: &Config,
+        reth_service_addr: Addr<R>,
+    ) -> Self {
+        tracing::info!("service started: peer_list");
+        Self::new_with_custom_api_client(db, config, IrysApiClient::new(), reth_service_addr)
+    }
+}
+
 impl<T, R> PeerListServiceWithClient<T, R>
 where
     T: ApiClient + 'static + Unpin + Default,
@@ -970,14 +984,6 @@ mod tests {
             }
         }
 
-        /// Create a new mock that will return an error when called
-        fn with_error(error_message: &str) -> Self {
-            Self {
-                received_peers: Vec::new(),
-                response: Some(Err(eyre::eyre!(error_message.to_string()))),
-            }
-        }
-
         /// Create a new mock that will return success when called
         fn with_success() -> Self {
             Self {
@@ -999,7 +1005,7 @@ mod tests {
     impl Handler<RethPeerInfo> for MockRethServiceActor {
         type Result = eyre::Result<()>;
 
-        fn handle(&mut self, msg: RethPeerInfo, ctx: &mut Self::Context) -> Self::Result {
+        fn handle(&mut self, msg: RethPeerInfo, _ctx: &mut Self::Context) -> Self::Result {
             let peer_info = msg;
 
             self.received_peers.push(peer_info);
@@ -1015,7 +1021,7 @@ mod tests {
     impl Handler<MockGetPeersRequest> for MockRethServiceActor {
         type Result = Vec<RethPeerInfo>;
 
-        fn handle(&mut self, msg: MockGetPeersRequest, ctx: &mut Self::Context) -> Self::Result {
+        fn handle(&mut self, _msg: MockGetPeersRequest, _ctx: &mut Self::Context) -> Self::Result {
             self.get_received_peers()
         }
     }

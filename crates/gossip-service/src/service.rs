@@ -21,9 +21,9 @@ use core::time::Duration;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::TxExistenceQuery;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
-use irys_actors::peer_list_service::{ActivePeersRequest, PeerListService};
-use irys_api_client::ApiClient;
-use irys_types::{GossipData, PeerListItem};
+use irys_actors::peer_list_service::{ActivePeersRequest, PeerListServiceWithClient};
+use irys_api_client::{ApiClient, IrysApiClient};
+use irys_types::{GossipData, PeerListItem, RethPeerInfo};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashSet;
@@ -141,13 +141,13 @@ impl GossipService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<M, B, A>(
+    pub fn run<M, B, A, R>(
         mut self,
         mempool: Addr<M>,
         block_discovery: Addr<B>,
         api_client: A,
         task_executor: &TaskExecutor,
-        peer_list: Addr<PeerListService>,
+        peer_list: Addr<PeerListServiceWithClient<IrysApiClient, R>>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         M: Handler<TxIngressMessage>
@@ -156,6 +156,7 @@ impl GossipService {
             + Actor<Context = Context<M>>,
         B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
         A: ApiClient + Clone + 'static,
+        R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     {
         tracing::debug!("Staring gossip service");
 
@@ -200,12 +201,15 @@ impl GossipService {
         Ok(gossip_service_handle)
     }
 
-    async fn broadcast_data(
+    async fn broadcast_data<R>(
         &self,
         original_source: GossipSource,
         data: &GossipData,
-        peer_list_service: &Addr<PeerListService>,
-    ) -> GossipResult<()> {
+        peer_list_service: &Addr<PeerListServiceWithClient<IrysApiClient, R>>,
+    ) -> GossipResult<()>
+    where
+        R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    {
         tracing::trace!("GOSSIP BROADCASTING DATA");
         let exclude_peers = match original_source {
             GossipSource::Internal => HashSet::new(),
@@ -302,12 +306,15 @@ fn spawn_cache_pruning_task(
     )
 }
 
-fn spawn_broadcast_task(
+fn spawn_broadcast_task<R>(
     mut mempool_data_receiver: mpsc::Receiver<GossipData>,
     service: Arc<GossipService>,
     task_executor: &TaskExecutor,
-    peer_list_service: Addr<PeerListService>,
-) -> ServiceHandleWithShutdownSignal {
+    peer_list_service: Addr<PeerListServiceWithClient<IrysApiClient, R>>,
+) -> ServiceHandleWithShutdownSignal
+where
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
     ServiceHandleWithShutdownSignal::spawn(
         "gossip broadcast",
         move |mut shutdown_rx| async move {
