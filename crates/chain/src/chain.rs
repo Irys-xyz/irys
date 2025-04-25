@@ -691,7 +691,7 @@ impl IrysNode {
         // Spawn the CommitmentCache service
         let _handle = CommitmentCache::spawn_service(
             &task_exec,
-            receivers.pending_commitments_cache,
+            receivers.commitments_cache,
             commitment_state_guard,
             &config,
         );

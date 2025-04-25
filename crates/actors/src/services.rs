@@ -32,7 +32,7 @@ impl ServiceSenders {
 pub struct ServiceReceivers {
     pub chunk_cache: UnboundedReceiver<CacheServiceAction>,
     pub ema: UnboundedReceiver<EmaServiceMessage>,
-    pub pending_commitments_cache: UnboundedReceiver<CommitmentCacheMessage>,
+    pub commitments_cache: UnboundedReceiver<CommitmentCacheMessage>,
 }
 
 #[derive(Debug)]
@@ -47,18 +47,18 @@ impl ServiceSendersInner {
     pub fn init() -> (Self, ServiceReceivers) {
         let (chunk_cache_sender, chunk_cache_receiver) = unbounded_channel::<CacheServiceAction>();
         let (ema_sender, ema_receiver) = unbounded_channel::<EmaServiceMessage>();
-        let (pending_commitments_cache_sender, pending_commitments_cached_receiver) =
+        let (commitments_cache_sender, commitments_cached_receiver) =
             unbounded_channel::<CommitmentCacheMessage>();
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
             ema: ema_sender,
-            commitment_cache: pending_commitments_cache_sender,
+            commitment_cache: commitments_cache_sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
             ema: ema_receiver,
-            pending_commitments_cache: pending_commitments_cached_receiver,
+            commitments_cache: commitments_cached_receiver,
         };
         (senders, receivers)
     }
