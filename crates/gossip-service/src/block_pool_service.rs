@@ -1,6 +1,6 @@
 use actix::{
     Actor, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised,
-    SystemService, WrapFuture
+    SystemService, WrapFuture,
 };
 use irys_actors::block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor};
 use irys_actors::peer_list_service::{PeerListService, PeerListServiceWithClient};
@@ -136,7 +136,10 @@ where
 
         Box::pin(
             async move {
-                debug!("Searching for parent block {:?} for block {:?} in the db", prev_block_hash, current_block_hash);
+                debug!(
+                    "Searching for parent block {:?} for block {:?} in the db",
+                    prev_block_hash, current_block_hash
+                );
                 // Check if the previous block is in the db
                 let maybe_previous_block_header = db
                     .as_ref()
@@ -177,7 +180,10 @@ where
                     return Ok(());
                 }
 
-                debug!("Parent block for block {:?} not found in db", current_block_hash);
+                debug!(
+                    "Parent block for block {:?} not found in db",
+                    current_block_hash
+                );
 
                 self_addr
                     .send(AddBlockToPoolAndTryToFetchParent {

@@ -95,14 +95,21 @@ async fn check_transaction_endpoints(
     assert!(txs.contains(&Some(tx_2.header)));
 }
 
-async fn check_get_block_endpoint(api_client: &IrysApiClient, api_address: SocketAddr, ctx: &IrysNodeTest<IrysNodeCtx>,) {
+async fn check_get_block_endpoint(
+    api_client: &IrysApiClient,
+    api_address: SocketAddr,
+    ctx: &IrysNodeTest<IrysNodeCtx>,
+) {
     // advance one block
     let (previous_header, _payload) = mine_block(&ctx.node_ctx).await.unwrap().unwrap();
     // advance one block, finalizing the previous block
     let (_header, _payload) = mine_block(&ctx.node_ctx).await.unwrap().unwrap();
 
     let previous_block_hash = previous_header.block_hash;
-    let block = api_client.get_block_by_hash(api_address, previous_block_hash).await.expect("valid get block response");
+    let block = api_client
+        .get_block_by_hash(api_address, previous_block_hash)
+        .await
+        .expect("valid get block response");
 
     assert!(block.is_some());
     debug!("block: {:?}", block);

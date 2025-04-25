@@ -32,7 +32,7 @@ where
     }
 }
 
-const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -54,6 +54,9 @@ where
     known_peers_cache: HashSet<PeerAddress>,
 
     currently_running_announcements: HashSet<SocketAddr>,
+
+    successful_announcements: HashMap<SocketAddr, AnnounceFinished>,
+    failed_announcements: HashMap<SocketAddr, AnnounceFinished>,
 
     gossip_client: Client,
     irys_api_client: T,
@@ -114,6 +117,8 @@ where
             peer_list_cache: HashMap::new(),
             known_peers_cache: HashSet::new(),
             currently_running_announcements: HashSet::new(),
+            successful_announcements: HashMap::new(),
+            failed_announcements: HashMap::new(),
             gossip_client: Client::new(),
             irys_api_client,
             chain_id: config.consensus.chain_id,
@@ -292,6 +297,8 @@ where
                     .insert(entry.address.gossip.ip(), mining_addr);
                 self.peer_list_cache.insert(mining_addr, entry.0);
                 self.known_peers_cache.insert(address);
+                self.api_addr_to_mining_addr_map
+                    .insert(address.api, mining_addr);
             }
         } else {
             return Err(PeerListServiceError::DatabaseNotConnected);
@@ -473,6 +480,10 @@ where
                 Ok(peer_response)
             }
             Err(error) => {
+                debug!(
+                    "Retrying to announce yourself to address {}: {:?}",
+                    api_address, error
+                );
                 // This is likely due to the networking error, we need to retry later
                 send_message_and_print_error(
                     AnnounceFinished::retry(api_address),
@@ -834,6 +845,12 @@ where
 
     fn handle(&mut self, msg: NewPotentialPeer, ctx: &mut Self::Context) -> Self::Result {
         debug!("NewPotentialPeer message received: {:?}", msg.api_address);
+
+        if self.successful_announcements.contains_key(&msg.api_address) && !msg.force_announce {
+            debug!("Already announced to peer {:?}", msg.api_address);
+            return;
+        }
+
         let already_in_cache = self
             .api_addr_to_mining_addr_map
             .contains_key(&msg.api_address);
@@ -864,7 +881,7 @@ where
 }
 
 /// Handle potential new peer
-#[derive(Message, Debug)]
+#[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
 pub struct AnnounceFinished {
     pub peer_api_address: SocketAddr,
@@ -904,7 +921,14 @@ where
                 let address = ctx.address();
                 ctx.spawn(send_message_and_print_error(message, address).into_actor(service));
             });
+        } else if !msg.success && !msg.retry {
+            self.failed_announcements
+                .insert(msg.peer_api_address, msg.clone());
+            self.currently_running_announcements
+                .remove(&msg.peer_api_address);
         } else {
+            self.successful_announcements
+                .insert(msg.peer_api_address, msg.clone());
             self.currently_running_announcements
                 .remove(&msg.peer_api_address);
         }

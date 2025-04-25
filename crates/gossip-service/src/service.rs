@@ -22,7 +22,7 @@ use core::time::Duration;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::TxExistenceQuery;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
-use irys_actors::peer_list_service::{TopActivePeersRequest, PeerListServiceWithClient};
+use irys_actors::peer_list_service::{PeerListServiceWithClient, TopActivePeersRequest};
 use irys_api_client::ApiClient;
 use irys_types::{DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
 use rand::prelude::SliceRandom as _;

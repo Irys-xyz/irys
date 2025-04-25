@@ -36,7 +36,11 @@ pub trait ApiClient: Send + Sync + Clone {
         -> Result<PeerResponse>;
 
     /// Gets block by hash
-    async fn get_block_by_hash(&self, peer: SocketAddr, block_hash: H256) -> Result<Option<CombinedBlockHeader>>;
+    async fn get_block_by_hash(
+        &self,
+        peer: SocketAddr,
+        block_hash: H256,
+    ) -> Result<Option<CombinedBlockHeader>>;
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
@@ -165,9 +169,15 @@ impl ApiClient for IrysApiClient {
         }
     }
 
-    async fn get_block_by_hash(&self, peer: SocketAddr, block_hash: H256) -> Result<Option<CombinedBlockHeader>> {
+    async fn get_block_by_hash(
+        &self,
+        peer: SocketAddr,
+        block_hash: H256,
+    ) -> Result<Option<CombinedBlockHeader>> {
         let path = format!("/block/{}", block_hash.0.to_base58());
-        let response = self.make_request::<CombinedBlockHeader, _>(peer, "GET", &path, None::<&()>).await;
+        let response = self
+            .make_request::<CombinedBlockHeader, _>(peer, "GET", &path, None::<&()>)
+            .await;
         match response {
             Ok(Some(block)) => Ok(Some(block)),
             Ok(None) => Ok(None),
@@ -225,8 +235,12 @@ pub mod test_utils {
         ) -> eyre::Result<()> {
             Ok(())
         }
-        
-        async fn get_block_by_hash(&self, _peer: std::net::SocketAddr, _block_hash: H256) -> eyre::Result<Option<CombinedBlockHeader>> {
+
+        async fn get_block_by_hash(
+            &self,
+            _peer: std::net::SocketAddr,
+            _block_hash: H256,
+        ) -> eyre::Result<Option<CombinedBlockHeader>> {
             Ok(None)
         }
     }
@@ -284,7 +298,11 @@ mod tests {
             Ok(())
         }
 
-        async fn get_block_by_hash(&self, _peer: SocketAddr, _block_hash: H256) -> Result<Option<CombinedBlockHeader>> {
+        async fn get_block_by_hash(
+            &self,
+            _peer: SocketAddr,
+            _block_hash: H256,
+        ) -> Result<Option<CombinedBlockHeader>> {
             Ok(None)
         }
     }

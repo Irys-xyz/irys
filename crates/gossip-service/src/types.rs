@@ -1,6 +1,6 @@
+use crate::block_pool_service::BlockPoolError;
 use irys_actors::mempool_service::TxIngressError;
 use thiserror::Error;
-use crate::block_pool_service::BlockPoolError;
 
 #[derive(Debug, Error)]
 pub enum GossipError {
