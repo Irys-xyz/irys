@@ -1,5 +1,6 @@
 use crate::utils::{mine_block, IrysNodeTest};
 use irys_actors::block_tree_service::get_canonical_chain;
+use irys_testing_utils::utils::temporary_directory;
 use irys_types::NodeConfig;
 use std::time::Duration;
 
@@ -45,9 +46,14 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()> {
-    // setup
+    // setup consistent test directory for this test
+    let temp_dir = temporary_directory(None, false);
+    let test_dir = temp_dir.path().to_path_buf();
+
     let config = NodeConfig::testnet();
-    let node = IrysNodeTest::new(config.clone()).await;
+
+    let mut node = IrysNodeTest::new_genesis(config.clone()).await;
+    node.cfg.base_directory = test_dir.clone();
 
     // action:
     // 1. start the genesis node;
@@ -60,7 +66,8 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
     // stop the node
     ctx.stop().await;
 
-    let node = IrysNodeTest::new(config).await;
+    let mut node = IrysNodeTest::new(config.clone()).await;
+    node.cfg.base_directory = test_dir;
     let ctx = node.start().await;
 
     // assert -- expect that the non genesis node can continue with the genesis data
