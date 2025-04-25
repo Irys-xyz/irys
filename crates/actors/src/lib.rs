@@ -7,6 +7,7 @@ pub mod block_validation;
 pub mod broadcast_mining_service;
 pub mod cache_service;
 pub mod chunk_migration_service;
+pub mod commitment_cache;
 pub mod ema_service;
 pub mod epoch_service;
 pub mod mempool_service;
@@ -20,4 +21,5 @@ pub mod vdf_service;
 
 pub use addresses::*;
 pub use block_producer::*;
+pub use commitment_cache::*;
 pub use epoch_service::*;

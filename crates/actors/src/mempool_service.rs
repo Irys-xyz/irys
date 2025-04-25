@@ -1,5 +1,7 @@
 use crate::block_producer::BlockConfirmedMessage;
 use crate::block_tree_service::BlockTreeReadGuard;
+use crate::services::ServiceSenders;
+use crate::{CommitmentCacheMessage, CommitmentStatus};
 use actix::{Actor, Context, Handler, Message, Supervised, SystemService};
 use base58::ToBase58 as _;
 use core::fmt::Display;
@@ -13,12 +15,14 @@ use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
-use irys_types::Config;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, GossipData,
     IrysTransactionHeader, H256,
 };
-use irys_types::{DataRoot, U256};
+use irys_types::{
+    CommitmentTransaction, Config, DataRoot, IrysBlockHeader, IrysTransactionId,
+    SignatureValidation, U256,
+};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::transaction::DbTx as _;
@@ -26,6 +30,7 @@ use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use tracing::{debug, error, info, warn};
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
@@ -43,6 +48,8 @@ pub struct MempoolService {
     config: Config,
     storage_modules: StorageModuleVec,
     block_tree_read_guard: BlockTreeReadGuard,
+    /// Reference to all the services we can send messages to
+    service_senders: ServiceSenders,
     gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
 }
 
@@ -71,6 +78,7 @@ impl MempoolService {
         storage_modules: StorageModuleVec,
         block_tree_read_guard: BlockTreeReadGuard,
         config: &Config,
+        service_senders: ServiceSenders,
         gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         info!("service started");
@@ -83,8 +91,83 @@ impl MempoolService {
             config: config.clone(),
             storage_modules,
             block_tree_read_guard,
+            service_senders,
             gossip_tx,
         }
+    }
+    // Helper to get the canonical chain and latest height
+    fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
+        let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
+        let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
+            "unable to get canonical chain from block tree".to_owned(),
+        ))?;
+
+        Ok(*latest_height)
+    }
+
+    // Helper to validate anchor
+    fn validate_anchor(
+        &mut self,
+        tx_id: &IrysTransactionId,
+        anchor: &H256,
+    ) -> Result<IrysBlockHeader, TxIngressError> {
+        let read_tx = &self
+            .irys_db
+            .tx()
+            .map_err(|_| TxIngressError::DatabaseError)?;
+
+        let latest_height = self.get_latest_block_height()?;
+        let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
+
+        match irys_database::block_header_by_hash(read_tx, anchor, false) {
+            Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
+                debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
+                Ok(hdr)
+            }
+            _ => {
+                self.invalid_tx.push(tx_id.clone());
+                warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
+                Err(TxIngressError::InvalidAnchor)
+            }
+        }
+    }
+
+    // Helper to verify signature
+    fn validate_signature<T: SignatureValidation>(&mut self, tx: &T) -> Result<(), TxIngressError> {
+        if tx.is_signature_valid() {
+            info!("Signature is valid");
+            Ok(())
+        } else {
+            self.invalid_tx.push(tx.id());
+            debug!("Signature is NOT valid");
+            Err(TxIngressError::InvalidSignature)
+        }
+    }
+
+    // Helper to execute async operation in a synchronous handler
+    // TODO: This is actually bad, we spawn a thread to perform the async
+    // operation from a sync context, to fix the mempool service needs to be
+    // converted to a new style service with async handlers.
+    fn execute_async_operation<T, F, Fut>(&self, operation: F) -> Result<T, TxIngressError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = T>,
+        T: Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let result = rt.block_on(operation());
+            tx.send(result)
+                .expect("Failed to send result back to handler thread");
+        });
+
+        Ok(rx.recv().expect("Failed to receive result from thread"))
     }
 }
 
@@ -93,6 +176,10 @@ impl MempoolService {
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(),TxIngressError>")]
 pub struct TxIngressMessage(pub IrysTransactionHeader);
+
+#[derive(Message, Debug)]
+#[rtype(result = "Result<(),TxIngressError>")]
+pub struct CommitmentTxIngressMessage(pub CommitmentTransaction);
 
 /// Reasons why Transaction Ingress might fail
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,68 +266,51 @@ impl Handler<TxIngressMessage> for MempoolService {
             &tx.id.0.to_base58(),
             &tx.data_root.0.to_base58()
         );
+
         // Early out if we already know about this transaction
         if self.invalid_tx.contains(&tx.id) || self.valid_tx.contains_key(&tx.id) {
-            // Skip tx reprocessing if already verified (valid or invalid) to prevent
-            // CPU-intensive signature verification spam attacks
             return Err(TxIngressError::Skipped);
         }
+
+        // Validate anchor
+        let hdr = self.validate_anchor(&tx.id, &tx.anchor)?;
 
         let read_tx = &self
             .irys_db
             .tx()
-            .map_err(|_| TxIngressError::DatabaseError)?; // we use `&` here to make this a `temporary`, which means rust will automatically drop it when we're done using it, instead of at the end of a block like usual
+            .map_err(|_| TxIngressError::DatabaseError)?;
         let read_reth_tx = &self
             .reth_db
             .tx()
             .map_err(|_| TxIngressError::DatabaseError)?;
 
-        // validate the `anchor` value
-        // it should be a block hash for a known, confirmed block (TODO: add tx hash support!)
-
-        let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
-
-        let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
-            "unable to get canonical chain from block tree".to_owned(),
-        ))?;
-
-        let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
-        match irys_database::block_header_by_hash(read_tx, &tx.anchor, false) {
-            // note: we use addition here as it's safer
-            Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= *latest_height => {
-                debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id);
-                // update any associated ingress proofs
-                if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
-                    let new_expiry = hdr.height + anchor_expiry_depth;
-                    debug!(
-                        "Updating ingress proof for data root {} expiry from {} -> {}",
-                        &tx.data_root, &old_expiry.last_height, &new_expiry
+        // Update any associated ingress proofs
+        if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
+            let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
+            let new_expiry = hdr.height + anchor_expiry_depth;
+            debug!(
+                "Updating ingress proof for data root {} expiry from {} -> {}",
+                &tx.data_root, &old_expiry.last_height, &new_expiry
+            );
+            self.irys_db
+                .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
+                .map_err(|e| {
+                    error!(
+                        "Error updating ingress proof expiry for {} - {}",
+                        &tx.data_root, &e
                     );
-                    self.irys_db
-                        .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
-                        .map_err(|e| {
-                            error!(
-                                "Error updating ingress proof expiry for {} - {}",
-                                &tx.data_root, &e
-                            );
-                            TxIngressError::DatabaseError
-                        })?
-                        .map_err(|e| {
-                            error!(
-                                "Error updating ingress proof expiry for {} - {}",
-                                &tx.data_root, &e
-                            );
-                            TxIngressError::DatabaseError
-                        })?;
-                }
-            }
-            _ => {
-                self.invalid_tx.push(tx.id);
-                warn!("Invalid anchor value {} for tx {}", &tx.anchor, &tx.id);
-                return Err(TxIngressError::InvalidAnchor);
-            }
-        };
+                    TxIngressError::DatabaseError
+                })?
+                .map_err(|e| {
+                    error!(
+                        "Error updating ingress proof expiry for {} - {}",
+                        &tx.data_root, &e
+                    );
+                    TxIngressError::DatabaseError
+                })?;
+        }
 
+        // Check account balance
         if irys_database::get_account_balance(read_reth_tx, tx_msg.0.signer)
             .map_err(|_| TxIngressError::DatabaseError)?
             < U256::from(tx_msg.0.total_fee())
@@ -249,23 +319,17 @@ impl Handler<TxIngressMessage> for MempoolService {
         }
 
         // Validate the transaction signature
-        if tx.is_signature_valid() {
-            println!("Signature is valid");
-            self.valid_tx.insert(tx.id, tx.clone());
-        } else {
-            self.invalid_tx.push(tx.id);
-            println!("Signature is NOT valid");
-            return Err(TxIngressError::InvalidSignature);
-        }
+        self.validate_signature(tx)?;
+        self.valid_tx.insert(tx.id, tx.clone());
 
         // Cache the data_root in the database
-
         let _ = self.irys_db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, tx)?;
             irys_database::insert_tx_header(db_tx, tx)?;
             Ok(())
         });
 
+        // Gossip transaction
         let gossip_sender = self.gossip_tx.clone();
         let gossip_data = GossipData::Transaction(tx.clone());
 
@@ -276,6 +340,84 @@ impl Handler<TxIngressMessage> for MempoolService {
         });
 
         Ok(())
+    }
+}
+
+/// Needs to be refactored when this handler can be made async.
+/// Mixing async and sync code is fugly.
+
+impl Handler<CommitmentTxIngressMessage> for MempoolService {
+    type Result = Result<(), TxIngressError>;
+
+    fn handle(
+        &mut self,
+        commitment_tx_msg: CommitmentTxIngressMessage,
+        _ctx: &mut Context<Self>,
+    ) -> Self::Result {
+        let commitment_tx = commitment_tx_msg.0.clone();
+        debug!(
+            "received commitment tx {:?}",
+            &commitment_tx.id.0.to_base58()
+        );
+
+        // Early out if we already know about this transaction
+        if self.invalid_tx.contains(&commitment_tx.id) {
+            return Err(TxIngressError::Skipped);
+        }
+
+        // Validate anchor
+        self.validate_anchor(&commitment_tx.id, &commitment_tx.anchor)?;
+
+        // Get commitment status asynchronously
+        let commitment_cache = self.service_senders.commitment_cache.clone();
+        let commitment_tx_clone = commitment_tx.clone();
+
+        let status = self
+            .execute_async_operation(|| async move {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+
+                let _ = commitment_cache.send(CommitmentCacheMessage::GetCommitmentStatus {
+                    commitment_tx: commitment_tx_clone,
+                    response: oneshot_tx,
+                });
+
+                oneshot_rx
+                    .await
+                    .expect("to receive CommitmentStatus from GetCommitmentStatus message")
+            })
+            .unwrap();
+
+        if status != CommitmentStatus::Unknown {
+            return Err(TxIngressError::Skipped);
+        }
+
+        // Validate signature
+        self.validate_signature(&commitment_tx)?;
+
+        // Add commitment asynchronously
+        let commitment_cache = self.service_senders.commitment_cache.clone();
+        let commitment_tx_clone = commitment_tx.clone();
+
+        let status = self
+            .execute_async_operation(|| async move {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+
+                let _ = commitment_cache.send(CommitmentCacheMessage::AddCommitment {
+                    commitment_tx: commitment_tx_clone,
+                    response: oneshot_tx,
+                });
+
+                oneshot_rx
+                    .await
+                    .expect("to receive CommitmentStatus from AddCommitment message")
+            })
+            .unwrap();
+
+        if status == CommitmentStatus::Accepted {
+            Ok(())
+        } else {
+            Err(TxIngressError::Skipped)
+        }
     }
 }
 

@@ -3,8 +3,8 @@ use crate::peer_utilities::{fetch_genesis_block, sync_state_from_peers};
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
+use irys_actors::ema_service::EmaServiceMessage;
 use irys_actors::packing::PackingConfig;
-use irys_actors::EpochReplayData;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -26,6 +26,7 @@ use irys_actors::{
     vdf_service::{GetVdfStateMessage, VdfService},
     ActorAddresses, BlockFinalizedMessage,
 };
+use irys_actors::{CommitmentCache, EpochReplayData, GetCommitmentStateGuardMessage};
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::StorageSubmodulesConfig;
@@ -70,6 +71,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, warn};
 
@@ -92,6 +94,21 @@ pub struct IrysNodeCtx {
 }
 
 impl IrysNodeCtx {
+    pub fn get_api_state(&self, ema_service: UnboundedSender<EmaServiceMessage>) -> ApiState {
+        ApiState {
+            mempool: self.actor_addresses.mempool.clone(),
+            chunk_provider: self.chunk_provider.clone(),
+            ema_service: ema_service,
+            peer_list: self.actor_addresses.peer_list.clone(),
+            db: self.db.clone(),
+            config: self.config.clone(),
+            reth_provider: self.reth_handle.clone(),
+            reth_http_url: self.reth_handle.rpc_server_handle().http_url().unwrap(),
+            block_tree: self.block_tree_guard.clone(),
+            block_index: self.block_index_guard.clone(),
+        }
+    }
+
     pub async fn stop(self) {
         let _ = self.actor_addresses.stop_mining();
         debug!("Sending shutdown signal to reth thread");
@@ -647,6 +664,11 @@ impl IrysNode {
             .await?;
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
 
+        // Retrieve Commitment State
+        let commitment_state_guard = epoch_service_actor
+            .send(GetCommitmentStateGuardMessage)
+            .await?;
+
         let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
             &config.node_config.gossip.bind_ip,
             config.node_config.gossip.port,
@@ -666,6 +688,14 @@ impl IrysNode {
         let _handle =
             EmaService::spawn_service(&task_exec, block_tree_guard.clone(), receivers.ema, &config);
 
+        // Spawn the CommitmentCache service
+        let _handle = CommitmentCache::spawn_service(
+            &task_exec,
+            receivers.pending_commitments_cache,
+            commitment_state_guard,
+            &config,
+        );
+
         // Spawn peer list service
         let (peer_list_service, peer_list_arbiter) = init_peer_list_service(&irys_db, &config);
 
@@ -677,6 +707,7 @@ impl IrysNode {
             reth_db,
             &storage_modules,
             &block_tree_guard,
+            &service_senders,
             gossip_tx.clone(),
         );
 
@@ -1131,6 +1162,7 @@ impl IrysNode {
         reth_db: irys_database::db::RethDbWrapper,
         storage_modules: &Vec<Arc<StorageModule>>,
         block_tree_guard: &BlockTreeReadGuard,
+        service_senders: &ServiceSenders,
         gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> (actix::Addr<MempoolService>, Arbiter) {
         let mempool_service = MempoolService::new(
@@ -1140,6 +1172,7 @@ impl IrysNode {
             storage_modules.clone(),
             block_tree_guard.clone(),
             &config,
+            service_senders.clone(),
             gossip_tx,
         );
         let mempool_arbiter = Arbiter::new();

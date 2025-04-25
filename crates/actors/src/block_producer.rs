@@ -59,7 +59,7 @@ pub struct BlockProducerActor {
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     /// Tracks the global state of partition assignments on the protocol
     pub epoch_service: Addr<EpochServiceActor>,
-    /// Tracks the global state of partition assignments on the protocol
+    /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,

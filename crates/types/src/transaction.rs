@@ -212,6 +212,10 @@ pub struct CommitmentTransaction {
     #[serde(with = "string_u64")]
     pub chain_id: u64,
 
+    /// Pay the fee required to mitigate tx spam
+    #[serde(with = "string_u64")]
+    pub fee: u64,
+
     /// Transaction signature bytes
     #[rlp(skip)]
     #[rlp(default)]
@@ -237,6 +241,32 @@ impl CommitmentTransaction {
     pub fn is_signature_valid(&self) -> bool {
         self.signature
             .validate_signature(self.signature_hash(), self.signer)
+    }
+}
+
+// Trait to abstract common behavior
+pub trait SignatureValidation {
+    fn is_signature_valid(&self) -> bool;
+    fn id(&self) -> IrysTransactionId;
+}
+
+impl SignatureValidation for IrysTransactionHeader {
+    fn is_signature_valid(&self) -> bool {
+        self.is_signature_valid()
+    }
+
+    fn id(&self) -> IrysTransactionId {
+        self.id
+    }
+}
+
+impl SignatureValidation for CommitmentTransaction {
+    fn is_signature_valid(&self) -> bool {
+        self.is_signature_valid()
+    }
+
+    fn id(&self) -> IrysTransactionId {
+        self.id
     }
 }
 
@@ -401,6 +431,7 @@ mod tests {
             signer: Address::default(),
             commitment_type: CommitmentType::Stake,
             version: 0,
+            fee: 1,
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
         };
