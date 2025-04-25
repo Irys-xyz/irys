@@ -120,6 +120,7 @@ async fn heavy_api_client_all_endpoints_should_work() {
 
     check_post_version_endpoint(&api_client, api_address).await;
     check_transaction_endpoints(&api_client, api_address, &ctx).await;
+    check_get_block_endpoint(&api_client, api_address, &ctx).await;
 
     ctx.node_ctx.stop().await;
 }

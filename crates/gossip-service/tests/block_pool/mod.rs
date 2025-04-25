@@ -1,4 +1,4 @@
-use super::util::MockRethServiceActor;
+use crate::util::MockRethServiceActor;
 use actix::{Actor, Handler, Message};
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
