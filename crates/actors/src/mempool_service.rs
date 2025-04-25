@@ -183,6 +183,7 @@ impl Handler<TxIngressMessage> for MempoolService {
         if self.invalid_tx.contains(&tx.id) || self.valid_tx.contains_key(&tx.id) {
             // Skip tx reprocessing if already verified (valid or invalid) to prevent
             // CPU-intensive signature verification spam attacks
+            info!("tx {} already known", &tx.id.0.to_base58());
             return Err(TxIngressError::Skipped);
         }
 
@@ -264,11 +265,27 @@ impl Handler<TxIngressMessage> for MempoolService {
 
         // Cache the data_root in the database
 
-        let _ = self.irys_db.update_eyre(|db_tx| {
+        match self.irys_db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, tx)?;
             irys_database::insert_tx_header(db_tx, tx)?;
             Ok(())
-        });
+        }) {
+            Ok(()) => {
+                info!(
+                    "Successfully cached data_root {:?} for tx {:?}",
+                    tx.data_root,
+                    tx.id.0.to_base58()
+                );
+            }
+            Err(db_error) => {
+                error!(
+                    "Failed to cache data_root {:?} for tx {:?}: {:?}",
+                    tx.data_root,
+                    tx.id.0.to_base58(),
+                    db_error
+                );
+            }
+        };
 
         let gossip_sender = self.gossip_tx.clone();
         let gossip_data = GossipData::Transaction(tx.clone());
