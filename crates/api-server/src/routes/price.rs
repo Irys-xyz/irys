@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::ApiState;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct PriceInfo {
     pub cost_in_irys: U256,
     pub ledger: u32,
@@ -53,7 +54,7 @@ pub async fn get_price(
                 bytes: bytes_to_store,
             }))
         }
-        DataLedger::Submit => Err(ErrorBadRequest("Term ledeger not supported")),
+        DataLedger::Submit => Err(ErrorBadRequest("Term ledger not supported")),
     }
 }
 
