@@ -4271,6 +4271,7 @@ name = "irys-gossip-service"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "actix-rt",
  "actix-web",
  "async-trait",
  "base58",

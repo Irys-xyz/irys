@@ -1,5 +1,6 @@
 use irys_actors::mempool_service::TxIngressError;
 use thiserror::Error;
+use crate::block_pool_service::BlockPoolError;
 
 #[derive(Debug, Error)]
 pub enum GossipError {
@@ -13,6 +14,8 @@ pub enum GossipError {
     Internal(InternalGossipError),
     #[error("Invalid data: {0}")]
     InvalidData(InvalidDataError),
+    #[error("Block pool error: {0:?}")]
+    BlockPool(BlockPoolError),
 }
 
 impl GossipError {

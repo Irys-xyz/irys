@@ -668,19 +668,19 @@ where
 /// Get the list of active peers
 #[derive(Message, Debug)]
 #[rtype(result = "Vec<PeerListItem>")]
-pub struct ActivePeersRequest {
+pub struct TopActivePeersRequest {
     pub truncate: Option<usize>,
     pub exclude_peers: HashSet<SocketAddr>,
 }
 
-impl<T, R> Handler<ActivePeersRequest> for PeerListServiceWithClient<T, R>
+impl<T, R> Handler<TopActivePeersRequest> for PeerListServiceWithClient<T, R>
 where
     T: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Vec<PeerListItem>;
 
-    fn handle(&mut self, msg: ActivePeersRequest, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: TopActivePeersRequest, _ctx: &mut Self::Context) -> Self::Result {
         let mut peers: Vec<PeerListItem> = self.peer_list_cache.values().cloned().collect();
         tracing::trace!("ActivePeersRequest: {} peers before retain()", peers.len());
         tracing::trace!("ActivePeersRequest: peers {:?})", peers);
@@ -937,7 +937,7 @@ where
                     tokio::time::sleep(Duration::from_secs(1)).await;
 
                     let active_peers = addr
-                        .send(ActivePeersRequest {
+                        .send(TopActivePeersRequest {
                             truncate: None,
                             exclude_peers: HashSet::new(),
                         })
@@ -1249,7 +1249,7 @@ mod tests {
         // Test active peers request using message handler
         let exclude_peers = HashSet::new();
         let active_peers = service.handle(
-            ActivePeersRequest {
+            TopActivePeersRequest {
                 truncate: Some(2),
                 exclude_peers,
             },
@@ -1351,7 +1351,7 @@ mod tests {
 
         let exclude_peers = HashSet::new();
         let active_peers = empty_service.handle(
-            ActivePeersRequest {
+            TopActivePeersRequest {
                 truncate: None,
                 exclude_peers,
             },
@@ -1957,7 +1957,7 @@ mod tests {
 
         // Verify we don't have any peers
         let active_peers = service_addr
-            .send(ActivePeersRequest {
+            .send(TopActivePeersRequest {
                 truncate: None,
                 exclude_peers: HashSet::new(),
             })
@@ -2008,7 +2008,7 @@ mod tests {
 
         // Verify we now have a peer
         let active_peers = service_addr
-            .send(ActivePeersRequest {
+            .send(TopActivePeersRequest {
                 truncate: None,
                 exclude_peers: HashSet::new(),
             })
@@ -2048,7 +2048,7 @@ mod tests {
 
         // Verify we don't have any peers
         let active_peers = service_addr
-            .send(ActivePeersRequest {
+            .send(TopActivePeersRequest {
                 truncate: None,
                 exclude_peers: HashSet::new(),
             })
@@ -2083,7 +2083,7 @@ mod tests {
 
         // Verify we still have no peers
         let active_peers = service_addr
-            .send(ActivePeersRequest {
+            .send(TopActivePeersRequest {
                 truncate: None,
                 exclude_peers: HashSet::new(),
             })

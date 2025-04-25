@@ -4,7 +4,7 @@ pub mod server;
 mod server_data_handler;
 pub mod service;
 pub mod types;
-mod block_pool_service;
+pub mod block_pool_service;
 
 pub use cache::GossipCache;
 pub use client::GossipClient;

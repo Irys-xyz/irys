@@ -22,7 +22,7 @@ use core::time::Duration;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::TxExistenceQuery;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
-use irys_actors::peer_list_service::{ActivePeersRequest, PeerListServiceWithClient};
+use irys_actors::peer_list_service::{TopActivePeersRequest, PeerListServiceWithClient};
 use irys_api_client::ApiClient;
 use irys_types::{DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
 use rand::prelude::SliceRandom as _;
@@ -237,7 +237,7 @@ impl GossipService {
 
         // Get all active peers except the source
         let mut peers: Vec<PeerListItem> = peer_list_service
-            .send(ActivePeersRequest {
+            .send(TopActivePeersRequest {
                 truncate: None,
                 exclude_peers,
             })

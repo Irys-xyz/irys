@@ -1,4 +1,4 @@
-use crate::block_pool_service::{AddBlock, BlockPoolService};
+use crate::block_pool_service::{ProcessBlock, BlockPoolService};
 use crate::types::{tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError};
 use crate::{GossipCache, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
@@ -301,12 +301,12 @@ where
         )?;
 
         self.block_pool
-            .send(AddBlock {
+            .send(ProcessBlock {
                 header: irys_block_header,
             })
             .await
             .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
-            .map_err(|error_report| GossipError::unknown(&error_report))?;
+            .map_err(|block_pool_error| GossipError::BlockPool(block_pool_error))?;
         Ok(())
     }
 

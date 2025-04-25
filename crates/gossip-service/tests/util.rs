@@ -14,11 +14,7 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
-use irys_types::{
-    AcceptedResponse, Base64, Config, DatabaseProvider, GossipData, IrysBlockHeader,
-    IrysTransaction, IrysTransactionHeader, NodeConfig, PeerAddress, PeerListItem, PeerResponse,
-    PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
-};
+use irys_types::{AcceptedResponse, Base64, CombinedBlockHeader, Config, DatabaseProvider, GossipData, IrysBlockHeader, IrysTransaction, IrysTransactionHeader, NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::net::TcpListener;
@@ -211,6 +207,10 @@ impl ApiClient for StubApiClient {
         _transaction: IrysTransactionHeader,
     ) -> Result<()> {
         Ok(())
+    }
+
+    async fn get_block_by_hash(&self, _peer: SocketAddr, _block_hash: H256) -> Result<Option<CombinedBlockHeader>> {
+        Ok(None)
     }
 }
 

@@ -1,6 +1,6 @@
 use base58::ToBase58;
 use eyre::Result;
-use irys_types::{IrysTransactionHeader, PeerResponse, VersionRequest, H256};
+use irys_types::{CombinedBlockHeader, IrysTransactionHeader, PeerResponse, VersionRequest, H256};
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
@@ -34,6 +34,9 @@ pub trait ApiClient: Send + Sync + Clone {
     /// information.
     async fn post_version(&self, peer: SocketAddr, version: VersionRequest)
         -> Result<PeerResponse>;
+
+    /// Gets block by hash
+    async fn get_block_by_hash(&self, peer: SocketAddr, block_hash: H256) -> Result<Option<CombinedBlockHeader>>;
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
@@ -161,6 +164,19 @@ impl ApiClient for IrysApiClient {
             }
         }
     }
+
+    async fn get_block_by_hash(&self, peer: SocketAddr, block_hash: H256) -> Result<Option<CombinedBlockHeader>> {
+        let path = format!("/block/{}", block_hash.0.to_base58());
+        let response = self.make_request::<CombinedBlockHeader, _>(peer, "GET", &path, None::<&()>).await;
+        match response {
+            Ok(Some(block)) => Ok(Some(block)),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                error!("Failed to get block: {}", e);
+                Err(e)
+            }
+        }
+    }
 }
 
 #[cfg(feature = "test-utils")]
@@ -208,6 +224,10 @@ pub mod test_utils {
             _transaction: IrysTransactionHeader,
         ) -> eyre::Result<()> {
             Ok(())
+        }
+        
+        async fn get_block_by_hash(&self, _peer: std::net::SocketAddr, _block_hash: H256) -> eyre::Result<Option<CombinedBlockHeader>> {
+            Ok(None)
         }
     }
 }
@@ -262,6 +282,10 @@ mod tests {
             _tx: IrysTransactionHeader,
         ) -> Result<()> {
             Ok(())
+        }
+
+        async fn get_block_by_hash(&self, _peer: SocketAddr, _block_hash: H256) -> Result<Option<CombinedBlockHeader>> {
+            Ok(None)
         }
     }
 
