@@ -16,7 +16,12 @@ pub fn save_genesis_block_to_disk(
     let json = serde_json::to_string_pretty(&genesis_block)
         .expect("genesis block should convert to json string");
     // ensure base_directory exists and create if not
-    create_dir_all(&base_directory);
+    if let Err(e) = create_dir_all(&base_directory) {
+        panic!(
+            "unable to recursively read or create directory \"{:?}\" error {}",
+            base_directory, e
+        );
+    }
     // write genesis block to disk
     let mut file = File::create(Path::new(&base_directory).join(GENESIS_BLOCK_FILENAME))?;
     file.write_all(json.as_bytes())?;
