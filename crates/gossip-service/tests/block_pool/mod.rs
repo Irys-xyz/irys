@@ -14,6 +14,7 @@ use irys_types::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use base58::ToBase58;
 use tracing::debug;
 
 #[derive(Clone, Default, Debug)]
@@ -152,7 +153,7 @@ async fn should_process_block() {
             .expect("to insert block");
         debug!(
             "Inserted parent block {:?} for block {:?}",
-            parent_block_header.block_hash, test_header.block_hash
+            parent_block_header.block_hash.0.to_base58(), test_header.block_hash.0.to_base58()
         );
     }
 
@@ -161,11 +162,15 @@ async fn should_process_block() {
         .expect("to fetch a block")
         .expect("block should exist");
 
-    debug!("Block in the db: {:?}", fetched_block.block_hash);
+    debug!("Block in the db: {}", fetched_block.block_hash.0.to_base58());
+    debug!(
+        "Block previous_block_hash: {:?}",
+        fetched_block.previous_block_hash.0.to_base58()
+    );
 
     debug!(
         "Previous block hash: {:?}",
-        test_header.previous_block_hash.to_string()
+        test_header.previous_block_hash.0.to_base58()
     );
 
     addr.send(ProcessBlock {
@@ -227,20 +232,20 @@ async fn should_process_block_with_intermediate_block_in_api() {
     block3.block_hash = BlockHash::random();
     block3.previous_block_hash = block2.block_hash;
 
-    debug!("Block 1: {:?}", block1.block_hash);
-    debug!("Block 2: {:?}", block2.block_hash);
-    debug!("Block 3: {:?}", block3.block_hash);
+    debug!("Block 1: {:?}", block1.block_hash.0.to_base58());
+    debug!("Block 2: {:?}", block2.block_hash.0.to_base58());
+    debug!("Block 3: {:?}", block3.block_hash.0.to_base58());
     debug!(
         "Block 1 previous_block_hash: {:?}",
-        block1.previous_block_hash
+        block1.previous_block_hash.0.to_base58()
     );
     debug!(
         "Block 2 previous_block_hash: {:?}",
-        block2.previous_block_hash
+        block2.previous_block_hash.0.to_base58()
     );
     debug!(
         "Block 3 previous_block_hash: {:?}",
-        block3.previous_block_hash
+        block3.previous_block_hash.0.to_base58()
     );
 
     // Setup MockApiClient to return block2 when queried
@@ -289,7 +294,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     {
         db.update_eyre(|tx| insert_block_header(tx, &block1))
             .expect("to insert block1");
-        debug!("Inserted block1 {:?} into database", block1.block_hash);
+        debug!("Inserted block1 {:?} into database", block1.block_hash.0.to_base58());
     }
 
     // Verify block1 is in the database
@@ -298,10 +303,10 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .expect("to fetch a block")
         .expect("block should exist");
 
-    debug!("Block in the db: {:?}", fetched_block.block_hash);
+    debug!("Block in the db: {:?}", fetched_block.block_hash.0.to_base58());
     debug!(
         "Block3 previous_block_hash: {:?}",
-        block3.previous_block_hash.to_string()
+        block3.previous_block_hash.0.to_base58()
     );
 
     // Process block3

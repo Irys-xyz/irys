@@ -108,6 +108,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // assert that genesis node is advertising the trusted peers it was given via config that succeeded in a handshake in trusted_peers_handshake_task()
     // i.e. the only good peer will be genesis at his point in the tests as other peers are not yet online
     // so we expect one peer, and we expect it to have the mining_address of the genesis node
+    error!("peer_list_items: {:?}", peer_list_items);
     assert_eq!(1, peer_list_items.len());
     assert_eq!(
         genesis_trusted_peers[0].api.ip(),

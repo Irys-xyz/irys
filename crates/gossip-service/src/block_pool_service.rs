@@ -11,6 +11,7 @@ use irys_database::reth_db::Database;
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use base58::ToBase58;
 use tracing::debug;
 
 #[derive(Debug)]
@@ -127,7 +128,7 @@ where
         block_header: IrysBlockHeader,
         ctx: &mut <BlockPoolService<A, R, B> as Actor>::Context,
     ) -> ResponseActFuture<Self, Result<(), BlockPoolError>> {
-        debug!("Processing block {:?}", block_header.block_hash);
+        debug!("Processing block {}", block_header.block_hash.0.to_base58());
         let prev_block_hash = block_header.previous_block_hash;
         let current_block_hash = block_header.block_hash;
         let self_addr = ctx.address();
@@ -137,8 +138,8 @@ where
         Box::pin(
             async move {
                 debug!(
-                    "Searching for parent block {:?} for block {:?} in the db",
-                    prev_block_hash, current_block_hash
+                    "Searching for parent block {} for block {} in the db",
+                    prev_block_hash.0.to_base58(), current_block_hash.0.to_base58()
                 );
                 // Check if the previous block is in the db
                 let maybe_previous_block_header = db
@@ -151,7 +152,7 @@ where
 
                 // If the parent block is in the db, process it
                 if let Some(previous_block_header) = maybe_previous_block_header {
-                    debug!("Found parent block for block {:?}", current_block_hash);
+                    debug!("Found parent block for block {}", current_block_hash.0.to_base58());
                     block_producer_addr
                         .as_ref()
                         .ok_or(BlockPoolError::OtherInternal(
@@ -181,8 +182,8 @@ where
                 }
 
                 debug!(
-                    "Parent block for block {:?} not found in db",
-                    current_block_hash
+                    "Parent block for block {} not found in db",
+                    current_block_hash.0.to_base58()
                 );
 
                 self_addr
@@ -364,7 +365,7 @@ where
                 for attempt in 1..=5 {
                     tracing::debug!(
                         "Attempting to fetch block {} from peer {} (attempt {}/5)",
-                        block_hash,
+                        block_hash.0.to_base58(),
                         peer.address.api,
                         attempt
                     );
@@ -376,7 +377,7 @@ where
                         Ok(Some(block)) => {
                             tracing::info!(
                                 "Successfully fetched block {} from peer {}",
-                                block_hash,
+                                block_hash.0.to_base58(),
                                 peer.address.api
                             );
 
@@ -398,7 +399,7 @@ where
                             tracing::debug!(
                                 "Peer {} doesn't have block {}",
                                 peer.address.api,
-                                block_hash
+                                block_hash.0.to_base58()
                             );
                             break;
                         }
@@ -406,7 +407,7 @@ where
                             last_error = Some(err);
                             tracing::warn!(
                                 "Failed to fetch block {} from peer {} (attempt {}/5): {}",
-                                block_hash,
+                                block_hash.0.to_base58(),
                                 peer.address.api,
                                 attempt,
                                 last_error.as_ref().unwrap()
@@ -427,7 +428,7 @@ where
 
             Err(BlockPoolError::OtherInternal(format!(
                 "Failed to fetch block {} after trying 5 peers: {:?}",
-                block_hash, last_error
+                block_hash.0.to_base58(), last_error
             )))
         };
 
