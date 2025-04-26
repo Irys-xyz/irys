@@ -29,7 +29,6 @@ pub enum CommitmentCacheMessage {
 pub enum CommitmentStatus {
     Accepted,        // The commitment is valid and was added to the cache
     Invalid(String), // The commitment failed validation with specific reason
-    Skipped,         // The commitment was skipped
     Unknown,         // The commitment is unknown to the cache & has no status
 }
 
@@ -221,7 +220,9 @@ impl Inner {
 
         // Early return for non-supported commitment types
         if !matches!(tx_type, CommitmentType::Stake | CommitmentType::Pledge) {
-            return send_status(CommitmentStatus::Skipped);
+            return send_status(CommitmentStatus::Invalid(
+                "unsupported commitment type".into(),
+            ));
         }
 
         // Get or create miner commitments entry
