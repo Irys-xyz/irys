@@ -1,17 +1,19 @@
+use crate::types::RequestedData;
+use crate::GossipClient;
 use actix::{
     Actor, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised,
     SystemService, WrapFuture,
 };
-use irys_actors::block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor};
-use irys_actors::peer_list_service::{PeerListService, PeerListServiceWithClient};
-use irys_actors::reth_service::RethServiceActor;
-use irys_api_client::{ApiClient, IrysApiClient};
+use base58::ToBase58;
+use irys_actors::block_discovery::BlockDiscoveredMessage;
+use irys_actors::peer_list_service::{PeerListFacade, PeerListFacadeError};
+use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::reth_db::Database;
-use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
-use std::collections::{HashMap, HashSet};
+use irys_types::{Address, BlockHash, DatabaseProvider, IrysBlockHeader, RethPeerInfo};
+use std::collections::HashMap;
 use std::sync::Arc;
-use base58::ToBase58;
+use std::time::Duration;
 use tracing::debug;
 
 #[derive(Debug)]
@@ -19,6 +21,16 @@ pub enum BlockPoolError {
     DatabaseError(eyre::Error),
     OtherInternal(String),
     BlockError(eyre::Error),
+}
+
+impl From<PeerListFacadeError> for BlockPoolError {
+    fn from(err: PeerListFacadeError) -> Self {
+        match err {
+            PeerListFacadeError::InternalError(error) => {
+                Self::OtherInternal(format!("Peer list error: {:?}", error))
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -33,10 +45,11 @@ where
     pub irys_api_client: A,
 
     pub orphaned_blocks_by_parent: HashMap<BlockHash, IrysBlockHeader>,
-    pub block_hashes: HashSet<BlockHash>,
+    pub block_hash_to_parent_hash: HashMap<BlockHash, BlockHash>,
 
     pub block_producer_addr: Option<Addr<B>>,
-    pub peer_list_addr: Option<Addr<PeerListServiceWithClient<A, R>>>,
+    pub peer_list: Option<PeerListFacade<A, R>>,
+    pub gossip_client: GossipClient,
 }
 
 impl<A, R, B> Default for BlockPoolService<A, R, B>
@@ -50,9 +63,10 @@ where
             db: None,
             irys_api_client: A::default(),
             orphaned_blocks_by_parent: HashMap::new(),
-            block_hashes: HashSet::new(),
+            block_hash_to_parent_hash: HashMap::new(),
             block_producer_addr: None,
-            peer_list_addr: None,
+            peer_list: None,
+            gossip_client: GossipClient::new(Duration::from_secs(5), Address::default()),
         }
     }
 }
@@ -86,21 +100,6 @@ where
 {
 }
 
-impl BlockPoolService<IrysApiClient, RethServiceActor, BlockDiscoveryActor> {
-    pub fn new(
-        db: DatabaseProvider,
-        peer_list_addr: Addr<PeerListService>,
-        block_discovery_addr: Addr<BlockDiscoveryActor>,
-    ) -> Self {
-        Self::new_with_client(
-            db,
-            IrysApiClient::default(),
-            peer_list_addr,
-            block_discovery_addr,
-        )
-    }
-}
-
 impl<A, R, B> BlockPoolService<A, R, B>
 where
     A: ApiClient + 'static + Unpin + Default,
@@ -110,16 +109,18 @@ where
     pub fn new_with_client(
         db: DatabaseProvider,
         irys_api_client: A,
-        peer_list_addr: Addr<PeerListServiceWithClient<A, R>>,
+        peer_list: PeerListFacade<A, R>,
         block_producer_addr: Addr<B>,
+        gossip_client: GossipClient,
     ) -> Self {
         Self {
             db: Some(db),
             irys_api_client,
             orphaned_blocks_by_parent: HashMap::new(),
-            block_hashes: HashSet::new(),
-            peer_list_addr: Some(peer_list_addr),
+            block_hash_to_parent_hash: HashMap::new(),
+            peer_list: Some(peer_list),
             block_producer_addr: Some(block_producer_addr),
+            gossip_client,
         }
     }
 
@@ -139,7 +140,8 @@ where
             async move {
                 debug!(
                     "Searching for parent block {} for block {} in the db",
-                    prev_block_hash.0.to_base58(), current_block_hash.0.to_base58()
+                    prev_block_hash.0.to_base58(),
+                    current_block_hash.0.to_base58()
                 );
                 // Check if the previous block is in the db
                 let maybe_previous_block_header = db
@@ -152,7 +154,10 @@ where
 
                 // If the parent block is in the db, process it
                 if let Some(previous_block_header) = maybe_previous_block_header {
-                    debug!("Found parent block for block {}", current_block_hash.0.to_base58());
+                    debug!(
+                        "Found parent block for block {}",
+                        current_block_hash.0.to_base58()
+                    );
                     block_producer_addr
                         .as_ref()
                         .ok_or(BlockPoolError::OtherInternal(
@@ -257,7 +262,8 @@ where
         if !already_in_cache {
             self.orphaned_blocks_by_parent
                 .insert(previous_block_hash, block_header);
-            self.block_hashes.insert(current_block_hash);
+            self.block_hash_to_parent_hash
+                .insert(current_block_hash, previous_block_hash);
         }
 
         Box::pin(
@@ -307,7 +313,7 @@ where
     fn handle(&mut self, msg: RemoveBlockFromPool, _ctx: &mut Self::Context) -> () {
         self.orphaned_blocks_by_parent
             .remove(&msg.parent_block_hash);
-        self.block_hashes.remove(&msg.block_hash);
+        self.block_hash_to_parent_hash.remove(&msg.block_hash);
     }
 }
 
@@ -326,14 +332,10 @@ where
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
-    fn handle(&mut self, msg: FetchAndProcessBlock, ctx: &mut Self::Context) -> Self::Result {
-        use irys_actors::peer_list_service::TopActivePeersRequest;
-        use std::collections::HashSet;
-
+    fn handle(&mut self, msg: FetchAndProcessBlock, _ctx: &mut Self::Context) -> Self::Result {
         let block_hash = msg.block_hash;
-        let peer_list_addr = self.peer_list_addr.clone();
-        let api_client = self.irys_api_client.clone();
-        let self_addr = ctx.address();
+        let peer_list_addr = self.peer_list.clone();
+        let gossip_client = self.gossip_client.clone();
 
         let fut = async move {
             // Handle case where peer list address is not set
@@ -342,15 +344,7 @@ where
             ))?;
 
             // Get top 5 active peers
-            let peers = peer_list_addr
-                .send(TopActivePeersRequest {
-                    truncate: Some(5),
-                    exclude_peers: HashSet::new(),
-                })
-                .await
-                .map_err(|err| {
-                    BlockPoolError::OtherInternal(format!("Failed to get active peers: {}", err))
-                })?;
+            let peers = peer_list_addr.top_active_peers(Some(5), None).await?;
 
             if peers.is_empty() {
                 return Err(BlockPoolError::OtherInternal(
@@ -363,40 +357,29 @@ where
 
             for peer in peers {
                 for attempt in 1..=5 {
-                    tracing::debug!(
+                    debug!(
                         "Attempting to fetch block {} from peer {} (attempt {}/5)",
                         block_hash.0.to_base58(),
                         peer.address.api,
                         attempt
                     );
 
-                    match api_client
-                        .get_block_by_hash(peer.address.api, block_hash)
+                    match gossip_client
+                        .get_data_request(&peer, RequestedData::Block(block_hash))
                         .await
                     {
-                        Ok(Some(block)) => {
+                        Ok(true) => {
                             tracing::info!(
-                                "Successfully fetched block {} from peer {}",
+                                "Successfully requested block {} from peer {}",
                                 block_hash.0.to_base58(),
                                 peer.address.api
                             );
 
-                            // Process the block through the BlockPoolService itself
-                            self_addr
-                                .send(ProcessBlock { header: block.irys })
-                                .await
-                                .map_err(|err| {
-                                    BlockPoolError::OtherInternal(format!(
-                                        "Failed to send block to block pool: {:?}",
-                                        err
-                                    ))
-                                })??;
-
                             return Ok(());
                         }
-                        Ok(None) => {
+                        Ok(false) => {
                             // Peer doesn't have this block, try another peer
-                            tracing::debug!(
+                            debug!(
                                 "Peer {} doesn't have block {}",
                                 peer.address.api,
                                 block_hash.0.to_base58()
@@ -428,11 +411,46 @@ where
 
             Err(BlockPoolError::OtherInternal(format!(
                 "Failed to fetch block {} after trying 5 peers: {:?}",
-                block_hash.0.to_base58(), last_error
+                block_hash.0.to_base58(),
+                last_error
             )))
         };
 
         Box::pin(fut.into_actor(self))
+    }
+}
+
+/// Adds a block to the block pool for processing.
+#[derive(Message, Debug, Clone)]
+#[rtype(result = "Result<Option<IrysBlockHeader>, BlockPoolError>")]
+pub struct GetBlockByHash {
+    pub block_hash: BlockHash,
+}
+
+impl<A, R, B> Handler<GetBlockByHash> for BlockPoolService<A, R, B>
+where
+    A: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+{
+    type Result = Result<Option<IrysBlockHeader>, BlockPoolError>;
+
+    fn handle(&mut self, msg: GetBlockByHash, _ctx: &mut Self::Context) -> Self::Result {
+        let block_hash = msg.block_hash;
+
+        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
+            if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
+                return Ok(Some(header.clone()));
+            }
+        }
+
+        self.db
+            .as_ref()
+            .ok_or(BlockPoolError::DatabaseError(eyre::eyre!(
+                "Database is not connected"
+            )))?
+            .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))
+            .map_err(|db_error| BlockPoolError::DatabaseError(db_error))
     }
 }
 

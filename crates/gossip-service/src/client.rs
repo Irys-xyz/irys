@@ -2,28 +2,27 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipError, GossipResult};
-use actix::{Actor, Addr, Context, Handler};
+use crate::types::{GossipDataRequest, GossipError, GossipResult, RequestedData};
+use actix::{Actor, Context, Handler};
 use core::time::Duration;
-use irys_actors::peer_list_service::{
-    DecreasePeerScore, IncreasePeerScore, PeerListServiceWithClient, ScoreDecreaseReason,
-    ScoreIncreaseReason,
-};
+use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_api_client::ApiClient;
-use irys_types::{GossipData, PeerListItem, RethPeerInfo};
+use irys_types::{Address, GossipData, PeerListItem, RethPeerInfo};
 use reqwest::Response;
 use serde::Serialize;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GossipClient {
+    mining_address: Address,
     client: reqwest::Client,
     timeout: Duration,
 }
 
 impl GossipClient {
     #[must_use]
-    pub fn new(timeout: Duration) -> Self {
+    pub fn new(timeout: Duration, mining_address: Address) -> Self {
         Self {
+            mining_address,
             client: reqwest::Client::new(),
             timeout,
         }
@@ -109,7 +108,7 @@ impl GossipClient {
         &self,
         peer: &PeerListItem,
         data: &GossipData,
-        peer_list_service: &Addr<PeerListServiceWithClient<A, R>>,
+        peer_list_service: &PeerListFacade<A, R>,
     ) -> GossipResult<()>
     where
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -120,10 +119,7 @@ impl GossipClient {
             Ok(()) => {
                 // Successful send, increase score
                 if let Err(e) = peer_list_service
-                    .send(IncreasePeerScore {
-                        peer: peer.address.gossip,
-                        reason: ScoreIncreaseReason::Online,
-                    })
+                    .increase_peer_score(peer, ScoreIncreaseReason::Online)
                     .await
                 {
                     tracing::error!("Failed to increase peer score: {}", e);
@@ -133,10 +129,7 @@ impl GossipClient {
             Err(error) => {
                 // Failed to send, decrease score
                 if let Err(e) = peer_list_service
-                    .send(DecreasePeerScore {
-                        peer: peer.address.gossip,
-                        reason: ScoreDecreaseReason::Offline,
-                    })
+                    .decrease_peer_score(peer, ScoreDecreaseReason::Offline)
                     .await
                 {
                     tracing::error!("Failed to decrease peer score: {}", e);
@@ -144,5 +137,30 @@ impl GossipClient {
                 Err(error)
             }
         }
+    }
+
+    /// Request a specific data to be gossiped. Returns true if the peer has the data,
+    /// and false if it doesn't.
+    pub async fn get_data_request(
+        &self,
+        peer: &PeerListItem,
+        requested_data: RequestedData,
+    ) -> GossipResult<bool> {
+        let url = format!("http://{}/gossip/get_data", peer.address.gossip);
+        let get_data_request = GossipDataRequest {
+            requester_miner_address: self.mining_address,
+            requested_data,
+        };
+
+        self.client
+            .post(&url)
+            .timeout(self.timeout)
+            .json(&get_data_request)
+            .send()
+            .await
+            .map_err(|error| GossipError::Network(error.to_string()))?
+            .json()
+            .await
+            .map_err(|error| GossipError::Network(error.to_string()))
     }
 }

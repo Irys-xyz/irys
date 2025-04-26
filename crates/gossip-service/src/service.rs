@@ -22,9 +22,9 @@ use core::time::Duration;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::TxExistenceQuery;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
-use irys_actors::peer_list_service::{PeerListServiceWithClient, TopActivePeersRequest};
+use irys_actors::peer_list_service::PeerListFacade;
 use irys_api_client::ApiClient;
-use irys_types::{DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
+use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashSet;
@@ -116,12 +116,13 @@ impl GossipService {
     pub fn new<T: Into<String>>(
         server_address: T,
         server_port: u16,
+        mining_address: Address,
     ) -> (Self, mpsc::Sender<GossipData>) {
         let cache = Arc::new(GossipCache::new());
         let (trusted_data_tx, trusted_data_rx) = mpsc::channel(1000);
 
         let client_timeout = Duration::from_secs(5);
-        let client = GossipClient::new(client_timeout);
+        let client = GossipClient::new(client_timeout, mining_address);
 
         (
             Self {
@@ -148,7 +149,7 @@ impl GossipService {
         block_discovery: Addr<B>,
         api_client: A,
         task_executor: &TaskExecutor,
-        peer_list: Addr<PeerListServiceWithClient<A, R>>,
+        peer_list: PeerListFacade<A, R>,
         db: DatabaseProvider,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
@@ -168,6 +169,7 @@ impl GossipService {
             api_client.clone(),
             peer_list.clone(),
             block_discovery.clone(),
+            self.client.clone(),
         );
         let arbiter = actix::Arbiter::new();
         let block_pool_addr =
@@ -178,6 +180,8 @@ impl GossipService {
             block_pool: block_pool_addr,
             api_client: api_client.clone(),
             cache: Arc::clone(&self.cache),
+            gossip_client: self.client.clone(),
+            peer_list_service: peer_list.clone(),
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 
@@ -219,7 +223,7 @@ impl GossipService {
         &self,
         original_source: GossipSource,
         data: &GossipData,
-        peer_list_service: &Addr<PeerListServiceWithClient<A, R>>,
+        peer_list_service: &PeerListFacade<A, R>,
     ) -> GossipResult<()>
     where
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -237,10 +241,7 @@ impl GossipService {
 
         // Get all active peers except the source
         let mut peers: Vec<PeerListItem> = peer_list_service
-            .send(TopActivePeersRequest {
-                truncate: None,
-                exclude_peers,
-            })
+            .top_active_peers(None, Some(exclude_peers))
             .await
             .map_err(|err| GossipError::Internal(InternalGossipError::Unknown(err.to_string())))?;
 
@@ -325,7 +326,7 @@ fn spawn_broadcast_task<R, A>(
     mut mempool_data_receiver: mpsc::Receiver<GossipData>,
     service: Arc<GossipService>,
     task_executor: &TaskExecutor,
-    peer_list_service: Addr<PeerListServiceWithClient<A, R>>,
+    peer_list_service: PeerListFacade<A, R>,
 ) -> ServiceHandleWithShutdownSignal
 where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,

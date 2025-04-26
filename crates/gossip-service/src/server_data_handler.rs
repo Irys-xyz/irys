@@ -1,6 +1,9 @@
-use crate::block_pool_service::{ProcessBlock, BlockPoolService};
-use crate::types::{tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError};
-use crate::{GossipCache, GossipError, GossipResult};
+use crate::block_pool_service::{BlockPoolService, GetBlockByHash, ProcessBlock};
+use crate::types::{
+    tx_ingress_error_to_gossip_error, GossipDataRequest, InternalGossipError, InvalidDataError,
+    RequestedData,
+};
+use crate::{GossipCache, GossipClient, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
 use base58::ToBase58;
 use core::net::SocketAddr;
@@ -8,6 +11,7 @@ use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::{
     ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
 };
+use irys_actors::peer_list_service::PeerListFacade;
 use irys_api_client::ApiClient;
 use irys_types::{
     GossipData, IrysBlockHeader, IrysTransactionHeader, RethPeerInfo, UnpackedChunk, H256,
@@ -30,6 +34,8 @@ where
     pub block_pool: Addr<BlockPoolService<A, R, B>>,
     pub cache: Arc<GossipCache>,
     pub api_client: A,
+    pub gossip_client: GossipClient,
+    pub peer_list_service: PeerListFacade<A, R>,
 }
 
 impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
@@ -48,6 +54,8 @@ where
             block_pool: self.block_pool.clone(),
             cache: Arc::clone(&self.cache),
             api_client: self.api_client.clone(),
+            gossip_client: self.gossip_client.clone(),
+            peer_list_service: self.peer_list_service.clone(),
         }
     }
 }
@@ -125,16 +133,23 @@ where
         tx: IrysTransactionHeader,
         source_address: SocketAddr,
     ) -> GossipResult<()> {
+        tracing::debug!(
+            "Gossip transaction received from peer {}: {:?}",
+            source_address,
+            tx.id.0.to_base58()
+        );
         match self.mempool.send(TxIngressMessage(tx.clone())).await {
             Ok(message_result) => {
                 match message_result {
                     Ok(()) => {
+                        tracing::debug!("Transaction sent to mempool");
                         // Success. Mempool will send the tx data to the internal mempool,
                         //  but we still need to update the cache with the source address.
                         self.cache
                             .record_seen(source_address, &GossipData::Transaction(tx))
                     }
                     Err(error) => {
+                        tracing::error!("Error when sending transaction to mempool: {:?}", error);
                         match error {
                             // ==== Not really errors
                             TxIngressError::Skipped => {
@@ -223,6 +238,10 @@ where
             if !self.is_known_tx(system_tx_id).await? {
                 missing_tx_ids.push(system_tx_id);
             }
+        }
+
+        if !missing_tx_ids.is_empty() {
+            tracing::debug!("Missing transactions to fetch: {:?}", missing_tx_ids);
         }
 
         // Fetch missing transactions from the source peer
@@ -322,5 +341,59 @@ where
                     )
                 })
             })
+    }
+
+    pub async fn handle_get_data(
+        &self,
+        source_address: SocketAddr,
+        data: GossipDataRequest,
+    ) -> GossipResult<bool> {
+        let peer_list_item = self
+            .peer_list_service
+            .peer_by_mining_address(data.requester_miner_address)
+            .await?;
+        let Some(peer_info) = peer_list_item else {
+            return Ok(false);
+        };
+        if source_address.ip() != peer_info.address.gossip.ip() {
+            return Err(GossipError::InvalidPeer(
+                "Requesting peer doesn't match the address of the source peer".to_string(),
+            ));
+        }
+
+        match data.requested_data {
+            RequestedData::Block(block_hash) => {
+                let block_result = self
+                    .block_pool
+                    .send(GetBlockByHash { block_hash })
+                    .await
+                    .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?;
+
+                let maybe_block = block_result
+                    .map_err(|block_pool_error| GossipError::BlockPool(block_pool_error))?;
+
+                match maybe_block {
+                    Some(block) => {
+                        match self
+                            .gossip_client
+                            .send_data_and_update_score(
+                                &peer_info,
+                                &GossipData::Block(block),
+                                &self.peer_list_service,
+                            )
+                            .await
+                        {
+                            Ok(()) => {}
+                            Err(error) => {
+                                tracing::error!("Failed to send block to peer: {}", error);
+                            }
+                        }
+                        Ok(true)
+                    }
+                    None => Ok(false),
+                }
+            }
+            RequestedData::Transaction(_tx_hash) => Ok(false),
+        }
     }
 }

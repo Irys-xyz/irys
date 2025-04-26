@@ -3,9 +3,9 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::server_data_handler::GossipServerDataHandler;
-use crate::types::InternalGossipError;
+use crate::types::{GossipDataRequest, InternalGossipError};
 use crate::types::{GossipError, GossipResult};
-use actix::{Actor, Addr, Context, Handler};
+use actix::{Actor, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{
     middleware,
@@ -14,9 +14,7 @@ use actix_web::{
 };
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngressMessage};
-use irys_actors::peer_list_service::{
-    DecreasePeerScore, PeerListEntryRequest, PeerListServiceWithClient,
-};
+use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason};
 use irys_api_client::ApiClient;
 use irys_types::{
     IrysBlockHeader, IrysTransactionHeader, PeerListItem, RethPeerInfo, UnpackedChunk,
@@ -34,7 +32,7 @@ where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     data_handler: GossipServerDataHandler<M, B, A, R>,
-    peer_list: Addr<PeerListServiceWithClient<A, R>>,
+    peer_list: PeerListFacade<A, R>,
 }
 
 impl<M, B, A, R> Clone for GossipServer<M, B, A, R>
@@ -67,7 +65,7 @@ where
 {
     pub const fn new(
         gossip_server_data_handler: GossipServerDataHandler<M, B, A, R>,
-        peer_list: Addr<PeerListServiceWithClient<A, R>>,
+        peer_list: PeerListFacade<A, R>,
     ) -> Self {
         Self {
             data_handler: gossip_server_data_handler,
@@ -95,6 +93,7 @@ where
                         )
                         .route("/chunk", web::post().to(handle_chunk::<M, B, A, R>))
                         .route("/block", web::post().to(handle_block::<M, B, A, R>))
+                        .route("/get_data", web::post().to(handle_get_data::<M, B, A, R>))
                         .route("/health", web::get().to(handle_health_check::<M, B, A, R>)),
                 )
         })
@@ -107,7 +106,7 @@ where
 }
 
 async fn check_peer<R, A>(
-    peer_service_addr: &Addr<PeerListServiceWithClient<A, R>>,
+    peer_service_addr: &PeerListFacade<A, R>,
     req: &actix_web::HttpRequest,
 ) -> Result<PeerListItem, HttpResponse>
 where
@@ -119,10 +118,7 @@ where
         return Err(HttpResponse::BadRequest().finish());
     };
 
-    match peer_service_addr
-        .send(PeerListEntryRequest::GossipSocketAddress(peer_address))
-        .await
-    {
+    match peer_service_addr.peer_by_gossip_address(peer_address).await {
         Ok(maybe_peer) => {
             if let Some(peer) = maybe_peer {
                 Ok(peer)
@@ -255,11 +251,7 @@ where
         return HttpResponse::BadRequest().finish();
     };
 
-    match server
-        .peer_list
-        .send(PeerListEntryRequest::GossipSocketAddress(peer_addr))
-        .await
-    {
+    match server.peer_list.peer_by_gossip_address(peer_addr).await {
         Ok(info) => match info {
             Some(_info) => HttpResponse::Ok().json(true),
             None => HttpResponse::NotFound().finish(),
@@ -271,20 +263,48 @@ where
 async fn handle_invalid_data<R, A>(
     peer: &mut PeerListItem,
     error: &GossipError,
-    peer_list_service: &Addr<PeerListServiceWithClient<A, R>>,
+    peer_list_service: &PeerListFacade<A, R>,
 ) where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     A: ApiClient + Clone + 'static + Unpin + Default,
 {
     if let GossipError::InvalidData(_) = error {
         if let Err(error) = peer_list_service
-            .send(DecreasePeerScore {
-                peer: peer.address.gossip,
-                reason: irys_actors::peer_list_service::ScoreDecreaseReason::BogusData,
-            })
+            .decrease_peer_score(peer, ScoreDecreaseReason::BogusData)
             .await
         {
             tracing::error!("Failed to decrease peer score: {}", error);
+        }
+    }
+}
+
+async fn handle_get_data<M, B, A, R>(
+    server: Data<GossipServer<M, B, A, R>>,
+    data_request: web::Json<GossipDataRequest>,
+    req: actix_web::HttpRequest,
+) -> HttpResponse
+where
+    M: Handler<TxIngressMessage>
+        + Handler<ChunkIngressMessage>
+        + Handler<TxExistenceQuery>
+        + Actor<Context = Context<M>>,
+    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    A: ApiClient + Clone + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+    let Some(source_addr) = req.peer_addr() else {
+        return HttpResponse::BadRequest().finish();
+    };
+
+    match server
+        .data_handler
+        .handle_get_data(source_addr, data_request.0)
+        .await
+    {
+        Ok(has_data) => HttpResponse::Ok().json(has_data),
+        Err(error) => {
+            tracing::error!("Failed to handle get data request: {}", error);
+            HttpResponse::InternalServerError().finish()
         }
     }
 }

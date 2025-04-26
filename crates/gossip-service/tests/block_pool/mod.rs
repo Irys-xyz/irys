@@ -1,5 +1,6 @@
 use crate::util::MockRethServiceActor;
 use actix::{Actor, Handler, Message};
+use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
 use irys_api_client::ApiClient;
@@ -14,7 +15,6 @@ use irys_types::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
-use base58::ToBase58;
 use tracing::debug;
 
 #[derive(Clone, Default, Debug)]
@@ -153,7 +153,8 @@ async fn should_process_block() {
             .expect("to insert block");
         debug!(
             "Inserted parent block {:?} for block {:?}",
-            parent_block_header.block_hash.0.to_base58(), test_header.block_hash.0.to_base58()
+            parent_block_header.block_hash.0.to_base58(),
+            test_header.block_hash.0.to_base58()
         );
     }
 
@@ -162,7 +163,10 @@ async fn should_process_block() {
         .expect("to fetch a block")
         .expect("block should exist");
 
-    debug!("Block in the db: {}", fetched_block.block_hash.0.to_base58());
+    debug!(
+        "Block in the db: {}",
+        fetched_block.block_hash.0.to_base58()
+    );
     debug!(
         "Block previous_block_hash: {:?}",
         fetched_block.previous_block_hash.0.to_base58()
@@ -294,7 +298,10 @@ async fn should_process_block_with_intermediate_block_in_api() {
     {
         db.update_eyre(|tx| insert_block_header(tx, &block1))
             .expect("to insert block1");
-        debug!("Inserted block1 {:?} into database", block1.block_hash.0.to_base58());
+        debug!(
+            "Inserted block1 {:?} into database",
+            block1.block_hash.0.to_base58()
+        );
     }
 
     // Verify block1 is in the database
@@ -303,7 +310,10 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .expect("to fetch a block")
         .expect("block should exist");
 
-    debug!("Block in the db: {:?}", fetched_block.block_hash.0.to_base58());
+    debug!(
+        "Block in the db: {:?}",
+        fetched_block.block_hash.0.to_base58()
+    );
     debug!(
         "Block3 previous_block_hash: {:?}",
         block3.previous_block_hash.0.to_base58()

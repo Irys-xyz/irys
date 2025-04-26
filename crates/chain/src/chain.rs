@@ -112,6 +112,7 @@ impl IrysNodeCtx {
     }
 }
 
+use irys_actors::peer_list_service::PeerListServiceFacade;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Shared stop guard that can be cloned
@@ -638,6 +639,7 @@ impl IrysNode {
         let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
             &config.node_config.gossip.bind_ip,
             config.node_config.gossip.port,
+            config.node_config.miner_address(),
         );
 
         // start the block tree service
@@ -1283,7 +1285,7 @@ fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
     reth_service_addr: Addr<RethServiceActor>,
-) -> (Addr<PeerListService>, Arbiter) {
+) -> (PeerListServiceFacade, Arbiter) {
     let peer_list_arbiter = Arbiter::new();
     let mut peer_list_service = PeerListService::new(irys_db.clone(), config, reth_service_addr);
     peer_list_service
@@ -1292,7 +1294,7 @@ fn init_peer_list_service(
     let peer_list_service =
         PeerListService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
     SystemRegistry::set(peer_list_service.clone());
-    (peer_list_service, peer_list_arbiter)
+    (peer_list_service.into(), peer_list_arbiter)
 }
 
 fn init_broadcaster_service() -> (actix::Addr<BroadcastMiningService>, Arbiter) {

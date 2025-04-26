@@ -11,6 +11,7 @@ use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
+use thiserror::Error;
 use tracing::{debug, error, warn};
 
 use crate::reth_service::RethServiceActor;
@@ -38,11 +39,150 @@ const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 pub type PeerListService = PeerListServiceWithClient<IrysApiClient, RethServiceActor>;
+pub type PeerListServiceFacade = PeerListFacade<IrysApiClient, RethServiceActor>;
+
+#[derive(Debug)]
+pub struct PeerListFacade<A, R>
+where
+    A: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+    addr: Addr<PeerListServiceWithClient<A, R>>,
+}
+
+impl<A, R> Clone for PeerListFacade<A, R>
+where
+    A: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            addr: self.addr.clone(),
+        }
+    }
+}
+
+impl<A, R> From<Addr<PeerListServiceWithClient<A, R>>> for PeerListFacade<A, R>
+where
+    A: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+    fn from(value: Addr<PeerListServiceWithClient<A, R>>) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<A, R> PeerListFacade<A, R>
+where
+    A: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+    pub fn new(addr: Addr<PeerListServiceWithClient<A, R>>) -> Self {
+        Self { addr }
+    }
+
+    pub async fn peer_by_mining_address(
+        &self,
+        mining_address: Address,
+    ) -> Result<Option<PeerListItem>, PeerListFacadeError> {
+        Ok(self
+            .addr
+            .send(GetPeerByMiningAddress { mining_address })
+            .await?)
+    }
+
+    pub async fn peer_by_gossip_address(
+        &self,
+        gossip_address: SocketAddr,
+    ) -> Result<Option<PeerListItem>, PeerListFacadeError> {
+        Ok(self
+            .addr
+            .send(PeerListEntryRequest::GossipSocketAddress(gossip_address))
+            .await?)
+    }
+
+    pub async fn increase_peer_score(
+        &self,
+        peer: &PeerListItem,
+        reason: ScoreIncreaseReason,
+    ) -> Result<(), PeerListFacadeError> {
+        Ok(self
+            .addr
+            .send(IncreasePeerScore {
+                peer: peer.address.gossip,
+                reason,
+            })
+            .await?)
+    }
+
+    pub async fn decrease_peer_score(
+        &self,
+        peer: &PeerListItem,
+        reason: ScoreDecreaseReason,
+    ) -> Result<(), PeerListFacadeError> {
+        Ok(self
+            .addr
+            .send(DecreasePeerScore {
+                peer: peer.address.gossip,
+                reason,
+            })
+            .await?)
+    }
+
+    pub async fn top_active_peers(
+        &self,
+        limit: Option<usize>,
+        exclude_peers: Option<HashSet<SocketAddr>>,
+    ) -> Result<Vec<PeerListItem>, PeerListFacadeError> {
+        Ok(self
+            .addr
+            .send(TopActivePeersRequest {
+                truncate: limit,
+                exclude_peers,
+            })
+            .await?)
+    }
+
+    pub async fn wait_for_active_peers(&self) -> Result<(), PeerListFacadeError> {
+        Ok(self.addr.send(WaitForActivePeer).await?)
+    }
+
+    pub async fn all_known_peers(&self) -> Result<Vec<PeerAddress>, PeerListFacadeError> {
+        Ok(self.addr.send(KnownPeersRequest).await?)
+    }
+
+    /// IMPORTANT! DO NOT USE THIS METHOD DIRECTLY; IT'S MEANT TO BE USED ONLY BY THE API SERVER.
+    pub async fn add_peer(
+        &self,
+        mining_address: Address,
+        peer: PeerListItem,
+    ) -> Result<(), PeerListFacadeError> {
+        Ok(self
+            .addr
+            .send(AddPeer {
+                mining_addr: mining_address,
+                peer,
+            })
+            .await?)
+    }
+}
+
+#[derive(Debug, Error, Clone)]
+pub enum PeerListFacadeError {
+    #[error("Internal peer list service error: {0:?}")]
+    InternalError(String),
+}
+
+impl From<MailboxError> for PeerListFacadeError {
+    fn from(err: MailboxError) -> Self {
+        Self::InternalError(format!("{:?}", err))
+    }
+}
 
 #[derive(Debug, Default)]
-pub struct PeerListServiceWithClient<T, R>
+pub struct PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     /// Reference to the node database
@@ -59,7 +199,7 @@ where
     failed_announcements: HashMap<SocketAddr, AnnounceFinished>,
 
     gossip_client: Client,
-    irys_api_client: T,
+    irys_api_client: A,
 
     chain_id: u64,
     mining_address: Address,
@@ -97,9 +237,9 @@ where
     }
 }
 
-impl<T, R> PeerListServiceWithClient<T, R>
+impl<A, R> PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     /// Create a new instance of the peer_list_service actor passing in a reference-counted
@@ -107,7 +247,7 @@ where
     pub fn new_with_custom_api_client(
         db: DatabaseProvider,
         config: &Config,
-        irys_api_client: T,
+        irys_api_client: A,
         reth_actor: Addr<R>,
     ) -> Self {
         Self {
@@ -150,9 +290,9 @@ where
     }
 }
 
-impl<T, R> Actor for PeerListServiceWithClient<T, R>
+impl<A, R> Actor for PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Context = Context<Self>;
@@ -230,16 +370,16 @@ where
 }
 
 /// Allows this actor to live in the the service registry
-impl<T, R> Supervised for PeerListServiceWithClient<T, R>
+impl<A, R> Supervised for PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
 }
 
-impl<T, R> SystemService for PeerListServiceWithClient<T, R>
+impl<A, R> SystemService for PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>> + Default,
 {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
@@ -274,9 +414,9 @@ pub enum ScoreIncreaseReason {
     ValidData,
 }
 
-impl<T, R> PeerListServiceWithClient<T, R>
+impl<A, R> PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     /// Initialize the peer list service
@@ -330,7 +470,7 @@ where
     }
 
     async fn trusted_peers_handshake_task(
-        peer_service_address: Addr<PeerListServiceWithClient<T, R>>,
+        peer_service_address: Addr<PeerListServiceWithClient<A, R>>,
         trusted_peers_api_addresses: HashSet<SocketAddr>,
     ) {
         let peer_service_address = peer_service_address.clone();
@@ -454,10 +594,10 @@ where
     }
 
     async fn announce_yourself_to_address(
-        api_client: T,
+        api_client: A,
         api_address: SocketAddr,
         version_request: VersionRequest,
-        peer_service_address: Addr<PeerListServiceWithClient<T, R>>,
+        peer_service_address: Addr<PeerListServiceWithClient<A, R>>,
     ) -> Result<(), PeerListServiceError> {
         let peer_response_result = api_client
             .post_version(api_address, version_request)
@@ -512,10 +652,10 @@ where
     }
 
     async fn announce_yourself_to_address_task(
-        api_client: T,
+        api_client: A,
         api_address: SocketAddr,
         version_request: VersionRequest,
-        peer_list_service_address: Addr<PeerListServiceWithClient<T, R>>,
+        peer_list_service_address: Addr<PeerListServiceWithClient<A, R>>,
     ) {
         debug!(
             "Announcing yourself to address {} with version request: {:?}",
@@ -540,10 +680,10 @@ where
     }
 
     async fn announce_yourself_to_all_peers(
-        api_client: T,
+        api_client: A,
         version_request: VersionRequest,
         known_peers_cache: HashSet<PeerAddress>,
-        peer_service_address: Addr<PeerListServiceWithClient<T, R>>,
+        peer_service_address: Addr<PeerListServiceWithClient<A, R>>,
     ) {
         let reth_service = RethServiceActor::from_registry();
         for peer in known_peers_cache.iter() {
@@ -653,9 +793,9 @@ pub struct IncreasePeerScore {
     pub reason: ScoreIncreaseReason,
 }
 
-impl<T, R> Handler<IncreasePeerScore> for PeerListServiceWithClient<T, R>
+impl<A, R> Handler<IncreasePeerScore> for PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
@@ -681,26 +821,28 @@ where
 #[rtype(result = "Vec<PeerListItem>")]
 pub struct TopActivePeersRequest {
     pub truncate: Option<usize>,
-    pub exclude_peers: HashSet<SocketAddr>,
+    pub exclude_peers: Option<HashSet<SocketAddr>>,
 }
 
-impl<T, R> Handler<TopActivePeersRequest> for PeerListServiceWithClient<T, R>
+impl<A, R> Handler<TopActivePeersRequest> for PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Vec<PeerListItem>;
 
     fn handle(&mut self, msg: TopActivePeersRequest, _ctx: &mut Self::Context) -> Self::Result {
         let mut peers: Vec<PeerListItem> = self.peer_list_cache.values().cloned().collect();
-        tracing::trace!("ActivePeersRequest: {} peers before retain()", peers.len());
-        tracing::trace!("ActivePeersRequest: peers {:?})", peers);
+
         peers.retain(|peer| {
-            !msg.exclude_peers.contains(&peer.address.gossip)
-                && peer.reputation_score.is_active()
-                && peer.is_online
+            let exclude = if let Some(exclude_peers) = &msg.exclude_peers {
+                exclude_peers.contains(&peer.address.gossip)
+            } else {
+                false
+            };
+            !exclude && peer.reputation_score.is_active() && peer.is_online
         });
-        tracing::trace!("ActivePeersRequest: {} peers after retain()", peers.len());
+
         peers.sort_by_key(|peer| peer.reputation_score.get());
         peers.reverse();
 
@@ -712,14 +854,33 @@ where
     }
 }
 
+/// Get the list of active peers
+#[derive(Message, Debug)]
+#[rtype(result = "Option<PeerListItem>")]
+pub struct GetPeerByMiningAddress {
+    pub mining_address: Address,
+}
+
+impl<A, R> Handler<GetPeerByMiningAddress> for PeerListServiceWithClient<A, R>
+where
+    A: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+    type Result = Option<PeerListItem>;
+
+    fn handle(&mut self, msg: GetPeerByMiningAddress, _ctx: &mut Self::Context) -> Self::Result {
+        self.peer_list_cache.get(&msg.mining_address).cloned()
+    }
+}
+
 /// Flush the peer list to the database
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(), PeerListServiceError>")]
 pub struct FlushRequest;
 
-impl<T, R> Handler<FlushRequest> for PeerListServiceWithClient<T, R>
+impl<A, R> Handler<FlushRequest> for PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Result<(), PeerListServiceError>;
@@ -737,9 +898,9 @@ pub struct AddPeer {
     pub peer: PeerListItem,
 }
 
-impl<T, R> Handler<AddPeer> for PeerListServiceWithClient<T, R>
+impl<A, R> Handler<AddPeer> for PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
@@ -800,9 +961,9 @@ where
 #[rtype(result = "Vec<PeerAddress>")]
 pub struct KnownPeersRequest;
 
-impl<T, R> Handler<KnownPeersRequest> for PeerListServiceWithClient<T, R>
+impl<A, R> Handler<KnownPeersRequest> for PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Vec<PeerAddress>;
@@ -836,9 +997,9 @@ impl NewPotentialPeer {
     }
 }
 
-impl<T, R> Handler<NewPotentialPeer> for PeerListServiceWithClient<T, R>
+impl<A, R> Handler<NewPotentialPeer> for PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
@@ -907,9 +1068,9 @@ impl AnnounceFinished {
     }
 }
 
-impl<T, R> Handler<AnnounceFinished> for PeerListServiceWithClient<T, R>
+impl<A, R> Handler<AnnounceFinished> for PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
@@ -939,9 +1100,9 @@ where
 #[rtype(result = "()")]
 pub struct WaitForActivePeer;
 
-impl<T, R> Handler<WaitForActivePeer> for PeerListServiceWithClient<T, R>
+impl<A, R> Handler<WaitForActivePeer> for PeerListServiceWithClient<A, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ResponseActFuture<Self, ()>;
@@ -963,7 +1124,7 @@ where
                     let active_peers = addr
                         .send(TopActivePeersRequest {
                             truncate: None,
-                            exclude_peers: HashSet::new(),
+                            exclude_peers: None,
                         })
                         .await
                         .unwrap_or_default();

@@ -6,6 +6,7 @@ use crate::{
     services::ServiceSenders,
 };
 use actix::prelude::*;
+use base58::ToBase58;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
@@ -16,7 +17,6 @@ use irys_types::{
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
 use std::sync::Arc;
-use base58::ToBase58;
 use tracing::info;
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -124,7 +124,9 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 self.db
                     .view_eyre(|tx| tx_header_by_txid(tx, txid))
                     .and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58()))
+                        opt.ok_or_else(|| {
+                            eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
+                        })
                     })
             })
             .collect::<Result<Vec<_>, _>>()

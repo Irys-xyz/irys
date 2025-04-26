@@ -20,6 +20,8 @@ actix.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true
 
+thiserror = { workspace = true }
+
 tokio.workspace = true
 reth-db.workspace = true
 irys-primitives.workspace = true
