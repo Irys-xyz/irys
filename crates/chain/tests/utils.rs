@@ -171,6 +171,7 @@ impl IrysNodeTest<()> {
         Self::new_inner(config).await
     }
 
+    /// Start a new test node in genesis mode
     pub async fn new_genesis(mut config: NodeConfig) -> Self {
         config.mode = NodeMode::Genesis;
         Self::new_inner(config).await

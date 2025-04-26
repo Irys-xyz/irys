@@ -9,6 +9,7 @@ use irys_types::H256;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     pub version: String,
     pub peer_count: u32,
