@@ -20,5 +20,10 @@ irys-testing-utils.workspace = true
 irys-packing.workspace = true
 derive_more.workspace = true
 base58.workspace = true
+atomic-write-file = "0.2"
+
+[dev-dependencies]
+test-log.workspace = true
+
 [lints]
 workspace = true

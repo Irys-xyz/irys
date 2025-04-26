@@ -1,5 +1,4 @@
-use irys_primitives::GenesisAccount;
-use irys_types::{config, Address, IrysBlockHeader};
+use irys_types::{Config, IrysBlockHeader};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder};
 use tracing::debug;
 
@@ -14,20 +13,21 @@ pub struct IrysChainSpecBuilder {
 
 impl IrysChainSpecBuilder {
     /// Construct a new builder from the mainnet chain spec.
-    pub fn from_config(config: &config::Config) -> Self {
+    pub fn from_config(config: &Config) -> Self {
         let genesis = IrysBlockHeader {
-            oracle_irys_price: config.genesis_token_price,
-            ema_irys_price: config.genesis_token_price,
-            miner_address: config.miner_address(),
-            reward_address: config.miner_address(),
+            oracle_irys_price: config.consensus.genesis_price,
+            ema_irys_price: config.consensus.genesis_price,
+            miner_address: config.node_config.miner_address(),
+            reward_address: config.node_config.miner_address(),
             height: 0,
+            system_ledgers: vec![], // Make sure theres no invalid txids in the system ledger
             // todo: we need a proper genesis block in the config rather than re-using a mock header
             ..IrysBlockHeader::new_mock_header()
         };
         Self {
             reth_builder: ChainSpecBuilder {
-                chain: Some(IRYS_TESTNET.chain),
-                genesis: Some(IRYS_TESTNET.genesis.clone()),
+                chain: Some(config.consensus.reth.chain.clone()),
+                genesis: Some(config.consensus.reth.genesis.clone()),
                 hardforks: IRYS_TESTNET.hardforks.clone(),
             },
             genesis,
@@ -41,21 +41,5 @@ impl IrysChainSpecBuilder {
         genesis.evm_block_hash = cs.genesis_hash();
         debug!("EVM genesis block hash: {}", &genesis.evm_block_hash);
         (cs, genesis)
-    }
-
-    /// extend the genesis accounts
-    pub fn extend_accounts(
-        &mut self,
-        accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
-    ) -> &mut Self {
-        let new_genesis = self
-            .reth_builder
-            .genesis
-            .as_ref()
-            .unwrap()
-            .clone()
-            .extend_accounts(accounts);
-        self.reth_builder = self.reth_builder.clone().genesis(new_genesis);
-        self
     }
 }

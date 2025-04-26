@@ -9,7 +9,6 @@ irys-storage.workspace = true
 irys-database.workspace = true
 alloy-eips.workspace = true
 alloy-rpc-types.workspace = true
-irys-config.workspace = true
 alloy-signer-local.workspace = true
 irys-primitives.workspace = true
 reth-chainspec.workspace = true

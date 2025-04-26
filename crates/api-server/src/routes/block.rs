@@ -6,10 +6,8 @@ use actix_web::{
 };
 use base58::FromBase58 as _;
 use irys_database::database;
-use irys_types::{IrysBlockHeader, H256};
-use reth::{
-    primitives::Header, providers::BlockReader, revm::primitives::alloy_primitives::TxHash,
-};
+use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
+use reth::{providers::BlockReader, revm::primitives::alloy_primitives::TxHash};
 use reth_db::Database;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -25,44 +23,31 @@ pub async fn get_block(
 
     // all roads lead to block hash
     let block_hash: H256 = match tag_param {
-        BlockParam::Latest => {
-            let block_tree_guard = state.block_tree.clone().ok_or(ApiError::Internal {
-                err: String::from("block tree error"),
-            })?;
-            let guard = block_tree_guard.read();
-            guard.tip.clone()
-        }
+        BlockParam::Latest => state.block_tree.read().tip.clone(),
         BlockParam::BlockHeight(height) => 'outer: {
-            let block_tree_guard = state.block_tree.clone().ok_or(ApiError::Internal {
-                err: String::from("block tree error"),
-            })?;
-            let guard = block_tree_guard.read();
-            let canon_chain = guard.get_canonical_chain();
-            let in_block_tree =
-                canon_chain
-                    .0
-                    .iter()
-                    .find_map(|(hash, hght, _, _)| match *hght == height {
-                        true => Some(hash),
-                        false => None,
-                    });
+            let in_block_tree = state
+                .block_tree
+                .read()
+                .get_canonical_chain()
+                .0
+                .iter()
+                .find_map(|(hash, hght, _, _)| match *hght == height {
+                    true => Some(hash),
+                    false => None,
+                })
+                .cloned();
             if let Some(hash) = in_block_tree {
                 break 'outer hash.clone();
             }
-            // get from block index
-            let block_index_guard = state.block_index.clone().ok_or(ApiError::Internal {
-                err: String::from("block index error"),
-            })?;
-            let guard = block_index_guard.read();
-            let r = guard
-                .get_item(height.try_into().map_err(|_| ApiError::Internal {
-                    err: String::from("Block height out of range"),
-                })?)
+            state
+                .block_index
+                .read()
+                .get_item(height)
                 .ok_or(ApiError::ErrNoId {
                     id: path.to_string(),
                     err: String::from("Invalid block height"),
-                })?;
-            r.block_hash
+                })
+                .map(|b| (*b).block_hash)?
         }
         BlockParam::Finalized | BlockParam::Pending => {
             return Err(ApiError::Internal {
@@ -92,16 +77,8 @@ fn get_block_by_hash(
         Ok(Some(tx_header)) => Ok(tx_header),
     }?;
 
-    let reth = match &state.reth_provider {
-        Some(r) => r,
-        None => {
-            return Err(ApiError::Internal {
-                err: String::from("db error"),
-            })
-        }
-    };
-
-    let reth_block = match reth
+    let reth_block = match state
+        .reth_provider
         .provider
         .block_by_hash(irys_header.evm_block_hash)
         .ok()
@@ -131,24 +108,6 @@ fn get_block_by_hash(
     };
 
     Ok(web::Json(cbh))
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-
-pub struct CombinedBlockHeader {
-    #[serde(flatten)]
-    pub irys: IrysBlockHeader,
-    pub execution: ExecutionHeader,
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-
-pub struct ExecutionHeader {
-    #[serde(flatten)]
-    pub header: Header,
-    pub transactions: Vec<TxHash>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -1,13 +1,17 @@
 use crate::{
-    block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeService,
-    block_validation::prevalidate_block, epoch_service::PartitionAssignmentsReadGuard,
+    block_index_service::BlockIndexReadGuard,
+    block_tree_service::BlockTreeService,
+    block_validation::prevalidate_block,
+    epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
 };
 use actix::prelude::*;
-use irys_database::{block_header_by_hash, tx_header_by_txid, Ledger};
+use irys_database::{
+    block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
+};
 use irys_types::{
-    DatabaseProvider, DifficultyAdjustmentConfig, IrysBlockHeader, IrysTransactionHeader,
-    StorageConfig, VDFStepsConfig,
+    CommitmentTransaction, Config, DatabaseProvider, GossipData, IrysBlockHeader,
+    IrysTransactionHeader,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
@@ -17,22 +21,22 @@ use tracing::info;
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockDiscoveryActor {
+    /// Tracks the global state of partition assignments on the protocol
+    pub epoch_service: Addr<EpochServiceActor>,
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
-    /// Reference to global storage config for node
-    pub storage_config: StorageConfig,
-    /// Reference to global difficulty config
-    pub difficulty_config: DifficultyAdjustmentConfig,
+    /// Reference to the global config
+    pub config: Config,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
-    /// VDF configuration for the node
-    pub vdf_config: VDFStepsConfig,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Service Senders
     pub service_senders: ServiceSenders,
+    /// Gossip message bus
+    pub gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
 }
 
 /// When a block is discovered, either produced locally or received from
@@ -43,7 +47,7 @@ pub struct BlockDiscoveredMessage(pub Arc<IrysBlockHeader>);
 
 /// Sent when a discovered block is pre-validated
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
+#[rtype(result = "eyre::Result<()>")]
 pub struct BlockPreValidatedMessage(
     pub Arc<IrysBlockHeader>,
     pub Arc<Vec<IrysTransactionHeader>>,
@@ -58,22 +62,22 @@ impl BlockDiscoveryActor {
     pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
-        storage_config: StorageConfig,
-        difficulty_config: DifficultyAdjustmentConfig,
+        config: Config,
         db: DatabaseProvider,
-        vdf_config: VDFStepsConfig,
         vdf_steps_guard: VdfStepsReadGuard,
         service_senders: ServiceSenders,
+        epoch_service: Addr<EpochServiceActor>,
+        gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         Self {
             block_index_guard,
             partition_assignments_guard,
-            storage_config,
-            difficulty_config,
             db,
-            vdf_config,
             vdf_steps_guard,
             service_senders,
+            gossip_sender,
+            config,
+            epoch_service,
         }
     }
 }
@@ -94,6 +98,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             other => {
                 return Box::pin(async move {
                     Err(eyre::eyre!(
+                        // the previous blocks header was not found in the database
                         "Failed to get block header for hash {}: {:?}",
                         prev_block_hash,
                         other
@@ -111,7 +116,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         // to retrieve and validate them from the block producer.
         // TODO: in the future we'll retrieve the missing transactions from the block
         // producer and validate them.
-        let submit_txs = match new_block_header.ledgers[Ledger::Submit]
+        let submit_txs = match new_block_header.data_ledgers[DataLedger::Submit]
             .tx_ids
             .iter()
             .map(|txid| {
@@ -139,7 +144,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         // 3. Update the local tx headers index so include the ingress- proof.
         //    This keeps the transaction from getting re-promoted each block.
         //    (this last step performed in mempool after the block is confirmed)
-        let publish_txs = match new_block_header.ledgers[Ledger::Publish]
+        let publish_txs = match new_block_header.data_ledgers[DataLedger::Publish]
             .tx_ids
             .iter()
             .map(|txid| {
@@ -160,7 +165,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         };
 
         if !publish_txs.is_empty() {
-            let publish_proofs = match &new_block_header.ledgers[Ledger::Publish].proofs {
+            let publish_proofs = match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
                 Some(proofs) => proofs,
                 None => {
                     return Box::pin(async move { Err(eyre::eyre!("Ingress proofs missing")) });
@@ -178,18 +183,51 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         }
 
         //====================================
+        // Commitments ledger TX Validation
+        //------------------------------------
+        // Extract the Commitment ledger from the epoch block
+        let commitments_ledger = new_block_header
+            .system_ledgers
+            .iter()
+            .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+        // Validate commitments (if there are some)
+        let mut commitments: Vec<CommitmentTransaction> = Vec::new();
+        if let Some(commitment_ledger) = commitments_ledger {
+            let read_tx = self.db.tx().expect("to create a database read tx");
+            commitments = commitment_ledger
+                .tx_ids
+                .iter()
+                .map(|txid| {
+                    commitment_tx_by_txid(&read_tx, txid).and_then(|opt| {
+                        opt.ok_or_else(|| eyre::eyre!("No commitment tx found for txid {:?}", txid))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("to be able to retrieve all of the commitment tx headers locally");
+
+            // TODO: Non epoch blocks and epoch blocks treat the commitments ledger a little differently
+            // during the epoch, stake and pledge commitments accumulate waiting to be finalized when the
+            // next epoch starts. As a result these pending commitments during the epoch need to have
+            // their own CommitmentsState where pending pledges can be checked to see if they have an
+            // outstanding stake (check with epoch_service) or if they've posted a pending stake commitment.
+            //
+            // This work will be done next, for now commitments are only handled in the genesis block
+        }
+
+        //====================================
         // Block header pre-validation
         //------------------------------------
-        let block_index_guard = self.block_index_guard.clone();
+        let block_index_guard2 = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = BlockTreeService::from_registry();
-        let storage_config = self.storage_config.clone();
-        let difficulty_config = self.difficulty_config;
-        let vdf_config = self.vdf_config.clone();
+        let config = self.config.clone();
         let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();
         let ema_service_sender = self.service_senders.ema.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
+        let epoch_service = self.epoch_service.clone();
+        let epoch_config = self.config.consensus.epoch.clone();
 
         info!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
@@ -197,21 +235,17 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             prev_output = ?new_block_header.vdf_limiter_info.prev_output,
             "Validating block"
         );
-        Box::pin(async move {
-            let block_header_clone = new_block_header.clone(); // Clone before moving
 
+        let gossip_sender = self.gossip_sender.clone();
+        Box::pin(async move {
             info!("Pre-validating block");
             let validation_future = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
                     block_header,
                     previous_block_header,
-                    block_index_guard,
                     partitions_guard,
-                    storage_config,
-                    difficulty_config,
-                    vdf_config,
+                    config,
                     vdf_steps_guard,
-                    block_header_clone.miner_address, // Use clone in validation
                     ema_service_sender,
                 )
             });
@@ -227,11 +261,43 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     all_txs.extend_from_slice(&publish_txs);
                     block_tree_addr
                         .send(BlockPreValidatedMessage(
-                            new_block_header,
+                            new_block_header.clone(),
                             Arc::new(all_txs),
                         ))
+                        .await??;
+
+                    // Is this an epoch block?
+                    let block_height = new_block_header.height;
+                    let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
+                    if block_height > 0 && block_height % blocks_in_epoch == 0 {
+                        // Look up the previous epoch block
+                        let block_item = block_index_guard2
+                            .read()
+                            .get_item(block_height - blocks_in_epoch)
+                            .expect("previous epoch block to be in block index")
+                            .clone();
+
+                        let previous_epoch_block = db
+                            .view(|tx| block_header_by_hash(tx, &block_item.block_hash, false))
+                            .unwrap()
+                            .expect("previous epoch block to be in database");
+
+                        // Send the NewEpochMessage referencing the current and previous epoch blocks
+                        epoch_service.do_send(NewEpochMessage {
+                            previous_epoch_block,
+                            epoch_block: new_block_header.clone(),
+                            commitments,
+                        });
+                    }
+
+                    // Send the block to the gossip bus
+                    if let Err(error) = gossip_sender
+                        .send(GossipData::Block(new_block_header.as_ref().clone()))
                         .await
-                        .unwrap();
+                    {
+                        tracing::error!("Failed to send gossip message: {}", error);
+                    }
+
                     Ok(())
                 }
                 Err(err) => Err(eyre::eyre!("Block validation error {:?}", err)),

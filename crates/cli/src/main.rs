@@ -1,9 +1,9 @@
 use clap::{command, Parser, Subcommand};
-use irys_config::IrysNodeConfig;
 use irys_database::reth_db::{
-    cursor::*, init_db, transaction::*, Database as _, PlainAccountState, StageCheckpoints,
+    cursor::*, transaction::*, Database as _, DatabaseEnv, DatabaseEnvKind, PlainAccountState,
+    StageCheckpoints,
 };
-use irys_types::Config;
+use irys_types::NodeConfig;
 use reth_node_core::version::default_client_version;
 use reth_tracing::tracing_subscriber::util::SubscriberInitExt as _;
 use std::fs::File;
@@ -57,33 +57,30 @@ fn main() -> eyre::Result<()> {
 
 fn backup_accounts() -> eyre::Result<()> {
     // load the config
-    let config_file = std::env::var("CONFIG")
+    let config = std::env::var("CONFIG")
         .unwrap_or_else(|_| "config.toml".to_owned())
         .parse::<PathBuf>()
-        .expect("invalid file path");
-
-    let config = std::fs::read_to_string(config_file).map_or_else(
-        |_err| {
-            tracing::warn!("config file not provided, defaulting to testnet config");
-            Config::testnet()
-        },
-        |config_file| toml::from_str::<Config>(&config_file).expect("invalid config file"),
-    );
-    let irys_node_config = IrysNodeConfig::new(&config);
+        .expect("file path to be valid");
+    let config = std::fs::read_to_string(config)
+        .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                ?err,
+                "config file not provided, defaulting to testnet config"
+            );
+            NodeConfig::testnet()
+        });
 
     // open the database, read the current account state
+    let db_path = config.reth_data_dir().join("db");
 
-    let db_path = irys_node_config.reth_data_dir().join("db");
-
-    let reth_db = Arc::new(
-        init_db(
-            db_path,
-            irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
-                .with_log_level(None)
-                .with_exclusive(Some(false)),
-        )?
-        .with_metrics(),
-    );
+    let reth_db = Arc::new(DatabaseEnv::open(
+        &db_path,
+        DatabaseEnvKind::RO,
+        irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
+            .with_log_level(None)
+            .with_exclusive(Some(false)),
+    )?);
 
     let read_tx = reth_db.tx()?;
     // read the latest block

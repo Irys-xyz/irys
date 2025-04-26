@@ -2,115 +2,12 @@
 use std::{
     env::{self},
     fs,
-    num::ParseIntError,
     path::{Path, PathBuf},
 };
 
-use chain::chainspec::IrysChainSpecBuilder;
-use irys_primitives::GenesisAccount;
-use irys_types::{config, irys::IrysSigner, Address};
 use serde::{Deserialize, Serialize};
 
 pub mod chain;
-
-#[derive(Debug, Clone)]
-/// Top level configuration struct for the node
-pub struct IrysNodeConfig {
-    /// Signer instance used for mining
-    pub mining_signer: IrysSigner,
-    /// Node ID/instance number: used for testing. if omitted, an instance subfolder is not created. reth will still be set as instance `1`.
-    pub instance_number: Option<u32>,
-    /// base data directory, i.e `./.tmp`
-    /// should not be used directly, instead use the appropriate methods, i.e `instance_directory`
-    pub base_directory: PathBuf,
-    /// `ChainSpec` builder - used to generate `ChainSpec`, which defines most of the chain-related parameters
-    pub chainspec_builder: IrysChainSpecBuilder,
-}
-
-/// "sane" default configuration
-#[cfg(any(feature = "test-utils", test))]
-impl Default for IrysNodeConfig {
-    fn default() -> Self {
-        use irys_types::Config;
-        let base_dir = env::current_dir()
-            .expect("Unable to determine working dir, aborting")
-            .join(".irys");
-
-        let testent_config = Config::testnet();
-        let chainspec_builder = IrysChainSpecBuilder::from_config(&testent_config);
-        Self {
-            mining_signer: IrysSigner::random_signer(&testent_config),
-            chainspec_builder,
-            instance_number: None, // no instance dir
-            base_directory: base_dir,
-        }
-    }
-}
-
-pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
-        .collect()
-}
-
-impl IrysNodeConfig {
-    pub fn new(config: &config::Config) -> Self {
-        Self {
-            mining_signer: IrysSigner::from_config(&config),
-            instance_number: None,
-            base_directory: config.base_directory.clone(),
-            chainspec_builder: IrysChainSpecBuilder::from_config(&config),
-        }
-    }
-
-    /// get the instance-specific directory path
-    /// this will return the base directory if instance_number is not `Some`
-    pub fn instance_directory(&self) -> PathBuf {
-        self.instance_number
-            .map_or(self.base_directory.clone(), |i| {
-                self.base_directory.join(i.to_string())
-            })
-    }
-    /// get the instance-specific storage module directory path
-    pub fn storage_module_dir(&self) -> PathBuf {
-        self.instance_directory().join("storage_modules")
-    }
-    /// get the instance-specific irys consensus data directory path
-    pub fn irys_consensus_data_dir(&self) -> PathBuf {
-        self.instance_directory().join("irys_consensus_data")
-    }
-    /// get the instance-specific reth data directory path
-    pub fn reth_data_dir(&self) -> PathBuf {
-        self.instance_directory().join("reth")
-    }
-    /// get the instance-specific reth log directory path
-    pub fn reth_log_dir(&self) -> PathBuf {
-        self.reth_data_dir().join("logs")
-    }
-    /// get the instance-specific `block_index` directory path  
-    pub fn block_index_dir(&self) -> PathBuf {
-        self.instance_directory().join("block_index")
-    }
-
-    /// get the instance-specific `vdf_steps` directory path  
-    pub fn vdf_steps_dir(&self) -> PathBuf {
-        self.instance_directory().join("vdf_steps")
-    }
-
-    /// Extend the configured genesis accounts
-    /// These accounts are used as the genesis state for the chain
-    pub fn extend_genesis_accounts(
-        &mut self,
-        accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
-    ) -> &mut Self {
-        self.chainspec_builder.extend_accounts(accounts);
-        self
-    }
-}
-
-pub const PRICE_PER_CHUNK_PERM: u128 = 10000;
-pub const PRICE_PER_CHUNK_5_EPOCH: u128 = 10;
 
 /// Subsystem allowing for the configuration of storage submodules via a handy TOML file
 ///

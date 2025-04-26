@@ -9,24 +9,20 @@ use alloy_provider::Provider;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::LocalSigner;
 use alloy_signer_local::PrivateKeySigner;
-use irys_types::Config;
+use irys_types::NodeConfig;
 use irys_types::TxChunkOffset;
 use irys_types::UnpackedChunk;
 use rand::Rng;
 
-use irys_actors::block_producer::SolutionFoundMessage;
-use irys_chain::start_irys_node;
-use irys_config::IrysNodeConfig;
+use crate::utils::mine_block;
+use crate::utils::IrysNodeTest;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG, StorageConfig};
+use irys_types::{irys::IrysSigner, serialization::*, IrysTransaction, SimpleRNG};
 use k256::ecdsa::SigningKey;
 use reth::rpc::types::TransactionRequest;
 use reth_primitives::GenesisAccount;
 use tokio::time::sleep;
-use tracing::{debug, info};
-
-use crate::utils::capacity_chunk_solution;
+use tracing::info;
 
 // network simulation test for analytics
 #[ignore]
@@ -34,15 +30,18 @@ use crate::utils::capacity_chunk_solution;
 async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
-    let temp_dir = setup_tracing_and_temp_dir(Some("test_blockprod"), false);
-    let testnet_config = Config::testnet();
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-
-    let account1 = IrysSigner::random_signer(&testnet_config);
-    let account2 = IrysSigner::random_signer(&testnet_config);
-    let account3 = IrysSigner::random_signer(&testnet_config);
-    config.extend_genesis_accounts(vec![
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().chunk_size = 32;
+    config.consensus.get_mut().num_chunks_in_partition = 1000;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.storage.num_writes_before_sync = 1;
+    config.consensus.get_mut().entropy_packing_iterations = 1_000;
+    config.consensus.get_mut().chunk_migration_depth = 1; // Testnet / single node confi;
+    let account1 = IrysSigner::random_signer(&config.consensus_config());
+    let account2 = IrysSigner::random_signer(&config.consensus_config());
+    let account3 = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -65,26 +64,16 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             },
         ),
     ]);
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .await
+        .start()
+        .await;
+    let _reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
-    let node = start_irys_node(
-        config.clone(),
-        StorageConfig {
-            chunk_size: 32,
-            num_chunks_in_partition: 1000,
-            num_chunks_in_recall_range: 2,
-            num_partitions_in_slot: 1,
-            miner_address: config.mining_signer.address(),
-            min_writes_before_sync: 1,
-            entropy_packing_iterations: 1_000,
-            chunk_migration_depth: 1, // Testnet / single node config
-            chain_id: testnet_config.chain_id,
-        },
-        testnet_config.clone(),
-    )
-    .await?;
-    let _reth_context = RethNodeContext::new(node.reth_handle.into()).await?;
-
-    let http_url = format!("http://127.0.0.1:{}", node.config.port);
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.port
+    );
 
     // server should be running
     // check with request to `/v1/info`
@@ -133,9 +122,12 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 .with_recommended_fillers()
                 .wallet(EthereumWallet::from(signer))
                 .on_http(
-                    format!("http://127.0.0.1:{}/v1/execution-rpc", node.config.port)
-                        .parse()
-                        .unwrap(),
+                    format!(
+                        "http://127.0.0.1:{}/v1/execution-rpc",
+                        node.node_ctx.config.node_config.http.port
+                    )
+                    .parse()
+                    .unwrap(),
                 )
         })
         .collect::<Vec<_>>();
@@ -162,7 +154,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 gas: Some(21000),
                 value: Some(U256::from(simple_rng.next_range(20_000))),
                 nonce: Some(alloy_provider.get_transaction_count(a.address()).await?),
-                chain_id: Some(testnet_config.chain_id),
+                chain_id: Some(node.node_ctx.config.consensus.chain_id),
                 ..Default::default()
             };
 
@@ -202,7 +194,9 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     data_size,
                     data_path,
                     bytes: Base64(data_bytes[min..max].to_vec()),
-                    tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
+                    tx_offset: TxChunkOffset::from(
+                        TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+                    ),
                 };
 
                 // Make a POST request with JSON payload
@@ -255,25 +249,10 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             }
         }
 
-        let poa_solution = capacity_chunk_solution(
-            node.node_config.mining_signer.address(),
-            node.vdf_steps_guard.clone(),
-            &node.vdf_config,
-            &node.storage_config,
-        )
-        .await;
-
-        let (_block, _reth_exec_env) = node
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution))
-            .await?
-            .unwrap()
-            .unwrap();
+        mine_block(&node.node_ctx).await?;
         info!("Finished step {}", &i);
     }
 
-    debug!("JESSEDEBUG DONE");
     sleep(Duration::from_secs(u64::MAX)).await;
 
     Ok(())

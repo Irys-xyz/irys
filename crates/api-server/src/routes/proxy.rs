@@ -40,10 +40,7 @@ pub async fn proxy(
     client: Data<Client>,
     state: web::Data<ApiState>,
 ) -> Result<HttpResponse, ProxyError> {
-    let target_uri = state
-        .reth_http_url
-        .as_ref()
-        .ok_or(ProxyError::MethodNotAllowed)?;
+    let target_uri = &state.reth_http_url;
 
     // Create a new client request
     let mut client_req = match *req.method() {

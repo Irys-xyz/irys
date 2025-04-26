@@ -11,8 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::irys::IrysSigner;
 
 use crate::{
-    generate_data_root, generate_ingress_leaves, generate_leaves_from_chunks, DataRoot,
-    IrysSignature, Node, H256,
+    generate_data_root, generate_ingress_leaves, ChunkBytes, DataRoot, IrysSignature, Node, H256,
 };
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact)]
 pub struct IngressProof {
@@ -34,18 +33,26 @@ impl Decompress for IngressProof {
     }
 }
 
-pub fn generate_ingress_proof_tree(chunks: Vec<&[u8]>, address: Address) -> eyre::Result<Node> {
-    let chunks = generate_ingress_leaves(chunks, address)?;
-    let root = generate_data_root(chunks.clone())?;
-    Ok(root)
+pub fn generate_ingress_proof_tree(
+    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+    address: Address,
+    and_regular: bool,
+) -> eyre::Result<(Node, Option<Node>)> {
+    let (ingress_leaves, regular_leaves) = generate_ingress_leaves(chunks, address, and_regular)?;
+    let ingress_root = generate_data_root(ingress_leaves)?;
+
+    Ok((
+        ingress_root,
+        regular_leaves.map(generate_data_root).transpose()?,
+    ))
 }
 
 pub fn generate_ingress_proof(
     signer: IrysSigner,
     data_root: DataRoot,
-    chunks: &Vec<&[u8]>,
+    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
 ) -> eyre::Result<IngressProof> {
-    let root = generate_ingress_proof_tree(chunks.clone(), signer.address())?;
+    let (root, _) = generate_ingress_proof_tree(chunks, signer.address(), false)?;
     let proof: [u8; 32] = root.id;
 
     // Combine proof and data_root into a single digest to sign
@@ -63,7 +70,10 @@ pub fn generate_ingress_proof(
     })
 }
 
-pub fn verify_ingress_proof(proof: IngressProof, chunks: &Vec<&[u8]>) -> eyre::Result<bool> {
+pub fn verify_ingress_proof(
+    proof: IngressProof,
+    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+) -> eyre::Result<bool> {
     let mut hasher = sha::Sha256::new();
     hasher.update(&proof.proof.0);
     hasher.update(&proof.data_root.0);
@@ -74,13 +84,14 @@ pub fn verify_ingress_proof(proof: IngressProof, chunks: &Vec<&[u8]>) -> eyre::R
     let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())
         .ok_or_eyre("Unable to recover signer")?;
 
-    // re-compute the proof
-    let proof_root = generate_ingress_proof_tree(chunks.clone(), recovered_address)?;
-    let nodes = generate_leaves_from_chunks(chunks)?;
+    // re-compute the ingress proof & regular trees & roots
+    let (proof_root, regular_root) = generate_ingress_proof_tree(chunks, recovered_address, true)?;
 
-    // re-compute the data_root
-    let root = generate_data_root(nodes.clone())?;
-    let data_root = H256(root.id);
+    let data_root = H256(
+        regular_root
+            .ok_or_eyre("expected regular_root to be Some")?
+            .id,
+    );
 
     // re-compute the prehash (combining data_root and proof)
     let mut hasher = sha::Sha256::new();
@@ -98,19 +109,22 @@ mod tests {
 
     use crate::{
         generate_data_root, generate_leaves, hash_sha256, ingress::verify_ingress_proof,
-        irys::IrysSigner, Config, H256,
+        irys::IrysSigner, ConsensusConfig, H256,
     };
 
     use super::generate_ingress_proof;
 
     #[test]
     fn interleave_test() -> eyre::Result<()> {
-        let testnet_config = Config::testnet();
+        let testnet_config = ConsensusConfig::testnet();
         let data_size = (testnet_config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
         let signer = IrysSigner::random_signer(&testnet_config);
-        let leaves = generate_leaves(&data_bytes, testnet_config.chunk_size as usize)?;
+        let leaves = generate_leaves(
+            vec![data_bytes].into_iter().map(Ok),
+            testnet_config.chunk_size as usize,
+        )?;
         let interleave_value = signer.address();
         let interleave_hash = hash_sha256(&interleave_value.0 .0)?;
 
@@ -129,28 +143,40 @@ mod tests {
     #[test]
     fn basic() -> eyre::Result<()> {
         // Create some random data
-        let testnet_config = Config::testnet();
+        let testnet_config = ConsensusConfig::testnet();
         let data_size = (testnet_config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // Build a merkle tree and data_root from the chunks
-        let leaves = generate_leaves(&data_bytes, testnet_config.chunk_size as usize).unwrap();
+        let leaves = generate_leaves(
+            vec![data_bytes.clone()].into_iter().map(Ok),
+            testnet_config.chunk_size as usize,
+        )
+        .unwrap();
         let root = generate_data_root(leaves)?;
         let data_root = H256(root.id);
 
         // Generate an ingress proof
         let signer = IrysSigner::random_signer(&testnet_config);
-        let chunks: Vec<&[u8]> = data_bytes
+        let chunks: Vec<Vec<u8>> = data_bytes
             .chunks(testnet_config.chunk_size as usize)
+            .map(|c| Vec::from(c))
             .collect();
-        let proof = generate_ingress_proof(signer.clone(), data_root, &chunks)?;
+        let proof = generate_ingress_proof(
+            signer.clone(),
+            data_root,
+            chunks.clone().into_iter().map(Ok),
+        )?;
 
         // Verify the ingress proof
-        assert!(verify_ingress_proof(proof.clone(), &chunks)?);
+        assert!(verify_ingress_proof(
+            proof.clone(),
+            chunks.clone().into_iter().map(Ok)
+        )?);
         let mut reversed = chunks.clone();
         reversed.reverse();
-        assert!(!verify_ingress_proof(proof, &reversed)?);
+        assert!(!verify_ingress_proof(proof, reversed.into_iter().map(Ok))?);
 
         Ok(())
     }

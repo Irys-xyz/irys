@@ -11,17 +11,16 @@ use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
-    Ledger,
+    DataLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_config::StorageConfig, vdf_config::VDFStepsConfig, Address,
-    Base64, DifficultyAdjustmentConfig, H256List, IngressProofsList, IrysBlockHeader,
-    IrysTransactionHeader, PoaData, Signature, TransactionLedger, TxIngressProof, VDFLimiterInfo,
-    H256, U256,
+    next_cumulative_diff, Address, Base64, Config, DataTransactionLedger, H256List,
+    IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TxIngressProof,
+    VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -36,9 +35,7 @@ use crate::{
     block_tree_service::BlockTreeReadGuard,
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     ema_service::EmaServiceMessage,
-    epoch_service::{
-        EpochServiceActor, EpochServiceConfig, GetPartitionAssignmentMessage, NewEpochMessage,
-    },
+    epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
@@ -66,18 +63,12 @@ pub struct BlockProducerActor {
     pub service_senders: ServiceSenders,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
-    /// Storage config
-    pub storage_config: StorageConfig,
-    /// Difficulty adjustment parameters for the Irys Protocol
-    pub difficulty_config: DifficultyAdjustmentConfig,
-    /// VDF configuration parameters
-    pub vdf_config: VDFStepsConfig,
+    /// Global config
+    pub config: Config,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Get the head of the chain
     pub block_tree_guard: BlockTreeReadGuard,
-    /// Epoch config
-    pub epoch_config: EpochServiceConfig,
     /// The Irys price oracle
     pub price_oracle: Arc<IrysPriceOracle>,
 }
@@ -120,13 +111,11 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
         let reth = self.reth_provider.clone();
         let db = self.db.clone();
-        let difficulty_config = self.difficulty_config;
-        let chunk_size = self.storage_config.chunk_size;
         let block_tree_guard = self.block_tree_guard.clone();
-        let blocks_in_epoch = self.epoch_config.num_blocks_in_epoch;
         let vdf_steps = self.vdf_steps_guard.clone();
         let price_oracle = self.price_oracle.clone();
         let ema_service = self.service_senders.ema.clone();
+        let config = self.config.clone();
 
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
@@ -149,7 +138,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 Ok(None) =>
                     Err(eyre!("No block header found for block {} ({}) ", prev_block_hash.0.to_base58(), prev_block_height)),
                 Err(e) =>
-                    Err(eyre!("Failed to get previous block {} ({}) header: {}", prev_block_hash.0.to_base58(), prev_block_height,  e)) 
+                    Err(eyre!("Failed to get previous block {} ({}) header: {}", prev_block_hash.0.to_base58(), prev_block_height,  e))
             }?;
 
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
@@ -188,7 +177,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     }
                 }
 
-                // Loop though all the pending tx to see which haven't been promoted 
+                // Loop though all the pending tx to see which haven't been promoted
                 for txid in &publish_txids {
                     let tx_header = match tx_header_by_txid(&read_tx, txid) {
                         Ok(Some(header)) => header,
@@ -231,16 +220,16 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             }
 
             // Publish Ledger Transactions
-            let publish_chunks_added = calculate_chunks_added(&publish_txs, chunk_size);
-            let publish_max_chunk_offset =  prev_block_header.ledgers[Ledger::Publish].max_chunk_offset + publish_chunks_added;
+            let publish_chunks_added = calculate_chunks_added(&publish_txs, config.consensus.chunk_size);
+            let publish_max_chunk_offset =  prev_block_header.data_ledgers[DataLedger::Publish].max_chunk_offset + publish_chunks_added;
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
-            // Submit Ledger Transactions    
+            // Submit Ledger Transactions
             let submit_txs: Vec<IrysTransactionHeader> =
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
 
-            let submit_chunks_added = calculate_chunks_added(&submit_txs, chunk_size);
-            let submit_max_chunk_offset = prev_block_header.ledgers[Ledger::Submit].max_chunk_offset + submit_chunks_added;
+            let submit_chunks_added = calculate_chunks_added(&submit_txs, config.consensus.chunk_size);
+            let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
 
             let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -251,7 +240,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let current_difficulty = prev_block_header.diff;
             let mut is_difficulty_updated = false;
             let block_height = prev_block_header.height + 1;
-            let (diff, stats) = calculate_difficulty(block_height, last_diff_timestamp, current_timestamp, current_difficulty, &difficulty_config);
+            let (diff, stats) = calculate_difficulty(block_height, last_diff_timestamp, current_timestamp, current_difficulty, &config.consensus.difficulty_adjustment);
 
             // Did an adjustment happen?
             if let Some(stats) = stats {
@@ -305,6 +294,21 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             ema_service.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
             let ema_irys_price = rx.await??;
 
+            // Update the last_epoch_hash field, which tracks the most recent epoch boundary
+            //
+            // The logic works as follows:
+            // 1. Start with the previous block's last_epoch_hash as default
+            // 2. Special case: At the first block after an epoch boundary (block_height % blocks_in_epoch == 1),
+            //    update last_epoch_hash to point to the epoch block itself (prev_block_hash)
+            // 3. This creates a chain of references where each block knows which epoch it belongs to,
+            //    and which block marked the beginning of that epoch
+            let mut last_epoch_hash = prev_block_header.last_epoch_hash;
+
+            // If this is the first block following an epoch boundary block
+            if block_height > 0 && block_height % config.consensus.epoch.num_blocks_in_epoch == 1 {
+                // Record the hash of the epoch block (previous block) as our epoch reference
+                last_epoch_hash = prev_block_hash;
+            }
             // build a new block header
             let mut irys_block = IrysBlockHeader {
                 block_hash,
@@ -313,8 +317,8 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 cumulative_diff: cumulative_difficulty,
                 last_diff_timestamp,
                 solution_hash: solution.solution_hash,
-                previous_solution_hash: H256::zero(),
-                last_epoch_hash: H256::random(),
+                previous_solution_hash: prev_block_header.solution_hash,
+                last_epoch_hash,
                 chunk_hash: poa_chunk_hash,
                 previous_block_hash: prev_block_hash,
                 previous_cumulative_diff: prev_block_header.cumulative_diff,
@@ -323,20 +327,21 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 miner_address: solution.mining_address,
                 signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
-                ledgers: vec![
+                system_ledgers: vec![],
+                data_ledgers: vec![
                     // Permanent Publish Ledger
-                    TransactionLedger {
-                        ledger_id: Ledger::Publish.into(),
-                        tx_root: TransactionLedger::merklize_tx_root(&publish_txs).0,
+                    DataTransactionLedger {
+                        ledger_id: DataLedger::Publish.into(),
+                        tx_root: DataTransactionLedger::merklize_tx_root(&publish_txs).0,
                         tx_ids: H256List(publish_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
                         max_chunk_offset: publish_max_chunk_offset,
                         expires: None,
                         proofs: opt_proofs,
                     },
                     // Term Submit Ledger
-                    TransactionLedger {
-                        ledger_id: Ledger::Submit.into(),
-                        tx_root: TransactionLedger::merklize_tx_root(&submit_txs).0,
+                    DataTransactionLedger {
+                        ledger_id: DataLedger::Submit.into(),
+                        tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
                         tx_ids: H256List(submit_txids.clone()),
                         max_chunk_offset: submit_max_chunk_offset,
                         expires: Some(1622543200),
@@ -457,10 +462,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             if is_difficulty_updated {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
-            }
-
-            if block_height > 0 && block_height % blocks_in_epoch == 0 {
-                epoch_service_addr.do_send(NewEpochMessage(block.clone()));
             }
 
             info!("Finished producing block {}, ({})", &block_hash.0.to_base58(),&block_height);

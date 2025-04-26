@@ -20,3 +20,4 @@ pub mod vdf_service;
 
 pub use addresses::*;
 pub use block_producer::*;
+pub use epoch_service::*;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use actix::{Actor, Context, Handler, Message, Supervised, WrapFuture};
 use actix::{AsyncContext, SystemService};
-use irys_types::{IrysBlockHeader, StorageConfig, VDFStepsConfig};
+use irys_types::{Config, IrysBlockHeader};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use irys_vdf::vdf_steps_are_valid;
 use tracing::error;
@@ -14,35 +14,37 @@ use crate::{
     epoch_service::PartitionAssignmentsReadGuard,
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ValidationService {
     /// Read only view of the block index
-    pub block_index_guard: Option<BlockIndexReadGuard>,
+    pub block_index_guard: BlockIndexReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
-    pub partition_assignments_guard: Option<PartitionAssignmentsReadGuard>,
+    pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// VDF steps read guard
-    pub vdf_steps_guard: Option<VdfStepsReadGuard>,
-    /// Reference to global storage config for node
-    pub storage_config: StorageConfig,
-    /// Network settings for VDF steps
-    pub vdf_config: VDFStepsConfig,
+    pub vdf_steps_guard: VdfStepsReadGuard,
+    /// Reference to global config for node
+    pub config: Config,
+}
+
+impl Default for ValidationService {
+    fn default() -> Self {
+        unimplemented!("don't rely on the default implementation for ValidationService");
+    }
 }
 
 impl ValidationService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory
-    pub const fn new(
+    pub fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
         vdf_steps_guard: VdfStepsReadGuard,
-        storage_config: StorageConfig,
-        vdf_config: VDFStepsConfig,
+        config: &Config,
     ) -> Self {
         Self {
-            block_index_guard: Some(block_index_guard),
-            partition_assignments_guard: Some(partition_assignments_guard),
-            vdf_steps_guard: Some(vdf_steps_guard),
-            storage_config,
-            vdf_config,
+            block_index_guard,
+            partition_assignments_guard,
+            vdf_steps_guard,
+            config: config.clone(),
         }
     }
 }
@@ -69,28 +71,23 @@ impl Handler<RequestValidationMessage> for ValidationService {
     type Result = ();
 
     fn handle(&mut self, msg: RequestValidationMessage, ctx: &mut Self::Context) -> Self::Result {
-        assert!(
-            !(self.partition_assignments_guard.is_none() || self.block_index_guard.is_none()),
-            "vdf_service is not initialized"
-        );
-
         let block = msg.0;
-        let block_index_guard = self.block_index_guard.clone().unwrap();
-        let partitions_guard = self.partition_assignments_guard.clone().unwrap();
-        let storage_config = self.storage_config.clone();
+        let block_index_guard = self.block_index_guard.clone();
+        let partitions_guard = self.partition_assignments_guard.clone();
         let miner_address = block.miner_address;
-        let vdf_config = self.vdf_config.clone();
         let block_hash = block.block_hash;
         let vdf_info = block.vdf_limiter_info.clone();
         let poa = block.poa.clone();
-        let vdf_steps_guard = self.vdf_steps_guard.clone().unwrap();
+        let vdf_steps_guard = self.vdf_steps_guard.clone();
 
         // Spawn VDF validation first
+        let vdf_config = self.config.consensus.vdf.clone();
         let vdf_future = tokio::task::spawn_blocking(move || {
             vdf_steps_are_valid(&vdf_info, &vdf_config, vdf_steps_guard)
         });
 
         // Wait for results before processing next message
+        let config = self.config.clone();
         ctx.wait(
             async move {
                 let validation_result = match vdf_future.await.unwrap() {
@@ -101,7 +98,7 @@ impl Handler<RequestValidationMessage> for ValidationService {
                                 &poa,
                                 &block_index_guard,
                                 &partitions_guard,
-                                &storage_config,
+                                &config.consensus,
                                 &miner_address,
                             )
                         });

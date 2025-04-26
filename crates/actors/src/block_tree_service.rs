@@ -19,10 +19,10 @@ use crate::{
 use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::ensure;
-use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, Initialized, Ledger};
+use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, DataLedger};
 use irys_types::{
-    Address, BlockHash, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionId, StorageConfig, H256, U256,
+    Address, BlockHash, ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
+    IrysTransactionId, H256, U256,
 };
 use reth_db::{transaction::DbTx, Database as _};
 use tracing::{debug, error, info};
@@ -31,7 +31,7 @@ use tracing::{debug, error, info};
 // BlockTreeReadGuard
 //------------------------------------------------------------------------------
 
-/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
+/// Wraps the internal `Arc<RwLock<_>>` to make the reference readonly
 #[derive(Debug, Clone, MessageResponse)]
 pub struct BlockTreeReadGuard {
     block_tree_cache: Arc<RwLock<BlockTreeCache>>,
@@ -83,7 +83,7 @@ pub struct BlockTreeService {
     /// Read view of the `block_index`
     pub block_index_guard: Option<BlockIndexReadGuard>,
     /// Global storage config
-    pub storage_config: StorageConfig,
+    pub consensus_config: ConsensusConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
 }
@@ -111,10 +111,10 @@ impl BlockTreeService {
     /// Initializes a `BlockTreeActor` without a `block_producer` address
     pub fn new(
         db: DatabaseProvider,
-        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+        block_index: Arc<RwLock<BlockIndex>>,
         miner_address: &Address,
         block_index_guard: BlockIndexReadGuard,
-        storage_config: StorageConfig,
+        consensus_config: ConsensusConfig,
         service_senders: ServiceSenders,
     ) -> Self {
         let cache = BlockTreeCache::initialize_from_list(block_index, db.clone());
@@ -124,7 +124,7 @@ impl BlockTreeService {
             cache: Some(Arc::new(RwLock::new(cache))),
             miner_address: *miner_address,
             block_index_guard: Some(block_index_guard),
-            storage_config,
+            consensus_config,
             service_senders,
         }
     }
@@ -149,8 +149,8 @@ impl BlockTreeService {
 
         // Get all the transactions for the finalized block, error if not found
         // TODO: Eventually abstract this for support of `n` ledgers
-        let submit_txs = get_ledger_tx_headers(&tx, &block_header, Ledger::Submit);
-        let publish_txs = get_ledger_tx_headers(&tx, &block_header, Ledger::Publish);
+        let submit_txs = get_ledger_tx_headers(&tx, &block_header, DataLedger::Submit);
+        let publish_txs = get_ledger_tx_headers(&tx, &block_header, DataLedger::Publish);
 
         let all_txs = {
             let mut combined = submit_txs.unwrap_or_default();
@@ -199,7 +199,7 @@ impl BlockTreeService {
         MempoolService::from_registry().do_send(msg);
         self.service_senders
             .ema
-            .send(EmaServiceMessage::NewConfirmedBlock)
+            .send(EmaServiceMessage::BlockConfirmed)
             .expect("EMA service has unexpectedly become unreachable");
     }
 
@@ -212,7 +212,7 @@ impl BlockTreeService {
         arc_block: &Arc<IrysBlockHeader>,
         cache: &BlockTreeCache,
     ) {
-        let migration_depth = self.storage_config.chunk_migration_depth as usize;
+        let migration_depth = self.consensus_config.chunk_migration_depth as usize;
 
         // Skip if block isn't deep enough for finalization
         if arc_block.height <= migration_depth as u64 {
@@ -246,7 +246,7 @@ impl BlockTreeService {
         let binding = self.block_index_guard.clone().unwrap();
         let bi = binding.read();
         if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
-            let finalized = bi.get_item(finalized_height as usize).unwrap();
+            let finalized = bi.get_item(finalized_height).unwrap();
             if finalized.block_hash == finalized_hash {
                 return;
             }
@@ -295,44 +295,58 @@ pub struct ValidationResultMessage {
 /// After adding the block, it's scheduled for full validation and the previous
 /// block is marked for storage finalization.
 impl Handler<BlockPreValidatedMessage> for BlockTreeService {
-    type Result = ();
+    type Result = ResponseFuture<eyre::Result<()>>;
+
     fn handle(&mut self, msg: BlockPreValidatedMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        let block = msg.0;
-        let all_txs = msg.1;
-        let block_hash = &block.block_hash;
-        let _finalized_block_hash = block.previous_block_hash;
+        let miner_address = self.miner_address;
+        let ema_service = self.service_senders.ema.clone();
+        let cache = self.cache.clone().expect("cache to be initialised");
 
-        let binding = self.cache.clone().unwrap();
-        let mut cache = binding.write().unwrap();
+        return Box::pin(async move {
+            let block = msg.0;
+            let all_txs = msg.1;
+            let block_hash = &block.block_hash;
+            let _finalized_block_hash = block.previous_block_hash;
+            let mut cache = cache.write().expect("cache lock poisoined");
 
-        // Handle block addition differently based on origin
-        let add_result = if block.miner_address == self.miner_address {
-            // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
-            // extension while full validation is still pending. This prevents blocking
-            // new block production while validation completes.
-            cache.add_validated_block((*block).clone(), BlockState::Unknown, all_txs)
-        } else {
-            // For blocks from peers: Add via standard path requiring validation
-            cache.add_block(&block, all_txs)
-        };
+            // Handle block addition differently based on origin
+            let add_result = if block.miner_address == miner_address {
+                // For locally mined blocks: Add as `BlockState::Unknown `to allow chain
+                // extension while full validation is still pending. This prevents blocking
+                // new block production while validation completes.
+                cache.add_validated_block((*block).clone(), BlockState::Unknown, all_txs)
+            } else {
+                // For blocks from peers: Add via standard path requiring validation
+                cache.add_block(&block, all_txs)
+            };
 
-        if add_result.is_ok() {
-            // Schedule block for full validation regardless of origin
-            let validation_service = ValidationService::from_registry();
-            validation_service.do_send(RequestValidationMessage(block.clone()));
+            if add_result.is_ok() {
+                // Schedule block for full validation regardless of origin
+                let validation_service = ValidationService::from_registry();
+                validation_service.do_send(RequestValidationMessage(block.clone()));
 
-            // Update block state to reflect scheduled validation
-            if cache
-                .mark_block_as_validation_scheduled(block_hash)
-                .is_err()
-            {
-                error!("Unable to mark block as ValidationScheduled");
+                // Update block state to reflect scheduled validation
+                if cache
+                    .mark_block_as_validation_scheduled(block_hash)
+                    .is_err()
+                {
+                    error!("Unable to mark block as ValidationScheduled");
+                }
+                debug!(
+                    "scheduling block for validation: {}",
+                    block_hash.0.to_base58()
+                );
+                // release the lock on `cache` so that the EMA service can acquire it
+                drop(cache);
+
+                // block until EMA service is updated
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                ema_service.send(EmaServiceMessage::NewPrevalidatedBlock { response: tx })?;
+                rx.await?;
             }
-            debug!(
-                "scheduling block for validation: {}",
-                block_hash.0.to_base58()
-            );
-        }
+
+            Ok(())
+        });
     }
 }
 
@@ -395,9 +409,9 @@ impl Handler<ValidationResultMessage> for BlockTreeService {
 fn get_ledger_tx_headers<T: DbTx>(
     tx: &T,
     block_header: &IrysBlockHeader,
-    ledger: Ledger,
+    ledger: DataLedger,
 ) -> Option<Vec<IrysTransactionHeader>> {
-    match block_header.ledgers[ledger]
+    match block_header.data_ledgers[ledger]
         .tx_ids
         .iter()
         .map(|txid| {
@@ -522,8 +536,8 @@ impl BlockTreeCache {
             vec![(
                 block_hash,
                 height,
-                block.ledgers[Ledger::Publish].tx_ids.0.clone(), // Publish ledger txs
-                block.ledgers[Ledger::Submit].tx_ids.0.clone(),  // Submit ledger txs
+                block.data_ledgers[DataLedger::Publish].tx_ids.0.clone(), // Publish ledger txs
+                block.data_ledgers[DataLedger::Submit].tx_ids.0.clone(),  // Submit ledger txs
             )],
             0,
         );
@@ -542,7 +556,7 @@ impl BlockTreeCache {
     /// The most recent block in the list is marked as the tip.
     /// The input blocks must be sorted in descending order, from newest to oldest.
     pub fn initialize_from_list(
-        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+        block_index: Arc<RwLock<BlockIndex>>,
         db: DatabaseProvider,
     ) -> Self {
         let block_index = block_index.read().unwrap();
@@ -558,7 +572,7 @@ impl BlockTreeCache {
         let end = block_index.num_blocks();
 
         // Initialize cache with the start block
-        let start_block_hash = block_index.get_item(start as usize).unwrap().block_hash;
+        let start_block_hash = block_index.get_item(start).unwrap().block_hash;
         let start_block = block_header_by_hash(&tx, &start_block_hash, false)
             .unwrap()
             .unwrap();
@@ -571,10 +585,7 @@ impl BlockTreeCache {
 
         // Add remaining blocks
         for block_height in (start + 1)..end {
-            let block_hash = block_index
-                .get_item(block_height as usize)
-                .unwrap()
-                .block_hash;
+            let block_hash = block_index.get_item(block_height).unwrap().block_hash;
             let block = block_header_by_hash(&tx, &block_hash, false)
                 .unwrap()
                 .unwrap();
@@ -602,7 +613,7 @@ impl BlockTreeCache {
         db: DatabaseProvider,
     ) -> Result<Vec<IrysTransactionHeader>, eyre::Report> {
         // Collect submit transactions
-        let submit_txs = block.ledgers[Ledger::Submit]
+        let submit_txs = block.data_ledgers[DataLedger::Submit]
             .tx_ids
             .iter()
             .map(|txid| {
@@ -618,7 +629,7 @@ impl BlockTreeCache {
             })?;
 
         // Collect publish transactions
-        let publish_txs = block.ledgers[Ledger::Publish]
+        let publish_txs = block.data_ledgers[DataLedger::Publish]
             .tx_ids
             .iter()
             .map(|txid| {
@@ -853,8 +864,14 @@ impl BlockTreeCache {
 
                 ChainState::Onchain => {
                     // Include OnChain blocks in pairs
-                    let publish_txs = entry.block.ledgers[Ledger::Publish].tx_ids.0.clone();
-                    let submit_txs = entry.block.ledgers[Ledger::Submit].tx_ids.0.clone();
+                    let publish_txs = entry.block.data_ledgers[DataLedger::Publish]
+                        .tx_ids
+                        .0
+                        .clone();
+                    let submit_txs = entry.block.data_ledgers[DataLedger::Submit]
+                        .tx_ids
+                        .0
+                        .clone();
                     pairs.push((current, entry.block.height, publish_txs, submit_txs));
 
                     if blocks_to_collect == 0 {
@@ -865,8 +882,14 @@ impl BlockTreeCache {
 
                 // For Validated or other NotOnchain states
                 ChainState::Validated(_) | ChainState::NotOnchain(_) => {
-                    let publish_txs = entry.block.ledgers[Ledger::Publish].tx_ids.0.clone();
-                    let submit_txs = entry.block.ledgers[Ledger::Submit].tx_ids.0.clone();
+                    let publish_txs = entry.block.data_ledgers[DataLedger::Publish]
+                        .tx_ids
+                        .0
+                        .clone();
+                    let submit_txs = entry.block.data_ledgers[DataLedger::Submit]
+                        .tx_ids
+                        .0
+                        .clone();
                     pairs.push((current, entry.block.height, publish_txs, submit_txs));
                     not_onchain_count += 1;
 
@@ -998,7 +1021,7 @@ impl BlockTreeCache {
         self.blocks.get(block_hash).map(|entry| &entry.block)
     }
 
-    /// Gets block and its current validation status    
+    /// Gets block and its current validation status
     #[must_use]
     pub fn get_block_and_status(
         &self,
@@ -1209,6 +1232,41 @@ impl BlockTreeCache {
     }
 }
 
+pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<(H256, u64)>> {
+    let canonical_chain = tokio::task::spawn_blocking(move || {
+        let cache = tree.read();
+
+        let mut blocks_to_collect = BLOCK_CACHE_DEPTH;
+        let mut chain_cache = Vec::with_capacity(
+            blocks_to_collect
+                .try_into()
+                .expect("u64 must fit into usize"),
+        );
+        let mut current = cache.max_cumulative_difficulty.1;
+        tracing::debug!(latest_cache_tip =? current, "updating canonical chain cache");
+
+        while let Some(entry) = cache.blocks.get(&current) {
+            chain_cache.push((current, entry.block.height));
+
+            if blocks_to_collect == 0 {
+                break;
+            }
+            blocks_to_collect -= 1;
+
+            if entry.block.height == 0 {
+                break;
+            } else {
+                current = entry.block.previous_block_hash;
+            }
+        }
+
+        chain_cache.reverse();
+        chain_cache
+    })
+    .await?;
+    Ok(canonical_chain)
+}
+
 /// Returns the canonical chain where the first item in the Vec is the oldest block
 /// Implementation detail: utilises `tokio::task::spawn_blocking`
 pub async fn get_canonical_chain(
@@ -1224,9 +1282,13 @@ pub async fn get_canonical_chain(
 pub async fn get_block(
     block_tree_read_guard: BlockTreeReadGuard,
     block_hash: H256,
-) -> eyre::Result<Option<IrysBlockHeader>> {
+) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
     let res = tokio::task::spawn_blocking(move || {
-        block_tree_read_guard.read().get_block(&block_hash).cloned()
+        block_tree_read_guard
+            .read()
+            .get_block(&block_hash)
+            .cloned()
+            .map(|block| Arc::new(block))
     })
     .await?;
     Ok(res)
@@ -1237,7 +1299,7 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use eyre::ensure;
-    use irys_database::Ledger;
+    use irys_database::DataLedger;
 
     #[actix::test]
     async fn test_block_cache() {
@@ -1279,10 +1341,12 @@ mod tests {
         // Adding `b1` again shouldn't change the state because it is confirmed
         // onchain
         let mut b1_test = b1.clone();
-        b1_test.ledgers[Ledger::Submit].tx_ids.push(H256::random());
+        b1_test.data_ledgers[DataLedger::Submit]
+            .tx_ids
+            .push(H256::random());
         assert_matches!(cache.add_block(&b1_test, all_tx.clone()), Ok(_));
         assert_eq!(
-            cache.get_block(&b1.block_hash).unwrap().ledgers[Ledger::Submit]
+            cache.get_block(&b1.block_hash).unwrap().data_ledgers[DataLedger::Submit]
                 .tx_ids
                 .len(),
             0
@@ -1291,7 +1355,7 @@ mod tests {
             cache
                 .get_by_solution_hash(&b1.solution_hash, &H256::random(), U256::one(), U256::one())
                 .unwrap()
-                .ledgers[Ledger::Submit]
+                .data_ledgers[DataLedger::Submit]
                 .tx_ids
                 .len(),
             0
@@ -1320,17 +1384,17 @@ mod tests {
 
         // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
         let txid = H256::random();
-        b2.ledgers[Ledger::Submit].tx_ids.push(txid);
+        b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
         assert_matches!(cache.add_block(&b2, all_tx.clone()), Ok(_));
         assert_eq!(
-            cache.get_block(&b2.block_hash).unwrap().ledgers[Ledger::Submit].tx_ids[0],
+            cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
             txid
         );
         assert_eq!(
             cache
                 .get_by_solution_hash(&b2.solution_hash, &H256::random(), U256::one(), U256::one())
                 .unwrap()
-                .ledgers[Ledger::Submit]
+                .data_ledgers[DataLedger::Submit]
                 .tx_ids[0],
             txid
         );
@@ -1338,7 +1402,7 @@ mod tests {
             cache
                 .get_by_solution_hash(&b2.solution_hash, &b1.block_hash, U256::one(), U256::one())
                 .unwrap()
-                .ledgers[Ledger::Submit]
+                .data_ledgers[DataLedger::Submit]
                 .tx_ids[0],
             txid
         );

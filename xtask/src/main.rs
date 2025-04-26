@@ -66,6 +66,10 @@ fn main() -> eyre::Result<()> {
                     sh.set_var(key, val);
                 }
             }
+
+            // this is needed otherwise some tests will fail (that assert panic messages)
+            sh.set_var("RUST_BACKTRACE", "1");
+
             cmd!(
                 sh,
                 "cargo nextest run --workspace --tests --all-targets {args...}"
@@ -132,10 +136,10 @@ fn main() -> eyre::Result<()> {
 
             if std::option_env!("CI").is_none() {
                 #[cfg(target_os = "macos")]
-                cmd!(sh, "open target/doc/relayer/index.html").run()?;
+                cmd!(sh, "open target/doc/irys/index.html").run()?;
 
                 #[cfg(target_os = "linux")]
-                cmd!(sh, "xdg-open target/doc/relayer/index.html").run()?;
+                cmd!(sh, "xdg-open target/doc/irys/index.html").run()?;
             }
         }
         Commands::Typos => {

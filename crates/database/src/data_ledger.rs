@@ -1,4 +1,4 @@
-use irys_types::{Compact, Config, TransactionLedger, H256};
+use irys_types::{Compact, ConsensusConfig, DataTransactionLedger, H256};
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 /// Manages the global ledger state within the epoch service, tracking:
@@ -10,7 +10,7 @@ use std::ops::{Index, IndexMut};
 /// validation state at any given time.
 /// A slot in a data ledger containing one or more partition hashes
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LedgerSlot {
     /// Assigned partition hashes
     pub partitions: Vec<H256>,
@@ -45,10 +45,10 @@ pub struct TermLedger {
 
 impl PermanentLedger {
     /// Constructs a permanent ledger, always with `Ledger::Publish` as the id
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &ConsensusConfig) -> Self {
         Self {
             slots: Vec::new(),
-            ledger_id: Ledger::Publish as u32,
+            ledger_id: DataLedger::Publish as u32,
             num_partitions_per_slot: config.num_partitions_per_slot,
         }
     }
@@ -56,12 +56,12 @@ impl PermanentLedger {
 
 impl TermLedger {
     /// Creates a term ledger with specified index and duration
-    pub fn new(ledger: Ledger, config: &Config) -> Self {
+    pub fn new(ledger: DataLedger, config: &ConsensusConfig) -> Self {
         Self {
             slots: Vec::new(),
             ledger_id: ledger as u32,
-            epoch_length: config.submit_ledger_epoch_length,
-            num_blocks_in_epoch: config.num_blocks_in_epoch,
+            epoch_length: config.epoch.submit_ledger_epoch_length,
+            num_blocks_in_epoch: config.epoch.num_blocks_in_epoch,
             num_partitions_per_slot: config.num_partitions_per_slot,
         }
     }
@@ -84,6 +84,10 @@ impl TermLedger {
 
         // Collect indices of slots to expire
         for (idx, slot) in self.slots.iter().enumerate() {
+            if idx == self.slots.len() - 1 {
+                // Never expire the last slot in a ledger
+                continue;
+            }
             if slot.last_height <= expiry_height && !slot.is_expired {
                 expired_indices.push(idx);
             }
@@ -107,7 +111,7 @@ pub trait LedgerCore {
     fn ledger_id(&self) -> u32;
 
     /// Adds slots to the ledger, reserving space for partitions
-    fn allocate_slots(&mut self, slots: u64) -> u64;
+    fn allocate_slots(&mut self, slots: u64, height: u64) -> u64;
 
     /// Get the slot needs for the ledger, returning a vector of (slot index, number of partitions needed)
     fn get_slot_needs(&self) -> Vec<(usize, usize)>;
@@ -122,13 +126,13 @@ impl LedgerCore for PermanentLedger {
     fn ledger_id(&self) -> u32 {
         self.ledger_id
     }
-    fn allocate_slots(&mut self, slots: u64) -> u64 {
+    fn allocate_slots(&mut self, slots: u64, height: u64) -> u64 {
         let mut num_partitions_added = 0;
         for _ in 0..slots {
             self.slots.push(LedgerSlot {
                 partitions: Vec::new(),
                 is_expired: false,
-                last_height: 0,
+                last_height: height,
             });
             num_partitions_added += self.num_partitions_per_slot;
         }
@@ -156,19 +160,27 @@ impl LedgerCore for PermanentLedger {
 }
 
 impl LedgerCore for TermLedger {
+    /// Get total slot count for capacity planning and chunk allocation decisions
+    ///
+    /// Returns the total number of slots (both expired and active) in the term ledger.
+    /// This count is critical for:
+    /// 1. Tracking maximum theoretical storage capacity over time
+    /// 2. Determining when to allocate additional slots based on data ingress rate
+    /// 3. Comparing against max_chunk_offset to assess if we're approaching capacity
+    ///    (within half a partition of maximum) and need to add additional slots
     fn slot_count(&self) -> usize {
-        self.slots.iter().filter(|slot| !slot.is_expired).count()
+        self.slots.len() as usize
     }
     fn ledger_id(&self) -> u32 {
         self.ledger_id
     }
-    fn allocate_slots(&mut self, slots: u64) -> u64 {
+    fn allocate_slots(&mut self, slots: u64, height: u64) -> u64 {
         let mut num_partitions_added = 0;
         for _ in 0..slots {
             self.slots.push(LedgerSlot {
                 partitions: Vec::new(),
                 is_expired: false,
-                last_height: 0,
+                last_height: height,
             });
             num_partitions_added += self.num_partitions_per_slot;
         }
@@ -199,7 +211,7 @@ impl LedgerCore for TermLedger {
 /// Names for each of the ledgers as well as their `ledger_id` discriminant
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord)]
 #[repr(u32)]
-pub enum Ledger {
+pub enum DataLedger {
     /// The permanent publish ledger
     Publish = 0,
     /// An expiring term ledger used for submitting to the publish ledger
@@ -207,17 +219,17 @@ pub enum Ledger {
     // Add more term ledgers as they exist
 }
 
-impl Default for Ledger {
+impl Default for DataLedger {
     fn default() -> Self {
         Self::Publish
     }
 }
 
-impl Ledger {
+impl DataLedger {
     /// An array of all the Ledger numbers in order
     pub const ALL: [Self; 2] = [Self::Publish, Self::Submit];
 
-    /// Make it possible to iterate over all the `LedgerNums` in order
+    /// Make it possible to iterate over all the data ledgers in order
     pub fn iter() -> impl Iterator<Item = Self> {
         Self::ALL.iter().copied()
     }
@@ -226,34 +238,35 @@ impl Ledger {
         *self as u32
     }
 
-    // Takes "perm" or some term e.g. "1year", or an integer ID
-    pub fn from_url(s: &str) -> eyre::Result<Self> {
-        if let Ok(ledger_id) = s.parse::<u32>() {
-            return Ledger::try_from(ledger_id).map_err(|e| eyre::eyre!(e));
-        }
-        match s {
-            "perm" => eyre::Result::Ok(Self::Publish),
-            "5days" => eyre::Result::Ok(Self::Submit),
-            _ => Err(eyre::eyre!("Ledger {} not supported", s)),
+    fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Publish),
+            1 => Some(Self::Submit),
+            _ => None,
         }
     }
 }
 
-impl From<Ledger> for u32 {
-    fn from(ledger: Ledger) -> Self {
+impl From<DataLedger> for u32 {
+    fn from(ledger: DataLedger) -> Self {
         ledger as Self
     }
 }
 
-impl TryFrom<u32> for Ledger {
-    type Error = &'static str;
+impl TryFrom<u32> for DataLedger {
+    type Error = eyre::Report;
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Publish),
-            1 => Ok(Self::Submit),
-            _ => Err("Invalid ledger number"),
-        }
+    fn try_from(value: u32) -> eyre::Result<Self> {
+        Self::from_u32(value).ok_or_else(|| eyre::eyre!("Invalid ledger number"))
+    }
+}
+
+impl TryFrom<&str> for DataLedger {
+    type Error = eyre::Report;
+
+    fn try_from(value: &str) -> eyre::Result<Self> {
+        let x = value.parse()?;
+        Self::from_u32(x).ok_or_else(|| eyre::eyre!("Invalid ledger number"))
     }
 }
 
@@ -277,10 +290,10 @@ pub struct Ledgers {
 
 impl Ledgers {
     /// Instantiate a Ledgers struct with the correct Ledgers
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &ConsensusConfig) -> Self {
         Self {
             perm: PermanentLedger::new(config),
-            term: vec![TermLedger::new(Ledger::Submit, config)],
+            term: vec![TermLedger::new(DataLedger::Submit, config)],
         }
     }
 
@@ -305,42 +318,42 @@ impl Ledgers {
     }
 
     // Private helper methods for term ledger lookups
-    fn get_term_ledger(&self, ledger: Ledger) -> &TermLedger {
+    fn get_term_ledger(&self, ledger: DataLedger) -> &TermLedger {
         self.term
             .iter()
             .find(|l| l.ledger_id == ledger as u32)
             .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
     }
 
-    fn get_term_ledger_mut(&mut self, ledger: Ledger) -> &mut TermLedger {
+    fn get_term_ledger_mut(&mut self, ledger: DataLedger) -> &mut TermLedger {
         self.term
             .iter_mut()
             .find(|l| l.ledger_id == ledger as u32)
             .unwrap_or_else(|| panic!("Term ledger {:?} not found", ledger))
     }
 
-    pub fn get_slots(&self, ledger: Ledger) -> &Vec<LedgerSlot> {
+    pub fn get_slots(&self, ledger: DataLedger) -> &Vec<LedgerSlot> {
         match ledger {
-            Ledger::Publish => self.perm.get_slots(),
+            DataLedger::Publish => self.perm.get_slots(),
             ledger => self.get_term_ledger(ledger).get_slots(),
         }
     }
 
-    pub fn get_slot_needs(&self, ledger: Ledger) -> Vec<(usize, usize)> {
+    pub fn get_slot_needs(&self, ledger: DataLedger) -> Vec<(usize, usize)> {
         match ledger {
-            Ledger::Publish => self.perm.get_slot_needs(),
+            DataLedger::Publish => self.perm.get_slot_needs(),
             ledger => self.get_term_ledger(ledger).get_slot_needs(),
         }
     }
 
     pub fn push_partition_to_slot(
         &mut self,
-        ledger: Ledger,
+        ledger: DataLedger,
         slot_index: usize,
         partition_hash: H256,
     ) {
         match ledger {
-            Ledger::Publish => {
+            DataLedger::Publish => {
                 self.perm.slots[slot_index].partitions.push(partition_hash);
             }
             ledger => {
@@ -353,12 +366,12 @@ impl Ledgers {
 
     pub fn remove_partition_from_slot(
         &mut self,
-        ledger: Ledger,
+        ledger: DataLedger,
         slot_index: usize,
         partition_hash: &H256,
     ) {
         match ledger {
-            Ledger::Publish => {
+            DataLedger::Publish => {
                 self.perm.slots[slot_index]
                     .partitions
                     .retain(|p| p != partition_hash);
@@ -373,12 +386,12 @@ impl Ledgers {
 }
 
 // Implement Index to retrieve a LedgerCore by its Ledger name
-impl Index<Ledger> for Ledgers {
+impl Index<DataLedger> for Ledgers {
     type Output = dyn LedgerCore;
 
-    fn index(&self, ledger: Ledger) -> &Self::Output {
+    fn index(&self, ledger: DataLedger) -> &Self::Output {
         match ledger {
-            Ledger::Publish => &self.perm,
+            DataLedger::Publish => &self.perm,
             ledger => self
                 .term
                 .iter()
@@ -389,27 +402,27 @@ impl Index<Ledger> for Ledgers {
 }
 
 // Implement IndexMut to retrieve a LedgerCore by its Ledger name
-impl IndexMut<Ledger> for Ledgers {
-    fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
+impl IndexMut<DataLedger> for Ledgers {
+    fn index_mut(&mut self, ledger: DataLedger) -> &mut Self::Output {
         match ledger {
-            Ledger::Publish => &mut self.perm,
-            Ledger::Submit => &mut self.term[0],
+            DataLedger::Publish => &mut self.perm,
+            DataLedger::Submit => &mut self.term[0],
         }
     }
 }
 
-impl Index<Ledger> for Vec<TransactionLedger> {
-    type Output = TransactionLedger;
+impl Index<DataLedger> for Vec<DataTransactionLedger> {
+    type Output = DataTransactionLedger;
 
-    fn index(&self, ledger: Ledger) -> &Self::Output {
+    fn index(&self, ledger: DataLedger) -> &Self::Output {
         self.iter()
             .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
             .expect("No transaction ledger found for given ledger type")
     }
 }
 
-impl IndexMut<Ledger> for Vec<TransactionLedger> {
-    fn index_mut(&mut self, ledger: Ledger) -> &mut Self::Output {
+impl IndexMut<DataLedger> for Vec<DataTransactionLedger> {
+    fn index_mut(&mut self, ledger: DataLedger) -> &mut Self::Output {
         self.iter_mut()
             .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
             .expect("No transaction ledger found for given ledger type")

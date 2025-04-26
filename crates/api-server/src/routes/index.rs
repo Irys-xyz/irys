@@ -4,10 +4,12 @@ use actix_web::{
     web::{self},
     HttpResponse,
 };
+use irys_actors::block_tree_service::get_canonical_chain;
 use irys_types::H256;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     pub version: String,
     pub peer_count: u32,
@@ -19,21 +21,19 @@ pub struct NodeInfo {
 }
 
 pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
-    let block_index_height = state
-        .block_index
-        .as_ref()
-        .expect("block index")
-        .read()
-        .latest_height();
-    // TODO: populate this response struct with real values
+    let block_index_height = state.block_index.read().latest_height();
+
+    let (chain, blocks) = get_canonical_chain(state.block_tree.clone()).await.unwrap();
+    let (block_hash, height, _, _) = chain.last().unwrap();
+
     let node_info = NodeInfo {
         version: "0.0.1".into(),
         peer_count: 0,
-        chain_id: state.config.chain_id,
-        height: 0,
-        block_hash: H256::zero(),
+        chain_id: state.config.consensus.chain_id,
+        height: *height,
+        block_hash: *block_hash,
         block_index_height,
-        blocks: 0,
+        blocks: blocks as u64,
     };
 
     HttpResponse::Ok()

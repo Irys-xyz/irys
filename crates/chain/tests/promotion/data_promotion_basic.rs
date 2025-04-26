@@ -1,87 +1,75 @@
-use irys_chain::start_irys_node;
-use irys_config::IrysNodeConfig;
-use irys_types::Config;
+use crate::utils::IrysNodeTest;
+use crate::utils::{get_block_parent, get_chunk, post_chunk, verify_published_chunk};
+use actix_web::{
+    middleware::Logger,
+    test::{self, call_service, TestRequest},
+    web::{self, JsonConfig},
+    App,
+};
+use alloy_core::primitives::U256;
+use awc::http::StatusCode;
+use base58::ToBase58;
+use irys_actors::packing::wait_for_packing;
+use irys_api_server::{routes, ApiState};
+use irys_database::DataLedger;
+use irys_types::NodeConfig;
+use irys_types::{irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset};
+use reth_primitives::GenesisAccount;
+use std::time::Duration;
+use tokio::time::sleep;
+use tracing::{debug, info};
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_data_promotion_test() {
-    use actix_web::{
-        middleware::Logger,
-        test::{self, call_service, TestRequest},
-        web::{self, JsonConfig},
-        App,
-    };
-    use alloy_core::primitives::U256;
-    use awc::http::StatusCode;
-    use base58::ToBase58;
-    use irys_actors::packing::wait_for_packing;
-    use irys_api_server::{routes, ApiState};
-    use irys_database::Ledger;
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{
-        irys::IrysSigner, IrysTransaction, IrysTransactionHeader, LedgerChunkOffset, StorageConfig,
-    };
-    use reth_primitives::GenesisAccount;
-    use std::time::Duration;
-    use tokio::time::sleep;
-    use tracing::{debug, info};
-
-    use crate::utils::{get_block_parent, get_chunk, post_chunk, verify_published_chunk};
-
-    let chunk_size = 32_u64; // 32 byte chunks
-
-    let mut testnet_config = Config {
-        chunk_size,
-        num_chunks_in_partition: 10,
-        num_chunks_in_recall_range: 2,
-        num_partitions_per_slot: 1,
-        num_writes_before_sync: 1,
-        entropy_packing_iterations: 1_000,
-        chunk_migration_depth: 1, // Testnet / single node config
-        ..Config::testnet()
-    };
-    testnet_config.chunk_size = chunk_size;
-    let storage_config = StorageConfig::new(&testnet_config);
-
-    let temp_dir = setup_tracing_and_temp_dir(Some("data_promotion_test"), false);
-    let mut config = IrysNodeConfig::new(&testnet_config);
-    config.base_directory = temp_dir.path().to_path_buf();
-    let signer = IrysSigner::random_signer(&testnet_config);
-
-    config.extend_genesis_accounts(vec![(
+    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().chunk_size = 32;
+    config.consensus.get_mut().chunk_migration_depth = 32;
+    config.consensus.get_mut().num_chunks_in_partition = 10;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.storage.num_writes_before_sync = 1;
+    config.consensus.get_mut().entropy_packing_iterations = 1_000;
+    config.consensus.get_mut().chunk_migration_depth = 1; // Testnet / single node config
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![(
         signer.address(),
         GenesisAccount {
             balance: U256::from(690000000000000000_u128),
             ..Default::default()
         },
     )]);
-
-    // This will create 3 storage modules, one for submit, one for publish, and one for capacity
-    let node_context = start_irys_node(
-        config.clone(),
-        storage_config.clone(),
-        testnet_config.clone(),
-    )
-    .await
-    .unwrap();
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .await
+        .start()
+        .await;
 
     wait_for_packing(
-        node_context.actor_addresses.packing.clone(),
+        node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
     .await
     .unwrap();
 
-    node_context.actor_addresses.start_mining().unwrap();
+    node.node_ctx.actor_addresses.start_mining().unwrap();
 
+    // FIXME: The node internally already spawns the API service, we probably don't want to spawn it again.
     let app_state = ApiState {
-        reth_provider: None,
-        reth_http_url: None,
-        block_index: None,
-        block_tree: None,
-        db: node_context.db.clone(),
-        mempool: node_context.actor_addresses.mempool.clone(),
-        chunk_provider: node_context.chunk_provider.clone(),
-        config: testnet_config,
+        ema_service: ema_tx,
+        reth_provider: node.node_ctx.reth_handle.clone(),
+        reth_http_url: node
+            .node_ctx
+            .reth_handle
+            .rpc_server_handle()
+            .http_url()
+            .unwrap(),
+        block_index: node.node_ctx.block_index_guard.clone(),
+        block_tree: node.node_ctx.block_tree_guard.clone(),
+        db: node.node_ctx.db.clone(),
+        mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        peer_list: node.node_ctx.actor_addresses.peer_list.clone(),
+        chunk_provider: node.node_ctx.chunk_provider.clone(),
+        config: config.into(),
     };
 
     // Initialize the app
@@ -255,7 +243,7 @@ async fn heavy_data_promotion_test() {
     // wait for the first set of chunks chunk to appear in the publish ledger
     for _attempts in 1..20 {
         if let Some(_packed_chunk) =
-            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(0)).await
+            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(0)).await
         {
             println!("First set of chunks found!");
             break;
@@ -266,7 +254,7 @@ async fn heavy_data_promotion_test() {
     // wait for the second set of chunks to appear in the publish ledger
     for _attempts in 1..20 {
         if let Some(_packed_chunk) =
-            get_chunk(&app, Ledger::Publish, LedgerChunkOffset::from(3)).await
+            get_chunk(&app, DataLedger::Publish, LedgerChunkOffset::from(3)).await
         {
             println!("Second set of chunks found!");
             break;
@@ -274,30 +262,30 @@ async fn heavy_data_promotion_test() {
         sleep(delay).await;
     }
 
-    let db = &node_context.db.clone();
-    let block_tx1 = get_block_parent(txs[0].header.id, Ledger::Publish, db).unwrap();
-    let block_tx2 = get_block_parent(txs[2].header.id, Ledger::Publish, db).unwrap();
+    let db = &node.node_ctx.db.clone();
+    let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
+    let block_tx2 = get_block_parent(txs[2].header.id, DataLedger::Publish, db).unwrap();
 
     let first_tx_index: usize;
     let next_tx_index: usize;
 
     if block_tx1.block_hash == block_tx2.block_hash {
         // Extract the transaction order
-        let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-        let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[1];
+        let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
+        let txid_2 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[1];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
         println!("1:{}", block_tx1);
     } else if block_tx1.height > block_tx2.height {
-        let txid_1 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
-        let txid_2 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
+        let txid_1 = block_tx2.data_ledgers[DataLedger::Publish].tx_ids.0[0];
+        let txid_2 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
         println!("1:{}", block_tx2);
         println!("2:{}", block_tx1);
     } else {
-        let txid_1 = block_tx1.ledgers[Ledger::Publish].tx_ids.0[0];
-        let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
+        let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
+        let txid_2 = block_tx2.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
         println!("1:{}", block_tx1);
@@ -316,7 +304,7 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node.node_ctx.config,
     )
     .await;
 
@@ -326,7 +314,7 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node.node_ctx.config,
     )
     .await;
 
@@ -336,7 +324,7 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node.node_ctx.config,
     )
     .await;
 
@@ -349,7 +337,7 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node.node_ctx.config,
     )
     .await;
 
@@ -359,7 +347,7 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node.node_ctx.config,
     )
     .await;
 
@@ -369,9 +357,9 @@ async fn heavy_data_promotion_test() {
         &app,
         LedgerChunkOffset::from(chunk_offset),
         expected_bytes,
-        &storage_config,
+        &node.node_ctx.config,
     )
     .await;
 
-    node_context.stop().await;
+    node.node_ctx.stop().await;
 }

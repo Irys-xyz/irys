@@ -3,12 +3,12 @@ use eyre::eyre;
 use irys_database::{
     cached_chunk_by_chunk_offset,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
-    BlockIndex, Initialized, Ledger,
+    BlockIndex, DataLedger,
 };
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    app_state::DatabaseProvider, Base64, DataRoot, IrysBlockHeader, IrysTransactionHeader,
-    LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig, TransactionLedger, TxChunkOffset,
+    app_state::DatabaseProvider, Base64, Config, DataRoot, DataTransactionLedger, IrysBlockHeader,
+    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, TxChunkOffset,
     UnpackedChunk, H256,
 };
 use reth_db::Database;
@@ -28,12 +28,12 @@ use crate::{
 /// - Maintains chunk location indices
 /// - Coordinates chunk reads/writes
 /// - Manages storage state transitions
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ChunkMigrationService {
     /// Tracks block boundaries and offsets for locating chunks in ledgers
-    pub block_index: Option<Arc<RwLock<BlockIndex<Initialized>>>>,
+    pub block_index: Option<Arc<RwLock<BlockIndex>>>,
     /// Configuration parameters for storage system
-    pub storage_config: StorageConfig,
+    pub config: Config,
     /// Collection of storage modules for distributing chunk data
     pub storage_modules: Vec<Arc<StorageModule>>,
     /// Persistent database for storing chunk metadata and indices
@@ -42,14 +42,20 @@ pub struct ChunkMigrationService {
     pub service_senders: Option<ServiceSenders>,
 }
 
+impl Default for ChunkMigrationService {
+    fn default() -> Self {
+        unimplemented!("don't rely on `Default` impl");
+    }
+}
+
 impl Actor for ChunkMigrationService {
     type Context = Context<Self>;
 }
 
 impl ChunkMigrationService {
     pub fn new(
-        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
-        storage_config: StorageConfig,
+        block_index: Arc<RwLock<BlockIndex>>,
+        config: Config,
         storage_modules: Vec<Arc<StorageModule>>,
         db: DatabaseProvider,
         service_senders: ServiceSenders,
@@ -57,7 +63,7 @@ impl ChunkMigrationService {
         println!("service started: chunk_migration");
         Self {
             block_index: Some(block_index),
-            storage_config,
+            config,
             storage_modules,
             db: Some(db),
             service_senders: Some(service_senders),
@@ -88,13 +94,13 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
         let block = msg.block_header;
         let all_txs = msg.all_txs;
         let block_index = self.block_index.clone().unwrap();
-        let chunk_size = self.storage_config.chunk_size as usize;
+        let chunk_size = self.config.consensus.chunk_size as usize;
         let storage_modules = Arc::new(self.storage_modules.clone());
         let db = Arc::new(self.db.clone().unwrap());
         let service_senders = self.service_senders.clone().unwrap();
 
         // Extract transactions for each ledger
-        let submit_tx_count = block.ledgers[Ledger::Submit].tx_ids.len();
+        let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
         let submit_txs = all_txs[..submit_tx_count].to_vec();
         let publish_txs = all_txs[submit_tx_count..].to_vec();
         let block_height = block.height;
@@ -102,7 +108,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
             // Process Submit ledger transactions
             process_ledger_transactions(
                 &block,
-                Ledger::Submit,
+                DataLedger::Submit,
                 &submit_txs,
                 &block_index,
                 chunk_size,
@@ -115,7 +121,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
             // Process Publish ledger transactions
             process_ledger_transactions(
                 &block,
-                Ledger::Publish,
+                DataLedger::Publish,
                 &publish_txs,
                 &block_index,
                 chunk_size,
@@ -144,9 +150,9 @@ impl Handler<Stop> for ChunkMigrationService {
 
 fn process_ledger_transactions(
     block: &Arc<IrysBlockHeader>,
-    ledger: Ledger,
+    ledger: DataLedger,
     txs: &[IrysTransactionHeader],
-    block_index: &Arc<RwLock<BlockIndex<Initialized>>>,
+    block_index: &Arc<RwLock<BlockIndex>>,
     chunk_size: usize,
     storage_modules: &Arc<Vec<Arc<StorageModule>>>,
     db: &Arc<DatabaseProvider>,
@@ -156,7 +162,10 @@ fn process_ledger_transactions(
     let mut prev_chunk_offset = block_range.start();
 
     for ((_txid, tx_path), (data_root, data_size)) in path_pairs {
-        let num_chunks_in_tx = data_size.div_ceil(chunk_size as u64) as u32;
+        let num_chunks_in_tx: u32 = data_size
+            .div_ceil(chunk_size as u64)
+            .try_into()
+            .expect("Value exceeds u32::MAX");
         let tx_chunk_range = LedgerChunkRange(ie(
             prev_chunk_offset,
             prev_chunk_offset + num_chunks_in_tx as u64,
@@ -168,6 +177,7 @@ fn process_ledger_transactions(
             tx_chunk_range,
             ledger,
             storage_modules,
+            data_size,
         )?;
 
         process_transaction_chunks(
@@ -195,7 +205,7 @@ fn process_transaction_chunks(
     data_root: DataRoot,
     data_size: u64,
     tx_chunk_range: LedgerChunkRange,
-    ledger: Ledger,
+    ledger: DataLedger,
     storage_modules: &[Arc<StorageModule>],
     db: &DatabaseProvider,
 ) -> Result<(), ()> {
@@ -235,14 +245,14 @@ fn process_transaction_chunks(
 /// added to the ledger by the specified block.
 fn get_block_range(
     block: &IrysBlockHeader,
-    ledger: Ledger,
-    block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+    ledger: DataLedger,
+    block_index: Arc<RwLock<BlockIndex>>,
 ) -> LedgerChunkRange {
     // Use the block index to get the ledger relative chunk offset of the
     // start of this new block from the previous block.
     let index_reader = block_index.read().unwrap();
     let start_chunk_offset = if block.height > 0 {
-        let prev_item = index_reader.get_item(block.height as usize - 1).unwrap();
+        let prev_item = index_reader.get_item(block.height - 1).unwrap();
         prev_item.ledgers[ledger].max_chunk_offset
     } else {
         0
@@ -250,17 +260,17 @@ fn get_block_range(
 
     LedgerChunkRange(ii(
         LedgerChunkOffset::from(start_chunk_offset),
-        LedgerChunkOffset::from(block.ledgers[ledger].max_chunk_offset),
+        LedgerChunkOffset::from(block.data_ledgers[ledger].max_chunk_offset),
     ))
 }
 fn get_tx_path_pairs(
     block: &IrysBlockHeader,
-    ledger: Ledger,
+    ledger: DataLedger,
     txs: &[IrysTransactionHeader],
 ) -> eyre::Result<Vec<((H256, Proof), (DataRoot, u64))>> {
-    let (tx_root, proofs) = TransactionLedger::merklize_tx_root(txs);
+    let (tx_root, proofs) = DataTransactionLedger::merklize_tx_root(txs);
 
-    if tx_root != block.ledgers[ledger].tx_root {
+    if tx_root != block.data_ledgers[ledger].tx_root {
         return Err(eyre::eyre!("Invalid tx_root"));
     }
 
@@ -275,15 +285,16 @@ fn update_storage_module_indexes(
     proof: &[u8],
     data_root: DataRoot,
     tx_chunk_range: LedgerChunkRange,
-    ledger: Ledger,
+    ledger: DataLedger,
     storage_modules: &[Arc<StorageModule>],
+    data_size: u64,
 ) -> Result<(), ()> {
     let overlapped_modules =
         get_overlapped_storage_modules(storage_modules, ledger, &tx_chunk_range);
 
     for storage_module in overlapped_modules {
         storage_module
-            .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range)
+            .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range, data_size)
             .map_err(|e| {
                 error!(
                     "Failed to add tx path + data_root + start_offset to index: {}",
@@ -303,7 +314,7 @@ fn get_cached_chunk(
 
 fn find_storage_module(
     storage_modules: &[Arc<StorageModule>],
-    ledger: Ledger,
+    ledger: DataLedger,
     ledger_offset: u64,
 ) -> Option<&Arc<StorageModule>> {
     storage_modules.iter().find_map(|module| {
@@ -314,7 +325,7 @@ fn find_storage_module(
             .and_then(|pa| pa.ledger_id)
             .filter(|&id| id == ledger as u32)
             // Then check offset range
-            .and_then(|_| module.get_storage_module_range().ok())
+            .and_then(|_| module.get_storage_module_ledger_range().ok())
             .filter(|range| range.contains_point(ledger_offset.into()))
             .map(|_| module)
     })

@@ -11,8 +11,9 @@ use crate::{
     Compact, DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader,
     Proof, H256, U256,
 };
-use alloy_primitives::{keccak256, Address, B256};
+use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
+use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
@@ -109,7 +110,7 @@ pub struct IrysBlockHeader {
     /// The solution hash of the previous block in the chain.
     pub previous_solution_hash: H256,
 
-    /// The solution hash of the last epoch block
+    /// The block hash of the last epoch block
     pub last_epoch_hash: H256,
 
     /// `SHA-256` hash of the PoA chunk (unencoded) bytes.
@@ -135,10 +136,13 @@ pub struct IrysBlockHeader {
     #[serde(with = "string_u128")]
     pub timestamp: u128,
 
-    /// A list of transaction ledgers, one for each active data ledger
+    /// A list of system transaction ledgers
+    pub system_ledgers: Vec<SystemTransactionLedger>,
+
+    /// A list of storage transaction ledgers, one for each active data ledger
     /// Maintains the block->tx_root->data_root relationship for each block
     /// and ledger.
-    pub ledgers: Vec<TransactionLedger>,
+    pub data_ledgers: Vec<DataTransactionLedger>,
 
     /// Evm block hash (32 bytes)
     pub evm_block_hash: B256,
@@ -157,6 +161,11 @@ pub struct IrysBlockHeader {
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
 
 impl IrysBlockHeader {
+    /// Returns true if the block is the genesis block, false otherwise
+    pub fn is_genesis(&self) -> bool {
+        self.height == 0
+    }
+
     /// Proxy method for `Encodable::encode`
     ///
     /// Packs all the header data into a byte buffer, using RLP encoding.
@@ -298,7 +307,7 @@ pub type TxRoot = H256;
 )]
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
-pub struct TransactionLedger {
+pub struct DataTransactionLedger {
     /// Unique identifier for this ledger, maps to discriminant in `Ledger` enum
     pub ledger_id: u32,
     /// Root of the merkle tree built from the ledger transaction data_roots
@@ -316,7 +325,7 @@ pub struct TransactionLedger {
     pub proofs: Option<IngressProofsList>,
 }
 
-impl TransactionLedger {
+impl DataTransactionLedger {
     /// Computes the tx_root and tx_paths. The TX Root is composed of taking the data_roots of each of the storage
     /// transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
     pub fn merklize_tx_root(data_txs: &[IrysTransactionHeader]) -> (H256, Vec<Proof>) {
@@ -336,6 +345,28 @@ impl TransactionLedger {
         let proofs = resolve_proofs(root, None).unwrap();
         (H256(root_id), proofs)
     }
+}
+
+#[derive(
+    Default,
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    Compact,
+    Arbitrary,
+    RlpDecodable,
+    RlpEncodable,
+)]
+#[rlp(trailing)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemTransactionLedger {
+    /// Unique identifier for this ledger, maps to discriminant in `SystemLedger` enum
+    pub ledger_id: u32,
+    /// List of system transaction ids added to the system ledger in this block
+    pub tx_ids: H256List,
 }
 
 impl fmt::Display for IrysBlockHeader {
@@ -381,9 +412,10 @@ impl IrysBlockHeader {
             reward_address: Address::ZERO,
             signature: IrysSignature::new(alloy_signer::Signature::test_signature()),
             timestamp: now.as_millis(),
-            ledgers: vec![
+            system_ledgers: vec![], // Many tests will fail if you add fake txids to this ledger
+            data_ledgers: vec![
                 // Permanent Publish Ledger
-                TransactionLedger {
+                DataTransactionLedger {
                     ledger_id: 0, // Publish ledger_id
                     tx_root: H256::zero(),
                     tx_ids,
@@ -392,7 +424,7 @@ impl IrysBlockHeader {
                     proofs: None,
                 },
                 // Term Submit Ledger
-                TransactionLedger {
+                DataTransactionLedger {
                     ledger_id: 1, // Submit ledger_id
                     tx_root: H256::zero(),
                     tx_ids: H256List::new(),
@@ -412,9 +444,25 @@ impl IrysBlockHeader {
     }
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExecutionHeader {
+    #[serde(flatten)]
+    pub header: Header,
+    pub transactions: Vec<TxHash>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CombinedBlockHeader {
+    #[serde(flatten)]
+    pub irys: IrysBlockHeader,
+    pub execution: ExecutionHeader,
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{validate_path, Config, TxIngressProof};
+    use crate::{validate_path, Config, NodeConfig, TxIngressProof};
 
     use super::*;
     use alloy_primitives::Signature;
@@ -493,9 +541,9 @@ mod tests {
     }
 
     #[test]
-    fn test_transaction_ledger_rlp_round_trip() {
+    fn test_storage_transaction_ledger_rlp_round_trip() {
         // setup
-        let data = TransactionLedger {
+        let data = DataTransactionLedger {
             ledger_id: 1,
             tx_root: H256::random(),
             tx_ids: H256List(vec![]),
@@ -514,6 +562,23 @@ mod tests {
 
         // Assert
         assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn test_system_transaction_ledger_rlp_round_trip() {
+        // setup
+        let system = SystemTransactionLedger {
+            ledger_id: 0, // System Ledger
+            tx_ids: H256List(vec![H256::random(), H256::random()]),
+        };
+
+        // action
+        let mut buffer = vec![];
+        system.encode(&mut buffer);
+        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+        assert_eq!(system, decoded);
     }
 
     #[test]
@@ -551,6 +616,8 @@ mod tests {
         // setup
         let header = mock_header();
         let mut buf = vec![];
+
+        println!("{}", serde_json::to_string_pretty(&header).unwrap());
 
         // action
         header.to_compact(&mut buf);
@@ -631,7 +698,7 @@ mod tests {
             tx.data_size = 64
         }
 
-        let (tx_root, proofs) = TransactionLedger::merklize_tx_root(&txs);
+        let (tx_root, proofs) = DataTransactionLedger::merklize_tx_root(&txs);
 
         for proof in proofs {
             let encoded_proof = Base64(proof.proof.to_vec());
@@ -643,8 +710,9 @@ mod tests {
     fn test_irys_block_header_signing() {
         // setup
         let mut header = mock_header();
-        let testnet_config = Config::testnet();
-        let signer = testnet_config.irys_signer();
+        let testnet_config = NodeConfig::testnet();
+        let config = Config::new(testnet_config);
+        let signer = config.irys_signer();
 
         // action
         // sign the block header
@@ -668,8 +736,8 @@ mod tests {
             |h: &mut IrysBlockHeader| h.reward_address.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.miner_address.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.timestamp.as_mut_bytes(),
-            |h: &mut IrysBlockHeader| h.ledgers[0].ledger_id.as_mut_bytes(),
-            |h: &mut IrysBlockHeader| h.ledgers[0].max_chunk_offset.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.data_ledgers[0].ledger_id.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.data_ledgers[0].max_chunk_offset.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.evm_block_hash.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.vdf_limiter_info.global_step_number.as_mut_bytes(),
         ];
@@ -680,7 +748,7 @@ mod tests {
             assert!(!header_clone.is_signature_valid());
         }
 
-        // assert that changing the block hash, the signature is still valid (because the validatoin does not validate )
+        // assert that changing the block hash, the signature is still valid (because the validation does not validate )
         header.block_hash = H256::random();
         assert!(header.is_signature_valid());
     }

@@ -1,18 +1,14 @@
-use crate::utils::{capacity_chunk_solution, future_or_mine_on_timeout};
+use crate::utils::{future_or_mine_on_timeout, mine_block, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
-use irys_actors::SolutionFoundMessage;
 use irys_api_server::routes::tx::TxOffset;
-use irys_chain::start_irys_node;
-use irys_config::IrysNodeConfig;
 use irys_database::get_cache_size;
 use irys_database::tables::CachedChunks;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
-use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, Config, IrysTransactionHeader, TxChunkOffset, UnpackedChunk};
+use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth::providers::BlockReader as _;
 use reth_db::Database as _;
 use reth_primitives::GenesisAccount;
@@ -20,19 +16,14 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
-    let temp_dir = setup_tracing_and_temp_dir(Some("heavy_test_cache_pruning"), false);
-    let mut testnet_config = Config::testnet();
-    testnet_config.chunk_size = 32;
-    testnet_config.chunk_migration_depth = 2;
-    let main_address = testnet_config.miner_address();
-    let account1 = IrysSigner::random_signer(&testnet_config);
-    let mut config = IrysNodeConfig {
-        base_directory: temp_dir.path().to_path_buf(),
-        ..IrysNodeConfig::new(&testnet_config)
-    };
-    config.extend_genesis_accounts(vec![
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().chunk_size = 32;
+    config.consensus.get_mut().chunk_migration_depth = 2;
+    let main_address = config.miner_address();
+    let account1 = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -48,16 +39,19 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             },
         ),
     ]);
-    let storage_config = irys_types::StorageConfig::new(&testnet_config);
+    let node = IrysNodeTest::new_genesis(config).await;
+    let node = node.start().await;
 
-    let node = start_irys_node(config, storage_config, testnet_config.clone()).await?;
     wait_for_packing(
-        node.actor_addresses.packing.clone(),
+        node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
     )
     .await?;
 
-    let http_url = format!("http://127.0.0.1:{}", node.config.port);
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.port
+    );
 
     // server should be running
     // check with request to `/v1/info`
@@ -112,12 +106,9 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     });
 
     future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut tx_header_fut,
         Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
     )
     .await?;
 
@@ -134,7 +125,9 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: TxChunkOffset::from(tx_chunk_offset as u32),
+            tx_offset: TxChunkOffset::from(
+                TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+            ),
         };
 
         // Make a POST request with JSON payload
@@ -174,38 +167,24 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     });
 
     let start_offset = future_or_mine_on_timeout(
-        node.clone(),
+        node.node_ctx.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
-        node.vdf_steps_guard.clone(),
-        &node.vdf_config,
-        &node.storage_config,
     )
     .await?
     .unwrap();
 
     // mine a couple blocks
-    let reth_context = RethNodeContext::new(node.reth_handle.clone().into()).await?;
-    let (chunk_cache_count, _) = &node
-        .db
-        .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, testnet_config.chunk_size))?;
+    let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
+    let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
+        get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
+    })?;
 
     assert_eq!(*chunk_cache_count, tx.chunks.len() as u64);
 
     for i in 1..4 {
         info!("manually producing block {}", i);
-        let poa_solution = capacity_chunk_solution(
-            node.node_config.mining_signer.address(),
-            node.vdf_steps_guard.clone(),
-            &node.vdf_config,
-            &node.storage_config,
-        )
-        .await;
-        let fut = node
-            .actor_addresses
-            .block_producer
-            .send(SolutionFoundMessage(poa_solution.clone()));
-        let (block, _reth_exec_env) = fut.await??.unwrap();
+        let (block, _reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
 
         //check reth for built block
         let reth_block = reth_context
@@ -216,6 +195,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
 
         // check irys DB for built block
         let db_irys_block = &node
+            .node_ctx
             .db
             .view_eyre(|tx| irys_database::block_header_by_hash(tx, &block.block_hash, false))?
             .unwrap();
@@ -224,9 +204,9 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         sleep(Duration::from_millis(1500)).await;
     }
 
-    let (chunk_cache_count, _) = &node
-        .db
-        .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, testnet_config.chunk_size))?;
+    let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
+        get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
+    })?;
     assert_eq!(*chunk_cache_count, 0);
 
     // make sure we can read the chunks

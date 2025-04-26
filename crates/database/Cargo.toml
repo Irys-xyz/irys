@@ -4,11 +4,14 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+test-utils = []
+
 [dependencies]
 alloy-primitives.workspace = true
 actix.workspace = true
 base58.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs"] }
 reth-node-metrics.workspace = true
 irys-config.workspace = true
 reth-db.workspace = true
@@ -20,6 +23,7 @@ modular-bitfield.workspace = true
 reth-codecs.workspace = true
 eyre.workspace = true
 irys-types.workspace = true
+irys-primitives.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
 irys-testing-utils.workspace = true
@@ -27,6 +31,7 @@ test-fuzz.workspace = true
 
 [dev-dependencies]
 irys-config = { workspace = true, features = ["test-utils"] }
+test-log.workspace = true
 
 [lints]
 workspace = true

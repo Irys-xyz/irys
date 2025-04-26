@@ -9,56 +9,45 @@ use actix_web::{
     web::{self, JsonConfig},
     App, HttpResponse, HttpServer,
 };
+use irys_actors::ema_service::EmaServiceMessage;
+use irys_actors::peer_list_service::{KnownPeersRequest, PeerListService};
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,
 };
-use irys_database::{tables::PeerListItems, walk_all};
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
-use irys_types::{app_state::DatabaseProvider, Config};
-use reth_db::Database;
+use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
     block, block_index, get_chunk, index, network_config, peer_list, post_chunk, post_version,
     price, proxy::proxy, tx,
 };
 use std::net::TcpListener;
 use std::{net::SocketAddr, sync::Arc};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct ApiState {
     pub mempool: Addr<MempoolService>,
     pub chunk_provider: Arc<ChunkProvider>,
+    pub ema_service: UnboundedSender<EmaServiceMessage>,
+    pub peer_list: Addr<PeerListService>,
     pub db: DatabaseProvider,
     pub config: Config,
     // TODO: slim this down to what we actually use - beware the types!
-    // TODO: remove the Option<>
-    pub reth_provider: Option<RethNodeProvider>,
-    pub reth_http_url: Option<String>,
-    pub block_tree: Option<BlockTreeReadGuard>,
-    pub block_index: Option<BlockIndexReadGuard>,
+    pub reth_provider: RethNodeProvider,
+    pub reth_http_url: String,
+    pub block_tree: BlockTreeReadGuard,
+    pub block_index: BlockIndexReadGuard,
 }
 
 impl ApiState {
-    pub fn get_known_peers(&self) -> eyre::Result<Vec<SocketAddr>> {
-        // Attempt to create a read transaction
-        let read_tx = self
-            .db
-            .tx()
-            .map_err(|e| eyre::eyre!("Database error: {}", e))?;
-
-        // Fetch peer list items
-        let peer_list_items =
-            walk_all::<PeerListItems, _>(&read_tx).map_err(|e| eyre::eyre!("Read error: {}", e))?;
-
-        // Extract IP addresses and Port (SocketAddr) into a Vec<String>
-        let ips: Vec<SocketAddr> = peer_list_items
-            .iter()
-            .map(|(_miner_addr, entry)| entry.address)
-            .collect();
-
-        Ok(ips)
+    pub async fn get_known_peers(&self) -> eyre::Result<Vec<PeerAddress>> {
+        self.peer_list
+            .send(KnownPeersRequest)
+            .await
+            .map_err(|mailbox_err| eyre::eyre!("Failed to get known peers: {}", mailbox_err))
     }
 }
 
@@ -87,7 +76,11 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
         .route("/tx", web::post().to(tx::post_tx))
-        .route("/tx/{tx_id}", web::get().to(tx::get_tx_header_api))
+        .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))
+        .route(
+            "/tx/{tx_id}/is_promoted",
+            web::get().to(tx::get_tx_is_promoted),
+        )
         .route(
             "/tx/{tx_id}/local/data_start_offset",
             web::get().to(tx::get_tx_local_start_offset),
@@ -96,7 +89,7 @@ pub fn routes() -> impl HttpServiceFactory {
 }
 
 pub async fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
-    let port = app_state.config.port;
+    let port = app_state.config.node_config.http.port;
     info!(?port, "Starting API server");
 
     HttpServer::new(move || {
@@ -241,7 +234,7 @@ pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
 //             data_size,
 //             data_path,
 //             bytes: Base64(data_bytes[min..max].to_vec()),
-//             tx_offset: tx_chunk_offset as u32,
+//             tx_offset: tx_chunk_offset.try_into().expect("Value exceeds u32::MAX"),
 //         };
 
 //         // Make a POST request with JSON payload

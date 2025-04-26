@@ -6,7 +6,7 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{ChunkIngressError, ChunkIngressMessage};
 use irys_types::UnpackedChunk;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::ApiState;
 
@@ -18,8 +18,10 @@ pub async fn post_chunk(
     state: web::Data<ApiState>,
     body: Json<UnpackedChunk>,
 ) -> actix_web::Result<HttpResponse> {
-    info!("Received chunk");
     let chunk = body.into_inner();
+    let data_root = chunk.data_root;
+    let number = chunk.tx_offset;
+    info!(?data_root, ?number, "Received chunk");
 
     // Create an actor message and send it
     let chunk_ingress_message = ChunkIngressMessage(chunk);
@@ -34,6 +36,7 @@ pub async fn post_chunk(
     // If message delivery succeeded, check for validation errors within the response
     let inner_result = msg_result.unwrap();
     if let Err(err) = inner_result {
+        warn!(?data_root, ?number, "Error processing chunk: {:?}", &err);
         return match err {
             ChunkIngressError::InvalidProof => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                 .body(format!("Invalid proof: {:?}", err))),
@@ -41,6 +44,8 @@ pub async fn post_chunk(
                 .body(format!("Invalid data_hash: {:?}", err))),
             ChunkIngressError::InvalidChunkSize => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                 .body(format!("Invalid chunk size: {:?}", err))),
+            ChunkIngressError::InvalidDataSize => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                .body(format!("Invalid data_size field : {:?}", err))),
             ChunkIngressError::UnknownTransaction => {
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                     .body(format!("Unknown transaction: {:?}", err)))

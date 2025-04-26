@@ -11,11 +11,10 @@ use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr;
 use irys_efficient_sampling::Ranges;
 use irys_storage::{ie, ii, StorageModule};
-use irys_types::app_state::DatabaseProvider;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{
-    partition_chunk_offset_ie, Address, AtomicVdfStepNumber, H256List, LedgerChunkOffset,
+    partition_chunk_offset_ie, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
     PartitionChunkOffset, PartitionChunkRange,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
@@ -24,8 +23,7 @@ use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct PartitionMiningActor {
-    mining_address: Address,
-    _database_provider: DatabaseProvider,
+    config: Config,
     block_producer_actor: Recipient<SolutionFoundMessage>,
     packing_actor: Recipient<PackingRequest>,
     storage_module: Arc<StorageModule>,
@@ -41,29 +39,28 @@ impl Supervised for PartitionMiningActor {}
 
 impl PartitionMiningActor {
     pub fn new(
-        mining_address: Address,
-        _database_provider: DatabaseProvider,
+        config: &Config,
         block_producer_addr: Recipient<SolutionFoundMessage>,
         packing_actor: Recipient<PackingRequest>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStepsReadGuard,
         atomic_global_step_number: AtomicVdfStepNumber,
+        initial_difficulty: U256,
     ) -> Self {
         Self {
-            mining_address,
-            _database_provider,
+            config: config.clone(),
             block_producer_actor: block_producer_addr,
             packing_actor,
             ranges: Ranges::new(
-                (storage_module.storage_config.num_chunks_in_partition
-                    / storage_module.storage_config.num_chunks_in_recall_range)
+                (config.consensus.num_chunks_in_partition
+                    / config.consensus.num_chunks_in_recall_range)
                     .try_into()
                     .expect("Recall ranges number exceeds usize representation"),
             ),
             storage_module,
             should_mine: start_mining,
-            difficulty: U256::zero(),
+            difficulty: initial_difficulty,
             steps_guard,
             atomic_global_step_number,
         }
@@ -128,14 +125,11 @@ impl PartitionMiningActor {
         };
 
         // Pick a random recall range in the partition using efficient sampling
-        let recall_range_index =
-            { self.get_recall_range(vdf_step, &mining_seed, &partition_hash)? };
-
-        let config = &self.storage_module.storage_config;
+        let recall_range_index = self.get_recall_range(vdf_step, &mining_seed, &partition_hash)?;
 
         // Starting chunk index within partition
-        let start_chunk_offset =
-            recall_range_index as u32 * config.num_chunks_in_recall_range as u32;
+        let start_chunk_offset = (recall_range_index as u32)
+            .saturating_mul(self.config.consensus.num_chunks_in_recall_range as u32);
 
         // info!(
         //     "Recall range index {} start chunk index {}",
@@ -144,7 +138,7 @@ impl PartitionMiningActor {
 
         let read_range = partition_chunk_offset_ie!(
             start_chunk_offset,
-            start_chunk_offset + config.num_chunks_in_recall_range as u32
+            start_chunk_offset + self.config.consensus.num_chunks_in_recall_range as u32
         );
 
         // haven't tested this, but it looks correct
@@ -157,8 +151,10 @@ impl PartitionMiningActor {
 
         if chunks.is_empty() {
             warn!(
-                "No chunks found - storage_module_id:{}",
-                self.storage_module.id
+                "No chunks found - storage_module_id:{} {}-{}",
+                self.storage_module.id,
+                &read_range.start(),
+                &read_range.end()
             );
         }
 
@@ -192,19 +188,20 @@ impl PartitionMiningActor {
 
             if test_solution >= self.difficulty {
                 info!(
-                    "Solution Found - partition_id: {}, ledger_offset: {}/{}, range_offset: {}/{}",
+                    "Solution Found - partition_id: {}, ledger_offset: {}/{}, range_offset: {}/{} difficulty {}",
                     self.storage_module.id,
                     partition_chunk_offset,
-                    config.num_chunks_in_partition,
+                    self.config.consensus.num_chunks_in_partition,
                     index,
-                    chunks.len()
+                    chunks.len(),
+                    self.difficulty
                 );
 
                 let solution = SolutionContext {
                     partition_hash,
                     chunk_offset: *partition_chunk_offset,
                     recall_chunk_index: index as u32,
-                    mining_address: self.mining_address,
+                    mining_address: self.config.node_config.miner_address(),
                     tx_path, // capacity partitions have no tx_path nor data_path
                     data_path,
                     chunk: chunk_bytes.clone(),
@@ -300,7 +297,8 @@ impl Handler<BroadcastDifficultyUpdate> for PartitionMiningActor {
     fn handle(&mut self, msg: BroadcastDifficultyUpdate, _: &mut Context<Self>) {
         let new_diff = msg.0.diff;
         debug!(
-            "updating difficulty target: from {} to {} (diff: {})",
+            "updating difficulty target in partition miner {}: from {} to {} (diff: {})",
+            &self.storage_module.id,
             &self.difficulty,
             &new_diff,
             &self.difficulty.abs_diff(new_diff)
@@ -383,10 +381,13 @@ mod tests {
     use irys_storage::{ie, PackingParams, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::{
-        app_state::DatabaseProvider, block_production::SolutionContext, chunk::UnpackedChunk,
-        partition::PartitionAssignment, storage::LedgerChunkRange, Address, StorageConfig, H256,
+        block_production::SolutionContext, chunk::UnpackedChunk, partition::PartitionAssignment,
+        storage::LedgerChunkRange, StorageSyncConfig, H256,
     };
-    use irys_types::{ledger_chunk_offset_ie, H256List, IrysBlockHeader, LedgerChunkOffset};
+    use irys_types::{
+        ledger_chunk_offset_ie, ConsensusConfig, H256List, IrysBlockHeader, LedgerChunkOffset,
+        NodeConfig,
+    };
     use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
     use std::any::Any;
     use std::collections::VecDeque;
@@ -414,12 +415,32 @@ mod tests {
         }))
     }
 
-    #[actix_rt::test]
+    #[test_log::test(actix_rt::test)]
     async fn test_solution() {
-        let partition_hash = H256::random();
-        let mining_address = Address::random();
         let chunk_count = 4;
         let chunk_size = 32;
+        let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: chunk_count.into(),
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chunk_migration_depth: 1, // Testnet / single node config
+                chain_id: 1,
+                ..ConsensusConfig::testnet()
+            }),
+            base_directory: base_path.clone(),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+            },
+            ..NodeConfig::testnet()
+        };
+        let config = Config::new(node_config);
+
+        let partition_hash = H256::random();
         let chunk_data = [0; 32];
         let data_path = [4, 3, 2, 1];
         let tx_path = [4, 3, 2, 1];
@@ -437,26 +458,12 @@ mod tests {
         let recipient: Recipient<SolutionFoundMessage> = block_producer_actor_addr.recipient();
         let mocked_addr = MockedBlockProducerAddr(recipient);
 
-        //SystemRegistry::set(block_producer_actor_addr);
-
         // Set up the storage geometry for this test
-        let storage_config = StorageConfig {
-            chunk_size,
-            num_chunks_in_partition: chunk_count.into(),
-            num_chunks_in_recall_range: 2,
-            num_partitions_in_slot: 1,
-            miner_address: mining_address,
-            min_writes_before_sync: 1,
-            entropy_packing_iterations: 1,
-            chunk_migration_depth: 1, // Testnet / single node config
-            chain_id: 1,
-        };
-
         let infos = vec![StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
-                miner_address: mining_address,
+                miner_address: config.node_config.miner_address(),
                 ledger_id: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
@@ -465,13 +472,9 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
-        let base_path = tmp_dir.path().to_path_buf();
-
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module =
-            Arc::new(StorageModule::new(&base_path, storage_module_info, storage_config).unwrap());
+        let storage_module = Arc::new(StorageModule::new(storage_module_info, &config).unwrap());
 
         // Verify the packing params file was crated in the submodule
         let params_path = base_path.join("hdd0").join("packing_params.toml");
@@ -482,22 +485,22 @@ mod tests {
         storage_module.pack_with_zeros();
 
         let path = temporary_directory(None, false);
-        let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
-
-        let database_provider = DatabaseProvider(Arc::new(db));
+        let _db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         let data_root = H256::random();
+        let data_size = chunk_size * chunk_count;
 
         let _ = storage_module.index_transaction_data(
             tx_path.to_vec(),
             data_root,
             LedgerChunkRange(ledger_chunk_offset_ie!(0, chunk_count)),
+            data_size,
         );
 
         for tx_chunk_offset in 0..chunk_count {
             let chunk = UnpackedChunk {
                 data_root,
-                data_size: chunk_size,
+                data_size,
                 data_path: data_path.to_vec().into(),
                 bytes: chunk_data.to_vec().into(),
                 tx_offset: tx_chunk_offset.into(),
@@ -517,14 +520,14 @@ mod tests {
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
         let partition_mining_actor = PartitionMiningActor::new(
-            mining_address,
-            database_provider.clone(),
+            &config,
             mocked_addr.0,
             packing.start().recipient(),
             storage_module,
             true,
             vdf_steps_guard.clone(),
             atomic_global_step_number,
+            U256::zero(),
         );
 
         let seed: Seed = Seed(H256::random());
@@ -561,12 +564,13 @@ mod tests {
         );
 
         assert!(
-            solution.chunk_offset < chunk_count * 2,
+            solution.chunk_offset < chunk_count as u32 * 2,
             "Not expected offset"
         );
 
         assert_eq!(
-            mining_address, solution.mining_address,
+            config.node_config.miner_address(),
+            solution.mining_address,
             "Not expected partition"
         );
 
@@ -585,7 +589,22 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_recall_range_reinit() {
-        let mining_address = Address::random();
+        let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                num_chunks_in_recall_range: 2, // Recall range size is 5 chunks
+                ..ConsensusConfig::testnet()
+            }),
+            base_directory: base_path.clone(),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+            },
+            ..NodeConfig::testnet()
+        };
+        let config = Config::new(node_config);
 
         let partition_hash = H256::random();
 
@@ -593,7 +612,7 @@ mod tests {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash: partition_hash.clone(),
-                miner_address: mining_address,
+                miner_address: config.node_config.miner_address(),
                 ledger_id: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
@@ -602,24 +621,9 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
-        let base_path = tmp_dir.path().to_path_buf();
-        let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
-        let database_provider = DatabaseProvider(Arc::new(db));
-
-        // Override the default StorageModule config for testing
-        let config = StorageConfig {
-            chunk_size: 32,
-            num_chunks_in_partition: 10,
-            num_chunks_in_recall_range: 2, // Recall range size is 5 chunks
-            miner_address: mining_address.clone(),
-            ..Default::default()
-        };
-
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module =
-            Arc::new(StorageModule::new(&base_path, storage_module_info, config.clone()).unwrap());
+        let storage_module = Arc::new(StorageModule::new(&storage_module_info, &config).unwrap());
 
         let rwlock: RwLock<Option<SolutionContext>> = RwLock::new(None);
         let arc_rwlock = Arc::new(rwlock);
@@ -660,14 +664,14 @@ mod tests {
         }));
 
         let mut partition_mining_actor = PartitionMiningActor::new(
-            mining_address,
-            database_provider.clone(),
+            &config,
             mocked_addr.0,
             packing.start().recipient(),
             storage_module,
             false,
             vdf_steps_guard.clone(),
             atomic_global_step_number,
+            U256::zero(),
         );
 
         let range = partition_mining_actor
