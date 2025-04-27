@@ -348,7 +348,7 @@ impl GossipServiceTestFixture {
     /// Can panic
     pub fn run_service(&mut self) -> (ServiceHandleWithShutdownSignal, mpsc::Sender<GossipData>) {
         let (gossip_service, internal_message_bus) =
-            GossipService::new("127.0.0.1", self.gossip_port);
+            GossipService::new("127.0.0.1", self.gossip_port, self.mining_address);
 
         let mempool_stub = MempoolStub::new(internal_message_bus.clone());
         self.mempool_txs = Arc::clone(&mempool_stub.txs);
@@ -369,7 +369,7 @@ impl GossipServiceTestFixture {
                 block_discovery_stub_addr,
                 self.api_client.clone(),
                 &self.task_executor,
-                self.peer_list.clone(),
+                self.peer_list.clone().into(),
                 self.db.clone(),
             )
             .expect("failed to run gossip service");

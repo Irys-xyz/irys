@@ -363,6 +363,7 @@ where
             version_request,
             peers_cache,
             peer_service_address.clone(),
+            self.reth_service_addr.clone(),
         )
         .into_actor(self);
         ctx.spawn(announce_fut);
@@ -684,8 +685,8 @@ where
         version_request: VersionRequest,
         known_peers_cache: HashSet<PeerAddress>,
         peer_service_address: Addr<PeerListServiceWithClient<A, R>>,
+        reth_service_address: Option<Addr<R>>,
     ) {
-        let reth_service = RethServiceActor::from_registry();
         for peer in known_peers_cache.iter() {
             match Self::announce_yourself_to_address(
                 api_client.clone(),
@@ -697,10 +698,13 @@ where
             {
                 Ok(_peer_response) => {
                     // TODO: announce yourself to those peers as well
-                    let _ = reth_service
-                        .send(peer.execution)
-                        .await
-                        .inspect_err(|e| error!("Failed to connect to reth peer {}", &e));
+                    // TODO @antouhou do we need this here?
+                    if let Some(ref reth_service_address) = reth_service_address {
+                        let _ = reth_service_address
+                            .send(peer.execution)
+                            .await
+                            .inspect_err(|e| error!("Failed to connect to reth peer {}", &e));
+                    }
                 }
                 Err(e) => {
                     error!(
@@ -1436,7 +1440,7 @@ mod tests {
         let active_peers = service.handle(
             TopActivePeersRequest {
                 truncate: Some(2),
-                exclude_peers,
+                exclude_peers: Some(exclude_peers),
             },
             ctx,
         );
@@ -1538,7 +1542,7 @@ mod tests {
         let active_peers = empty_service.handle(
             TopActivePeersRequest {
                 truncate: None,
-                exclude_peers,
+                exclude_peers: Some(exclude_peers),
             },
             ctx,
         );
@@ -1740,7 +1744,7 @@ mod tests {
             db,
             &config,
             mock_client.clone(),
-            mock_addr,
+            mock_addr.clone(),
         );
         let addr = peer_list_service.start();
 
@@ -1766,6 +1770,7 @@ mod tests {
             version_request,
             known_peers,
             addr,
+            Some(mock_addr),
         )
         .await;
 
@@ -2144,7 +2149,7 @@ mod tests {
         let active_peers = service_addr
             .send(TopActivePeersRequest {
                 truncate: None,
-                exclude_peers: HashSet::new(),
+                exclude_peers: None,
             })
             .await
             .expect("send active peers request");
@@ -2195,7 +2200,7 @@ mod tests {
         let active_peers = service_addr
             .send(TopActivePeersRequest {
                 truncate: None,
-                exclude_peers: HashSet::new(),
+                exclude_peers: None,
             })
             .await
             .expect("send active peers request");
@@ -2235,7 +2240,7 @@ mod tests {
         let active_peers = service_addr
             .send(TopActivePeersRequest {
                 truncate: None,
-                exclude_peers: HashSet::new(),
+                exclude_peers: None,
             })
             .await
             .expect("send active peers request");
@@ -2270,7 +2275,7 @@ mod tests {
         let active_peers = service_addr
             .send(TopActivePeersRequest {
                 truncate: None,
-                exclude_peers: HashSet::new(),
+                exclude_peers: None,
             })
             .await
             .expect("send active peers request");

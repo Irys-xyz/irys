@@ -7,14 +7,17 @@ use irys_api_client::ApiClient;
 use irys_database::reth_db::Database;
 use irys_database::{block_header_by_hash, insert_block_header};
 use irys_gossip_service::block_pool_service::{BlockPoolService, ProcessBlock};
+use irys_gossip_service::GossipClient;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    AcceptedResponse, BlockHash, CombinedBlockHeader, Config, DatabaseProvider, IrysBlockHeader,
-    IrysTransactionHeader, NodeConfig, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
+    AcceptedResponse, Address, BlockHash, CombinedBlockHeader, Config, DatabaseProvider,
+    IrysBlockHeader, IrysTransactionHeader, NodeConfig, PeerListItem, PeerResponse, PeerScore,
+    VersionRequest, H256,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::debug;
 
 #[derive(Clone, Default, Debug)]
@@ -133,8 +136,9 @@ async fn should_process_block() {
     let service = BlockPoolService::new_with_client(
         db.clone(),
         mock_client,
-        peer_addr,
+        peer_addr.into(),
         block_discovery_addr.clone(),
+        GossipClient::new(Duration::from_secs(5), Address::default()),
     );
     let addr = service.start();
 
@@ -289,8 +293,9 @@ async fn should_process_block_with_intermediate_block_in_api() {
     let service = BlockPoolService::new_with_client(
         db.clone(),
         mock_client,
-        peer_addr,
+        peer_addr.into(),
         block_discovery_addr.clone(),
+        GossipClient::new(Duration::from_secs(5), Address::default()),
     );
     let addr = service.start();
 
