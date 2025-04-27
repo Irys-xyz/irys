@@ -12,7 +12,7 @@ use irys_database::db_cache::DataRootLRUEntry;
 use irys_database::submodule::get_data_size_by_data_root;
 use irys_database::tables::DataRootLRU;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
-use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger};
+use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger, SystemLedger};
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
 use irys_types::{
@@ -40,6 +40,7 @@ pub struct MempoolService {
     reth_db: RethDbWrapper,
     /// Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
+    valid_commitment_tx: BTreeMap<H256, CommitmentTransaction>,
     /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
     /// instead of the actor executor runtime, while also providing some `QoL`
     task_exec: TaskExecutor,
@@ -86,6 +87,7 @@ impl MempoolService {
             irys_db,
             reth_db,
             valid_tx: BTreeMap::new(),
+            valid_commitment_tx: BTreeMap::new(),
             invalid_tx: Vec::new(),
             task_exec,
             config: config.clone(),
@@ -360,18 +362,19 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
             &commitment_tx.id.0.to_base58()
         );
 
-        // Early out if we already know about this transaction
-        if self.invalid_tx.contains(&commitment_tx.id) {
+        // Early out if we already know about this transaction (valid or invalid)
+        if self.invalid_tx.contains(&commitment_tx.id)
+            || self.valid_commitment_tx.contains_key(&commitment_tx.id)
+        {
             return Err(TxIngressError::Skipped);
         }
 
-        // Validate anchor
+        // Validate the tx anchor
         self.validate_anchor(&commitment_tx.id, &commitment_tx.anchor)?;
 
         // Get commitment status asynchronously
         let commitment_cache = self.service_senders.commitment_cache.clone();
         let commitment_tx_clone = commitment_tx.clone();
-
         let status = self
             .execute_async_operation(|| async move {
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
@@ -387,14 +390,20 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
             })
             .unwrap();
 
+        // Return early if transaction status is not Unknown, indicating it has already been processed
         if status != CommitmentStatus::Unknown {
             return Err(TxIngressError::Skipped);
         }
 
-        // Validate signature
+        // Validate tx signature
         self.validate_signature(&commitment_tx)?;
 
-        // Add commitment asynchronously
+        // Add the commitment tx to the valid tx list to be included in the next block
+        self.valid_commitment_tx
+            .insert(commitment_tx.id, commitment_tx.clone());
+
+        // TODO: move this to after pre-validation
+        // Add commitment asynchronously to the commitment cache
         let commitment_cache = self.service_senders.commitment_cache.clone();
         let commitment_tx_clone = commitment_tx.clone();
 
@@ -686,6 +695,19 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
             for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
                 // Remove the submit tx from the pending valid_tx pool
                 self.valid_tx.remove(txid);
+            }
+
+            // Is there a commitment ledger in this block?
+            let commitment_ledger = block
+                .system_ledgers
+                .iter()
+                .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+            if let Some(commitment_ledger) = commitment_ledger {
+                for txid in commitment_ledger.tx_ids.iter() {
+                    // Remove the commitment tx from the pending valid_tx pool
+                    self.valid_commitment_tx.remove(txid);
+                }
             }
 
             let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;

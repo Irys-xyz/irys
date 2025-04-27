@@ -183,17 +183,17 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         }
 
         //====================================
-        // Commitments ledger TX Validation
+        // Commitment ledger TX Validation
         //------------------------------------
         // Extract the Commitment ledger from the epoch block
-        let commitments_ledger = new_block_header
+        let commitment_ledger = new_block_header
             .system_ledgers
             .iter()
             .find(|b| b.ledger_id == SystemLedger::Commitment);
 
         // Validate commitments (if there are some)
         let mut commitments: Vec<CommitmentTransaction> = Vec::new();
-        if let Some(commitment_ledger) = commitments_ledger {
+        if let Some(commitment_ledger) = commitment_ledger {
             let read_tx = self.db.tx().expect("to create a database read tx");
             commitments = commitment_ledger
                 .tx_ids

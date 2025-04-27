@@ -1,3 +1,5 @@
+use std::ops::{Index, IndexMut};
+
 use irys_config::StorageSubmodulesConfig;
 use irys_primitives::CommitmentType;
 use irys_types::{
@@ -60,6 +62,24 @@ impl PartialEq<u32> for SystemLedger {
 impl PartialEq<SystemLedger> for u32 {
     fn eq(&self, other: &SystemLedger) -> bool {
         *self == other.get_id()
+    }
+}
+
+impl Index<SystemLedger> for Vec<SystemTransactionLedger> {
+    type Output = SystemTransactionLedger;
+
+    fn index(&self, ledger: SystemLedger) -> &Self::Output {
+        self.iter()
+            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
+            .expect("No system transaction ledger found for given ledger type")
+    }
+}
+
+impl IndexMut<SystemLedger> for Vec<SystemTransactionLedger> {
+    fn index_mut(&mut self, ledger: SystemLedger) -> &mut Self::Output {
+        self.iter_mut()
+            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
+            .expect("No system transaction ledger found for given ledger type")
     }
 }
 
