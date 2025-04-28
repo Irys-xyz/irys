@@ -1,5 +1,7 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
-use crate::genesis_utilities::{load_genesis_block_from_disk, save_genesis_block_to_disk};
+use crate::genesis_utilities::{
+    genesis_block_exists_on_disk, load_genesis_block_from_disk, save_genesis_block_to_disk,
+};
 use crate::peer_utilities::{fetch_genesis_block, sync_state_from_peers};
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
@@ -210,8 +212,9 @@ impl IrysNode {
         let config = Config::new(node_config);
 
         let data_exists = Self::blockchain_data_exists(&config.node_config.base_directory);
+        let genesis_file_exists = genesis_block_exists_on_disk(&config.node_config.base_directory);
 
-        let irys_genesis_block = if data_exists {
+        let irys_genesis_block = if genesis_file_exists {
             info!("loading genesis block from disk");
             //load genesis from disk genesis.json
             load_genesis_block_from_disk(&config.node_config.base_directory)

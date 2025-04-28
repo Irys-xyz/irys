@@ -30,6 +30,12 @@ pub fn save_genesis_block_to_disk(
     Ok(())
 }
 
+/// Check if genesis block exists on disk
+pub fn genesis_block_exists_on_disk(base_directory: &PathBuf) -> bool {
+    let path = Path::new(base_directory).join(GENESIS_BLOCK_FILENAME);
+    path.is_file()
+}
+
 /// Read genesis block from disk
 pub fn load_genesis_block_from_disk(
     base_directory: &PathBuf,
