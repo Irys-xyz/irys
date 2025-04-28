@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-const GENESIS_BLOCK_FILENAME: &str = ".genesis.json";
+const GENESIS_BLOCK_FILENAME: &str = ".irys_genesis.json";
 
 /// Write genesis block to disk
 pub fn save_genesis_block_to_disk(
