@@ -1,4 +1,4 @@
-use crate::util::MockRethServiceActor;
+use crate::util::{FakeGossipServer, MockRethServiceActor};
 use actix::{Actor, Handler, Message};
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
@@ -12,8 +12,8 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, Address, BlockHash, CombinedBlockHeader, Config, DatabaseProvider,
-    IrysBlockHeader, IrysTransactionHeader, NodeConfig, PeerListItem, PeerResponse, PeerScore,
-    VersionRequest, H256,
+    IrysBlockHeader, IrysTransactionHeader, NodeConfig, PeerAddress, PeerListItem, PeerResponse,
+    PeerScore, VersionRequest, H256,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -214,6 +214,15 @@ async fn should_process_block_with_intermediate_block_in_api() {
             .expect("can't open temp dir"),
     ));
 
+    let gossip_server = FakeGossipServer::new();
+    let (server_handle, fake_peer_gossip_addr) =
+        gossip_server.run(SocketAddr::from(([127, 0, 0, 1], 0)));
+
+    tokio::spawn(server_handle);
+
+    // Wait for the server to start
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
     // Create three blocks in a chain: block1 -> block2 -> block3
     // block1: in database
     // block2: in API client
@@ -228,12 +237,6 @@ async fn should_process_block_with_intermediate_block_in_api() {
     let mut block2 = IrysBlockHeader::default();
     block2.block_hash = BlockHash::random();
     block2.previous_block_hash = block1.block_hash;
-
-    // Create a combined block header for block2 to be returned by the API client
-    let combined_block2 = CombinedBlockHeader {
-        irys: block2.clone(),
-        execution: Default::default(),
-    };
 
     // Create block3 (test block)
     let mut block3 = IrysBlockHeader::default();
@@ -257,9 +260,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     );
 
     // Setup MockApiClient to return block2 when queried
-    let mock_client = MockApiClient {
-        block_response: Some(combined_block2),
-    };
+    let mock_client = MockApiClient::default();
 
     let mock_block_discovery_actor = BlockDiscoveryMockActor {
         messages: vec![],
@@ -282,7 +283,10 @@ async fn should_process_block_with_intermediate_block_in_api() {
             peer: PeerListItem {
                 reputation_score: PeerScore::new(100),
                 response_time: 0,
-                address: Default::default(),
+                address: PeerAddress {
+                    gossip: fake_peer_gossip_addr,
+                    ..PeerAddress::default()
+                },
                 last_seen: 0,
                 is_online: true,
             },
@@ -298,6 +302,23 @@ async fn should_process_block_with_intermediate_block_in_api() {
         GossipClient::new(Duration::from_secs(5), Address::default()),
     );
     let addr = service.start();
+
+    // Set the fake server to mimic get_data -> gossip_service sends message to block pool
+    let block_for_server = block2.clone();
+    let addr_for_server = addr.clone();
+    gossip_server.set_on_block_data_request(Box::new(move |block_hash| {
+        let block = block_for_server.clone();
+        let addr = addr_for_server.clone();
+        debug!("Receive get block: {:?}", block_hash.0.to_base58());
+        tokio::spawn(async move {
+            debug!("Send block to block pool");
+            addr.send(ProcessBlock { header: block })
+                .await
+                .expect("to send message")
+                .expect("to process block");
+        });
+        true
+    }));
 
     // Insert block1 into the database
     {

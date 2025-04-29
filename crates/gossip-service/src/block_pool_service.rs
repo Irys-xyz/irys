@@ -360,7 +360,7 @@ where
                     debug!(
                         "Attempting to fetch block {} from peer {} (attempt {}/5)",
                         block_hash.0.to_base58(),
-                        peer.address.api,
+                        peer.address.gossip,
                         attempt
                     );
 
@@ -372,7 +372,7 @@ where
                             tracing::info!(
                                 "Successfully requested block {} from peer {}",
                                 block_hash.0.to_base58(),
-                                peer.address.api
+                                peer.address.gossip
                             );
 
                             return Ok(());
@@ -381,17 +381,17 @@ where
                             // Peer doesn't have this block, try another peer
                             debug!(
                                 "Peer {} doesn't have block {}",
-                                peer.address.api,
+                                peer.address.gossip,
                                 block_hash.0.to_base58()
                             );
-                            break;
+                            continue;
                         }
                         Err(err) => {
                             last_error = Some(err);
                             tracing::warn!(
                                 "Failed to fetch block {} from peer {} (attempt {}/5): {}",
                                 block_hash.0.to_base58(),
-                                peer.address.api,
+                                peer.address.gossip,
                                 attempt,
                                 last_error.as_ref().unwrap()
                             );
