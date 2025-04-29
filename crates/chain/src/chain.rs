@@ -790,10 +790,14 @@ impl IrysNode {
             latest_block.diff,
         );
 
+        //TODO: these channels are unused
+        let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
+
         // set up the vdf thread
         let vdf_thread_handler = Self::init_vdf_thread(
             &config,
             vdf_shutdown_receiver,
+            new_seed_rx,
             latest_block,
             seed,
             global_step_number,
@@ -918,6 +922,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
+        new_seed_rx: mpsc::Receiver<H256>,
         latest_block: Arc<IrysBlockHeader>,
         seed: H256,
         global_step_number: u64,
@@ -949,8 +954,6 @@ impl IrysNode {
                     }
                 }
 
-                // TODO: these channels are unused
-                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
                 run_vdf(
                     &vdf_config,
                     global_step_number,
