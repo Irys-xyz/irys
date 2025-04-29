@@ -41,6 +41,7 @@ impl VdfService {
     }
 }
 
+/// create VDF state using the latest block in db
 fn create_state(
     block_index: BlockIndexReadGuard,
     db: DatabaseProvider,
