@@ -18,7 +18,9 @@ use tokio::time::sleep;
 pub struct VdfState {
     /// last global step stored
     pub global_step: u64,
+    /// maximum number of seeds to store in seeds VecDeque
     pub capacity: usize,
+    /// stored seeds
     pub seeds: VecDeque<Seed>,
 }
 
