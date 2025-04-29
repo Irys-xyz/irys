@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::task::{self, JoinHandle};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::block_index_service::BlockIndexReadGuard;
 use crate::services::Stop;
@@ -161,16 +161,23 @@ async fn create_state_parallel(
     };
 }
 
+/// return the larger of MINIMUM_CAPACITY or number of seeds required for (chunks in partition / chunks in recall range)
+/// This ensure the capacity of VecDeqeue is large enough for the partition.
 pub fn calc_capacity(config: &Config) -> usize {
-    const DEFAULT_CAPACITY: usize = 10_000;
-    let capacity = std::cmp::max(
-        DEFAULT_CAPACITY,
-        (config.consensus.num_chunks_in_partition / config.consensus.num_chunks_in_recall_range)
-            .try_into()
-            .unwrap(),
-    );
+    const MINIMUM_CAPACITY: u64 = 10_000;
+    let capacity_from_config: u64 =
+        config.consensus.num_chunks_in_partition / config.consensus.num_chunks_in_recall_range;
+    let capacity = if capacity_from_config < MINIMUM_CAPACITY {
+        warn!(
+            "capacity in config: {} set too low. Overidden with {}",
+            capacity_from_config, MINIMUM_CAPACITY
+        );
+        MINIMUM_CAPACITY
+    } else {
+        std::cmp::max(MINIMUM_CAPACITY, capacity_from_config)
+    };
 
-    capacity
+    capacity.try_into().expect("expected u64 to cast to u32")
 }
 
 impl Supervised for VdfService {}
