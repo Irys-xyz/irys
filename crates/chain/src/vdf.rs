@@ -6,8 +6,8 @@ use irys_actors::{
 use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
-use std::sync::mpsc::Receiver;
 use std::time::Instant;
+use tokio::sync::mpsc::Receiver;
 use tracing::{debug, info};
 
 pub fn run_vdf(
@@ -15,8 +15,8 @@ pub fn run_vdf(
     global_step_number: u64,
     seed: H256,
     initial_reset_seed: H256,
-    new_seed_listener: Receiver<H256>,
-    shutdown_listener: Receiver<()>,
+    mut new_seed_listener: Receiver<H256>,
+    mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
     vdf_service: Addr<VdfService>,
     atomic_vdf_global_step: AtomicVdfStepNumber,
@@ -94,9 +94,10 @@ mod tests {
     use irys_vdf::{vdf_sha_verification, vdf_state::VdfStepsReadGuard, vdf_steps_are_valid};
     use nodit::interval::ii;
     use std::{
-        sync::{atomic::AtomicU64, mpsc, Arc},
+        sync::{atomic::AtomicU64, Arc},
         time::Duration,
     };
+    use tokio::sync::mpsc;
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
 
@@ -160,12 +161,12 @@ mod tests {
 
         let broadcast_mining_service = BroadcastMiningService::from_registry();
         let capacity = calc_capacity(&config);
-        let vdf_service = VdfService::from_capacity(capacity).start();
+        let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>(1);
+        let vdf_service = VdfService::from_capacity(capacity, new_seed_tx).start();
         SystemRegistry::set(vdf_service.clone());
         let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();
 
-        let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
@@ -237,7 +238,7 @@ mod tests {
         );
 
         // Send shutdown signal
-        shutdown_tx.send(()).unwrap();
+        shutdown_tx.send(()).await.unwrap();
 
         // Wait for vdf thread to finish
         vdf_thread_handler.join().unwrap();

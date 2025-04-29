@@ -1,40 +1,54 @@
 use actix::prelude::*;
 use irys_database::block_header_by_hash;
-use irys_types::{block_production::Seed, Config, DatabaseProvider};
+use irys_types::{block_production::Seed, Config, DatabaseProvider, H256};
 use irys_vdf::vdf_state::{AtomicVdfState, VdfState, VdfStepsReadGuard};
 use reth_db::Database;
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock},
 };
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::block_index_service::BlockIndexReadGuard;
 use crate::services::Stop;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct VdfService {
     pub vdf_state: AtomicVdfState,
+    pub tx: mpsc::Sender<H256>,
+}
+
+impl Default for VdfService {
+    fn default() -> Self {
+        unimplemented!("don't rely on the default implementation of the `VdfService`");
+    }
 }
 
 impl VdfService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
-    pub fn new(block_index: BlockIndexReadGuard, db: DatabaseProvider, config: &Config) -> Self {
+    pub fn new(
+        block_index: BlockIndexReadGuard,
+        db: DatabaseProvider,
+        config: &Config,
+        new_seed_tx: mpsc::Sender<H256>,
+    ) -> Self {
         let vdf_state = create_state(block_index, db, &config);
-
         Self {
             vdf_state: Arc::new(RwLock::new(vdf_state)),
+            tx: new_seed_tx,
         }
     }
 
     #[cfg(any(feature = "test-utils", test))]
-    pub fn from_capacity(capacity: usize) -> Self {
+    pub fn from_capacity(capacity: usize, new_seed_tx: mpsc::Sender<H256>) -> Self {
         VdfService {
             vdf_state: Arc::new(RwLock::new(VdfState {
                 global_step: 0,
                 capacity,
                 seeds: VecDeque::with_capacity(capacity),
             })),
+            tx: new_seed_tx,
         }
     }
 }
@@ -174,7 +188,8 @@ mod tests {
     #[actix_rt::test]
     async fn test_vdf() {
         let testnet_config = NodeConfig::testnet().into();
-        let service = VdfService::from_capacity(calc_capacity(&testnet_config));
+        let (new_seed_tx, _) = mpsc::channel::<H256>(1);
+        let service = VdfService::from_capacity(calc_capacity(&testnet_config), new_seed_tx);
         service.vdf_state.write().unwrap().seeds = VecDeque::with_capacity(4);
         service.vdf_state.write().unwrap().capacity = 4;
         let addr = service.start();

@@ -66,11 +66,12 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
     path::PathBuf,
     sync::atomic::AtomicU64,
-    sync::{mpsc, Arc, RwLock},
+    sync::{Arc, RwLock},
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, warn};
@@ -337,7 +338,7 @@ impl IrysNode {
         let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
         let (main_actor_thread_shutdown_tx, main_actor_thread_shutdown_rx) =
             tokio::sync::mpsc::channel::<()>(1);
-        let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel();
+        let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel(1);
         let (reth_handle_sender, reth_handle_receiver) =
             oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
@@ -520,7 +521,7 @@ impl IrysNode {
                         debug!("Actors stopped");
 
                         // Send shutdown signal
-                        vdf_shutdown_sender.send(()).unwrap();
+                        vdf_shutdown_sender.send(()).await.unwrap();
 
                         debug!("Waiting for VDF thread to finish");
                         // Wait for vdf thread to finish & save steps
@@ -601,7 +602,7 @@ impl IrysNode {
     async fn init_services(
         config: &Config,
         reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
-        vdf_shutdown_receiver: std::sync::mpsc::Receiver<()>,
+        vdf_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
         reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
         block_index: Arc<RwLock<BlockIndex>>,
         latest_block: Arc<IrysBlockHeader>,
@@ -721,8 +722,11 @@ impl IrysNode {
             &storage_modules,
         );
 
+        let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>(1);
+
         // spawn the vdf service
-        let vdf_service = Self::init_vdf_service(&config, &irys_db, &block_index_guard);
+        let vdf_service =
+            Self::init_vdf_service(&config, &irys_db, &block_index_guard, new_seed_tx);
         let vdf_steps_guard = vdf_service.send(GetVdfStateMessage).await?;
 
         // spawn the validation service
@@ -789,9 +793,6 @@ impl IrysNode {
             &packing_actor_addr,
             latest_block.diff,
         );
-
-        //TODO: these channels are unused
-        let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
 
         // set up the vdf thread
         let vdf_thread_handler = Self::init_vdf_thread(
@@ -1134,9 +1135,14 @@ impl IrysNode {
         config: &Config,
         irys_db: &DatabaseProvider,
         block_index_guard: &BlockIndexReadGuard,
+        new_seed_tx: mpsc::Sender<H256>,
     ) -> actix::Addr<VdfService> {
-        let vdf_service_actor =
-            VdfService::new(block_index_guard.clone(), irys_db.clone(), &config);
+        let vdf_service_actor = VdfService::new(
+            block_index_guard.clone(),
+            irys_db.clone(),
+            &config,
+            new_seed_tx,
+        );
         let vdf_service = vdf_service_actor.start();
         SystemRegistry::set(vdf_service.clone());
         vdf_service

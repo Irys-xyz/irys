@@ -394,7 +394,7 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
-    use tokio::time::sleep;
+    use tokio::{sync::mpsc, time::sleep};
 
     fn get_mocked_block_producer(
         closure_arc: Arc<RwLock<Option<SolutionContext>>>,
@@ -513,7 +513,8 @@ mod tests {
         let mining_broadcaster = BroadcastMiningService::new();
         let _mining_broadcaster_addr = mining_broadcaster.start();
 
-        let vdf_service = VdfService::from_registry();
+        let (new_seed_tx, _) = mpsc::channel::<H256>(1);
+        let vdf_service = VdfService::from_capacity(100, new_seed_tx).start();
         let vdf_steps_guard: VdfStepsReadGuard =
             vdf_service.send(GetVdfStateMessage).await.unwrap();
 
@@ -638,8 +639,11 @@ mod tests {
             capacity: 5,
             seeds: VecDeque::new(),
         };
+        let (new_seed_tx, _) = mpsc::channel::<H256>(1);
+
         let vdf_service = VdfService {
             vdf_state: Arc::new(RwLock::new(vdf_state)),
+            tx: new_seed_tx,
         }
         .start();
         let vdf_steps_guard: VdfStepsReadGuard =
