@@ -18,7 +18,7 @@ use tokio::time::sleep;
 pub struct VdfState {
     /// last global step stored
     pub global_step: u64,
-    pub max_seeds_num: usize,
+    pub capacity: usize,
     pub seeds: VecDeque<Seed>,
 }
 
@@ -29,7 +29,7 @@ impl VdfState {
 
     /// Push new seed, and removing oldest one if is full
     pub fn push_step(&mut self, seed: Seed) {
-        if self.seeds.len() >= self.max_seeds_num {
+        if self.seeds.len() >= self.capacity {
             self.seeds.pop_front();
         }
 

@@ -635,7 +635,7 @@ mod tests {
 
         let vdf_state = VdfState {
             global_step: 0,
-            max_seeds_num: 5,
+            capacity: 5,
             seeds: VecDeque::new(),
         };
         let vdf_service = VdfService {

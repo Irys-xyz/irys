@@ -385,7 +385,7 @@ async fn partition_expiration_and_repacking_test() {
     }));
 
     let vdf_steps_guard = VdfStepsReadGuard::new(Arc::new(RwLock::new(VdfState {
-        max_seeds_num: 10,
+        capacity: 10,
         global_step: 0,
         seeds: VecDeque::new(),
     })));

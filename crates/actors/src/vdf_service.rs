@@ -34,7 +34,7 @@ impl VdfService {
         VdfService {
             vdf_state: Arc::new(RwLock::new(VdfState {
                 global_step: 0,
-                max_seeds_num: capacity,
+                capacity,
                 seeds: VecDeque::with_capacity(capacity),
             })),
         }
@@ -84,7 +84,7 @@ fn create_state(
         return VdfState {
             global_step: global_step_number,
             seeds,
-            max_seeds_num: capacity,
+            capacity,
         };
     };
 
@@ -92,7 +92,7 @@ fn create_state(
     VdfState {
         global_step: 0,
         seeds: VecDeque::with_capacity(capacity),
-        max_seeds_num: capacity,
+        capacity,
     }
 }
 
@@ -157,7 +157,7 @@ async fn create_state_parallel(
     return VdfState {
         global_step: global_step_number,
         seeds,
-        max_seeds_num: capacity,
+        capacity,
     };
 }
 
@@ -248,7 +248,7 @@ mod tests {
         let testnet_config = NodeConfig::testnet().into();
         let service = VdfService::from_capacity(calc_capacity(&testnet_config));
         service.vdf_state.write().unwrap().seeds = VecDeque::with_capacity(4);
-        service.vdf_state.write().unwrap().max_seeds_num = 4;
+        service.vdf_state.write().unwrap().capacity = 4;
         let addr = service.start();
 
         // Send 8 seeds 1,2..,8 (capacity is 4)
@@ -369,7 +369,7 @@ mod tests {
             elapsed
         );
 
-        assert_eq!(vdf_state.max_seeds_num, vdf_state_parallel.max_seeds_num);
+        assert_eq!(vdf_state.capacity, vdf_state_parallel.capacity);
         assert_eq!(vdf_state.global_step, vdf_state_parallel.global_step);
         assert_eq!(vdf_state.seeds, vdf_state_parallel.seeds);
     }
