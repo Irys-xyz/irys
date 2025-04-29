@@ -337,7 +337,7 @@ impl IrysNode {
         let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
         let (main_actor_thread_shutdown_tx, main_actor_thread_shutdown_rx) =
             tokio::sync::mpsc::channel::<()>(1);
-        let (vdf_sthutodwn_sender, vdf_sthutodwn_receiver) = mpsc::channel();
+        let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel();
         let (reth_handle_sender, reth_handle_receiver) =
             oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
@@ -345,13 +345,14 @@ impl IrysNode {
         let irys_provider = irys_storage::reth_provider::create_provider();
 
         // init the services
+        // vdf gets started here...
         let actor_main_thread_handle = Self::init_services_thread(
             self.config.clone(),
             latest_block_height_tx,
             reth_shutdown_sender,
             main_actor_thread_shutdown_rx,
-            vdf_sthutodwn_sender,
-            vdf_sthutodwn_receiver,
+            vdf_shutdown_sender,
+            vdf_shutdown_receiver,
             reth_handle_receiver,
             irys_node_ctx_tx,
             &irys_provider,
@@ -916,7 +917,7 @@ impl IrysNode {
 
     fn init_vdf_thread(
         config: &Config,
-        vdf_sthutodwn_receiver: mpsc::Receiver<()>,
+        vdf_shutdown_receiver: mpsc::Receiver<()>,
         latest_block: Arc<IrysBlockHeader>,
         seed: H256,
         global_step_number: u64,
@@ -956,7 +957,7 @@ impl IrysNode {
                     seed,
                     vdf_reset_seed,
                     new_seed_rx,
-                    vdf_sthutodwn_receiver,
+                    vdf_shutdown_receiver,
                     broadcast_mining_actor.clone(),
                     vdf_service.clone(),
                     atomic_global_step_number.clone(),
