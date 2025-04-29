@@ -262,7 +262,7 @@ mod tests {
 
         let steps = state.read().seeds.iter().cloned().collect::<Vec<_>>();
 
-        // Should only contain last 3 messages
+        // Should only contain last 4 seeds
         assert_eq!(steps.len(), 4);
 
         // Check last 4 seeds are stored
