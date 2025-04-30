@@ -236,7 +236,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // Commitment Transactions
             let commitment_txs = mempool_tx.commitment_tx;
             let mut commitment_txids=  H256List::new();
-            
             let tx = db.tx_mut().unwrap();
             for commitment_tx in commitment_txs.iter() {
                 if insert_commitment_tx(&tx,commitment_tx ).is_ok() {
@@ -245,10 +244,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 }
             }
             tx.inner.commit().unwrap();
-            
-            let commitment_ledger = SystemTransactionLedger { 
-                ledger_id: SystemLedger::Commitment.into(), 
-                tx_ids:commitment_txids 
+
+            let commitment_ledger = SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids:commitment_txids
             };
 
             // Only populate the system_ledgers if the commitment_ledger has tx
