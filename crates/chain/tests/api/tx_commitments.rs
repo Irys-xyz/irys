@@ -11,6 +11,8 @@ use tracing::info;
 
 #[actix_web::test]
 async fn test_commitments_basic_test() -> eyre::Result<()> {
+    // ===== TEST SETUP =====
+    // Create test environment with a funded signer for transaction creation
     let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut config = NodeConfig::testnet();
     let signer = IrysSigner::random_signer(&config.consensus_config());
@@ -31,6 +33,7 @@ async fn test_commitments_basic_test() -> eyre::Result<()> {
         node.node_ctx.config.node_config.http.port
     );
 
+    // Initialize packing and mining
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
@@ -41,7 +44,7 @@ async fn test_commitments_basic_test() -> eyre::Result<()> {
     let api_state = node.node_ctx.get_api_state(ema_tx);
     let _db = api_state.db.clone();
 
-    // Start the actix web server
+    // Start the API server
     let _app = actix_web::test::init_service(
         App::new()
             .wrap(Logger::default())
@@ -50,7 +53,8 @@ async fn test_commitments_basic_test() -> eyre::Result<()> {
     )
     .await;
 
-    // Create a Stake commitment transaction
+    // ===== TEST CASE 1: Stake Commitment Creation and Processing =====
+    // Create a new stake commitment transaction
     let stake_tx = CommitmentTransaction {
         id: H256::random(),
         commitment_type: CommitmentType::Stake,
@@ -60,18 +64,22 @@ async fn test_commitments_basic_test() -> eyre::Result<()> {
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
     info!("Generated stake_tx.id: {}", stake_tx.id);
 
-    // Verify the transaction is not in the commitment state ahead of time
+    // Verify stake commitment starts in 'Unknown' state
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
     assert_eq!(status, CommitmentStatus::Unknown);
 
-    // Make a POST request with commitment tx JSON payload
+    // Submit stake commitment via API
     post_commitment_tx_request(&uri, &stake_tx).await;
 
-    // Verify the status in the CommitmentCache
+    // Mine a block to include the commitment
+    node.mine_block().await.unwrap();
+
+    // Verify stake commitment is now 'Accepted'
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
     assert_eq!(status, CommitmentStatus::Accepted);
 
-    // Create a Pledge commitment for the soon to be staked address
+    // ===== TEST CASE 2: Pledge Creation for Staked Address =====
+    // Create a pledge commitment for the already staked address
     let pledge_tx = CommitmentTransaction {
         id: H256::random(),
         commitment_type: CommitmentType::Pledge,
@@ -81,31 +89,42 @@ async fn test_commitments_basic_test() -> eyre::Result<()> {
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
-    // Verify the transaction is not in the commitment state ahead of time
+    // Verify pledge starts in 'Unknown' state
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
     assert_eq!(status, CommitmentStatus::Unknown);
 
-    // Make a POST request with commitment tx JSON payload
+    // Submit pledge via API
     post_commitment_tx_request(&uri, &pledge_tx).await;
 
-    // Verify the status in the CommitmentCache
+    // Verify pledge is still 'Unknown' before mining
+    let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
+    assert_eq!(status, CommitmentStatus::Unknown);
+
+    // Mine a block to include the pledge
+    node.mine_block().await.unwrap();
+
+    // Verify pledge is now 'Accepted' after mining
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
     assert_eq!(status, CommitmentStatus::Accepted);
 
-    // Verify the stake commitment is already accepted
+    // ===== TEST CASE 3: Re-submitting Existing Commitment =====
+    // Verify stake commitment is still accepted
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
     assert_eq!(status, CommitmentStatus::Accepted);
 
-    // Make a POST request with commitment tx JSON payload
+    // Re-submit the same stake commitment
     post_commitment_tx_request(&uri, &stake_tx).await;
+    node.mine_block().await.unwrap();
 
-    // Verify the stake commitment is still accepted after reposting it
+    // Verify stake is still 'Accepted' (idempotent operation)
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
     assert_eq!(status, CommitmentStatus::Accepted);
 
-    // Create a new signer and send a pledge without stake
+    // ===== TEST CASE 4: Pledge Without Stake (Should Fail) =====
+    // Create a new signer without any stake commitment
     let signer2 = IrysSigner::random_signer(&config.consensus_config());
 
+    // Create a pledge for the unstaked address
     let pledge_tx = CommitmentTransaction {
         id: H256::random(),
         commitment_type: CommitmentType::Pledge,
@@ -115,23 +134,19 @@ async fn test_commitments_basic_test() -> eyre::Result<()> {
     let pledge_tx = signer2.sign_commitment(pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
-    // Verify the pledge is not in the commitment state ahead of time
+    // Verify pledge starts in 'Unstaked' state
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
-    assert_eq!(
-        status,
-        CommitmentStatus::Invalid("pledge address not staked".into())
-    );
+    assert_eq!(status, CommitmentStatus::Unstaked);
 
-    // Make a POST request with commitment tx JSON payload
+    // Submit pledge via API
     post_commitment_tx_request(&uri, &pledge_tx).await;
+    node.mine_block().await.unwrap();
 
-    // Verify the pledge is STILL not in the commitment state
+    // Verify pledge remains 'Unstaked' (invalid without stake)
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
-    assert_eq!(
-        status,
-        CommitmentStatus::Invalid("pledge address not staked".into())
-    );
+    assert_eq!(status, CommitmentStatus::Unstaked);
 
+    // ===== TEST CLEANUP =====
     node.node_ctx.stop().await;
     Ok(())
 }

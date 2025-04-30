@@ -10,8 +10,8 @@ use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
-    DataLedger,
+    block_header_by_hash, cached_data_root_by_data_root, insert_commitment_tx,
+    tables::IngressProofs, tx_header_by_txid, DataLedger, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
@@ -19,8 +19,8 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Address, Base64, Config, DataTransactionLedger, H256List,
-    IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TxIngressProof,
-    VDFLimiterInfo, H256, U256,
+    IngressProofsList, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData,
+    Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -225,13 +225,38 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
             // Submit Ledger Transactions
-            let submit_txs: Vec<IrysTransactionHeader> =
+            let mempool_tx =
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
+            let submit_txs = mempool_tx.storage_tx;
 
             let submit_chunks_added = calculate_chunks_added(&submit_txs, config.consensus.chunk_size);
             let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
-
             let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
+
+            // Commitment Transactions
+            let commitment_txs = mempool_tx.commitment_tx;
+            let mut commitment_txids=  H256List::new();
+            
+            let tx = db.tx_mut().unwrap();
+            for commitment_tx in commitment_txs.iter() {
+                if insert_commitment_tx(&tx,commitment_tx ).is_ok() {
+                    debug!("Inserting commitment transaction: {:#?}", commitment_tx);
+                    commitment_txids.push(commitment_tx.id);
+                }
+            }
+            tx.inner.commit().unwrap();
+            
+            let commitment_ledger = SystemTransactionLedger { 
+                ledger_id: SystemLedger::Commitment.into(), 
+                tx_ids:commitment_txids 
+            };
+
+            // Only populate the system_ledgers if the commitment_ledger has tx
+            let mut system_ledgers: Vec<SystemTransactionLedger> = Vec::new();
+            if commitment_txs.len() > 0 {
+                system_ledgers.push(commitment_ledger);
+            }
+
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
             // Difficulty adjustment logic
@@ -327,7 +352,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 miner_address: solution.mining_address,
                 signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
-                system_ledgers: vec![],
+                system_ledgers,
                 data_ledgers: vec![
                     // Permanent Publish Ledger
                     DataTransactionLedger {

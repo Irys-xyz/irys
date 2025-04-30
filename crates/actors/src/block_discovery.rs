@@ -4,19 +4,21 @@ use crate::{
     block_validation::prevalidate_block,
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
+    CommitmentCacheMessage, CommitmentStatus,
 };
 use actix::prelude::*;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
+
 use irys_types::{
-    CommitmentTransaction, Config, DatabaseProvider, GossipData, IrysBlockHeader,
+    CommitmentTransaction, Config, DatabaseProvider, GossipData, H256List, IrysBlockHeader,
     IrysTransactionHeader,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, error, info};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
@@ -193,9 +195,13 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         // Validate commitments (if there are some)
         let mut commitments: Vec<CommitmentTransaction> = Vec::new();
+        let mut commitment_txids: H256List = H256List::new();
         if let Some(commitment_ledger) = commitment_ledger {
+            debug!("{:#?}", commitment_ledger);
             let read_tx = self.db.tx().expect("to create a database read tx");
-            commitments = commitment_ledger
+
+            // Collect commitments with proper error handling
+            match commitment_ledger
                 .tx_ids
                 .iter()
                 .map(|txid| {
@@ -204,15 +210,14 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()
-                .expect("to be able to retrieve all of the commitment tx headers locally");
+            {
+                Ok(collected) => {
+                    commitments = collected;
+                    commitment_txids = commitment_ledger.tx_ids.clone();
+                }
 
-            // TODO: Non epoch blocks and epoch blocks treat the commitments ledger a little differently
-            // during the epoch, stake and pledge commitments accumulate waiting to be finalized when the
-            // next epoch starts. As a result these pending commitments during the epoch need to have
-            // their own CommitmentsState where pending pledges can be checked to see if they have an
-            // outstanding stake (check with epoch_service) or if they've posted a pending stake commitment.
-            //
-            // This work will be done next, for now commitments are only handled in the genesis block
+                Err(e) => error!("Failed to collect commitment transactions: {:?}", e),
+            }
         }
 
         //====================================
@@ -225,6 +230,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();
         let ema_service_sender = self.service_senders.ema.clone();
+        let commitment_cache_sender = self.service_senders.commitment_cache.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_service = self.epoch_service.clone();
         let epoch_config = self.config.consensus.epoch.clone();
@@ -252,6 +258,36 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
             match validation_future.await.unwrap().await {
                 Ok(_) => {
+                    // Attempt to validate / update the epoch commitment cache
+                    for commitment_tx in commitments.iter() {
+                        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                        let _ =
+                            commitment_cache_sender.send(CommitmentCacheMessage::AddCommitment {
+                                commitment_tx: commitment_tx.clone(),
+                                response: oneshot_tx,
+                            });
+                        let status = oneshot_rx
+                            .await
+                            .expect("to receive CommitmentStatus from AddCommitment message");
+
+                        if matches!(status, CommitmentStatus::Accepted) == false {
+                            // Something went wrong with the commitments validation, it's time to roll back
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            let _ = commitment_cache_sender.send(
+                                CommitmentCacheMessage::RollbackCommitments {
+                                    commitment_txs: commitment_txids,
+                                    response: tx,
+                                },
+                            );
+                            let _ = rx
+                                .await
+                                .expect("to receive a response from RollbackCommitments message");
+
+                            // These commitments do not result in valid commitment state
+                            return Err(eyre::eyre!("Invalid commitments"));
+                        }
+                    }
+
                     info!("Block is valid, sending to block tree");
 
                     db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))

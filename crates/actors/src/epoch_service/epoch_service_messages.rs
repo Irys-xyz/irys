@@ -2,9 +2,10 @@ use super::{CommitmentState, EpochServiceActor, EpochServiceError, PartitionAssi
 use crate::services::Stop;
 use actix::{ActorContext, Handler, Message, MessageResponse};
 use irys_database::Ledgers;
+use irys_primitives::CommitmentStatus;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    CommitmentTransaction, IrysBlockHeader,
+    Address, CommitmentTransaction, IrysBlockHeader,
 };
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
@@ -126,6 +127,13 @@ impl CommitmentStateReadGuard {
     /// Accessor method to get a ReadGuard for the CommitmentState
     pub fn read(&self) -> RwLockReadGuard<'_, CommitmentState> {
         self.commitment_state.read().unwrap()
+    }
+
+    pub fn is_staked(&self, address: Address) -> bool {
+        if let Some(commitment) = self.read().stake_commitments.get(&address) {
+            return commitment.commitment_status == CommitmentStatus::Active;
+        }
+        false
     }
 }
 

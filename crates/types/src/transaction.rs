@@ -120,10 +120,6 @@ impl IrysTransactionHeader {
         self.signature
             .validate_signature(self.signature_hash(), self.signer)
     }
-
-    pub fn total_fee(&self) -> u64 {
-        self.perm_fee.unwrap_or(0) + self.term_fee
-    }
 }
 
 /// Wrapper for the underlying IrysTransactionHeader fields, this wrapper
@@ -245,12 +241,14 @@ impl CommitmentTransaction {
 }
 
 // Trait to abstract common behavior
-pub trait SignatureValidation {
+pub trait IrysTransactionCommon {
     fn is_signature_valid(&self) -> bool;
     fn id(&self) -> IrysTransactionId;
+    fn total_fee(&self) -> u64;
+    fn signer(&self) -> Address;
 }
 
-impl SignatureValidation for IrysTransactionHeader {
+impl IrysTransactionCommon for IrysTransactionHeader {
     fn is_signature_valid(&self) -> bool {
         self.is_signature_valid()
     }
@@ -258,15 +256,30 @@ impl SignatureValidation for IrysTransactionHeader {
     fn id(&self) -> IrysTransactionId {
         self.id
     }
+
+    fn total_fee(&self) -> u64 {
+        self.perm_fee.unwrap_or(0) + self.term_fee
+    }
+
+    fn signer(&self) -> Address {
+        self.signer
+    }
 }
 
-impl SignatureValidation for CommitmentTransaction {
+impl IrysTransactionCommon for CommitmentTransaction {
     fn is_signature_valid(&self) -> bool {
         self.is_signature_valid()
     }
 
     fn id(&self) -> IrysTransactionId {
         self.id
+    }
+
+    fn total_fee(&self) -> u64 {
+        self.fee
+    }
+    fn signer(&self) -> Address {
+        self.signer
     }
 }
 
