@@ -267,7 +267,7 @@ where
                     }
                 };
             })
-            .with_components(components_builder, on_component_initialized, None).await?;
+            .with_components(components_builder, on_component_initialized, Some(irys_ext.clone())).await?;
 
         // spawn exexs
         let exex_manager_handle = ExExLauncher::new(

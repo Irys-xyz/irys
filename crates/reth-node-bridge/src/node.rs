@@ -51,7 +51,7 @@ macro_rules! vec_of_strings {
 // static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
 // reth node with custom IrysExecutor
-pub type RethNode = NodeAdapter<
+pub type RethNodeOLD = NodeAdapter<
     FullNodeTypesAdapter<
         NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
         BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
@@ -74,6 +74,33 @@ pub type RethNode = NodeAdapter<
         IrysEvmConfig,
         EthExecutorProvider<IrysEvmConfig>,
         Arc<dyn Consensus>,
+        EthereumEngineValidator,
+    >,
+>;
+
+pub type RethNode = NodeAdapter<
+    FullNodeTypesAdapter<
+        NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+        BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+    >,
+    reth_node_builder::components::Components<
+        FullNodeTypesAdapter<
+            NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+            BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+        >,
+        reth_transaction_pool::Pool<
+            TransactionValidationTaskExecutor<
+                EthTransactionValidator<
+                    BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+                    EthPooledTransaction,
+                >,
+            >,
+            CoinbaseTipOrdering<EthPooledTransaction>,
+            DiskFileBlobStore,
+        >,
+        IrysEvmConfig,
+        EthExecutorProvider<IrysEvmConfig>,
+        Arc<(dyn reth_consensus::Consensus + 'static)>,
         EthereumEngineValidator,
     >,
 >;
@@ -107,11 +134,13 @@ pub type RethNodeStandard = NodeAdapter<
 >;
 
 pub type RethNodeAddOns = EthereumAddOns;
+pub type RethNodeExitHandleOLD = NodeHandle<RethNodeOLD, RethNodeAddOns>;
+
 pub type RethNodeExitHandle = NodeHandle<RethNode, RethNodeAddOns>;
 
 pub type RethNodeHandle = FullNode<RethNode, RethNodeAddOns>;
 
-pub type RethNodeExitHandle2 = NodeHandle<RethNode, RethNodeAddOns>;
+pub type RethNodeExitHandle2 = NodeHandle<RethNodeOLD, RethNodeAddOns>;
 
 pub type RethNode2 = NodeHandle<
     NodeAdapter<
@@ -227,7 +256,7 @@ pub async fn run_node(
     provider: IrysRethProvider,
     latest_block: u64,
     random_ports: bool,
-) -> eyre::Result<RethNodeExitHandle> {
+) -> eyre::Result<RethNodeExitHandleOLD> {
     let mut os_args: Vec<String> = std::env::args().collect();
     let bp = os_args.remove(0);
 
@@ -432,7 +461,7 @@ pub async fn run_node2(
     provider: IrysRethProvider,
     latest_block: u64,
     random_ports: bool,
-) -> eyre::Result<RethNodeExitHandle> {
+) -> eyre::Result<RethNodeExitHandleOLD> {
     let mut node_config = node_config;
 
     // let mut os_args: Vec<String> = std::env::args().collect();
@@ -612,7 +641,7 @@ pub async fn run_node_new(
     provider: IrysRethProvider,
     latest_block: u64,
     random_ports: bool,
-) -> eyre::Result<RethNode2> {
+) -> eyre::Result<RethNodeExitHandle> {
     let mut os_args: Vec<String> = std::env::args().collect();
     let bp = os_args.remove(0);
 

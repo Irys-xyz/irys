@@ -11,10 +11,7 @@ use std::{
 };
 use tracing::warn;
 
-use crate::{
-    node::{run_node4, run_node5, run_node_new},
-    run_node,
-};
+use crate::node::{run_node, run_node4, run_node5, run_node_new};
 
 mod t {
     use irys_types::Address;

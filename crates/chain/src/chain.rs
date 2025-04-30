@@ -36,9 +36,8 @@ use irys_database::{
 };
 use irys_gossip_service::ServiceHandleWithShutdownSignal;
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
-pub use irys_reth_node_bridge::node::{
-    RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
-};
+use irys_reth_node_bridge::node::RethNode;
+pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeExitHandleOLD, RethNodeProvider};
 use irys_storage::{
     irys_consensus_data_db::open_or_create_irys_consensus_data_db,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
@@ -158,7 +157,8 @@ async fn start_reth_node(
     latest_block: u64,
     random_ports: bool,
 ) -> eyre::Result<NodeExitReason> {
-    let node_handle = irys_reth_node_bridge::run_node(
+    let node_handle = irys_reth_node_bridge::node::run_node_new(
+        /* run_node */
         Arc::new(chainspec),
         task_executor,
         config.node_config.clone(),
@@ -601,7 +601,7 @@ impl IrysNode {
         let irys_db = init_irys_db(&config)?;
 
         // initialize the databases
-        let (reth_node, reth_db) = init_reth_db(reth_handle_receiver, &irys_db).await?;
+        let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initiailsed");
 
         // start services
@@ -1339,10 +1339,10 @@ fn init_reth_service(
 
 async fn init_reth_db(
     reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
-    irys_db: &DatabaseProvider,
 ) -> Result<(RethNodeProvider, irys_database::db::RethDbWrapper), eyre::Error> {
     let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await?));
     let reth_db = reth_node.provider.database.db.clone();
+    // TODO: fix this so we can migrate the consensus/irys DB
     // we no longer extend the reth database with our own tables/metadata
     // check_db_version_and_run_migrations_if_needed(&reth_db, irys_db)?;
     Ok((reth_node, reth_db))
