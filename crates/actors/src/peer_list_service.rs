@@ -929,28 +929,19 @@ where
                 let future = reth_service_addr.send(reth_peer_info);
                 let reth_task = async move {
                     match future.await {
-                        Ok(res) => {
-                            match res {
-                                Ok(()) => {
-                                    info!(
-                                        "JESSEDEBUG2 Successfully connected to reth peer: {:?}",
-                                        reth_peer_info
-                                    );
-                                }
-                                Err(reth_error) => {
-                                    error!(
-                                        "JESSEDEBUG2  Failed to connect to reth peer: {}",
-                                        reth_error.to_string()
-                                    );
-                                }
+                        Ok(res) => match res {
+                            Ok(()) => {
+                                info!("Successfully connected to reth peer: {:?}", reth_peer_info);
                             }
-                            debug!("JESSEDEBUG2  Successfully connected to reth peer");
-                        }
+                            Err(reth_error) => {
+                                error!(
+                                    "Failed to connect to reth peer: {}",
+                                    reth_error.to_string()
+                                );
+                            }
+                        },
                         Err(mailbox_error) => {
-                            error!(
-                                "JESSEDEBUG2  Failed to connect to reth peer: {}",
-                                mailbox_error
-                            );
+                            error!("Failed to connect to reth peer: {}", mailbox_error);
                         }
                     }
                 }

@@ -50,13 +50,13 @@ pub fn run_vdf(
         atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
 
         let elapsed = now.elapsed();
-        // debug!("Vdf step duration: {:.2?}", elapsed);
+        debug!("Vdf step duration: {:.2?}", elapsed);
 
-        // info!(
-        //     "Seed created {} step number {}",
-        //     hash.clone(),
-        //     global_step_number
-        // );
+        info!(
+            "Seed created {} step number {}",
+            hash.clone(),
+            global_step_number
+        );
         vdf_service.do_send(VdfSeed(Seed(hash)));
         broadcast_mining_service.do_send(BroadcastMiningSeed {
             seed: Seed(hash),

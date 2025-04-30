@@ -11,7 +11,6 @@ mod tests {
         sync::{Arc, RwLock},
         time::{SystemTime, UNIX_EPOCH},
     };
-    use tracing::warn;
 
     use reth::{payload::EthPayloadBuilderAttributes, rpc::types::engine::PayloadAttributes};
 
@@ -34,7 +33,7 @@ mod tests {
         std::env::set_var("RUST_LOG", "debug");
         reth_tracing::init_test_tracing();
 
-        let (mut nodes, _tasks, wallet) = setup::<EthereumNode>(
+        let (mut nodes, _tasks, _wallet) = setup::<EthereumNode>(
             2,
             Arc::new(
                 ChainSpecBuilder::default()
@@ -90,7 +89,7 @@ mod tests {
         std::env::set_var("RUST_LOG", "debug");
         reth_tracing::init_test_tracing();
 
-        let (mut nodes, _tasks, wallet) = setup::<EthereumNode>(
+        let (mut nodes, _tasks, _wallet) = setup::<EthereumNode>(
             2,
             Arc::new(
                 ChainSpecBuilder::default()
@@ -254,7 +253,7 @@ mod tests {
         let mut nodes = {
             let mut nodes: Vec<reth_e2e_test_utils::node::NodeTestContext<_, _>> =
                 Vec::with_capacity(num_nodes);
-            for idx in 0..num_nodes {
+            for _ in 0..num_nodes {
                 // let tmp_dir = temporary_directory(None, true);
                 let tmp_dir = reth_db::test_utils::tempdir_path();
                 let reth_node_builder::NodeHandle {
@@ -280,24 +279,10 @@ mod tests {
                 .await?;
                 let node = reth_e2e_test_utils::node::NodeTestContext::new(node).await?;
 
-                // // Connect each node in a chain.
-                // if let Some(previous_node) = nodes.last_mut() {
-                //     previous_node.connect(&mut node).await;
-                // }
-
-                // // Connect last node with the first if there are more than two
-                // if idx + 1 == num_nodes && num_nodes > 2 {
-                //     if let Some(first_node) = nodes.first_mut() {
-                //         node.connect(first_node).await;
-                //     }
-                // }
-
                 nodes.push(node)
             }
             nodes
         };
-
-        warn!("JESSEDEBUG2 got nodes");
 
         // let raw_tx = TransactionTestContext::transfer_tx_bytes(1, wallet.inner).await;
         let mut second_node = nodes.pop().unwrap();

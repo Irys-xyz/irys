@@ -227,16 +227,13 @@ impl Handler<ConnectToPeerMessage> for RethServiceActor {
     type Result = eyre::Result<()>;
 
     fn handle(&mut self, msg: ConnectToPeerMessage, _ctx: &mut Self::Context) -> Self::Result {
-        info!("JESSEDEBUG2 connecting to {:?}", &msg);
+        debug!("Connecting to {:?}", &msg);
         Ok(self
             .handle
             .clone()
             .ok_or_eyre("reth service uninitialized")?
             .network
             .add_peer(msg.peer_id, msg.peering_tcp_addr))
-
-        // info!("JESSEDEBUG2 SKIPPING connecting to {:?}", &msg);
-        // Ok(())
     }
 }
 

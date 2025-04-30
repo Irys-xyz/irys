@@ -1,10 +1,6 @@
 //! Utilities for end-to-end tests.
 //! Taken from ext/reth/crates/e2e-test-utils
 
-use std::sync::{Arc, RwLock};
-
-use irys_database::db::RethDbWrapper;
-use irys_storage::reth_provider::IrysRethProviderInner;
 use node::RethNodeContext;
 use reth::{
     args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
@@ -20,11 +16,10 @@ use reth_node_builder::{
     NodeAdapter, NodeAddOns, NodeComponents, NodeTypesWithDBAdapter, NodeTypesWithEngine,
     RethFullAdapter,
 };
-use reth_provider::providers::{BlockchainProvider, BlockchainProvider2};
+use reth_provider::providers::BlockchainProvider;
+use std::sync::Arc;
 use tracing::{span, Level};
 use wallet::Wallet;
-
-use crate::launcher::CustomEngineNodeLauncher;
 
 /// Wrapper type to create test nodes
 pub mod node;
@@ -89,65 +84,14 @@ where
 
         let span = span!(Level::INFO, "node", idx);
         let _enter = span.enter();
-        // let irys_provider: Arc<RwLock<Option<IrysRethProviderInner>>> = Arc::new(RwLock::new(None));
 
-        // use reth_engine_tree::tree::TreeConfig;
-        // let engine_tree_config = TreeConfig::default();
-
-        // let db = reth_db::test_utils::create_test_rw_db();
-
-        // use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
         let NodeHandle {
             node,
             node_exit_future: _,
         } = NodeBuilder::new(node_config.clone())
-            // .with_database(db)
-            // .with_types_and_provider::<EthereumNode, BlockchainProvider2<
-            //     NodeTypesWithDBAdapter<EthereumNode, Arc<TempDatabase<DatabaseEnv>>>,
-            // >>()
-            // .testing_node(exec.clone())
-            // //     .with_types_and_provider::<EthereumNode, BlockchainProvider2<
-            // //     NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
-            // // >>()
-            // // .with_types::<EthereumNode>();
-            // .with_components(
-            //     // EthereumNode::components()
-            //     //     .executor(IrysExecutorBuilder {
-            //     //         precompile_state_provider: PrecompileStateProvider {
-            //     //             provider: irys_provider.clone(),
-            //     //         },
-            //     //     })
-            //     //     .payload(IrysPayloadBuilder::default()),
-            //     Default::default(),
-            // )
-            // // .with_components(EthereumNode::components())
-            // .with_add_ons(EthereumAddOns::default())
-            // // .with_types_and_provider::<EthereumNode, BlockchainProvider2<
-            // //     NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
-            // // >>()
-            // .launch_with_fn(|builder| {
-            //     let launcher = CustomEngineNodeLauncher::new(
-            //         builder.task_executor().clone(),
-            //         builder.config().datadir(),
-            //         engine_tree_config,
-            //         irys_provider,
-            //         latest_block,
-            //     );
-            //     builder.launch_with(launcher)
-            // })
             .testing_node(exec.clone())
             .node(Default::default())
             .launch()
-            // .with_components(EthereumNode::components())
-            // .with_add_ons(EthereumAddOns::default())
-            // .launch_with_fn(|builder| {
-            //     let launcher = reth_node_builder::EngineNodeLauncher::new(
-            //         tasks.executor(),
-            //         builder.config.datadir(),
-            //         Default::default(),
-            //     );
-            //     builder.launch_with(launcher)
-            // })
             .await?;
 
         let mut node = RethNodeContext::new(node).await?;

@@ -1,18 +1,15 @@
 use actix::prelude::*;
+use irys_types::{block_production::Seed, H256List, H256};
 use nodit::{interval::ii, InclusiveInterval, Interval};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock, RwLockReadGuard},
     time::Duration,
 };
-
+use tokio::time::sleep;
 use tracing::{info, warn};
 
-use irys_types::{block_production::Seed, H256List, H256};
-
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
-
-use tokio::time::sleep;
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -35,11 +32,11 @@ impl VdfState {
 
         self.global_step += 1;
         self.seeds.push_back(seed);
-        // info!(
-        //     "Received seed: {:?} global step: {}",
-        //     self.seeds.back().unwrap(),
-        //     self.global_step
-        // );
+        info!(
+            "Received seed: {:?} global step: {}",
+            self.seeds.back().unwrap(),
+            self.global_step
+        );
     }
 
     /// Get steps in the given global steps numbers Interval

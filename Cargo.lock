@@ -393,7 +393,6 @@ dependencies = [
  "derive_more 1.0.0",
  "serde",
  "serde_with",
- "tracing",
 ]
 
 [[package]]
@@ -7396,7 +7395,6 @@ dependencies = [
  "reth-codecs-derive",
  "reth-primitives",
  "thiserror 1.0.69",
- "tracing",
 ]
 
 [[package]]

@@ -21,7 +21,7 @@ use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::NodeCommand;
 use reth_consensus::Consensus;
-use reth_db::{init_db, HasName, HasTableType};
+use reth_db::init_db;
 use reth_engine_tree::tree::TreeConfig;
 use reth_ethereum_engine_primitives::EthereumEngineValidator;
 use reth_node_api::{FullNodeTypesAdapter, NodeTypesWithDBAdapter};

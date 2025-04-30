@@ -31,8 +31,7 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
-    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx,
-    migration::check_db_version_and_run_migrations_if_needed, tables::IrysTables, BlockIndex,
+    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx, BlockIndex,
 };
 use irys_gossip_service::ServiceHandleWithShutdownSignal;
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
@@ -57,7 +56,7 @@ use reth::{
     tasks::{TaskExecutor, TaskManager},
 };
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
-use reth_db::{Database as _, HasName, HasTableType};
+use reth_db::Database as _;
 use std::{
     fs,
     net::TcpListener,
