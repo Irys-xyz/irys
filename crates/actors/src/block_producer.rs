@@ -6,7 +6,7 @@ use std::{
 
 use actix::prelude::*;
 use actors::mocker::Mocker;
-use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes};
+use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes, PayloadStatusEnum};
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
@@ -363,7 +363,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
-            let context =  RethNodeContext::new(reth.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
+            let mut context =  RethNodeContext::new(reth.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
 
             let shadows = Shadows::new(
                 submit_txs
@@ -414,24 +414,78 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 finalized_hash: None,
             }).await??;
 
-            let exec_payload = context
+            // let exec_payload = context
+            //     .engine_api
+            //     .build_payload_v1_irys(prev_block_header.evm_block_hash, payload_attrs)
+            //     .await?;
+
+            // // we can examine the execution status of generated shadow txs
+            // // let shadow_receipts = exec_payload.shadow_receipts;
+
+            // let v1_payload = exec_payload
+            //     .clone()
+            //     .execution_payload
+            //     .payload_inner
+            //     .payload_inner
+            //     .payload_inner;
+            // // TODO @JesseTheRobot create a deref(?) trait so this isn't as bad
+            // let block_hash = v1_payload.block_hash;
+
+            // let (exec_payload, evm_block_hash) = {
+            //                 let exec_payload = context
+            //     .engine_api
+            //     .build_payload_v1_irys(prev_block_header.evm_block_hash, payload_attrs)
+            //     .await?;
+            // // we can examine the execution status of generated shadow txs
+            // // let shadow_receipts = exec_payload.shadow_receipts;
+            // let v1_payload = exec_payload
+            //     .clone()
+            //     .execution_payload
+            //     .payload_inner
+            //     .payload_inner
+            //     .payload_inner;
+
+            //     (exec_payload, v1_payload.block_hash)
+            // };
+
+
+            let (exec_payload, evm_block_hash) = {
+                // let exec_payload = context
+                // .engine_api
+                // .build_payload_v1_irys(prev_block_header.evm_block_hash, payload_attrs)
+                // .await?;
+                // // we can examine the execution status of generated shadow txs
+                // // let shadow_receipts = exec_payload.shadow_receipts;
+                // let v1_payload = exec_payload
+                // .clone()
+                // .execution_payload
+                // .payload_inner
+                // .payload_inner
+                // .payload_inner;
+                // (exec_payload, v1_payload.block_hash)
+
+                let (exec_payload, built, attrs) = context.new_payload_irys(prev_block_header.evm_block_hash, payload_attrs).await?;
+
+                let block_hash = context
                 .engine_api
-                .build_payload_v1_irys(prev_block_header.evm_block_hash, payload_attrs)
+                .submit_payload(
+                    built.clone(),
+                    attrs.clone(),
+                    PayloadStatusEnum::Valid,
+                    vec![],
+                )
                 .await?;
+    
+                // trigger forkchoice update via engine api to commit the block to the blockchain
+                context
+                    .engine_api
+                    .update_forkchoice(block_hash, block_hash)
+                    .await?;
+                
+                    (exec_payload, built.block().hash())
+            };
 
-            // we can examine the execution status of generated shadow txs
-            // let shadow_receipts = exec_payload.shadow_receipts;
-
-            let v1_payload = exec_payload
-                .clone()
-                .execution_payload
-                .payload_inner
-                .payload_inner
-                .payload_inner;
-            // TODO @JesseTheRobot create a deref(?) trait so this isn't as bad
-            let block_hash = v1_payload.block_hash;
-
-            irys_block.evm_block_hash = block_hash;
+            irys_block.evm_block_hash = evm_block_hash;
 
 
             let block = Arc::new(irys_block);
@@ -449,7 +503,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // we set the canon head here, as we produced this block, and this lets us build off of it
             RethServiceActor::from_registry().send(ForkChoiceUpdateMessage{
-                head_hash: BlockHashType::Evm(block_hash),
+                head_hash: BlockHashType::Evm(evm_block_hash),
                 confirmed_hash: None,
                 finalized_hash: None,
             }).await??;

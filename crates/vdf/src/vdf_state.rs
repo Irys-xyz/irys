@@ -35,11 +35,11 @@ impl VdfState {
 
         self.global_step += 1;
         self.seeds.push_back(seed);
-        info!(
-            "Received seed: {:?} global step: {}",
-            self.seeds.back().unwrap(),
-            self.global_step
-        );
+        // info!(
+        //     "Received seed: {:?} global step: {}",
+        //     self.seeds.back().unwrap(),
+        //     self.global_step
+        // );
     }
 
     /// Get steps in the given global steps numbers Interval

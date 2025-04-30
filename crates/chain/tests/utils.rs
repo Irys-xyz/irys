@@ -410,11 +410,15 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 }
 
-pub async fn mine_blocks(node_ctx: &IrysNodeCtx, blocks: usize) -> eyre::Result<()> {
+pub async fn mine_blocks(
+    node_ctx: &IrysNodeCtx,
+    blocks: usize,
+) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> {
+    let mut results = Vec::with_capacity(blocks);
     for _ in 0..blocks {
-        mine_block(node_ctx).await?.unwrap();
+        results.push(mine_block(node_ctx).await?.unwrap());
     }
-    Ok(())
+    Ok(results)
 }
 
 pub async fn mine_block(

@@ -32,7 +32,7 @@ use reth_node_builder::{
 };
 use reth_node_builder::{NodeAdapter, NodeHandle};
 use reth_node_ethereum::{node::EthereumAddOns, EthEvmConfig, EthExecutorProvider, EthereumNode};
-use reth_provider::providers::BlockchainProvider2;
+use reth_provider::providers::{BlockchainProvider, BlockchainProvider2};
 use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
     blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
@@ -111,6 +111,98 @@ pub type RethNodeExitHandle = NodeHandle<RethNode, RethNodeAddOns>;
 
 pub type RethNodeHandle = FullNode<RethNode, RethNodeAddOns>;
 
+pub type RethNodeExitHandle2 = NodeHandle<RethNode, RethNodeAddOns>;
+
+pub type RethNode2 = NodeHandle<
+    NodeAdapter<
+        FullNodeTypesAdapter<
+            NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+            BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+        >,
+        reth_node_builder::components::Components<
+            FullNodeTypesAdapter<
+                NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+                BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+            >,
+            reth_transaction_pool::Pool<
+                TransactionValidationTaskExecutor<
+                    EthTransactionValidator<
+                        BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+                        EthPooledTransaction,
+                    >,
+                >,
+                CoinbaseTipOrdering<EthPooledTransaction>,
+                DiskFileBlobStore,
+            >,
+            IrysEvmConfig,
+            EthExecutorProvider<IrysEvmConfig>,
+            Arc<(dyn reth_consensus::Consensus + 'static)>,
+            EthereumEngineValidator,
+        >,
+    >,
+    EthereumAddOns,
+>;
+// with standard EVM
+pub type RethNode3 = NodeHandle<
+    NodeAdapter<
+        FullNodeTypesAdapter<
+            NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+            BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+        >,
+        reth_node_builder::components::Components<
+            FullNodeTypesAdapter<
+                NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+                BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+            >,
+            reth_transaction_pool::Pool<
+                TransactionValidationTaskExecutor<
+                    EthTransactionValidator<
+                        BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+                        EthPooledTransaction,
+                    >,
+                >,
+                CoinbaseTipOrdering<EthPooledTransaction>,
+                DiskFileBlobStore,
+            >,
+            EthEvmConfig,
+            EthExecutorProvider<EthEvmConfig>,
+            Arc<(dyn reth_consensus::Consensus + 'static)>,
+            EthereumEngineValidator,
+        >,
+    >,
+    EthereumAddOns,
+>;
+
+pub type RethNode4 = NodeHandle<
+    NodeAdapter<
+        FullNodeTypesAdapter<
+            NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+            BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+        >,
+        Components<
+            FullNodeTypesAdapter<
+                NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+                BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+            >,
+            Pool<
+                TransactionValidationTaskExecutor<
+                    EthTransactionValidator<
+                        BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+                        EthPooledTransaction,
+                    >,
+                >,
+                CoinbaseTipOrdering<EthPooledTransaction>,
+                DiskFileBlobStore,
+            >,
+            EthEvmConfig,
+            EthExecutorProvider,
+            Arc<dyn Consensus>,
+            EthereumEngineValidator,
+        >,
+    >,
+    EthereumAddOns,
+>;
+
 #[derive(Debug, Clone)]
 pub struct RethNodeProvider(pub Arc<RethNodeHandle>);
 
@@ -128,11 +220,10 @@ impl From<RethNodeProvider> for RethNodeHandle {
     }
 }
 
-pub async fn run_node<T: HasName + HasTableType>(
+pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
     node_config: irys_types::NodeConfig,
-    tables: &[T],
     provider: IrysRethProvider,
     latest_block: u64,
     random_ports: bool,
@@ -186,13 +277,6 @@ pub async fn run_node<T: HasName + HasTableType>(
     let cli = Cli::<EthereumChainSpecParser, EngineArgs>::parse_from(args.clone());
     let _guard = cli.logs.init_tracing()?;
 
-    // loop {
-
-    // this loop allows us to 'reload' the reth node with a new config very quickly, without having to actually restart the entire process
-    // mainly used to provide and then restart with a new genesis block.
-    // TODO: extract run_command_until_exit to re-use async context to prevent global thread pool error on reload
-
-    // let exit_reason = runner.run_command_until_exit(|ctx| {
     let ctx = CliContext { task_executor };
 
     let matched_cmd = match cli.command {
@@ -255,9 +339,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     let db_path = data_dir.db();
 
     tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
-    let database = RethDbWrapper::new(
-        init_db(db_path.clone(), db.database_args())?.with_metrics_and_tables(tables),
-    );
+    let database = RethDbWrapper::new(init_db(db_path.clone(), db.database_args())?.with_metrics());
 
     let irys_provider = provider;
 
@@ -274,9 +356,218 @@ pub async fn run_node<T: HasName + HasTableType>(
     // run_custom_node(ctx, cli.clone(), |builder, engine_args| async move {
     // from ext/reth/bin/reth/src/main.rs
 
-    let engine_tree_config = TreeConfig::default()
-        .with_persistence_threshold(0 /* engine_args.persistence_threshold */) // always persist to disk
-        .with_memory_block_buffer_target(0 /* engine_args.memory_block_buffer_target */);
+    let engine_tree_config = TreeConfig::default();
+    // .with_persistence_threshold(0 /* engine_args.persistence_threshold */) // always persist to disk
+    // .with_memory_block_buffer_target(0 /* engine_args.memory_block_buffer_target */);
+
+    let handle =
+        builder
+            .with_types_and_provider::<EthereumNode, BlockchainProvider2<
+                NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+            >>()
+            .with_components(
+                EthereumNode::components()
+                .executor(IrysExecutorBuilder{ precompile_state_provider: PrecompileStateProvider { provider: irys_provider.clone()}})
+                .payload(IrysPayloadBuilder::default())
+            )
+            // .with_components(EthereumNode::components())
+            .with_add_ons(EthereumAddOns::default())
+            // .extend_rpc_modules(move |ctx| {
+            //     let provider = ctx.provider().clone();
+            //     let irys_ext = ctx.node().components.irys_ext.clone();
+            //     let network = ctx.network().clone();
+            //     let ext = AccountStateExt { provider, irys_ext, network };
+            //     let rpc = ext.into_rpc();
+            //     ctx.modules.merge_configured(rpc)?;
+            //     Ok(())
+            // })
+            .launch_with_fn(|builder| {
+                let launcher = CustomEngineNodeLauncher::new(
+                    builder.task_executor().clone(),
+                    builder.config().datadir(),
+                    engine_tree_config,
+                    irys_provider,
+                    latest_block,
+                );
+                builder.launch_with(launcher)
+            })
+            // .launch_with(reth_node_builder::DefaultNodeLauncher::new(task_executor, builder.config.datadir()))
+            .await?;
+
+    Ok(handle)
+    // let exit_reason = handle.node_exit_future.await?;
+
+    // if true
+    // /* launched.node.config.dev.dev */
+    // {
+    //     match exit_reason.clone() {
+    //         NodeExitReason::Normal => (),
+    //         NodeExitReason::Reload(payload) => match payload {
+    //             ReloadPayload::ReloadConfig(chain_spec) => {
+    //                 // delay here so the genesis submission RPC response is able to make it back before the server dies
+    //                 let ser = serde_json::to_string_pretty(&chain_spec.genesis)?;
+    //                 let pb =
+    //                     PathBuf::from(handle.node.data_dir.data_dir().join("dev_genesis.json"));
+    //                 // remove_file(&pb)?;
+    //                 let mut f = File::create(&pb)?;
+    //                 f.write_all(ser.as_bytes())?;
+    //                 info!("Written dev_genesis.json");
+    //                 sleep(Duration::from_millis(500)).await;
+    //             }
+    //         },
+    //     }
+    // }
+
+    // Ok(NodeExitReason::Normal)
+
+    // })
+    //     })?;
+    // }
+    // Ok(())
+}
+
+pub async fn run_node2(
+    node_config: NodeConfig<ChainSpec>,
+    task_executor: TaskExecutor,
+    provider: IrysRethProvider,
+    latest_block: u64,
+    random_ports: bool,
+) -> eyre::Result<RethNodeExitHandle> {
+    let mut node_config = node_config;
+
+    // let mut os_args: Vec<String> = std::env::args().collect();
+    // let bp = os_args.remove(0);
+
+    // let mut args = vec_of_strings![
+    //     "node",
+    //     "-vvvvv",
+    //     "--disable-discovery",
+    //     "--http",
+    //     "--http.api",
+    //     // "debug,rpc,reth,eth,trace",
+    //     "eth",
+    //     "--http.addr",
+    //     "0.0.0.0",
+    //     "--datadir",
+    //     format!("{}", node_config.reth_data_dir().to_str().unwrap()),
+    //     "--log.file.directory",
+    //     format!("{}", node_config.reth_log_dir().to_str().unwrap()),
+    //     "--log.file.format",
+    //     "json",
+    //     "--log.stdout.format",
+    //     "terminal",
+    //     "--log.stdout.filter",
+    //     "debug",
+    //     "--log.file.filter",
+    //     "trace",
+    //     "--http.corsdomain",
+    //     "*" // TODO @JesseTheRobot - make sure this lines up with the path dev_genesis.json is written to
+    //         // "--chain",
+    //         // ".reth/dev_genesis.json"
+    // ];
+
+    // // `instance` is mutually exclusive with random ports
+    // if random_ports {
+    //     args.push("--with-unused-ports".to_string());
+    //     warn!("Reth instance numbers will not be used when port randomisation is enabled")
+    // } else {
+    //     args.push("--instance".to_string());
+    //     args.push(format!("{}", 1).to_string())
+    // }
+
+    // args.insert(0, bp.to_string());
+    // info!("discarding os args: {:?}", os_args);
+    // // args.append(&mut os_args);
+    // // // dbg!(&args);
+    // info!("Running with args: {:#?}", &args);
+
+    // let cli = Cli::<EthereumChainSpecParser, EngineArgs>::parse_from(args.clone());
+    // let _guard = cli.logs.init_tracing()?;
+
+    // let ctx = CliContext { task_executor };
+
+    // let matched_cmd = match cli.command {
+    //     Commands::Node(command) => Some(command),
+    //     _ => None,
+    // };
+
+    // let node_command = *matched_cmd.expect("unable to get cmd_cfg");
+
+    // tracing::info!(target: "reth::cli", version = ?version::SHORT_VERSION, "Starting reth");
+
+    // let NodeCommand {
+    //     datadir,
+    //     config,
+    //     // chain,
+    //     metrics,
+    //     instance,
+    //     with_unused_ports,
+    //     network,
+    //     rpc,
+    //     txpool,
+    //     builder,
+    //     debug,
+    //     db,
+    //     dev,
+    //     pruning,
+    //     ext: _engine_args,
+    //     ..
+    // } = node_command;
+
+    // // let chain_spec =
+    // // get_chain_spec_with_path(vec![], &datadir.datadir.unwrap_or_default().as_ref(), dev.dev);
+
+    // // set up node config
+    // let mut node_config = NodeConfig {
+    //     datadir,
+    //     config,
+    //     // chain,
+    //     chain: chainspec,
+    //     // chain: Arc::new(chain_spec),
+    //     metrics,
+    //     instance,
+    //     network,
+    //     rpc,
+    //     txpool,
+    //     builder,
+    //     debug,
+    //     db,
+    //     dev,
+    //     pruning,
+    // };
+
+    // Register the prometheus recorder before creating the database,
+    // because irys_database init needs it to register metrics.
+    let _ = install_prometheus_recorder();
+
+    let data_dir = node_config.datadir();
+    let abs_data_dir = canonicalize(data_dir.data_dir())?;
+    tracing::info!(target: "reth::cli", path = ?abs_data_dir, "Absolute data dir:");
+    let db_path = data_dir.db();
+
+    tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
+    let database = RethDbWrapper::new(
+        init_db(db_path.clone(), node_config.db.database_args())?.with_metrics(),
+    );
+
+    let irys_provider = provider;
+
+    if random_ports {
+        node_config = node_config.with_unused_ports();
+    }
+
+    let builder = NodeBuilder::new(node_config)
+        .with_database(database)
+        .with_launch_context(task_executor);
+
+    // launcher(builder, ext).await?;
+
+    // run_custom_node(ctx, cli.clone(), |builder, engine_args| async move {
+    // from ext/reth/bin/reth/src/main.rs
+
+    let engine_tree_config = TreeConfig::default();
+    // .with_persistence_threshold(0 /* engine_args.persistence_threshold */) // always persist to disk
+    // .with_memory_block_buffer_target(0 /* engine_args.memory_block_buffer_target */);
 
     let handle =
         builder
@@ -312,35 +603,368 @@ pub async fn run_node<T: HasName + HasTableType>(
             .await?;
 
     Ok(handle)
-    // let exit_reason = handle.node_exit_future.await?;
+}
 
-    // if true
-    // /* launched.node.config.dev.dev */
-    // {
-    //     match exit_reason.clone() {
-    //         NodeExitReason::Normal => (),
-    //         NodeExitReason::Reload(payload) => match payload {
-    //             ReloadPayload::ReloadConfig(chain_spec) => {
-    //                 // delay here so the genesis submission RPC response is able to make it back before the server dies
-    //                 let ser = serde_json::to_string_pretty(&chain_spec.genesis)?;
-    //                 let pb =
-    //                     PathBuf::from(handle.node.data_dir.data_dir().join("dev_genesis.json"));
-    //                 // remove_file(&pb)?;
-    //                 let mut f = File::create(&pb)?;
-    //                 f.write_all(ser.as_bytes())?;
-    //                 info!("Written dev_genesis.json");
-    //                 sleep(Duration::from_millis(500)).await;
-    //             }
-    //         },
-    //     }
-    // }
+pub async fn run_node3(
+    chainspec: Arc<ChainSpec>,
+    task_executor: TaskExecutor,
+    node_config: irys_types::NodeConfig,
+    provider: IrysRethProvider,
+    latest_block: u64,
+    random_ports: bool,
+) -> eyre::Result<RethNode3> {
+    let mut os_args: Vec<String> = std::env::args().collect();
+    let bp = os_args.remove(0);
 
-    // Ok(NodeExitReason::Normal)
+    let mut args = vec_of_strings![
+        "node",
+        "-vvvvv",
+        "--disable-discovery",
+        "--http",
+        "--http.api",
+        // "debug,rpc,reth,eth,trace",
+        "eth",
+        "--http.addr",
+        "0.0.0.0",
+        "--datadir",
+        format!("{}", node_config.reth_data_dir().to_str().unwrap()),
+        "--log.file.directory",
+        format!("{}", node_config.reth_log_dir().to_str().unwrap()),
+        "--log.file.format",
+        "json",
+        "--log.stdout.format",
+        "terminal",
+        "--log.stdout.filter",
+        "debug",
+        "--log.file.filter",
+        "trace",
+        "--http.corsdomain",
+        "*" // TODO @JesseTheRobot - make sure this lines up with the path dev_genesis.json is written to
+            // "--chain",
+            // ".reth/dev_genesis.json"
+    ];
 
-    // })
-    //     })?;
-    // }
-    // Ok(())
+    // `instance` is mutually exclusive with random ports
+    if random_ports {
+        args.push("--with-unused-ports".to_string());
+        warn!("Reth instance numbers will not be used when port randomisation is enabled")
+    } else {
+        args.push("--instance".to_string());
+        args.push(format!("{}", 1).to_string())
+    }
+
+    args.insert(0, bp.to_string());
+    info!("discarding os args: {:?}", os_args);
+    // args.append(&mut os_args);
+    // // dbg!(&args);
+    info!("Running with args: {:#?}", &args);
+
+    let cli = Cli::<EthereumChainSpecParser, EngineArgs>::parse_from(args.clone());
+    let _guard = cli.logs.init_tracing()?;
+
+    let ctx = CliContext { task_executor };
+
+    let matched_cmd = match cli.command {
+        Commands::Node(command) => Some(command),
+        _ => None,
+    };
+
+    let node_command = *matched_cmd.expect("unable to get cmd_cfg");
+
+    tracing::info!(target: "reth::cli", version = ?version::SHORT_VERSION, "Starting reth");
+
+    let NodeCommand {
+        datadir,
+        config,
+        // chain,
+        metrics,
+        instance,
+        with_unused_ports,
+        network,
+        rpc,
+        txpool,
+        builder,
+        debug,
+        db,
+        dev,
+        pruning,
+        ext: _engine_args,
+        ..
+    } = node_command;
+
+    // let chain_spec =
+    // get_chain_spec_with_path(vec![], &datadir.datadir.unwrap_or_default().as_ref(), dev.dev);
+
+    // set up node config
+    let mut node_config = NodeConfig {
+        datadir,
+        config,
+        // chain,
+        chain: chainspec,
+        // chain: Arc::new(chain_spec),
+        metrics,
+        instance,
+        network,
+        rpc,
+        txpool,
+        builder,
+        debug,
+        db,
+        dev,
+        pruning,
+    };
+
+    // Register the prometheus recorder before creating the database,
+    // because irys_database init needs it to register metrics.
+    let _ = install_prometheus_recorder();
+
+    let data_dir = node_config.datadir();
+    let abs_data_dir = canonicalize(data_dir.data_dir())?;
+    tracing::info!(target: "reth::cli", path = ?abs_data_dir, "Absolute data dir:");
+    let db_path = data_dir.db();
+
+    tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
+    let database = RethDbWrapper::new(init_db(db_path.clone(), db.database_args())?.with_metrics());
+
+    let irys_provider = provider;
+
+    if with_unused_ports {
+        node_config = node_config.with_unused_ports();
+    }
+
+    let builder = NodeBuilder::new(node_config)
+        .with_database(database)
+        .with_launch_context(ctx.task_executor);
+
+    // launcher(builder, ext).await?;
+
+    // run_custom_node(ctx, cli.clone(), |builder, engine_args| async move {
+    // from ext/reth/bin/reth/src/main.rs
+
+    let engine_tree_config = TreeConfig::default();
+    // .with_persistence_threshold(0 /* engine_args.persistence_threshold */) // always persist to disk
+    // .with_memory_block_buffer_target(0 /* engine_args.memory_block_buffer_target */);
+
+    let handle = builder
+        .with_types_and_provider::<EthereumNode, reth_provider::providers::BlockchainProvider<
+            NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+        >>()
+        .with_components(
+            EthereumNode::components(), // .executor(IrysExecutorBuilder {
+                                        //     precompile_state_provider: PrecompileStateProvider {
+                                        //         provider: irys_provider.clone(),
+                                        //     },
+                                        // })
+                                        // .payload(IrysPayloadBuilder::default()),
+        )
+        // .with_components(EthereumNode::components())
+        .with_add_ons(EthereumAddOns::default())
+        // .extend_rpc_modules(move |ctx| {
+        //     let provider = ctx.provider().clone();
+        //     let irys_ext = ctx.node().components.irys_ext.clone();
+        //     let network = ctx.network().clone();
+        //     let ext = AccountStateExt { provider, irys_ext, network };
+        //     let rpc = ext.into_rpc();
+        //     ctx.modules.merge_configured(rpc)?;
+        //     Ok(())
+        // })
+        .launch_with_fn(|builder| {
+            let launcher = crate::launcher2::CustomNodeLauncher::new(
+                builder.task_executor().clone(),
+                builder.config().datadir(),
+                engine_tree_config,
+                irys_provider,
+                latest_block,
+            );
+            builder.launch_with(launcher)
+        })
+        .await?;
+
+    Ok(handle)
+}
+
+pub async fn run_node4(
+    chainspec: Arc<ChainSpec>,
+    task_executor: TaskExecutor,
+    node_config: irys_types::NodeConfig,
+    provider: IrysRethProvider,
+    latest_block: u64,
+    random_ports: bool,
+) -> eyre::Result<RethNode4> {
+    let mut os_args: Vec<String> = std::env::args().collect();
+    let bp = os_args.remove(0);
+
+    let mut args = vec_of_strings![
+        "node",
+        "-vvvvv",
+        "--disable-discovery",
+        "--http",
+        "--http.api",
+        // "debug,rpc,reth,eth,trace",
+        "eth",
+        "--http.addr",
+        "0.0.0.0",
+        "--datadir",
+        format!("{}", node_config.reth_data_dir().to_str().unwrap()),
+        "--log.file.directory",
+        format!("{}", node_config.reth_log_dir().to_str().unwrap()),
+        "--log.file.format",
+        "json",
+        "--log.stdout.format",
+        "terminal",
+        "--log.stdout.filter",
+        "debug",
+        "--log.file.filter",
+        "trace",
+        "--http.corsdomain",
+        "*" // TODO @JesseTheRobot - make sure this lines up with the path dev_genesis.json is written to
+            // "--chain",
+            // ".reth/dev_genesis.json"
+    ];
+
+    // `instance` is mutually exclusive with random ports
+    if random_ports {
+        args.push("--with-unused-ports".to_string());
+        warn!("Reth instance numbers will not be used when port randomisation is enabled")
+    } else {
+        args.push("--instance".to_string());
+        args.push(format!("{}", 1).to_string())
+    }
+
+    args.insert(0, bp.to_string());
+    info!("discarding os args: {:?}", os_args);
+    // args.append(&mut os_args);
+    // // dbg!(&args);
+    info!("Running with args: {:#?}", &args);
+
+    let cli = Cli::<EthereumChainSpecParser, EngineArgs>::parse_from(args.clone());
+    let _guard = cli.logs.init_tracing()?;
+
+    let ctx = CliContext { task_executor };
+
+    let matched_cmd = match cli.command {
+        Commands::Node(command) => Some(command),
+        _ => None,
+    };
+
+    let node_command = *matched_cmd.expect("unable to get cmd_cfg");
+
+    tracing::info!(target: "reth::cli", version = ?version::SHORT_VERSION, "Starting reth");
+
+    let NodeCommand {
+        datadir,
+        config,
+        // chain,
+        metrics,
+        instance,
+        with_unused_ports,
+        network,
+        rpc,
+        txpool,
+        builder,
+        debug,
+        db,
+        dev,
+        pruning,
+        ext: _engine_args,
+        ..
+    } = node_command;
+
+    // let chain_spec =
+    // get_chain_spec_with_path(vec![], &datadir.datadir.unwrap_or_default().as_ref(), dev.dev);
+
+    // set up node config
+    let mut node_config = NodeConfig {
+        datadir,
+        config,
+        // chain,
+        chain: chainspec,
+        // chain: Arc::new(chain_spec),
+        metrics,
+        instance,
+        network,
+        rpc,
+        txpool,
+        builder,
+        debug,
+        db,
+        dev,
+        pruning,
+    };
+
+    // Register the prometheus recorder before creating the database,
+    // because irys_database init needs it to register metrics.
+    let _ = install_prometheus_recorder();
+
+    let data_dir = node_config.datadir();
+    let abs_data_dir = canonicalize(data_dir.data_dir())?;
+    tracing::info!(target: "reth::cli", path = ?abs_data_dir, "Absolute data dir:");
+    let db_path = data_dir.db();
+
+    tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
+    let database = RethDbWrapper::new(init_db(db_path.clone(), db.database_args())?.with_metrics());
+
+    let irys_provider = provider;
+
+    if with_unused_ports {
+        node_config = node_config.with_unused_ports();
+    }
+
+    let builder = NodeBuilder::new(node_config)
+        .with_database(database)
+        .with_launch_context(ctx.task_executor.clone());
+
+    // launcher(builder, ext).await?;
+
+    // run_custom_node(ctx, cli.clone(), |builder, engine_args| async move {
+    // from ext/reth/bin/reth/src/main.rs
+
+    let engine_tree_config = TreeConfig::default();
+    // .with_persistence_threshold(0 /* engine_args.persistence_threshold */) // always persist to disk
+    // .with_memory_block_buffer_target(0 /* engine_args.memory_block_buffer_target */);
+
+    let handle = builder
+        .with_types_and_provider::<EthereumNode, reth_provider::providers::BlockchainProvider2<
+            NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+        >>()
+        .with_components(
+            EthereumNode::components(), // .executor(IrysExecutorBuilder {
+                                        //     precompile_state_provider: PrecompileStateProvider {
+                                        //         provider: irys_provider.clone(),
+                                        //     },
+                                        // })
+                                        // .payload(IrysPayloadBuilder::default()),
+        )
+        // .with_components(EthereumNode::components())
+        .with_add_ons(EthereumAddOns::default())
+        // .extend_rpc_modules(move |ctx| {
+        //     let provider = ctx.provider().clone();
+        //     let irys_ext = ctx.node().components.irys_ext.clone();
+        //     let network = ctx.network().clone();
+        //     let ext = AccountStateExt { provider, irys_ext, network };
+        //     let rpc = ext.into_rpc();
+        //     ctx.modules.merge_configured(rpc)?;
+        //     Ok(())
+        // })
+        .launch_with_fn(|builder| {
+            // let launcher = crate::launcher2::CustomNodeLauncher::new(
+            //     builder.task_executor().clone(),
+            //     builder.config().datadir(),
+            //     engine_tree_config,
+            //     irys_provider,
+            //     latest_block,
+            // );
+            // builder.launch_with(launcher)
+            let launcher = reth_node_builder::EngineNodeLauncher::new(
+                ctx.task_executor.clone(),
+                builder.config().datadir(),
+                Default::default(),
+            );
+            builder.launch_with(launcher)
+        })
+        .await?;
+
+    Ok(handle)
 }
 
 pub async fn run_custom_node<Ext, C, L, Fut>(

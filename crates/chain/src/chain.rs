@@ -149,11 +149,10 @@ impl Clone for StopGuard {
     }
 }
 
-async fn start_reth_node<T: HasName + HasTableType>(
+async fn start_reth_node(
     task_executor: TaskExecutor,
     chainspec: ChainSpec,
     config: Config,
-    tables: &[T],
     sender: oneshot::Sender<FullNode<RethNode, RethNodeAddOns>>,
     irys_provider: IrysRethProvider,
     latest_block: u64,
@@ -163,7 +162,6 @@ async fn start_reth_node<T: HasName + HasTableType>(
         Arc::new(chainspec),
         task_executor,
         config.node_config.clone(),
-        tables,
         irys_provider,
         latest_block,
         random_ports,
@@ -545,7 +543,6 @@ impl IrysNode {
                                 exec,
                                 reth_chainspec,
                                 config,
-                                IrysTables::ALL,
                                 reth_handle_sender,
                                 irys_provider.clone(),
                                 latest_block_height,
@@ -1346,7 +1343,8 @@ async fn init_reth_db(
 ) -> Result<(RethNodeProvider, irys_database::db::RethDbWrapper), eyre::Error> {
     let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await?));
     let reth_db = reth_node.provider.database.db.clone();
-    check_db_version_and_run_migrations_if_needed(&reth_db, irys_db)?;
+    // we no longer extend the reth database with our own tables/metadata
+    // check_db_version_and_run_migrations_if_needed(&reth_db, irys_db)?;
     Ok((reth_node, reth_db))
 }
 

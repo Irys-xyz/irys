@@ -55,7 +55,10 @@ impl<E: EngineTypes> PayloadContext<E> {
     }
 
     /// Wait until the best built payload is ready
-    pub async fn wait_for_built_payload(&self, payload_id: PayloadId) {
+    pub async fn wait_for_built_payload(
+        &self,
+        payload_id: PayloadId,
+    ) -> <E as reth_node_builder::PayloadTypes>::BuiltPayload {
         loop {
             // let payload = self.payload_builder.best_payload(payload_id).await.unwrap().unwrap();
             match self.payload_builder.best_payload(payload_id).await {
@@ -66,7 +69,7 @@ impl<E: EngineTypes> PayloadContext<E> {
                             continue;
                         } else {
                             trace!("got payload");
-                            break;
+                            return v;
                         }
                     }
                     Err(e) => {

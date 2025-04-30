@@ -1,6 +1,7 @@
-use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
-use alloy_core::primitives::ruint::aliases::U256;
-use irys_actors::mempool_service::TxIngressError;
+use crate::utils::{mine_block, mine_blocks, AddTxError, IrysNodeTest};
+use alloy_core::primitives::{ruint::aliases::U256, B256};
+use alloy_eips::BlockNumberOrTag;
+use irys_actors::{mempool_service::TxIngressError, reth_service::ForkChoiceUpdateMessage};
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{
     peer_utilities::{
@@ -10,18 +11,42 @@ use irys_chain::{
 };
 use irys_database::BlockIndexItem;
 use irys_types::{
-    irys::IrysSigner, Config, GossipConfig, HttpConfig, IrysTransaction, NodeConfig, NodeMode,
-    PeerAddress, RethPeerInfo,
+    irys::IrysSigner, Address, Config, GossipConfig, HttpConfig, IrysTransaction, NodeConfig,
+    NodeMode, PeerAddress, RethPeerInfo,
 };
 use k256::ecdsa::SigningKey;
+use reth::rpc::{eth::EthApiServer as _, types::engine::PayloadStatusEnum};
 use reth_primitives::irys_primitives::IrysTxId;
 use reth_primitives::GenesisAccount;
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::time::{sleep, Duration};
-use tracing::{debug, error};
+use tracing::{debug, error, info, span, Instrument, Level};
 
-#[test_log::test(actix_web::test)]
+mod t {
+    use alloy_core::primitives::B256;
+    use irys_types::Address;
+    use reth::{payload::EthPayloadBuilderAttributes, rpc::types::engine::PayloadAttributes};
+
+    pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
+        let attributes = PayloadAttributes {
+            timestamp,
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: Address::ZERO,
+            withdrawals: Some(vec![]),
+            parent_beacon_block_root: None, /* Some(B256::ZERO) */
+            shadows: None,
+        };
+        EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+    }
+}
+
+#[actix_web::test]
 async fn heavy_test_p2p() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+    reth_tracing::init_test_tracing();
     let config = Config::new(NodeConfig::testnet());
     let account1 = IrysSigner::random_signer(&config.consensus);
     let genesis = start_genesis_node(&config.node_config, &account1).await;
@@ -59,12 +84,612 @@ async fn heavy_test_p2p() -> eyre::Result<()> {
         &account1,
     )
     .await;
+
     tracing::info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
         &genesis.node_ctx.config.node_config.reth_peer_info,
         &peer1.node_ctx.config.node_config.reth_peer_info,
         &peer2.node_ctx.config.node_config.reth_peer_info
     );
+
+    // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
+
+    let mut genctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
+        genesis.node_ctx.reth_handle.clone().into(),
+    )
+    .await?;
+
+    let mut p1ctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
+        peer1.node_ctx.reth_handle.clone().into(),
+    )
+    .await?;
+
+    // don't use if the reth service connect messages are used
+    // genctx.connect(&mut p1ctx).await;
+    // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
+
+    let gen_latest = genctx
+        .rpc
+        .inner
+        .eth_api()
+        .block_by_number(BlockNumberOrTag::Latest, false)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let p1_latest = p1ctx
+        .rpc
+        .inner
+        .eth_api()
+        .block_by_number(BlockNumberOrTag::Latest, false)
+        .await
+        .unwrap()
+        .unwrap();
+
+    info!(
+        "JESSEDEBUG2 GL: {}, P1L: {}",
+        &gen_latest.header.hash, &p1_latest.header.hash
+    );
+
+    let (block_hash, block_number) = {
+        // let (block, _) = mine_block(&genesis.node_ctx).await?.unwrap();
+        // (block.evm_block_hash, block.height)
+
+        // let (payload, _) = genctx
+        //     .advance_block(vec![], t::eth_payload_attributes)
+        //     .await?;
+        // (payload.block().hash(), payload.block().number)
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+        let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
+            timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
+            prev_randao: alloy_core::primitives::B256::ZERO,
+            suggested_fee_recipient: account1.address(),
+            withdrawals: None,
+            parent_beacon_block_root: None,
+            shadows: None,
+        };
+
+        let payload = genctx
+            .engine_api
+            .build_payload_v1_irys(gen_latest.header.hash, payload_attrs)
+            .await?;
+
+        // (
+        //     payload
+        //         .execution_payload
+        //         .payload_inner
+        //         .payload_inner
+        //         .payload_inner
+        //         .block_hash,
+        //     payload
+        //         .execution_payload
+        //         .payload_inner
+        //         .payload_inner
+        //         .payload_inner
+        //         .block_number,
+        // )
+
+        // let (payload, eth_attr) = self.new_payload(attributes_generator).await?;
+        let (payload, _) = genctx
+            .advance_block(vec![], t::eth_payload_attributes)
+            .await?;
+        (payload.block().hash(), payload.block().number)
+    };
+
+    info!("JESSEDEBUG2.1 gen forkchoice");
+
+    // genctx
+    //     .engine_api
+    //     .update_forkchoice(block_hash, block_hash)
+    //     .await?;
+
+    info!("JESSEDEBUG2.1 gen assert");
+
+    genctx.assert_new_block2(block_hash, block_number).await?;
+
+    // peer1.node_ctx.reth_handle.network.announce_block(block, hash);
+
+    // peer1
+    //     .node_ctx
+    //     .actor_addresses
+    //     .reth
+    //     .send(ForkChoiceUpdateMessage {
+    //         head_hash: irys_actors::reth_service::BlockHashType::Evm(a.evm_block_hash),
+    //         confirmed_hash: None,
+    //         finalized_hash: None,
+    //     })
+    //     .await
+    //     .unwrap()
+    //     .unwrap();
+
+    // sleep(Duration::from_millis(2_000)).await;
+
+    info!("JESSEDEBUG2.1 p1 forkchoice");
+
+    p1ctx
+        .engine_api
+        .update_forkchoice(block_hash, block_hash)
+        .await?;
+
+    info!("JESSEDEBUG2.1 p1 assert");
+
+    p1ctx.assert_new_block2(block_hash, block_number).await?;
+
+    // sleep(Duration::from_millis(2_000)).await;
+
+    let a2 = p1ctx
+        .rpc
+        .inner
+        .eth_api()
+        .block_by_hash(block_hash, false)
+        .await?;
+
+    info!("JESSEDEBUG2.1 BLOCK HERE");
+    dbg!(a2);
+    // mine_blocks(&peer1.node_ctx, 1).await?;
+    // mine_blocks(&peer2.node_ctx, 1).await?;
+    // mine_blocks(&genesis.node_ctx, 1).await?;
+
+    peer1.stop().await;
+    peer2.stop().await;
+    genesis.stop().await;
+
+    Ok(())
+}
+
+#[actix_web::test]
+async fn heavy_test_p2p2() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+    reth_tracing::init_test_tracing();
+    let config = Config::new(NodeConfig::testnet());
+    let account1 = IrysSigner::random_signer(&config.consensus);
+    let genesis = start_genesis_node(&config.node_config, &account1).await;
+    tracing::info!(
+        "peer info: {:?}",
+        &genesis.node_ctx.config.node_config.reth_peer_info
+    );
+    let genesis_peer_address = PeerAddress {
+        gossip: format!(
+            "{}:{}",
+            genesis.node_ctx.config.node_config.gossip.bind_ip,
+            genesis.node_ctx.config.node_config.gossip.port
+        )
+        .parse()
+        .expect("valid SocketAddr expected"),
+        api: format!(
+            "{}:{}",
+            genesis.node_ctx.config.node_config.http.bind_ip,
+            genesis.node_ctx.config.node_config.http.port
+        )
+        .parse()
+        .expect("valid SocketAddr expected"),
+        execution: genesis.node_ctx.config.node_config.reth_peer_info,
+    };
+
+    let (peer1, peer2) = start_peer_nodes(
+        &Config::new(NodeConfig {
+            trusted_peers: vec![genesis_peer_address],
+            ..NodeConfig::testnet()
+        }),
+        &Config::new(NodeConfig {
+            trusted_peers: vec![genesis_peer_address],
+            ..NodeConfig::testnet()
+        }),
+        &account1,
+    )
+    .await;
+
+    info!(
+        "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
+        &genesis.node_ctx.config.node_config.reth_peer_info,
+        &peer1.node_ctx.config.node_config.reth_peer_info,
+        &peer2.node_ctx.config.node_config.reth_peer_info
+    );
+
+    // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
+
+    let mut genctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
+        genesis.node_ctx.reth_handle.clone().into(),
+    )
+    .await?;
+
+    let mut p1ctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
+        peer1.node_ctx.reth_handle.clone().into(),
+    )
+    .await?;
+
+    info!("JESSEDEBUG2 connecting");
+
+    // don't use if the reth service connect messages are used
+    // genctx.connect(&mut p1ctx).await;
+    // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
+
+    info!("JESSEDEBUG2 connected");
+
+    let (block_hash, block_number) = {
+        let p1_latest = genctx
+            .rpc
+            .inner
+            .eth_api()
+            .block_by_number(alloy_eips::BlockNumberOrTag::Latest, false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+        let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
+            timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: Address::ZERO,
+            withdrawals: None,
+            parent_beacon_block_root: None,
+            shadows: None,
+        };
+
+        let (exec_payload, built, attrs) = genctx
+            .new_payload_irys2(p1_latest.header.hash, payload_attrs)
+            .await?;
+
+        let block_hash = genctx
+            .engine_api
+            .submit_payload(
+                built.clone(),
+                attrs.clone(),
+                PayloadStatusEnum::Valid,
+                vec![],
+            )
+            .await?;
+
+        // trigger forkchoice update via engine api to commit the block to the blockchain
+        genctx
+            .engine_api
+            .update_forkchoice(block_hash, block_hash)
+            .await?;
+
+        (
+            exec_payload
+                .execution_payload
+                .payload_inner
+                .payload_inner
+                .payload_inner
+                .block_hash,
+            exec_payload
+                .execution_payload
+                .payload_inner
+                .payload_inner
+                .payload_inner
+                .block_number,
+        )
+    };
+
+    // assert the block has been committed to the blockchain
+    genctx.assert_new_block2(block_hash, block_number).await?;
+    info!("JESSEDEBUG2 sending p1 FCU");
+    // only send forkchoice update to second node
+    p1ctx
+        .engine_api
+        .update_forkchoice(block_hash, block_hash)
+        .await?;
+
+    // expect second node advanced via p2p gossip
+
+    info!("JESSEDEBUG2 asserting p1 sync");
+
+    p1ctx.assert_new_block2(block_hash, block_number).await?;
+
+    peer1.stop().await;
+    peer2.stop().await;
+    genesis.stop().await;
+
+    Ok(())
+}
+
+#[actix_web::test]
+async fn heavy_test_p2p3() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+    reth_tracing::init_test_tracing();
+    let config = Config::new(NodeConfig::testnet());
+    let account1 = IrysSigner::random_signer(&config.consensus);
+    let genesis = start_genesis_node(&config.node_config, &account1).await;
+    tracing::info!(
+        "peer info: {:?}",
+        &genesis.node_ctx.config.node_config.reth_peer_info
+    );
+    let genesis_peer_address = PeerAddress {
+        gossip: format!(
+            "{}:{}",
+            genesis.node_ctx.config.node_config.gossip.bind_ip,
+            genesis.node_ctx.config.node_config.gossip.port
+        )
+        .parse()
+        .expect("valid SocketAddr expected"),
+        api: format!(
+            "{}:{}",
+            genesis.node_ctx.config.node_config.http.bind_ip,
+            genesis.node_ctx.config.node_config.http.port
+        )
+        .parse()
+        .expect("valid SocketAddr expected"),
+        execution: genesis.node_ctx.config.node_config.reth_peer_info,
+    };
+
+    let (peer1, peer2) = start_peer_nodes(
+        &Config::new(NodeConfig {
+            trusted_peers: vec![genesis_peer_address],
+            ..NodeConfig::testnet()
+        }),
+        &Config::new(NodeConfig {
+            trusted_peers: vec![genesis_peer_address],
+            ..NodeConfig::testnet()
+        }),
+        &account1,
+    )
+    .await;
+
+    tracing::info!(
+        "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
+        &genesis.node_ctx.config.node_config.reth_peer_info,
+        &peer1.node_ctx.config.node_config.reth_peer_info,
+        &peer2.node_ctx.config.node_config.reth_peer_info
+    );
+
+    // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
+
+    let mut genctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
+        genesis.node_ctx.reth_handle.clone().into(),
+    )
+    .await?;
+
+    let mut p1ctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
+        peer1.node_ctx.reth_handle.clone().into(),
+    )
+    .await?;
+
+    // don't use if the reth service connect messages are used
+    // genctx.connect(&mut p1ctx).await;
+    // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
+
+    let (block_hash, block_number) = {
+        let p1_latest = genctx
+            .rpc
+            .inner
+            .eth_api()
+            .block_by_number(alloy_eips::BlockNumberOrTag::Latest, false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+        let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
+            timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: Address::ZERO,
+            withdrawals: None,
+            parent_beacon_block_root: None,
+            shadows: None,
+        };
+
+        let (exec_payload, built, attrs) = genctx
+            .new_payload_irys2(p1_latest.header.hash, payload_attrs)
+            .await?;
+
+        let block_hash = genctx
+            .engine_api
+            .submit_payload(
+                built.clone(),
+                attrs.clone(),
+                PayloadStatusEnum::Valid,
+                vec![],
+            )
+            .await?;
+
+        // trigger forkchoice update via engine api to commit the block to the blockchain
+        genctx
+            .engine_api
+            .update_forkchoice(block_hash, block_hash)
+            .await?;
+
+        (
+            exec_payload
+                .execution_payload
+                .payload_inner
+                .payload_inner
+                .payload_inner
+                .block_hash,
+            exec_payload
+                .execution_payload
+                .payload_inner
+                .payload_inner
+                .payload_inner
+                .block_number,
+        )
+
+        // let payload = genctx
+        //     .engine_api
+        //     .build_payload_v1_irys(/* gen_latest.header.hash */ B256::ZERO, payload_attrs)
+        //     .await?;
+
+        // // (payload.block().hash(), payload.block().number)
+
+        // let block_hash = genctx
+        //     .engine_api
+        //     .submit_payload(
+        //         payload.clone(),
+        //         payload_attrs.clone(),
+        //         PayloadStatusEnum::Valid,
+        //         versioned_hashes,
+        //     )
+        //     .await?;
+
+        // (
+        //     payload
+        //         .execution_payload
+        //         .payload_inner
+        //         .payload_inner
+        //         .payload_inner
+        //         .block_hash,
+        //     payload
+        //         .execution_payload
+        //         .payload_inner
+        //         .payload_inner
+        //         .payload_inner
+        //         .block_number,
+        // )
+
+        // let (payload, _) = genctx
+        //     .advance_block(vec![], t::eth_payload_attributes)
+        //     .await?;
+
+        // (payload.block().hash(), payload.block().number)
+
+        // let (payload, _) = genctx
+        //     .advance_block_irys(vec![], t::eth_payload_attributes)
+        //     .await?;
+
+        // (payload.block().hash(), payload.block().number)
+    };
+
+    // assert the block has been committed to the blockchain
+    // genctx.assert_new_block(tx_hash, block_hash, block_number).await?;
+    genctx.assert_new_block2(block_hash, block_number).await?;
+
+    // genctx.wait_block(block_number, block_hash, false).await?;
+
+    // only send forkchoice update to second node
+    p1ctx
+        .engine_api
+        .update_forkchoice(block_hash, block_hash)
+        .await?;
+
+    // expect second node advanced via p2p gossip
+    // p1ctx.wait_block(block_number, block_hash, false).await?;
+    p1ctx.assert_new_block2(block_hash, block_number).await?;
+
+    // let gen_latest = genctx
+    //     .rpc
+    //     .inner
+    //     .eth_api()
+    //     .block_by_number(BlockNumberOrTag::Latest, false)
+    //     .await
+    //     .unwrap()
+    //     .unwrap();
+
+    // let p1_latest = p1ctx
+    //     .rpc
+    //     .inner
+    //     .eth_api()
+    //     .block_by_number(BlockNumberOrTag::Latest, false)
+    //     .await
+    //     .unwrap()
+    //     .unwrap();
+
+    // info!(
+    //     "JESSEDEBUG2 GL: {}, P1L: {}",
+    //     &gen_latest.header.hash, &p1_latest.header.hash
+    // );
+
+    // let (block_hash, block_number) = {
+    //     // let (block, _) = mine_block(&genesis.node_ctx).await?.unwrap();
+    //     // (block.evm_block_hash, block.height)
+
+    //     // let (payload, _) = genctx
+    //     //     .advance_block(vec![], t::eth_payload_attributes)
+    //     //     .await?;
+    //     // (payload.block().hash(), payload.block().number)
+    //     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+    //     let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
+    //         timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
+    //         prev_randao: alloy_core::primitives::B256::ZERO,
+    //         suggested_fee_recipient: account1.address(),
+    //         withdrawals: None,
+    //         parent_beacon_block_root: None,
+    //         shadows: None,
+    //     };
+
+    //     let payload = genctx
+    //         .engine_api
+    //         .build_payload_v1_irys(gen_latest.header.hash, payload_attrs)
+    //         .await?;
+
+    //     // (
+    //     //     payload
+    //     //         .execution_payload
+    //     //         .payload_inner
+    //     //         .payload_inner
+    //     //         .payload_inner
+    //     //         .block_hash,
+    //     //     payload
+    //     //         .execution_payload
+    //     //         .payload_inner
+    //     //         .payload_inner
+    //     //         .payload_inner
+    //     //         .block_number,
+    //     // )
+
+    //     // let (payload, eth_attr) = self.new_payload(attributes_generator).await?;
+    //     let (payload, _) = genctx
+    //         .advance_block(vec![], t::eth_payload_attributes)
+    //         .await?;
+    //     (payload.block().hash(), payload.block().number)
+    // };
+
+    // info!("JESSEDEBUG2.1 gen forkchoice");
+
+    // // genctx
+    // //     .engine_api
+    // //     .update_forkchoice(block_hash, block_hash)
+    // //     .await?;
+
+    // info!("JESSEDEBUG2.1 gen assert");
+
+    // genctx.assert_new_block2(block_hash, block_number).await?;
+
+    // // peer1.node_ctx.reth_handle.network.announce_block(block, hash);
+
+    // // peer1
+    // //     .node_ctx
+    // //     .actor_addresses
+    // //     .reth
+    // //     .send(ForkChoiceUpdateMessage {
+    // //         head_hash: irys_actors::reth_service::BlockHashType::Evm(a.evm_block_hash),
+    // //         confirmed_hash: None,
+    // //         finalized_hash: None,
+    // //     })
+    // //     .await
+    // //     .unwrap()
+    // //     .unwrap();
+
+    // // sleep(Duration::from_millis(2_000)).await;
+
+    // info!("JESSEDEBUG2.1 p1 forkchoice");
+
+    // p1ctx
+    //     .engine_api
+    //     .update_forkchoice(block_hash, block_hash)
+    //     .await?;
+
+    // info!("JESSEDEBUG2.1 p1 assert");
+
+    // p1ctx.assert_new_block2(block_hash, block_number).await?;
+
+    // // sleep(Duration::from_millis(2_000)).await;
+
+    // let a2 = p1ctx
+    //     .rpc
+    //     .inner
+    //     .eth_api()
+    //     .block_by_hash(block_hash, false)
+    //     .await?;
+
+    // info!("JESSEDEBUG2.1 BLOCK HERE");
+    // dbg!(a2);
+    // // mine_blocks(&peer1.node_ctx, 1).await?;
+    // // mine_blocks(&peer2.node_ctx, 1).await?;
+    // // mine_blocks(&genesis.node_ctx, 1).await?;
 
     peer1.stop().await;
     peer2.stop().await;
