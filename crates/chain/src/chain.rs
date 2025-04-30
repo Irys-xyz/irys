@@ -11,7 +11,7 @@ use irys_actors::{
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
-    broadcast_mining_service::BroadcastMiningService,
+    broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
     ema_service::EmaService,
@@ -24,9 +24,11 @@ use irys_actors::{
     services::ServiceSenders,
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService},
-    ActorAddresses, BlockFinalizedMessage,
 };
-use irys_actors::{CommitmentCache, EpochReplayData, GetCommitmentStateGuardMessage};
+use irys_actors::{
+    ActorAddresses, BlockFinalizedMessage, CommitmentCache, EpochReplayData,
+    GetCommitmentStateGuardMessage,
+};
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::StorageSubmodulesConfig;
@@ -723,7 +725,7 @@ impl IrysNode {
             &storage_modules,
         );
 
-        let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>(1);
+        let (new_seed_tx, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
 
         // spawn the vdf service
         let vdf_service =
@@ -925,7 +927,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
-        new_seed_rx: mpsc::Receiver<H256>,
+        new_seed_rx: mpsc::Receiver<BroadcastMiningSeed>,
         latest_block: Arc<IrysBlockHeader>,
         seed: H256,
         global_step_number: u64,
@@ -1137,7 +1139,7 @@ impl IrysNode {
         config: &Config,
         irys_db: &DatabaseProvider,
         block_index_guard: &BlockIndexReadGuard,
-        new_seed_tx: mpsc::Sender<H256>,
+        new_seed_tx: mpsc::Sender<BroadcastMiningSeed>,
     ) -> actix::Addr<VdfService> {
         let vdf_service_actor = VdfService::new(
             block_index_guard.clone(),

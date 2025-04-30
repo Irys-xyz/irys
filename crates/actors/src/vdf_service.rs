@@ -1,6 +1,6 @@
 use actix::prelude::*;
 use irys_database::block_header_by_hash;
-use irys_types::{block_production::Seed, Config, DatabaseProvider, H256};
+use irys_types::{block_production::Seed, Config, DatabaseProvider};
 use irys_vdf::vdf_state::{AtomicVdfState, VdfState, VdfStepsReadGuard};
 use reth_db::Database;
 use std::{
@@ -10,13 +10,15 @@ use std::{
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use crate::block_index_service::BlockIndexReadGuard;
-use crate::services::Stop;
+use crate::{
+    block_index_service::BlockIndexReadGuard, broadcast_mining_service::BroadcastMiningSeed,
+    services::Stop,
+};
 
 #[derive(Debug)]
 pub struct VdfService {
     pub vdf_state: AtomicVdfState,
-    pub tx: mpsc::Sender<H256>,
+    pub tx: mpsc::Sender<BroadcastMiningSeed>,
 }
 
 impl Default for VdfService {
@@ -31,7 +33,7 @@ impl VdfService {
         block_index: BlockIndexReadGuard,
         db: DatabaseProvider,
         config: &Config,
-        new_seed_tx: mpsc::Sender<H256>,
+        new_seed_tx: mpsc::Sender<BroadcastMiningSeed>,
     ) -> Self {
         let vdf_state = create_state(block_index, db, &config);
         Self {
@@ -41,7 +43,7 @@ impl VdfService {
     }
 
     #[cfg(any(feature = "test-utils", test))]
-    pub fn from_capacity(capacity: usize, new_seed_tx: mpsc::Sender<H256>) -> Self {
+    pub fn from_capacity(capacity: usize, new_seed_tx: mpsc::Sender<BroadcastMiningSeed>) -> Self {
         VdfService {
             vdf_state: Arc::new(RwLock::new(VdfState {
                 global_step: 0,
@@ -145,7 +147,7 @@ impl Actor for VdfService {
 /// Reset VDF Steps as we have a new block with future steps
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
-pub struct ResetVdfMessage(pub H256);
+pub struct ResetVdfMessage(pub BroadcastMiningSeed);
 
 impl Handler<ResetVdfMessage> for VdfService {
     type Result = ();
@@ -212,7 +214,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_vdf() {
         let testnet_config = NodeConfig::testnet().into();
-        let (new_seed_tx, _) = mpsc::channel::<H256>(1);
+        let (new_seed_tx, _) = mpsc::channel::<BroadcastMiningSeed>(1);
         let service = VdfService::from_capacity(calc_capacity(&testnet_config), new_seed_tx);
         service.vdf_state.write().unwrap().seeds = VecDeque::with_capacity(4);
         service.vdf_state.write().unwrap().capacity = 4;

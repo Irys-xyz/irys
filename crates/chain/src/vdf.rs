@@ -8,14 +8,14 @@ use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::time::Instant;
 use tokio::sync::mpsc::Receiver;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 pub fn run_vdf(
     config: &irys_types::VdfConfig,
     global_step_number: u64,
     seed: H256,
     initial_reset_seed: H256,
-    mut new_seed_listener: Receiver<H256>,
+    mut new_seed_listener: Receiver<BroadcastMiningSeed>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
     vdf_service: Addr<VdfService>,
@@ -43,7 +43,7 @@ pub fn run_vdf(
             &mut hash,
             config.num_checkpoints_in_vdf_step,
             config.sha_1s_difficulty,
-            &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints ?
+            &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints?
         );
 
         global_step_number += 1;
@@ -77,9 +77,14 @@ pub fn run_vdf(
             break;
         };
 
-        if let Ok(h) = new_seed_listener.try_recv() {
-            debug!("New Send Seed {}", h); // TODO: wire new seed injections from chain accepted blocks message BlockConfirmedMessage
-            reset_seed = h;
+        if let Ok(mining_seed) = new_seed_listener.try_recv() {
+            error!(
+                "New Step {:?} with Seed {:?}",
+                mining_seed.global_step, mining_seed.seed
+            );
+            // TODO: wire new seed injections from chain accepted blocks message BlockConfirmedMessage
+            reset_seed = mining_seed.seed.0;
+            global_step_number = mining_seed.global_step; //FIX ME THIS NEEDS TO COME WITH THE SEED?
         }
     }
     debug!(?global_step_number, "VDF thread stopped");
@@ -161,7 +166,7 @@ mod tests {
 
         let broadcast_mining_service = BroadcastMiningService::from_registry();
         let capacity = calc_capacity(&config);
-        let (new_seed_tx, new_seed_rx) = mpsc::channel::<H256>(1);
+        let (new_seed_tx, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
         let vdf_service = VdfService::from_capacity(capacity, new_seed_tx).start();
         SystemRegistry::set(vdf_service.clone());
         let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();

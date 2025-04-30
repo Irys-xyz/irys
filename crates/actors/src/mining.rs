@@ -513,7 +513,7 @@ mod tests {
         let mining_broadcaster = BroadcastMiningService::new();
         let _mining_broadcaster_addr = mining_broadcaster.start();
 
-        let (new_seed_tx, _) = mpsc::channel::<H256>(1);
+        let (new_seed_tx, _) = mpsc::channel::<BroadcastMiningSeed>(1);
         let vdf_service = VdfService::from_capacity(100, new_seed_tx).start();
         let vdf_steps_guard: VdfStepsReadGuard =
             vdf_service.send(GetVdfStateMessage).await.unwrap();
@@ -639,7 +639,7 @@ mod tests {
             capacity: 5,
             seeds: VecDeque::new(),
         };
-        let (new_seed_tx, _) = mpsc::channel::<H256>(1);
+        let (new_seed_tx, _) = mpsc::channel::<BroadcastMiningSeed>(1);
 
         let vdf_service = VdfService {
             vdf_state: Arc::new(RwLock::new(vdf_state)),

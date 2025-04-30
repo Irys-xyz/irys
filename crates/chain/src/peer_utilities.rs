@@ -2,12 +2,13 @@ use actix::Addr;
 use base58::ToBase58;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
+    broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
     peer_list_service::{AddPeer, PeerListService},
     vdf_service::{ResetVdfMessage, VdfService},
 };
 use irys_database::{BlockIndexItem, DataLedger};
-use irys_types::Address;
+use irys_types::{block_production::Seed, Address};
 
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
@@ -285,9 +286,15 @@ pub async fn sync_state_from_peers(
             }
 
             //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
-            vdf_service_addr
-                .send(ResetVdfMessage(block.vdf_limiter_info.seed))
-                .await?;
+            let mining_seed = BroadcastMiningSeed {
+                seed: Seed {
+                    0: block.vdf_limiter_info.seed,
+                },
+                global_step: block.vdf_limiter_info.global_step_number,
+                checkpoints: block.vdf_limiter_info.last_step_checkpoints.clone(),
+            };
+
+            vdf_service_addr.send(ResetVdfMessage(mining_seed)).await?;
 
             // allow block to be discovered by block discovery actor
             if let Err(e) = block_discovery_addr
