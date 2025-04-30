@@ -5,9 +5,8 @@ use alloy_primitives::BlockNumber;
 use alloy_rpc_types::engine::ClientVersionV1;
 use futures::{future::Either, stream, stream_select, StreamExt};
 use irys_storage::reth_provider::IrysRethProvider;
-use reth_beacon_consensus::{
-    hooks::{EngineHooks, StaticFileHook},
-};
+use reth_beacon_consensus::
+    hooks::{EngineHooks, StaticFileHook};
 use reth_blockchain_tree::BlockchainTreeConfig;
 use reth_chainspec::EthChainSpec;
 use reth_consensus_debug_client::{DebugConsensusClient, EtherscanBlockProvider};
@@ -28,7 +27,7 @@ use reth_provider::BlockNumReader;
 use reth_provider::ChainStateBlockReader;
 use reth_provider::ChainStateBlockWriter;
 use reth_provider::{
-    providers::{ ProviderNodeTypes},
+    providers::ProviderNodeTypes,
     StaticFileProviderFactory as _,
 };
 use reth_rpc_engine_api::{capabilities::EngineCapabilities, EngineApi};

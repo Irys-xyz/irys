@@ -475,7 +475,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     vec![],
                 )
                 .await?;
-    
                 // trigger forkchoice update via engine api to commit the block to the blockchain
                 context
                     .engine_api
