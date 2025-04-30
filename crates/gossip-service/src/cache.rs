@@ -29,6 +29,21 @@ impl GossipCache {
         Self::default()
     }
 
+    pub fn seen_block_from_any_peer(&self, block_hash: &BlockHash) -> GossipResult<bool> {
+        let blocks = self
+            .blocks
+            .read()
+            .map_err(|error| GossipError::Cache(error.to_string()))?;
+
+        Ok(blocks.contains_key(block_hash))
+    }
+
+    pub fn seen_block_from_peer(&self, block_hash: &BlockHash, peer_address: &SocketAddr) -> GossipResult<bool> {
+        let peer_map = self.blocks.read().map_err(|error| GossipError::Cache(error.to_string()))?;
+        let peer_map = peer_map.get(block_hash).ok_or_else(|| GossipError::Cache("Block not found".to_string()))?;
+        Ok(peer_map.contains_key(peer_address))
+    }
+
     /// Record that a peer has seen some data
     ///
     /// # Errors

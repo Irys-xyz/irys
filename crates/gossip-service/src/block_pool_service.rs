@@ -420,7 +420,7 @@ where
     }
 }
 
-/// Adds a block to the block pool for processing.
+/// Get block by its hash
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<Option<IrysBlockHeader>, BlockPoolError>")]
 pub struct GetBlockByHash {
@@ -449,8 +449,44 @@ where
             .ok_or(BlockPoolError::DatabaseError(eyre::eyre!(
                 "Database is not connected"
             )))?
-            .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))
+            .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
             .map_err(|db_error| BlockPoolError::DatabaseError(db_error))
+    }
+}
+
+/// Adds a block to the block pool for processing.
+#[derive(Message, Debug, Clone)]
+#[rtype(result = "Result<bool, BlockPoolError>")]
+pub struct BlockExists {
+    pub block_hash: BlockHash,
+}
+
+impl<A, R, B> Handler<BlockExists> for BlockPoolService<A, R, B>
+where
+    A: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+{
+    type Result = Result<bool, BlockPoolError>;
+
+    fn handle(&mut self, msg: BlockExists, _ctx: &mut Self::Context) -> Self::Result {
+        let block_hash = msg.block_hash;
+
+        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
+            if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
+                return Ok(true);
+            }
+        }
+
+        Ok(self
+            .db
+            .as_ref()
+            .ok_or(BlockPoolError::DatabaseError(eyre::eyre!(
+                "Database is not connected"
+            )))?
+            .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
+            .map_err(|db_error| BlockPoolError::DatabaseError(db_error))?
+            .is_some())
     }
 }
 

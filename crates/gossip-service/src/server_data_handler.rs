@@ -1,4 +1,4 @@
-use crate::block_pool_service::{BlockPoolService, GetBlockByHash, ProcessBlock};
+use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
 use crate::types::{
     tx_ingress_error_to_gossip_error, GossipDataRequest, InternalGossipError, InvalidDataError,
     RequestedData,
@@ -17,6 +17,7 @@ use irys_types::{
     GossipData, IrysBlockHeader, IrysTransactionHeader, RethPeerInfo, UnpackedChunk, H256,
 };
 use std::sync::Arc;
+use tracing::debug;
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
@@ -134,7 +135,8 @@ where
         source_address: SocketAddr,
     ) -> GossipResult<()> {
         tracing::debug!(
-            "Gossip transaction received from peer {}: {:?}",
+            "Node {}: Gossip transaction received from peer {}: {:?}",
+            self.gossip_client.mining_address,
             source_address,
             tx.id.0.to_base58()
         );
@@ -206,10 +208,44 @@ where
         source_api_address: SocketAddr,
     ) -> GossipResult<()> where {
         tracing::debug!(
-            "Gossip block received from peer {}: {:?}",
+            "Node {}: Gossip block received from peer {}: {:?}",
+            self.gossip_client.mining_address,
             source_address,
             irys_block_header.block_hash.0.to_base58()
         );
+
+        let block_seen = self
+            .cache
+            .seen_block_from_any_peer(&irys_block_header.block_hash)?;
+
+        // Record block in cache
+        self.cache.record_seen(
+            source_address,
+            &GossipData::Block(irys_block_header.clone()),
+        )?;
+
+        // This check must be after we've added the block to the cache, otherwise we won't be
+        // able to keep track of which peers seen what
+        if block_seen {
+            debug!("Node {}: Block {} already seen, skipping", self.gossip_client.mining_address, irys_block_header.block_hash.0.to_base58());
+            return Ok(());
+        }
+
+        let has_block_already_been_processed = self
+            .block_pool
+            .send(BlockExists {
+                block_hash: irys_block_header.block_hash,
+            })
+            .await
+            .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
+            .map_err(|block_pool_error| GossipError::BlockPool(block_pool_error))?;
+
+        if has_block_already_been_processed {
+            debug!("Node {}: Block {} has already been processed, skipping", self.gossip_client.mining_address, irys_block_header.block_hash.0.to_base58());
+            return Ok(());
+        }
+
+        debug!("Node {}: Block {} has not been processed yet, starting processing", self.gossip_client.mining_address, irys_block_header.block_hash.0.to_base58());
 
         // Get all transaction IDs from the block
         let data_tx_ids = irys_block_header
@@ -312,12 +348,6 @@ where
                 )));
             }
         }
-
-        // Record block in cache
-        self.cache.record_seen(
-            source_address,
-            &GossipData::Block(irys_block_header.clone()),
-        )?;
 
         self.block_pool
             .send(ProcessBlock {
