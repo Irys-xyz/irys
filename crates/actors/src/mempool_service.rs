@@ -479,32 +479,6 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
         } else {
             Err(TxIngressError::Skipped)
         }
-
-        // TODO: move this to after pre-validation
-        // Add commitment asynchronously to the commitment cache
-        // let commitment_cache = self.service_senders.commitment_cache.clone();
-        // let commitment_tx_clone = commitment_tx.clone();
-
-        // let status = self
-        //     .execute_async_operation(|| async move {
-        //         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-
-        //         let _ = commitment_cache.send(CommitmentCacheMessage::AddCommitment {
-        //             commitment_tx: commitment_tx_clone,
-        //             response: oneshot_tx,
-        //         });
-
-        //         oneshot_rx
-        //             .await
-        //             .expect("to receive CommitmentStatus from AddCommitment message")
-        //     })
-        //     .unwrap();
-
-        // if status == CommitmentStatus::Accepted {
-        //     Ok(())
-        // } else {
-        //     Err(TxIngressError::Skipped)
-        // }
     }
 }
 
