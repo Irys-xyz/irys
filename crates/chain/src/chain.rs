@@ -407,6 +407,7 @@ impl IrysNode {
             sync_state_from_peers(
                 ctx.config.node_config.trusted_peers.clone(),
                 ctx.actor_addresses.block_discovery_addr.clone(),
+                ctx.actor_addresses.vdf.clone(),
                 ctx.actor_addresses.mempool.clone(),
                 ctx.actor_addresses.peer_list.clone(),
             )
@@ -803,7 +804,7 @@ impl IrysNode {
             seed,
             global_step_number,
             broadcast_mining_actor,
-            vdf_service,
+            vdf_service.clone(),
             atomic_global_step_number,
         );
 
@@ -822,6 +823,7 @@ impl IrysNode {
                 epoch_service: epoch_service_actor,
                 peer_list: peer_list_service.clone(),
                 reth: reth_service_actor,
+                vdf: vdf_service,
             },
             reth_handle: reth_node.clone(),
             db: irys_db.clone(),

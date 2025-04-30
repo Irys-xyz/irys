@@ -4,6 +4,7 @@ use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     mempool_service::{MempoolService, TxIngressMessage},
     peer_list_service::{AddPeer, PeerListService},
+    vdf_service::{ResetVdfMessage, VdfService},
 };
 use irys_database::{BlockIndexItem, DataLedger};
 use irys_types::Address;
@@ -219,6 +220,7 @@ pub async fn fetch_block_index(
 pub async fn sync_state_from_peers(
     trusted_peers: Vec<PeerAddress>,
     block_discovery_addr: Addr<BlockDiscoveryActor>,
+    vdf_service_addr: Addr<VdfService>,
     mempool_addr: Addr<MempoolService>,
     peer_list_service_addr: Addr<PeerListService>,
 ) -> eyre::Result<()> {
@@ -282,6 +284,12 @@ pub async fn sync_state_from_peers(
                 }
             }
 
+            //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
+            vdf_service_addr
+                .send(ResetVdfMessage(block.vdf_limiter_info.seed))
+                .await?;
+
+            // allow block to be discovered by block discovery actor
             if let Err(e) = block_discovery_addr
                 .send(BlockDiscoveredMessage(block.clone()))
                 .await?

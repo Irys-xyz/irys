@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::block_index_service::BlockIndexReadGuard;
 use crate::services::Stop;
@@ -139,6 +139,30 @@ impl Actor for VdfService {
 
     fn started(&mut self, _ctx: &mut Self::Context) {
         info!("Vdf service started!");
+    }
+}
+
+/// Reset VDF Steps as we have a new block with future steps
+#[derive(Message, Debug, Clone)]
+#[rtype(result = "()")]
+pub struct ResetVdfMessage(pub H256);
+
+impl Handler<ResetVdfMessage> for VdfService {
+    type Result = ();
+
+    fn handle(&mut self, msg: ResetVdfMessage, ctx: &mut Context<Self>) -> Self::Result {
+        let tx = self.tx.clone();
+        let value = msg.0;
+
+        // this to allow using the async fn tx.send() inside an actix context
+        ctx.spawn(
+            async move {
+                if let Err(e) = tx.send(value).await {
+                    error!("Error sending to VDF channel: {}", e);
+                }
+            }
+            .into_actor(self),
+        );
     }
 }
 

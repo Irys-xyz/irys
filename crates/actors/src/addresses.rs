@@ -9,6 +9,7 @@ use crate::{
     packing::PackingActor,
     peer_list_service::PeerListService,
     reth_service::RethServiceActor,
+    vdf_service::VdfService,
     EpochServiceActor,
 };
 
@@ -25,6 +26,7 @@ pub struct ActorAddresses {
     pub epoch_service: Addr<EpochServiceActor>,
     pub peer_list: Addr<PeerListService>,
     pub reth: Addr<RethServiceActor>,
+    pub vdf: Addr<VdfService>,
 }
 
 impl ActorAddresses {
