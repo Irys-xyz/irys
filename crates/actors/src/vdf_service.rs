@@ -156,11 +156,18 @@ impl Handler<FastForwardVdfMessage> for VdfService {
         let tx = self.tx.clone();
         let value = msg.0;
 
+        self.vdf_state
+            .write()
+            .unwrap()
+            .jump_step(value.seed.clone(), value.global_step.clone());
+
         // allow using the async fn tx.send() inside an actix context
         ctx.spawn(
             async move {
                 if let Err(e) = tx.send(value).await {
                     error!("Error sending to VDF channel: {}", e);
+                } else {
+                    error!("Sent to VDF channel");
                 }
             }
             .into_actor(self),
