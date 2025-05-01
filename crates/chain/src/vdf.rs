@@ -66,6 +66,7 @@ pub fn run_vdf(
         });
 
         if global_step_number % nonce_limiter_reset_frequency == 0 {
+            // FIXME: is there an issue with reset_seed never changing here?
             info!(
                 "Reset seed {:?} applied to step {}",
                 global_step_number, reset_seed
