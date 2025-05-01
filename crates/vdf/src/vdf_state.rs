@@ -61,7 +61,10 @@ impl VdfState {
         let vdf_steps_len = self.seeds.len() as u64;
 
         let last_global_step = self.global_step;
-        let first_global_step = last_global_step - vdf_steps_len + 1;
+
+        // first available global step should be at least one.
+        // TODO: Should this instead panic! as something has gone very wrong?
+        let first_global_step = last_global_step.saturating_sub(vdf_steps_len) + 1;
 
         if first_global_step > last_global_step {
             return Err(eyre::eyre!("No steps stored!"));
