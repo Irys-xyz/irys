@@ -269,9 +269,6 @@ pub async fn sync_state_from_peers(
         if let Some(irys_block) = fetch_block(&peer.api, &client, &block_index_item).await {
             let block = Arc::new(irys_block);
             let block_discovery_addr = block_discovery_addr.clone();
-            //TODO: temporarily introducing a 2 second pause to allow vdf steps to be created. otherwise vdf steps try to be included that do not exist locally. This helps prevent against the following type of error:
-            //      Error sending BlockDiscoveredMessage for block 3Yy6zT8as2P4n4A4xYtVL4oMfwsAzgBpFMdoUJ6UYKoy: Block validation error Unavailable requested range (6..=10). Stored steps range is (1..=8)
-            sleep(Duration::from_millis(2000));
 
             //add txns from block to txn db
             for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
