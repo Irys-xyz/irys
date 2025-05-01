@@ -227,6 +227,7 @@ impl Handler<ConnectToPeerMessage> for RethServiceActor {
     type Result = eyre::Result<()>;
 
     fn handle(&mut self, msg: ConnectToPeerMessage, _ctx: &mut Self::Context) -> Self::Result {
+        debug!("Connecting to {:?}", &msg);
         Ok(self
             .handle
             .clone()

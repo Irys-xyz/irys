@@ -473,7 +473,7 @@ where
         let block_hash = msg.block_hash;
 
         if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
-            if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
+            if let Some(_header) = self.orphaned_blocks_by_parent.get(parent_hash) {
                 return Ok(true);
             }
         }

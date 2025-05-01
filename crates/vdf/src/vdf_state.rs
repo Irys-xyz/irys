@@ -1,18 +1,15 @@
 use actix::prelude::*;
+use irys_types::{block_production::Seed, H256List, H256};
 use nodit::{interval::ii, InclusiveInterval, Interval};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock, RwLockReadGuard},
     time::Duration,
 };
-
+use tokio::time::sleep;
 use tracing::{info, warn};
 
-use irys_types::{block_production::Seed, H256List, H256};
-
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
-
-use tokio::time::sleep;
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {

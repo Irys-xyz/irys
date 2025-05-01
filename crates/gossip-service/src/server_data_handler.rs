@@ -227,7 +227,11 @@ where
         // This check must be after we've added the block to the cache, otherwise we won't be
         // able to keep track of which peers seen what
         if block_seen {
-            debug!("Node {}: Block {} already seen, skipping", self.gossip_client.mining_address, irys_block_header.block_hash.0.to_base58());
+            debug!(
+                "Node {}: Block {} already seen, skipping",
+                self.gossip_client.mining_address,
+                irys_block_header.block_hash.0.to_base58()
+            );
             return Ok(());
         }
 
@@ -241,11 +245,19 @@ where
             .map_err(|block_pool_error| GossipError::BlockPool(block_pool_error))?;
 
         if has_block_already_been_processed {
-            debug!("Node {}: Block {} has already been processed, skipping", self.gossip_client.mining_address, irys_block_header.block_hash.0.to_base58());
+            debug!(
+                "Node {}: Block {} has already been processed, skipping",
+                self.gossip_client.mining_address,
+                irys_block_header.block_hash.0.to_base58()
+            );
             return Ok(());
         }
 
-        debug!("Node {}: Block {} has not been processed yet, starting processing", self.gossip_client.mining_address, irys_block_header.block_hash.0.to_base58());
+        debug!(
+            "Node {}: Block {} has not been processed yet, starting processing",
+            self.gossip_client.mining_address,
+            irys_block_header.block_hash.0.to_base58()
+        );
 
         // Get all transaction IDs from the block
         let data_tx_ids = irys_block_header

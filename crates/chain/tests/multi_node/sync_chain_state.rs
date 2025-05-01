@@ -1,5 +1,5 @@
 use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
-use alloy_core::primitives::ruint::aliases::U256;
+use alloy_core::primitives::{ruint::aliases::U256, B256};
 use irys_actors::mempool_service::TxIngressError;
 use irys_api_server::routes::index::NodeInfo;
 use irys_chain::{
@@ -10,18 +10,36 @@ use irys_chain::{
 };
 use irys_database::BlockIndexItem;
 use irys_types::{
-    irys::IrysSigner, Config, GossipConfig, HttpConfig, IrysTransaction, NodeConfig, NodeMode,
-    PeerAddress, RethPeerInfo,
+    irys::IrysSigner, Address, Config, GossipConfig, HttpConfig, IrysTransaction, NodeConfig,
+    NodeMode, PeerAddress, RethPeerInfo,
 };
 use k256::ecdsa::SigningKey;
+use reth::rpc::{eth::EthApiServer as _, types::engine::PayloadStatusEnum};
+use reth::{payload::EthPayloadBuilderAttributes, rpc::types::engine::PayloadAttributes};
 use reth_primitives::irys_primitives::IrysTxId;
 use reth_primitives::GenesisAccount;
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::time::{sleep, Duration};
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
-#[test_log::test(actix_web::test)]
-async fn heavy_test_p2p() -> eyre::Result<()> {
+pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
+    let attributes = PayloadAttributes {
+        timestamp,
+        prev_randao: B256::ZERO,
+        suggested_fee_recipient: Address::ZERO,
+        withdrawals: Some(vec![]),
+        parent_beacon_block_root: None, /* Some(B256::ZERO) */
+        shadows: None,
+    };
+    EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+}
+
+#[actix_web::test]
+async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
     let config = Config::new(NodeConfig::testnet());
     let account1 = IrysSigner::random_signer(&config.consensus);
     let genesis = start_genesis_node(&config.node_config, &account1).await;
@@ -59,11 +77,206 @@ async fn heavy_test_p2p() -> eyre::Result<()> {
         &account1,
     )
     .await;
+
     tracing::info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
         &genesis.node_ctx.config.node_config.reth_peer_info,
         &peer1.node_ctx.config.node_config.reth_peer_info,
         &peer2.node_ctx.config.node_config.reth_peer_info
+    );
+
+    // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
+
+    let mut genctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
+        genesis.node_ctx.reth_handle.clone().into(),
+    )
+    .await?;
+
+    let p1ctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
+        peer1.node_ctx.reth_handle.clone().into(),
+    )
+    .await?;
+
+    // don't use if the reth service connect messages are used
+    // genctx.connect(&mut p1ctx).await;
+    // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
+
+    let (block_hash, block_number) = {
+        let (payload, _) = genctx.advance_block(vec![], eth_payload_attributes).await?;
+        (payload.block().hash(), payload.block().number)
+    };
+
+    genctx.assert_new_block2(block_hash, block_number).await?;
+
+    p1ctx
+        .engine_api
+        .update_forkchoice(block_hash, block_hash)
+        .await?;
+
+    p1ctx.assert_new_block2(block_hash, block_number).await?;
+
+    // sleep(Duration::from_millis(2_000)).await;
+
+    let a2 = p1ctx
+        .rpc
+        .inner
+        .eth_api()
+        .block_by_hash(block_hash, false)
+        .await?;
+
+    assert!(
+        a2.is_some_and(|b| b.header.hash == block_hash),
+        "Retrieved blocks hash is correct"
+    );
+
+    peer1.stop().await;
+    peer2.stop().await;
+    genesis.stop().await;
+
+    Ok(())
+}
+
+#[actix_web::test]
+async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let config = Config::new(NodeConfig::testnet());
+    let account1 = IrysSigner::random_signer(&config.consensus);
+    let genesis = start_genesis_node(&config.node_config, &account1).await;
+
+    let genesis_peer_address = PeerAddress {
+        gossip: format!(
+            "{}:{}",
+            genesis.node_ctx.config.node_config.gossip.bind_ip,
+            genesis.node_ctx.config.node_config.gossip.port
+        )
+        .parse()
+        .expect("valid SocketAddr expected"),
+        api: format!(
+            "{}:{}",
+            genesis.node_ctx.config.node_config.http.bind_ip,
+            genesis.node_ctx.config.node_config.http.port
+        )
+        .parse()
+        .expect("valid SocketAddr expected"),
+        execution: genesis.node_ctx.config.node_config.reth_peer_info,
+    };
+
+    let (peer1, peer2) = start_peer_nodes(
+        &Config::new(NodeConfig {
+            trusted_peers: vec![genesis_peer_address],
+            ..NodeConfig::testnet()
+        }),
+        &Config::new(NodeConfig {
+            trusted_peers: vec![genesis_peer_address],
+            ..NodeConfig::testnet()
+        }),
+        &account1,
+    )
+    .await;
+
+    info!(
+        "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
+        &genesis.node_ctx.config.node_config.reth_peer_info,
+        &peer1.node_ctx.config.node_config.reth_peer_info,
+        &peer2.node_ctx.config.node_config.reth_peer_info
+    );
+
+    // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
+
+    let mut genctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
+        genesis.node_ctx.reth_handle.clone().into(),
+    )
+    .await?;
+
+    let p1ctx = irys_reth_node_bridge::adapter::node::RethNodeContext::new(
+        peer1.node_ctx.reth_handle.clone().into(),
+    )
+    .await?;
+
+    // don't use if the reth service connect messages are used
+    // genctx.connect(&mut p1ctx).await;
+    // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
+
+    let (block_hash, block_number) = {
+        let p1_latest = genctx
+            .rpc
+            .inner
+            .eth_api()
+            .block_by_number(alloy_eips::BlockNumberOrTag::Latest, false)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
+        let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
+            timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: Address::ZERO,
+            withdrawals: None,
+            parent_beacon_block_root: None,
+            shadows: None,
+        };
+
+        let (exec_payload, built, attrs) = genctx
+            .new_payload_irys2(p1_latest.header.hash, payload_attrs)
+            .await?;
+
+        let block_hash = genctx
+            .engine_api
+            .submit_payload(
+                built.clone(),
+                attrs.clone(),
+                PayloadStatusEnum::Valid,
+                vec![],
+            )
+            .await?;
+
+        // trigger forkchoice update via engine api to commit the block to the blockchain
+        genctx
+            .engine_api
+            .update_forkchoice(block_hash, block_hash)
+            .await?;
+
+        (
+            exec_payload
+                .execution_payload
+                .payload_inner
+                .payload_inner
+                .payload_inner
+                .block_hash,
+            exec_payload
+                .execution_payload
+                .payload_inner
+                .payload_inner
+                .payload_inner
+                .block_number,
+        )
+    };
+
+    // assert the block has been committed to the blockchain
+    genctx.assert_new_block2(block_hash, block_number).await?;
+
+    // only send forkchoice update to second node
+    p1ctx
+        .engine_api
+        .update_forkchoice(block_hash, block_hash)
+        .await?;
+
+    // expect second node advanced via p2p gossip
+
+    p1ctx.assert_new_block2(block_hash, block_number).await?;
+
+    let a2 = p1ctx
+        .rpc
+        .inner
+        .eth_api()
+        .block_by_hash(block_hash, false)
+        .await?;
+
+    assert!(
+        a2.is_some_and(|b| b.header.hash == block_hash),
+        "Retrieved blocks hash is correct"
     );
 
     peer1.stop().await;
