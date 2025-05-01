@@ -25,7 +25,7 @@ mod tests {
             prev_randao: B256::ZERO,
             suggested_fee_recipient: Address::ZERO,
             withdrawals: Some(vec![]),
-            parent_beacon_block_root: None, /* Some(B256::ZERO) */
+            parent_beacon_block_root: None, // NEVER SET THIS TO Some(B256::ZERO), IT SHOULD ALWAYS BE NONE
             shadows: None,
         };
         EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
@@ -53,7 +53,6 @@ mod tests {
         let second_node = nodes.pop().unwrap();
         let mut first_node = nodes.pop().unwrap();
 
-        // Make the first node advance
         // let tx_hash = first_node.rpc.inject_tx(raw_tx).await?;
 
         // make the node advance
@@ -65,12 +64,9 @@ mod tests {
         let block_number = payload.block().number;
 
         // assert the block has been committed to the blockchain
-        // first_node.assert_new_block(tx_hash, block_hash, block_number).await?;
         first_node
             .assert_new_block2(block_hash, block_number)
             .await?;
-
-        // first_node.wait_block(block_number, block_hash, false).await?;
 
         // only send forkchoice update to second node
         second_node
@@ -79,7 +75,6 @@ mod tests {
             .await?;
 
         // expect second node advanced via p2p gossip
-        // second_node.wait_block(block_number, block_hash, false).await?;
         second_node
             .assert_new_block2(block_hash, block_number)
             .await?;
@@ -105,20 +100,8 @@ mod tests {
         )
         .await?;
 
-        // let raw_tx = TransactionTestContext::transfer_tx_bytes(1, wallet.inner).await;
         let second_node = nodes.pop().unwrap();
         let mut first_node = nodes.pop().unwrap();
-
-        // Make the first node advance
-        // let tx_hash = first_node.rpc.inject_tx(raw_tx).await?;
-
-        // make the node advance
-        // let (payload, _) = first_node
-        //     .advance_block(vec![], eth_payload_attributes)
-        //     .await?;
-
-        // let block_hash = payload.block().hash();
-        // let block_number = payload.block().number;
 
         let (block_hash, block_number) = {
             let p1_latest = first_node
@@ -222,12 +205,9 @@ mod tests {
         };
 
         // assert the block has been committed to the blockchain
-        // first_node.assert_new_block(tx_hash, block_hash, block_number).await?;
         first_node
             .assert_new_block2(block_hash, block_number)
             .await?;
-
-        // first_node.wait_block(block_number, block_hash, false).await?;
 
         // only send forkchoice update to second node
         second_node
@@ -236,7 +216,6 @@ mod tests {
             .await?;
 
         // expect second node advanced via p2p gossip
-        // second_node.wait_block(block_number, block_hash, false).await?;
         second_node
             .assert_new_block2(block_hash, block_number)
             .await?;
@@ -293,17 +272,6 @@ mod tests {
 
         first_node.connect(&mut second_node).await;
 
-        // Make the first node advance
-        // let tx_hash = first_node.rpc.inject_tx(raw_tx).await?;
-
-        // make the node advance
-        // let (payload, _) = first_node
-        //     .advance_block(vec![], eth_payload_attributes)
-        //     .await?;
-
-        // let block_hash = payload.block().hash();
-        // let block_number = payload.block().number;
-
         let (block_hash, block_number) = {
             let p1_latest = first_node
                 .rpc
@@ -359,59 +327,12 @@ mod tests {
                     .payload_inner
                     .block_number,
             )
-
-            // let payload = first_node
-            //     .engine_api
-            //     .build_payload_v1_irys(/* gen_latest.header.hash */ B256::ZERO, payload_attrs)
-            //     .await?;
-
-            // // (payload.block().hash(), payload.block().number)
-
-            // let block_hash = first_node
-            //     .engine_api
-            //     .submit_payload(
-            //         payload.clone(),
-            //         payload_attrs.clone(),
-            //         PayloadStatusEnum::Valid,
-            //         versioned_hashes,
-            //     )
-            //     .await?;
-
-            // (
-            //     payload
-            //         .execution_payload
-            //         .payload_inner
-            //         .payload_inner
-            //         .payload_inner
-            //         .block_hash,
-            //     payload
-            //         .execution_payload
-            //         .payload_inner
-            //         .payload_inner
-            //         .payload_inner
-            //         .block_number,
-            // )
-
-            // let (payload, _) = first_node
-            //     .advance_block(vec![], eth_payload_attributes)
-            //     .await?;
-
-            // (payload.block().hash(), payload.block().number)
-
-            // let (payload, _) = first_node
-            //     .advance_block_irys(vec![], eth_payload_attributes)
-            //     .await?;
-
-            // (payload.block().hash(), payload.block().number)
         };
 
         // assert the block has been committed to the blockchain
-        // first_node.assert_new_block(tx_hash, block_hash, block_number).await?;
         first_node
             .assert_new_block2(block_hash, block_number)
             .await?;
-
-        // first_node.wait_block(block_number, block_hash, false).await?;
 
         // only send forkchoice update to second node
         second_node
@@ -420,7 +341,6 @@ mod tests {
             .await?;
 
         // expect second node advanced via p2p gossip
-        // second_node.wait_block(block_number, block_hash, false).await?;
         second_node
             .assert_new_block2(block_hash, block_number)
             .await?;

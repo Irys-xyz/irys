@@ -38,7 +38,7 @@ pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttribu
 }
 
 #[actix_web::test]
-async fn heavy_test_p2p() -> eyre::Result<()> {
+async fn heavy_test_p2p_evm_gossip() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let config = Config::new(NodeConfig::testnet());
     let account1 = IrysSigner::random_signer(&config.consensus);
@@ -101,96 +101,12 @@ async fn heavy_test_p2p() -> eyre::Result<()> {
     // genctx.connect(&mut p1ctx).await;
     // p1ctx.connect(&mut genctx).await; <- will fail as it expects to see a new peer session event, and will hang if the peer is already connected
 
-    // let gen_latest = genctx
-    //     .rpc
-    //     .inner
-    //     .eth_api()
-    //     .block_by_number(BlockNumberOrTag::Latest, false)
-    //     .await
-    //     .unwrap()
-    //     .unwrap();
-
-    // let p1_latest = p1ctx
-    //     .rpc
-    //     .inner
-    //     .eth_api()
-    //     .block_by_number(BlockNumberOrTag::Latest, false)
-    //     .await
-    //     .unwrap()
-    //     .unwrap();
-
-    // info!(
-    //     "JESSEDEBUG2 GL: {}, P1L: {}",
-    //     &gen_latest.header.hash, &p1_latest.header.hash
-    // );
-
     let (block_hash, block_number) = {
-        // let (block, _) = mine_block(&genesis.node_ctx).await?.unwrap();
-        // (block.evm_block_hash, block.height)
-
-        // let (payload, _) = genctx
-        //     .advance_block(vec![], t::eth_payload_attributes)
-        //     .await?;
-        // (payload.block().hash(), payload.block().number)
-        // let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-
-        // let payload_attrs = reth::rpc::types::engine::PayloadAttributes {
-        //     timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
-        //     prev_randao: alloy_core::primitives::B256::ZERO,
-        //     suggested_fee_recipient: account1.address(),
-        //     withdrawals: None,
-        //     parent_beacon_block_root: None,
-        //     shadows: None,
-        // };
-
-        // let payload = genctx
-        //     .engine_api
-        //     .build_payload_v1_irys(gen_latest.header.hash, payload_attrs)
-        //     .await?;
-
-        // (
-        //     payload
-        //         .execution_payload
-        //         .payload_inner
-        //         .payload_inner
-        //         .payload_inner
-        //         .block_hash,
-        //     payload
-        //         .execution_payload
-        //         .payload_inner
-        //         .payload_inner
-        //         .payload_inner
-        //         .block_number,
-        // )
-
-        // let (payload, eth_attr) = self.new_payload(attributes_generator).await?;
         let (payload, _) = genctx.advance_block(vec![], eth_payload_attributes).await?;
         (payload.block().hash(), payload.block().number)
     };
 
-    // genctx
-    //     .engine_api
-    //     .update_forkchoice(block_hash, block_hash)
-    //     .await?;
-
     genctx.assert_new_block2(block_hash, block_number).await?;
-
-    // peer1.node_ctx.reth_handle.network.announce_block(block, hash);
-
-    // peer1
-    //     .node_ctx
-    //     .actor_addresses
-    //     .reth
-    //     .send(ForkChoiceUpdateMessage {
-    //         head_hash: irys_actors::reth_service::BlockHashType::Evm(a.evm_block_hash),
-    //         confirmed_hash: None,
-    //         finalized_hash: None,
-    //     })
-    //     .await
-    //     .unwrap()
-    //     .unwrap();
-
-    // sleep(Duration::from_millis(2_000)).await;
 
     p1ctx
         .engine_api
@@ -221,7 +137,7 @@ async fn heavy_test_p2p() -> eyre::Result<()> {
 }
 
 #[actix_web::test]
-async fn heavy_test_p2p2() -> eyre::Result<()> {
+async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let config = Config::new(NodeConfig::testnet());
     let account1 = IrysSigner::random_signer(&config.consensus);
