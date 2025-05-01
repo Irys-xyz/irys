@@ -14,8 +14,10 @@ use tracing::{debug, error};
 #[test_log::test(actix_web::test)]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let required_blocks_height: usize = 5;
+    let expected_block_lag_between_index_and_tree: usize = 2;
     // +2 is so genesis is two blocks ahead of the peer nodes, as currently we check the peers index which lags behind
-    let required_genesis_node_height = required_blocks_height + 2;
+    let required_genesis_node_height =
+        required_blocks_height + expected_block_lag_between_index_and_tree;
     let trusted_peers = vec![PeerAddress {
         api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
         gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
