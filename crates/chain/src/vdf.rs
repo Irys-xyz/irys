@@ -8,7 +8,7 @@ use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
 use std::time::Instant;
 use tokio::sync::mpsc::Receiver;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 pub fn run_vdf(
     config: &irys_types::VdfConfig,

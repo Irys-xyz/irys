@@ -394,7 +394,7 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
-    use tokio::{sync::mpsc, time::sleep};
+    use tokio::time::sleep;
 
     fn get_mocked_block_producer(
         closure_arc: Arc<RwLock<Option<SolutionContext>>>,
