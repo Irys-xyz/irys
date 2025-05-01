@@ -224,6 +224,7 @@ pub async fn sync_state_from_peers(
     vdf_service_addr: Addr<VdfService>,
     mempool_addr: Addr<MempoolService>,
     peer_list_service_addr: Addr<PeerListService>,
+    vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));

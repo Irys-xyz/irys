@@ -89,6 +89,9 @@ pub struct IrysNodeCtx {
     pub block_tree_guard: BlockTreeReadGuard,
     pub vdf_steps_guard: VdfStepsReadGuard,
     pub service_senders: ServiceSenders,
+    // vdf channel for fast forwarding steps during sync
+    pub vdf_sender:
+        tokio::sync::mpsc::Sender<irys_actors::broadcast_mining_service::BroadcastMiningSeed>,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
@@ -412,6 +415,7 @@ impl IrysNode {
                 ctx.actor_addresses.vdf.clone(),
                 ctx.actor_addresses.mempool.clone(),
                 ctx.actor_addresses.peer_list.clone(),
+                ctx.vdf_sender.clone(),
             )
             .await?;
         }
@@ -725,11 +729,11 @@ impl IrysNode {
             &storage_modules,
         );
 
-        let (new_seed_tx, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
+        let (vdf_sender, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
 
         // spawn the vdf service
         let vdf_service =
-            Self::init_vdf_service(&config, &irys_db, &block_index_guard, new_seed_tx);
+            Self::init_vdf_service(&config, &irys_db, &block_index_guard, vdf_sender.clone());
         let vdf_steps_guard = vdf_service.send(GetVdfStateMessage).await?;
 
         // spawn the validation service
@@ -833,6 +837,7 @@ impl IrysNode {
             block_index_guard: block_index_guard.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
+            vdf_sender,
             reth_shutdown_sender,
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),
