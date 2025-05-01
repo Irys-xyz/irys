@@ -156,8 +156,7 @@ async fn start_reth_node(
     latest_block: u64,
     random_ports: bool,
 ) -> eyre::Result<NodeExitReason> {
-    let node_handle = irys_reth_node_bridge::node::run_node_new(
-        /* run_node */
+    let node_handle = irys_reth_node_bridge::node::run_node(
         Arc::new(chainspec),
         task_executor,
         config.node_config.clone(),

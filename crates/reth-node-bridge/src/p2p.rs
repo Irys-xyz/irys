@@ -14,7 +14,10 @@ mod tests {
 
     use reth::{payload::EthPayloadBuilderAttributes, rpc::types::engine::PayloadAttributes};
 
-    use crate::node::run_node_new;
+    use crate::node::run_node;
+
+    const TEST_GENESIS: &str =
+        include_str!("../../../ext/reth/crates/ethereum/node/tests/assets/genesis.json");
 
     pub fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
         let attributes = PayloadAttributes {
@@ -38,7 +41,7 @@ mod tests {
             Arc::new(
                 ChainSpecBuilder::default()
                     .chain(MAINNET.chain)
-                    .genesis(serde_json::from_str(include_str!("./genesis.json")).unwrap())
+                    .genesis(serde_json::from_str(TEST_GENESIS).unwrap())
                     .cancun_activated()
                     .build(),
             ),
@@ -94,7 +97,7 @@ mod tests {
             Arc::new(
                 ChainSpecBuilder::default()
                     .chain(MAINNET.chain)
-                    .genesis(serde_json::from_str(include_str!("./genesis.json")).unwrap())
+                    .genesis(serde_json::from_str(TEST_GENESIS).unwrap())
                     .cancun_activated()
                     .build(),
             ),
@@ -259,11 +262,11 @@ mod tests {
                 let reth_node_builder::NodeHandle {
                     node,
                     node_exit_future: _,
-                } = run_node_new(
+                } = run_node(
                     Arc::new(
                         ChainSpecBuilder::default()
                             .chain(MAINNET.chain)
-                            .genesis(serde_json::from_str(include_str!("./genesis.json")).unwrap())
+                            .genesis(serde_json::from_str(TEST_GENESIS).unwrap())
                             .cancun_activated()
                             .build(),
                     ),
