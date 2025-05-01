@@ -25,7 +25,8 @@ pub fn run_vdf(
     let mut hash: H256 = seed;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
     let mut global_step_number = global_step_number;
-    let mut reset_seed = initial_reset_seed;
+    // FIXME: The reset seed is the same as the seed... which I suspect is incorrect!
+    let reset_seed = initial_reset_seed;
     info!(
         "VDF thread started at global_step_number: {}",
         global_step_number
