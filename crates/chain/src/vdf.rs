@@ -77,14 +77,21 @@ pub fn run_vdf(
             break;
         };
 
-        if let Ok(mining_seed) = new_seed_listener.try_recv() {
-            error!(
-                "New Step {:?} with Seed {:?}",
-                mining_seed.global_step, mining_seed.seed
-            );
-            // TODO: wire new seed injections from chain accepted blocks message BlockConfirmedMessage
-            reset_seed = mining_seed.seed.0;
-            global_step_number = mining_seed.global_step; //FIX ME THIS NEEDS TO COME WITH THE SEED?
+        if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
+            // if the step number is ahead of local nodes vdf steps
+            if global_step_number < proposed_ff_to_mining_seed.global_step {
+                debug!(
+                    "Fastforward Step {:?} with Seed {:?}",
+                    proposed_ff_to_mining_seed.global_step, proposed_ff_to_mining_seed.seed
+                );
+                reset_seed = proposed_ff_to_mining_seed.seed.0;
+                global_step_number = proposed_ff_to_mining_seed.global_step;
+            } else {
+                debug!(
+                    "Fastforward Step {} is not ahead of {}",
+                    proposed_ff_to_mining_seed.global_step, global_step_number
+                );
+            }
         }
     }
     debug!(?global_step_number, "VDF thread stopped");
