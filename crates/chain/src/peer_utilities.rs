@@ -302,7 +302,7 @@ pub async fn sync_state_from_peers(
                 .await?
             {
                 error!(
-                    "Error sending BlockDiscoveredMessage for block {}: {:?}\nOFFENDING BLOCK evm_block_hash: {}",
+                    "Peer Sync: Error sending BlockDiscoveredMessage for block {}: {:?}\nOFFENDING BLOCK evm_block_hash: {}",
                     block_index_item.block_hash.0.to_base58(),
                     e,
                     block.clone().evm_block_hash,
