@@ -84,7 +84,7 @@ pub fn run_vdf(
                     "Fastforward Step {:?} with Seed {:?}",
                     proposed_ff_to_mining_seed.global_step, proposed_ff_to_mining_seed.seed
                 );
-                reset_seed = proposed_ff_to_mining_seed.seed.0;
+                hash = proposed_ff_to_mining_seed.seed.0;
                 global_step_number = proposed_ff_to_mining_seed.global_step;
             } else {
                 debug!(
