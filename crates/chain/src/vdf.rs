@@ -175,8 +175,8 @@ mod tests {
 
         let broadcast_mining_service = BroadcastMiningService::from_registry();
         let capacity = calc_capacity(&config);
-        let (new_seed_tx, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
-        let vdf_service = VdfService::from_capacity(capacity, new_seed_tx).start();
+        let (_, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
+        let vdf_service = VdfService::from_capacity(capacity).start();
         SystemRegistry::set(vdf_service.clone());
         let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();
 

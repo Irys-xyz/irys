@@ -7,18 +7,13 @@ use std::{
     collections::VecDeque,
     sync::{Arc, RwLock},
 };
-use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-use crate::{
-    block_index_service::BlockIndexReadGuard, broadcast_mining_service::BroadcastMiningSeed,
-    services::Stop,
-};
+use crate::{block_index_service::BlockIndexReadGuard, services::Stop};
 
 #[derive(Debug)]
 pub struct VdfService {
     pub vdf_state: AtomicVdfState,
-    pub tx: mpsc::Sender<BroadcastMiningSeed>,
 }
 
 impl Default for VdfService {
@@ -29,28 +24,21 @@ impl Default for VdfService {
 
 impl VdfService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
-    pub fn new(
-        block_index: BlockIndexReadGuard,
-        db: DatabaseProvider,
-        config: &Config,
-        new_seed_tx: mpsc::Sender<BroadcastMiningSeed>,
-    ) -> Self {
+    pub fn new(block_index: BlockIndexReadGuard, db: DatabaseProvider, config: &Config) -> Self {
         let vdf_state = create_state(block_index, db, &config);
         Self {
             vdf_state: Arc::new(RwLock::new(vdf_state)),
-            tx: new_seed_tx,
         }
     }
 
     #[cfg(any(feature = "test-utils", test))]
-    pub fn from_capacity(capacity: usize, new_seed_tx: mpsc::Sender<BroadcastMiningSeed>) -> Self {
+    pub fn from_capacity(capacity: usize) -> Self {
         VdfService {
             vdf_state: Arc::new(RwLock::new(VdfState {
                 global_step: 0,
                 capacity,
                 seeds: VecDeque::with_capacity(capacity),
             })),
-            tx: new_seed_tx,
         }
     }
 }
@@ -144,37 +132,6 @@ impl Actor for VdfService {
     }
 }
 
-/// Reset VDF Steps as we have a new block with future steps
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
-pub struct FastForwardVdfMessage(pub BroadcastMiningSeed);
-
-impl Handler<FastForwardVdfMessage> for VdfService {
-    type Result = ();
-
-    fn handle(&mut self, msg: FastForwardVdfMessage, ctx: &mut Context<Self>) -> Self::Result {
-        let tx = self.tx.clone();
-        let value = msg.0;
-
-        self.vdf_state
-            .write()
-            .unwrap()
-            .jump_step(value.seed.clone(), value.global_step.clone());
-
-        // allow using the async fn tx.send() inside an actix context
-        ctx.spawn(
-            async move {
-                if let Err(e) = tx.send(value).await {
-                    error!("Error sending to VDF channel: {}", e);
-                } else {
-                    error!("Sent to VDF channel");
-                }
-            }
-            .into_actor(self),
-        );
-    }
-}
-
 /// Send the most recent mining step to all the `PartitionMiningActors`
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
@@ -221,8 +178,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_vdf() {
         let testnet_config = NodeConfig::testnet().into();
-        let (new_seed_tx, _) = mpsc::channel::<BroadcastMiningSeed>(1);
-        let service = VdfService::from_capacity(calc_capacity(&testnet_config), new_seed_tx);
+        let service = VdfService::from_capacity(calc_capacity(&testnet_config));
         service.vdf_state.write().unwrap().seeds = VecDeque::with_capacity(4);
         service.vdf_state.write().unwrap().capacity = 4;
         let addr = service.start();

@@ -731,8 +731,7 @@ impl IrysNode {
         let (vdf_sender, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
 
         // spawn the vdf service
-        let vdf_service =
-            Self::init_vdf_service(&config, &irys_db, &block_index_guard, vdf_sender.clone());
+        let vdf_service = Self::init_vdf_service(&config, &irys_db, &block_index_guard);
         let vdf_steps_guard = vdf_service.send(GetVdfStateMessage).await?;
 
         // spawn the validation service
@@ -1143,14 +1142,9 @@ impl IrysNode {
         config: &Config,
         irys_db: &DatabaseProvider,
         block_index_guard: &BlockIndexReadGuard,
-        new_seed_tx: mpsc::Sender<BroadcastMiningSeed>,
     ) -> actix::Addr<VdfService> {
-        let vdf_service_actor = VdfService::new(
-            block_index_guard.clone(),
-            irys_db.clone(),
-            &config,
-            new_seed_tx,
-        );
+        let vdf_service_actor =
+            VdfService::new(block_index_guard.clone(), irys_db.clone(), &config);
         let vdf_service = vdf_service_actor.start();
         SystemRegistry::set(vdf_service.clone());
         vdf_service
