@@ -164,7 +164,6 @@ where
                 Ok(reth::providers::providers::BlockchainProvider::new(provider_factory, tree)?)
             }, tree_config, canon_state_notification_sender)?
             .inspect(|this: &LaunchContextWith<Attached<WithConfigs<<Types as NodeTypes>::ChainSpec>, reth_node_builder::common::WithMeteredProviders<T>>>| {
-                
             let result = || -> eyre::Result<bool> {
 
                 let provider_factory = this.provider_factory();

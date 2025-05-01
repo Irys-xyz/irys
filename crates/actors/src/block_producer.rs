@@ -407,7 +407,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 confirmed_hash: None,
                 finalized_hash: None,
             }).await??;
-            
+
             // try to get block by hash
             let parent = context
             .rpc
@@ -432,13 +432,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 vec![],
             )
             .await?;
-        
+
             // trigger forkchoice update via engine api to commit the block to the blockchain
             context
                 .engine_api
                 .update_forkchoice(block_hash, block_hash)
                 .await?;
-            
+
             let evm_block_hash =  built.block().hash();
 
             irys_block.evm_block_hash = evm_block_hash;
