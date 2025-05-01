@@ -283,18 +283,20 @@ pub async fn sync_state_from_peers(
                 }
             }
 
-            //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
-            let mining_seed = BroadcastMiningSeed {
-                seed: Seed {
-                    0: block.vdf_limiter_info.seed,
-                },
-                global_step: block.vdf_limiter_info.global_step_number,
-                checkpoints: block.vdf_limiter_info.last_step_checkpoints.clone(),
-            };
+            let block_end_step = block.vdf_limiter_info.global_step_number;
+            let block_start_step = block_end_step - block.vdf_limiter_info.steps.len() as u64;
+            for (i, step) in block.vdf_limiter_info.steps.iter().enumerate() {
+                //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
+                let mining_seed = BroadcastMiningSeed {
+                    seed: Seed { 0: *step },
+                    global_step: block_start_step + i as u64,
+                    checkpoints: block.vdf_limiter_info.last_step_checkpoints.clone(), //TODO can this be just H256List::new()?
+                };
 
-            vdf_service_addr
-                .send(FastForwardVdfMessage(mining_seed))
-                .await?;
+                if let Err(e) = vdf_sender.send(mining_seed).await {
+                    error!("Peer Sync: VDF Send Error: {:?}", e);
+                }
+            }
 
             // allow block to be discovered by block discovery actor
             if let Err(e) = block_discovery_addr
