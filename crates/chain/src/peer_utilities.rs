@@ -5,7 +5,6 @@ use irys_actors::{
     broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
     peer_list_service::{AddPeer, PeerListService},
-    vdf_service::{FastForwardVdfMessage, VdfService},
 };
 use irys_database::{BlockIndexItem, DataLedger};
 use irys_types::{block_production::Seed, Address};
@@ -221,7 +220,6 @@ pub async fn fetch_block_index(
 pub async fn sync_state_from_peers(
     trusted_peers: Vec<PeerAddress>,
     block_discovery_addr: Addr<BlockDiscoveryActor>,
-    vdf_service_addr: Addr<VdfService>,
     mempool_addr: Addr<MempoolService>,
     peer_list_service_addr: Addr<PeerListService>,
     vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,

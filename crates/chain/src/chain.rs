@@ -412,7 +412,6 @@ impl IrysNode {
             sync_state_from_peers(
                 ctx.config.node_config.trusted_peers.clone(),
                 ctx.actor_addresses.block_discovery_addr.clone(),
-                ctx.actor_addresses.vdf.clone(),
                 ctx.actor_addresses.mempool.clone(),
                 ctx.actor_addresses.peer_list.clone(),
                 ctx.vdf_sender.clone(),
