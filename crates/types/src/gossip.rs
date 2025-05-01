@@ -1,5 +1,5 @@
-use base58::ToBase58;
 use crate::{IrysBlockHeader, IrysTransactionHeader, UnpackedChunk};
+use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

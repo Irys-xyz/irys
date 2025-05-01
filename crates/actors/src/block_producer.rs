@@ -6,7 +6,9 @@ use std::{
 
 use actix::prelude::*;
 use actors::mocker::Mocker;
-use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV1Irys, PayloadAttributes, PayloadStatusEnum};
+use alloy_rpc_types_engine::{
+    ExecutionPayloadEnvelopeV1Irys, PayloadAttributes, PayloadStatusEnum,
+};
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{

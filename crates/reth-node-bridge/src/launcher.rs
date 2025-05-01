@@ -1,19 +1,27 @@
 //! Engine node related functionality.
 // this is the 'engine launcher'
 
+use alloy_primitives::utils::format_ether;
 use alloy_primitives::BlockNumber;
 use alloy_rpc_types::engine::ClientVersionV1;
 use futures::{future::Either, stream, stream_select, StreamExt};
 use irys_storage::reth_provider::IrysRethProvider;
-use reth_beacon_consensus::
-    hooks::{EngineHooks, StaticFileHook};
+use reth_beacon_consensus::hooks::{EngineHooks, StaticFileHook};
 use reth_blockchain_tree::BlockchainTreeConfig;
 use reth_chainspec::EthChainSpec;
 use reth_consensus_debug_client::{DebugConsensusClient, EtherscanBlockProvider};
 use reth_engine_util::EngineMessageStreamExt;
 use reth_exex::ExExManagerHandle;
 use reth_network_api::{BlockDownloaderProvider, NetworkEventListenerProvider};
-use reth_node_api::{ FullNodeTypes, NodeAddOns, NodeTypes, NodeTypesWithEngine};
+use reth_node_api::{FullNodeTypes, NodeAddOns, NodeTypes, NodeTypesWithEngine};
+use reth_node_builder::{
+    common::{Attached, LaunchContextWith, WithConfigs},
+    hooks::NodeHooks,
+    rpc::{launch_rpc_servers, EthApiBuilderProvider},
+    AddOns, ExExLauncher, FullNode, LaunchContext, LaunchNode, NodeAdapter,
+    NodeBuilderWithComponents, NodeComponents, NodeComponentsBuilder, NodeHandle, NodeTypesAdapter,
+};
+use reth_node_core::irys_ext::IrysExt;
 use reth_node_core::{
     dirs::{ChainPath, DataDirPath},
     exit::NodeExitFuture,
@@ -26,25 +34,13 @@ use reth_provider::BlockExecutionWriter;
 use reth_provider::BlockNumReader;
 use reth_provider::ChainStateBlockReader;
 use reth_provider::ChainStateBlockWriter;
-use reth_provider::{
-    providers::ProviderNodeTypes,
-    StaticFileProviderFactory as _,
-};
+use reth_provider::{providers::ProviderNodeTypes, StaticFileProviderFactory as _};
 use reth_rpc_engine_api::{capabilities::EngineCapabilities, EngineApi};
 use reth_tasks::TaskExecutor;
 use reth_tracing::tracing::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::{mpsc::unbounded_channel, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use reth_node_core::irys_ext::IrysExt;
-use reth_node_builder::{
-    common::{Attached, LaunchContextWith, WithConfigs},
-    hooks::NodeHooks,
-    rpc::{launch_rpc_servers, EthApiBuilderProvider},
-    AddOns, ExExLauncher, FullNode, LaunchContext, LaunchNode, NodeAdapter,
-    NodeBuilderWithComponents, NodeComponents, NodeComponentsBuilder, NodeHandle, NodeTypesAdapter,
-};
-use alloy_primitives::utils::format_ether;
 
 /// The engine node launcher.
 #[derive(Debug)]

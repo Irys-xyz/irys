@@ -260,7 +260,10 @@ impl GossipService {
             let maybe_selected_peers = peers.get(0..n);
 
             if let Some(selected_peers) = maybe_selected_peers {
-                debug!("Peers selected for the current broadcast step: {:?}", selected_peers);
+                debug!(
+                    "Peers selected for the current broadcast step: {:?}",
+                    selected_peers
+                );
                 // Send data to selected peers
                 for peer in selected_peers {
                     if let Err(error) = self
