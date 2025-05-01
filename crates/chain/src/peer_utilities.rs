@@ -7,9 +7,7 @@ use irys_actors::{
 };
 use irys_api_server::routes::tx::IrysTransaction;
 use irys_database::{BlockIndexItem, DataLedger};
-pub use irys_reth_node_bridge::node::{
-    RethNodeAddOns, RethNodeExitHandleOLD, RethNodeOLD, RethNodeProvider,
-};
+pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_types::{block::CombinedBlockHeader, IrysBlockHeader, PeerAddress, H256};
 use std::{
     collections::{HashSet, VecDeque},

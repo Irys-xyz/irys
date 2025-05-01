@@ -397,15 +397,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
 
 
-            // try to get block by hash
-            let parent = context
-            .rpc
-            .inner
-            .eth_api()
-            .block_by_hash(prev_block_header.evm_block_hash, false)
-            .await;
 
-            debug!("JESSEDEBUG parent block: {:?}", &parent);
 
             // make sure the parent block is canonical on the reth side so we can built upon it
             RethServiceActor::from_registry().send(ForkChoiceUpdateMessage{
@@ -413,76 +405,39 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 confirmed_hash: None,
                 finalized_hash: None,
             }).await??;
+            
+            // try to get block by hash
+            let parent = context
+            .rpc
+            .inner
+            .eth_api()
+            .block_by_hash(prev_block_header.evm_block_hash, false)
+            .await?;
 
-            // let exec_payload = context
-            //     .engine_api
-            //     .build_payload_v1_irys(prev_block_header.evm_block_hash, payload_attrs)
-            //     .await?;
+            assert!(parent.is_some_and(|b| b.header.hash == prev_block_header.evm_block_hash));
 
-            // // we can examine the execution status of generated shadow txs
-            // // let shadow_receipts = exec_payload.shadow_receipts;
+            let (exec_payload, built, attrs) = context.new_payload_irys(prev_block_header.evm_block_hash, payload_attrs).await?;
 
-            // let v1_payload = exec_payload
-            //     .clone()
-            //     .execution_payload
-            //     .payload_inner
-            //     .payload_inner
-            //     .payload_inner;
-            // // TODO @JesseTheRobot create a deref(?) trait so this isn't as bad
-            // let block_hash = v1_payload.block_hash;
+            // we can examine the execution status of generated shadow txs
+            // let shadow_receipts = exec_payload.shadow_receipts;
 
-            // let (exec_payload, evm_block_hash) = {
-            //                 let exec_payload = context
-            //     .engine_api
-            //     .build_payload_v1_irys(prev_block_header.evm_block_hash, payload_attrs)
-            //     .await?;
-            // // we can examine the execution status of generated shadow txs
-            // // let shadow_receipts = exec_payload.shadow_receipts;
-            // let v1_payload = exec_payload
-            //     .clone()
-            //     .execution_payload
-            //     .payload_inner
-            //     .payload_inner
-            //     .payload_inner;
-
-            //     (exec_payload, v1_payload.block_hash)
-            // };
-
-
-            let (exec_payload, evm_block_hash) = {
-                // let exec_payload = context
-                // .engine_api
-                // .build_payload_v1_irys(prev_block_header.evm_block_hash, payload_attrs)
-                // .await?;
-                // // we can examine the execution status of generated shadow txs
-                // // let shadow_receipts = exec_payload.shadow_receipts;
-                // let v1_payload = exec_payload
-                // .clone()
-                // .execution_payload
-                // .payload_inner
-                // .payload_inner
-                // .payload_inner;
-                // (exec_payload, v1_payload.block_hash)
-
-                let (exec_payload, built, attrs) = context.new_payload_irys(prev_block_header.evm_block_hash, payload_attrs).await?;
-
-                let block_hash = context
+            let block_hash = context
+            .engine_api
+            .submit_payload(
+                built.clone(),
+                attrs.clone(),
+                PayloadStatusEnum::Valid,
+                vec![],
+            )
+            .await?;
+        
+            // trigger forkchoice update via engine api to commit the block to the blockchain
+            context
                 .engine_api
-                .submit_payload(
-                    built.clone(),
-                    attrs.clone(),
-                    PayloadStatusEnum::Valid,
-                    vec![],
-                )
+                .update_forkchoice(block_hash, block_hash)
                 .await?;
-                // trigger forkchoice update via engine api to commit the block to the blockchain
-                context
-                    .engine_api
-                    .update_forkchoice(block_hash, block_hash)
-                    .await?;
-                
-                    (exec_payload, built.block().hash())
-            };
+            
+            let evm_block_hash =  built.block().hash();
 
             irys_block.evm_block_hash = evm_block_hash;
 

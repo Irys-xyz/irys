@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::reth_service::RethServiceActor;
 
@@ -931,7 +931,7 @@ where
                     match future.await {
                         Ok(res) => match res {
                             Ok(()) => {
-                                info!("Successfully connected to reth peer: {:?}", reth_peer_info);
+                                debug!("Successfully connected to reth peer: {:?}", reth_peer_info);
                             }
                             Err(reth_error) => {
                                 error!(

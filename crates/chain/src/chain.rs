@@ -38,7 +38,7 @@ use irys_database::{
 use irys_gossip_service::ServiceHandleWithShutdownSignal;
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::node::RethNode;
-pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeExitHandleOLD, RethNodeProvider};
+pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_storage::{
     irys_consensus_data_db::open_or_create_irys_consensus_data_db,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},

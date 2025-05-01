@@ -243,7 +243,7 @@ impl Handler<BroadcastMiningSeed> for PartitionMiningActor {
     fn handle(&mut self, msg: BroadcastMiningSeed, _: &mut Context<Self>) {
         let seed = msg.seed;
         if !self.should_mine {
-            // debug!("Mining disabled, skipping seed {:?}", seed);
+            debug!("Mining disabled, skipping seed {:?}", seed);
             return;
         }
 
