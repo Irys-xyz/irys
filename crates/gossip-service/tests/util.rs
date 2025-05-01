@@ -1,4 +1,7 @@
 use actix::{Actor, Addr, Context, Handler};
+use actix_web::dev::Server;
+use actix_web::{middleware, web, App, HttpResponse, HttpServer};
+use base58::ToBase58;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::Result;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
@@ -8,6 +11,7 @@ use irys_actors::mempool_service::{
 use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
 use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
+use irys_gossip_service::types::{GossipDataRequest, RequestedData};
 use irys_gossip_service::GossipService;
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -15,16 +19,17 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    AcceptedResponse, Base64, CombinedBlockHeader, Config, DatabaseProvider, GossipData,
+    AcceptedResponse, Base64, BlockHash, CombinedBlockHeader, Config, DatabaseProvider, GossipData,
     IrysBlockHeader, IrysTransaction, IrysTransactionHeader, NodeConfig, PeerAddress, PeerListItem,
     PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 #[derive(Debug)]
 pub struct MempoolStub {
@@ -479,4 +484,122 @@ pub fn create_test_chunks(tx: &IrysTransaction) -> Vec<UnpackedChunk> {
     }
 
     chunks
+}
+
+struct FakeGossipDataHandler {
+    on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
+}
+
+impl FakeGossipDataHandler {
+    fn new() -> Self {
+        Self {
+            on_block_data_request: Box::new(|_| false),
+        }
+    }
+
+    fn call_on_block_data_request(&self, block_hash: BlockHash) -> bool {
+        (self.on_block_data_request)(block_hash)
+    }
+
+    fn set_on_block_data_request(
+        &mut self,
+        on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
+    ) {
+        self.on_block_data_request = on_block_data_request;
+    }
+}
+
+pub struct FakeGossipServer {
+    handler: Arc<RwLock<FakeGossipDataHandler>>,
+}
+
+impl Debug for FakeGossipServer {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeGossipServer").finish()
+    }
+}
+
+impl FakeGossipServer {
+    pub fn new() -> Self {
+        Self {
+            handler: Arc::new(RwLock::new(FakeGossipDataHandler::new())),
+        }
+    }
+
+    pub fn set_on_block_data_request(
+        &self,
+        on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
+    ) {
+        self.handler
+            .write()
+            .expect("to unlock handler")
+            .set_on_block_data_request(on_block_data_request);
+    }
+
+    /// Runs the fake server, returns the address on which the server has started, as well
+    /// as the server handle
+    pub fn run(&self, address: SocketAddr) -> (Server, SocketAddr) {
+        let handler = self.handler.clone();
+        let server = HttpServer::new(move || {
+            let handler = handler.clone();
+            App::new()
+                .app_data(web::Data::new(handler.clone()))
+                .wrap(middleware::Logger::new("%r %s %D ms"))
+                .service(web::resource("/gossip/get_data").route(web::post().to(handle_get_data)))
+                .default_service(web::to(|| async {
+                    warn!("Request hit default handler - check your route paths");
+                    HttpResponse::NotFound()
+                        .content_type("application/json")
+                        .json(false)
+                }))
+        })
+        .workers(1)
+        .shutdown_timeout(5)
+        .keep_alive(actix_web::http::KeepAlive::Disabled)
+        .bind(address)
+        .expect("to bind");
+
+        let addr = server.addrs()[0].clone();
+        let server = server.run();
+        (server, addr)
+    }
+}
+
+async fn handle_get_data(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    data_request: web::Json<GossipDataRequest>,
+    _req: actix_web::HttpRequest,
+) -> HttpResponse {
+    warn!(
+        "Fake server got request: {:?}",
+        data_request.0.requested_data
+    );
+
+    match handler.read() {
+        Ok(handler) => match data_request.0.requested_data {
+            RequestedData::Block(block_hash) => {
+                let res = handler.call_on_block_data_request(block_hash);
+                warn!(
+                    "Block data request for hash {:?}, response: {}",
+                    block_hash.0.to_base58(),
+                    res
+                );
+                HttpResponse::Ok()
+                    .content_type("application/json")
+                    .json(res)
+            }
+            RequestedData::Transaction(transaction_hash) => {
+                warn!("Transaction request for hash {:?}", transaction_hash);
+                HttpResponse::Ok()
+                    .content_type("application/json")
+                    .json(false)
+            }
+        },
+        Err(e) => {
+            warn!("Failed to acquire read lock on handler: {}", e);
+            HttpResponse::InternalServerError()
+                .content_type("application/json")
+                .json("Failed to process request")
+        }
+    }
 }

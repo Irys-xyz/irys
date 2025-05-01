@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-const GENESIS_BLOCK_FILENAME: &str = ".genesis.json";
+const GENESIS_BLOCK_FILENAME: &str = ".irys_genesis.json";
 
 /// Write genesis block to disk
 pub fn save_genesis_block_to_disk(
@@ -28,6 +28,12 @@ pub fn save_genesis_block_to_disk(
     file.write_all(json.as_bytes())?;
 
     Ok(())
+}
+
+/// Check if genesis block exists on disk
+pub fn genesis_block_exists_on_disk(base_directory: &PathBuf) -> bool {
+    let path = Path::new(base_directory).join(GENESIS_BLOCK_FILENAME);
+    path.is_file()
 }
 
 /// Read genesis block from disk

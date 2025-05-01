@@ -1,7 +1,7 @@
 use crate::block_pool_service::BlockPoolError;
 use irys_actors::mempool_service::TxIngressError;
 use irys_actors::peer_list_service::PeerListFacadeError;
-use irys_types::{Address, BlockHash};
+use irys_types::{Address, BlockHash, H256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -102,7 +102,7 @@ pub type GossipResult<T> = Result<T, GossipError>;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum RequestedData {
     Block(BlockHash),
-    Transaction(BlockHash),
+    Transaction(H256),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

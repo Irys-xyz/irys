@@ -31,6 +31,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc::error::SendError;
 use tokio::{sync::mpsc, time};
+use tracing::debug;
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -229,7 +230,8 @@ impl GossipService {
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
         A: ApiClient + Clone + 'static + Unpin + Default,
     {
-        tracing::trace!("GOSSIP BROADCASTING DATA");
+        debug!("Broadcasting data to peers: {}", data.data_type_and_id());
+
         let exclude_peers = match original_source {
             GossipSource::Internal => HashSet::new(),
             GossipSource::External(addr) => {
@@ -245,7 +247,7 @@ impl GossipService {
             .await
             .map_err(|err| GossipError::Internal(InternalGossipError::Unknown(err.to_string())))?;
 
-        tracing::trace!("BROADCASTING DATA TO {:?} PEERS", peers.len());
+        tracing::debug!("Peers selected for broadcast: {:?}", peers);
 
         peers.shuffle(&mut rand::thread_rng());
 
@@ -258,6 +260,7 @@ impl GossipService {
             let maybe_selected_peers = peers.get(0..n);
 
             if let Some(selected_peers) = maybe_selected_peers {
+                debug!("Peers selected for the current broadcast step: {:?}", selected_peers);
                 // Send data to selected peers
                 for peer in selected_peers {
                     if let Err(error) = self
@@ -282,6 +285,7 @@ impl GossipService {
                     }
                 }
             } else {
+                debug!("No peers selected for the current broadcast step");
                 break;
             }
 

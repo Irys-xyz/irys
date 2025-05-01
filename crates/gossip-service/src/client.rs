@@ -13,7 +13,7 @@ use serde::Serialize;
 
 #[derive(Debug, Clone)]
 pub struct GossipClient {
-    mining_address: Address,
+    pub mining_address: Address,
     client: reqwest::Client,
     timeout: Duration,
 }
