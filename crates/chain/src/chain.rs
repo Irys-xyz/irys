@@ -33,7 +33,7 @@ use irys_database::migration::check_db_version_and_run_migrations_if_needed;
 use irys_database::{
     add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx,
 };
-use irys_gossip_service::{GossipResult, ServiceHandleWithShutdownSignal};
+use irys_gossip_service::ServiceHandleWithShutdownSignal;
 use irys_price_oracle::mock_oracle::MockOracle;
 use irys_price_oracle::IrysPriceOracle;
 pub use irys_reth_node_bridge::node::{
@@ -72,11 +72,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::Runtime;
-use tokio::{
-    runtime::Handle,
-    sync::oneshot::{self},
-};
-use tracing::{debug, info};
+use tokio::sync::oneshot::{self};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -466,7 +463,10 @@ impl IrysNode {
                         actix_server.await.unwrap();
                         server_stop_handle.await.unwrap();
 
-                        gossip_service_handle.stop().await.unwrap().unwrap();
+                        match gossip_service_handle.stop().await {
+                            Ok(_) => info!("Gossip service stopped"),
+                            Err(e) => warn!("Gossip service is already stopped: {:?}", e),
+                        }
 
                         debug!("Stopping actors");
                         for arbiter in arbiters {
@@ -527,7 +527,8 @@ impl IrysNode {
                             reth_shutdown_receiver,
                         ),
                     )
-                    .await;
+                    .await
+                    .inspect_err(|e| error!("Reth thread error: {:?}", &e));
                     debug!("Sending shutdown signal to the main actor thread");
                     let _ = main_actor_thread_shutdown_tx.try_send(());
 
@@ -570,7 +571,7 @@ impl IrysNode {
         JoinHandle<()>,
         Vec<ArbiterHandle>,
         RethNodeProvider,
-        ServiceHandleWithShutdownSignal<GossipResult<()>>,
+        ServiceHandleWithShutdownSignal,
     )> {
         let node_config = Arc::new(self.irys_node_config.clone());
 
@@ -694,6 +695,7 @@ impl IrysNode {
             mempool_service.clone(),
             block_discovery.clone(),
             irys_api_client::IrysApiClient::new(),
+            task_exec,
         )?;
 
         // set up the price oracle
@@ -814,11 +816,14 @@ impl IrysNode {
                 mempool: mempool_service,
                 chunk_provider: chunk_provider.clone(),
                 db: irys_db,
-                reth_provider: Some(reth_node.clone()),
-                block_tree: Some(block_tree_guard.clone()),
-                block_index: Some(block_index_guard.clone()),
+                reth_provider: reth_node.clone(),
+                block_tree: block_tree_guard.clone(),
+                block_index: block_index_guard.clone(),
                 config: self.config.clone(),
-                reth_http_url: reth_node.rpc_server_handle().http_url(),
+                reth_http_url: reth_node
+                    .rpc_server_handle()
+                    .http_url()
+                    .expect("Missing reth rpc url!"),
             },
             http_listener,
         )
@@ -955,7 +960,6 @@ impl IrysNode {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
         let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
         let packing_actor_addr = PackingActor::new(
-            Handle::current(),
             reth_node.task_executor.clone(),
             sm_ids,
             self.packing_config.clone(),

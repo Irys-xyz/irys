@@ -55,6 +55,8 @@ pub enum InternalGossipError {
     ServerAlreadyRunning,
     #[error("Broadcast receiver has been already shutdown")]
     BroadcastReceiverShutdown,
+    #[error("Trying to shutdown a server that is already shutdown: {0}")]
+    AlreadyShutdown(String),
 }
 
 pub(crate) fn tx_ingress_error_to_gossip_error(error: TxIngressError) -> Option<GossipError> {

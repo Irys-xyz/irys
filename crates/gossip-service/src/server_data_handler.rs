@@ -40,7 +40,7 @@ where
         Self {
             mempool: self.mempool.clone(),
             block_discovery: self.block_discovery.clone(),
-            cache: self.cache.clone(),
+            cache: Arc::clone(&self.cache),
             api_client: self.api_client.clone(),
         }
     }

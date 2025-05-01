@@ -1,6 +1,7 @@
 use actix::MailboxError;
 use futures::future::select;
 use irys_actors::block_producer::SolutionFoundMessage;
+use irys_actors::block_tree_service::get_canonical_chain;
 use irys_actors::block_validation;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
 use irys_chain::{IrysNode, IrysNodeCtx};
@@ -188,7 +189,7 @@ impl IrysNodeTest<()> {
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
-    pub async fn wait_until_height(
+    pub async fn wait_until_height_on_chain(
         &self,
         target_height: u64,
         max_seconds: usize,
@@ -215,8 +216,53 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub fn get_height(&self) -> u64 {
+    pub async fn wait_until_height(
+        &self,
+        target_height: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<()> {
+        let mut retries = 0;
+        let max_retries = max_seconds; // 1 second per retry
+
+        while get_canonical_chain(self.node_ctx.block_tree_guard.clone())
+            .await
+            .unwrap()
+            .0
+            .last()
+            .unwrap()
+            .1
+            < target_height
+            && retries < max_retries
+        {
+            sleep(Duration::from_secs(1)).await;
+            retries += 1;
+        }
+        if retries == max_retries {
+            Err(eyre::eyre!(
+                "Failed to reach target height after {} retries",
+                retries
+            ))
+        } else {
+            info!(
+                "got block after {} seconds and {} retries",
+                max_seconds, &retries
+            );
+            Ok(())
+        }
+    }
+
+    pub fn get_height_on_chain(&self) -> u64 {
         self.node_ctx.block_index_guard.read().latest_height()
+    }
+
+    pub async fn get_height(&self) -> u64 {
+        get_canonical_chain(self.node_ctx.block_tree_guard.clone())
+            .await
+            .unwrap()
+            .0
+            .last()
+            .unwrap()
+            .1
     }
 
     pub async fn mine_block(&self) -> eyre::Result<()> {
@@ -224,7 +270,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
-        let height = self.get_height();
+        let height = self.get_height().await;
         self.node_ctx.actor_addresses.set_mining(true)?;
         self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
@@ -266,7 +312,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub fn get_block_by_height(
+    pub fn get_block_by_height_on_chain(
         &self,
         height: u64,
         include_chunk: bool,
@@ -286,7 +332,25 @@ impl IrysNodeTest<IrysNodeCtx> {
             })
     }
 
-    pub fn get_block_by_hash(
+    pub async fn get_block_by_height(&self, height: u64) -> eyre::Result<IrysBlockHeader> {
+        get_canonical_chain(self.node_ctx.block_tree_guard.clone())
+            .await
+            .unwrap()
+            .0
+            .iter()
+            .find(|(_, blk_height, _, _)| *blk_height == height)
+            .map(|(blk_hash, _, _, _)| {
+                self.node_ctx
+                    .block_tree_guard
+                    .read()
+                    .get_block(blk_hash)
+                    .cloned()
+            })
+            .flatten()
+            .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
+    }
+
+    pub fn get_block_by_hash_on_chain(
         &self,
         hash: &H256,
         include_chunk: bool,
@@ -299,6 +363,15 @@ impl IrysNodeTest<IrysNodeCtx> {
             Some(db_irys_block) => Ok(db_irys_block.clone()),
             None => Err(eyre::eyre!("Block with hash {} not found", hash)),
         }
+    }
+
+    pub fn get_block_by_hash(&self, hash: &H256) -> eyre::Result<IrysBlockHeader> {
+        self.node_ctx
+            .block_tree_guard
+            .read()
+            .get_block(hash)
+            .cloned()
+            .ok_or_else(|| eyre::eyre!("Block with hash {} not found", hash))
     }
 
     pub async fn stop(self) -> IrysNodeTest<()> {

@@ -1,7 +1,8 @@
 use clap::{command, Parser, Subcommand};
 use irys_config::IrysNodeConfig;
 use irys_database::reth_db::{
-    cursor::*, init_db, transaction::*, Database as _, PlainAccountState, StageCheckpoints,
+    cursor::*, transaction::*, Database as _, DatabaseEnv, DatabaseEnvKind, PlainAccountState,
+    StageCheckpoints,
 };
 use irys_types::Config;
 use reth_node_core::version::default_client_version;
@@ -75,15 +76,13 @@ fn backup_accounts() -> eyre::Result<()> {
 
     let db_path = irys_node_config.reth_data_dir().join("db");
 
-    let reth_db = Arc::new(
-        init_db(
-            db_path,
-            irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
-                .with_log_level(None)
-                .with_exclusive(Some(false)),
-        )?
-        .with_metrics(),
-    );
+    let reth_db = Arc::new(DatabaseEnv::open(
+        &db_path,
+        DatabaseEnvKind::RO,
+        irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
+            .with_log_level(None)
+            .with_exclusive(Some(false)),
+    )?);
 
     let read_tx = reth_db.tx()?;
     // read the latest block
