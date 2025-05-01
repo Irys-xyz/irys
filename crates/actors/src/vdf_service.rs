@@ -147,16 +147,16 @@ impl Actor for VdfService {
 /// Reset VDF Steps as we have a new block with future steps
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
-pub struct ResetVdfMessage(pub BroadcastMiningSeed);
+pub struct FastForwardVdfMessage(pub BroadcastMiningSeed);
 
-impl Handler<ResetVdfMessage> for VdfService {
+impl Handler<FastForwardVdfMessage> for VdfService {
     type Result = ();
 
-    fn handle(&mut self, msg: ResetVdfMessage, ctx: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: FastForwardVdfMessage, ctx: &mut Context<Self>) -> Self::Result {
         let tx = self.tx.clone();
         let value = msg.0;
 
-        // this to allow using the async fn tx.send() inside an actix context
+        // allow using the async fn tx.send() inside an actix context
         ctx.spawn(
             async move {
                 if let Err(e) = tx.send(value).await {

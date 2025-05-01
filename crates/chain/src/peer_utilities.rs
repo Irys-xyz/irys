@@ -5,7 +5,7 @@ use irys_actors::{
     broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
     peer_list_service::{AddPeer, PeerListService},
-    vdf_service::{ResetVdfMessage, VdfService},
+    vdf_service::{FastForwardVdfMessage, VdfService},
 };
 use irys_database::{BlockIndexItem, DataLedger};
 use irys_types::{block_production::Seed, Address};
@@ -294,7 +294,9 @@ pub async fn sync_state_from_peers(
                 checkpoints: block.vdf_limiter_info.last_step_checkpoints.clone(),
             };
 
-            vdf_service_addr.send(ResetVdfMessage(mining_seed)).await?;
+            vdf_service_addr
+                .send(FastForwardVdfMessage(mining_seed))
+                .await?;
 
             // allow block to be discovered by block discovery actor
             if let Err(e) = block_discovery_addr
