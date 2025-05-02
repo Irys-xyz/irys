@@ -14,9 +14,7 @@ pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
-use irys_types::{
-    Address, H256List, IrysBlockHeader, IrysTransactionHeader, PeerAddress, PeerListItem, H256,
-};
+use irys_types::{H256List, IrysBlockHeader, PeerAddress, H256};
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
@@ -218,6 +216,7 @@ pub async fn sync_state_from_peers(
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
     peer_service_addr: PeerListServiceFacade,
+    vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
