@@ -26,8 +26,8 @@ use irys_actors::{
     vdf_service::{GetVdfStateMessage, VdfService},
 };
 use irys_actors::{
-    ActorAddresses, BlockFinalizedMessage, CommitmentCache, EpochReplayData,
-    GetCommitmentStateGuardMessage,
+    ActorAddresses, BlockFinalizedMessage, CommitmentCache, CommitmentStateReadGuard, 
+    EpochReplayData, GetCommitmentStateGuardMessage,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
@@ -700,7 +700,7 @@ impl IrysNode {
         let _handle = CommitmentCache::spawn_service(
             &task_exec,
             receivers.commitments_cache,
-            commitment_state_guard,
+            commitment_state_guard.clone(),
             &config,
         );
 
@@ -715,6 +715,7 @@ impl IrysNode {
             reth_db,
             &storage_modules,
             &block_tree_guard,
+            &commitment_state_guard,
             &service_senders,
             gossip_tx.clone(),
         );
@@ -1174,6 +1175,7 @@ impl IrysNode {
         reth_db: irys_database::db::RethDbWrapper,
         storage_modules: &Vec<Arc<StorageModule>>,
         block_tree_guard: &BlockTreeReadGuard,
+        commitment_state_guard: &CommitmentStateReadGuard,
         service_senders: &ServiceSenders,
         gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> (actix::Addr<MempoolService>, Arbiter) {
@@ -1183,6 +1185,7 @@ impl IrysNode {
             reth_node.task_executor.clone(),
             storage_modules.clone(),
             block_tree_guard.clone(),
+            commitment_state_guard.clone(),
             &config,
             service_senders.clone(),
             gossip_tx,

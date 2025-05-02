@@ -94,8 +94,8 @@ async fn external_api() -> eyre::Result<()> {
             .send(GetBestMempoolTxs)
             .await;
         match txs {
-            Ok(transactions) if !transactions.is_empty() => {
-                break transactions[0].clone();
+            Ok(mempool_tx) if !mempool_tx.storage_tx.is_empty() => {
+                break mempool_tx.storage_tx[0].clone();
             }
             _ => {
                 sleep(Duration::from_millis(100)).await;
