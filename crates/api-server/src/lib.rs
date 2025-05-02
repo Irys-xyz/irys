@@ -18,6 +18,7 @@ use irys_actors::{
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
+use routes::commitment;
 use routes::{
     block, block_index, get_chunk, index, network_config, peer_list, post_chunk, post_version,
     price, proxy::proxy, tx,
@@ -57,6 +58,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route(
             "/block_index",
             web::get().to(block_index::block_index_route),
+        )
+        .route(
+            "/commitment_tx",
+            web::post().to(commitment::post_commitment_tx),
         )
         .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route(

@@ -6,8 +6,8 @@ use irys_actors::{
 use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
-use std::sync::mpsc::Receiver;
 use std::time::Instant;
+use tokio::sync::mpsc::Receiver;
 use tracing::{debug, info};
 
 pub fn run_vdf(
@@ -15,8 +15,8 @@ pub fn run_vdf(
     global_step_number: u64,
     seed: H256,
     initial_reset_seed: H256,
-    new_seed_listener: Receiver<H256>,
-    shutdown_listener: Receiver<()>,
+    mut new_seed_listener: Receiver<BroadcastMiningSeed>,
+    mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
     vdf_service: Addr<VdfService>,
     atomic_vdf_global_step: AtomicVdfStepNumber,
@@ -25,7 +25,8 @@ pub fn run_vdf(
     let mut hash: H256 = seed;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
     let mut global_step_number = global_step_number;
-    let mut reset_seed = initial_reset_seed;
+    // FIXME: The reset seed is the same as the seed... which I suspect is incorrect!
+    let reset_seed = initial_reset_seed;
     info!(
         "VDF thread started at global_step_number: {}",
         global_step_number
@@ -43,7 +44,7 @@ pub fn run_vdf(
             &mut hash,
             config.num_checkpoints_in_vdf_step,
             config.sha_1s_difficulty,
-            &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints ?
+            &mut checkpoints, // TODO: need to send also checkpoints to block producer for last_step_checkpoints?
         );
 
         global_step_number += 1;
@@ -65,6 +66,7 @@ pub fn run_vdf(
         });
 
         if global_step_number % nonce_limiter_reset_frequency == 0 {
+            // FIXME: is there an issue with reset_seed never changing here?
             info!(
                 "Reset seed {:?} applied to step {}",
                 global_step_number, reset_seed
@@ -77,9 +79,21 @@ pub fn run_vdf(
             break;
         };
 
-        if let Ok(h) = new_seed_listener.try_recv() {
-            debug!("New Send Seed {}", h); // TODO: wire new seed injections from chain accepted blocks message BlockConfirmedMessage
-            reset_seed = h;
+        if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
+            // if the step number is ahead of local nodes vdf steps
+            if global_step_number < proposed_ff_to_mining_seed.global_step {
+                debug!(
+                    "Fastforward Step {:?} with Seed {:?}",
+                    proposed_ff_to_mining_seed.global_step, proposed_ff_to_mining_seed.seed
+                );
+                hash = proposed_ff_to_mining_seed.seed.0;
+                global_step_number = proposed_ff_to_mining_seed.global_step;
+            } else {
+                debug!(
+                    "Fastforward Step {} is not ahead of {}",
+                    proposed_ff_to_mining_seed.global_step, global_step_number
+                );
+            }
         }
     }
     debug!(?global_step_number, "VDF thread stopped");
@@ -94,9 +108,10 @@ mod tests {
     use irys_vdf::{vdf_sha_verification, vdf_state::VdfStepsReadGuard, vdf_steps_are_valid};
     use nodit::interval::ii;
     use std::{
-        sync::{atomic::AtomicU64, mpsc, Arc},
+        sync::{atomic::AtomicU64, Arc},
         time::Duration,
     };
+    use tokio::sync::mpsc;
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt};
 
@@ -160,12 +175,12 @@ mod tests {
 
         let broadcast_mining_service = BroadcastMiningService::from_registry();
         let capacity = calc_capacity(&config);
+        let (_, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
         let vdf_service = VdfService::from_capacity(capacity).start();
         SystemRegistry::set(vdf_service.clone());
         let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();
 
-        let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
@@ -237,7 +252,7 @@ mod tests {
         );
 
         // Send shutdown signal
-        shutdown_tx.send(()).unwrap();
+        shutdown_tx.send(()).await.unwrap();
 
         // Wait for vdf thread to finish
         vdf_thread_handler.join().unwrap();

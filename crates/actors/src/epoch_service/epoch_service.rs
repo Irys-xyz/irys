@@ -132,15 +132,15 @@ impl EpochServiceActor {
         commitments: &Vec<CommitmentTransaction>,
     ) -> eyre::Result<()> {
         // Extract the commitments ledger from the system ledgers in the epoch block
-        let commitments_ledger = block_header
+        let commitment_ledger = block_header
             .system_ledgers
             .iter()
             .find(|b| b.ledger_id == SystemLedger::Commitment);
 
         // Verify that each commitment transaction ID referenced in the commitments ledger has a
         // corresponding commitment transaction in the replay data
-        if let Some(commitments_ledger) = commitments_ledger {
-            for txid in commitments_ledger.tx_ids.iter() {
+        if let Some(commitment_ledger) = commitment_ledger {
+            for txid in commitment_ledger.tx_ids.iter() {
                 // If we can't find the commitment transaction for a referenced txid, return an error
                 if commitments.iter().find(|c| c.id == *txid).is_none() {
                     return Err(eyre::eyre!(

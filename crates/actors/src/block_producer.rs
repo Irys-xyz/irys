@@ -12,8 +12,8 @@ use alloy_rpc_types_engine::{
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
-    DataLedger,
+    block_header_by_hash, cached_data_root_by_data_root, insert_commitment_tx,
+    tables::IngressProofs, tx_header_by_txid, DataLedger, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
@@ -21,8 +21,8 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Address, Base64, Config, DataTransactionLedger, H256List,
-    IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TxIngressProof,
-    VDFLimiterInfo, H256, U256,
+    IngressProofsList, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData,
+    Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -61,7 +61,7 @@ pub struct BlockProducerActor {
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     /// Tracks the global state of partition assignments on the protocol
     pub epoch_service: Addr<EpochServiceActor>,
-    /// Tracks the global state of partition assignments on the protocol
+    /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
@@ -125,23 +125,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let (latest_block_hash, prev_block_height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
             info!(?latest_block_hash, ?prev_block_height, "Starting block production, previous block");
 
-            let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash, false)) {
+            let prev_block_header = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash, false)) {
                 Ok(Some(header)) => Ok(header),
-                    Ok(None) =>
-                    Err(eyre!("No block header found for hash {} ({})", latest_block_hash, prev_block_height + 1)),
+                Ok(None) => Err(eyre!("No block header found for hash {} ({})", latest_block_hash, prev_block_height + 1)),
                 Err(e) =>  Err(eyre!("Failed to get previous block ({}) header: {}", prev_block_height, e))
             }?;
-
-            // Retrieve the previous block header and hash
-
-            let prev_block_hash = block_item.block_hash;
-            let prev_block_header: IrysBlockHeader = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false)) {
-                Ok(Some(header)) => Ok(header),
-                Ok(None) =>
-                    Err(eyre!("No block header found for block {} ({}) ", prev_block_hash.0.to_base58(), prev_block_height)),
-                Err(e) =>
-                    Err(eyre!("Failed to get previous block {} ({}) header: {}", prev_block_hash.0.to_base58(), prev_block_height,  e))
-            }?;
+            let prev_block_hash = prev_block_header.block_hash;
 
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
                 warn!("Skipping solution for old step number {}, previous block step number {} for block {} ({}) ", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58(),  prev_block_height);
@@ -227,13 +216,37 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
             // Submit Ledger Transactions
-            let submit_txs: Vec<IrysTransactionHeader> =
+            let mempool_tx =
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
+            let submit_txs = mempool_tx.storage_tx;
 
             let submit_chunks_added = calculate_chunks_added(&submit_txs, config.consensus.chunk_size);
             let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
-
             let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
+
+            // Commitment Transactions
+            let commitment_txs = mempool_tx.commitment_tx;
+            let mut commitment_txids=  H256List::new();
+            let tx = db.tx_mut().unwrap();
+            for commitment_tx in commitment_txs.iter() {
+                if insert_commitment_tx(&tx,commitment_tx ).is_ok() {
+                    debug!("Inserting commitment transaction: {:#?}", commitment_tx);
+                    commitment_txids.push(commitment_tx.id);
+                }
+            }
+            tx.inner.commit().unwrap();
+
+            let commitment_ledger = SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids:commitment_txids
+            };
+
+            // Only populate the system_ledgers if the commitment_ledger has tx
+            let mut system_ledgers: Vec<SystemTransactionLedger> = Vec::new();
+            if commitment_txs.len() > 0 {
+                system_ledgers.push(commitment_ledger);
+            }
+
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
             // Difficulty adjustment logic
@@ -329,7 +342,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 miner_address: solution.mining_address,
                 signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
-                system_ledgers: vec![],
+                system_ledgers,
                 data_ledgers: vec![
                     // Permanent Publish Ledger
                     DataTransactionLedger {
