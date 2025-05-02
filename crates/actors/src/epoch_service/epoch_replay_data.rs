@@ -73,11 +73,21 @@ impl EpochReplayData {
             }
 
             // Find the commitment ledger in the epoch block's system ledgers
-            let commitments_ledger = block
+            let commitments_ledger = match block
                 .system_ledgers
                 .iter()
                 .find(|b| b.ledger_id == SystemLedger::Commitment)
-                .expect("Expected epoch block to contain a Commitment system ledger");
+            {
+                Some(v) => v,
+                None => {
+                    // skip the commitment specific logic
+                    replay_data.push_back(EpochReplayData {
+                        epoch_block: block,
+                        commitments: vec![],
+                    });
+                    continue;
+                }
+            };
 
             // Retrieve all commitment transactions referenced by this epoch block
             let read_tx = db

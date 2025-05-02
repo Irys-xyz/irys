@@ -256,14 +256,6 @@ impl IrysNode {
                 }
             };
 
-            // write genesis.json to disk
-            if let Err(e) = save_genesis_block_to_disk(
-                irys_genesis_block.clone(),
-                &config.node_config.base_directory,
-            ) {
-                panic!("unable to save genesis block to disk: {:?}", e);
-            }
-
             irys_genesis_block
         };
 
@@ -313,7 +305,16 @@ impl IrysNode {
                     ..irys_genesis
                 };
                 add_genesis_commitments(&mut irys_genesis, &self.config);
+
                 let irys_genesis_block = Arc::new(irys_genesis);
+
+                // write genesis.json to disk
+                if let Err(e) = save_genesis_block_to_disk(
+                    irys_genesis_block.clone(),
+                    &self.config.node_config.base_directory,
+                ) {
+                    panic!("unable to save genesis block to disk: {:?}", e);
+                }
 
                 // special handilng for genesis node
                 Self::init_genesis_thread(
@@ -572,7 +573,6 @@ impl IrysNode {
 
                 reth_node.provider.database.db.close();
                 irys_storage::reth_provider::cleanup_provider(&irys_provider);
-
                 info!("Reth thread finished");
             })?;
 
