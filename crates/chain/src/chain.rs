@@ -26,7 +26,7 @@ use irys_actors::{
     vdf_service::{GetVdfStateMessage, VdfService},
 };
 use irys_actors::{
-    ActorAddresses, BlockFinalizedMessage, CommitmentCache, CommitmentStateReadGuard, 
+    ActorAddresses, BlockFinalizedMessage, CommitmentCache, CommitmentStateReadGuard,
     EpochReplayData, GetCommitmentStateGuardMessage,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
