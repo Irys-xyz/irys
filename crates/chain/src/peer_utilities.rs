@@ -8,15 +8,14 @@ use irys_actors::{
 };
 use irys_api_server::routes::tx::IrysTransaction;
 use irys_database::{BlockIndexItem, DataLedger};
-use irys_types::{block_production::Seed, block::CombinedBlockHeader};
+use irys_types::{block::CombinedBlockHeader, block_production::Seed};
 
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
 use irys_types::{
-    Address, H256List, IrysBlockHeader, IrysTransactionHeader, PeerAddress,
-    PeerListItem, H256,
+    Address, H256List, IrysBlockHeader, IrysTransactionHeader, PeerAddress, PeerListItem, H256,
 };
 use std::{
     collections::{HashSet, VecDeque},
