@@ -205,7 +205,12 @@ impl Handler<TxIngressMessage> for MempoolService {
             "unable to get canonical chain from block tree".to_owned(),
         ))?;
 
-        let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
+        let anchor_expiry_depth = self
+            .config
+            .node_config
+            .consensus_config()
+            .mempool
+            .anchor_expiry_depth as u64;
         match irys_database::block_header_by_hash(read_tx, &tx.anchor, false) {
             // note: we use addition here as it's safer
             Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= *latest_height => {
@@ -544,6 +549,7 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
             .take(
                 self.config
                     .node_config
+                    .consensus_config()
                     .mempool
                     .max_data_txs_per_block
                     .try_into()
