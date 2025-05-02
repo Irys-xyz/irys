@@ -14,8 +14,8 @@ pub use irys_reth_node_bridge::node::{
 };
 
 use irys_types::{
-    block::CombinedBlockHeader, IrysBlockHeader, IrysTransactionHeader, PeerAddress, PeerListItem,
-    H256,
+    block::CombinedBlockHeader, H256List, IrysBlockHeader, IrysTransactionHeader, PeerAddress,
+    PeerListItem, H256,
 };
 use std::{
     collections::{HashSet, VecDeque},
@@ -288,7 +288,7 @@ pub async fn sync_state_from_peers(
                 let mining_seed = BroadcastMiningSeed {
                     seed: Seed { 0: *step },
                     global_step: block_start_step + i as u64,
-                    checkpoints: block.vdf_limiter_info.last_step_checkpoints.clone(), //TODO can this be just H256List::new()?
+                    checkpoints: H256List::new(),
                 };
 
                 if let Err(e) = vdf_sender.send(mining_seed).await {
