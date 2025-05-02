@@ -29,25 +29,12 @@ impl VdfState {
         (self.global_step, self.seeds.back().cloned())
     }
 
-    /// Called when local vdf thread generates a new step and wants to increment vdf step state
-    pub fn push_step(&mut self, seed: Seed) {
-        self.update_state(seed, self.global_step + 1);
-    }
-
-    /// Called when vdf step is recieved during peer sync and we need to jump to specified step
-    pub fn jump_step(&mut self, seed: Seed, step: u64) {
-        self.update_state(seed, step);
-    }
-
-    // FIXME: update_state() might not be ok to jump... it might need to fill in the gap too. How to know?
-    //        would that create the recall_range error we see when discovering a block?
-
-    /// Push new seed, removing oldest one if capacity full
-    fn update_state(&mut self, seed: Seed, step: u64) {
+    /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state
+    pub fn increment_step(&mut self, seed: Seed) {
         if self.seeds.len() >= self.capacity {
             self.seeds.pop_front();
         }
-        self.global_step = step;
+        self.global_step += 1;
         self.seeds.push_back(seed);
         info!(
             "Received seed: {:?} global step: {}",

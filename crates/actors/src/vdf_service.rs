@@ -142,7 +142,7 @@ impl Handler<VdfSeed> for VdfService {
     type Result = ();
 
     fn handle(&mut self, msg: VdfSeed, _ctx: &mut Context<Self>) -> Self::Result {
-        self.vdf_state.write().unwrap().push_step(msg.0);
+        self.vdf_state.write().unwrap().increment_step(msg.0);
     }
 }
 
