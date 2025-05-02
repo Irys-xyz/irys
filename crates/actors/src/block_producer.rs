@@ -1,9 +1,8 @@
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
 use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_rpc_types_engine::{
@@ -27,7 +26,9 @@ use irys_types::{
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
 use openssl::sha;
-use reth::{revm::primitives::B256, rpc::eth::EthApiServer as _};
+use reth::{
+    revm::primitives::B256, rpc::eth::EthApiServer as _,
+};
 use reth_db::cursor::*;
 use reth_db::Database;
 use tracing::{debug, error, info, warn};
@@ -236,6 +237,22 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
+            // This exists to prevent block validation errors in the unlikely* case two blocks are produced with the exact same timestamp
+            // This can happen due to EVM blocks using second-precision time, instead of our millisecond precision 
+            // this just waits until the next second (timers (afaict) never undersleep, so we don't need an extra buffer here)
+            // *dev configs can easily trigger this behaviour
+            // as_secs does not take into account/round the underlying nanos at all
+            let now =  if now.as_secs() == Duration::from_millis(prev_block_header.timestamp as u64).as_secs(){
+                let nanos_into_sec = now.subsec_nanos();
+                let nano_to_next_sec = 1_000_000_000 - nanos_into_sec;
+                let time_to_wait = Duration::from_nanos(nano_to_next_sec as u64); 
+                info!("Waiting {:.2?} to prevent timestamp overlap", &time_to_wait);
+                tokio::time::sleep(time_to_wait).await;
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
+            }else {
+                now
+            };
+            
             // Difficulty adjustment logic
             let current_timestamp = now.as_millis();
             let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
@@ -387,19 +404,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // create a new reth payload
 
-            // generate payload attributes
-            // TODO: we need previous block metadata to fill in parent & prev_randao
-            let payload_attrs = PayloadAttributes {
-                timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
-                prev_randao: B256::ZERO,
-                suggested_fee_recipient: irys_block.reward_address,
-                withdrawals: None,
-                parent_beacon_block_root: None,
-                shadows: Some(shadows),
-            };
-
-
-
 
             // make sure the parent block is canonical on the reth side so we can built upon it
             RethServiceActor::from_registry().send(ForkChoiceUpdateMessage{
@@ -414,9 +418,21 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             .inner
             .eth_api()
             .block_by_hash(prev_block_header.evm_block_hash, false)
-            .await?;
+            .await?.expect("Should be able to get the parent EVM block");
 
-            assert!(parent.is_some_and(|b| b.header.hash == prev_block_header.evm_block_hash));
+            assert!(parent.header.hash == prev_block_header.evm_block_hash);
+
+            // generate payload attributes
+            // TODO: we need previous block metadata to fill in parent & prev_randao
+            let payload_attrs = PayloadAttributes {
+                timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
+                prev_randao: parent.header.mix_hash.unwrap_or(B256::ZERO),
+                suggested_fee_recipient: irys_block.reward_address,
+                withdrawals: None, // these should ALWAYS be none
+                parent_beacon_block_root: None, // maybe one day we pass through the parent irys block hash here?
+                shadows: Some(shadows),
+            };
+
 
             let (exec_payload, built, attrs) = context.new_payload_irys(prev_block_header.evm_block_hash, payload_attrs).await?;
 
