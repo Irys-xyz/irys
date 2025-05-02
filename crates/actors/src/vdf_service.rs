@@ -106,7 +106,7 @@ pub fn calc_capacity(config: &Config) -> usize {
         config.consensus.num_chunks_in_partition / config.consensus.num_chunks_in_recall_range;
     let capacity = if capacity_from_config < MINIMUM_CAPACITY {
         warn!(
-            "capacity in config: {} set too low. Overidden with {}",
+            "capacity in config: {} set too low. Overridden with {}",
             capacity_from_config, MINIMUM_CAPACITY
         );
         MINIMUM_CAPACITY
