@@ -129,7 +129,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 Err(e) =>  Err(eyre!("Failed to get previous block ({}) header: {}", prev_block_height, e))
             }?;
             let prev_block_hash = prev_block_header.block_hash;
-           
+
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
                 warn!("Skipping solution for old step number {}, previous block step number {} for block {} ({}) ", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58(),  prev_block_height);
                 return Ok(None)
