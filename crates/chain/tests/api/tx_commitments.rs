@@ -174,16 +174,24 @@ async fn get_commitment_status(
 
 #[actix_web::test]
 async fn test_commitments_3epochs_test() -> eyre::Result<()> {
+    // ===== TEST ENVIRONMENT SETUP =====
+    // Configure logging to reduce noise while keeping relevant commitment outputs
     std::env::set_var("RUST_LOG", "debug,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_actors::block_validation=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::block_producer=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
-    // ===== TEST SETUP =====
-    // Override the config to accelerate epoch blocks by having 2 blocks per epoch
+
+    // ===== TEST PURPOSE: Multiple Epochs with Commitments =====
+    // This test verifies that:
+    // 1. Stake and pledge commitments are correctly processed across multiple epoch transitions
+    // 2. Partition assignments are properly created and maintained for all pledges
+    // 3. The commitment state correctly tracks stake and pledge relationships
+
+    // Configure a test network with accelerated epochs (2 blocks per epoch)
     let mut config = NodeConfig::testnet();
     let num_blocks_in_epoch: usize = 2;
     config
         .consensus
         .set_num_blocks_in_epoch(num_blocks_in_epoch);
 
-    // Create test environment with a 2 additional funded signers for commitment tx creation
+    // Create multiple signers to test different commitment scenarios
     let signer1 = IrysSigner::random_signer(&config.consensus_config());
     let signer2 = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![
@@ -202,6 +210,8 @@ async fn test_commitments_3epochs_test() -> eyre::Result<()> {
             },
         ),
     ]);
+
+    // Start a test node with custom configuration
     let node = IrysNodeTest::new_genesis(config.clone())
         .await
         .start()
@@ -212,7 +222,7 @@ async fn test_commitments_3epochs_test() -> eyre::Result<()> {
         node.node_ctx.config.node_config.http.port
     );
 
-    // Initialize packing and mining
+    // Initialize blockchain components
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
@@ -220,11 +230,10 @@ async fn test_commitments_3epochs_test() -> eyre::Result<()> {
     .await?;
     node.node_ctx.actor_addresses.start_mining().unwrap();
 
-    // Get a reference to the API state so we can start the api server
+    // Initialize API for submitting commitment transactions
     let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let api_state = node.node_ctx.get_api_state(ema_tx);
 
-    // Start the API server
     let _app = actix_web::test::init_service(
         App::new()
             .wrap(Logger::default())
@@ -233,79 +242,100 @@ async fn test_commitments_3epochs_test() -> eyre::Result<()> {
     )
     .await;
 
+    // Get access to commitment and partition services for verification
     let epoch_service = node.node_ctx.actor_addresses.epoch_service.clone();
-
     let commitment_state_guard = epoch_service
         .send(GetCommitmentStateGuardMessage)
         .await
         .unwrap();
-
     let pa_guard = epoch_service
         .send(GetPartitionAssignmentsGuardMessage)
         .await
         .unwrap();
 
-    // Check that the genesis block producer has 3 partition assignments
+    // ===== PHASE 1: Verify Genesis Block Initialization =====
+    // Check that the genesis block producer has the expected initial pledges
     let genesis_signer = node.node_ctx.config.node_config.miner_address();
 
     let commitment_state = commitment_state_guard.read();
     let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
     if let Some(pledges) = pledges {
-        assert_eq!(pledges.len(), 3);
+        assert_eq!(
+            pledges.len(),
+            3,
+            "Genesis miner should have exactly 3 pledges"
+        );
     } else {
-        panic!("Expected genesis miner pledges!");
+        panic!("Expected genesis miner to have pledges!");
     }
-    drop(commitment_state); // Drop this so the node can acquire a read lock during block production
+    drop(commitment_state); // Release lock to allow node operations
 
-    // Post a stake commitment for signer1
+    // ===== PHASE 2: First Epoch - Create Commitments =====
+    // Create stake commitment for first test signer
     post_stake_commitment(&uri, &signer1).await;
 
-    // Post two pledge commitments for signer1
+    // Create two pledge commitments for first test signer
     let anchor = post_pledge_commitment(&uri, &signer1, H256::default())
         .await
         .id;
     post_pledge_commitment(&uri, &signer1, anchor).await;
 
-    // Stake signer 2
+    // Create stake commitment for second test signer
     post_stake_commitment(&uri, &signer2).await;
 
-    // Mine epoch block;
-    info!("MINE EPOCH BLOCK:");
+    // Mine enough blocks to reach the first epoch boundary
+    info!("MINE FIRST EPOCH BLOCK:");
     node.mine_blocks(num_blocks_in_epoch).await.unwrap();
 
+    // ===== PHASE 3: Verify First Epoch Assignments =====
+    // Verify that all pledges have been assigned partitions
     validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
     validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
 
-    // Validates partition assignments occur during epoch tasks
+    // Verify commitment state contains expected pledges and stakes
     let commitment_state = commitment_state_guard.read();
+
+    // Check genesis miner pledges
     let pledges = commitment_state
         .pledge_commitments
         .get(&genesis_signer)
         .expect("Expected genesis miner pledges!");
-    assert_eq!(pledges.len(), 3);
+    assert_eq!(
+        pledges.len(),
+        3,
+        "Genesis miner should still have 3 pledges after first epoch"
+    );
 
+    // Check signer1 pledges and stake
     let pledges = commitment_state
         .pledge_commitments
         .get(&signer1.address())
         .expect("Expected signer1 miner pledges!");
-    assert_eq!(pledges.len(), 2);
+    assert_eq!(
+        pledges.len(),
+        2,
+        "Signer1 should have 2 pledges after first epoch"
+    );
 
     let stake = commitment_state.stake_commitments.get(&signer1.address());
-    assert_matches!(stake, Some(_));
+    assert_matches!(stake, Some(_), "Signer1 should have a stake commitment");
     drop(commitment_state);
 
-    // Signer 2 pledges
+    // ===== PHASE 4: Second Epoch - Add More Commitments =====
+    // Create pledge for second test signer
     post_pledge_commitment(&uri, &signer2, H256::default()).await;
 
-    // Mine epoch block
-    info!("MINE EPOCH BLOCK:");
+    // Mine enough blocks to reach the second epoch boundary
+    info!("MINE SECOND EPOCH BLOCK:");
     node.mine_blocks(num_blocks_in_epoch).await.unwrap();
 
-    // Validate all pledges have partition assignments
+    // ===== PHASE 5: Verify Second Epoch Assignments =====
+    // Verify all signers have proper partition assignments for all pledges
     validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
     validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
     validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
 
+    // ===== TODO: Future Test Extension =====
     // TODO: Waiting for node restart support in master
 
     // // Restart the node
