@@ -38,7 +38,8 @@ use crate::{
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
-    services::ServiceSenders, CommitmentCacheMessage,
+    services::ServiceSenders,
+    CommitmentCacheMessage,
 };
 
 /// Used to mock up a `BlockProducerActor`
@@ -233,16 +234,16 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 // from the current epoch without re-inserting them into the database
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let _ = commitment_cache.send(CommitmentCacheMessage::GetEpochCommitments { response: tx });
-                
+
                 // Get the commitments and create a new H256List with their IDs
                 let commitments = rx.await.expect("to receive epoch commitments");
                 let mut txids = H256List::new();
-                
+
                 for tx in commitments.iter() {
                     debug!("Epoch block includes commitment: {}", tx.id.0.to_base58());
                     txids.push(tx.id);
                 }
-                
+
                 SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),
                     tx_ids: txids
@@ -252,7 +253,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 // from the mempool and create a ledger entry referencing them
                 let tx = db.tx_mut().unwrap();
                 let mut txids = H256List::new();
-                
+
                 for tx_item in mempool_tx.commitment_tx.iter() {
                     // Only include successfully inserted transactions
                     if insert_commitment_tx(&tx, tx_item).is_ok() {
@@ -261,7 +262,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     }
                 }
                 tx.inner.commit().unwrap();
-                
+
                 SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),
                     tx_ids: txids
