@@ -38,7 +38,7 @@ use crate::{
     epoch_service::{EpochServiceActor, GetPartitionAssignmentMessage},
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
-    services::ServiceSenders,
+    services::ServiceSenders, CommitmentCacheMessage,
 };
 
 /// Used to mock up a `BlockProducerActor`
@@ -115,6 +115,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let vdf_steps = self.vdf_steps_guard.clone();
         let price_oracle = self.price_oracle.clone();
         let ema_service = self.service_senders.ema.clone();
+        let commitment_cache = self.service_senders.commitment_cache.clone();
         let config = self.config.clone();
 
         AtomicResponse::new(Box::pin( async move {
@@ -223,27 +224,57 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
 
             // Commitment Transactions
-            let commitment_txs = mempool_tx.commitment_tx;
-            let mut commitment_txids=  H256List::new();
-            let tx = db.tx_mut().unwrap();
-            for commitment_tx in commitment_txs.iter() {
-                if insert_commitment_tx(&tx,commitment_tx ).is_ok() {
-                    debug!("Inserting commitment transaction: {:#?}", commitment_tx);
-                    commitment_txids.push(commitment_tx.id);
-                }
-            }
-            tx.inner.commit().unwrap();
+            let block_height = prev_block_header.height + 1;
+            let is_epoch_block = block_height % config.consensus.epoch.num_blocks_in_epoch == 0;
 
-            let commitment_ledger = SystemTransactionLedger {
-                ledger_id: SystemLedger::Commitment.into(),
-                tx_ids:commitment_txids
+            // Construct commitment ledger based on block type (epoch vs regular)
+            let commitment_ledger = if is_epoch_block {
+                // In epoch blocks: collect and reference all previously validated commitments 
+                // from the current epoch without re-inserting them into the database
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = commitment_cache.send(CommitmentCacheMessage::GetEpochCommitments { response: tx });
+                
+                // Get the commitments and create a new H256List with their IDs
+                let commitments = rx.await.expect("to receive epoch commitments");
+                let mut txids = H256List::new();
+                
+                for tx in commitments.iter() {
+                    debug!("Epoch block includes commitment: {}", tx.id.0.to_base58());
+                    txids.push(tx.id);
+                }
+                
+                SystemTransactionLedger {
+                    ledger_id: SystemLedger::Commitment.into(),
+                    tx_ids: txids
+                }
+            } else {
+                // In regular blocks: process and persist new commitment transactions
+                // from the mempool and create a ledger entry referencing them
+                let tx = db.tx_mut().unwrap();
+                let mut txids = H256List::new();
+                
+                for tx_item in mempool_tx.commitment_tx.iter() {
+                    // Only include successfully inserted transactions
+                    if insert_commitment_tx(&tx, tx_item).is_ok() {
+                        debug!("New commitment persisted: {}", tx_item.id.0.to_base58());
+                        txids.push(tx_item.id);
+                    }
+                }
+                tx.inner.commit().unwrap();
+                
+                SystemTransactionLedger {
+                    ledger_id: SystemLedger::Commitment.into(),
+                    tx_ids: txids
+                }
             };
 
-            // Only populate the system_ledgers if the commitment_ledger has tx
-            let mut system_ledgers: Vec<SystemTransactionLedger> = Vec::new();
-            if commitment_txs.len() > 0 {
-                system_ledgers.push(commitment_ledger);
-            }
+            // Only add the system ledger to the block when commitments exist
+            // Empty ledgers are excluded to optimize block size
+            let system_ledgers = if !commitment_ledger.tx_ids.is_empty() {
+                vec![commitment_ledger]
+            } else {
+                Vec::new()
+            };
 
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
@@ -252,7 +283,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
             let current_difficulty = prev_block_header.diff;
             let mut is_difficulty_updated = false;
-            let block_height = prev_block_header.height + 1;
             let (diff, stats) = calculate_difficulty(block_height, last_diff_timestamp, current_timestamp, current_difficulty, &config.consensus.difficulty_adjustment);
 
             // Did an adjustment happen?

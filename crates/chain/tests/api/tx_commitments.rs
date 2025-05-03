@@ -1,13 +1,19 @@
 use crate::{api::post_commitment_tx_request, utils::IrysNodeTest};
 use actix_web::{middleware::Logger, App};
 use alloy_core::primitives::U256;
-use irys_actors::{packing::wait_for_packing, CommitmentCacheMessage, CommitmentStatus};
+use assert_matches::assert_matches;
+use base58::ToBase58;
+use irys_actors::{
+    packing::wait_for_packing, CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentStatus,
+    GetCommitmentStateGuardMessage, GetPartitionAssignmentsGuardMessage,
+    PartitionAssignmentsReadGuard,
+};
 use irys_api_server::routes;
 use irys_chain::IrysNodeCtx;
-use irys_types::{irys::IrysSigner, CommitmentTransaction, NodeConfig, H256};
+use irys_types::{irys::IrysSigner, Address, CommitmentTransaction, NodeConfig, H256};
 use reth_primitives::{irys_primitives::CommitmentType, GenesisAccount};
 use tokio::time::Duration;
-use tracing::info;
+use tracing::{debug, info};
 
 #[actix_web::test]
 async fn test_commitments_basic_test() -> eyre::Result<()> {
@@ -56,7 +62,6 @@ async fn test_commitments_basic_test() -> eyre::Result<()> {
     // ===== TEST CASE 1: Stake Commitment Creation and Processing =====
     // Create a new stake commitment transaction
     let stake_tx = CommitmentTransaction {
-        id: H256::random(),
         commitment_type: CommitmentType::Stake,
         fee: 1,
         ..Default::default()
@@ -81,7 +86,6 @@ async fn test_commitments_basic_test() -> eyre::Result<()> {
     // ===== TEST CASE 2: Pledge Creation for Staked Address =====
     // Create a pledge commitment for the already staked address
     let pledge_tx = CommitmentTransaction {
-        id: H256::random(),
         commitment_type: CommitmentType::Pledge,
         fee: 1,
         ..Default::default()
@@ -126,7 +130,6 @@ async fn test_commitments_basic_test() -> eyre::Result<()> {
 
     // Create a pledge for the unstaked address
     let pledge_tx = CommitmentTransaction {
-        id: H256::random(),
         commitment_type: CommitmentType::Pledge,
         fee: 1,
         ..Default::default()
@@ -167,4 +170,228 @@ async fn get_commitment_status(
         .await
         .expect("to receive CommitmentStatus from GetCommitmentStatus message");
     status
+}
+
+#[actix_web::test]
+async fn test_commitments_3epochs_test() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_actors::block_validation=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::block_producer=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    // ===== TEST SETUP =====
+    // Override the config to accelerate epoch blocks by having 2 blocks per epoch
+    let mut config = NodeConfig::testnet();
+    let num_blocks_in_epoch: usize = 2;
+    config
+        .consensus
+        .set_num_blocks_in_epoch(num_blocks_in_epoch);
+
+    // Create test environment with a 2 additional funded signers for commitment tx creation
+    let signer1 = IrysSigner::random_signer(&config.consensus_config());
+    let signer2 = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![
+        (
+            signer1.address(),
+            GenesisAccount {
+                balance: U256::from(690000000000000000_u128),
+                ..Default::default()
+            },
+        ),
+        (
+            signer2.address(),
+            GenesisAccount {
+                balance: U256::from(690000000000000000_u128),
+                ..Default::default()
+            },
+        ),
+    ]);
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .await
+        .start()
+        .await;
+
+    let uri = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.port
+    );
+
+    // Initialize packing and mining
+    wait_for_packing(
+        node.node_ctx.actor_addresses.packing.clone(),
+        Some(Duration::from_secs(10)),
+    )
+    .await?;
+    node.node_ctx.actor_addresses.start_mining().unwrap();
+
+    // Get a reference to the API state so we can start the api server
+    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
+    let api_state = node.node_ctx.get_api_state(ema_tx);
+
+    // Start the API server
+    let _app = actix_web::test::init_service(
+        App::new()
+            .wrap(Logger::default())
+            .app_data(actix_web::web::Data::new(api_state))
+            .service(routes()),
+    )
+    .await;
+
+    let epoch_service = node.node_ctx.actor_addresses.epoch_service.clone();
+
+    let commitment_state_guard = epoch_service
+        .send(GetCommitmentStateGuardMessage)
+        .await
+        .unwrap();
+
+    let pa_guard = epoch_service
+        .send(GetPartitionAssignmentsGuardMessage)
+        .await
+        .unwrap();
+
+    // Check that the genesis block producer has 3 partition assignments
+    let genesis_signer = node.node_ctx.config.node_config.miner_address();
+
+    let commitment_state = commitment_state_guard.read();
+    let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
+    if let Some(pledges) = pledges {
+        assert_eq!(pledges.len(), 3);
+    } else {
+        panic!("Expected genesis miner pledges!");
+    }
+    drop(commitment_state); // Drop this so the node can acquire a read lock during block production
+
+    // Post a stake commitment for signer1
+    post_stake_commitment(&uri, &signer1).await;
+
+    // Post two pledge commitments for signer1
+    let anchor = post_pledge_commitment(&uri, &signer1, H256::default())
+        .await
+        .id;
+    post_pledge_commitment(&uri, &signer1, anchor).await;
+
+    // Stake signer 2
+    post_stake_commitment(&uri, &signer2).await;
+
+    // Mine epoch block;
+    info!("MINE EPOCH BLOCK:");
+    node.mine_blocks(num_blocks_in_epoch).await.unwrap();
+
+    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
+    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
+
+    // Validates partition assignments occur during epoch tasks
+    let commitment_state = commitment_state_guard.read();
+    let pledges = commitment_state
+        .pledge_commitments
+        .get(&genesis_signer)
+        .expect("Expected genesis miner pledges!");
+    assert_eq!(pledges.len(), 3);
+
+    let pledges = commitment_state
+        .pledge_commitments
+        .get(&signer1.address())
+        .expect("Expected signer1 miner pledges!");
+    assert_eq!(pledges.len(), 2);
+
+    let stake = commitment_state.stake_commitments.get(&signer1.address());
+    assert_matches!(stake, Some(_));
+    drop(commitment_state);
+
+    // Signer 2 pledges
+    post_pledge_commitment(&uri, &signer2, H256::default()).await;
+
+    // Mine epoch block
+    info!("MINE EPOCH BLOCK:");
+    node.mine_blocks(num_blocks_in_epoch).await.unwrap();
+
+    // Validate all pledges have partition assignments
+    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
+    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
+    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
+
+    // TODO: Waiting for node restart support in master
+
+    // // Restart the node
+    // let node = node.stop().await.start().await;
+
+    // // Verify the partition assignments persist
+    // validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
+    // validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
+    // validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
+
+    // ===== TEST CLEANUP =====
+    node.node_ctx.stop().await;
+    Ok(())
+}
+
+async fn post_stake_commitment(uri: &str, signer: &IrysSigner) {
+    let stake_tx = CommitmentTransaction {
+        commitment_type: CommitmentType::Stake,
+        fee: 1,
+        ..Default::default()
+    };
+    let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+    info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
+
+    // Submit stake commitment via API
+    post_commitment_tx_request(&uri, &stake_tx).await;
+}
+
+async fn post_pledge_commitment(
+    uri: &str,
+    signer: &IrysSigner,
+    anchor: H256,
+) -> CommitmentTransaction {
+    let pledge_tx = CommitmentTransaction {
+        commitment_type: CommitmentType::Pledge,
+        anchor,
+        fee: 1,
+        ..Default::default()
+    };
+    let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+    info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
+
+    // Submit pledge commitment via API
+    post_commitment_tx_request(&uri, &pledge_tx).await;
+
+    pledge_tx
+}
+
+fn validate_pledge_assignments(
+    commitment_state_guard: &CommitmentStateReadGuard,
+    pa_guard: &PartitionAssignmentsReadGuard,
+    address: &Address,
+) {
+    // Extract partition hashes from pledges
+    let partition_hashes: Vec<Option<H256>> = commitment_state_guard
+        .read()
+        .pledge_commitments
+        .get(address)
+        .map(|pledges| pledges.iter().map(|pledge| pledge.partition_hash).collect())
+        .unwrap_or_default();
+
+    let direct = commitment_state_guard
+        .read()
+        .pledge_commitments
+        .get(address)
+        .unwrap()
+        .clone();
+
+    debug!(
+        "Got partition_hashes from pledges {:#?} {:#?}",
+        partition_hashes, direct
+    );
+
+    // Look up their partition assignments
+    for partition_hash in partition_hashes {
+        if let Some(partition_hash) = partition_hash {
+            let pa = pa_guard.read().get_assignment(partition_hash);
+            match pa {
+                Some(pa) => {
+                    // Verify the partition assignments in the partition assignment state
+                    assert_eq!(&pa.miner_address, address);
+                }
+                None => panic!("expected partition assignment for hash"),
+            }
+        } else {
+            panic!("expected partition hash for pledge")
+        }
+    }
 }

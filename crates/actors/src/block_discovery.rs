@@ -4,13 +4,12 @@ use crate::{
     block_validation::prevalidate_block,
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
-    CommitmentCacheMessage, CommitmentStatus,
+    CommitmentCacheInner, CommitmentCacheMessage, CommitmentStatus, GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
-
 use irys_types::{
     CommitmentTransaction, Config, DatabaseProvider, GossipData, H256List, IrysBlockHeader,
     IrysTransactionHeader,
@@ -302,10 +301,37 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         ))
                         .await??;
 
-                    // Is this an epoch block?
+                    // Check if we've reached the end of an epoch and should finalize commitments
                     let block_height = new_block_header.height;
                     let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
-                    if block_height > 0 && block_height % blocks_in_epoch == 0 {
+                    let is_epoch_block = block_height > 0 && block_height % blocks_in_epoch == 0;
+
+                    if is_epoch_block {
+                        // For epoch blocks, validate that all included commitments are legitimate
+                        // Get current commitment state from epoch service for validation
+                        let commitment_state_guard = epoch_service
+                            .send(GetCommitmentStateGuardMessage)
+                            .await
+                            .unwrap();
+
+                        // Create a temporary local commitment validation environment
+                        // This avoids async overhead while checking commitment validity and creates
+                        // an independent cache we can populate and discard
+                        let mut local_commitment_cache =
+                            CommitmentCacheInner::new(commitment_state_guard);
+
+                        // Validate each commitment transaction before accepting the epoch block
+                        for commitment_tx in commitments.iter() {
+                            let status =
+                                local_commitment_cache.add_commitment(commitment_tx.clone());
+
+                            // Reject the entire epoch block if any commitment is invalid
+                            // This ensures only verified commitments are finalized at epoch boundaries
+                            if status != CommitmentStatus::Accepted {
+                                return Err(eyre::eyre!("Invalid commitments in epoch block"));
+                            }
+                        }
+
                         // Look up the previous epoch block
                         let block_item = block_index_guard2
                             .read()
@@ -324,6 +350,14 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             epoch_block: new_block_header.clone(),
                             commitments,
                         });
+
+                        // Clear the CommitmentCache for a new epoch
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = commitment_cache_sender
+                            .send(CommitmentCacheMessage::ClearCache { response: tx });
+                        let _ = rx
+                            .await
+                            .expect("to receive a response from ClearCache message");
                     }
 
                     // Send the block to the gossip bus

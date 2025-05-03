@@ -605,6 +605,12 @@ impl EpochServiceActor {
                 .stake_commitments
                 .insert(stake_commitment.signer, value);
         }
+        drop(commitment_state); // Ensure the writes are recorded
+
+        let mut commitment_state = self
+            .commitment_state
+            .write()
+            .expect("to create a writeable commitment state");
 
         // Process pledge commitments - miners committing resources to the network
         for pledge_commitment in pledge_commitments {
@@ -617,9 +623,7 @@ impl EpochServiceActor {
                 .get(&address)
                 .is_some_and(|c| c.commitment_status == CommitmentStatus::Active)
             {
-                continue;
-            } else {
-                // TODO: Consider raising an error - this condition should have been caught in pre-validation
+                panic!("Invalid commitments found in epoch block");
             }
 
             // Create the state entry for the pledge commitment
@@ -690,42 +694,46 @@ impl EpochServiceActor {
         // of pledges and unassigned hashes leads to deterministic pledge assignment
         unassigned_pledges.sort_unstable_by(|a, b| a.id.cmp(&b.id));
 
-        // Loop though both lists assigning capacity partitions to pledges
+        // Loop through both lists assigning capacity partitions to pledges
         for pledge in &unassigned_pledges {
-            let partition_hash = unassigned_parts.pop_front().unwrap(); // Safe because we check isEmpty above
+            // Get the next available partition hash
+            let Some(partition_hash) = unassigned_parts.pop_front() else {
+                break; // No more partitions available
+            };
 
-            // Initialize flag to track if we assigned a pledge commitment to a partition_hash
-            let mut pledge_assigned = false;
+            // Try to get all the pledge commitments for a particular address
+            let Some(entries) = commitment_state.pledge_commitments.get_mut(&pledge.signer) else {
+                continue; // No pledges for this signer, skip to next
+            };
 
-            // Get the pledges for this signer
-            if let Some(entries) = commitment_state.pledge_commitments.get_mut(&pledge.signer) {
-                // Look for the matching pledge
-                for entry in entries.iter_mut() {
-                    if entry.id == pledge.id {
-                        // Record the assigned partition hash in the pledge entry
-                        entry.partition_hash = Some(partition_hash);
-                        pledge_assigned = true;
-                        break;
-                    }
-                }
-            }
+            // Find the specific pledge entry by ID
+            let Some(entry) = entries.iter_mut().find(|entry| entry.id == pledge.id) else {
+                continue; // Pledge not found, skip to next
+            };
 
-            // If the pledge commitment was updated, update partition assignments state to match
-            if pledge_assigned {
-                let mut pa = self.partition_assignments.write().unwrap();
-                pa.capacity_partitions.insert(
+            // Assign the partition hash to this pledge
+            entry.partition_hash = Some(partition_hash);
+
+            // Update partition assignments state to reference the assigned address
+            let mut pa = self.partition_assignments.write().unwrap();
+            pa.capacity_partitions.insert(
+                partition_hash,
+                PartitionAssignment {
                     partition_hash,
-                    PartitionAssignment {
-                        partition_hash,
-                        miner_address: pledge.signer,
-                        ledger_id: None,
-                        slot_index: None,
-                    },
-                );
-                // Remove the partition_hash from the unassigned partitions list
-                self.unassigned_partitions
-                    .retain(|&hash| hash != partition_hash);
-            }
+                    miner_address: pledge.signer,
+                    ledger_id: None,
+                    slot_index: None,
+                },
+            );
+
+            debug!(
+                "Assigned partition_hash {} to address {}",
+                partition_hash, pledge.signer
+            );
+
+            // Remove the hash from unassigned partitions
+            self.unassigned_partitions
+                .retain(|&hash| hash != partition_hash);
         }
     }
 

@@ -32,18 +32,21 @@ pub async fn post_commitment_tx(
     let inner_result = msg_result.unwrap();
     if let Err(err) = inner_result {
         return match err {
-            TxIngressError::InvalidSignature => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                .body(format!("Invalid Signature: {:?}", err))),
-            TxIngressError::Unfunded => Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED)
-                .body(format!("Unfunded: {:?}", err))),
+            TxIngressError::InvalidSignature => {
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{:?}", err)))
+            }
+            TxIngressError::Unfunded => {
+                Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED).body(format!("{:?}", err)))
+            }
             TxIngressError::Skipped => Ok(HttpResponse::Ok()
                 .body("Already processed: the transaction was previously handled")),
             TxIngressError::Other(err) => {
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Failed to deliver transaction: {:?}", err)))
             }
-            TxIngressError::InvalidAnchor => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                .body(format!("Invalid Anchor: {:?}", err))),
+            TxIngressError::InvalidAnchor => {
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{:?}", err)))
+            }
             TxIngressError::DatabaseError => {
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal database error: {:?}", err)))
