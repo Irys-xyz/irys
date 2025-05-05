@@ -300,7 +300,8 @@ impl IrysNode {
             (false, &NodeMode::PeerSync) => {
                 let genesis_file_exists =
                     genesis_block_exists_on_disk(&self.config.node_config.base_directory);
-
+                // TODO: add logic to insert the genesis block (like init_genesis_thread)
+                // right now, the genesis block is synchronised automatically via block discovery
                 if !genesis_file_exists {
                     info!("fetching genesis block from trusted peer");
                     let awc_client = awc::Client::new();
@@ -324,6 +325,7 @@ impl IrysNode {
                         panic!("unable to save genesis block to disk: {:?}", e);
                     }
                 }
+
                 // no special handling for if the genesis block exists on disk already
             }
             (true, &NodeMode::PeerSync) => {
