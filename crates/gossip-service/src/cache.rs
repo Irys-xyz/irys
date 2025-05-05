@@ -4,9 +4,8 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::types::{GossipError, GossipResult};
-use core::net::SocketAddr;
 use core::time::Duration;
-use irys_types::{BlockHash, ChunkPathHash, GossipData, IrysTransactionId, H256};
+use irys_types::{Address, BlockHash, ChunkPathHash, GossipData, IrysTransactionId, H256};
 use std::collections::HashSet;
 use std::{
     collections::HashMap,
@@ -18,9 +17,9 @@ use std::{
 #[derive(Debug, Default)]
 pub struct GossipCache {
     /// Maps data identifiers to a map of peer IPs and when they last saw the data
-    chunks: Arc<RwLock<HashMap<ChunkPathHash, HashMap<SocketAddr, Instant>>>>,
-    transactions: Arc<RwLock<HashMap<IrysTransactionId, HashMap<SocketAddr, Instant>>>>,
-    blocks: Arc<RwLock<HashMap<BlockHash, HashMap<SocketAddr, Instant>>>>,
+    chunks: Arc<RwLock<HashMap<ChunkPathHash, HashMap<Address, Instant>>>>,
+    transactions: Arc<RwLock<HashMap<IrysTransactionId, HashMap<Address, Instant>>>>,
+    blocks: Arc<RwLock<HashMap<BlockHash, HashMap<Address, Instant>>>>,
 }
 
 impl GossipCache {
@@ -41,7 +40,7 @@ impl GossipCache {
     pub fn seen_block_from_peer(
         &self,
         block_hash: &BlockHash,
-        peer_address: &SocketAddr,
+        peer_miner_address: &Address,
     ) -> GossipResult<bool> {
         let peer_map = self
             .blocks
@@ -50,7 +49,7 @@ impl GossipCache {
         let peer_map = peer_map
             .get(block_hash)
             .ok_or_else(|| GossipError::Cache("Block not found".to_string()))?;
-        Ok(peer_map.contains_key(peer_address))
+        Ok(peer_map.contains_key(peer_miner_address))
     }
 
     /// Record that a peer has seen some data
@@ -58,7 +57,7 @@ impl GossipCache {
     /// # Errors
     ///
     /// This function will return an error if the cache cannot be accessed.
-    pub fn record_seen(&self, peer_ip: SocketAddr, data: &GossipData) -> GossipResult<()> {
+    pub fn record_seen(&self, miner_address: Address, data: &GossipData) -> GossipResult<()> {
         let now = Instant::now();
         match data {
             GossipData::Chunk(unpacked_chunk) => {
@@ -67,7 +66,7 @@ impl GossipCache {
                     .write()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
                 let peer_map = chunks.entry(unpacked_chunk.chunk_path_hash()).or_default();
-                peer_map.insert(peer_ip, now);
+                peer_map.insert(miner_address, now);
             }
             GossipData::Transaction(irys_transaction_header) => {
                 let mut txs = self
@@ -75,7 +74,7 @@ impl GossipCache {
                     .write()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
                 let peer_map = txs.entry(irys_transaction_header.id).or_default();
-                peer_map.insert(peer_ip, now);
+                peer_map.insert(miner_address, now);
             }
             GossipData::Block(irys_block_header) => {
                 let mut blocks = self
@@ -83,7 +82,7 @@ impl GossipCache {
                     .write()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
                 let peer_map = blocks.entry(irys_block_header.block_hash).or_default();
-                peer_map.insert(peer_ip, now);
+                peer_map.insert(miner_address, now);
             }
         }
         Ok(())
@@ -96,7 +95,7 @@ impl GossipCache {
     /// This function will return an error if the cache cannot be accessed.
     pub fn has_seen(
         &self,
-        peer_ip: &SocketAddr,
+        peer_miner_address: &Address,
         data: &GossipData,
         within: Duration,
     ) -> GossipResult<bool> {
@@ -111,7 +110,7 @@ impl GossipCache {
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
                 chunks
                     .get(&chunk_path_hash)
-                    .and_then(|peer_map| peer_map.get(peer_ip))
+                    .and_then(|peer_map| peer_map.get(peer_miner_address))
                     .is_some_and(|&last_seen| now.duration_since(last_seen) <= within)
             }
             GossipData::Transaction(transaction) => {
@@ -120,7 +119,7 @@ impl GossipCache {
                     .read()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
                 txs.get(&transaction.id)
-                    .and_then(|peer_map| peer_map.get(peer_ip))
+                    .and_then(|peer_map| peer_map.get(peer_miner_address))
                     .is_some_and(|&last_seen| now.duration_since(last_seen) <= within)
             }
             GossipData::Block(block) => {
@@ -130,7 +129,7 @@ impl GossipCache {
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
                 blocks
                     .get(&block.block_hash)
-                    .and_then(|peer_map| peer_map.get(peer_ip))
+                    .and_then(|peer_map| peer_map.get(peer_miner_address))
                     .is_some_and(|&last_seen| now.duration_since(last_seen) <= within)
             }
         };
@@ -138,7 +137,7 @@ impl GossipCache {
         Ok(result)
     }
 
-    pub fn peers_that_have_seen(&self, data: &GossipData) -> GossipResult<HashSet<SocketAddr>> {
+    pub fn peers_that_have_seen(&self, data: &GossipData) -> GossipResult<HashSet<Address>> {
         let result = match data {
             GossipData::Chunk(unpacked_chunk) => {
                 let chunk_path_hash = unpacked_chunk.chunk_path_hash();
@@ -175,7 +174,7 @@ impl GossipCache {
     pub fn prune_expired(&self, older_than: Duration) -> GossipResult<()> {
         let now = Instant::now();
 
-        let cleanup_chunks = |map: &mut HashMap<H256, HashMap<SocketAddr, Instant>>| {
+        let cleanup_map = |map: &mut HashMap<H256, HashMap<Address, Instant>>| {
             map.retain(|_, peer_map| {
                 peer_map.retain(|_, &mut last_seen| now.duration_since(last_seen) <= older_than);
                 !peer_map.is_empty()
@@ -188,7 +187,7 @@ impl GossipCache {
                 .write()
                 .map_err(|error| GossipError::Cache(error.to_string()))?;
             let chunks = &mut *chunks_guard;
-            cleanup_chunks(chunks);
+            cleanup_map(chunks);
         };
 
         {
@@ -197,7 +196,7 @@ impl GossipCache {
                 .write()
                 .map_err(|error| GossipError::Cache(error.to_string()))?;
             let txs = &mut *txs_guard;
-            cleanup_chunks(txs);
+            cleanup_map(txs);
         };
 
         {
@@ -206,7 +205,7 @@ impl GossipCache {
                 .write()
                 .map_err(|error| GossipError::Cache(error.to_string()))?;
             let blocks = &mut *blocks_guard;
-            cleanup_chunks(blocks);
+            cleanup_map(blocks);
         };
 
         Ok(())

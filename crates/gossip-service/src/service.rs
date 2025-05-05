@@ -17,7 +17,6 @@ use crate::{
 };
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
-use core::net::SocketAddr;
 use core::time::Duration;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::TxExistenceQuery;
@@ -234,15 +233,15 @@ impl GossipService {
 
         let exclude_peers = match original_source {
             GossipSource::Internal => HashSet::new(),
-            GossipSource::External(addr) => {
+            GossipSource::External(miner_address) => {
                 let mut exclude_peers = HashSet::new();
-                exclude_peers.insert(addr);
+                exclude_peers.insert(miner_address);
                 exclude_peers
             }
         };
 
         // Get all active peers except the source
-        let mut peers: Vec<PeerListItem> = peer_list_service
+        let mut peers: Vec<(Address, PeerListItem)> = peer_list_service
             .top_active_peers(None, Some(exclude_peers))
             .await
             .map_err(|err| GossipError::Internal(InternalGossipError::Unknown(err.to_string())))?;
@@ -254,7 +253,9 @@ impl GossipService {
         while !peers.is_empty() {
             // Remove peers that seen the data since the last iteration
             let peers_that_seen_data = self.cache.peers_that_have_seen(data)?;
-            peers.retain(|peer| !peers_that_seen_data.contains(&peer.address.gossip));
+            peers.retain(|(peer_miner_address, _peer)| {
+                !peers_that_seen_data.contains(peer_miner_address)
+            });
 
             let n = std::cmp::min(MAX_PEERS_PER_BROADCAST, peers.len());
             let maybe_selected_peers = peers.get(0..n);
@@ -265,24 +266,28 @@ impl GossipService {
                     selected_peers
                 );
                 // Send data to selected peers
-                for peer in selected_peers {
+                for (peer_miner_address, peer_entry) in selected_peers {
                     if let Err(error) = self
                         .client
-                        .send_data_and_update_score(peer, data, peer_list_service)
+                        .send_data_and_update_score(
+                            (peer_miner_address, peer_entry),
+                            data,
+                            peer_list_service,
+                        )
                         .await
                     {
                         tracing::warn!(
                             "Failed to send data to peer {}: {}",
-                            peer.address.gossip,
+                            peer_miner_address,
                             error
                         );
                     }
 
                     // Record as seen anyway, so we don't rebroadcast to them
-                    if let Err(error) = self.cache.record_seen(peer.address.gossip, data) {
+                    if let Err(error) = self.cache.record_seen(*peer_miner_address, data) {
                         tracing::error!(
                             "Failed to record data in cache for peer {}: {}",
-                            peer.address.gossip,
+                            peer_miner_address,
                             error
                         );
                     }
@@ -455,13 +460,13 @@ fn spawn_main_task(
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum GossipSource {
     Internal,
-    External(SocketAddr),
+    External(Address),
 }
 
 impl GossipSource {
     #[must_use]
-    pub const fn from_ip(ip: SocketAddr) -> Self {
-        Self::External(ip)
+    pub const fn from_miner_address(address: Address) -> Self {
+        Self::External(address)
     }
 
     #[must_use]

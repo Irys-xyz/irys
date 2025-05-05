@@ -192,15 +192,21 @@ async fn start_reth_node(
     .await
     .expect("expected reth node to have started");
     debug!("Reth node started");
-    sender
-        .send(node_handle.node.clone())
-        .expect("unable to send reth node handle");
+    match sender.send(node_handle.node.clone()) {
+        Ok(()) => {}
+        Err(_full_node) => {
+            return Err(eyre::eyre!(
+                "Failed to send reth node handle to main actor thread"
+            ));
+        }
+    }
 
     node_handle.node_exit_future.await
 }
 
 /// Builder pattern for configuring and bootstrapping an Irys blockchain node.
 pub struct IrysNode {
+    pub genesis_timestamp: u128,
     pub config: Config,
     pub data_exists: bool,
     pub random_ports: bool,
