@@ -2,12 +2,12 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipDataRequest, GossipError, GossipResult, RequestedData};
+use crate::types::{GossipError, GossipResult, RequestedData};
 use actix::{Actor, Context, Handler};
 use core::time::Duration;
 use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_api_client::ApiClient;
-use irys_types::{Address, GossipData, PeerListItem, RethPeerInfo};
+use irys_types::{Address, GossipData, GossipRequest, PeerListItem, RethPeerInfo};
 use reqwest::Response;
 use serde::Serialize;
 
@@ -90,10 +90,11 @@ impl GossipClient {
         url: String,
         data: &T,
     ) -> Result<Response, GossipError> {
+        let req = self.create_request(data);
         self.client
             .post(&url)
             .timeout(self.timeout)
-            .json(data)
+            .json(&req)
             .send()
             .await
             .map_err(|error| GossipError::Network(error.to_string()))
@@ -142,6 +143,13 @@ impl GossipClient {
         }
     }
 
+    fn create_request<T>(&self, data: T) -> GossipRequest<T> {
+        GossipRequest {
+            miner_address: self.mining_address,
+            data,
+        }
+    }
+
     /// Request a specific data to be gossiped. Returns true if the peer has the data,
     /// and false if it doesn't.
     pub async fn get_data_request(
@@ -150,10 +158,7 @@ impl GossipClient {
         requested_data: RequestedData,
     ) -> GossipResult<bool> {
         let url = format!("http://{}/gossip/get_data", peer.address.gossip);
-        let get_data_request = GossipDataRequest {
-            requester_miner_address: self.mining_address,
-            requested_data,
-        };
+        let get_data_request = self.create_request(requested_data);
 
         self.client
             .post(&url)
