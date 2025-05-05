@@ -206,7 +206,6 @@ async fn start_reth_node(
 
 /// Builder pattern for configuring and bootstrapping an Irys blockchain node.
 pub struct IrysNode {
-    pub genesis_timestamp: u128,
     pub config: Config,
     pub data_exists: bool,
     pub random_ports: bool,
@@ -238,7 +237,7 @@ impl IrysNode {
         let data_exists = Self::blockchain_data_exists(&config.node_config.base_directory);
         let genesis_file_exists = genesis_block_exists_on_disk(&config.node_config.base_directory);
 
-        let irys_genesis_block = if genesis_file_exists {
+        if genesis_file_exists {
             info!("loading genesis block from disk");
             //load genesis from disk genesis.json
             load_genesis_block_from_disk(&config.node_config.base_directory)
@@ -296,7 +295,6 @@ impl IrysNode {
         };
 
         Ok(IrysNode {
-            genesis_timestamp: irys_genesis_block.timestamp,
             data_exists,
             config,
             random_ports,
@@ -368,7 +366,7 @@ impl IrysNode {
                     genesis_block_exists_on_disk(&self.config.node_config.base_directory);
 
                 if !genesis_file_exists {
-                    info!("fetching genesis block from trusted peer");
+                    info!("fetching genesis block from trusted peer because genesis file does not exist on disk");
                     let awc_client = awc::Client::new();
                     let irys_genesis_block = fetch_genesis_block(
                         &self
