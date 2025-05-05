@@ -205,7 +205,6 @@ pub struct IrysNode {
     pub config: Config,
     pub data_exists: bool,
     pub random_ports: bool,
-    // pub genesis_timestamp: u128,
     pub http_listener: TcpListener,
 }
 
