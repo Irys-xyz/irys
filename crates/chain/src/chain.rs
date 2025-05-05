@@ -204,7 +204,6 @@ pub struct IrysNode {
     pub config: Config,
     pub data_exists: bool,
     pub random_ports: bool,
-    pub genesis_timestamp: u128,
     pub http_listener: TcpListener,
 }
 
@@ -320,7 +319,8 @@ impl IrysNode {
             (true, NodeMode::Genesis { .. }) => {
                 eyre::bail!("You cannot start a genesis chain with existing data")
             }
-            (false, _) => {
+            (false, &NodeMode::Genesis { .. }) => {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
                 // special handling for genesis node
                 let commitments = get_genesis_commitments(&self.config);
 
@@ -331,8 +331,8 @@ impl IrysNode {
                         3,
                     )
                     .expect("valid calculated initial difficulty"),
-                    timestamp: self.genesis_timestamp,
-                    last_diff_timestamp: self.genesis_timestamp,
+                    timestamp: now.as_millis(),
+                    last_diff_timestamp: now.as_millis(),
                     ..irys_genesis
                 };
                 add_genesis_commitments(&mut irys_genesis, &self.config);

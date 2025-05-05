@@ -241,6 +241,10 @@ impl ConsensusOptions {
         config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
     }
 
+    pub fn set_num_blocks_in_epoch(&mut self, num_blocks: usize) {
+        self.get_mut().epoch.num_blocks_in_epoch = num_blocks as u64;
+    }
+
     pub fn get_mut(&mut self) -> &mut ConsensusConfig {
         let Self::Custom(config) = self else {
             panic!("only support mutating custom configs");
