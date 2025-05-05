@@ -4152,6 +4152,7 @@ dependencies = [
  "alloy-signer-local",
  "alloy-sol-macro",
  "alloy-sol-types",
+ "assert_matches",
  "awc",
  "base58",
  "color-eyre",

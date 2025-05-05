@@ -12,6 +12,7 @@ use tokio::{
 use tracing::debug;
 
 use crate::CommitmentStateReadGuard;
+
 // Messages that the CommitmentCache service supports
 #[derive(Debug)]
 pub enum CommitmentCacheMessage {
@@ -25,6 +26,12 @@ pub enum CommitmentCacheMessage {
     },
     RollbackCommitments {
         commitment_txs: H256List,
+        response: oneshot::Sender<eyre::Result<()>>,
+    },
+    GetEpochCommitments {
+        response: oneshot::Sender<Vec<CommitmentTransaction>>,
+    },
+    ClearCache {
         response: oneshot::Sender<eyre::Result<()>>,
     },
 }
@@ -41,136 +48,32 @@ pub enum CommitmentStatus {
 pub struct CommitmentCache {
     shutdown: GracefulShutdown,
     msg_rx: UnboundedReceiver<CommitmentCacheMessage>,
-    inner: Inner,
+    inner: CommitmentCacheInner,
 }
 
 #[derive(Debug)]
-struct Inner {
+pub struct CommitmentCacheInner {
     cache: BTreeMap<Address, MinerCommitments>,
     commitment_state_guard: CommitmentStateReadGuard,
 }
+
 #[derive(Default, Debug)]
 struct MinerCommitments {
     stake: Option<CommitmentTransaction>,
     pledges: Vec<CommitmentTransaction>,
 }
 
-impl CommitmentCache {
-    /// Spawn a new CommitmentCache service
-    pub fn spawn_service(
-        exec: &TaskExecutor,
-        rx: UnboundedReceiver<CommitmentCacheMessage>,
-        commitment_state_guard: CommitmentStateReadGuard,
-        _config: &Config,
-    ) -> JoinHandle<()> {
-        exec.spawn_critical_with_graceful_shutdown_signal(
-            "CommitmentCache Service",
-            |shutdown| async move {
-                let pending_commitments_cache = Self {
-                    shutdown,
-                    msg_rx: rx,
-                    inner: Inner {
-                        cache: BTreeMap::new(),
-                        commitment_state_guard,
-                    },
-                };
-                pending_commitments_cache
-                    .start()
-                    .await
-                    .expect("CommitmentCache encountered an irrecoverable error")
-            },
-        )
-    }
-
-    async fn start(mut self) -> eyre::Result<()> {
-        tracing::info!("starting CommitmentCache service");
-
-        let mut shutdown_future = pin!(self.shutdown);
-        let shutdown_guard = loop {
-            let mut msg_rx = pin!(self.msg_rx.recv());
-            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
-                Either::Left((Some(msg), _)) => {
-                    self.inner.handle_message(msg).await?;
-                }
-                Either::Left((None, _)) => {
-                    tracing::warn!("receiver channel closed");
-                    break None;
-                }
-                Either::Right((shutdown, _)) => {
-                    tracing::warn!("shutdown signal received");
-                    break Some(shutdown);
-                }
-            }
-        };
-
-        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await?;
+impl CommitmentCacheInner {
+    /// Create a new CommitmentCacheInner instance
+    pub fn new(commitment_state_guard: CommitmentStateReadGuard) -> Self {
+        Self {
+            cache: BTreeMap::new(),
+            commitment_state_guard,
         }
-
-        // explicitly inform the TaskManager that we're shutting down
-        drop(shutdown_guard);
-
-        tracing::info!("shutting down CommitmentCache service");
-        Ok(())
-    }
-}
-
-impl Inner {
-    /// Dispatches received messages to appropriate handler methods
-    ///
-    /// Acts as the main entry point for the CommitmentCache service, routing
-    /// incoming messages to their respective handler functions:
-    ///
-    /// # Arguments
-    /// * `msg` - The commitment cache message to process
-    ///
-    /// # Returns
-    /// * `eyre::Result<()>` - Success or failure of message handling
-    #[tracing::instrument(skip_all, err)]
-    async fn handle_message(&mut self, msg: CommitmentCacheMessage) -> eyre::Result<()> {
-        match msg {
-            CommitmentCacheMessage::GetCommitmentStatus {
-                commitment_tx,
-                response,
-            } => {
-                self.get_commitment_status(commitment_tx, response);
-            }
-            CommitmentCacheMessage::AddCommitment {
-                commitment_tx,
-                response,
-            } => {
-                self.add_commitment(commitment_tx, response);
-            }
-            CommitmentCacheMessage::RollbackCommitments {
-                commitment_txs,
-                response,
-            } => {
-                self.rollback_commitments(&commitment_txs, response);
-            }
-        }
-        Ok(())
     }
 
     /// Checks and returns the status of a commitment transaction
-    ///
-    /// Evaluates the provided commitment transaction to determine its status in the system:
-    /// - For stake commitments: Determines if it's already accepted or unknown
-    /// - For pledge commitments: Verifies if a matching pledge exists, or if the address
-    ///   lacks a required stake commitment
-    /// - For unsupported types: Returns an unsupported status
-    ///
-    /// The function does not modify any state but checks against the current cache
-    /// to determine appropriate status.
-    ///
-    /// # Arguments
-    /// * `commitment_tx` - The commitment transaction to evaluate
-    /// * `response` - Channel for sending the determined status to caller
-    fn get_commitment_status(
-        &self,
-        commitment_tx: CommitmentTransaction,
-        response: oneshot::Sender<CommitmentStatus>,
-    ) {
+    pub fn get_commitment_status(&self, commitment_tx: CommitmentTransaction) -> CommitmentStatus {
         debug!("GetCommitmentStatus message received");
 
         let commitment_type = commitment_tx.commitment_type;
@@ -186,10 +89,7 @@ impl Inner {
                 "CommitmentStatus is Rejected: unsupported type: {:?}",
                 commitment_type
             );
-            let _ = response
-                .send(CommitmentStatus::Unsupported)
-                .inspect_err(|_| tracing::warn!("Response send failed, channel dropped"));
-            return;
+            return CommitmentStatus::Unsupported;
         }
 
         // Check if we have commitments for this miner address
@@ -230,40 +130,18 @@ impl Inner {
         };
 
         debug!("CommitmentStatus is {:?}", status);
-        let _ = response.send(status).inspect_err(|_| {
-            tracing::warn!("CommitmentStatus could not be returned, sender has dropped its half of the channel")
-        });
+        status
     }
 
     /// Adds a new commitment transaction to the cache and validates its acceptance
-    ///
-    /// Processes the commitment transaction based on its type:
-    /// - For stake commitments: Verifies the address isn't already staked in either the
-    ///   current epoch or pending cache
-    /// - For pledge commitments: Only accepts if the address has an existing stake commitment
-    ///   either in the current epoch or pending cache
-    ///
-    /// # Arguments
-    /// * `commitment_tx` - The commitment transaction to add to the cache
-    /// * `response` - Channel for sending the resulting commitment status to caller
-    fn add_commitment(
-        &mut self,
-        commitment_tx: CommitmentTransaction,
-        response: oneshot::Sender<CommitmentStatus>,
-    ) {
+    pub fn add_commitment(&mut self, commitment_tx: CommitmentTransaction) -> CommitmentStatus {
         debug!("AddCommitment message received");
         let signer = &commitment_tx.signer;
         let tx_type = commitment_tx.commitment_type;
-        let send_status = |status| {
-            debug!("AddCommitment response: {:?}", status);
-            let _ = response.send(status).inspect_err(|_| {
-                tracing::warn!("CommitmentStatus could not be returned, sender dropped their half of the channel")
-            });
-        };
 
         // Early return for unsupported commitment types
         if !matches!(tx_type, CommitmentType::Stake | CommitmentType::Pledge) {
-            return send_status(CommitmentStatus::Unsupported);
+            return CommitmentStatus::Unsupported;
         }
 
         // Check if address is already staked in current epoch
@@ -278,7 +156,7 @@ impl Inner {
             // Check existing commitments in epoch service
             if is_staked_in_epoch {
                 // Already staked in current epoch, no need to add again
-                return send_status(CommitmentStatus::Accepted);
+                return CommitmentStatus::Accepted;
             }
 
             // Get or create miner commitments entry
@@ -289,12 +167,12 @@ impl Inner {
 
             // Check if already has pending stake
             if miner_commitments.stake.is_some() {
-                return send_status(CommitmentStatus::Accepted);
+                return CommitmentStatus::Accepted;
             }
 
             // Store new stake commitment
             miner_commitments.stake = Some(commitment_tx.clone());
-            send_status(CommitmentStatus::Accepted);
+            return CommitmentStatus::Accepted;
         } else {
             // Handle pledge commitments - only accept if address has a stake
 
@@ -307,7 +185,7 @@ impl Inner {
                     .or_insert_with(MinerCommitments::default);
 
                 miner_commitments.pledges.push(commitment_tx.clone());
-                return send_status(CommitmentStatus::Accepted);
+                return CommitmentStatus::Accepted;
             }
 
             // Next check if there's a pending stake in the local cache
@@ -315,36 +193,17 @@ impl Inner {
                 if miner_commitments.stake.is_some() {
                     // Has pending stake, can add pledge
                     miner_commitments.pledges.push(commitment_tx.clone());
-                    return send_status(CommitmentStatus::Accepted);
+                    return CommitmentStatus::Accepted;
                 }
             }
 
             // No stake found, reject pledge
-            return send_status(CommitmentStatus::Unstaked);
+            return CommitmentStatus::Unstaked;
         }
     }
 
     /// Removes commitment transactions with specified IDs from the cache
-    ///
-    /// Traverses the cache and removes any commitments (both stakes and pledges) whose
-    /// transaction IDs match those in the provided list. Cleans up empty entries and
-    /// sends a completion status through the provided response channel.
-    ///
-    /// # Arguments
-    /// * `commitment_txs` - List of transaction IDs to be removed
-    /// * `response` - Channel for sending operation result to caller
-    fn rollback_commitments(
-        &mut self,
-        commitment_txs: &H256List,
-        response: oneshot::Sender<eyre::Result<()>>,
-    ) {
-        let send_status = |status| {
-            debug!("RollbackCommitments response: {:?}", status);
-            let _ = response.send(status).inspect_err(|_| {
-                tracing::warn!("RollbackCommitments response could not be returned, sender dropped their half of the channel")
-            });
-        };
-
+    pub fn rollback_commitments(&mut self, commitment_txs: &H256List) -> eyre::Result<()> {
         // Create a HashSet for faster lookups
         let ids_set: HashSet<&H256> = commitment_txs.iter().collect();
 
@@ -376,6 +235,141 @@ impl Inner {
             }
         }
 
-        send_status(Ok(()));
+        Ok(())
+    }
+
+    /// Collects all commitment transactions from the cache for epoch processing
+    pub fn get_epoch_commitments(&self) -> Vec<CommitmentTransaction> {
+        let mut commitment_tx: Vec<CommitmentTransaction> = Vec::new();
+
+        // First collect all stake transactions in address order
+        // BTreeMap is already ordered by keys (addresses)
+        for (_, miner_commitments) in &self.cache {
+            if let Some(stake) = &miner_commitments.stake {
+                commitment_tx.push(stake.clone());
+            }
+        }
+
+        // Then collect all pledge transactions in address order
+        for (_, miner_commitments) in &self.cache {
+            // Add all pledges for this miner
+            for pledge in &miner_commitments.pledges {
+                commitment_tx.push(pledge.clone());
+            }
+        }
+
+        commitment_tx
+    }
+
+    pub fn clear_cache(&mut self) -> eyre::Result<()> {
+        // Clear out all the existing cached commitments as they have
+        // been applied to the CommitmentState in the epoch service
+        self.cache.clear();
+        Ok(())
+    }
+
+    /// Dispatches received messages to appropriate handler methods and sends responses
+    #[tracing::instrument(skip_all, err)]
+    async fn handle_message(&mut self, msg: CommitmentCacheMessage) -> eyre::Result<()> {
+        match msg {
+            CommitmentCacheMessage::GetCommitmentStatus {
+                commitment_tx,
+                response,
+            } => {
+                let status = self.get_commitment_status(commitment_tx);
+                let _ = response.send(status).inspect_err(|_| {
+                    tracing::warn!("GetCommitmentStatus response could not be returned, sender dropped their half of the channel")
+                });
+            }
+            CommitmentCacheMessage::AddCommitment {
+                commitment_tx,
+                response,
+            } => {
+                let status = self.add_commitment(commitment_tx);
+                let _ = response.send(status).inspect_err(|_| {
+                    tracing::warn!("AddCommitment response could not be returned, sender dropped their half of the channel")
+                });
+            }
+            CommitmentCacheMessage::RollbackCommitments {
+                commitment_txs,
+                response,
+            } => {
+                let result = self.rollback_commitments(&commitment_txs);
+                let _ = response.send(result).inspect_err(|_| {
+                    tracing::warn!("RollbackCommitments response could not be returned, sender dropped their half of the channel")
+                });
+            }
+            CommitmentCacheMessage::GetEpochCommitments { response } => {
+                let commitments = self.get_epoch_commitments();
+                let _ = response.send(commitments).inspect_err(|_| {
+                    tracing::warn!("GetEpochCommitments response could not be delivered, sender dropped their half of the channel")
+                });
+            }
+            CommitmentCacheMessage::ClearCache { response } => {
+                let result = self.clear_cache();
+                let _ = response.send(result).inspect_err(|_| {
+                    tracing::warn!("StartNewEpoch response could not be returned, sender dropped their half of the channel")
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CommitmentCache {
+    /// Spawn a new CommitmentCache service
+    pub fn spawn_service(
+        exec: &TaskExecutor,
+        rx: UnboundedReceiver<CommitmentCacheMessage>,
+        commitment_state_guard: CommitmentStateReadGuard,
+        _config: &Config,
+    ) -> JoinHandle<()> {
+        exec.spawn_critical_with_graceful_shutdown_signal(
+            "CommitmentCache Service",
+            |shutdown| async move {
+                let pending_commitments_cache = Self {
+                    shutdown,
+                    msg_rx: rx,
+                    inner: CommitmentCacheInner::new(commitment_state_guard),
+                };
+                pending_commitments_cache
+                    .start()
+                    .await
+                    .expect("CommitmentCache encountered an irrecoverable error")
+            },
+        )
+    }
+
+    async fn start(mut self) -> eyre::Result<()> {
+        tracing::info!("starting CommitmentCache service");
+
+        let mut shutdown_future = pin!(self.shutdown);
+        let shutdown_guard = loop {
+            let mut msg_rx = pin!(self.msg_rx.recv());
+            match futures::future::select(&mut msg_rx, &mut shutdown_future).await {
+                Either::Left((Some(msg), _)) => {
+                    self.inner.handle_message(msg).await?;
+                }
+                Either::Left((None, _)) => {
+                    tracing::warn!("receiver channel closed");
+                    break None;
+                }
+                Either::Right((shutdown, _)) => {
+                    tracing::warn!("shutdown signal received");
+                    break Some(shutdown);
+                }
+            }
+        };
+
+        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.inner.handle_message(msg).await?;
+        }
+
+        // explicitly inform the TaskManager that we're shutting down
+        drop(shutdown_guard);
+
+        tracing::info!("shutting down CommitmentCache service");
+        Ok(())
     }
 }

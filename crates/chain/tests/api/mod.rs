@@ -1,3 +1,4 @@
+use actix_http::StatusCode;
 use base58::ToBase58;
 use irys_database::DataLedger;
 use irys_types::CommitmentTransaction;
@@ -73,15 +74,28 @@ pub async fn post_commitment_tx_request(address: &str, commitment_tx: &Commitmen
     info!("Posting Commitment TX: {}", commitment_tx.id.0.to_base58());
 
     let client = awc::Client::default();
-    let response = client
+    let mut response = client
         .post(format!("{}/v1/commitment_tx", address))
         .send_json(commitment_tx) // Send the commitment_tx as JSON in the request body
         .await
         .expect("client post failed");
 
-    info!(
-        "Response status: {}\n{}",
-        response.status(),
-        serde_json::to_string_pretty(&commitment_tx).unwrap()
-    );
+    if response.status() != StatusCode::OK {
+        // Read the response body
+        let body_bytes = response.body().await.expect("Failed to read response body");
+        let body_str = String::from_utf8_lossy(&body_bytes);
+
+        panic!(
+            "Response status: {} - {}\nRequest Body: {}",
+            response.status(),
+            body_str,
+            serde_json::to_string_pretty(&commitment_tx).unwrap(),
+        );
+    } else {
+        info!(
+            "Response status: {}\n{}",
+            response.status(),
+            serde_json::to_string_pretty(&commitment_tx).unwrap()
+        );
+    }
 }

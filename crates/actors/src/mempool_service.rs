@@ -47,6 +47,8 @@ pub struct MempoolService {
     task_exec: TaskExecutor,
     /// The miner's signer instance, used to sign ingress proofs
     invalid_tx: Vec<H256>,
+    /// Tracks recent valid txids from either storage or commitment
+    recent_valid_tx: HashSet<H256>,
     config: Config,
     storage_modules: StorageModuleVec,
     block_tree_read_guard: BlockTreeReadGuard,
@@ -99,6 +101,7 @@ impl MempoolService {
             commitment_state_guard,
             service_senders,
             gossip_tx,
+            recent_valid_tx: HashSet::new(),
         }
     }
     // Helper to get the canonical chain and latest height
@@ -124,6 +127,20 @@ impl MempoolService {
 
         let latest_height = self.get_latest_block_height()?;
         let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
+
+        // Allow transactions to use the txid of a transaction in the mempool
+        if self.recent_valid_tx.contains(anchor) {
+            let (canonical_blocks, _) = self.block_tree_read_guard.read().get_canonical_chain();
+            let (latest_block_hash, _, _, _) = canonical_blocks.last().unwrap();
+            // Just provide the most recent block as an anchor
+            match irys_database::block_header_by_hash(read_tx, latest_block_hash, false) {
+                Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
+                    debug!("valid txid anchor {} for tx {}", anchor, tx_id);
+                    return Ok(hdr);
+                }
+                _ => {}
+            };
+        }
 
         match irys_database::block_header_by_hash(read_tx, anchor, false) {
             Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
@@ -234,6 +251,8 @@ impl MempoolService {
     /// Returns true if the transaction was found and removed, false otherwise
     fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
         let mut found = false;
+
+        self.recent_valid_tx.remove(&txid);
 
         // Create a vector of addresses to update to avoid borrowing issues
         let addresses_to_check: Vec<Address> = self.valid_commitment_tx.keys().cloned().collect();
@@ -358,7 +377,7 @@ impl Handler<TxIngressMessage> for MempoolService {
         );
 
         // Early out if we already know about this transaction
-        if self.invalid_tx.contains(&tx.id) || self.valid_tx.contains_key(&tx.id) {
+        if self.invalid_tx.contains(&tx.id) || self.recent_valid_tx.contains(&tx.id) {
             return Err(TxIngressError::Skipped);
         }
 
@@ -411,6 +430,7 @@ impl Handler<TxIngressMessage> for MempoolService {
         // Validate the transaction signature
         self.validate_signature(tx)?;
         self.valid_tx.insert(tx.id, tx.clone());
+        self.recent_valid_tx.insert(tx.id);
 
         // Cache the data_root in the database
         let _ = self.irys_db.update_eyre(|db_tx| {
@@ -455,8 +475,18 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
             &commitment_tx.id.0.to_base58()
         );
 
-        // Early out if we already know about this transaction (valid or invalid)
+        // Early out if we already know about this transaction (invalid)
         if self.invalid_tx.contains(&commitment_tx.id) {
+            return Err(TxIngressError::Skipped);
+        }
+
+        // Check if the transaction already exists in valid transactions
+        let tx_exists = self
+            .valid_commitment_tx
+            .get(&commitment_tx.signer)
+            .map_or(false, |txs| txs.iter().any(|c| c.id == commitment_tx.id));
+
+        if tx_exists {
             return Err(TxIngressError::Skipped);
         }
 
@@ -469,12 +499,13 @@ impl Handler<CommitmentTxIngressMessage> for MempoolService {
             self.validate_signature(&commitment_tx)?;
 
             // Add the commitment tx to the valid tx list to be included in the next block
-            let valid = self
-                .valid_commitment_tx
+            self.valid_commitment_tx
                 .entry(commitment_tx.signer)
-                .or_default();
+                .or_default()
+                .push(commitment_tx.clone());
 
-            valid.push(commitment_tx.clone());
+            self.recent_valid_tx.insert(commitment_tx.id);
+
             Ok(())
         } else {
             Err(TxIngressError::Skipped)
@@ -814,6 +845,7 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
             for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
                 // Remove the submit tx from the pending valid_tx pool
                 self.valid_tx.remove(txid);
+                self.recent_valid_tx.remove(txid);
             }
 
             // Is there a commitment ledger in this block?
@@ -921,6 +953,10 @@ impl Handler<TxExistenceQuery> for MempoolService {
 
     fn handle(&mut self, tx_msg: TxExistenceQuery, _ctx: &mut Context<Self>) -> Self::Result {
         if self.valid_tx.contains_key(&tx_msg.0) {
+            return Ok(true);
+        }
+
+        if self.recent_valid_tx.contains(&tx_msg.0) {
             return Ok(true);
         }
 
