@@ -1,6 +1,8 @@
 use crate::block_producer::BlockConfirmedMessage;
 use crate::block_tree_service::BlockTreeReadGuard;
-use actix::{Actor, Context, Handler, Message, Supervised, SystemService};
+use crate::services::ServiceSenders;
+use crate::{CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentStatus};
+use actix::{Actor, Context, Handler, Message, MessageResponse, Supervised, SystemService};
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
@@ -10,15 +12,18 @@ use irys_database::db_cache::DataRootLRUEntry;
 use irys_database::submodule::get_data_size_by_data_root;
 use irys_database::tables::DataRootLRU;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
-use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger};
+use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger, SystemLedger};
+use irys_primitives::CommitmentType;
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
-use irys_types::Config;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, GossipData,
     IrysTransactionHeader, H256,
 };
-use irys_types::{DataRoot, U256};
+use irys_types::{
+    Address, CommitmentTransaction, Config, DataRoot, IrysBlockHeader, IrysTransactionCommon,
+    IrysTransactionId, U256,
+};
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::transaction::DbTx as _;
@@ -26,6 +31,7 @@ use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use tracing::{debug, error, info, warn};
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
@@ -35,14 +41,20 @@ pub struct MempoolService {
     reth_db: RethDbWrapper,
     /// Temporary mempool stubs - will replace with proper data models - `DMac`
     valid_tx: BTreeMap<H256, IrysTransactionHeader>,
+    valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// `task_exec` is used to spawn background jobs on reth's MT tokio runtime
     /// instead of the actor executor runtime, while also providing some `QoL`
     task_exec: TaskExecutor,
     /// The miner's signer instance, used to sign ingress proofs
     invalid_tx: Vec<H256>,
+    /// Tracks recent valid txids from either storage or commitment
+    recent_valid_tx: HashSet<H256>,
     config: Config,
     storage_modules: StorageModuleVec,
     block_tree_read_guard: BlockTreeReadGuard,
+    commitment_state_guard: CommitmentStateReadGuard,
+    /// Reference to all the services we can send messages to
+    service_senders: ServiceSenders,
     gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
 }
 
@@ -70,7 +82,9 @@ impl MempoolService {
         task_exec: TaskExecutor,
         storage_modules: StorageModuleVec,
         block_tree_read_guard: BlockTreeReadGuard,
+        commitment_state_guard: CommitmentStateReadGuard,
         config: &Config,
+        service_senders: ServiceSenders,
         gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         info!("service started");
@@ -78,13 +92,191 @@ impl MempoolService {
             irys_db,
             reth_db,
             valid_tx: BTreeMap::new(),
+            valid_commitment_tx: BTreeMap::new(),
             invalid_tx: Vec::new(),
             task_exec,
             config: config.clone(),
             storage_modules,
             block_tree_read_guard,
+            commitment_state_guard,
+            service_senders,
             gossip_tx,
+            recent_valid_tx: HashSet::new(),
         }
+    }
+    // Helper to get the canonical chain and latest height
+    fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
+        let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
+        let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
+            "unable to get canonical chain from block tree".to_owned(),
+        ))?;
+
+        Ok(*latest_height)
+    }
+
+    // Helper to validate anchor
+    fn validate_anchor(
+        &mut self,
+        tx_id: &IrysTransactionId,
+        anchor: &H256,
+    ) -> Result<IrysBlockHeader, TxIngressError> {
+        let read_tx = &self
+            .irys_db
+            .tx()
+            .map_err(|_| TxIngressError::DatabaseError)?;
+
+        let latest_height = self.get_latest_block_height()?;
+        let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
+
+        // Allow transactions to use the txid of a transaction in the mempool
+        if self.recent_valid_tx.contains(anchor) {
+            let (canonical_blocks, _) = self.block_tree_read_guard.read().get_canonical_chain();
+            let (latest_block_hash, _, _, _) = canonical_blocks.last().unwrap();
+            // Just provide the most recent block as an anchor
+            match irys_database::block_header_by_hash(read_tx, latest_block_hash, false) {
+                Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
+                    debug!("valid txid anchor {} for tx {}", anchor, tx_id);
+                    return Ok(hdr);
+                }
+                _ => {}
+            };
+        }
+
+        match irys_database::block_header_by_hash(read_tx, anchor, false) {
+            Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= latest_height => {
+                debug!("valid block hash anchor {} for tx {}", anchor, tx_id);
+                Ok(hdr)
+            }
+            _ => {
+                self.invalid_tx.push(tx_id.clone());
+                warn!("Invalid anchor value {} for tx {}", anchor, tx_id);
+                Err(TxIngressError::InvalidAnchor)
+            }
+        }
+    }
+
+    // Helper to verify signature
+    fn validate_signature<T: IrysTransactionCommon>(
+        &mut self,
+        tx: &T,
+    ) -> Result<(), TxIngressError> {
+        if tx.is_signature_valid() {
+            info!("Signature is valid");
+            Ok(())
+        } else {
+            self.invalid_tx.push(tx.id());
+            debug!("Signature is NOT valid");
+            Err(TxIngressError::InvalidSignature)
+        }
+    }
+
+    // Helper to execute async operation in a synchronous handler
+    // TODO: This is actually bad, we spawn a thread to perform the async
+    // operation from a sync context, to fix the mempool service needs to be
+    // converted to a new style service with async handlers.
+    fn execute_async_operation<T, F, Fut>(&self, operation: F) -> Result<T, TxIngressError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = T>,
+        T: Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let result = rt.block_on(operation());
+            tx.send(result)
+                .expect("Failed to send result back to handler thread");
+        });
+
+        Ok(rx.recv().expect("Failed to receive result from thread"))
+    }
+
+    fn is_commitment_valid(&self, commitment_tx: &CommitmentTransaction) -> bool {
+        // Check if already staked in the blockchain
+        let is_staked = self.commitment_state_guard.is_staked(commitment_tx.signer);
+
+        // Most commitments are valid by default
+        // Only pledges require special validation when not already staked
+        let is_pledge = commitment_tx.commitment_type == CommitmentType::Pledge;
+        if !is_pledge || is_staked {
+            return true;
+        }
+
+        // For unstaked pledges, validate against cache and pending transactions
+        let commitment_cache = self.service_senders.commitment_cache.clone();
+        let commitment_tx_clone = commitment_tx.clone();
+        let cache_status = self
+            .execute_async_operation(|| async move {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                let _ = commitment_cache.send(CommitmentCacheMessage::GetCommitmentStatus {
+                    commitment_tx: commitment_tx_clone,
+                    response: oneshot_tx,
+                });
+                oneshot_rx
+                    .await
+                    .expect("to receive CommitmentStatus from GetCommitmentStatus message")
+            })
+            .unwrap();
+
+        // Reject unsupported commitment types
+        if matches!(cache_status, CommitmentStatus::Unsupported) {
+            return false;
+        }
+
+        // For unstaked addresses, check for pending stake transactions
+        if matches!(cache_status, CommitmentStatus::Unstaked) {
+            // Get pending transactions for this address
+            let pending = self.valid_commitment_tx.get(&commitment_tx.signer);
+            if pending.is_none() {
+                return false;
+            }
+
+            // Valid if there's at least one pending stake transaction
+            return pending
+                .unwrap()
+                .iter()
+                .any(|c| c.commitment_type == CommitmentType::Stake);
+        }
+
+        // All other cases are valid
+        true
+    }
+
+    /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
+    /// Returns true if the transaction was found and removed, false otherwise
+    fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
+        let mut found = false;
+
+        self.recent_valid_tx.remove(&txid);
+
+        // Create a vector of addresses to update to avoid borrowing issues
+        let addresses_to_check: Vec<Address> = self.valid_commitment_tx.keys().cloned().collect();
+
+        for address in addresses_to_check {
+            if let Some(transactions) = self.valid_commitment_tx.get_mut(&address) {
+                // Find the index of the transaction to remove
+                if let Some(index) = transactions.iter().position(|tx| tx.id == *txid) {
+                    // Remove the transaction
+                    transactions.remove(index);
+                    found = true;
+
+                    // If the vector is now empty, remove the entry
+                    if transactions.is_empty() {
+                        self.valid_commitment_tx.remove(&address);
+                    }
+
+                    // Exit early once we've found and removed the transaction
+                    break;
+                }
+            }
+        }
+
+        found
     }
 }
 
@@ -93,6 +285,10 @@ impl MempoolService {
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(),TxIngressError>")]
 pub struct TxIngressMessage(pub IrysTransactionHeader);
+
+#[derive(Message, Debug)]
+#[rtype(result = "Result<(),TxIngressError>")]
+pub struct CommitmentTxIngressMessage(pub CommitmentTransaction);
 
 /// Reasons why Transaction Ingress might fail
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,74 +375,50 @@ impl Handler<TxIngressMessage> for MempoolService {
             &tx.id.0.to_base58(),
             &tx.data_root.0.to_base58()
         );
+
         // Early out if we already know about this transaction
-        if self.invalid_tx.contains(&tx.id) || self.valid_tx.contains_key(&tx.id) {
-            // Skip tx reprocessing if already verified (valid or invalid) to prevent
-            // CPU-intensive signature verification spam attacks
-            info!("tx {} already known", &tx.id.0.to_base58());
+        if self.invalid_tx.contains(&tx.id) || self.recent_valid_tx.contains(&tx.id) {
             return Err(TxIngressError::Skipped);
         }
+        // Validate anchor
+        let hdr = self.validate_anchor(&tx.id, &tx.anchor)?;
 
         let read_tx = &self
             .irys_db
             .tx()
-            .map_err(|_| TxIngressError::DatabaseError)?; // we use `&` here to make this a `temporary`, which means rust will automatically drop it when we're done using it, instead of at the end of a block like usual
+            .map_err(|_| TxIngressError::DatabaseError)?;
         let read_reth_tx = &self
             .reth_db
             .tx()
             .map_err(|_| TxIngressError::DatabaseError)?;
 
-        // validate the `anchor` value
-        // it should be a block hash for a known, confirmed block (TODO: add tx hash support!)
-
-        let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
-
-        let (_, latest_height, _, _) = canon_chain.0.last().ok_or(TxIngressError::Other(
-            "unable to get canonical chain from block tree".to_owned(),
-        ))?;
-
-        let anchor_expiry_depth = self
-            .config
-            .node_config
-            .consensus_config()
-            .mempool
-            .anchor_expiry_depth as u64;
-        match irys_database::block_header_by_hash(read_tx, &tx.anchor, false) {
-            // note: we use addition here as it's safer
-            Ok(Some(hdr)) if hdr.height + anchor_expiry_depth >= *latest_height => {
-                debug!("valid block hash anchor {} for tx {}", &tx.anchor, &tx.id);
-                // update any associated ingress proofs
-                if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
-                    let new_expiry = hdr.height + anchor_expiry_depth;
-                    debug!(
-                        "Updating ingress proof for data root {} expiry from {} -> {}",
-                        &tx.data_root, &old_expiry.last_height, &new_expiry
+        // Update any associated ingress proofs
+        if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
+            let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
+            let new_expiry = hdr.height + anchor_expiry_depth;
+            debug!(
+                "Updating ingress proof for data root {} expiry from {} -> {}",
+                &tx.data_root, &old_expiry.last_height, &new_expiry
+            );
+            self.irys_db
+                .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
+                .map_err(|e| {
+                    error!(
+                        "Error updating ingress proof expiry for {} - {}",
+                        &tx.data_root, &e
                     );
-                    self.irys_db
-                        .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
-                        .map_err(|e| {
-                            error!(
-                                "Error updating ingress proof expiry for {} - {}",
-                                &tx.data_root, &e
-                            );
-                            TxIngressError::DatabaseError
-                        })?
-                        .map_err(|e| {
-                            error!(
-                                "Error updating ingress proof expiry for {} - {}",
-                                &tx.data_root, &e
-                            );
-                            TxIngressError::DatabaseError
-                        })?;
-                }
-            }
-            _ => {
-                self.invalid_tx.push(tx.id);
-                warn!("Invalid anchor value {} for tx {}", &tx.anchor, &tx.id);
-                return Err(TxIngressError::InvalidAnchor);
-            }
-        };
+                    TxIngressError::DatabaseError
+                })?
+                .map_err(|e| {
+                    error!(
+                        "Error updating ingress proof expiry for {} - {}",
+                        &tx.data_root, &e
+                    );
+                    TxIngressError::DatabaseError
+                })?;
+        }
 
+        // Check account balance
         if irys_database::get_account_balance(read_reth_tx, tx_msg.0.signer)
             .map_err(|_| TxIngressError::DatabaseError)?
             < U256::from(tx_msg.0.total_fee())
@@ -259,19 +431,18 @@ impl Handler<TxIngressMessage> for MempoolService {
         }
 
         // Validate the transaction signature
-        if tx.is_signature_valid() {
-            info!("Signature is valid");
-            self.valid_tx.insert(tx.id, tx.clone());
-        } else {
-            self.invalid_tx.push(tx.id);
-            warn!("Signature is NOT valid");
-            return Err(TxIngressError::InvalidSignature);
-        }
+        self.validate_signature(tx)?;
+        self.valid_tx.insert(tx.id, tx.clone());
+        self.recent_valid_tx.insert(tx.id);
 
         // Cache the data_root in the database
-
         match self.irys_db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, tx)?;
+            // TODO: tx headers should not immediately be added to the database
+            // this is a work around until the mempool can persist its state
+            // during shutdown. Currently this has the potential to create
+            // orphaned tx headers in the database with expired anchors and
+            // not linked to any blocks.
             irys_database::insert_tx_header(db_tx, tx)?;
             Ok(())
         }) {
@@ -292,6 +463,7 @@ impl Handler<TxIngressMessage> for MempoolService {
             }
         };
 
+        // Gossip transaction
         let gossip_sender = self.gossip_tx.clone();
         let gossip_data = GossipData::Transaction(tx.clone());
 
@@ -302,6 +474,61 @@ impl Handler<TxIngressMessage> for MempoolService {
         });
 
         Ok(())
+    }
+}
+
+/// Needs to be refactored when this handler can be made async.
+/// Mixing async and sync code is fugly.
+
+impl Handler<CommitmentTxIngressMessage> for MempoolService {
+    type Result = Result<(), TxIngressError>;
+
+    fn handle(
+        &mut self,
+        commitment_tx_msg: CommitmentTxIngressMessage,
+        _ctx: &mut Context<Self>,
+    ) -> Self::Result {
+        let commitment_tx = commitment_tx_msg.0.clone();
+        debug!(
+            "received commitment tx {:?}",
+            &commitment_tx.id.0.to_base58()
+        );
+
+        // Early out if we already know about this transaction (invalid)
+        if self.invalid_tx.contains(&commitment_tx.id) {
+            return Err(TxIngressError::Skipped);
+        }
+
+        // Check if the transaction already exists in valid transactions
+        let tx_exists = self
+            .valid_commitment_tx
+            .get(&commitment_tx.signer)
+            .map_or(false, |txs| txs.iter().any(|c| c.id == commitment_tx.id));
+
+        if tx_exists {
+            return Err(TxIngressError::Skipped);
+        }
+
+        // Validate the tx anchor
+        self.validate_anchor(&commitment_tx.id, &commitment_tx.anchor)?;
+
+        // Check pending commitments and cached commitments and active commitments
+        if self.is_commitment_valid(&commitment_tx) {
+            // Validate tx signature
+            self.validate_signature(&commitment_tx)?;
+
+            // Add the commitment tx to the valid tx list to be included in the next block
+            self.valid_commitment_tx
+                .entry(commitment_tx.signer)
+                .or_default()
+                .push(commitment_tx.clone());
+
+            self.recent_valid_tx.insert(commitment_tx.id);
+
+            Ok(())
+        } else {
+            Err(TxIngressError::Skipped)
+        }
     }
 }
 
@@ -515,48 +742,114 @@ impl Handler<ChunkIngressMessage> for MempoolService {
         Ok(())
     }
 }
+#[derive(MessageResponse, Debug)]
+pub struct MempoolTxs {
+    pub commitment_tx: Vec<CommitmentTransaction>,
+    pub storage_tx: Vec<IrysTransactionHeader>,
+}
 
-/// Message for getting txs for block building
 #[derive(Message, Debug)]
-#[rtype(result = "Vec<IrysTransactionHeader>")]
+#[rtype(result = "MempoolTxs")]
 pub struct GetBestMempoolTxs;
 
 impl Handler<GetBestMempoolTxs> for MempoolService {
-    type Result = Vec<IrysTransactionHeader>;
+    type Result = MempoolTxs;
 
     fn handle(&mut self, _msg: GetBestMempoolTxs, _ctx: &mut Self::Context) -> Self::Result {
         let reth_db = self.reth_db.clone();
         let mut fees_spent_per_address = HashMap::new();
+        let mut commitment_tx = Vec::new();
+        let mut unfunded_address = HashSet::new();
 
-        // TODO sort by fee
-        self.valid_tx
-            .iter()
-            .filter(|(_, tx)| {
-                let current_spent = *fees_spent_per_address.get(&tx.signer).unwrap_or(&0_u64);
-                let valid = irys_database::get_account_balance(&reth_db.tx().unwrap(), tx.signer)
-                    .unwrap()
-                    >= U256::from(current_spent + tx.total_fee());
-                match fees_spent_per_address.get_mut(&tx.signer) {
-                    Some(val) => {
-                        *val += tx.total_fee();
-                    }
-                    None => {
-                        fees_spent_per_address.insert(tx.signer, tx.total_fee());
-                    }
-                };
-                valid
-            })
-            .take(
-                self.config
-                    .node_config
-                    .consensus_config()
-                    .mempool
-                    .max_data_txs_per_block
-                    .try_into()
-                    .expect("valid u64"),
-            )
-            .map(|(_, header)| header.clone())
-            .collect()
+        // Helper function that verifies transaction funding and tracks cumulative fees
+        // Returns true if the transaction can be funded based on current account balance
+        // and previously included transactions in this block
+        let mut check_funding = |tx: &dyn IrysTransactionCommon| -> bool {
+            let signer = tx.signer();
+
+            // Skip transactions from addresses with previously unfunded transactions
+            // This ensures we don't include any transactions (including pledges) from
+            // addresses that couldn't afford their stake commitments
+            if unfunded_address.contains(&signer) {
+                return false;
+            }
+
+            let fee = tx.total_fee();
+            let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&0_u64);
+
+            // Calculate total required balance including previously selected transactions
+            let tx_ref = &reth_db.tx().unwrap();
+            let has_funds = irys_database::get_account_balance(tx_ref, signer).unwrap()
+                >= U256::from(current_spent + fee);
+
+            // Track fees for this address regardless of whether this specific transaction is included
+            fees_spent_per_address
+                .entry(signer)
+                .and_modify(|val| *val += fee)
+                .or_insert(fee);
+
+            // If transaction cannot be funded, mark the entire address as unfunded
+            // Since stakes are processed before pledges, this prevents inclusion of
+            // pledge commitments when their associated stake commitment is unfunded
+            if !has_funds {
+                unfunded_address.insert(signer);
+                return false;
+            }
+
+            has_funds
+        };
+
+        // Process commitments in priority order (stakes then pledges)
+        // This order ensures stake transactions are processed before pledges
+        for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
+            // Gather all commitments of current type from all addresses
+            let mut sorted_commitments: Vec<_> = self
+                .valid_commitment_tx
+                .values()
+                .flat_map(|txs| {
+                    txs.iter()
+                        .filter(|tx| tx.commitment_type == *commitment_type)
+                        .map(|tx| tx.clone())
+                })
+                .collect();
+
+            // Sort commitments by fee (highest first) to maximize network revenue
+            sorted_commitments.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
+
+            // Select fundable commitments in fee-priority order
+            for tx in sorted_commitments {
+                if check_funding(&tx) {
+                    commitment_tx.push(tx);
+                }
+            }
+        }
+
+        // Prepare storage transactions for inclusion after commitments
+        let mut all_storage_txs: Vec<_> = self.valid_tx.values().cloned().collect();
+
+        // Sort storage transactions by fee (highest first) to maximize revenue
+        all_storage_txs.sort_by(|a, b| b.total_fee().cmp(&a.total_fee()));
+
+        // Apply block size constraint and funding checks to storage transactions
+        let mut storage_tx = Vec::new();
+        let max_txs = self.config.node_config.mempool.max_data_txs_per_block as usize;
+
+        // Select storage transactions in fee-priority order, respecting funding limits
+        // and maximum transaction count per block
+        for tx in all_storage_txs {
+            if check_funding(&tx) {
+                storage_tx.push(tx);
+                if storage_tx.len() >= max_txs {
+                    break;
+                }
+            }
+        }
+
+        // Return selected transactions grouped by type
+        MempoolTxs {
+            commitment_tx,
+            storage_tx,
+        }
     }
 }
 
@@ -571,6 +864,20 @@ impl Handler<BlockConfirmedMessage> for MempoolService {
             for txid in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
                 // Remove the submit tx from the pending valid_tx pool
                 self.valid_tx.remove(txid);
+                self.recent_valid_tx.remove(txid);
+            }
+
+            // Is there a commitment ledger in this block?
+            let commitment_ledger = block
+                .system_ledgers
+                .iter()
+                .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+            if let Some(commitment_ledger) = commitment_ledger {
+                for txid in commitment_ledger.tx_ids.iter() {
+                    // Remove the commitment tx from the pending valid_tx pool
+                    self.remove_commitment_tx(txid);
+                }
             }
 
             let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
@@ -665,6 +972,10 @@ impl Handler<TxExistenceQuery> for MempoolService {
 
     fn handle(&mut self, tx_msg: TxExistenceQuery, _ctx: &mut Context<Self>) -> Self::Result {
         if self.valid_tx.contains_key(&tx_msg.0) {
+            return Ok(true);
+        }
+
+        if self.recent_valid_tx.contains(&tx_msg.0) {
             return Ok(true);
         }
 

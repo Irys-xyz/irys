@@ -305,8 +305,10 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let ctx_genesis_node = start_genesis_node(&testnet_config_genesis, &account1).await;
 
     let required_blocks_height: usize = 5;
+    let expected_block_lag_between_index_and_tree: usize = 2;
     // +2 is so genesis is two blocks ahead of the peer nodes, as currently we check the peers index which lags behind
-    let required_genesis_node_height = required_blocks_height + 2;
+    let required_genesis_node_height =
+        required_blocks_height + expected_block_lag_between_index_and_tree;
 
     // generate a txn and add it to the block...
     generate_test_transaction_and_add_to_block(&ctx_genesis_node, &account1).await;

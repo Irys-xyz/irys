@@ -11,8 +11,8 @@ use alloy_rpc_types_engine::{
 use base58::ToBase58;
 use eyre::eyre;
 use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, tables::IngressProofs, tx_header_by_txid,
-    DataLedger,
+    block_header_by_hash, cached_data_root_by_data_root, insert_commitment_tx,
+    tables::IngressProofs, tx_header_by_txid, DataLedger, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
@@ -20,8 +20,8 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Address, Base64, Config, DataTransactionLedger, H256List,
-    IngressProofsList, IrysBlockHeader, IrysTransactionHeader, PoaData, Signature, TxIngressProof,
-    VDFLimiterInfo, H256, U256,
+    IngressProofsList, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData,
+    Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -42,6 +42,7 @@ use crate::{
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
+    CommitmentCacheMessage,
 };
 
 /// Used to mock up a `BlockProducerActor`
@@ -62,7 +63,7 @@ pub struct BlockProducerActor {
     pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     /// Tracks the global state of partition assignments on the protocol
     pub epoch_service: Addr<EpochServiceActor>,
-    /// Tracks the global state of partition assignments on the protocol
+    /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
     /// Reference to the VM node
     pub reth_provider: RethNodeProvider,
@@ -118,6 +119,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let vdf_steps = self.vdf_steps_guard.clone();
         let price_oracle = self.price_oracle.clone();
         let ema_service = self.service_senders.ema.clone();
+        let commitment_cache = self.service_senders.commitment_cache.clone();
         let config = self.config.clone();
 
         AtomicResponse::new(Box::pin( async move {
@@ -126,23 +128,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let (latest_block_hash, prev_block_height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
             info!(?latest_block_hash, ?prev_block_height, "Starting block production, previous block");
 
-            let block_item = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash, false)) {
+            let prev_block_header = match db.view_eyre(|tx| block_header_by_hash(tx, latest_block_hash, false)) {
                 Ok(Some(header)) => Ok(header),
-                    Ok(None) =>
-                    Err(eyre!("No block header found for hash {} ({})", latest_block_hash, prev_block_height + 1)),
+                Ok(None) => Err(eyre!("No block header found for hash {} ({})", latest_block_hash, prev_block_height + 1)),
                 Err(e) =>  Err(eyre!("Failed to get previous block ({}) header: {}", prev_block_height, e))
             }?;
-
-            // Retrieve the previous block header and hash
-
-            let prev_block_hash = block_item.block_hash;
-            let prev_block_header: IrysBlockHeader = match db.view_eyre(|tx| block_header_by_hash(tx, &prev_block_hash, false)) {
-                Ok(Some(header)) => Ok(header),
-                Ok(None) =>
-                    Err(eyre!("No block header found for block {} ({}) ", prev_block_hash.0.to_base58(), prev_block_height)),
-                Err(e) =>
-                    Err(eyre!("Failed to get previous block {} ({}) header: {}", prev_block_hash.0.to_base58(), prev_block_height,  e))
-            }?;
+            let prev_block_hash = prev_block_header.block_hash;
 
             if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
                 warn!("Skipping solution for old step number {}, previous block step number {} for block {} ({}) ", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58(),  prev_block_height);
@@ -228,13 +219,67 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
 
             // Submit Ledger Transactions
-            let submit_txs: Vec<IrysTransactionHeader> =
+            let mempool_tx =
                 mempool_addr.send(GetBestMempoolTxs).await.unwrap();
+            let submit_txs = mempool_tx.storage_tx;
 
             let submit_chunks_added = calculate_chunks_added(&submit_txs, config.consensus.chunk_size);
             let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit].max_chunk_offset + submit_chunks_added;
-
             let submit_txids = submit_txs.iter().map(|h| h.id).collect::<Vec<H256>>();
+
+            // Commitment Transactions
+            let block_height = prev_block_header.height + 1;
+            let is_epoch_block = block_height % config.consensus.epoch.num_blocks_in_epoch == 0;
+
+            // Construct commitment ledger based on block type (epoch vs regular)
+            let commitment_ledger = if is_epoch_block {
+                // In epoch blocks: collect and reference all previously validated commitments 
+                // from the current epoch without re-inserting them into the database
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = commitment_cache.send(CommitmentCacheMessage::GetEpochCommitments { response: tx });
+
+                // Get the commitments and create a new H256List with their IDs
+                let commitments = rx.await.expect("to receive epoch commitments");
+                let mut txids = H256List::new();
+
+                for tx in commitments.iter() {
+                    debug!("Epoch block includes commitment: {}", tx.id.0.to_base58());
+                    txids.push(tx.id);
+                }
+
+                SystemTransactionLedger {
+                    ledger_id: SystemLedger::Commitment.into(),
+                    tx_ids: txids
+                }
+            } else {
+                // In regular blocks: process and persist new commitment transactions
+                // from the mempool and create a ledger entry referencing them
+                let tx = db.tx_mut().unwrap();
+                let mut txids = H256List::new();
+
+                for tx_item in mempool_tx.commitment_tx.iter() {
+                    // Only include successfully inserted transactions
+                    if insert_commitment_tx(&tx, tx_item).is_ok() {
+                        debug!("New commitment persisted: {}", tx_item.id.0.to_base58());
+                        txids.push(tx_item.id);
+                    }
+                }
+                tx.inner.commit().unwrap();
+
+                SystemTransactionLedger {
+                    ledger_id: SystemLedger::Commitment.into(),
+                    tx_ids: txids
+                }
+            };
+
+            // Only add the system ledger to the block when commitments exist
+            // Empty ledgers are excluded to optimize block size
+            let system_ledgers = if !commitment_ledger.tx_ids.is_empty() {
+                vec![commitment_ledger]
+            } else {
+                Vec::new()
+            };
+
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
             // This exists to prevent block validation errors in the unlikely* case two blocks are produced with the exact same timestamp
@@ -258,7 +303,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
             let current_difficulty = prev_block_header.diff;
             let mut is_difficulty_updated = false;
-            let block_height = prev_block_header.height + 1;
             let (diff, stats) = calculate_difficulty(block_height, last_diff_timestamp, current_timestamp, current_difficulty, &config.consensus.difficulty_adjustment);
 
             // Did an adjustment happen?
@@ -346,7 +390,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 miner_address: solution.mining_address,
                 signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
-                system_ledgers: vec![],
+                system_ledgers,
                 data_ledgers: vec![
                     // Permanent Publish Ledger
                     DataTransactionLedger {

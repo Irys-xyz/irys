@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 pub struct CommitmentStateEntry {
     pub id: IrysTransactionId,
     pub commitment_status: CommitmentStatus,
+    // Only valid for pledge commitments
     pub partition_hash: Option<H256>,
     pub signer: Address,
     /// Irys token amount in atomic units

@@ -3,12 +3,18 @@ use base58::ToBase58;
 use irys_actors::peer_list_service::PeerListServiceFacade;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
+    broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
 };
 use irys_api_server::routes::tx::IrysTransaction;
 use irys_database::{BlockIndexItem, DataLedger};
-pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
-use irys_types::{block::CombinedBlockHeader, IrysBlockHeader, PeerAddress, H256};
+use irys_types::{block::CombinedBlockHeader, block_production::Seed};
+
+pub use irys_reth_node_bridge::node::{
+    RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
+};
+
+use irys_types::{H256List, IrysBlockHeader, PeerAddress, H256};
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
@@ -210,6 +216,7 @@ pub async fn sync_state_from_peers(
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
     peer_service_addr: PeerListServiceFacade,
+    vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
     let peers = Arc::new(Mutex::new(trusted_peers.clone()));
@@ -246,9 +253,6 @@ pub async fn sync_state_from_peers(
         if let Some(irys_block) = fetch_block(&peer.api, &client, &block_index_item).await {
             let block = Arc::new(irys_block);
             let block_discovery_addr = block_discovery_addr.clone();
-            //TODO: temporarily introducing a 2 second pause to allow vdf steps to be created. otherwise vdf steps try to be included that do not exist locally. This helps prevent against the following type of error:
-            //      Error sending BlockDiscoveredMessage for block 3Yy6zT8as2P4n4A4xYtVL4oMfwsAzgBpFMdoUJ6UYKoy: Block validation error Unavailable requested range (6..=10). Stored steps range is (1..=8)
-            sleep(Duration::from_millis(2000));
 
             //add txns from block to txn db
             for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
@@ -268,12 +272,28 @@ pub async fn sync_state_from_peers(
                 }
             }
 
+            let block_end_step = block.vdf_limiter_info.global_step_number;
+            let block_start_step = block_end_step - block.vdf_limiter_info.steps.len() as u64;
+            for (i, step) in block.vdf_limiter_info.steps.iter().enumerate() {
+                //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
+                let mining_seed = BroadcastMiningSeed {
+                    seed: Seed { 0: *step },
+                    global_step: block_start_step + i as u64,
+                    checkpoints: H256List::new(),
+                };
+
+                if let Err(e) = vdf_sender.send(mining_seed).await {
+                    error!("Peer Sync: VDF Send Error: {:?}", e);
+                }
+            }
+
+            // allow block to be discovered by block discovery actor
             if let Err(e) = block_discovery_addr
                 .send(BlockDiscoveredMessage(block.clone()))
                 .await?
             {
                 error!(
-                    "Error sending BlockDiscoveredMessage for block {}: {:?}\nOFFENDING BLOCK evm_block_hash: {}",
+                    "Peer Sync: Error sending BlockDiscoveredMessage for block {}: {:?}\nOFFENDING BLOCK evm_block_hash: {}",
                     block_index_item.block_hash.0.to_base58(),
                     e,
                     block.clone().evm_block_hash,

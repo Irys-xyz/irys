@@ -1,7 +1,5 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
-use crate::genesis_utilities::{
-    genesis_block_exists_on_disk, load_genesis_block_from_disk, save_genesis_block_to_disk,
-};
+use crate::genesis_utilities::{genesis_block_exists_on_disk, save_genesis_block_to_disk};
 use crate::peer_utilities::{fetch_genesis_block, sync_state_from_peers};
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
@@ -12,10 +10,10 @@ use irys_actors::{
     block_producer::BlockProducerActor,
     block_tree_service::BlockTreeReadGuard,
     block_tree_service::{BlockTreeService, GetBlockTreeGuardMessage},
-    broadcast_mining_service::BroadcastMiningService,
+    broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
-    ema_service::EmaService,
+    ema_service::{EmaService, EmaServiceMessage},
     epoch_service::{EpochServiceActor, GetPartitionAssignmentsGuardMessage},
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
@@ -27,7 +25,10 @@ use irys_actors::{
     services::ServiceSenders,
     validation_service::ValidationService,
     vdf_service::{GetVdfStateMessage, VdfService},
-    ActorAddresses, BlockFinalizedMessage, EpochReplayData,
+};
+use irys_actors::{
+    ActorAddresses, BlockFinalizedMessage, CommitmentCache, CommitmentStateReadGuard,
+    EpochReplayData, GetCommitmentStateGuardMessage,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
@@ -65,11 +66,13 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::atomic::AtomicU64,
-    sync::{mpsc, Arc, RwLock},
+    sync::{Arc, RwLock},
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, warn};
 
@@ -84,6 +87,9 @@ pub struct IrysNodeCtx {
     pub block_tree_guard: BlockTreeReadGuard,
     pub vdf_steps_guard: VdfStepsReadGuard,
     pub service_senders: ServiceSenders,
+    // vdf channel for fast forwarding steps during sync
+    pub vdf_sender:
+        tokio::sync::mpsc::Sender<irys_actors::broadcast_mining_service::BroadcastMiningSeed>,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
@@ -92,6 +98,21 @@ pub struct IrysNodeCtx {
 }
 
 impl IrysNodeCtx {
+    pub fn get_api_state(&self, ema_service: UnboundedSender<EmaServiceMessage>) -> ApiState {
+        ApiState {
+            mempool: self.actor_addresses.mempool.clone(),
+            chunk_provider: self.chunk_provider.clone(),
+            ema_service: ema_service,
+            peer_list: self.actor_addresses.peer_list.clone(),
+            db: self.db.clone(),
+            config: self.config.clone(),
+            reth_provider: self.reth_handle.clone(),
+            reth_http_url: self.reth_handle.rpc_server_handle().http_url().unwrap(),
+            block_tree: self.block_tree_guard.clone(),
+            block_index: self.block_index_guard.clone(),
+        }
+    }
+
     pub async fn stop(self) {
         let _ = self.actor_addresses.stop_mining();
         debug!("Sending shutdown signal to reth thread");
@@ -181,7 +202,6 @@ pub struct IrysNode {
     pub config: Config,
     pub data_exists: bool,
     pub random_ports: bool,
-    pub genesis_timestamp: u128,
     pub http_listener: TcpListener,
 }
 
@@ -208,59 +228,8 @@ impl IrysNode {
         let config = Config::new(node_config);
 
         let data_exists = Self::blockchain_data_exists(&config.node_config.base_directory);
-        let genesis_file_exists = genesis_block_exists_on_disk(&config.node_config.base_directory);
-
-        let irys_genesis_block = if genesis_file_exists {
-            info!("loading genesis block from disk");
-            //load genesis from disk genesis.json
-            load_genesis_block_from_disk(&config.node_config.base_directory)
-                .expect("valid genesis block loaded from disk")
-        } else {
-            // we need to generate or sync the genesis block
-            let irys_genesis_block = match &config.node_config.mode {
-                NodeMode::Genesis => {
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                    let (_, irys_genesis) = IrysChainSpecBuilder::from_config(&config).build();
-
-                    let irys_genesis = IrysBlockHeader {
-                        diff: calculate_initial_difficulty(
-                            &config.consensus,
-                            // TODO: where does this magic constant come from?
-                            3,
-                        )
-                        .expect("valid calculated initial difficulty"),
-                        timestamp: now.as_millis(),
-                        last_diff_timestamp: now.as_millis(),
-                        ..irys_genesis
-                    };
-                    info!(
-                        "genesis generated by this node at startup {:?}",
-                        &irys_genesis
-                    );
-                    Arc::new(irys_genesis)
-                }
-                NodeMode::PeerSync => {
-                    info!("fetching genesis block from trusted peer");
-                    let awc_client = awc::Client::new();
-                    fetch_genesis_block(
-                        &config
-                            .node_config
-                            .trusted_peers
-                            .first()
-                            .expect("expected at least one trusted peer in config")
-                            .api,
-                        &awc_client,
-                    )
-                    .await
-                    .expect("expected genesis block from http api")
-                }
-            };
-
-            irys_genesis_block
-        };
 
         Ok(IrysNode {
-            genesis_timestamp: irys_genesis_block.timestamp,
             data_exists,
             config,
             random_ports,
@@ -285,11 +254,14 @@ impl IrysNode {
 
         // figure out the init mode
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
+
+        // note: if you need the genesis header later, you can easily make this match block return it
         match (self.data_exists, &self.config.node_config.mode) {
             (true, NodeMode::Genesis { .. }) => {
                 eyre::bail!("You cannot start a genesis chain with existing data")
             }
-            (false, _) => {
+            (false, &NodeMode::Genesis { .. }) => {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
                 // special handling for genesis node
                 let commitments = get_genesis_commitments(&self.config);
 
@@ -300,8 +272,8 @@ impl IrysNode {
                         3,
                     )
                     .expect("valid calculated initial difficulty"),
-                    timestamp: self.genesis_timestamp,
-                    last_diff_timestamp: self.genesis_timestamp,
+                    timestamp: now.as_millis(),
+                    last_diff_timestamp: now.as_millis(),
                     ..irys_genesis
                 };
                 add_genesis_commitments(&mut irys_genesis, &self.config);
@@ -325,8 +297,37 @@ impl IrysNode {
                 .join()
                 .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
             }
-            _ => {
-                // no special handling for `peer` mode node
+            (false, &NodeMode::PeerSync) => {
+                let genesis_file_exists =
+                    genesis_block_exists_on_disk(&self.config.node_config.base_directory);
+
+                if !genesis_file_exists {
+                    info!("fetching genesis block from trusted peer");
+                    let awc_client = awc::Client::new();
+                    let irys_genesis_block = fetch_genesis_block(
+                        &self
+                            .config
+                            .node_config
+                            .trusted_peers
+                            .first()
+                            .expect("expected at least one trusted peer in config")
+                            .api,
+                        &awc_client,
+                    )
+                    .await
+                    .expect("expected genesis block from http api");
+                    // write genesis.json to disk
+                    if let Err(e) = save_genesis_block_to_disk(
+                        irys_genesis_block.clone(),
+                        &self.config.node_config.base_directory,
+                    ) {
+                        panic!("unable to save genesis block to disk: {:?}", e);
+                    }
+                }
+                // no special handling for if the genesis block exists on disk already
+            }
+            (true, &NodeMode::PeerSync) => {
+                // no special handling for initialized PeerSync nodes
             }
         };
 
@@ -341,7 +342,7 @@ impl IrysNode {
         let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
         let (main_actor_thread_shutdown_tx, main_actor_thread_shutdown_rx) =
             tokio::sync::mpsc::channel::<()>(1);
-        let (vdf_sthutodwn_sender, vdf_sthutodwn_receiver) = mpsc::channel();
+        let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel(1);
         let (reth_handle_sender, reth_handle_receiver) =
             oneshot::channel::<FullNode<RethNode, RethNodeAddOns>>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
@@ -349,13 +350,14 @@ impl IrysNode {
         let irys_provider = irys_storage::reth_provider::create_provider();
 
         // init the services
+        // vdf gets started here...
         let actor_main_thread_handle = Self::init_services_thread(
             self.config.clone(),
             latest_block_height_tx,
             reth_shutdown_sender,
             main_actor_thread_shutdown_rx,
-            vdf_sthutodwn_sender,
-            vdf_sthutodwn_receiver,
+            vdf_shutdown_sender,
+            vdf_shutdown_receiver,
             reth_handle_receiver,
             irys_node_ctx_tx,
             &irys_provider,
@@ -391,6 +393,7 @@ impl IrysNode {
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
                 ctx.actor_addresses.peer_list.clone(),
+                ctx.vdf_sender.clone(),
             )
             .await?;
         }
@@ -503,7 +506,7 @@ impl IrysNode {
                         debug!("Actors stopped");
 
                         // Send shutdown signal
-                        vdf_shutdown_sender.send(()).unwrap();
+                        vdf_shutdown_sender.send(()).await.unwrap();
 
                         debug!("Waiting for VDF thread to finish");
                         // Wait for vdf thread to finish & save steps
@@ -582,7 +585,7 @@ impl IrysNode {
     async fn init_services(
         config: &Config,
         reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
-        vdf_shutdown_receiver: std::sync::mpsc::Receiver<()>,
+        vdf_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
         reth_handle_receiver: oneshot::Receiver<FullNode<RethNode, RethNodeAddOns>>,
         block_index: Arc<RwLock<BlockIndex>>,
         latest_block: Arc<IrysBlockHeader>,
@@ -655,6 +658,11 @@ impl IrysNode {
             .await?;
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
 
+        // Retrieve Commitment State
+        let commitment_state_guard = epoch_service_actor
+            .send(GetCommitmentStateGuardMessage)
+            .await?;
+
         let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
             &config.node_config.gossip.bind_ip,
             config.node_config.gossip.port,
@@ -675,6 +683,14 @@ impl IrysNode {
         let _handle =
             EmaService::spawn_service(&task_exec, block_tree_guard.clone(), receivers.ema, &config);
 
+        // Spawn the CommitmentCache service
+        let _handle = CommitmentCache::spawn_service(
+            &task_exec,
+            receivers.commitments_cache,
+            commitment_state_guard.clone(),
+            &config,
+        );
+
         // Spawn peer list service
         let (peer_list_service, peer_list_arbiter) =
             init_peer_list_service(&irys_db, &config, reth_service_actor.clone());
@@ -687,6 +703,8 @@ impl IrysNode {
             reth_db,
             &storage_modules,
             &block_tree_guard,
+            &commitment_state_guard,
+            &service_senders,
             gossip_tx.clone(),
         );
 
@@ -698,6 +716,8 @@ impl IrysNode {
             &service_senders,
             &storage_modules,
         );
+
+        let (vdf_sender, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
 
         // spawn the vdf service
         let vdf_service = Self::init_vdf_service(&config, &irys_db, &block_index_guard);
@@ -773,11 +793,12 @@ impl IrysNode {
         let vdf_thread_handler = Self::init_vdf_thread(
             &config,
             vdf_shutdown_receiver,
+            new_seed_rx,
             latest_block,
             seed,
             global_step_number,
             broadcast_mining_actor,
-            vdf_service,
+            vdf_service.clone(),
             atomic_global_step_number,
         );
 
@@ -796,6 +817,7 @@ impl IrysNode {
                 epoch_service: epoch_service_actor,
                 peer_list: peer_list_service.clone(),
                 reth: reth_service_actor,
+                vdf: vdf_service,
             },
             reth_handle: reth_node.clone(),
             db: irys_db.clone(),
@@ -803,6 +825,7 @@ impl IrysNode {
             block_index_guard: block_index_guard.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
+            vdf_sender,
             reth_shutdown_sender,
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),
@@ -896,7 +919,8 @@ impl IrysNode {
 
     fn init_vdf_thread(
         config: &Config,
-        vdf_sthutodwn_receiver: mpsc::Receiver<()>,
+        vdf_shutdown_receiver: mpsc::Receiver<()>,
+        new_seed_rx: mpsc::Receiver<BroadcastMiningSeed>,
         latest_block: Arc<IrysBlockHeader>,
         seed: H256,
         global_step_number: u64,
@@ -928,15 +952,13 @@ impl IrysNode {
                     }
                 }
 
-                // TODO: these channels are unused
-                let (_new_seed_tx, new_seed_rx) = mpsc::channel::<H256>();
                 run_vdf(
                     &vdf_config,
                     global_step_number,
                     seed,
                     vdf_reset_seed,
                     new_seed_rx,
-                    vdf_sthutodwn_receiver,
+                    vdf_shutdown_receiver,
                     broadcast_mining_actor.clone(),
                     vdf_service.clone(),
                     atomic_global_step_number.clone(),
@@ -1142,6 +1164,8 @@ impl IrysNode {
         reth_db: irys_database::db::RethDbWrapper,
         storage_modules: &Vec<Arc<StorageModule>>,
         block_tree_guard: &BlockTreeReadGuard,
+        commitment_state_guard: &CommitmentStateReadGuard,
+        service_senders: &ServiceSenders,
         gossip_tx: tokio::sync::mpsc::Sender<GossipData>,
     ) -> (actix::Addr<MempoolService>, Arbiter) {
         let mempool_service = MempoolService::new(
@@ -1150,7 +1174,9 @@ impl IrysNode {
             reth_node.task_executor.clone(),
             storage_modules.clone(),
             block_tree_guard.clone(),
+            commitment_state_guard.clone(),
             &config,
+            service_senders.clone(),
             gossip_tx,
         );
         let mempool_arbiter = Arbiter::new();

@@ -73,7 +73,7 @@ impl EpochReplayData {
             }
 
             // Find the commitment ledger in the epoch block's system ledgers
-            let commitments_ledger = match block
+            let commitment_ledger = match block
                 .system_ledgers
                 .iter()
                 .find(|b| b.ledger_id == SystemLedger::Commitment)
@@ -93,7 +93,7 @@ impl EpochReplayData {
             let read_tx = db
                 .tx()
                 .expect("Expected to create a valid database transaction");
-            let commitments_tx = commitments_ledger
+            let commitments_tx = commitment_ledger
                 .tx_ids
                 .iter()
                 .map(|txid| {
