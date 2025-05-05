@@ -321,6 +321,8 @@ impl IrysNode {
 
         // figure out the init mode
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
+
+        // note: if you need the genesis header later, you can easily make this match block return it
         match (self.data_exists, &self.config.node_config.mode) {
             (true, NodeMode::Genesis { .. }) => {
                 eyre::bail!("You cannot start a genesis chain with existing data")
@@ -344,6 +346,14 @@ impl IrysNode {
                 add_genesis_commitments(&mut irys_genesis, &self.config);
                 let irys_genesis_block = Arc::new(irys_genesis);
 
+                // write genesis.json to disk
+                if let Err(e) = save_genesis_block_to_disk(
+                    irys_genesis_block.clone(),
+                    &self.config.node_config.base_directory,
+                ) {
+                    panic!("unable to save genesis block to disk: {:?}", e);
+                }
+
                 // special handilng for genesis node
                 Self::init_genesis_thread(
                     self.config.clone(),
@@ -353,8 +363,37 @@ impl IrysNode {
                 .join()
                 .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
             }
-            _ => {
-                // no special handling for `peer` mode node
+            (false, &NodeMode::PeerSync) => {
+                let genesis_file_exists =
+                    genesis_block_exists_on_disk(&self.config.node_config.base_directory);
+
+                if !genesis_file_exists {
+                    info!("fetching genesis block from trusted peer");
+                    let awc_client = awc::Client::new();
+                    let irys_genesis_block = fetch_genesis_block(
+                        &self
+                            .config
+                            .node_config
+                            .trusted_peers
+                            .first()
+                            .expect("expected at least one trusted peer in config")
+                            .api,
+                        &awc_client,
+                    )
+                    .await
+                    .expect("expected genesis block from http api");
+                    // write genesis.json to disk
+                    if let Err(e) = save_genesis_block_to_disk(
+                        irys_genesis_block.clone(),
+                        &self.config.node_config.base_directory,
+                    ) {
+                        panic!("unable to save genesis block to disk: {:?}", e);
+                    }
+                }
+                // no special handling for if the genesis block exists on disk already
+            }
+            (true, &NodeMode::PeerSync) => {
+                // no special handling for initialized PeerSync nodes
             }
         };
 

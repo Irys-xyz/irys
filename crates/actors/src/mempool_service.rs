@@ -380,7 +380,6 @@ impl Handler<TxIngressMessage> for MempoolService {
         if self.invalid_tx.contains(&tx.id) || self.recent_valid_tx.contains(&tx.id) {
             return Err(TxIngressError::Skipped);
         }
-
         // Validate anchor
         let hdr = self.validate_anchor(&tx.id, &tx.anchor)?;
 
