@@ -62,10 +62,10 @@ impl GossipClient {
                 .await?;
             }
             GossipData::Block(irys_block_header) => {
-                tracing::trace!(
-                    "GOSSIP POSTING to {:?} DATA to: {:?}",
+                tracing::error!(
+                    "GOSSIP POSTING BLOCK HEIGHT {:?} DATA to {:?}",
+                    irys_block_header.height,
                     format!("http://{}/gossip/block", peer.address.gossip),
-                    irys_block_header
                 );
                 self.send_data_internal(
                     format!("http://{}/gossip/block", peer.address.gossip),

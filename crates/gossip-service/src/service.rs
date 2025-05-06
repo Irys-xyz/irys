@@ -18,12 +18,17 @@ use crate::{
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
-use irys_actors::block_discovery::BlockDiscoveredMessage;
-use irys_actors::mempool_service::TxExistenceQuery;
-use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
-use irys_actors::peer_list_service::PeerListFacade;
+use irys_actors::{
+    block_discovery::BlockDiscoveredMessage,
+    broadcast_mining_service::BroadcastMiningSeed,
+    mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngressMessage},
+    peer_list_service::PeerListFacade,
+};
 use irys_api_client::ApiClient;
-use irys_types::{Address, DatabaseProvider, GossipData, PeerListItem, RethPeerInfo};
+use irys_types::{
+    block_production::Seed, Address, DatabaseProvider, GossipData, H256List, PeerListItem,
+    RethPeerInfo, VDFLimiterInfo,
+};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashSet;
@@ -151,6 +156,7 @@ impl GossipService {
         task_executor: &TaskExecutor,
         peer_list: PeerListFacade<A, R>,
         db: DatabaseProvider,
+        vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         M: Handler<TxIngressMessage>
@@ -170,6 +176,7 @@ impl GossipService {
             peer_list.clone(),
             block_discovery.clone(),
             self.client.clone(),
+            Some(vdf_sender),
         );
         let arbiter = actix::Arbiter::new();
         let block_pool_addr =
@@ -455,6 +462,27 @@ fn spawn_main_task(
         },
         task_executor,
     )
+}
+
+///
+pub async fn fast_forward_vdf_steps_from_block(
+    vdf_limiter_info: VDFLimiterInfo,
+    vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
+) {
+    let block_end_step = vdf_limiter_info.global_step_number;
+    let block_start_step = block_end_step - vdf_limiter_info.steps.len() as u64;
+    for (i, step) in vdf_limiter_info.steps.iter().enumerate() {
+        //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
+        let mining_seed = BroadcastMiningSeed {
+            seed: Seed { 0: *step },
+            global_step: block_start_step + i as u64,
+            checkpoints: H256List::new(),
+        };
+
+        if let Err(e) = vdf_sender.send(mining_seed).await {
+            tracing::error!("Peer Sync: VDF Send Error: {:?}", e);
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]

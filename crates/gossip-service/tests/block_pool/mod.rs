@@ -133,12 +133,14 @@ async fn should_process_block() {
     );
     let peer_addr = peer_list_service.start();
 
+    let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
     let service = BlockPoolService::new_with_client(
         db.clone(),
         mock_client,
         peer_addr.into(),
         block_discovery_addr.clone(),
         GossipClient::new(Duration::from_secs(5), Address::default()),
+        Some(vdf_tx),
     );
     let addr = service.start();
 
@@ -294,12 +296,15 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .await
         .expect("can't send message to peer list");
 
+    let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel(1);
+
     let service = BlockPoolService::new_with_client(
         db.clone(),
         mock_client,
         peer_addr.into(),
         block_discovery_addr.clone(),
         GossipClient::new(Duration::from_secs(5), Address::default()),
+        Some(vdf_tx),
     );
     let addr = service.start();
 

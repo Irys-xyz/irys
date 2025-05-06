@@ -5,6 +5,7 @@ use base58::ToBase58;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::Result;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
+use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_actors::mempool_service::{
     ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
 };
@@ -368,6 +369,8 @@ impl GossipServiceTestFixture {
         };
         let block_discovery_stub_addr = block_discovery_stub.start();
 
+        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
+
         let service_handle = gossip_service
             .run(
                 mempool_stub_addr,
@@ -376,6 +379,7 @@ impl GossipServiceTestFixture {
                 &self.task_executor,
                 self.peer_list.clone().into(),
                 self.db.clone(),
+                vdf_tx,
             )
             .expect("failed to run gossip service");
 

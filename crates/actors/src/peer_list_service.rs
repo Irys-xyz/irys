@@ -1326,7 +1326,7 @@ mod tests {
         // Test increasing score using message handler
         service.handle(
             IncreasePeerScore {
-                peer_miner_address: peer.address.gossip,
+                peer_miner_address: mining_addr,
                 reason: ScoreIncreaseReason::Online,
             },
             ctx,
@@ -1344,7 +1344,7 @@ mod tests {
         // Test decreasing score using message handler
         service.handle(
             DecreasePeerScore {
-                peer_miner_address: peer.address.gossip,
+                peer_miner_address: mining_addr,
                 reason: ScoreDecreaseReason::Offline,
             },
             ctx,
@@ -1438,8 +1438,8 @@ mod tests {
         );
 
         assert_eq!(active_peers.len(), 2);
-        assert_eq!(active_peers[0].address, peer1.address); // Higher score should be first
-        assert_eq!(active_peers[1].address, peer2.address);
+        assert_eq!(active_peers[0].1, peer1); // Higher score should be first
+        assert_eq!(active_peers[1].1, peer2);
     }
 
     #[actix_rt::test]
@@ -1490,10 +1490,12 @@ mod tests {
         assert_eq!(known_peers.len(), 1);
 
         // Test peer lookup with non-existent address
-        let non_existent_addr =
+        let non_existent_addr = Address::from_str("0xDEAD111111111111111111111111111111111111")
+            .expect("expected valid mining address");
+        let non_existent_gossip_addr =
             SocketAddr::new(IpAddr::from_str("192.168.1.1").expect("invalid IP"), 9999);
         let result = service.handle(
-            PeerListEntryRequest::GossipSocketAddress(non_existent_addr),
+            PeerListEntryRequest::GossipSocketAddress(non_existent_gossip_addr),
             ctx,
         );
         assert!(result.is_none());
@@ -2198,10 +2200,7 @@ mod tests {
             .expect("send active peers request");
 
         assert_eq!(active_peers.len(), 1, "Should have one active peer");
-        assert_eq!(
-            active_peers[0].address, peer.address,
-            "Should be the peer we added"
-        );
+        assert_eq!(active_peers[0].1, peer, "Should be the peer we added");
     }
 
     #[actix_rt::test]

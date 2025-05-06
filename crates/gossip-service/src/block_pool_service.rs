@@ -1,3 +1,4 @@
+use crate::service::fast_forward_vdf_steps_from_block;
 use crate::types::RequestedData;
 use crate::GossipClient;
 use actix::{
@@ -6,6 +7,7 @@ use actix::{
 };
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
+use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_actors::peer_list_service::{PeerListFacade, PeerListFacadeError};
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
@@ -14,7 +16,7 @@ use irys_types::{Address, BlockHash, DatabaseProvider, IrysBlockHeader, RethPeer
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, error};
 
 #[derive(Debug)]
 pub enum BlockPoolError {
@@ -50,6 +52,7 @@ where
     pub block_producer_addr: Option<Addr<B>>,
     pub peer_list: Option<PeerListFacade<A, R>>,
     pub gossip_client: GossipClient,
+    pub vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
 }
 
 impl<A, R, B> Default for BlockPoolService<A, R, B>
@@ -67,6 +70,7 @@ where
             block_producer_addr: None,
             peer_list: None,
             gossip_client: GossipClient::new(Duration::from_secs(5), Address::default()),
+            vdf_sender: None,
         }
     }
 }
@@ -112,6 +116,7 @@ where
         peer_list: PeerListFacade<A, R>,
         block_producer_addr: Addr<B>,
         gossip_client: GossipClient,
+        vdf_sender: Option<tokio::sync::mpsc::Sender<BroadcastMiningSeed>>,
     ) -> Self {
         Self {
             db: Some(db),
@@ -121,6 +126,7 @@ where
             peer_list: Some(peer_list),
             block_producer_addr: Some(block_producer_addr),
             gossip_client,
+            vdf_sender,
         }
     }
 
@@ -132,9 +138,16 @@ where
         debug!("Processing block {}", block_header.block_hash.0.to_base58());
         let prev_block_hash = block_header.previous_block_hash;
         let current_block_hash = block_header.block_hash;
+        let vdf_limiter_info = block_header.vdf_limiter_info.clone();
         let self_addr = ctx.address();
         let block_producer_addr = self.block_producer_addr.clone();
         let db = self.db.clone();
+        let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
+
+        error!(
+            "GOSSIP process_block() BLOCK HEIGHT: {}",
+            block_header.height
+        );
 
         Box::pin(
             async move {
@@ -158,6 +171,10 @@ where
                         "Found parent block for block {}",
                         current_block_hash.0.to_base58()
                     );
+
+                    //process vdf steps from block
+                    fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
+
                     block_producer_addr
                         .as_ref()
                         .ok_or(BlockPoolError::OtherInternal(
