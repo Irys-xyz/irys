@@ -4,8 +4,8 @@
 )]
 use crate::types::{GossipError, GossipResult, RequestedData};
 use actix::{Actor, Context, Handler};
-use core::time::Duration;
 use base58::ToBase58;
+use core::time::Duration;
 use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_api_client::ApiClient;
 use irys_types::{Address, GossipData, GossipRequest, PeerListItem, RethPeerInfo};
@@ -63,7 +63,7 @@ impl GossipClient {
                 .await?;
             }
             GossipData::Block(irys_block_header) => {
-                tracing::error!(
+                tracing::debug!(
                     "GOSSIP POSTING BLOCK {:?} HEIGHT {:?} DATA to {:?}",
                     irys_block_header.block_hash.0.to_base58(),
                     irys_block_header.height,

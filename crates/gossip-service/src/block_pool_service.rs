@@ -264,7 +264,6 @@ where
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
     fn handle(&mut self, msg: ProcessBlock, ctx: &mut Self::Context) -> Self::Result {
-        tracing::error!("calling self.process_block()");
         self.process_block(msg.header, ctx)
     }
 }
