@@ -4429,6 +4429,7 @@ version = "0.1.0"
 dependencies = [
  "eyre",
  "irys-types",
+ "rstest",
 ]
 
 [[package]]

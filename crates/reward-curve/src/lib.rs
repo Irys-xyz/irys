@@ -1,112 +1,185 @@
+//! Exponential-decay (base-2) emission curve
+//!
+//! R(t) = R_max · ln 2 / T½ · 2^-(t/T½)
+//!
+//! All arithmetic is 18-decimal fixed-point using 256-bit unsigned integers.
+
 use eyre::{eyre, Result};
-use irys_types::storage_pricing::{mul_div, safe_add, safe_div, safe_sub, TOKEN_SCALE};
+use irys_types::storage_pricing::{
+    mul_div,
+    safe_add,
+    safe_div,
+    safe_sub,
+    TOKEN_SCALE, // TOKEN_SCALE = 1 e18
+};
 use irys_types::storage_pricing::{phantoms::Irys, Amount};
 use irys_types::U256;
 
-/// 18-decimal fixed-point representation of ln(2).
-/// 0.693147180559945309 × 10¹⁸  ≈  693_147_180_559_945_309
-const LN2_SCALED: U256 = U256([693_147_180_559_945_309u64, 0, 0, 0]);
+/// ln 2 in 18-dec fixed-point:
+/// 0.693 147 180 559 945 309 × 1 e18 ≈ 693 147 180 559 945 309
+const LN2_FP18: U256 = U256([693_147_180_559_945_309u64, 0, 0, 0]);
 
-/// Exponential–decay emission curve:
+/// Number of terms kept in the e^(-x) Taylor series.
+/// 10 → |ε| < 3 × 10⁻¹⁵.
+const TAYLOR_TERMS: u64 = 10;
+
+/// Continuous halving emission curve.
 ///
-/// R(t) = R_max · ln(2)/T½ · 2⁻(t/T½)
-///
-/// Everything is integer / fixed-point.  
-/// `inflation_supply` – asymptotic total emission (atomic units)  
-/// `half_life_secs`   – half-life in **seconds**
+/// * **inflation_cap** – asymptotic total emission, atomic units (R_max)  
+/// * **half_life_secs** – seconds until the remaining emission halves (T½)
 #[derive(Debug, Clone)]
-pub struct LogCurve {
-    pub inflation_supply: Amount<Irys>,
+pub struct HalvingCurve {
+    pub inflation_cap: Amount<Irys>,
     pub half_life_secs: u64,
 }
 
-impl LogCurve {
-    /// Per-block reward at `block_timestamp` (seconds since genesis).
-    ///
-    /// Returns `Amount<Irys>` in atomic units.
-    pub fn miner_reward(&self, block_timestamp: u64) -> Result<Amount<Irys>> {
-        if self.inflation_supply.amount.is_zero() || self.half_life_secs == 0 {
+impl HalvingCurve {
+    /// Block reward at the given timestamp (seconds since genesis).
+    pub fn block_reward(&self, seconds_since_genesis_block: u64) -> Result<Amount<Irys>> {
+        if self.inflation_cap.amount.is_zero() || self.half_life_secs == 0 {
             return Ok(Amount::new(U256::zero()));
         }
 
-        //--------------------------------------------------------------------
-        // 1.  R_max · ln(2) / T½   (scaled 1e18)
-        //--------------------------------------------------------------------
-        let r_ln2_scaled = mul_div(
-            self.inflation_supply.amount,
-            LN2_SCALED,
+        // r_ln2 = R_max · ln 2 / T½  (18-dec)
+        let r_ln2_fp18 = mul_div(
+            self.inflation_cap.amount,
+            LN2_FP18,
             U256::from(self.half_life_secs),
         )?;
 
-        //--------------------------------------------------------------------
-        // 2.  decay = 2^-(t / T½)  (scaled 1e18)
-        //--------------------------------------------------------------------
-        let decay_scaled = pow_half_ratio(block_timestamp, self.half_life_secs)?;
+        // decay = 2^-(t/T½)  (18-dec)
+        let decay_fp18 = decay_factor(seconds_since_genesis_block, self.half_life_secs)?;
 
-        //--------------------------------------------------------------------
-        // 3.  reward = (r_ln2_scaled · decay_scaled) / 1e18   → atomic units
-        //--------------------------------------------------------------------
-        let reward = mul_div(r_ln2_scaled, decay_scaled, TOKEN_SCALE)?;
-
+        // reward = r_ln2 · decay / 1 e18  ⟶ atomic units
+        let reward = mul_div(r_ln2_fp18, decay_fp18, TOKEN_SCALE)?;
         Ok(Amount::new(reward))
     }
 }
 
-/*──────────────────────── helper functions ──────────────────────────*/
-
-/// 2^-(t / half_life)  in 1e18 fixed-point.
+/// 2^-(t / half_life) in 18-dec fixed-point.
 ///
-/// Split t / T½  into its integer part  *q*  and fractional part  *f*.
-/// * 2⁻ᵠ  is just a right-shift / division by 2ᵠ.
-/// * 2⁻ᶠ = e^(-ln2·f)  is approximated with a 6-term Taylor series;
-///   f ≤ 1 so the error stays < 10⁻¹² for practical ranges.
-fn pow_half_ratio(timestamp: u64, half_life: u64) -> Result<U256> {
+/// Split `t / half_life = q + f` into integer `q` and fractional `f`.
+/// * 2^-q ⇒ divide by 2^q (bit-shift)  
+/// * 2^-f ⇒ e^(-ln 2 · f) via truncated Taylor series
+fn decay_factor(t_secs: u64, half_life: u64) -> Result<U256> {
     if half_life == 0 {
         return Err(eyre!("half_life cannot be zero"));
     }
 
-    let whole = timestamp / half_life;
-    let remainder = timestamp % half_life;
+    let q = t_secs / half_life;
+    let f_secs = t_secs % half_life;
 
-    // TOKEN_SCALE / 2^whole
-    let mut result = TOKEN_SCALE;
-    if whole > 0 {
-        // shift >255 would underflow straight to zero – early-out
-        if whole >= 256 {
-            return Ok(U256::zero());
-        }
-        let pow2_whole = U256::one() << whole;
-        result = safe_div(result, pow2_whole)?;
+    // 2^-q
+    let decay_q_fp18 = if q == 0 {
+        TOKEN_SCALE
+    } else if q >= 256 {
+        U256::zero() // underflow
+    } else {
+        safe_div(TOKEN_SCALE, U256::one() << q)?
+    };
+
+    // No fractional part? Done.
+    if f_secs == 0 || decay_q_fp18.is_zero() {
+        return Ok(decay_q_fp18);
     }
 
-    // If there is no fractional part we are done.
-    if remainder == 0 {
-        return Ok(result);
-    }
+    // x = ln 2 · f / half_life  (18-dec)
+    let x_fp18 = mul_div(LN2_FP18, U256::from(f_secs), U256::from(half_life))?;
+    let decay_f_fp18 = exp_neg(x_fp18)?;
 
-    // x = ln2 * remainder / half_life   (scaled 1e18)
-    let x_scaled = mul_div(LN2_SCALED, U256::from(remainder), U256::from(half_life))?;
-    let exp_frac = exp_neg_fixed(x_scaled)?;
-
-    // combine: 2^-whole * 2^-fraction
-    mul_div(result, exp_frac, TOKEN_SCALE)
+    // Combine integer and fractional pieces.
+    mul_div(decay_q_fp18, decay_f_fp18, TOKEN_SCALE)
 }
 
-/// e^(-x) in 18-dec fixed-point for 0 ≤ x ≤ ~0.7 (covers ln2*fraction).
-/// 6-term alternating Taylor series  ⇒  relative error < 10⁻¹².
-fn exp_neg_fixed(x_scaled: U256) -> Result<U256> {
-    let mut term = TOKEN_SCALE; // current term (starts at 1)
+/// e^(-x) in 18-dec fixed-point using `TAYLOR_TERMS` terms.
+fn exp_neg(x_fp18: U256) -> Result<U256> {
+    let mut term = TOKEN_SCALE; // current term (= 1)
     let mut sum = TOKEN_SCALE; // running total
 
-    for i in 1..=6u64 {
-        term = mul_div(term, x_scaled, TOKEN_SCALE)?; // term *= x
+    for i in 1..=TAYLOR_TERMS {
+        term = mul_div(term, x_fp18, TOKEN_SCALE)?; // term *= x
         term = safe_div(term, U256::from(i))?; // term /= i
-        if i & 1 == 1 {
-            // alternate signs
-            sum = safe_sub(sum, term)?;
+        sum = if i & 1 == 1 {
+            // alternating signs
+            safe_sub(sum, term)?
         } else {
-            sum = safe_add(sum, term)?;
-        }
+            safe_add(sum, term)?
+        };
     }
     Ok(sum)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use eyre::Result;
+    use rstest::rstest;
+
+    const INF_SUPPLY: u128 = 100_000_000; // R_max (tokens)
+    const HALF_LIFE_YEARS: u64 = 4; // half-life
+    const SECS_PER_YEAR: u64 = 365 * 24 * 60 * 60; // 31 536 000
+
+    /// Cumulative emitted tokens after `t_years`, computed
+    /// **with the same integer math** that `LogCurve::miner_reward` uses:
+    ///
+    /// S(t) = R_max · (1 − 2^{-t/T½})
+    fn circulating_supply(curve: &HalvingCurve, t_years: u64) -> Result<u128> {
+        use irys_types::storage_pricing::{mul_div, safe_sub, TOKEN_SCALE};
+
+        let elapsed_secs = t_years * SECS_PER_YEAR;
+
+        // decay = 2^{-t/T½} (scaled 1e18)
+        let decay_scaled = decay_factor(elapsed_secs, curve.half_life_secs)?;
+
+        // emitted = R_max · (1 − decay)
+        let one_minus = safe_sub(TOKEN_SCALE, decay_scaled)?;
+        let emitted = mul_div(curve.inflation_cap.amount, one_minus, TOKEN_SCALE)?;
+
+        // numbers are tiny (≤ 1e8) → always fit in u128
+        Ok(<u128>::try_from(emitted).expect("fits into u128"))
+    }
+
+    fn test_curve() -> HalvingCurve {
+        HalvingCurve {
+            inflation_cap: Amount::new(U256::from(INF_SUPPLY)),
+            half_life_secs: HALF_LIFE_YEARS * SECS_PER_YEAR,
+        }
+    }
+
+    // table-driven assertions
+    #[rstest]
+    #[case(0, 0)]
+    #[case(1, 15_910_358)]
+    #[case(2, 29_289_322)]
+    #[case(3, 40_539_644)]
+    #[case(4, 50_000_000)]
+    #[case(5, 57_955_179)]
+    #[case(6, 64_644_661)]
+    #[case(7, 70_269_822)]
+    #[case(8, 75_000_000)]
+    #[case(9, 78_977_590)]
+    #[case(10, 82_322_330)]
+    #[case(11, 85_134_911)]
+    #[case(12, 87_500_000)]
+    #[case(13, 89_488_795)]
+    #[case(14, 91_161_165)]
+    #[case(15, 92_567_456)]
+    #[case(16, 93_750_000)]
+    #[case(17, 94_744_397)]
+    #[case(18, 95_580_583)]
+    #[case(19, 96_283_728)]
+    fn circulating_supply_matches_table(#[case] year: u64, #[case] expected: u128) -> Result<()> {
+        let curve = test_curve();
+        let actual = circulating_supply(&curve, year)?;
+
+        // there's a potential rounding error of a single token between the source impl and the test data (taken from excel)
+        // - the Excel sheet rounded to nearest integer (source of the result)
+        // - our helper truncates (floor-divides) after the final mul_div.
+        assert!(
+            (actual as i128 - expected as i128).abs() <= 1,
+            "year {year}: expected {expected}, got {actual}"
+        );
+        Ok(())
+    }
 }
