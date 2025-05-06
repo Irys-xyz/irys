@@ -2,7 +2,7 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipError, GossipResult, RequestedData};
+use crate::types::{GossipError, GossipResult, GossipDataRequest};
 use actix::{Actor, Context, Handler};
 use base58::ToBase58;
 use core::time::Duration;
@@ -157,7 +157,7 @@ impl GossipClient {
     pub async fn get_data_request(
         &self,
         peer: &PeerListItem,
-        requested_data: RequestedData,
+        requested_data: GossipDataRequest,
     ) -> GossipResult<bool> {
         let url = format!("http://{}/gossip/get_data", peer.address.gossip);
         let get_data_request = self.create_request(requested_data);

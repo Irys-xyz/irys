@@ -1,5 +1,5 @@
 use crate::service::fast_forward_vdf_steps_from_block;
-use crate::types::RequestedData;
+use crate::types::GossipDataRequest;
 use crate::GossipClient;
 use actix::{
     Actor, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised,
@@ -409,7 +409,7 @@ where
                     );
 
                     match gossip_client
-                        .get_data_request(&peer_item, RequestedData::Block(block_hash))
+                        .get_data_request(&peer_item, GossipDataRequest::Block(block_hash))
                         .await
                     {
                         Ok(true) => {

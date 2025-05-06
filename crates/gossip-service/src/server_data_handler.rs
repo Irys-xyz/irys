@@ -1,7 +1,7 @@
 use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
 use crate::cache::GossipCacheKey;
 use crate::types::{
-    tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError, RequestedData,
+    tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError, GossipDataRequest,
 };
 use crate::{GossipCache, GossipClient, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
@@ -402,7 +402,7 @@ where
     pub async fn handle_get_data(
         &self,
         source_address: SocketAddr,
-        request: GossipRequest<RequestedData>,
+        request: GossipRequest<GossipDataRequest>,
     ) -> GossipResult<bool> {
         let peer_list_item = self
             .peer_list_service
@@ -418,7 +418,7 @@ where
         }
 
         match request.data {
-            RequestedData::Block(block_hash) => {
+            GossipDataRequest::Block(block_hash) => {
                 let block_result = self
                     .block_pool
                     .send(GetBlockByHash { block_hash })
@@ -449,7 +449,7 @@ where
                     None => Ok(false),
                 }
             }
-            RequestedData::Transaction(_tx_hash) => Ok(false),
+            GossipDataRequest::Transaction(_tx_hash) => Ok(false),
         }
     }
 }

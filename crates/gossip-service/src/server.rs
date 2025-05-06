@@ -4,7 +4,7 @@
 )]
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::{GossipError, GossipResult};
-use crate::types::{InternalGossipError, RequestedData};
+use crate::types::{InternalGossipError, GossipDataRequest};
 use actix::{Actor, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{
@@ -319,7 +319,7 @@ async fn handle_invalid_data<R, A>(
 
 async fn handle_get_data<M, B, A, R>(
     server: Data<GossipServer<M, B, A, R>>,
-    data_request: web::Json<GossipRequest<RequestedData>>,
+    data_request: web::Json<GossipRequest<GossipDataRequest>>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse
 where

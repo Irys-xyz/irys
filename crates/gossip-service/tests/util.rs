@@ -13,7 +13,7 @@ use irys_actors::mempool_service::{
 use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
 use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
-use irys_gossip_service::types::{GossipDataRequest, RequestedData};
+use irys_gossip_service::types::GossipDataRequest;
 use irys_gossip_service::GossipService;
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -590,14 +590,14 @@ impl FakeGossipServer {
 
 async fn handle_get_data(
     handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
-    data_request: web::Json<GossipRequest<RequestedData>>,
+    data_request: web::Json<GossipRequest<GossipDataRequest>>,
     _req: actix_web::HttpRequest,
 ) -> HttpResponse {
     warn!("Fake server got request: {:?}", data_request.data);
 
     match handler.read() {
         Ok(handler) => match data_request.data {
-            RequestedData::Block(block_hash) => {
+            GossipDataRequest::Block(block_hash) => {
                 let res = handler.call_on_block_data_request(block_hash);
                 warn!(
                     "Block data request for hash {:?}, response: {}",
@@ -608,7 +608,7 @@ async fn handle_get_data(
                     .content_type("application/json")
                     .json(res)
             }
-            RequestedData::Transaction(transaction_hash) => {
+            GossipDataRequest::Transaction(transaction_hash) => {
                 warn!("Transaction request for hash {:?}", transaction_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
