@@ -549,7 +549,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
 
-    error!("PEER2 got the block");
+    error!("PEER2 should have got the block");
 
     let block_index_genesis = result_genesis
         .json::<Vec<BlockIndexItem>>()
