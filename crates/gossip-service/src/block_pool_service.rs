@@ -167,13 +167,17 @@ where
 
                 // If the parent block is in the db, process it
                 if let Some(previous_block_header) = maybe_previous_block_header {
-                    debug!(
+                    tracing::error!(
                         "Found parent block for block {}",
                         current_block_hash.0.to_base58()
                     );
 
                     //process vdf steps from block
                     fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
+                    tracing::error!(
+                        "FF VDF Steps for block for block {}",
+                        current_block_hash.0.to_base58()
+                    );
 
                     block_producer_addr
                         .as_ref()
@@ -254,6 +258,7 @@ where
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
     fn handle(&mut self, msg: ProcessBlock, ctx: &mut Self::Context) -> Self::Result {
+        tracing::error!("calling self.process_block()");
         self.process_block(msg.header, ctx)
     }
 }
