@@ -182,19 +182,16 @@ where
                     block_producer_addr
                         .as_ref()
                         .ok_or_else(|| {
-                            let error_message = "Block producer address is not connected".to_string();
+                            let error_message =
+                                "Block producer address is not connected".to_string();
                             error!(error_message);
-                            BlockPoolError::OtherInternal(
-                                error_message,
-                            )
+                            BlockPoolError::OtherInternal(error_message)
                         })?
                         .send(BlockDiscoveredMessage(Arc::new(block_header.clone())))
                         .await
                         .map_err(|mailbox_error| {
-                            let error_message = format!(
-                                "Can't send block to block producer: {:?}",
-                                mailbox_error
-                            );
+                            let error_message =
+                                format!("Can't send block to block producer: {:?}", mailbox_error);
                             error!(error_message);
                             BlockPoolError::OtherInternal(error_message)
                         })?
@@ -558,7 +555,10 @@ where
             async move {
                 if let Some(orphaned_block) = maybe_orphaned_block {
                     let block_hash_string = orphaned_block.block_hash.0.to_base58();
-                    info!("Start processing orphaned ancestor block: {:?}", block_hash_string);
+                    info!(
+                        "Start processing orphaned ancestor block: {:?}",
+                        block_hash_string
+                    );
 
                     address
                         .send(ProcessBlock {
@@ -581,7 +581,10 @@ where
                             block_pool_error
                         })
                 } else {
-                    info!("No orphaned ancestor block found for block: {:?}", msg.block_hash);
+                    info!(
+                        "No orphaned ancestor block found for block: {:?}",
+                        msg.block_hash
+                    );
                     Ok(())
                 }
             }

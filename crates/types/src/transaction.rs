@@ -461,3 +461,15 @@ pub enum IrysTransactionResponse {
     #[serde(rename = "storage")]
     Storage(IrysTransactionHeader),
 }
+
+impl From<CommitmentTransaction> for IrysTransactionResponse {
+    fn from(tx: CommitmentTransaction) -> Self {
+        IrysTransactionResponse::Commitment(tx)
+    }
+}
+
+impl From<IrysTransactionHeader> for IrysTransactionResponse {
+    fn from(tx: IrysTransactionHeader) -> Self {
+        IrysTransactionResponse::Storage(tx)
+    }
+}
