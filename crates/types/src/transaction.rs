@@ -451,3 +451,13 @@ mod tests {
         original_header
     }
 }
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum IrysTransactionResponse {
+    #[serde(rename = "commitment")]
+    Commitment(CommitmentTransaction),
+
+    #[serde(rename = "storage")]
+    Storage(IrysTransactionHeader),
+}

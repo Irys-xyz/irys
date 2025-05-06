@@ -2,7 +2,9 @@ use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
 use crate::genesis_utilities::{
     genesis_block_exists_on_disk, load_genesis_block_from_disk, save_genesis_block_to_disk,
 };
-use crate::peer_utilities::{fetch_genesis_block, sync_state_from_peers};
+use crate::peer_utilities::{
+    fetch_genesis_block, fetch_genesis_commitments, sync_state_from_peers,
+};
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
@@ -300,25 +302,23 @@ impl IrysNode {
                 .join()
                 .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
             }
-            (false, &NodeMode::PeerSync) => { ;
+            (false, &NodeMode::PeerSync) => {
                 let genesis_file_exists =
                     genesis_block_exists_on_disk(&self.config.node_config.base_directory);
 
                 if !genesis_file_exists {
+                    let trusted_peer = &self
+                        .config
+                        .node_config
+                        .trusted_peers
+                        .first()
+                        .expect("expected at least one trusted peer in config")
+                        .api;
                     info!("fetching genesis block from trusted peer because genesis file does not exist on disk");
                     let awc_client = awc::Client::new();
-                    let irys_genesis_block = fetch_genesis_block(
-                        &self
-                            .config
-                            .node_config
-                            .trusted_peers
-                            .first()
-                            .expect("expected at least one trusted peer in config")
-                            .api,
-                        &awc_client,
-                    )
-                    .await
-                    .expect("expected genesis block from http api");
+                    let irys_genesis_block = fetch_genesis_block(trusted_peer, &awc_client)
+                        .await
+                        .expect("expected genesis block from http api");
 
                     let irys_genesis_block = Arc::new(irys_genesis_block);
 
@@ -330,18 +330,16 @@ impl IrysNode {
                         panic!("unable to save genesis block to disk: {:?}", e);
                     }
 
-                    let commitments = get_genesis_commitments(&self.config);
-                    // irys_genesis_block.system_ledgers
-
-                        // TODO: fetch system transactions here
+                    let commitments =
+                        fetch_genesis_commitments(trusted_peer, &irys_genesis_block).await?;
 
                     Self::init_genesis_thread(
                         self.config.clone(),
                         irys_genesis_block.clone(),
                         commitments,
                     )?
-                        .join()
-                        .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
+                    .join()
+                    .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
                 }
                 // no special handling for if the genesis block exists on disk already
             }

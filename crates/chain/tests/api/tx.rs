@@ -5,10 +5,11 @@ use actix_web::{middleware::Logger, App};
 use alloy_core::primitives::U256;
 use base58::ToBase58;
 use irys_actors::packing::wait_for_packing;
-use irys_api_server::{routes, routes::tx::IrysTransaction, ApiState};
+use irys_api_server::{routes, ApiState};
 use irys_database::database;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, IrysTransactionHeader, NodeConfig, H256,
+    irys::IrysSigner, CommitmentTransaction, IrysTransactionHeader, IrysTransactionResponse,
+    NodeConfig, H256,
 };
 use reth_db::Database;
 use reth_primitives::GenesisAccount;
@@ -102,13 +103,13 @@ async fn test_get_tx() -> eyre::Result<()> {
 
     let resp = actix_web::test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let transaction: IrysTransaction = actix_web::test::read_body_json(resp).await;
+    let transaction: IrysTransactionResponse = actix_web::test::read_body_json(resp).await;
     info!("{}", serde_json::to_string_pretty(&transaction).unwrap());
 
     // Extract storage transaction or fail
     let storage = match transaction {
-        IrysTransaction::Storage(storage) => storage,
-        IrysTransaction::Commitment(_) => {
+        IrysTransactionResponse::Storage(storage) => storage,
+        IrysTransactionResponse::Commitment(_) => {
             panic!("Expected Storage transaction, got Commitment")
         }
     };
@@ -122,13 +123,15 @@ async fn test_get_tx() -> eyre::Result<()> {
 
     let resp = actix_web::test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let transaction: IrysTransaction = actix_web::test::read_body_json(resp).await;
+    let transaction: IrysTransactionResponse = actix_web::test::read_body_json(resp).await;
     info!("{}", serde_json::to_string_pretty(&transaction).unwrap());
 
     // Extract commitment transaction or fail
     let commitment = match transaction {
-        IrysTransaction::Commitment(commitment) => commitment,
-        IrysTransaction::Storage(_) => panic!("Expected Commitment transaction, got Storage"),
+        IrysTransactionResponse::Commitment(commitment) => commitment,
+        IrysTransactionResponse::Storage(_) => {
+            panic!("Expected Commitment transaction, got Storage")
+        }
     };
     assert_eq!(commitment_tx, commitment);
     node.node_ctx.stop().await;

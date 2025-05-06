@@ -3,7 +3,9 @@
 use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_chain::IrysNodeCtx;
-use irys_types::{AcceptedResponse, PeerResponse, ProtocolVersion, VersionRequest};
+use irys_types::{
+    AcceptedResponse, IrysTransactionResponse, PeerResponse, ProtocolVersion, VersionRequest,
+};
 use semver::Version;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -80,10 +82,12 @@ async fn check_transaction_endpoints(
     let retrieved_tx = api_client
         .get_transaction(api_address, tx_id)
         .await
-        .expect("valid get transaction response")
-        .expect("transaction not found");
+        .expect("valid get transaction response");
 
-    assert_eq!(retrieved_tx, tx.header);
+    assert_eq!(
+        retrieved_tx,
+        IrysTransactionResponse::Storage(tx.header.clone())
+    );
 
     let txs = api_client
         .get_transactions(api_address, &[tx_id, tx_2_id])
@@ -91,8 +95,8 @@ async fn check_transaction_endpoints(
         .expect("valid get transactions response");
 
     assert_eq!(txs.len(), 2);
-    assert!(txs.contains(&Some(tx.header)));
-    assert!(txs.contains(&Some(tx_2.header)));
+    assert!(txs.contains(&IrysTransactionResponse::Storage(tx.header)));
+    assert!(txs.contains(&IrysTransactionResponse::Storage(tx_2.header)));
 }
 
 async fn check_get_block_endpoint(

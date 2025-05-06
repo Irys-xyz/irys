@@ -22,6 +22,23 @@ pub struct GossipCache {
     blocks: Arc<RwLock<HashMap<BlockHash, HashMap<Address, Instant>>>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GossipCacheKey {
+    Chunk(ChunkPathHash),
+    Transaction(IrysTransactionId),
+    Block(BlockHash),
+}
+
+impl From<&GossipData> for GossipCacheKey {
+    fn from(data: &GossipData) -> Self {
+        match data {
+            GossipData::Chunk(chunk) => GossipCacheKey::Chunk(chunk.chunk_path_hash()),
+            GossipData::Transaction(transaction) => GossipCacheKey::Transaction(transaction.id),
+            GossipData::Block(block) => GossipCacheKey::Block(block.block_hash),
+        }
+    }
+}
+
 impl GossipCache {
     #[must_use]
     pub fn new() -> Self {
@@ -57,31 +74,31 @@ impl GossipCache {
     /// # Errors
     ///
     /// This function will return an error if the cache cannot be accessed.
-    pub fn record_seen(&self, miner_address: Address, data: &GossipData) -> GossipResult<()> {
+    pub fn record_seen(&self, miner_address: Address, key: GossipCacheKey) -> GossipResult<()> {
         let now = Instant::now();
-        match data {
-            GossipData::Chunk(unpacked_chunk) => {
+        match key {
+            GossipCacheKey::Chunk(chunk_path_hash) => {
                 let mut chunks = self
                     .chunks
                     .write()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
-                let peer_map = chunks.entry(unpacked_chunk.chunk_path_hash()).or_default();
+                let peer_map = chunks.entry(chunk_path_hash).or_default();
                 peer_map.insert(miner_address, now);
             }
-            GossipData::Transaction(irys_transaction_header) => {
+            GossipCacheKey::Transaction(irys_transaction_hash) => {
                 let mut txs = self
                     .transactions
                     .write()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
-                let peer_map = txs.entry(irys_transaction_header.id).or_default();
+                let peer_map = txs.entry(irys_transaction_hash).or_default();
                 peer_map.insert(miner_address, now);
             }
-            GossipData::Block(irys_block_header) => {
+            GossipCacheKey::Block(irys_block_hash) => {
                 let mut blocks = self
                     .blocks
                     .write()
                     .map_err(|error| GossipError::Cache(error.to_string()))?;
-                let peer_map = blocks.entry(irys_block_header.block_hash).or_default();
+                let peer_map = blocks.entry(irys_block_hash).or_default();
                 peer_map.insert(miner_address, now);
             }
         }
