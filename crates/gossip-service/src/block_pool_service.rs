@@ -144,7 +144,7 @@ where
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
 
-        error!(
+        debug!(
             "GOSSIP process_block() BLOCK HEIGHT: {}",
             block_header.height
         );
