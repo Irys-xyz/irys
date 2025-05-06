@@ -4426,6 +4426,10 @@ dependencies = [
 [[package]]
 name = "irys-reward-curve"
 version = "0.1.0"
+dependencies = [
+ "eyre",
+ "irys-types",
+]
 
 [[package]]
 name = "irys-storage"

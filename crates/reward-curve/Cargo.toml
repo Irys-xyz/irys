@@ -9,6 +9,8 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+irys-types.workspace = true
+eyre.workspace = true
 
 [lints]
 workspace = true
