@@ -193,14 +193,12 @@ async fn start_reth_node(
     .expect("expected reth node to have started");
     debug!("Reth node started");
 
-    match sender.send(node_handle.node.clone()) {
-        Ok(()) => {}
-        Err(_full_node) => {
-            return Err(eyre::eyre!(
-                "Failed to send reth node handle to main actor thread"
-            ));
-        }
-    }
+    sender.send(node_handle.node.clone()).map_err(|e| {
+        eyre::eyre!(
+            "Failed to send reth node handle to main actor thread: {:?}",
+            &e
+        )
+    })?;
 
     node_handle.node_exit_future.await
 }
