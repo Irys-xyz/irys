@@ -555,7 +555,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         (required_blocks_height + 1 + additional_blocks_for_gossip_test)
             .try_into()
             .expect("expected required_blocks_height to be valid u64"),
-        20,
+        2000,
     )
     .await;
 
