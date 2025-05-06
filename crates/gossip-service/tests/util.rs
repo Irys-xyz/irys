@@ -22,9 +22,9 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, CombinedBlockHeader, Config, DatabaseProvider, GossipData,
-    IrysBlockHeader, IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig,
-    PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
-    VersionRequest, H256,
+    GossipRequest, IrysBlockHeader, IrysTransaction, IrysTransactionHeader,
+    IrysTransactionResponse, NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore,
+    RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
@@ -590,16 +590,13 @@ impl FakeGossipServer {
 
 async fn handle_get_data(
     handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
-    data_request: web::Json<GossipDataRequest>,
+    data_request: web::Json<GossipRequest<RequestedData>>,
     _req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    warn!(
-        "Fake server got request: {:?}",
-        data_request.0.requested_data
-    );
+    warn!("Fake server got request: {:?}", data_request.data);
 
     match handler.read() {
-        Ok(handler) => match data_request.0.requested_data {
+        Ok(handler) => match data_request.data {
             RequestedData::Block(block_hash) => {
                 let res = handler.call_on_block_data_request(block_hash);
                 warn!(

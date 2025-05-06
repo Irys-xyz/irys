@@ -281,7 +281,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Adding a peer so we can send a request to the mock client
     peer_addr
         .send(AddPeer {
-            mining_addr: Default::default(),
+            mining_addr: Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
             peer: PeerListItem {
                 reputation_score: PeerScore::new(100),
                 response_time: 0,
