@@ -16,7 +16,7 @@ use irys_types::{Address, BlockHash, DatabaseProvider, IrysBlockHeader, RethPeer
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 #[derive(Debug)]
 pub enum BlockPoolError {
@@ -190,6 +190,7 @@ where
                         })?
                         .map_err(|block_error| BlockPoolError::BlockError(block_error))?;
 
+                    info!("Block {} processed", current_block_hash.0.to_base58());
                     self_addr.do_send(RemoveBlockFromPool {
                         parent_block_hash: previous_block_header.block_hash,
                         block_hash: block_header.block_hash,
@@ -543,6 +544,8 @@ where
             async move {
                 if let Some(orphaned_block) = maybe_orphaned_block {
                     let block_hash_string = orphaned_block.block_hash.0.to_base58();
+                    info!("Start processing orphaned ancestor block: {:?}", orphaned_block.block_hash);
+
                     address
                         .send(ProcessBlock {
                             header: orphaned_block,
@@ -564,6 +567,7 @@ where
                             block_pool_error
                         })
                 } else {
+                    info!("No orphaned ancestor block found for block: {:?}", msg.block_hash);
                     Ok(())
                 }
             }
