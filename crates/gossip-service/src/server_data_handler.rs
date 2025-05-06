@@ -211,7 +211,7 @@ where
         let source_miner_address = block_header_request.miner_address;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
-        tracing::debug!(
+        tracing::error!(
             "Node {}: Gossip block received from peer {}: {:?}",
             self.gossip_client.mining_address,
             source_miner_address,
