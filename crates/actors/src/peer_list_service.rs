@@ -478,10 +478,7 @@ where
 
         for peer_api_address in trusted_peers_api_addresses {
             match peer_service_address
-                .send(NewPotentialPeer {
-                    api_address: peer_api_address,
-                    force_announce: true,
-                })
+                .send(NewPotentialPeer::force_announce(peer_api_address))
                 .await
             {
                 Ok(()) => {}
@@ -1001,7 +998,12 @@ where
     type Result = ();
 
     fn handle(&mut self, msg: NewPotentialPeer, ctx: &mut Self::Context) -> Self::Result {
+        let self_address = self.peer_address.api;
         debug!("NewPotentialPeer message received: {:?}", msg.api_address);
+        if msg.api_address == self_address {
+            debug!("Ignoring self address");
+            return;
+        }
 
         if self.successful_announcements.contains_key(&msg.api_address) && !msg.force_announce {
             debug!("Already announced to peer {:?}", msg.api_address);
