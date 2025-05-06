@@ -2,7 +2,7 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipError, GossipResult, GossipDataRequest};
+use crate::types::{GossipDataRequest, GossipError, GossipResult};
 use actix::{Actor, Context, Handler};
 use base58::ToBase58;
 use core::time::Duration;

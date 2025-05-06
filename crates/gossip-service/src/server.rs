@@ -3,8 +3,8 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::server_data_handler::GossipServerDataHandler;
+use crate::types::{GossipDataRequest, InternalGossipError};
 use crate::types::{GossipError, GossipResult};
-use crate::types::{InternalGossipError, GossipDataRequest};
 use actix::{Actor, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{
