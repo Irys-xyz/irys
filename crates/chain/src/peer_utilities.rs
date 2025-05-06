@@ -8,13 +8,14 @@ use irys_actors::{
 };
 use irys_api_server::routes::tx::IrysTransaction;
 use irys_database::{BlockIndexItem, DataLedger};
-use irys_types::{block::CombinedBlockHeader, block_production::Seed};
+use irys_types::block::CombinedBlockHeader;
 
+use irys_gossip_service::service::fast_forward_vdf_steps_from_block;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
-use irys_types::{H256List, IrysBlockHeader, PeerAddress, H256};
+use irys_types::{IrysBlockHeader, PeerAddress, H256};
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
@@ -272,20 +273,8 @@ pub async fn sync_state_from_peers(
                 }
             }
 
-            let block_end_step = block.vdf_limiter_info.global_step_number;
-            let block_start_step = block_end_step - block.vdf_limiter_info.steps.len() as u64;
-            for (i, step) in block.vdf_limiter_info.steps.iter().enumerate() {
-                //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
-                let mining_seed = BroadcastMiningSeed {
-                    seed: Seed { 0: *step },
-                    global_step: block_start_step + i as u64,
-                    checkpoints: H256List::new(),
-                };
-
-                if let Err(e) = vdf_sender.send(mining_seed).await {
-                    error!("Peer Sync: VDF Send Error: {:?}", e);
-                }
-            }
+            fast_forward_vdf_steps_from_block(block.vdf_limiter_info.clone(), vdf_sender.clone())
+                .await;
 
             // allow block to be discovered by block discovery actor
             if let Err(e) = block_discovery_addr

@@ -23,7 +23,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{sleep, Duration};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 pub(crate) fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
     let attributes = PayloadAttributes {
@@ -416,7 +416,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         block_index_peer1, block_index_peer2
     );
 
-    debug!("STARTUP SEQUENCE ASSERTS WERE A SUCCESS. TO GET HERE TAKES ~2 MINUTES");
+    error!("STARTUP SEQUENCE ASSERTS WERE A SUCCESS. TO GET HERE TAKES ~2 MINUTES");
 
     /*
     // BEGIN TESTING BLOCK GOSSIP FROM PEER2 to GENESIS
@@ -514,33 +514,43 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // BEGIN TESTING BLOCK GOSSIP FROM GENESIS to PEER2
      */
 
+    error!("BEGIN TESTING BLOCK GOSSIP FROM GENESIS to PEER2");
+
     // mine more blocks on genesis node, and see if gossip service brings them to peer2
     let additional_blocks_for_gossip_test: usize = 2;
+    error!("MINING BLOCKS ON GENESIS TO BE GOSIPPED");
+    // ISSUE IS HERE. PEER2 NEVER GETS TO HEIGHT 7
+    // CHECK GOSSIP IS BEING RECIEVED?!
     mine_blocks(
         &ctx_genesis_node.node_ctx,
         additional_blocks_for_gossip_test,
     )
     .await
     .expect("expected many mined blocks");
+
+    // TODO WE could possibly add a check here to see if genesis really did mine the block and the index height has increased...
+    let mut result_genesis = block_index_endpoint_request(
+        &local_test_url(&testnet_config_genesis.http.port),
+        0,
+        (required_blocks_height + 1 + additional_blocks_for_gossip_test)
+            .try_into()
+            .expect("expected required_blocks_height to be valid u64"),
+    )
+    .await;
+
     //now see if the block makes its way to peer2 via gossip service
     let result_peer2 = poll_until_fetch_at_block_index_height(
         "peer2".to_owned(),
         &ctx_peer2_node.node_ctx,
-        (required_blocks_height + additional_blocks_for_gossip_test)
+        (required_blocks_height + 1 + additional_blocks_for_gossip_test)
             .try_into()
             .expect("expected required_blocks_height to be valid u64"),
         20,
     )
     .await;
 
-    let mut result_genesis = block_index_endpoint_request(
-        &local_test_url(&testnet_config_genesis.http.port),
-        0,
-        required_blocks_height
-            .try_into()
-            .expect("expected required_blocks_height to be valid u64"),
-    )
-    .await;
+    error!("PEER2 got the block");
+
     let block_index_genesis = result_genesis
         .json::<Vec<BlockIndexItem>>()
         .await
@@ -555,6 +565,8 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         "expecting json from genesis node {:?} to match json from peer2 {:?}",
         block_index_genesis, block_index_peer2
     );
+
+    error!("COMPLETED FINAL PEER2 ASSERTS");
 
     // shut down peer nodes and then genesis node, we have what we need
     ctx_peer1_node.stop().await;
@@ -741,9 +753,9 @@ async fn poll_until_fetch_at_block_index_height(
 
         let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
         if required_blocks_height > json_response.block_index_height {
-            debug!(
-                "attempt {} checking {}. required_blocks_height > json_response.block_index_height {} > {}",
-                &attempts, &url, required_blocks_height, json_response.block_index_height
+            error!(
+                "{} attempt {} checking {}. required_blocks_height > json_response.block_index_height {} > {}",
+                node_name, &attempts, &url, required_blocks_height, json_response.block_index_height
             );
             //wait one second and try again
             sleep(Duration::from_millis(1000)).await;
