@@ -20,6 +20,7 @@ members = [
   "crates/cli",
   "crates/gossip-service",
   "crates/api-client",
+  "crates/reward-curve",
 ]
 resolver = "2"
 
@@ -48,6 +49,7 @@ irys-testing-utils = { path = "./crates/testing-utils" }
 irys-packing = { path = "./crates/packing" }
 irys-chain = { path = "./crates/chain" }
 irys-vdf = { path = "./crates/vdf" }
+irys-rewrd-curve = { path = "./crates/reward-curve" }
 irys-efficient-sampling = { path = "./crates/efficient-sampling" }
 irys-price-oracle = { path = "./crates/price-oracle" }
 irys-gossip-service = { path = "./crates/gossip-service" }
