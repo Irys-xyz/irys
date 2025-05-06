@@ -476,7 +476,8 @@ pub async fn fast_forward_vdf_steps_from_block(
     vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
 ) {
     let block_end_step = vdf_limiter_info.global_step_number;
-    let block_start_step = block_end_step - vdf_limiter_info.steps.len() as u64;
+    let len = vdf_limiter_info.steps.len();
+    let block_start_step = block_end_step - len as u64;
     for (i, step) in vdf_limiter_info.steps.iter().enumerate() {
         //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
         let mining_seed = BroadcastMiningSeed {
