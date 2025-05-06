@@ -63,7 +63,8 @@ impl GossipClient {
             }
             GossipData::Block(irys_block_header) => {
                 tracing::error!(
-                    "GOSSIP POSTING BLOCK HEIGHT {:?} DATA to {:?}",
+                    "GOSSIP POSTING BLOCK {:?} HEIGHT {:?} DATA to {:?}",
+                    irys_block_header.block_hash,
                     irys_block_header.height,
                     format!("http://{}/gossip/block", peer.address.gossip),
                 );

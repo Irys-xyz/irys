@@ -7,6 +7,7 @@
     reason = "I don't know how to name it"
 )]
 use crate::block_pool_service::BlockPoolService;
+use crate::cache::GossipCacheKey;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
@@ -18,6 +19,7 @@ use crate::{
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
+use irys_actors::mempool_service::CommitmentTxIngressMessage;
 use irys_actors::{
     block_discovery::BlockDiscoveredMessage,
     broadcast_mining_service::BroadcastMiningSeed,
@@ -160,6 +162,7 @@ impl GossipService {
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         M: Handler<TxIngressMessage>
+            + Handler<CommitmentTxIngressMessage>
             + Handler<ChunkIngressMessage>
             + Handler<TxExistenceQuery>
             + Actor<Context = Context<M>>,
@@ -291,7 +294,10 @@ impl GossipService {
                     }
 
                     // Record as seen anyway, so we don't rebroadcast to them
-                    if let Err(error) = self.cache.record_seen(*peer_miner_address, data) {
+                    if let Err(error) = self
+                        .cache
+                        .record_seen(*peer_miner_address, GossipCacheKey::from(data))
+                    {
                         tracing::error!(
                             "Failed to record data in cache for peer {}: {}",
                             peer_miner_address,

@@ -1,4 +1,5 @@
 use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
+use crate::cache::GossipCacheKey;
 use crate::types::{
     tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError, RequestedData,
 };
@@ -8,13 +9,14 @@ use base58::ToBase58;
 use core::net::SocketAddr;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::{
-    ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
+    ChunkIngressError, ChunkIngressMessage, CommitmentTxIngressMessage, TxExistenceQuery,
+    TxIngressError, TxIngressMessage,
 };
 use irys_actors::peer_list_service::PeerListFacade;
 use irys_api_client::ApiClient;
 use irys_types::{
-    GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader, RethPeerInfo, UnpackedChunk,
-    H256,
+    GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
+    RethPeerInfo, UnpackedChunk, H256,
 };
 use std::sync::Arc;
 use tracing::debug;
@@ -24,6 +26,7 @@ use tracing::debug;
 pub struct GossipServerDataHandler<M, B, A, R>
 where
     M: Handler<TxIngressMessage>
+        + Handler<CommitmentTxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
@@ -42,6 +45,7 @@ where
 impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
 where
     M: Handler<TxIngressMessage>
+        + Handler<CommitmentTxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
@@ -64,6 +68,7 @@ where
 impl<M, B, A, R> GossipServerDataHandler<M, B, A, R>
 where
     M: Handler<TxIngressMessage>
+        + Handler<CommitmentTxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
@@ -77,14 +82,17 @@ where
     ) -> GossipResult<()> {
         let source_miner_address = chunk_request.miner_address;
         let chunk = chunk_request.data;
-        match self.mempool.send(ChunkIngressMessage(chunk.clone())).await {
+        let chunk_path_hash = chunk.chunk_path_hash();
+        match self.mempool.send(ChunkIngressMessage(chunk)).await {
             Ok(message_result) => {
                 match message_result {
                     Ok(()) => {
                         // Success. Mempool will send the tx data to the internal mempool,
                         //  but we still need to update the cache with the source address.
-                        self.cache
-                            .record_seen(source_miner_address, &GossipData::Chunk(chunk))
+                        self.cache.record_seen(
+                            source_miner_address,
+                            GossipCacheKey::Chunk(chunk_path_hash),
+                        )
                     }
                     Err(error) => {
                         match error {
@@ -142,7 +150,8 @@ where
         );
         let tx = transaction_request.data;
         let source_miner_address = transaction_request.miner_address;
-        match self.mempool.send(TxIngressMessage(tx.clone())).await {
+        let tx_id = tx.id;
+        match self.mempool.send(TxIngressMessage(tx)).await {
             Ok(message_result) => {
                 match message_result {
                     Ok(()) => {
@@ -150,7 +159,7 @@ where
                         // Success. Mempool will send the tx data to the internal mempool,
                         //  but we still need to update the cache with the source address.
                         self.cache
-                            .record_seen(source_miner_address, &GossipData::Transaction(tx))
+                            .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))
                     }
                     Err(error) => {
                         tracing::error!("Error when sending transaction to mempool: {:?}", error);
@@ -158,8 +167,10 @@ where
                             // ==== Not really errors
                             TxIngressError::Skipped => {
                                 // Not an invalid transaction - just skipped
-                                self.cache
-                                    .record_seen(source_miner_address, &GossipData::Transaction(tx))
+                                self.cache.record_seen(
+                                    source_miner_address,
+                                    GossipCacheKey::Transaction(tx_id),
+                                )
                             }
                             // ==== External errors
                             TxIngressError::InvalidSignature => {
@@ -212,8 +223,10 @@ where
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
         tracing::error!(
-            "Node {}: Gossip block received from peer {}: {:?}",
+            "Node {}: Gossip block {:?} (height: {}) received from peer {}: {:?}",
             self.gossip_client.mining_address,
+            block_header.block_hash,
+            block_header.height,
             source_miner_address,
             block_hash.0.to_base58()
         );
@@ -221,10 +234,8 @@ where
         let block_seen = self.cache.seen_block_from_any_peer(&block_hash)?;
 
         // Record block in cache
-        self.cache.record_seen(
-            source_miner_address,
-            &GossipData::Block(block_header.clone()),
-        )?;
+        self.cache
+            .record_seen(source_miner_address, GossipCacheKey::Block(block_hash))?;
 
         // This check must be after we've added the block to the cache, otherwise we won't be
         // able to keep track of which peers seen what
@@ -260,13 +271,6 @@ where
             self.gossip_client.mining_address,
             block_header.block_hash.0.to_base58()
         );
-
-        // Get all transaction IDs from the block
-        let data_tx_ids = block_header
-            .data_ledgers
-            .iter()
-            .flat_map(|ledger| ledger.tx_ids.0.clone())
-            .collect::<Vec<H256>>();
 
         let mut missing_tx_ids = Vec::new();
 
@@ -309,59 +313,67 @@ where
             })?;
 
         // Process each transaction
-        for (tx_id, tx) in data_tx_ids.iter().zip(missing_txs.iter()) {
-            if let Some(tx) = tx {
-                // Send transaction to mempool
-                match self.mempool.send(TxIngressMessage(tx.clone())).await {
-                    Ok(message_result) => {
-                        match message_result {
-                            Ok(()) => {
-                                // Success. Record in cache
-                                self.cache.record_seen(
-                                    source_miner_address,
-                                    &GossipData::Transaction(tx.clone()),
-                                )?;
-                            }
-                            Err(error) => {
-                                match tx_ingress_error_to_gossip_error(error) {
-                                    Some(GossipError::InvalidData(error)) => {
-                                        // Invalid transaction, decrease source reputation
-                                        return Err(GossipError::InvalidData(error));
-                                    }
-                                    Some(GossipError::Internal(error)) => {
-                                        // Internal error - log it
-                                        tracing::error!("Internal error: {:?}", error);
-                                        return Err(GossipError::Internal(error));
-                                    }
-                                    Some(error) => {
-                                        // Other error - log it
-                                        tracing::error!("Unexpected error when handling gossip transaction: {:?}", error);
-                                        return Err(error);
-                                    }
-                                    None => {
-                                        // Not an invalid transaction - just skipped
-                                        self.cache.record_seen(
-                                            source_miner_address,
-                                            &GossipData::Transaction(tx.clone()),
-                                        )?;
-                                    }
+        for tx_response in missing_txs.into_iter() {
+            let tx_id;
+            let mempool_response = match tx_response {
+                IrysTransactionResponse::Commitment(commitment_tx) => {
+                    tx_id = commitment_tx.id;
+                    self.mempool
+                        .send(CommitmentTxIngressMessage(commitment_tx))
+                        .await
+                }
+                IrysTransactionResponse::Storage(tx) => {
+                    tx_id = tx.id;
+                    self.mempool.send(TxIngressMessage(tx)).await
+                }
+            };
+
+            match mempool_response {
+                Ok(message_result) => {
+                    match message_result {
+                        Ok(()) => {
+                            // Success. Record in cache
+                            self.cache.record_seen(
+                                source_miner_address,
+                                GossipCacheKey::Transaction(tx_id),
+                            )?;
+                        }
+                        Err(error) => {
+                            match tx_ingress_error_to_gossip_error(error) {
+                                Some(GossipError::InvalidData(error)) => {
+                                    // Invalid transaction, decrease source reputation
+                                    return Err(GossipError::InvalidData(error));
+                                }
+                                Some(GossipError::Internal(error)) => {
+                                    // Internal error - log it
+                                    tracing::error!("Internal error: {:?}", error);
+                                    return Err(GossipError::Internal(error));
+                                }
+                                Some(error) => {
+                                    // Other error - log it
+                                    tracing::error!(
+                                        "Unexpected error when handling gossip transaction: {:?}",
+                                        error
+                                    );
+                                    return Err(error);
+                                }
+                                None => {
+                                    // Not an invalid transaction - just skipped
+                                    self.cache.record_seen(
+                                        source_miner_address,
+                                        GossipCacheKey::Transaction(tx_id),
+                                    )?;
                                 }
                             }
                         }
                     }
-                    Err(error) => {
-                        tracing::error!("Failed to send transaction to mempool: {}", error);
-                        return Err(GossipError::Internal(InternalGossipError::Unknown(
-                            error.to_string(),
-                        )));
-                    }
                 }
-            } else {
-                return Err(GossipError::InvalidData(InvalidDataError::InvalidBlock(
-                    format!(
-                        "Missing transaction {tx_id} in block from peer {source_miner_address}"
-                    ),
-                )));
+                Err(error) => {
+                    tracing::error!("Failed to send transaction to mempool: {}", error);
+                    return Err(GossipError::Internal(InternalGossipError::Unknown(
+                        error.to_string(),
+                    )));
+                }
             }
         }
 

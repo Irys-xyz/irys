@@ -6,7 +6,6 @@ use irys_actors::{
     broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
 };
-use irys_api_server::routes::tx::IrysTransaction;
 use irys_database::{BlockIndexItem, DataLedger};
 use irys_types::block::CombinedBlockHeader;
 
@@ -15,7 +14,10 @@ pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
-use irys_types::{IrysBlockHeader, PeerAddress, H256};
+use irys_api_client::{ApiClient, IrysApiClient};
+use irys_types::{
+    CommitmentTransaction, IrysBlockHeader, IrysTransactionResponse, PeerAddress, H256,
+};
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
@@ -77,7 +79,7 @@ pub async fn version_endpoint_request(
 pub async fn fetch_genesis_block(
     peer: &SocketAddr,
     client: &awc::Client,
-) -> Option<Arc<IrysBlockHeader>> {
+) -> Option<IrysBlockHeader> {
     let url = format!("http://{}", peer);
     let mut result_genesis = block_index_endpoint_request(&url, 0, 1).await;
 
@@ -89,21 +91,43 @@ pub async fn fetch_genesis_block(
     let fetched_genesis_block = fetch_block(peer, &client, &block_index_genesis.get(0).unwrap())
         .await
         .unwrap();
-    let fetched_genesis_block = Arc::new(fetched_genesis_block);
+    let fetched_genesis_block = fetched_genesis_block;
     Some(fetched_genesis_block)
+}
+
+pub async fn fetch_genesis_commitments(
+    peer: &SocketAddr,
+    irys_block_header: &IrysBlockHeader,
+) -> eyre::Result<Vec<CommitmentTransaction>> {
+    let api_client = IrysApiClient::new();
+    let system_txs: Vec<H256> = irys_block_header
+        .system_ledgers
+        .iter()
+        .flat_map(|ledger| ledger.tx_ids.0.clone())
+        .collect();
+
+    Ok(api_client
+        .get_transactions(*peer, &system_txs)
+        .await?
+        .into_iter()
+        .filter_map(|tx| match tx {
+            IrysTransactionResponse::Commitment(commitment_tx) => Some(commitment_tx),
+            IrysTransactionResponse::Storage(_) => None,
+        })
+        .collect())
 }
 
 pub async fn fetch_txn(
     peer: &SocketAddr,
     client: &awc::Client,
     txn_id: H256,
-) -> Option<IrysTransaction> {
+) -> Option<IrysTransactionResponse> {
     let url = format!("http://{}/v1/tx/{}", peer, txn_id.0.to_base58());
 
     match client.get(url.clone()).send().await {
         Ok(mut response) => {
             if response.status().is_success() {
-                match response.json::<IrysTransaction>().await {
+                match response.json::<IrysTransactionResponse>().await {
                     Ok(txn) => Some(txn),
                     Err(e) => {
                         let msg = format!("Error reading body from {}: {}", &url, e);
@@ -262,10 +286,10 @@ pub async fn sync_state_from_peers(
                         .await
                         .expect("valid txn from http GET")
                     {
-                        IrysTransaction::Commitment(_c) => {
+                        IrysTransactionResponse::Commitment(_c) => {
                             panic!("not implemented commitment txns")
                         }
-                        IrysTransaction::Storage(s) => s,
+                        IrysTransactionResponse::Storage(s) => s,
                     },
                 );
                 if let Err(e) = mempool_addr.send(tx_ingress_msg).await {

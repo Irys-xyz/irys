@@ -1,6 +1,9 @@
 use base58::ToBase58;
 use eyre::Result;
-use irys_types::{CombinedBlockHeader, IrysTransactionHeader, PeerResponse, VersionRequest, H256};
+use irys_types::{
+    CombinedBlockHeader, IrysTransactionHeader, IrysTransactionResponse, PeerResponse,
+    VersionRequest, H256,
+};
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
@@ -14,7 +17,7 @@ pub trait ApiClient: Send + Sync + Clone {
         &self,
         peer: SocketAddr,
         tx_id: H256,
-    ) -> Result<Option<IrysTransactionHeader>>;
+    ) -> Result<IrysTransactionResponse>;
 
     /// Post a transaction header to a node
     async fn post_transaction(
@@ -28,7 +31,7 @@ pub trait ApiClient: Send + Sync + Clone {
         &self,
         peer: SocketAddr,
         tx_ids: &[H256],
-    ) -> Result<Vec<Option<IrysTransactionHeader>>>;
+    ) -> Result<Vec<IrysTransactionResponse>>;
 
     /// Post a version request to a peer. Version request contains protocol version and peer
     /// information.
@@ -109,11 +112,13 @@ impl ApiClient for IrysApiClient {
         &self,
         peer: SocketAddr,
         tx_id: H256,
-    ) -> Result<Option<IrysTransactionHeader>> {
+    ) -> Result<IrysTransactionResponse> {
         // IMPORTANT: You have to keep the debug format here, since normal to_string of H256
         //  encodes just first 4 and last 4 bytes with a placeholder in the middle
         let path = format!("/tx/{}", tx_id.0.to_base58());
-        self.make_request(peer, "GET", &path, None::<&()>).await
+        self.make_request(peer, "GET", &path, None::<&()>)
+            .await?
+            .ok_or_else(|| eyre::eyre!("Expected transaction response to have a body: {}", tx_id))
     }
 
     async fn post_transaction(
@@ -139,7 +144,7 @@ impl ApiClient for IrysApiClient {
         &self,
         peer: SocketAddr,
         tx_ids: &[H256],
-    ) -> Result<Vec<Option<IrysTransactionHeader>>> {
+    ) -> Result<Vec<IrysTransactionResponse>> {
         let mut results = Vec::with_capacity(tx_ids.len());
 
         for &tx_id in tx_ids {

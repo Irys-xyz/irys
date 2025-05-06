@@ -13,7 +13,9 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::block_discovery::BlockDiscoveredMessage;
-use irys_actors::mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngressMessage};
+use irys_actors::mempool_service::{
+    ChunkIngressMessage, CommitmentTxIngressMessage, TxExistenceQuery, TxIngressMessage,
+};
 use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason};
 use irys_api_client::ApiClient;
 use irys_types::{
@@ -25,6 +27,7 @@ use irys_types::{
 pub struct GossipServer<M, B, A, R>
 where
     M: Handler<TxIngressMessage>
+        + Handler<CommitmentTxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
@@ -39,6 +42,7 @@ where
 impl<M, B, A, R> Clone for GossipServer<M, B, A, R>
 where
     M: Handler<TxIngressMessage>
+        + Handler<CommitmentTxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
@@ -57,6 +61,7 @@ where
 impl<M, B, A, R> GossipServer<M, B, A, R>
 where
     M: Handler<TxIngressMessage>
+        + Handler<CommitmentTxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
@@ -152,6 +157,7 @@ async fn handle_block<M, B, A, R>(
 ) -> HttpResponse
 where
     M: Handler<TxIngressMessage>
+        + Handler<CommitmentTxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
@@ -172,7 +178,7 @@ where
         .await
     {
         handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
-        tracing::error!("Failed to send block: {}", error);
+        tracing::error!("Gossip: Failed to process the block: {}", error);
         return HttpResponse::InternalServerError().finish();
     }
 
@@ -186,6 +192,7 @@ async fn handle_transaction<M, B, A, R>(
 ) -> HttpResponse
 where
     M: Handler<TxIngressMessage>
+        + Handler<CommitmentTxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
@@ -218,6 +225,7 @@ async fn handle_chunk<M, B, A, R>(
 ) -> HttpResponse
 where
     M: Handler<TxIngressMessage>
+        + Handler<CommitmentTxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
@@ -248,6 +256,7 @@ async fn handle_health_check<M, B, A, R>(
 ) -> HttpResponse
 where
     M: Handler<TxIngressMessage>
+        + Handler<CommitmentTxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
@@ -293,6 +302,7 @@ async fn handle_get_data<M, B, A, R>(
 ) -> HttpResponse
 where
     M: Handler<TxIngressMessage>
+        + Handler<CommitmentTxIngressMessage>
         + Handler<ChunkIngressMessage>
         + Handler<TxExistenceQuery>
         + Actor<Context = Context<M>>,
