@@ -1,7 +1,6 @@
 use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
 use crate::types::{
-    tx_ingress_error_to_gossip_error, GossipDataRequest, InternalGossipError, InvalidDataError,
-    RequestedData,
+    tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError, RequestedData,
 };
 use crate::{GossipCache, GossipClient, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
@@ -14,7 +13,8 @@ use irys_actors::mempool_service::{
 use irys_actors::peer_list_service::PeerListFacade;
 use irys_api_client::ApiClient;
 use irys_types::{
-    GossipData, IrysBlockHeader, IrysTransactionHeader, RethPeerInfo, UnpackedChunk, H256,
+    GossipData, GossipRequest, IrysBlockHeader, IrysTransactionHeader, RethPeerInfo, UnpackedChunk,
+    H256,
 };
 use std::sync::Arc;
 use tracing::debug;
@@ -73,9 +73,10 @@ where
 {
     pub(crate) async fn handle_chunk(
         &self,
-        chunk: UnpackedChunk,
-        source_address: SocketAddr,
+        chunk_request: GossipRequest<UnpackedChunk>,
     ) -> GossipResult<()> {
+        let source_miner_address = chunk_request.miner_address;
+        let chunk = chunk_request.data;
         match self.mempool.send(ChunkIngressMessage(chunk.clone())).await {
             Ok(message_result) => {
                 match message_result {
@@ -83,7 +84,7 @@ where
                         // Success. Mempool will send the tx data to the internal mempool,
                         //  but we still need to update the cache with the source address.
                         self.cache
-                            .record_seen(source_address, &GossipData::Chunk(chunk))
+                            .record_seen(source_miner_address, &GossipData::Chunk(chunk))
                     }
                     Err(error) => {
                         match error {
@@ -131,15 +132,16 @@ where
 
     pub(crate) async fn handle_transaction(
         &self,
-        tx: IrysTransactionHeader,
-        source_address: SocketAddr,
+        transaction_request: GossipRequest<IrysTransactionHeader>,
     ) -> GossipResult<()> {
         tracing::debug!(
             "Node {}: Gossip transaction received from peer {}: {:?}",
             self.gossip_client.mining_address,
-            source_address,
-            tx.id.0.to_base58()
+            transaction_request.miner_address,
+            transaction_request.data.id.0.to_base58()
         );
+        let tx = transaction_request.data;
+        let source_miner_address = transaction_request.miner_address;
         match self.mempool.send(TxIngressMessage(tx.clone())).await {
             Ok(message_result) => {
                 match message_result {
@@ -148,7 +150,7 @@ where
                         // Success. Mempool will send the tx data to the internal mempool,
                         //  but we still need to update the cache with the source address.
                         self.cache
-                            .record_seen(source_address, &GossipData::Transaction(tx))
+                            .record_seen(source_miner_address, &GossipData::Transaction(tx))
                     }
                     Err(error) => {
                         tracing::error!("Error when sending transaction to mempool: {:?}", error);
@@ -157,7 +159,7 @@ where
                             TxIngressError::Skipped => {
                                 // Not an invalid transaction - just skipped
                                 self.cache
-                                    .record_seen(source_address, &GossipData::Transaction(tx))
+                                    .record_seen(source_miner_address, &GossipData::Transaction(tx))
                             }
                             // ==== External errors
                             TxIngressError::InvalidSignature => {
@@ -203,25 +205,25 @@ where
 
     pub(crate) async fn handle_block_header(
         &self,
-        irys_block_header: IrysBlockHeader,
-        source_address: SocketAddr,
+        block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,
     ) -> GossipResult<()> where {
+        let source_miner_address = block_header_request.miner_address;
+        let block_header = block_header_request.data;
+        let block_hash = block_header.block_hash;
         tracing::debug!(
             "Node {}: Gossip block received from peer {}: {:?}",
             self.gossip_client.mining_address,
-            source_address,
-            irys_block_header.block_hash.0.to_base58()
+            source_miner_address,
+            block_hash.0.to_base58()
         );
 
-        let block_seen = self
-            .cache
-            .seen_block_from_any_peer(&irys_block_header.block_hash)?;
+        let block_seen = self.cache.seen_block_from_any_peer(&block_hash)?;
 
         // Record block in cache
         self.cache.record_seen(
-            source_address,
-            &GossipData::Block(irys_block_header.clone()),
+            source_miner_address,
+            &GossipData::Block(block_header.clone()),
         )?;
 
         // This check must be after we've added the block to the cache, otherwise we won't be
@@ -230,7 +232,7 @@ where
             debug!(
                 "Node {}: Block {} already seen, skipping",
                 self.gossip_client.mining_address,
-                irys_block_header.block_hash.0.to_base58()
+                block_header.block_hash.0.to_base58()
             );
             return Ok(());
         }
@@ -238,7 +240,7 @@ where
         let has_block_already_been_processed = self
             .block_pool
             .send(BlockExists {
-                block_hash: irys_block_header.block_hash,
+                block_hash: block_header.block_hash,
             })
             .await
             .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
@@ -248,7 +250,7 @@ where
             debug!(
                 "Node {}: Block {} has already been processed, skipping",
                 self.gossip_client.mining_address,
-                irys_block_header.block_hash.0.to_base58()
+                block_header.block_hash.0.to_base58()
             );
             return Ok(());
         }
@@ -256,11 +258,11 @@ where
         debug!(
             "Node {}: Block {} has not been processed yet, starting processing",
             self.gossip_client.mining_address,
-            irys_block_header.block_hash.0.to_base58()
+            block_header.block_hash.0.to_base58()
         );
 
         // Get all transaction IDs from the block
-        let data_tx_ids = irys_block_header
+        let data_tx_ids = block_header
             .data_ledgers
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
@@ -268,7 +270,7 @@ where
 
         let mut missing_tx_ids = Vec::new();
 
-        for tx_id in irys_block_header
+        for tx_id in block_header
             .data_ledgers
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
@@ -278,7 +280,7 @@ where
             }
         }
 
-        for system_tx_id in irys_block_header
+        for system_tx_id in block_header
             .system_ledgers
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
@@ -316,7 +318,7 @@ where
                             Ok(()) => {
                                 // Success. Record in cache
                                 self.cache.record_seen(
-                                    source_address,
+                                    source_miner_address,
                                     &GossipData::Transaction(tx.clone()),
                                 )?;
                             }
@@ -339,7 +341,7 @@ where
                                     None => {
                                         // Not an invalid transaction - just skipped
                                         self.cache.record_seen(
-                                            source_address,
+                                            source_miner_address,
                                             &GossipData::Transaction(tx.clone()),
                                         )?;
                                     }
@@ -356,14 +358,16 @@ where
                 }
             } else {
                 return Err(GossipError::InvalidData(InvalidDataError::InvalidBlock(
-                    format!("Missing transaction {tx_id} in block from peer {source_address}"),
+                    format!(
+                        "Missing transaction {tx_id} in block from peer {source_miner_address}"
+                    ),
                 )));
             }
         }
 
         self.block_pool
             .send(ProcessBlock {
-                header: irys_block_header,
+                header: block_header,
             })
             .await
             .map_err(|mailbox_error| GossipError::unknown(&mailbox_error))?
@@ -388,11 +392,11 @@ where
     pub async fn handle_get_data(
         &self,
         source_address: SocketAddr,
-        data: GossipDataRequest,
+        request: GossipRequest<RequestedData>,
     ) -> GossipResult<bool> {
         let peer_list_item = self
             .peer_list_service
-            .peer_by_mining_address(data.requester_miner_address)
+            .peer_by_mining_address(request.miner_address)
             .await?;
         let Some(peer_info) = peer_list_item else {
             return Ok(false);
@@ -403,7 +407,7 @@ where
             ));
         }
 
-        match data.requested_data {
+        match request.data {
             RequestedData::Block(block_hash) => {
                 let block_result = self
                     .block_pool
@@ -419,7 +423,7 @@ where
                         match self
                             .gossip_client
                             .send_data_and_update_score(
-                                &peer_info,
+                                (&request.miner_address, &peer_info),
                                 &GossipData::Block(block),
                                 &self.peer_list_service,
                             )

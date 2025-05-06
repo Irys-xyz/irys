@@ -103,13 +103,13 @@ where
 
     pub async fn increase_peer_score(
         &self,
-        peer: &PeerListItem,
+        peer_mining_address: &Address,
         reason: ScoreIncreaseReason,
     ) -> Result<(), PeerListFacadeError> {
         Ok(self
             .addr
             .send(IncreasePeerScore {
-                peer: peer.address.gossip,
+                peer_miner_address: *peer_mining_address,
                 reason,
             })
             .await?)
@@ -117,13 +117,13 @@ where
 
     pub async fn decrease_peer_score(
         &self,
-        peer: &PeerListItem,
+        peer_miner_address: &Address,
         reason: ScoreDecreaseReason,
     ) -> Result<(), PeerListFacadeError> {
         Ok(self
             .addr
             .send(DecreasePeerScore {
-                peer: peer.address.gossip,
+                peer_miner_address: *peer_miner_address,
                 reason,
             })
             .await?)
@@ -132,8 +132,8 @@ where
     pub async fn top_active_peers(
         &self,
         limit: Option<usize>,
-        exclude_peers: Option<HashSet<SocketAddr>>,
-    ) -> Result<Vec<PeerListItem>, PeerListFacadeError> {
+        exclude_peers: Option<HashSet<Address>>,
+    ) -> Result<Vec<(Address, PeerListItem)>, PeerListFacadeError> {
         Ok(self
             .addr
             .send(TopActivePeersRequest {
@@ -322,7 +322,7 @@ where
                 })
                 .collect();
 
-            for (mining_addr, peer, gossip_addr) in inactive_peers {
+            for (mining_addr, peer, ..) in inactive_peers {
                 // Clone the peer address to use in the async block
                 let peer_address = peer.address.clone();
                 let client = act.gossip_client.clone();
@@ -332,11 +332,11 @@ where
                     .map(move |result, act, _ctx| match result {
                         Ok(true) => {
                             debug!("Peer {:?} is online", mining_addr);
-                            act.increase_peer_score(&gossip_addr, ScoreIncreaseReason::Online);
+                            act.increase_peer_score(&mining_addr, ScoreIncreaseReason::Online);
                         }
                         Ok(false) => {
                             debug!("Peer {:?} is offline", mining_addr);
-                            act.decrease_peer_score(&gossip_addr, ScoreDecreaseReason::Offline);
+                            act.decrease_peer_score(&mining_addr, ScoreDecreaseReason::Offline);
                         }
                         Err(e) => {
                             error!("Failed to check health of peer {:?}: {:?}", mining_addr, e);
@@ -549,37 +549,33 @@ where
         }
     }
 
-    fn increase_peer_score(&mut self, address: &SocketAddr, score: ScoreIncreaseReason) {
-        if let Some(mining_addr) = self.gossip_addr_to_mining_addr_map.get(&address.ip()) {
-            if let Some(peer_item) = self.peer_list_cache.get_mut(mining_addr) {
-                match score {
-                    ScoreIncreaseReason::Online => {
-                        peer_item.reputation_score.increase();
-                    }
-                    ScoreIncreaseReason::ValidData => {
-                        peer_item.reputation_score.increase();
-                    }
+    fn increase_peer_score(&mut self, mining_addr: &Address, score: ScoreIncreaseReason) {
+        if let Some(peer_item) = self.peer_list_cache.get_mut(mining_addr) {
+            match score {
+                ScoreIncreaseReason::Online => {
+                    peer_item.reputation_score.increase();
+                }
+                ScoreIncreaseReason::ValidData => {
+                    peer_item.reputation_score.increase();
                 }
             }
         }
     }
 
-    fn decrease_peer_score(&mut self, peer: &SocketAddr, reason: ScoreDecreaseReason) {
-        if let Some(mining_addr) = self.gossip_addr_to_mining_addr_map.get(&peer.ip()) {
-            if let Some(peer_item) = self.peer_list_cache.get_mut(mining_addr) {
-                match reason {
-                    ScoreDecreaseReason::BogusData => {
-                        peer_item.reputation_score.decrease_bogus_data();
-                    }
-                    ScoreDecreaseReason::Offline => {
-                        peer_item.reputation_score.decrease_offline();
-                    }
+    fn decrease_peer_score(&mut self, mining_addr: &Address, reason: ScoreDecreaseReason) {
+        if let Some(peer_item) = self.peer_list_cache.get_mut(mining_addr) {
+            match reason {
+                ScoreDecreaseReason::BogusData => {
+                    peer_item.reputation_score.decrease_bogus_data();
                 }
+                ScoreDecreaseReason::Offline => {
+                    peer_item.reputation_score.decrease_offline();
+                }
+            }
 
-                // Don't propagate inactive peers
-                if !peer_item.reputation_score.is_active() {
-                    self.known_peers_cache.remove(&peer_item.address);
-                }
+            // Don't propagate inactive peers
+            if !peer_item.reputation_score.is_active() {
+                self.known_peers_cache.remove(&peer_item.address);
             }
         }
     }
@@ -773,7 +769,7 @@ where
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub struct DecreasePeerScore {
-    pub peer: SocketAddr,
+    pub peer_miner_address: Address,
     pub reason: ScoreDecreaseReason,
 }
 
@@ -785,7 +781,7 @@ where
     type Result = ();
 
     fn handle(&mut self, msg: DecreasePeerScore, _ctx: &mut Self::Context) -> Self::Result {
-        self.decrease_peer_score(&msg.peer, msg.reason);
+        self.decrease_peer_score(&msg.peer_miner_address, msg.reason);
     }
 }
 
@@ -793,7 +789,7 @@ where
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub struct IncreasePeerScore {
-    pub peer: SocketAddr,
+    pub peer_miner_address: Address,
     pub reason: ScoreIncreaseReason,
 }
 
@@ -805,15 +801,13 @@ where
     type Result = ();
 
     fn handle(&mut self, msg: IncreasePeerScore, _ctx: &mut Self::Context) -> Self::Result {
-        if let Some(mining_addr) = self.gossip_addr_to_mining_addr_map.get(&msg.peer.ip()) {
-            if let Some(peer_item) = self.peer_list_cache.get_mut(mining_addr) {
-                match msg.reason {
-                    ScoreIncreaseReason::Online => {
-                        peer_item.reputation_score.increase();
-                    }
-                    ScoreIncreaseReason::ValidData => {
-                        peer_item.reputation_score.increase();
-                    }
+        if let Some(peer_item) = self.peer_list_cache.get_mut(&msg.peer_miner_address) {
+            match msg.reason {
+                ScoreIncreaseReason::Online => {
+                    peer_item.reputation_score.increase();
+                }
+                ScoreIncreaseReason::ValidData => {
+                    peer_item.reputation_score.increase();
                 }
             }
         }
@@ -822,10 +816,10 @@ where
 
 /// Get the list of active peers
 #[derive(Message, Debug)]
-#[rtype(result = "Vec<PeerListItem>")]
+#[rtype(result = "Vec<(Address, PeerListItem)>")]
 pub struct TopActivePeersRequest {
     pub truncate: Option<usize>,
-    pub exclude_peers: Option<HashSet<SocketAddr>>,
+    pub exclude_peers: Option<HashSet<Address>>,
 }
 
 impl<A, R> Handler<TopActivePeersRequest> for PeerListServiceWithClient<A, R>
@@ -833,21 +827,25 @@ where
     A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
-    type Result = Vec<PeerListItem>;
+    type Result = Vec<(Address, PeerListItem)>;
 
     fn handle(&mut self, msg: TopActivePeersRequest, _ctx: &mut Self::Context) -> Self::Result {
-        let mut peers: Vec<PeerListItem> = self.peer_list_cache.values().cloned().collect();
+        let mut peers: Vec<(Address, PeerListItem)> = self
+            .peer_list_cache
+            .iter()
+            .map(|(key, value)| (*key, value.clone()))
+            .collect();
 
-        peers.retain(|peer| {
+        peers.retain(|(miner_address, peer)| {
             let exclude = if let Some(exclude_peers) = &msg.exclude_peers {
-                exclude_peers.contains(&peer.address.gossip)
+                exclude_peers.contains(miner_address)
             } else {
                 false
             };
             !exclude && peer.reputation_score.is_active() && peer.is_online
         });
 
-        peers.sort_by_key(|peer| peer.reputation_score.get());
+        peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
         peers.reverse();
 
         if let Some(truncate) = msg.truncate {
@@ -1328,7 +1326,7 @@ mod tests {
         // Test increasing score using message handler
         service.handle(
             IncreasePeerScore {
-                peer: peer.address.gossip,
+                peer_miner_address: peer.address.gossip,
                 reason: ScoreIncreaseReason::Online,
             },
             ctx,
@@ -1346,7 +1344,7 @@ mod tests {
         // Test decreasing score using message handler
         service.handle(
             DecreasePeerScore {
-                peer: peer.address.gossip,
+                peer_miner_address: peer.address.gossip,
                 reason: ScoreDecreaseReason::Offline,
             },
             ctx,
@@ -1503,14 +1501,14 @@ mod tests {
         // Test score manipulation for non-existent peer using message handlers
         service.handle(
             IncreasePeerScore {
-                peer: non_existent_addr,
+                peer_miner_address: non_existent_addr,
                 reason: ScoreIncreaseReason::Online,
             },
             ctx,
         );
         service.handle(
             DecreasePeerScore {
-                peer: non_existent_addr,
+                peer_miner_address: non_existent_addr,
                 reason: ScoreDecreaseReason::Offline,
             },
             ctx,

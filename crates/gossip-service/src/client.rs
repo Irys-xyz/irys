@@ -2,12 +2,12 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipDataRequest, GossipError, GossipResult, RequestedData};
+use crate::types::{GossipError, GossipResult, RequestedData};
 use actix::{Actor, Context, Handler};
 use core::time::Duration;
 use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_api_client::ApiClient;
-use irys_types::{Address, GossipData, PeerListItem, RethPeerInfo};
+use irys_types::{Address, GossipData, GossipRequest, PeerListItem, RethPeerInfo};
 use reqwest::Response;
 use serde::Serialize;
 
@@ -90,10 +90,11 @@ impl GossipClient {
         url: String,
         data: &T,
     ) -> Result<Response, GossipError> {
+        let req = self.create_request(data);
         self.client
             .post(&url)
             .timeout(self.timeout)
-            .json(data)
+            .json(&req)
             .send()
             .await
             .map_err(|error| GossipError::Network(error.to_string()))
@@ -106,7 +107,7 @@ impl GossipClient {
     /// If the peer is offline or the request fails, an error is returned.
     pub async fn send_data_and_update_score<R, A>(
         &self,
-        peer: &PeerListItem,
+        peer: (&Address, &PeerListItem),
         data: &GossipData,
         peer_list_service: &PeerListFacade<A, R>,
     ) -> GossipResult<()>
@@ -114,12 +115,15 @@ impl GossipClient {
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
         A: ApiClient + Clone + 'static + Unpin + Default,
     {
+        let peer_miner_address = peer.0;
+        let peer = peer.1;
+
         let res = self.send_data(peer, data).await;
         match res {
             Ok(()) => {
                 // Successful send, increase score
                 if let Err(e) = peer_list_service
-                    .increase_peer_score(peer, ScoreIncreaseReason::Online)
+                    .increase_peer_score(peer_miner_address, ScoreIncreaseReason::Online)
                     .await
                 {
                     tracing::error!("Failed to increase peer score: {}", e);
@@ -129,13 +133,20 @@ impl GossipClient {
             Err(error) => {
                 // Failed to send, decrease score
                 if let Err(e) = peer_list_service
-                    .decrease_peer_score(peer, ScoreDecreaseReason::Offline)
+                    .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline)
                     .await
                 {
                     tracing::error!("Failed to decrease peer score: {}", e);
                 };
                 Err(error)
             }
+        }
+    }
+
+    fn create_request<T>(&self, data: T) -> GossipRequest<T> {
+        GossipRequest {
+            miner_address: self.mining_address,
+            data,
         }
     }
 
@@ -147,10 +158,7 @@ impl GossipClient {
         requested_data: RequestedData,
     ) -> GossipResult<bool> {
         let url = format!("http://{}/gossip/get_data", peer.address.gossip);
-        let get_data_request = GossipDataRequest {
-            requester_miner_address: self.mining_address,
-            requested_data,
-        };
+        let get_data_request = self.create_request(requested_data);
 
         self.client
             .post(&url)

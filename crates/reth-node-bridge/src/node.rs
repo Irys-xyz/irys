@@ -32,6 +32,7 @@ use reth_transaction_pool::{
     blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
     EthTransactionValidator, Pool, TransactionValidationTaskExecutor,
 };
+use std::fmt::{Debug, Formatter};
 use std::{fs::canonicalize, future::Future, ops::Deref, sync::Arc};
 use tracing::{info, warn};
 
@@ -104,8 +105,14 @@ pub type RethNodeExitHandle = NodeHandle<RethNode, RethNodeAddOns>;
 
 pub type RethNodeHandle = FullNode<RethNode, RethNodeAddOns>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RethNodeProvider(pub Arc<RethNodeHandle>);
+
+impl Debug for RethNodeProvider {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RethNodeProvider")
+    }
+}
 
 impl Deref for RethNodeProvider {
     type Target = Arc<RethNodeHandle>;

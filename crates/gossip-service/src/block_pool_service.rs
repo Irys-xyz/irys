@@ -355,24 +355,24 @@ where
             // Try up to 5 peers to get the block
             let mut last_error = None;
 
-            for peer in peers {
+            for (address, peer_item) in peers {
                 for attempt in 1..=5 {
                     debug!(
                         "Attempting to fetch block {} from peer {} (attempt {}/5)",
                         block_hash.0.to_base58(),
-                        peer.address.gossip,
+                        address,
                         attempt
                     );
 
                     match gossip_client
-                        .get_data_request(&peer, RequestedData::Block(block_hash))
+                        .get_data_request(&peer_item, RequestedData::Block(block_hash))
                         .await
                     {
                         Ok(true) => {
                             tracing::info!(
                                 "Successfully requested block {} from peer {}",
                                 block_hash.0.to_base58(),
-                                peer.address.gossip
+                                address
                             );
 
                             return Ok(());
@@ -381,7 +381,7 @@ where
                             // Peer doesn't have this block, try another peer
                             debug!(
                                 "Peer {} doesn't have block {}",
-                                peer.address.gossip,
+                                address,
                                 block_hash.0.to_base58()
                             );
                             continue;
@@ -391,7 +391,7 @@ where
                             tracing::warn!(
                                 "Failed to fetch block {} from peer {} (attempt {}/5): {}",
                                 block_hash.0.to_base58(),
-                                peer.address.gossip,
+                                address,
                                 attempt,
                                 last_error.as_ref().unwrap()
                             );
@@ -473,9 +473,7 @@ where
         let block_hash = msg.block_hash;
 
         if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
-            if let Some(_header) = self.orphaned_blocks_by_parent.get(parent_hash) {
-                return Ok(true);
-            }
+            return Ok(self.orphaned_blocks_by_parent.contains_key(parent_hash));
         }
 
         Ok(self

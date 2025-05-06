@@ -1,4 +1,5 @@
 use crate::{IrysBlockHeader, IrysTransactionHeader, UnpackedChunk};
+use alloy_primitives::Address;
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 
@@ -23,4 +24,10 @@ impl GossipData {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GossipRequest<T> {
+    pub miner_address: Address,
+    pub data: T,
 }
