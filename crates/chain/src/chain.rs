@@ -1,7 +1,5 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
-use crate::genesis_utilities::{
-    genesis_block_exists_on_disk, load_genesis_block_from_disk, save_genesis_block_to_disk,
-};
+use crate::genesis_utilities::{genesis_block_exists_on_disk, save_genesis_block_to_disk};
 use crate::peer_utilities::{
     fetch_genesis_block, fetch_genesis_commitments, sync_state_from_peers,
 };

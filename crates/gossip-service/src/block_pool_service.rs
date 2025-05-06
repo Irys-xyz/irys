@@ -3,7 +3,7 @@ use crate::types::RequestedData;
 use crate::GossipClient;
 use actix::{
     Actor, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised,
-    SystemService, WrapFuture, WrapStream,
+    SystemService, WrapFuture,
 };
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
