@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 # Internal dependencies
 irys-actors.workspace = true
-irys-vdf.workspace = true
 irys-types = { path = "../types", features = ["test-utils"] }
 irys-primitives = { path = "../primitives" }
 irys-api-client.workspace = true
