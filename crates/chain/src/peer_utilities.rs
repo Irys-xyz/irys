@@ -76,7 +76,7 @@ pub async fn version_endpoint_request(
 pub async fn fetch_genesis_block(
     peer: &SocketAddr,
     client: &awc::Client,
-) -> Option<Arc<IrysBlockHeader>> {
+) -> Option<IrysBlockHeader> {
     let url = format!("http://{}", peer);
     let mut result_genesis = block_index_endpoint_request(&url, 0, 1).await;
 
@@ -88,7 +88,7 @@ pub async fn fetch_genesis_block(
     let fetched_genesis_block = fetch_block(peer, &client, &block_index_genesis.get(0).unwrap())
         .await
         .unwrap();
-    let fetched_genesis_block = Arc::new(fetched_genesis_block);
+    let fetched_genesis_block = fetched_genesis_block;
     Some(fetched_genesis_block)
 }
 
