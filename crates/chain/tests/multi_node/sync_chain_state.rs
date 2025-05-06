@@ -568,7 +568,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         (required_blocks_height + 1 + additional_blocks_for_gossip_test)
             .try_into()
             .expect("expected required_blocks_height to be valid u64"),
-        20,
+        2000,
     )
     .await;
 
@@ -580,7 +580,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         .expect("expected a valid json deserialize");
 
     let block_index_peer1 = result_peer1
-        .expect("expected a client response from peer2")
+        .expect("expected a client response from peer1")
         .json::<Vec<BlockIndexItem>>()
         .await
         .expect("expected a valid json deserialize");
