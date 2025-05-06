@@ -194,14 +194,6 @@ async fn start_reth_node(
     .await
     .expect("expected reth node to have started");
     debug!("Reth node started");
-    // match sender.send(node_handle.node.clone()) {
-    //     Ok(()) => {}
-    //     Err(_full_node) => {
-    //         return Err(eyre::eyre!(
-    //             "Failed to send reth node handle to main actor thread"
-    //         ));
-    //     }
-    // }
 
     node_handle.node_exit_future.await
 }
@@ -261,6 +253,7 @@ impl IrysNode {
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
         let data_exists = Self::blockchain_data_exists(&self.config.node_config.base_directory);
 
+        error!("Data exists: {}", data_exists);
         // note: if you need the genesis header later, you can easily make this match block return it
         match (data_exists, &self.config.node_config.mode) {
             (true, NodeMode::Genesis { .. }) => {
@@ -306,6 +299,7 @@ impl IrysNode {
                 let genesis_file_exists =
                     genesis_block_exists_on_disk(&self.config.node_config.base_directory);
 
+                error!("genesis file exists: {}", genesis_file_exists);
                 if !genesis_file_exists {
                     let trusted_peer = &self
                         .config

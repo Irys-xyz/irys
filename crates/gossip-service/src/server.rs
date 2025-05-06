@@ -178,7 +178,7 @@ where
         .await
     {
         handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
-        tracing::error!("Failed to send block: {}", error);
+        tracing::error!("Gossip: Failed to process the block: {}", error);
         return HttpResponse::InternalServerError().finish();
     }
 

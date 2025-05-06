@@ -3,7 +3,7 @@ use crate::types::RequestedData;
 use crate::GossipClient;
 use actix::{
     Actor, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised,
-    SystemService, WrapFuture,
+    SystemService, WrapFuture, WrapStream,
 };
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
@@ -196,9 +196,21 @@ where
                     });
 
                     // Check if the currently processed block has any ancestors in the orphaned blocks pool
-                    self_addr.do_send(ProcessOrphanedAncestor {
-                        block_hash: block_header.block_hash,
-                    });
+                    self_addr
+                        .send(ProcessOrphanedAncestor {
+                            block_hash: block_header.block_hash,
+                        })
+                        .await
+                        .map_err(|mailbox_error| {
+                            error!(
+                                "Can't send ProcessOrphanedAncestor to block pool: {:?}",
+                                mailbox_error
+                            );
+                            BlockPoolError::OtherInternal(format!(
+                                "Can't send block to block pool: {:?}",
+                                mailbox_error
+                            ))
+                        })??;
 
                     return Ok(());
                 }
@@ -289,13 +301,13 @@ where
                     // If the parent is also in the cache it's likely that processing has already started
                     if !parent_is_also_in_cache {
                         self_addr
-                            .send(FetchAndProcessBlock {
+                            .send(RequestBlockFromTheNetwork {
                                 block_hash: previous_block_hash,
                             })
                             .await
                             .map_err(|mailbox| {
                                 BlockPoolError::OtherInternal(format!(
-                                    "Can't send block to block producer: {:?}",
+                                    "Can't request the block from the network: {:?}",
                                     mailbox
                                 ))
                             })?
@@ -337,11 +349,11 @@ where
 /// Adds a block to the block pool for processing.
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<(), BlockPoolError>")]
-struct FetchAndProcessBlock {
+struct RequestBlockFromTheNetwork {
     pub block_hash: BlockHash,
 }
 
-impl<A, R, B> Handler<FetchAndProcessBlock> for BlockPoolService<A, R, B>
+impl<A, R, B> Handler<RequestBlockFromTheNetwork> for BlockPoolService<A, R, B>
 where
     A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -349,7 +361,11 @@ where
 {
     type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
-    fn handle(&mut self, msg: FetchAndProcessBlock, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(
+        &mut self,
+        msg: RequestBlockFromTheNetwork,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
         let block_hash = msg.block_hash;
         let peer_list_addr = self.peer_list.clone();
         let gossip_client = self.gossip_client.clone();
@@ -506,7 +522,7 @@ where
 }
 
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
+#[rtype(result = "Result<(), BlockPoolError>")]
 struct ProcessOrphanedAncestor {
     pub block_hash: BlockHash,
 }
@@ -517,16 +533,41 @@ where
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
 {
-    type Result = ();
+    type Result = ResponseActFuture<Self, Result<(), BlockPoolError>>;
 
     fn handle(&mut self, msg: ProcessOrphanedAncestor, ctx: &mut Self::Context) -> Self::Result {
         let address = ctx.address();
-
         let maybe_orphaned_block = self.orphaned_blocks_by_parent.get(&msg.block_hash).cloned();
-        if let Some(orphaned_block) = maybe_orphaned_block {
-            address.do_send(ProcessBlock {
-                header: orphaned_block,
-            });
-        }
+
+        Box::pin(
+            async move {
+                if let Some(orphaned_block) = maybe_orphaned_block {
+                    let block_hash_string = orphaned_block.block_hash.0.to_base58();
+                    address
+                        .send(ProcessBlock {
+                            header: orphaned_block,
+                        })
+                        .await
+                        .map_err(|mailbox_error| {
+                            let message = format!(
+                                "Can't send block {:?} to pool: {:?}",
+                                block_hash_string, mailbox_error
+                            );
+                            error!(message);
+                            BlockPoolError::OtherInternal(message)
+                        })?
+                        .map_err(|block_pool_error| {
+                            error!(
+                                "Error while processing block {:?}: {:?}",
+                                block_hash_string, block_pool_error
+                            );
+                            block_pool_error
+                        })
+                } else {
+                    Ok(())
+                }
+            }
+            .into_actor(self),
+        )
     }
 }
