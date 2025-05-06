@@ -237,7 +237,6 @@ impl IrysNode {
         };
         let config = Config::new(node_config);
         Ok(IrysNode {
-            data_exists: Self::blockchain_data_exists(&config.node_config.base_directory),
             config,
             random_ports,
             http_listener,
