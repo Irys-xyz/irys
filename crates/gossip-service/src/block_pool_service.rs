@@ -16,7 +16,7 @@ use irys_types::{Address, BlockHash, DatabaseProvider, IrysBlockHeader, RethPeer
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 pub enum BlockPoolError {
@@ -167,32 +167,41 @@ where
 
                 // If the parent block is in the db, process it
                 if let Some(previous_block_header) = maybe_previous_block_header {
-                    tracing::error!(
+                    warn!(
                         "Found parent block for block {}",
                         current_block_hash.0.to_base58()
                     );
 
-                    //process vdf steps from block
+                    // process vdf steps from block
                     fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
-                    tracing::error!(
+                    warn!(
                         "FF VDF Steps for block for block {}",
                         current_block_hash.0.to_base58()
                     );
 
                     block_producer_addr
                         .as_ref()
-                        .ok_or(BlockPoolError::OtherInternal(
-                            "Block producer address is not connected".to_string(),
-                        ))?
+                        .ok_or_else(|| {
+                            let error_message = "Block producer address is not connected".to_string();
+                            error!(error_message);
+                            BlockPoolError::OtherInternal(
+                                error_message,
+                            )
+                        })?
                         .send(BlockDiscoveredMessage(Arc::new(block_header.clone())))
                         .await
                         .map_err(|mailbox_error| {
-                            BlockPoolError::OtherInternal(format!(
+                            let error_message = format!(
                                 "Can't send block to block producer: {:?}",
                                 mailbox_error
-                            ))
+                            );
+                            error!(error_message);
+                            BlockPoolError::OtherInternal(error_message)
                         })?
-                        .map_err(|block_error| BlockPoolError::BlockError(block_error))?;
+                        .map_err(|block_error| {
+                            error!("{:?}", block_error);
+                            BlockPoolError::BlockError(block_error)
+                        })?;
 
                     info!("Block {} processed", current_block_hash.0.to_base58());
                     self_addr.do_send(RemoveBlockFromPool {
@@ -549,7 +558,7 @@ where
             async move {
                 if let Some(orphaned_block) = maybe_orphaned_block {
                     let block_hash_string = orphaned_block.block_hash.0.to_base58();
-                    info!("Start processing orphaned ancestor block: {:?}", orphaned_block.block_hash);
+                    info!("Start processing orphaned ancestor block: {:?}", block_hash_string);
 
                     address
                         .send(ProcessBlock {
