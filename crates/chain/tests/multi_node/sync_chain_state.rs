@@ -483,6 +483,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         block_index_genesis, block_index_peer2
     );
 
+    //FIXME: https://github.com/Irys-xyz/irys/issues/368
     // mine more blocks on peer2 node, and see if gossip service brings them to genesis
     /*let additional_blocks_for_gossip_test: usize = 2;
     mine_blocks(&ctx_peer2_node.node_ctx, additional_blocks_for_gossip_test)
@@ -609,6 +610,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 }
 
 /// setup configs for genesis, peer1 and peer2 for e2e tests
+/// FIXME: hardcoded ports https://github.com/Irys-xyz/irys/issues/367
 fn init_configs() -> (
     NodeConfig,
     NodeConfig,
