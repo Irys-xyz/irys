@@ -1,36 +1,38 @@
 use crate::{
-    block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeService,
-    block_validation::prevalidate_block, epoch_service::PartitionAssignmentsReadGuard,
+    block_index_service::BlockIndexReadGuard,
+    block_tree_service::BlockTreeService,
+    block_validation::prevalidate_block,
+    epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
+    CommitmentCacheInner, CommitmentCacheMessage, CommitmentStatus, GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
+use base58::ToBase58;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
 use irys_types::{
-    DatabaseProvider, DifficultyAdjustmentConfig, GossipData, IrysBlockHeader,
-    IrysTransactionHeader, StorageConfig, VDFStepsConfig,
+    CommitmentTransaction, Config, DatabaseProvider, GossipData, H256List, IrysBlockHeader,
+    IrysTransactionHeader,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, error, info};
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
 #[derive(Debug)]
 pub struct BlockDiscoveryActor {
+    /// Tracks the global state of partition assignments on the protocol
+    pub epoch_service: Addr<EpochServiceActor>,
     /// Read only view of the block index
     pub block_index_guard: BlockIndexReadGuard,
     /// `PartitionAssignmentsReadGuard` for looking up ledger info
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
-    /// Reference to global storage config for node
-    pub storage_config: StorageConfig,
-    /// Reference to global difficulty config
-    pub difficulty_config: DifficultyAdjustmentConfig,
+    /// Reference to the global config
+    pub config: Config,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
-    /// VDF configuration for the node
-    pub vdf_config: VDFStepsConfig,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Service Senders
@@ -47,7 +49,7 @@ pub struct BlockDiscoveredMessage(pub Arc<IrysBlockHeader>);
 
 /// Sent when a discovered block is pre-validated
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "()")]
+#[rtype(result = "eyre::Result<()>")]
 pub struct BlockPreValidatedMessage(
     pub Arc<IrysBlockHeader>,
     pub Arc<Vec<IrysTransactionHeader>>,
@@ -62,24 +64,22 @@ impl BlockDiscoveryActor {
     pub const fn new(
         block_index_guard: BlockIndexReadGuard,
         partition_assignments_guard: PartitionAssignmentsReadGuard,
-        storage_config: StorageConfig,
-        difficulty_config: DifficultyAdjustmentConfig,
+        config: Config,
         db: DatabaseProvider,
-        vdf_config: VDFStepsConfig,
         vdf_steps_guard: VdfStepsReadGuard,
         service_senders: ServiceSenders,
+        epoch_service: Addr<EpochServiceActor>,
         gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
     ) -> Self {
         Self {
             block_index_guard,
             partition_assignments_guard,
-            storage_config,
-            difficulty_config,
             db,
-            vdf_config,
             vdf_steps_guard,
             service_senders,
             gossip_sender,
+            config,
+            epoch_service,
         }
     }
 }
@@ -100,7 +100,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
             other => {
                 return Box::pin(async move {
                     Err(eyre::eyre!(
-                        "Failed to get block header for hash {}: {:?}",
+                        // the previous blocks header was not found in the database
+                        "Failed to get previous block header. Previous block hash: {}: {:?}",
                         prev_block_hash,
                         other
                     ))
@@ -124,7 +125,9 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 self.db
                     .view_eyre(|tx| tx_header_by_txid(tx, txid))
                     .and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
+                        opt.ok_or_else(|| {
+                            eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
+                        })
                     })
             })
             .collect::<Result<Vec<_>, _>>()
@@ -184,18 +187,23 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         }
 
         //====================================
-        // Commitments ledger TX Validation
+        // Commitment ledger TX Validation
         //------------------------------------
         // Extract the Commitment ledger from the epoch block
-        let commitments_ledger = new_block_header
+        let commitment_ledger = new_block_header
             .system_ledgers
             .iter()
             .find(|b| b.ledger_id == SystemLedger::Commitment);
 
         // Validate commitments (if there are some)
-        if let Some(commitment_ledger) = commitments_ledger {
+        let mut commitments: Vec<CommitmentTransaction> = Vec::new();
+        let mut commitment_txids: H256List = H256List::new();
+        if let Some(commitment_ledger) = commitment_ledger {
+            debug!("{:#?}", commitment_ledger);
             let read_tx = self.db.tx().expect("to create a database read tx");
-            let _commitment_txs = commitment_ledger
+
+            // Collect commitments with proper error handling
+            match commitment_ledger
                 .tx_ids
                 .iter()
                 .map(|txid| {
@@ -204,30 +212,30 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()
-                .expect("to be able to retrieve all of the commitment tx headers locally");
+            {
+                Ok(collected) => {
+                    commitments = collected;
+                    commitment_txids = commitment_ledger.tx_ids.clone();
+                }
 
-            // TODO: Non epoch blocks and epoch blocks treat the commitments ledger a little differently
-            // during the epoch, stake and pledge commitments accumulate waiting to be finalized when the
-            // next epoch starts. As a result these pending commitments during the epoch need to have
-            // their own CommitmentsState where pending pledges can be checked to see if they have an
-            // outstanding stake (check with epoch_service) or if they've posted a pending stake commitment.
-            //
-            // This work will be done next, for now commitments are only handled in the genesis block
+                Err(e) => error!("Failed to collect commitment transactions: {:?}", e),
+            }
         }
 
         //====================================
         // Block header pre-validation
         //------------------------------------
-        let block_index_guard = self.block_index_guard.clone();
+        let block_index_guard2 = self.block_index_guard.clone();
         let partitions_guard = self.partition_assignments_guard.clone();
         let block_tree_addr = BlockTreeService::from_registry();
-        let storage_config = self.storage_config.clone();
-        let difficulty_config = self.difficulty_config;
-        let vdf_config = self.vdf_config.clone();
+        let config = self.config.clone();
         let vdf_steps_guard = self.vdf_steps_guard.clone();
         let db = self.db.clone();
         let ema_service_sender = self.service_senders.ema.clone();
+        let commitment_cache_sender = self.service_senders.commitment_cache.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
+        let epoch_service = self.epoch_service.clone();
+        let epoch_config = self.config.consensus.epoch.clone();
 
         info!(height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
@@ -238,26 +246,50 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
         let gossip_sender = self.gossip_sender.clone();
         Box::pin(async move {
-            let block_header_clone = new_block_header.clone(); // Clone before moving
-
             info!("Pre-validating block");
             let validation_future = tokio::task::spawn_blocking(move || {
                 prevalidate_block(
                     block_header,
                     previous_block_header,
-                    block_index_guard,
                     partitions_guard,
-                    storage_config,
-                    difficulty_config,
-                    vdf_config,
+                    config,
                     vdf_steps_guard,
-                    block_header_clone.miner_address, // Use clone in validation
                     ema_service_sender,
                 )
             });
 
             match validation_future.await.unwrap().await {
                 Ok(_) => {
+                    // Attempt to validate / update the epoch commitment cache
+                    for commitment_tx in commitments.iter() {
+                        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                        let _ =
+                            commitment_cache_sender.send(CommitmentCacheMessage::AddCommitment {
+                                commitment_tx: commitment_tx.clone(),
+                                response: oneshot_tx,
+                            });
+                        let status = oneshot_rx
+                            .await
+                            .expect("to receive CommitmentStatus from AddCommitment message");
+
+                        if matches!(status, CommitmentStatus::Accepted) == false {
+                            // Something went wrong with the commitments validation, it's time to roll back
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            let _ = commitment_cache_sender.send(
+                                CommitmentCacheMessage::RollbackCommitments {
+                                    commitment_txs: commitment_txids,
+                                    response: tx,
+                                },
+                            );
+                            let _ = rx
+                                .await
+                                .expect("to receive a response from RollbackCommitments message");
+
+                            // These commitments do not result in valid commitment state
+                            return Err(eyre::eyre!("Invalid commitments"));
+                        }
+                    }
+
                     info!("Block is valid, sending to block tree");
 
                     db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
@@ -270,10 +302,72 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             new_block_header.clone(),
                             Arc::new(all_txs),
                         ))
-                        .await
-                        .unwrap();
+                        .await??;
+
+                    // Check if we've reached the end of an epoch and should finalize commitments
+                    let block_height = new_block_header.height;
+                    let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
+                    let is_epoch_block = block_height > 0 && block_height % blocks_in_epoch == 0;
+
+                    if is_epoch_block {
+                        // For epoch blocks, validate that all included commitments are legitimate
+                        // Get current commitment state from epoch service for validation
+                        let commitment_state_guard = epoch_service
+                            .send(GetCommitmentStateGuardMessage)
+                            .await
+                            .unwrap();
+
+                        // Create a temporary local commitment validation environment
+                        // This avoids async overhead while checking commitment validity and creates
+                        // an independent cache we can populate and discard
+                        let mut local_commitment_cache =
+                            CommitmentCacheInner::new(commitment_state_guard);
+
+                        // Validate each commitment transaction before accepting the epoch block
+                        for commitment_tx in commitments.iter() {
+                            let status =
+                                local_commitment_cache.add_commitment(commitment_tx.clone());
+
+                            // Reject the entire epoch block if any commitment is invalid
+                            // This ensures only verified commitments are finalized at epoch boundaries
+                            if status != CommitmentStatus::Accepted {
+                                return Err(eyre::eyre!("Invalid commitments in epoch block"));
+                            }
+                        }
+
+                        // Look up the previous epoch block
+                        let block_item = block_index_guard2
+                            .read()
+                            .get_item(block_height - blocks_in_epoch)
+                            .expect("previous epoch block to be in block index")
+                            .clone();
+
+                        let previous_epoch_block = db
+                            .view(|tx| block_header_by_hash(tx, &block_item.block_hash, false))
+                            .unwrap()
+                            .expect("previous epoch block to be in database");
+
+                        // Send the NewEpochMessage referencing the current and previous epoch blocks
+                        epoch_service.do_send(NewEpochMessage {
+                            previous_epoch_block,
+                            epoch_block: new_block_header.clone(),
+                            commitments,
+                        });
+
+                        // Clear the CommitmentCache for a new epoch
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = commitment_cache_sender
+                            .send(CommitmentCacheMessage::ClearCache { response: tx });
+                        let _ = rx
+                            .await
+                            .expect("to receive a response from ClearCache message");
+                    }
 
                     // Send the block to the gossip bus
+                    tracing::trace!(
+                        "sending block to bus: block height {:?}",
+                        &new_block_header.height
+                    );
                     if let Err(error) = gossip_sender
                         .send(GossipData::Block(new_block_header.as_ref().clone()))
                         .await
@@ -283,7 +377,10 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
                     Ok(())
                 }
-                Err(err) => Err(eyre::eyre!("Block validation error {:?}", err)),
+                Err(err) => {
+                    tracing::error!("Block validation error {:?}", err);
+                    Err(eyre::eyre!("Block validation error {:?}", err))
+                }
             }
         })
     }

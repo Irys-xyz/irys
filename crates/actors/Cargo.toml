@@ -14,11 +14,13 @@ irys-config.workspace = true
 irys-vdf.workspace = true
 irys-price-oracle.workspace = true
 irys-efficient-sampling.workspace = true
+irys-api-client.workspace = true
 
 actix.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true
-env_logger = "0.11"
+
+thiserror = { workspace = true }
 
 tokio.workspace = true
 reth-db.workspace = true
@@ -35,14 +37,15 @@ base58.workspace = true
 futures.workspace = true
 rust_decimal.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
+reqwest = { version = "0.11", features = ["json"] }
 rust_decimal_macros.workspace = true
-
 # serde.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-config = { workspace = true, features = ["test-utils"] }
 irys-database = { workspace = true, features = ["test-utils"] }
+irys-api-client = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true
 rstest.workspace = true
 rand.workspace = true

@@ -1,29 +1,38 @@
 use actix::{Actor, Addr, Context, Handler};
+use actix_web::dev::Server;
+use actix_web::{middleware, web, App, HttpResponse, HttpServer};
+use base58::ToBase58;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
-use eyre::Result;
+use eyre::{eyre, Result};
 use irys_actors::block_discovery::BlockDiscoveredMessage;
+use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_actors::mempool_service::{
-    ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
+    ChunkIngressError, ChunkIngressMessage, CommitmentTxIngressMessage, TxExistenceQuery,
+    TxIngressError, TxIngressMessage,
 };
+use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
 use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
-use irys_gossip_service::{GossipService, PeerListProvider};
+use irys_gossip_service::types::GossipDataRequest;
+use irys_gossip_service::GossipService;
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    Base64, Config, DatabaseProvider, GossipData, IrysBlockHeader, IrysTransaction,
-    IrysTransactionHeader, PeerAddress, PeerListItem, PeerScore, TxChunkOffset, UnpackedChunk,
-    H256,
+    AcceptedResponse, Base64, BlockHash, CombinedBlockHeader, Config, DatabaseProvider, GossipData,
+    GossipRequest, IrysBlockHeader, IrysTransaction, IrysTransactionHeader,
+    IrysTransactionResponse, NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore,
+    RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 #[derive(Debug)]
 pub struct MempoolStub {
@@ -79,6 +88,18 @@ impl Handler<TxIngressMessage> for MempoolStub {
                 .expect("to send transaction");
         });
 
+        Ok(())
+    }
+}
+
+impl Handler<CommitmentTxIngressMessage> for MempoolStub {
+    type Result = Result<(), TxIngressError>;
+
+    fn handle(
+        &mut self,
+        _msg: CommitmentTxIngressMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
         Ok(())
     }
 }
@@ -174,17 +195,22 @@ impl ApiClient for StubApiClient {
         &self,
         _peer: SocketAddr,
         tx_id: H256,
-    ) -> Result<Option<IrysTransactionHeader>> {
+    ) -> Result<IrysTransactionResponse> {
         println!("Fetching transaction {:?} from stub API client", tx_id);
         println!("{:?}", self.txs.get(&tx_id));
-        Ok(self.txs.get(&tx_id).cloned())
+        Ok(self
+            .txs
+            .get(&tx_id)
+            .ok_or(eyre!("Transaction {} not found in stub API client", tx_id))?
+            .clone()
+            .into())
     }
 
     async fn get_transactions(
         &self,
         peer: SocketAddr,
         tx_ids: &[H256],
-    ) -> Result<Vec<Option<IrysTransactionHeader>>> {
+    ) -> Result<Vec<IrysTransactionResponse>> {
         debug!("Fetching {} transactions from peer {}", tx_ids.len(), peer);
         let mut results = Vec::with_capacity(tx_ids.len());
 
@@ -194,6 +220,30 @@ impl ApiClient for StubApiClient {
         }
 
         Ok(results)
+    }
+
+    async fn post_version(
+        &self,
+        _api_address: SocketAddr,
+        _version: VersionRequest,
+    ) -> Result<PeerResponse> {
+        Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock re sponse
+    }
+
+    async fn post_transaction(
+        &self,
+        _api_address: SocketAddr,
+        _transaction: IrysTransactionHeader,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_block_by_hash(
+        &self,
+        _peer: SocketAddr,
+        _block_hash: H256,
+    ) -> Result<Option<CombinedBlockHeader>> {
+        Ok(None)
     }
 }
 
@@ -221,10 +271,11 @@ pub struct GossipServiceTestFixture {
     pub temp_dir: TempDir,
     pub gossip_port: u16,
     pub api_port: u16,
+    pub execution: RethPeerInfo,
     pub db: DatabaseProvider,
-    pub peer_list: PeerListProvider,
     pub mining_address: Address,
     pub mempool: Addr<MempoolStub>,
+    pub peer_list: Addr<PeerListServiceWithClient<StubApiClient, MockRethServiceActor>>,
     pub block_discovery: Addr<BlockDiscoveryStub>,
     pub mempool_txs: Arc<RwLock<Vec<TxIngressMessage>>>,
     pub mempool_chunks: Arc<RwLock<Vec<ChunkIngressMessage>>>,
@@ -240,6 +291,21 @@ impl Default for GossipServiceTestFixture {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MockRethServiceActor {}
+
+impl Actor for MockRethServiceActor {
+    type Context = Context<Self>;
+}
+
+impl Handler<RethPeerInfo> for MockRethServiceActor {
+    type Result = eyre::Result<()>;
+
+    fn handle(&mut self, _msg: RethPeerInfo, _ctx: &mut Self::Context) -> Self::Result {
+        Ok(())
+    }
+}
+
 impl GossipServiceTestFixture {
     /// # Panics
     /// Can panic
@@ -247,11 +313,22 @@ impl GossipServiceTestFixture {
     pub fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
+        let config = NodeConfig::testnet().into();
         let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
-        let peer_list = PeerListProvider::new(db.clone());
+
+        let mock_reth_service = MockRethServiceActor {};
+        let reth_service_addr = mock_reth_service.start();
+
+        let peer_service = PeerListServiceWithClient::new_with_custom_api_client(
+            db.clone(),
+            &config,
+            StubApiClient::new(),
+            reth_service_addr,
+        );
+        let peer_list = peer_service.start();
 
         let (gossip_sender, _rx) = mpsc::channel(100);
 
@@ -277,10 +354,11 @@ impl GossipServiceTestFixture {
             temp_dir,
             gossip_port,
             api_port,
+            execution: RethPeerInfo::default(),
             db,
-            peer_list,
             mining_address: Address::random(),
             mempool: mempool_stub_addr,
+            peer_list,
             block_discovery: block_discovery_addr,
             mempool_txs,
             mempool_chunks,
@@ -295,7 +373,7 @@ impl GossipServiceTestFixture {
     /// Can panic
     pub fn run_service(&mut self) -> (ServiceHandleWithShutdownSignal, mpsc::Sender<GossipData>) {
         let (gossip_service, internal_message_bus) =
-            GossipService::new("127.0.0.1", self.gossip_port, self.db.clone());
+            GossipService::new("127.0.0.1", self.gossip_port, self.mining_address);
 
         let mempool_stub = MempoolStub::new(internal_message_bus.clone());
         self.mempool_txs = Arc::clone(&mempool_stub.txs);
@@ -310,14 +388,17 @@ impl GossipServiceTestFixture {
         };
         let block_discovery_stub_addr = block_discovery_stub.start();
 
-        let api_client = self.api_client.clone();
+        let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
 
         let service_handle = gossip_service
             .run(
                 mempool_stub_addr,
                 block_discovery_stub_addr,
-                api_client,
+                self.api_client.clone(),
                 &self.task_executor,
+                self.peer_list.clone().into(),
+                self.db.clone(),
+                vdf_tx,
             )
             .expect("failed to run gossip service");
 
@@ -332,6 +413,7 @@ impl GossipServiceTestFixture {
             address: PeerAddress {
                 gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), self.gossip_port),
                 api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), self.api_port),
+                execution: self.execution,
             },
             last_seen: 0,
             is_online: true,
@@ -340,7 +422,7 @@ impl GossipServiceTestFixture {
 
     /// # Panics
     /// Can panic
-    pub fn add_peer(&self, other: &Self) {
+    pub async fn add_peer(&self, other: &Self) {
         let peer = other.create_default_peer_entry();
 
         tracing::debug!(
@@ -350,25 +432,34 @@ impl GossipServiceTestFixture {
         );
 
         self.peer_list
-            .add_peer(&other.mining_address, &peer)
-            .expect("to add peer");
+            .send(AddPeer {
+                mining_addr: other.mining_address,
+                peer: peer.clone(),
+            })
+            .await
+            .expect("Adding peer failed");
     }
 
     /// # Panics
     /// Can panic
-    pub fn add_peer_with_reputation(&self, other: &Self, score: PeerScore) {
+    pub async fn add_peer_with_reputation(&self, other: &Self, score: PeerScore) {
         let peer = PeerListItem {
             address: PeerAddress {
                 gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.gossip_port),
                 api: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.api_port),
+                execution: other.execution,
             },
             reputation_score: score,
             is_online: true,
             ..PeerListItem::default()
         };
         self.peer_list
-            .add_peer(&other.mining_address, &peer)
-            .expect("to add a peer");
+            .send(AddPeer {
+                mining_addr: other.mining_address,
+                peer: peer.clone(),
+            })
+            .await
+            .expect("Adding peer failed");
     }
 }
 
@@ -382,8 +473,9 @@ fn random_free_port() -> u16 {
 /// Can panic
 #[must_use]
 pub fn generate_test_tx() -> IrysTransaction {
-    let testnet_config = Config::testnet();
-    let account1 = IrysSigner::random_signer(&testnet_config);
+    let testnet_config = NodeConfig::testnet();
+    let config = Config::new(testnet_config);
+    let account1 = IrysSigner::random_signer(&config.consensus);
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
     // post a tx, mine a block
@@ -415,4 +507,119 @@ pub fn create_test_chunks(tx: &IrysTransaction) -> Vec<UnpackedChunk> {
     }
 
     chunks
+}
+
+struct FakeGossipDataHandler {
+    on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
+}
+
+impl FakeGossipDataHandler {
+    fn new() -> Self {
+        Self {
+            on_block_data_request: Box::new(|_| false),
+        }
+    }
+
+    fn call_on_block_data_request(&self, block_hash: BlockHash) -> bool {
+        (self.on_block_data_request)(block_hash)
+    }
+
+    fn set_on_block_data_request(
+        &mut self,
+        on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
+    ) {
+        self.on_block_data_request = on_block_data_request;
+    }
+}
+
+pub struct FakeGossipServer {
+    handler: Arc<RwLock<FakeGossipDataHandler>>,
+}
+
+impl Debug for FakeGossipServer {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeGossipServer").finish()
+    }
+}
+
+impl FakeGossipServer {
+    pub fn new() -> Self {
+        Self {
+            handler: Arc::new(RwLock::new(FakeGossipDataHandler::new())),
+        }
+    }
+
+    pub fn set_on_block_data_request(
+        &self,
+        on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
+    ) {
+        self.handler
+            .write()
+            .expect("to unlock handler")
+            .set_on_block_data_request(on_block_data_request);
+    }
+
+    /// Runs the fake server, returns the address on which the server has started, as well
+    /// as the server handle
+    pub fn run(&self, address: SocketAddr) -> (Server, SocketAddr) {
+        let handler = self.handler.clone();
+        let server = HttpServer::new(move || {
+            let handler = handler.clone();
+            App::new()
+                .app_data(web::Data::new(handler.clone()))
+                .wrap(middleware::Logger::new("%r %s %D ms"))
+                .service(web::resource("/gossip/get_data").route(web::post().to(handle_get_data)))
+                .default_service(web::to(|| async {
+                    warn!("Request hit default handler - check your route paths");
+                    HttpResponse::NotFound()
+                        .content_type("application/json")
+                        .json(false)
+                }))
+        })
+        .workers(1)
+        .shutdown_timeout(5)
+        .keep_alive(actix_web::http::KeepAlive::Disabled)
+        .bind(address)
+        .expect("to bind");
+
+        let addr = server.addrs()[0].clone();
+        let server = server.run();
+        (server, addr)
+    }
+}
+
+async fn handle_get_data(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    data_request: web::Json<GossipRequest<GossipDataRequest>>,
+    _req: actix_web::HttpRequest,
+) -> HttpResponse {
+    warn!("Fake server got request: {:?}", data_request.data);
+
+    match handler.read() {
+        Ok(handler) => match data_request.data {
+            GossipDataRequest::Block(block_hash) => {
+                let res = handler.call_on_block_data_request(block_hash);
+                warn!(
+                    "Block data request for hash {:?}, response: {}",
+                    block_hash.0.to_base58(),
+                    res
+                );
+                HttpResponse::Ok()
+                    .content_type("application/json")
+                    .json(res)
+            }
+            GossipDataRequest::Transaction(transaction_hash) => {
+                warn!("Transaction request for hash {:?}", transaction_hash);
+                HttpResponse::Ok()
+                    .content_type("application/json")
+                    .json(false)
+            }
+        },
+        Err(e) => {
+            warn!("Failed to acquire read lock on handler: {}", e);
+            HttpResponse::InternalServerError()
+                .content_type("application/json")
+                .json("Failed to process request")
+        }
+    }
 }

@@ -1,4 +1,8 @@
+use crate::block_pool_service::BlockPoolError;
 use irys_actors::mempool_service::TxIngressError;
+use irys_actors::peer_list_service::PeerListFacadeError;
+use irys_types::{BlockHash, H256};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -13,6 +17,18 @@ pub enum GossipError {
     Internal(InternalGossipError),
     #[error("Invalid data: {0}")]
     InvalidData(InvalidDataError),
+    #[error("Block pool error: {0:?}")]
+    BlockPool(BlockPoolError),
+}
+
+impl From<PeerListFacadeError> for GossipError {
+    fn from(error: PeerListFacadeError) -> Self {
+        match error {
+            PeerListFacadeError::InternalError(err) => {
+                Self::Internal(InternalGossipError::Unknown(err))
+            }
+        }
+    }
 }
 
 impl GossipError {
@@ -82,3 +98,9 @@ pub(crate) fn tx_ingress_error_to_gossip_error(error: TxIngressError) -> Option<
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GossipDataRequest {
+    Block(BlockHash),
+    Transaction(H256),
+}

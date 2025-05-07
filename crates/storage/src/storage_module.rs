@@ -39,7 +39,7 @@
 use atomic_write_file::AtomicWriteFile;
 use base58::ToBase58;
 use derive_more::derive::{Deref, DerefMut};
-use eyre::{eyre, Context, OptionExt, Result};
+use eyre::{ensure, eyre, Context, OptionExt, Result};
 use irys_database::{
     submodule::{
         add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
@@ -55,10 +55,10 @@ use irys_types::{
     app_state::DatabaseProvider,
     get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
-    partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, DataRoot,
-    LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange,
-    ProofDeserialize, RelativeChunkOffset, StorageConfig, TxChunkOffset, TxPath, UnpackedChunk,
-    H256,
+    partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config,
+    DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset,
+    PartitionChunkRange, ProofDeserialize, RelativeChunkOffset, TxChunkOffset, TxPath,
+    UnpackedChunk, H256,
 };
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use openssl::sha;
@@ -99,7 +99,7 @@ pub struct StorageModule {
     /// Physical storage locations indexed by chunk ranges
     submodules: SubmoduleMap,
     /// Runtime configuration parameters
-    pub storage_config: StorageConfig,
+    pub config: Config,
 }
 
 /// On-disk metadata for StorageModule persistence
@@ -202,19 +202,15 @@ impl StorageModules {
 
 impl StorageModule {
     /// Initializes a new StorageModule
-    pub fn new(
-        base_path: &PathBuf,
-        storage_module_info: &StorageModuleInfo,
-        storage_config: StorageConfig,
-    ) -> eyre::Result<Self> {
+    pub fn new(storage_module_info: &StorageModuleInfo, config: &Config) -> eyre::Result<Self> {
         let mut submodule_map = NoditMap::new();
         let mut global_intervals = StorageIntervals::new();
 
         // Initialize the submodules from the StorageModuleInfo
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
-            let sub_base_path = base_path.join(dir.clone());
+            let sub_base_path = config.node_config.base_directory.join(dir.clone());
 
-            println!("{:?}", sub_base_path);
+            tracing::info!(?sub_base_path);
             fs::create_dir_all(&sub_base_path)?; // Ensure the directory exists (for component tests)
 
             // Get a file handle to the chunks.data file in the submodule
@@ -246,7 +242,7 @@ impl StorageModule {
             let params_path = sub_base_path.join("packing_params.toml");
             if params_path.exists() == false {
                 let mut params = PackingParams {
-                    packing_address: storage_config.miner_address,
+                    packing_address: config.node_config.miner_address(),
                     ..Default::default()
                 };
                 if let Some(pa) = storage_module_info.partition_assignment {
@@ -259,21 +255,19 @@ impl StorageModule {
                 // Load the packing params and check to see if they match
                 let params = PackingParams::from_toml(params_path).expect("packing params to load");
                 let pa = storage_module_info.partition_assignment.unwrap();
-                if params.packing_address != storage_config.miner_address {
-                    panic!(
-                        "Active mining address: {} does not match partition packing address {}",
-                        storage_config.miner_address, params.packing_address
-                    );
-                }
-                if params.partition_hash != Some(pa.partition_hash) {
-                    panic!(
-                        "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
-                        This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
-                        assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
-                        pa.partition_hash.0.to_base58(),
-                        params.partition_hash.unwrap().0.to_base58(),
-                    );
-                }
+                ensure!(
+                    params.packing_address == config.node_config.miner_address(),
+                    "Active mining address: {} does not match partition packing address {}",
+                    config.node_config.miner_address(),
+                    params.packing_address
+                );
+                ensure!(params.partition_hash == Some(pa.partition_hash),
+                    "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
+                    This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
+                    assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
+                    pa.partition_hash.0.to_base58(),
+                    params.partition_hash.unwrap().0.to_base58(),
+                );
             }
 
             let intervals_file_path = sub_base_path.join("intervals.json");
@@ -317,7 +311,7 @@ impl StorageModule {
             .gaps_untrimmed(partition_chunk_offset_ii!(0, u32::MAX))
             .collect::<Vec<_>>();
         let expected = vec![partition_chunk_offset_ii!(
-            TryInto::<u32>::try_into(storage_config.num_chunks_in_partition)
+            TryInto::<u32>::try_into(config.consensus.num_chunks_in_partition)
                 .expect("Value exceeds u32::MAX"),
             u32::MAX
         )];
@@ -338,7 +332,7 @@ impl StorageModule {
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
             intervals: Arc::new(RwLock::new(loaded_intervals)),
             submodules: submodule_map,
-            storage_config,
+            config: config.clone(),
         })
     }
 
@@ -381,8 +375,9 @@ impl StorageModule {
         self.partition_assignment
             .and_then(|part| part.slot_index)
             .map(|slot_index| {
-                let start_offset = slot_index as u64 * self.storage_config.num_chunks_in_partition;
-                let end_offset = start_offset + self.storage_config.num_chunks_in_partition;
+                let start_offset =
+                    slot_index as u64 * self.config.consensus.num_chunks_in_partition;
+                let end_offset = start_offset + self.config.consensus.num_chunks_in_partition;
                 (start_offset..end_offset).contains(&*chunk_offset)
             })
             .unwrap_or(false)
@@ -407,7 +402,7 @@ impl StorageModule {
     /// The sync threshold is configured via `min_writes_before_sync` to optimize
     /// disk writes and minimize fragmentation.
     pub fn sync_pending_chunks(&self) -> eyre::Result<()> {
-        let threshold = self.storage_config.min_writes_before_sync;
+        let threshold = self.config.node_config.storage.num_writes_before_sync;
         let arc = self.pending_writes.clone();
 
         // First use read lock to check if we have work to do
@@ -626,7 +621,7 @@ impl StorageModule {
             .unwrap();
 
         // Calculate file offset and prepare buffer
-        let chunk_size = self.storage_config.chunk_size;
+        let chunk_size = self.config.consensus.chunk_size;
         let file_offset = *(chunk_offset - interval.start()) as u64 * chunk_size;
         let mut buf = vec![0u8; chunk_size as usize];
 
@@ -943,7 +938,7 @@ impl StorageModule {
                 let proof = get_leaf_proof(&path_buff)?;
                 // -1 as it starts with 0
                 let chunk_offset =
-                    (proof.offset() as u64).div_ceil(self.storage_config.chunk_size) - 1;
+                    (proof.offset() as u64).div_ceil(self.config.consensus.chunk_size) - 1;
 
                 Ok((
                     data_root,
@@ -968,7 +963,7 @@ impl StorageModule {
             bytes: Base64::from(chunk_info.0),
             partition_offset,
             tx_offset: chunk_offset,
-            packing_address: self.storage_config.miner_address,
+            packing_address: self.config.node_config.miner_address(),
             partition_hash: self.partition_hash().unwrap(),
         }))
     }
@@ -1024,7 +1019,7 @@ impl StorageModule {
         bytes: Vec<u8>,
         chunk_type: ChunkType,
     ) -> eyre::Result<()> {
-        let chunk_size = self.storage_config.chunk_size;
+        let chunk_size = self.config.consensus.chunk_size;
         // Get the correct submodule reference based on chunk_offset
         let (interval, submodule) = self.get_submodule_for_offset(chunk_offset).unwrap();
 
@@ -1064,8 +1059,8 @@ impl StorageModule {
     pub fn get_storage_module_ledger_range(&self) -> eyre::Result<LedgerChunkRange> {
         if let Some(part_assign) = self.partition_assignment {
             if let Some(slot_index) = part_assign.slot_index {
-                let start = slot_index as u64 * self.storage_config.num_chunks_in_partition;
-                let end = start + self.storage_config.num_chunks_in_partition;
+                let start = slot_index as u64 * self.config.consensus.num_chunks_in_partition;
+                let end = start + self.config.consensus.num_chunks_in_partition;
                 return Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)));
             } else {
                 return Err(eyre::eyre!("Ledger slot not assigned!"));
@@ -1121,8 +1116,8 @@ impl StorageModule {
 
     /// Test utility function to mark a StorageModule as packed
     pub fn pack_with_zeros(&self) {
-        let entropy_bytes = vec![0u8; self.storage_config.chunk_size as usize];
-        for chunk_offset in 0..self.storage_config.num_chunks_in_partition as u32 {
+        let entropy_bytes = vec![0u8; self.config.consensus.chunk_size as usize];
+        for chunk_offset in 0..self.config.consensus.num_chunks_in_partition as u32 {
             self.write_chunk(
                 PartitionChunkOffset::from(chunk_offset),
                 entropy_bytes.clone(),
@@ -1306,17 +1301,17 @@ pub fn find_invalid_packing_starts(sm: Arc<StorageModule>) -> Vec<PartitionChunk
 
 pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::Result<bool> {
     let chunk = sm.read_chunk_internal(PartitionChunkOffset::from(point))?;
-    let chunk_size = sm.storage_config.chunk_size;
+    let chunk_size = sm.config.consensus.chunk_size;
     let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
 
     compute_entropy_chunk(
-        sm.storage_config.miner_address,
+        sm.config.node_config.miner_address(),
         point as u64,
         sm.partition_hash().unwrap().0,
-        sm.storage_config.entropy_packing_iterations,
+        sm.config.consensus.entropy_packing_iterations,
         chunk_size.try_into()?,
         &mut out,
-        sm.storage_config.chain_id,
+        sm.config.consensus.chain_id,
     );
 
     Ok(out == chunk)
@@ -1329,7 +1324,10 @@ pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::R
 mod tests {
     use super::*;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{ledger_chunk_offset_ii, partition_chunk_offset_ii, TxChunkOffset, H256};
+    use irys_types::{
+        ledger_chunk_offset_ii, partition_chunk_offset_ii, ConsensusConfig, NodeConfig,
+        StorageSyncConfig, TxChunkOffset, H256,
+    };
     use nodit::interval::ii;
 
     #[test]
@@ -1344,20 +1342,22 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir(Some("storage_module_test"), false);
+        let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-
-        // Override the default StorageModule config for testing
-        let config = StorageConfig {
-            min_writes_before_sync: 1,
-            chunk_size: 32,
-            num_chunks_in_partition: 20,
-            ..Default::default()
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 20,
+                ..ConsensusConfig::testnet()
+            }),
+            base_directory: base_path.clone(),
+            ..NodeConfig::testnet()
         };
+        let config = Config::new(node_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module = StorageModule::new(&base_path, storage_module_info, config)?;
+        let storage_module = StorageModule::new(storage_module_info, &config)?;
 
         // Verify the packing params file was crated in the submodule
         let params_path = base_path.join("hdd0-4TB").join("packing_params.toml");
@@ -1545,21 +1545,27 @@ mod tests {
             ],
         }];
 
-        let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
+        let tmp_dir = setup_tracing_and_temp_dir(Some("pending_writes_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-
-        // Override the default StorageModule config for testing
-        let config = StorageConfig {
-            min_writes_before_sync: 10,
-            chunk_size: 32,
-            num_chunks_in_partition: 51,
-            ..Default::default()
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 51,
+                chunk_migration_depth: 1,
+                ..ConsensusConfig::testnet()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 10,
+            },
+            base_directory: base_path.clone(),
+            ..NodeConfig::testnet()
         };
-        let chunk_size = config.chunk_size as usize;
+        let config = Config::new(node_config);
+        let chunk_size = config.consensus.chunk_size as usize;
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module = StorageModule::new(&base_path, storage_module_info, config)?;
+        let storage_module = StorageModule::new(storage_module_info, &config)?;
 
         // Queue up some entropy chunks in the pending writes queue
         let entropy_bytes = vec![0u8; chunk_size];
@@ -1751,20 +1757,20 @@ mod tests {
 
         let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
-
-        // Override the default StorageModule config for testing
-        let config = StorageConfig {
-            min_writes_before_sync: 1,
-            chunk_size: 5,
-            num_chunks_in_partition: 5,
-            ..Default::default()
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 5,
+                num_chunks_in_partition: 5,
+                ..ConsensusConfig::testnet()
+            }),
+            base_directory: base_path.clone(),
+            ..NodeConfig::testnet()
         };
-
-        // initialize_storage_files(&base_path, &infos, &config)?;
+        let config = Config::new(node_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
-        let storage_module = StorageModule::new(&base_path, storage_module_info, config)?;
+        let storage_module = StorageModule::new(storage_module_info, &config)?;
         let chunk_data = vec![0, 1, 2, 3, 4];
         let data_path = vec![4, 3, 2, 1];
         let tx_path = vec![5, 6, 7, 8];

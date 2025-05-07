@@ -2905,7 +2905,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f2c92ceda6ceec50f43169f9ee8424fe2db276791afde7b2cd8bc084cb376ab"
 dependencies = [
  "log",
- "regex",
 ]
 
 [[package]]
@@ -2917,7 +2916,6 @@ dependencies = [
  "anstream",
  "anstyle",
  "env_filter",
- "humantime",
  "log",
 ]
 
@@ -3573,7 +3571,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.5.8",
+ "socket2 0.4.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -4050,9 +4048,9 @@ dependencies = [
  "alloy-rpc-types-engine",
  "assert_matches",
  "base58",
- "env_logger",
  "eyre",
  "futures",
+ "irys-api-client",
  "irys-config",
  "irys-database",
  "irys-efficient-sampling",
@@ -4067,6 +4065,7 @@ dependencies = [
  "nodit",
  "openssl",
  "rand",
+ "reqwest 0.11.27",
  "reth",
  "reth-db",
  "rstest",
@@ -4075,6 +4074,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-log",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -4085,6 +4085,7 @@ name = "irys-api-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base58",
  "eyre",
  "irys-types",
  "reqwest 0.12.15",
@@ -4104,7 +4105,6 @@ dependencies = [
  "base58",
  "eyre",
  "irys-actors",
- "irys-config",
  "irys-database",
  "irys-reth-node-bridge",
  "irys-storage",
@@ -4116,6 +4116,8 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2 0.5.8",
+ "test-log",
+ "tokio",
  "tracing",
 ]
 
@@ -4151,6 +4153,7 @@ dependencies = [
  "alloy-signer-local",
  "alloy-sol-macro",
  "alloy-sol-types",
+ "assert_matches",
  "awc",
  "base58",
  "color-eyre",
@@ -4183,6 +4186,7 @@ dependencies = [
  "rstest",
  "rust_decimal",
  "rust_decimal_macros",
+ "semver 1.0.24",
  "serde_json",
  "sha2 0.10.8",
  "test-fuzz",
@@ -4201,7 +4205,6 @@ dependencies = [
  "clap",
  "color-eyre",
  "eyre",
- "irys-config",
  "irys-database",
  "irys-types",
  "reth-node-core",
@@ -4250,6 +4253,7 @@ dependencies = [
  "serde",
  "tempfile",
  "test-fuzz",
+ "test-log",
  "tokio",
  "tracing",
 ]
@@ -4269,8 +4273,10 @@ name = "irys-gossip-service"
 version = "0.1.0"
 dependencies = [
  "actix",
+ "actix-rt",
  "actix-web",
  "async-trait",
+ "base58",
  "eyre",
  "irys-actors",
  "irys-api-client",
@@ -4357,7 +4363,6 @@ dependencies = [
  "eyre",
  "futures",
  "futures-util",
- "irys-config",
  "irys-database",
  "irys-packing",
  "irys-primitives",
@@ -4367,6 +4372,7 @@ dependencies = [
  "jsonrpsee-core",
  "jsonrpsee-types",
  "reth",
+ "reth-auto-seal-consensus",
  "reth-beacon-consensus",
  "reth-blockchain-tree",
  "reth-chainspec",
@@ -4435,6 +4441,7 @@ dependencies = [
  "reth-db",
  "serde",
  "serde_json",
+ "test-log",
  "toml",
  "tracing",
 ]
@@ -4476,11 +4483,14 @@ dependencies = [
  "modular-bitfield",
  "nodit",
  "openssl",
+ "pretty_assertions",
  "rand",
+ "reth-chainspec",
  "reth-codecs",
  "reth-db",
  "reth-db-api",
  "reth-primitives",
+ "reth-transaction-pool",
  "rstest",
  "rust_decimal",
  "rust_decimal_macros",

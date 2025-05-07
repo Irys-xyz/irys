@@ -1,8 +1,6 @@
 //! Utilities for end-to-end tests.
 //! Taken from ext/reth/crates/e2e-test-utils
 
-use std::sync::Arc;
-
 use node::RethNodeContext;
 use reth::{
     args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
@@ -19,6 +17,7 @@ use reth_node_builder::{
     RethFullAdapter,
 };
 use reth_provider::providers::BlockchainProvider;
+use std::sync::Arc;
 use tracing::{span, Level};
 use wallet::Wallet;
 
@@ -85,6 +84,7 @@ where
 
         let span = span!(Level::INFO, "node", idx);
         let _enter = span.enter();
+
         let NodeHandle {
             node,
             node_exit_future: _,

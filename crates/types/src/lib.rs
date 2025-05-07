@@ -6,6 +6,7 @@ pub mod app_state;
 pub mod block;
 pub mod block_production;
 pub mod chunk;
+pub mod chunked;
 pub mod config;
 pub mod difficulty_adjustment_config;
 pub mod gossip;
@@ -18,11 +19,11 @@ pub mod serialization;
 pub mod signature;
 pub mod simple_rng;
 pub mod storage;
-pub mod storage_config;
 pub mod storage_pricing;
 pub mod transaction;
-pub mod vdf_config;
 pub mod version;
+
+use std::sync::{atomic::AtomicU64, Arc};
 
 pub use block::*;
 pub use config::*;
@@ -42,6 +43,6 @@ pub use nodit::Interval;
 pub use peer_list::*;
 pub use reth_codecs::Compact;
 pub use simple_rng::*;
-pub use storage_config::*;
-pub use vdf_config::*;
 pub use version::*;
+
+pub type AtomicVdfStepNumber = Arc<AtomicU64>;

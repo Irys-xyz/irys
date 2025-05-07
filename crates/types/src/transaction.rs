@@ -1,6 +1,6 @@
 use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    Config, IrysSignature, Node, Proof, Signature, TxIngressProof, H256,
+    ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -120,10 +120,6 @@ impl IrysTransactionHeader {
         self.signature
             .validate_signature(self.signature_hash(), self.signer)
     }
-
-    pub fn total_fee(&self) -> u64 {
-        self.perm_fee.unwrap_or(0) + self.term_fee
-    }
 }
 
 /// Wrapper for the underlying IrysTransactionHeader fields, this wrapper
@@ -132,7 +128,8 @@ impl IrysTransactionHeader {
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
 pub struct IrysTransaction {
     pub header: IrysTransactionHeader,
-    pub data: Base64,
+    // TODO: make this compatible with stream/iterator data sources
+    pub data: Option<Base64>,
     #[serde(skip)]
     pub chunks: Vec<Node>,
     #[serde(skip)]
@@ -146,7 +143,7 @@ impl IrysTransaction {
 }
 
 impl IrysTransactionHeader {
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &ConsensusConfig) -> Self {
         IrysTransactionHeader {
             id: H256::zero(),
             anchor: H256::zero(),
@@ -211,6 +208,10 @@ pub struct CommitmentTransaction {
     #[serde(with = "string_u64")]
     pub chain_id: u64,
 
+    /// Pay the fee required to mitigate tx spam
+    #[serde(with = "string_u64")]
+    pub fee: u64,
+
     /// Transaction signature bytes
     #[rlp(skip)]
     #[rlp(default)]
@@ -239,6 +240,49 @@ impl CommitmentTransaction {
     }
 }
 
+// Trait to abstract common behavior
+pub trait IrysTransactionCommon {
+    fn is_signature_valid(&self) -> bool;
+    fn id(&self) -> IrysTransactionId;
+    fn total_fee(&self) -> u64;
+    fn signer(&self) -> Address;
+}
+
+impl IrysTransactionCommon for IrysTransactionHeader {
+    fn is_signature_valid(&self) -> bool {
+        self.is_signature_valid()
+    }
+
+    fn id(&self) -> IrysTransactionId {
+        self.id
+    }
+
+    fn total_fee(&self) -> u64 {
+        self.perm_fee.unwrap_or(0) + self.term_fee
+    }
+
+    fn signer(&self) -> Address {
+        self.signer
+    }
+}
+
+impl IrysTransactionCommon for CommitmentTransaction {
+    fn is_signature_valid(&self) -> bool {
+        self.is_signature_valid()
+    }
+
+    fn id(&self) -> IrysTransactionId {
+        self.id
+    }
+
+    fn total_fee(&self) -> u64 {
+        self.fee
+    }
+    fn signer(&self) -> Address {
+        self.signer
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,7 +296,7 @@ mod tests {
     #[test]
     fn test_irys_transaction_header_rlp_round_trip() {
         // setup
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let mut header = mock_header(&config);
 
         // action
@@ -270,7 +314,7 @@ mod tests {
     #[test]
     fn test_commitment_transaction_rlp_round_trip() {
         // setup
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let mut header = mock_commitment_tx(&config);
 
         // action
@@ -288,7 +332,7 @@ mod tests {
     #[test]
     fn test_irys_transaction_header_serde() {
         // Create a sample IrysTransactionHeader
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let original_header = mock_header(&config);
 
         // Serialize the IrysTransactionHeader to JSON
@@ -307,7 +351,7 @@ mod tests {
     #[test]
     fn test_commitment_transaction_serde() {
         // Create a sample commitment tx
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let original_tx = mock_commitment_tx(&config);
 
         // Serialize the commitment tx to JSON
@@ -325,7 +369,7 @@ mod tests {
     #[test]
     fn test_tx_encode_and_signing() {
         // setup
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let original_header = mock_header(&config);
         let mut sig_data = Vec::new();
         original_header.encode(&mut sig_data);
@@ -336,7 +380,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size as usize,
+            chunk_size: config.chunk_size,
         };
         let tx = IrysTransaction {
             header: dec,
@@ -351,7 +395,7 @@ mod tests {
     #[test]
     fn test_commitment_tx_encode_and_signing() {
         // setup
-        let config = Config::testnet();
+        let config = ConsensusConfig::testnet();
         let original_tx = mock_commitment_tx(&config);
         let mut sig_data = Vec::new();
         original_tx.encode(&mut sig_data);
@@ -361,7 +405,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size as usize,
+            chunk_size: config.chunk_size,
         };
 
         let signed_tx = signer.sign_commitment(original_tx.clone()).unwrap();
@@ -374,7 +418,7 @@ mod tests {
         assert!(signed_tx.is_signature_valid());
     }
 
-    fn mock_header(config: &Config) -> IrysTransactionHeader {
+    fn mock_header(config: &ConsensusConfig) -> IrysTransactionHeader {
         let original_header = IrysTransactionHeader {
             id: H256::from([255u8; 32]),
             anchor: H256::from([1u8; 32]),
@@ -393,16 +437,39 @@ mod tests {
         original_header
     }
 
-    fn mock_commitment_tx(config: &Config) -> CommitmentTransaction {
+    fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
         let original_header = CommitmentTransaction {
             id: H256::from([255u8; 32]),
             anchor: H256::from([1u8; 32]),
             signer: Address::default(),
             commitment_type: CommitmentType::Stake,
             version: 0,
+            fee: 1,
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
         };
         original_header
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum IrysTransactionResponse {
+    #[serde(rename = "commitment")]
+    Commitment(CommitmentTransaction),
+
+    #[serde(rename = "storage")]
+    Storage(IrysTransactionHeader),
+}
+
+impl From<CommitmentTransaction> for IrysTransactionResponse {
+    fn from(tx: CommitmentTransaction) -> Self {
+        IrysTransactionResponse::Commitment(tx)
+    }
+}
+
+impl From<IrysTransactionHeader> for IrysTransactionResponse {
+    fn from(tx: IrysTransactionHeader) -> Self {
+        IrysTransactionResponse::Storage(tx)
     }
 }

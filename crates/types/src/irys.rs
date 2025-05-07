@@ -1,7 +1,6 @@
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction,
-    Config, IrysBlockHeader, IrysSignature, IrysTransaction, IrysTransactionHeader, Signature,
-    H256,
+    IrysBlockHeader, IrysSignature, IrysTransaction, IrysTransactionHeader, Signature, H256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -15,25 +14,14 @@ use k256::ecdsa::SigningKey;
 pub struct IrysSigner {
     pub signer: SigningKey,
     pub chain_id: u64,
-    pub chunk_size: usize,
+    pub chunk_size: u64,
 }
 
 /// Encapsulates an Irys API for doing client type things, making transactions,
 /// signing them, posting them etc.
 impl IrysSigner {
-    pub fn from_config(config: &Config) -> Self {
-        IrysSigner {
-            signer: config.mining_key.clone(),
-            chain_id: config.chain_id,
-            chunk_size: config
-                .chunk_size
-                .try_into()
-                .expect("invalid chunk size specified in the config"),
-        }
-    }
-
     #[cfg(any(feature = "test-utils", test))]
-    pub fn random_signer(config: &Config) -> Self {
+    pub fn random_signer(config: &crate::ConsensusConfig) -> Self {
         use rand::rngs::OsRng;
 
         IrysSigner {
@@ -59,7 +47,7 @@ impl IrysSigner {
         data: Vec<u8>,
         anchor: Option<H256>, //TODO!: more parameters as they are implemented
     ) -> Result<IrysTransaction> {
-        let mut transaction = self.merklize(data, self.chunk_size)?;
+        let mut transaction = self.merklize(data, self.chunk_size as usize)?;
 
         // TODO: These should be calculated from some pricing params passed in
         // as a parameter
@@ -133,7 +121,8 @@ impl IrysSigner {
     /// Builds a merkle tree, with a root, including all the proofs for each
     /// chunk.
     fn merklize(&self, data: Vec<u8>, chunk_size: usize) -> Result<IrysTransaction> {
-        let chunks = generate_leaves(&data, chunk_size)?;
+        // TODO: fix the `data` field so we can use "streaming" data sources & remove the clone
+        let chunks = generate_leaves(vec![data.clone()].into_iter().map(Ok), chunk_size)?;
         let root = generate_data_root(chunks.clone())?;
         let data_root = H256(root.id);
         let proofs = resolve_proofs(root, None)?;
@@ -150,7 +139,7 @@ impl IrysSigner {
                 data_root,
                 ..Default::default()
             },
-            data: Base64(data),
+            data: Some(Base64(data)),
             chunks,
             proofs,
             ..Default::default()
@@ -175,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn create_and_sign_transaction() {
         // Create 2.5 chunks worth of data *  fill the data with random bytes
-        let config = crate::Config::testnet();
+        let config = crate::ConsensusConfig::testnet();
         let data_size = (config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);

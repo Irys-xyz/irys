@@ -8,7 +8,7 @@ use irys_database::get_cache_size;
 use irys_database::tables::CachedChunks;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, Config, IrysTransactionHeader, TxChunkOffset, UnpackedChunk};
+use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth::providers::BlockReader as _;
 use reth_db::Database as _;
 use reth_primitives::GenesisAccount;
@@ -16,17 +16,14 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
-    let testnet_config = Config {
-        chunk_size: 32,
-        chunk_migration_depth: 2,
-        ..Config::testnet()
-    };
-    let main_address = testnet_config.miner_address();
-    let account1 = IrysSigner::random_signer(&testnet_config);
-    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().chunk_size = 32;
+    config.consensus.get_mut().chunk_migration_depth = 2;
+    let main_address = config.miner_address();
+    let account1 = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -42,6 +39,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             },
         ),
     ]);
+    let node = IrysNodeTest::new_genesis(config).await;
     let node = node.start().await;
 
     wait_for_packing(
@@ -50,7 +48,10 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     )
     .await?;
 
-    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.port);
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.port
+    );
 
     // server should be running
     // check with request to `/v1/info`
@@ -108,9 +109,6 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut tx_header_fut,
         Duration::from_millis(500),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await?;
 
@@ -172,19 +170,15 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await?
     .unwrap();
 
     // mine a couple blocks
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
-    let (chunk_cache_count, _) = &node
-        .node_ctx
-        .db
-        .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, testnet_config.chunk_size))?;
+    let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
+        get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
+    })?;
 
     assert_eq!(*chunk_cache_count, tx.chunks.len() as u64);
 
@@ -210,10 +204,9 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         sleep(Duration::from_millis(1500)).await;
     }
 
-    let (chunk_cache_count, _) = &node
-        .node_ctx
-        .db
-        .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, testnet_config.chunk_size))?;
+    let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
+        get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
+    })?;
     assert_eq!(*chunk_cache_count, 0);
 
     // make sure we can read the chunks

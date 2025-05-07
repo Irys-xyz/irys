@@ -12,7 +12,7 @@ use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
 use irys_types::{irys::IrysSigner, Address};
-use irys_types::{Base64, Config, IrysTransactionHeader, TxChunkOffset, UnpackedChunk};
+use irys_types::{Base64, IrysTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 
 use k256::ecdsa::SigningKey;
 use reth::rpc::eth::EthApiServer;
@@ -41,14 +41,12 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
-    let mut irys_node = IrysNodeTest::new_genesis(Config {
-        chunk_size: 32,
-        chunk_migration_depth: 2,
-        ..Config::testnet()
-    });
-    let main_address = irys_node.cfg.config.miner_address();
-    let account1 = IrysSigner::random_signer(&irys_node.cfg.config);
-    irys_node.cfg.irys_node_config.extend_genesis_accounts(vec![
+    let mut testnet_config = NodeConfig::testnet();
+    testnet_config.consensus.get_mut().chunk_size = 32;
+    testnet_config.consensus.get_mut().chunk_migration_depth = 2;
+    let main_address = testnet_config.miner_address();
+    let account1 = IrysSigner::random_signer(&testnet_config.consensus_config());
+    testnet_config.consensus.extend_genesis_accounts(vec![
         (
             main_address,
             GenesisAccount {
@@ -71,8 +69,10 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
             },
         ),
     ]);
-
-    let node = irys_node.start().await;
+    let node = IrysNodeTest::new_genesis(testnet_config)
+        .await
+        .start()
+        .await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
@@ -93,7 +93,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         .on_http(
             format!(
                 "http://127.0.0.1:{}/v1/execution-rpc",
-                node.node_ctx.config.port
+                node.node_ctx.config.node_config.http.port
             )
             .parse()?,
         );
@@ -107,9 +107,6 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut deploy_fut,
         Duration::from_millis(500),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await??;
 
@@ -122,7 +119,10 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         precompile_address
     );
 
-    let http_url = format!("http://127.0.0.1:{}", node.node_ctx.config.port);
+    let http_url = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.port
+    );
 
     // server should be running
     // check with request to `/v1/info`
@@ -187,9 +187,6 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut tx_header_fut,
         Duration::from_millis(500),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await?;
 
@@ -255,9 +252,6 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut start_offset_fut,
         Duration::from_millis(500),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await?
     .unwrap();
@@ -305,9 +299,6 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         node.node_ctx.clone(),
         &mut invocation_receipt_fut,
         Duration::from_millis(500),
-        node.node_ctx.vdf_steps_guard.clone(),
-        &node.node_ctx.vdf_config,
-        &node.node_ctx.storage_config,
     )
     .await??;
 

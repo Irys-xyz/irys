@@ -15,6 +15,7 @@ use serde::{
     de::{self, Error as _},
     Deserialize, Deserializer, Serialize, Serializer,
 };
+use std::fmt;
 use std::{ops::Index, slice::SliceIndex, str::FromStr};
 
 use fixed_hash::construct_fixed_hash;
@@ -565,7 +566,7 @@ impl<'de> Deserialize<'de> for Base64 {
 // H256List Type
 //------------------------------------------------------------------------------
 /// A struct of [`Vec<H256>`] used for lists of [`Base64`] encoded hashes
-#[derive(Debug, Default, Clone, Eq, PartialEq, Compact, Arbitrary, RlpEncodable, RlpDecodable)]
+#[derive(Default, Clone, Eq, PartialEq, Compact, Arbitrary, RlpEncodable, RlpDecodable)]
 pub struct H256List(pub Vec<H256>);
 
 impl H256List {
@@ -601,6 +602,27 @@ impl H256List {
 
     pub fn get(&self, index: usize) -> Option<&<usize as SliceIndex<[H256]>>::Output> {
         self.0.get(index)
+    }
+}
+
+impl fmt::Debug for H256List {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("H256List(")?;
+        f.write_str("[\n\t")?;
+
+        let mut first = true;
+        for item in &self.0 {
+            if !first {
+                f.write_str(",\n\t")?;
+            }
+            first = false;
+
+            // Write the base58-encoded version of the hash
+            f.write_str(&item.0.to_base58())?;
+        }
+
+        f.write_str("\n])")?;
+        Ok(())
     }
 }
 

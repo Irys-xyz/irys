@@ -10,8 +10,8 @@ use irys_database::DataLedger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
 use irys_types::{
-    calculate_difficulty, next_cumulative_diff, storage_config::StorageConfig, validate_path,
-    Address, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, VDFStepsConfig, H256,
+    calculate_difficulty, next_cumulative_diff, validate_path, Address, Config, ConsensusConfig,
+    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::vdf_state::VdfStepsReadGuard;
@@ -22,13 +22,9 @@ use tracing::{debug, info};
 pub async fn prevalidate_block(
     block: IrysBlockHeader,
     previous_block: IrysBlockHeader,
-    _block_index_guard: BlockIndexReadGuard,
-    _partitions_guard: PartitionAssignmentsReadGuard,
-    storage_config: StorageConfig,
-    difficulty_config: DifficultyAdjustmentConfig,
-    vdf_config: VDFStepsConfig,
+    partitions_guard: PartitionAssignmentsReadGuard,
+    config: Config,
     steps_guard: VdfStepsReadGuard,
-    _miner_address: Address,
     ema_serviece_sendr: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
     debug!(
@@ -61,7 +57,11 @@ pub async fn prevalidate_block(
     );
 
     // Check the difficulty
-    difficulty_is_valid(&block, &previous_block, &difficulty_config)?;
+    difficulty_is_valid(
+        &block,
+        &previous_block,
+        &config.consensus.difficulty_adjustment,
+    )?;
 
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
@@ -77,11 +77,11 @@ pub async fn prevalidate_block(
         "cumulative_difficulty_is_valid",
     );
 
-    check_poa_data_expiration(&block.poa, &_partitions_guard)?;
+    check_poa_data_expiration(&block.poa, &partitions_guard)?;
     debug!("poa data not expired");
 
     // Check the solution_hash
-    solution_hash_is_valid(&block)?;
+    solution_hash_is_valid(&block, &previous_block)?;
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -89,7 +89,7 @@ pub async fn prevalidate_block(
     );
 
     // Recall range check
-    recall_recall_range_is_valid(&block, &storage_config, &steps_guard)?;
+    recall_recall_range_is_valid(&block, &config.consensus, &steps_guard)?;
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -97,7 +97,7 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &vdf_config).await?;
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -249,22 +249,24 @@ pub fn cumulative_difficulty_is_valid(
 }
 
 /// Checks to see if the `solution_hash` exceeds the difficulty threshold
+/// of the previous block
 ///
 /// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
-pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
+pub fn solution_hash_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> eyre::Result<()> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
 
-    let previous_solution_diff = hash_to_number(&block.previous_solution_hash.0);
-
-    if solution_diff >= previous_solution_diff {
+    if solution_diff >= previous_block.diff {
         Ok(())
     } else {
         Err(eyre::eyre!(
             "Invalid solution_hash - expected difficulty >={}, got {} (diff: {})",
-            &block.diff,
+            &previous_block.diff,
             &solution_diff,
-            &block.diff.abs_diff(solution_diff)
+            &previous_block.diff.abs_diff(solution_diff)
         ))
     }
 }
@@ -273,7 +275,7 @@ pub fn solution_hash_is_valid(block: &IrysBlockHeader) -> eyre::Result<()> {
 /// Check recall range is valid
 pub fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
-    config: &StorageConfig,
+    config: &ConsensusConfig,
     steps_guard: &VdfStepsReadGuard,
 ) -> eyre::Result<()> {
     let num_recall_ranges_in_partition =
@@ -300,7 +302,7 @@ pub fn recall_recall_range_is_valid(
 
 pub fn get_recall_range(
     step_num: u64,
-    config: &StorageConfig,
+    config: &ConsensusConfig,
     steps_guard: &VdfStepsReadGuard,
     partition_hash: &H256,
 ) -> eyre::Result<usize> {
@@ -322,7 +324,7 @@ pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
     partitions_guard: &PartitionAssignmentsReadGuard,
-    config: &StorageConfig,
+    config: &ConsensusConfig,
     miner_address: &Address,
 ) -> eyre::Result<()> {
     debug!("PoA validating mining address: {:?} chunk_offset: {} partition hash: {:?} iterations: {} chunk size: {}", miner_address, poa.partition_chunk_offset, poa.partition_hash, config.entropy_packing_iterations, config.chunk_size);
@@ -341,7 +343,7 @@ pub fn poa_is_valid(
             .unwrap();
 
         let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
-            * config.num_partitions_in_slot
+            * config.num_partitions_per_slot
             * config.num_chunks_in_partition
             + poa.partition_chunk_offset as u64;
 
@@ -448,101 +450,85 @@ mod tests {
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
         epoch_service::{
-            EpochServiceActor, EpochServiceConfig, GetLedgersGuardMessage,
-            GetPartitionAssignmentsGuardMessage, NewEpochMessage,
+            EpochServiceActor, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
+            NewEpochMessage,
         },
         BlockFinalizedMessage,
     };
     use actix::{prelude::*, SystemRegistry};
 
-    use irys_config::IrysNodeConfig;
-    use irys_database::{add_genesis_commitments, BlockIndex, Initialized};
+    use irys_database::{add_genesis_commitments, BlockIndex};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
-        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, Config,
-        DataTransactionLedger, H256List, IrysTransaction, IrysTransactionHeader, Signature, H256,
-        U256,
+        irys::IrysSigner, partition::PartitionAssignment, Address, Base64, DataTransactionLedger,
+        H256List, IrysTransaction, IrysTransactionHeader, NodeConfig, Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
-    use tracing::log::LevelFilter;
     use tracing::{debug, info};
 
     use super::*;
 
     pub(super) struct TestContext {
-        pub block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+        pub block_index: Arc<RwLock<BlockIndex>>,
         pub block_index_actor: Addr<BlockIndexService>,
         pub partitions_guard: PartitionAssignmentsReadGuard,
-        pub storage_config: StorageConfig,
         pub miner_address: Address,
         pub partition_hash: H256,
         pub partition_assignment: PartitionAssignment,
-        pub testnet_config: Config,
+        pub consensus_config: ConsensusConfig,
+        #[allow(dead_code)]
+        pub node_config: NodeConfig,
     }
 
     async fn init() -> (TempDir, TestContext) {
-        let _ = env_logger::builder()
-            // Include all events in tests
-            .filter_level(LevelFilter::max())
-            // Ensure events are captured by `cargo test`
-            .is_test(true)
-            // Ignore errors initializing the logger if tests race to configure it
-            .try_init();
+        let data_dir = temporary_directory(Some("block_validation_tests"), false);
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 100,
+                ..ConsensusConfig::testnet()
+            }),
+            base_directory: data_dir.path().to_path_buf(),
+            ..NodeConfig::testnet()
+        };
+        let config = Config::new(node_config);
 
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
         let chunk_size = 32;
-        let testnet_config = Config {
+        let mut node_config = NodeConfig::testnet();
+        node_config.storage.num_writes_before_sync = 1;
+        node_config.base_directory = data_dir.path().to_path_buf();
+        let consensus_config = ConsensusConfig {
             chunk_size,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
             num_partitions_per_slot: 1,
-            num_writes_before_sync: 1,
             entropy_packing_iterations: 1_000,
             chunk_migration_depth: 1,
-            ..Config::testnet()
+            ..node_config.consensus_config()
         };
 
-        let commitments = add_genesis_commitments(&mut genesis_block, &testnet_config);
+        let commitments = add_genesis_commitments(&mut genesis_block, &config);
 
-        let data_dir = temporary_directory(Some("block_validation_tests"), false);
         let arc_genesis = Arc::new(genesis_block);
-        let signer = testnet_config.irys_signer();
+        let signer = config.irys_signer();
         let miner_address = signer.address();
 
         // Create epoch service with random miner address
-        let storage_config = StorageConfig::new(&testnet_config);
-        let epoch_config = EpochServiceConfig::new(&testnet_config);
-
-        let mut config = IrysNodeConfig::new(&testnet_config);
-        config.base_directory = data_dir.path().to_path_buf();
-        let arc_config = Arc::new(config);
-
-        let block_index: Arc<RwLock<BlockIndex<Initialized>>> = Arc::new(RwLock::new(
-            BlockIndex::default()
-                .reset(&arc_config.clone())
-                .unwrap()
-                .init(arc_config.clone())
-                .await
-                .unwrap(),
-        ));
+        let block_index = Arc::new(RwLock::new(BlockIndex::new(&node_config).await.unwrap()));
 
         let block_index_actor =
-            BlockIndexService::new(block_index.clone(), storage_config.clone()).start();
+            BlockIndexService::new(block_index.clone(), &consensus_config).start();
         SystemRegistry::set(block_index_actor.clone());
 
-        let block_index_guard = block_index_actor
-            .send(GetBlockIndexGuardMessage)
-            .await
-            .unwrap();
-
-        let epoch_service =
-            EpochServiceActor::new(epoch_config.clone(), &testnet_config, block_index_guard);
+        let epoch_service = EpochServiceActor::new(&config);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers
         let msg = NewEpochMessage {
+            previous_epoch_block: None,
             epoch_block: arc_genesis.clone(),
             commitments,
         };
@@ -590,11 +576,11 @@ mod tests {
                 block_index,
                 block_index_actor,
                 partitions_guard,
-                storage_config,
                 miner_address,
                 partition_hash,
                 partition_assignment,
-                testnet_config,
+                consensus_config,
+                node_config,
             },
         )
     }
@@ -611,7 +597,7 @@ mod tests {
 
         // Create a bunch of signed TX from the chunks
         // Loop though all the data_chunks and create wrapper tx for them
-        let signer = IrysSigner::random_signer(&context.testnet_config);
+        let signer = IrysSigner::random_signer(&context.consensus_config);
         let mut txs: Vec<IrysTransaction> = Vec::new();
 
         for chunks in &data_chunks {
@@ -634,7 +620,7 @@ mod tests {
                     poa_tx_num,
                     poa_chunk_num,
                     9,
-                    context.testnet_config.chunk_size as usize,
+                    context.consensus_config.chunk_size as usize,
                 )
                 .await;
             }
@@ -646,7 +632,7 @@ mod tests {
         let (_tmp, context) = init().await;
 
         // Create a signed TX from the chunks
-        let signer = IrysSigner::random_signer(&context.testnet_config);
+        let signer = IrysSigner::random_signer(&context.consensus_config);
         let mut txs: Vec<IrysTransaction> = Vec::new();
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
@@ -655,7 +641,7 @@ mod tests {
         txs.push(tx);
 
         let poa_tx_num = 0;
-        let chunk_size = context.testnet_config.chunk_size as usize;
+        let chunk_size = context.consensus_config.chunk_size as usize;
         for poa_chunk_num in 0..2 {
             let mut poa_chunk: Vec<u8> = data[poa_chunk_num * (chunk_size)
                 ..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())]
@@ -693,10 +679,10 @@ mod tests {
             context.miner_address,
             (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64,
             context.partition_hash.into(),
-            context.storage_config.entropy_packing_iterations,
+            context.consensus_config.entropy_packing_iterations,
             chunk_size,
             &mut entropy_chunk,
-            context.storage_config.chain_id,
+            context.consensus_config.chain_id,
         );
 
         xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);
@@ -779,8 +765,8 @@ mod tests {
             .unwrap();
 
         let ledger_chunk_offset = context.partition_assignment.slot_index.unwrap() as u64
-            * context.storage_config.num_partitions_in_slot
-            * context.storage_config.num_chunks_in_partition
+            * context.consensus_config.num_partitions_per_slot
+            * context.consensus_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
 
         assert_eq!(
@@ -805,7 +791,7 @@ mod tests {
             &poa,
             &block_index_guard,
             &context.partitions_guard,
-            &context.storage_config,
+            &context.consensus_config,
             &context.miner_address,
         );
 

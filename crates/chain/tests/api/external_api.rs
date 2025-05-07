@@ -1,7 +1,13 @@
 //! endpoint tests
 use std::sync::Arc;
 
-use crate::utils::{mine_block, IrysNodeTest};
+use crate::{
+    api::{
+        block_index_endpoint_request, chunk_endpoint_request, info_endpoint_request,
+        network_config_endpoint_request, peer_list_endpoint_request, version_endpoint_request,
+    },
+    utils::{mine_block, IrysNodeTest},
+};
 use actix_web::{http::header::ContentType, HttpMessage};
 use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
@@ -10,61 +16,14 @@ use irys_types::{Address, IrysTransactionHeader, Signature, H256};
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
-async fn client_request(
-    url: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    let client = awc::Client::default();
-
-    client.get(url).send().await.expect("client request")
-}
-
-async fn info_endpoint_request(
-    address: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!("{}{}", &address, "/v1/info")).await
-}
-
-async fn block_index_endpoint_request(
-    address: &str,
-    height: u64,
-    limit: u64,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!(
-        "{}{}?height={}&limit={}",
-        &address, "/v1/block_index", &height, &limit
-    ))
-    .await
-}
-
-async fn chunk_endpoint_request(
-    address: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!("{}{}", &address, "/v1/chunk/ledger/0/0")).await
-}
-
-async fn network_config_endpoint_request(
-    address: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!("{}{}", &address, "/v1/network/config")).await
-}
-
-async fn peer_list_endpoint_request(
-    address: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!("{}{}", &address, "/v1/peer_list")).await
-}
-
-async fn version_endpoint_request(
-    address: &str,
-) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
-    client_request(&format!("{}{}", &address, "/v1/version")).await
-}
-
 #[actix::test]
 async fn heavy_external_api() -> eyre::Result<()> {
-    let ctx = IrysNodeTest::default().start().await;
+    let ctx = IrysNodeTest::default_async().await.start().await;
 
-    let address = format!("http://127.0.0.1:{}", ctx.node_ctx.config.port);
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.port
+    );
 
     // FIXME: Test to be updated with future endpoint work
     let mut _response = chunk_endpoint_request(&address).await;
@@ -112,7 +71,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
         perm_fee: Some(200),
         ledger_id: 1,
         bundle_format: None,
-        chain_id: ctx.node_ctx.config.chain_id,
+        chain_id: ctx.node_ctx.config.consensus.chain_id,
         version: 0,
         ingress_proofs: None,
         signature: Signature::test_signature().into(),

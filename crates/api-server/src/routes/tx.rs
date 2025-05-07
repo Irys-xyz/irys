@@ -7,7 +7,9 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
 use irys_database::{database, DataLedger};
-use irys_types::{u64_stringify, CommitmentTransaction, IrysTransactionHeader, H256};
+use irys_types::{
+    u64_stringify, CommitmentTransaction, IrysTransactionHeader, IrysTransactionResponse, H256,
+};
 use reth_db::Database;
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -48,7 +50,7 @@ pub async fn post_tx(
                     .body(format!("Failed to deliver transaction: {:?}", err)))
             }
             TxIngressError::InvalidAnchor => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                .body(format!("Invalid Signature: {:?}", err))),
+                .body(format!("Invalid Anchor: {:?}", err))),
             TxIngressError::DatabaseError => {
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal database error: {:?}", err)))
@@ -64,20 +66,10 @@ pub async fn post_tx(
     Ok(HttpResponse::Ok().finish())
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum IrysTransaction {
-    #[serde(rename = "commitment")]
-    Commitment(CommitmentTransaction),
-
-    #[serde(rename = "storage")]
-    Storage(IrysTransactionHeader),
-}
-
 pub async fn get_transaction_api(
     state: web::Data<ApiState>,
     path: web::Path<H256>,
-) -> Result<Json<IrysTransaction>, ApiError> {
+) -> Result<Json<IrysTransactionResponse>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx by tx_id: {}", tx_id);
     get_transaction(&state, tx_id).map(web::Json)
@@ -124,15 +116,22 @@ pub fn get_commitment_transaction(
 pub fn get_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
-) -> Result<IrysTransaction, ApiError> {
+) -> Result<IrysTransactionResponse, ApiError> {
     get_storage_transaction(state, tx_id)
-        .map(IrysTransaction::Storage)
+        .map(IrysTransactionResponse::Storage)
         .or_else(|err| match err {
             ApiError::ErrNoId { .. } => {
-                get_commitment_transaction(state, tx_id).map(IrysTransaction::Commitment)
+                get_commitment_transaction(state, tx_id).map(IrysTransactionResponse::Commitment)
             }
             other => Err(other),
         })
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TxOffset {
+    #[serde(default, with = "u64_stringify")]
+    pub data_start_offset: u64,
 }
 
 // Modified to work only with storage transactions
@@ -169,90 +168,17 @@ pub async fn get_tx_local_start_offset(
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct TxOffset {
-    #[serde(default, with = "u64_stringify")]
-    pub data_start_offset: u64,
+// TODO: REMOVE ME ONCE WE HAVE A GATEWAY
+/// Returns whether or not a transaction has been promoted
+/// by checking if the ingress_proofs field of the tx's header is `Some`,
+///  which only occurs when it's been promoted.
+pub async fn get_tx_is_promoted(
+    state: web::Data<ApiState>,
+    path: web::Path<H256>,
+) -> Result<Json<bool>, ApiError> {
+    let tx_id: H256 = path.into_inner();
+    info!("Get tx_is_promoted by tx_id: {}", tx_id);
+    let tx_header = get_storage_transaction(&state, tx_id)?;
+
+    Ok(web::Json(tx_header.ingress_proofs.is_some()))
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use crate::routes;
-
-//     use super::*;
-//     use actix::SystemService as _;
-//     use actix_web::{middleware::Logger, test, App};
-//     use base58::ToBase58;
-//     use database::open_or_create_db;
-//     use irys_actors::{mempool_service::MempoolService, packing::wait_for_packing};
-//     use irys_database::tables::IrysTables;
-//     use irys_storage::ChunkProvider;
-//     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-//     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, Config, StorageConfig};
-//     use reth::{primitives::GenesisAccount, revm::primitives::U256};
-//     use std::{sync::Arc, time::Duration};
-//     use tracing::{error, info};
-//     #[actix_web::test]
-//     async fn test_get_non_existent_tx() -> Result<(), Error> {
-//         // std::env::set_var("RUST_LOG", "debug");
-//         // env_logger::init();
-
-//         let path = tempdir().unwrap();
-//         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
-//         let tx = IrysTransactionHeader::default();
-
-//         let db_arc = Arc::new(db);
-
-//         let task_manager = TaskManager::current();
-//         let storage_config = StorageConfig::default();
-
-//         let mempool_service = MempoolService::new(
-//             irys_types::app_state::DatabaseProvider(db_arc.clone()),
-//             task_manager.executor(),
-//             IrysSigner::random_signer(),
-//             storage_config.clone(),
-//             Arc::new(Vec::new()).to_vec(),
-//         );
-//         SystemRegistry::set(mempool_service.start());
-//         let mempool_addr = MempoolService::from_registry();
-
-//         let chunk_provider = ChunkProvider::new(
-//             storage_config.clone(),
-//             Arc::new(Vec::new()).to_vec(),
-//             DatabaseProvider(db_arc.clone()),
-//         );
-
-//         let app_state = ApiState {
-//             reth_provider: None,
-//             reth_http_url: None,
-//             block_index: None,
-//             block_tree: None,
-//             db: DatabaseProvider(db_arc.clone()),
-//             mempool: mempool_addr,
-//             chunk_provider: Arc::new(chunk_provider),
-//         };
-
-//         let app = test::init_service(
-//             App::new()
-//                 .app_data(web::Data::new(app_state))
-//                 .service(web::scope("/v1").route("/tx/{tx_id}", web::get().to(get_tx_header_api))),
-//         )
-//         .await;
-
-//         let id: String = tx.id.as_bytes().to_base58();
-//         let req = test::TestRequest::get()
-//             .uri(&format!("/v1/tx/{}", &id))
-//             .to_request();
-
-//         let resp = test::call_service(&app, req).await;
-//         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-//         let result: ApiError = test::read_body_json(resp).await;
-//         let tx_error = ApiError::ErrNoId {
-//             id: tx.id.to_string(),
-//             err: String::from("tx not found"),
-//         };
-//         assert_eq!(tx_error, result);
-//         Ok(())
-//     }
-//}

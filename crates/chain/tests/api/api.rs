@@ -1,4 +1,6 @@
-use irys_types::{irys::IrysSigner, Base64, IrysTransactionHeader, PackedChunk, UnpackedChunk};
+use irys_types::{
+    irys::IrysSigner, Base64, IrysTransactionHeader, NodeConfig, PackedChunk, UnpackedChunk,
+};
 use rand::Rng;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -17,7 +19,7 @@ use actix_web::{
     App,
 };
 use base58::ToBase58;
-use irys_types::{Config, TxChunkOffset};
+use irys_types::TxChunkOffset;
 use reth_primitives::GenesisAccount;
 
 use crate::utils::IrysNodeTest;
@@ -37,29 +39,31 @@ async fn heavy_api_end_to_end_test_256kb() {
 }
 
 async fn api_end_to_end_test(chunk_size: usize) {
+    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
     let entropy_packing_iterations = 1_000;
-    let testnet_config = Config {
-        chunk_size: chunk_size.try_into().unwrap(),
-        entropy_packing_iterations,
-        ..Config::testnet()
-    };
-    let chain_id = testnet_config.chain_id;
-    let main_signer = IrysSigner::random_signer(&testnet_config);
-    let mut node = IrysNodeTest::new_genesis(testnet_config.clone());
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![(
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().chunk_size = chunk_size.try_into().unwrap();
+    config.consensus.get_mut().entropy_packing_iterations = entropy_packing_iterations;
+    let main_signer = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![(
         main_signer.address(),
         GenesisAccount {
             balance: U256::from(1000),
             ..Default::default()
         },
     )]);
-    let node = node.start().await;
+    let chain_id = config.consensus_config().chain_id;
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .await
+        .start()
+        .await;
 
     // FIXME: The node startup already spins up an internal actix-web API service.
     // Is there any reason for spawning another one here?
     node.node_ctx.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
+        ema_service: ema_tx,
         reth_provider: node.node_ctx.reth_handle.clone(),
         reth_http_url: node
             .node_ctx
@@ -71,8 +75,9 @@ async fn api_end_to_end_test(chunk_size: usize) {
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),
         mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        peer_list: node.node_ctx.actor_addresses.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
-        config: testnet_config,
+        config: config.into(),
     };
 
     // Initialize the app

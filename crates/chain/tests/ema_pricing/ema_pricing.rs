@@ -5,19 +5,16 @@ use irys_actors::{
     block_tree_service::{get_block, get_canonical_chain},
     ema_service::EmaServiceMessage,
 };
-use irys_types::{storage_pricing::Amount, Config, OracleConfig};
+use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
 use rust_decimal_macros::dec;
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<()> {
     // setup
     let price_adjustment_interval = 3;
-    let ctx = IrysNodeTest::new_genesis(Config {
-        price_adjustment_interval,
-        ..Config::testnet()
-    })
-    .start()
-    .await;
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    let ctx = IrysNodeTest::new_genesis(config).await.start().await;
 
     // action
     // we start at 1 because the genesis block is already mined
@@ -33,15 +30,15 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
         // assert each new block that we mine
         assert_eq!(header.height, expected_height);
         assert_eq!(
-            ctx.node_ctx.config.genesis_token_price, returnted_ema_price,
+            ctx.node_ctx.config.consensus.genesis_price, returnted_ema_price,
             "Genisis price not respected for the expected duration"
         );
         assert_ne!(
-            ctx.node_ctx.config.genesis_token_price, header.oracle_irys_price,
+            ctx.node_ctx.config.consensus.genesis_price, header.oracle_irys_price,
             "Expected the header to contain new & unique oracle irys price"
         );
         assert_ne!(
-            ctx.node_ctx.config.genesis_token_price, header.ema_irys_price,
+            ctx.node_ctx.config.consensus.genesis_price, header.ema_irys_price,
             "Expected the header to contain new & unique EMA irys price"
         );
     }
@@ -54,16 +51,13 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
 async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::Result<()> {
     // setup
     let price_adjustment_interval = 3;
-    let ctx = IrysNodeTest::new_genesis(Config {
-        price_adjustment_interval,
-        ..Config::testnet()
-    })
-    .start()
-    .await;
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    let ctx = IrysNodeTest::new_genesis(config).await.start().await;
     // (oracle price, EMA price)
     let mut registered_prices = vec![(
-        ctx.node_ctx.config.genesis_token_price,
-        ctx.node_ctx.config.genesis_token_price,
+        ctx.node_ctx.config.consensus.genesis_price,
+        ctx.node_ctx.config.consensus.genesis_price,
     )];
     // mine 6 blocks
     for _expected_height in 1..(price_adjustment_interval * 2) {
@@ -87,7 +81,7 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
         "expected the 7th block to be mined (height = 6)"
     );
     assert_ne!(
-        ctx.node_ctx.config.genesis_token_price, returnted_ema_price,
+        ctx.node_ctx.config.consensus.genesis_price, returnted_ema_price,
         "After the second interval we no longer use the genesis price"
     );
     assert_eq!(
@@ -104,19 +98,17 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
     // setup
     let price_adjustment_interval = 3;
     let token_price_safe_range = Amount::percentage(dec!(0.1)).unwrap();
-    let ctx = IrysNodeTest::new_genesis(Config {
-        price_adjustment_interval,
-        oracle_config: OracleConfig::Mock {
-            initial_price: Amount::token(dec!(1.0)).unwrap(),
-            percent_change: Amount::percentage(dec!(0.2)).unwrap(), // every block will increase price by 20%
-            // only change direction after 10 blocks
-            smoothing_interval: 10,
-        },
-        token_price_safe_range: token_price_safe_range.clone(), // 10% allowed diff from the previous oracle
-        ..Config::testnet()
-    })
-    .start()
-    .await;
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    config.consensus.get_mut().token_price_safe_range = token_price_safe_range;
+    config.oracle = OracleConfig::Mock {
+        initial_price: Amount::token(dec!(1.0)).unwrap(),
+        percent_change: Amount::percentage(dec!(0.2)).unwrap(), // every block will increase price by 20%
+        // only change direction after 10 blocks
+        smoothing_interval: 10,
+    };
+
+    let ctx = IrysNodeTest::new_genesis(config).await.start().await;
 
     // mine 3 blocks
     let (header_1, _payload) = mine_block(&ctx.node_ctx).await?.unwrap();

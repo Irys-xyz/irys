@@ -5,9 +5,9 @@ edition = "2021"
 
 [dependencies]
 # Internal dependencies
+irys-actors.workspace = true
 irys-types = { path = "../types", features = ["test-utils"] }
 irys-primitives = { path = "../primitives" }
-irys-database = { path = "../database" }
 irys-api-client.workspace = true
 # Other dependencies
 actix-web = { workspace = true }
@@ -17,10 +17,12 @@ tracing = { workspace = true }
 eyre.workspace = true
 rand = "0.8"
 reqwest = { version = "0.11", features = ["json"] }
-irys-actors.workspace = true
 actix.workspace = true
 serde = { workspace = true }
 reth-tasks = { workspace = true }
+base58.workspace = true
+irys-database.workspace = true
+actix-rt.workspace = true
 
 [dev-dependencies]
 irys-testing-utils.workspace = true

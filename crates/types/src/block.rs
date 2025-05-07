@@ -110,7 +110,7 @@ pub struct IrysBlockHeader {
     /// The solution hash of the previous block in the chain.
     pub previous_solution_hash: H256,
 
-    /// The solution hash of the last epoch block
+    /// The block hash of the last epoch block
     pub last_epoch_hash: H256,
 
     /// `SHA-256` hash of the PoA chunk (unencoded) bytes.
@@ -462,7 +462,7 @@ pub struct CombinedBlockHeader {
 
 #[cfg(test)]
 mod tests {
-    use crate::{validate_path, Config, TxIngressProof};
+    use crate::{validate_path, Config, NodeConfig, TxIngressProof};
 
     use super::*;
     use alloy_primitives::Signature;
@@ -710,8 +710,9 @@ mod tests {
     fn test_irys_block_header_signing() {
         // setup
         let mut header = mock_header();
-        let testnet_config = Config::testnet();
-        let signer = testnet_config.irys_signer();
+        let testnet_config = NodeConfig::testnet();
+        let config = Config::new(testnet_config);
+        let signer = config.irys_signer();
 
         // action
         // sign the block header

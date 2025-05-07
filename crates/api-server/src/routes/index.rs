@@ -9,6 +9,7 @@ use irys_types::H256;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     pub version: String,
     pub peer_count: u32,
@@ -28,7 +29,7 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
     let node_info = NodeInfo {
         version: "0.0.1".into(),
         peer_count: 0,
-        chain_id: state.config.chain_id,
+        chain_id: state.config.consensus.chain_id,
         height: *height,
         block_hash: *block_hash,
         block_index_height,

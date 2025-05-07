@@ -2,23 +2,28 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipError, GossipResult};
+use crate::types::{GossipDataRequest, GossipError, GossipResult};
+use actix::{Actor, Context, Handler};
+use base58::ToBase58;
 use core::time::Duration;
-use irys_database::tables::CompactPeerListItem;
-use irys_types::GossipData;
+use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
+use irys_api_client::ApiClient;
+use irys_types::{Address, GossipData, GossipRequest, PeerListItem, RethPeerInfo};
 use reqwest::Response;
 use serde::Serialize;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GossipClient {
+    pub mining_address: Address,
     client: reqwest::Client,
     timeout: Duration,
 }
 
 impl GossipClient {
     #[must_use]
-    pub fn new(timeout: Duration) -> Self {
+    pub fn new(timeout: Duration, mining_address: Address) -> Self {
         Self {
+            mining_address,
             client: reqwest::Client::new(),
             timeout,
         }
@@ -29,14 +34,16 @@ impl GossipClient {
     /// # Errors
     ///
     /// If the peer is offline or the request fails, an error is returned.
-    pub async fn send_data(
-        &self,
-        peer: &CompactPeerListItem,
-        data: &GossipData,
-    ) -> GossipResult<()> {
+    pub async fn send_data(&self, peer: &PeerListItem, data: &GossipData) -> GossipResult<()> {
+        tracing::trace!("CHECKING IF PEER ONLINE: {:?}", peer);
         Self::check_if_peer_online(peer)?;
         match data {
             GossipData::Chunk(unpacked_chunk) => {
+                tracing::trace!(
+                    "GOSSIP POSTING to {:?} DATA to: {:?}",
+                    format!("http://{}/gossip/chunk", peer.address.gossip),
+                    unpacked_chunk
+                );
                 self.send_data_internal(
                     format!("http://{}/gossip/chunk", peer.address.gossip),
                     unpacked_chunk,
@@ -44,6 +51,11 @@ impl GossipClient {
                 .await?;
             }
             GossipData::Transaction(irys_transaction_header) => {
+                tracing::trace!(
+                    "GOSSIP POSTING to {:?} DATA to: {:?}",
+                    format!("http://{}/gossip/transaction", peer.address.gossip),
+                    irys_transaction_header
+                );
                 self.send_data_internal(
                     format!("http://{}/gossip/transaction", peer.address.gossip),
                     irys_transaction_header,
@@ -51,6 +63,12 @@ impl GossipClient {
                 .await?;
             }
             GossipData::Block(irys_block_header) => {
+                tracing::debug!(
+                    "GOSSIP POSTING BLOCK {:?} HEIGHT {:?} DATA to {:?}",
+                    irys_block_header.block_hash.0.to_base58(),
+                    irys_block_header.height,
+                    format!("http://{}/gossip/block", peer.address.gossip),
+                );
                 self.send_data_internal(
                     format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,
@@ -62,7 +80,7 @@ impl GossipClient {
         Ok(())
     }
 
-    fn check_if_peer_online(peer: &CompactPeerListItem) -> GossipResult<()> {
+    fn check_if_peer_online(peer: &PeerListItem) -> GossipResult<()> {
         if !peer.is_online {
             return Err(GossipError::InvalidPeer("Peer is offline".into()));
         }
@@ -74,42 +92,83 @@ impl GossipClient {
         url: String,
         data: &T,
     ) -> Result<Response, GossipError> {
+        let req = self.create_request(data);
         self.client
             .post(&url)
             .timeout(self.timeout)
-            .json(data)
+            .json(&req)
             .send()
             .await
             .map_err(|error| GossipError::Network(error.to_string()))
     }
 
-    /// Check the health of a peer
+    /// Send data to a peer and update their score based on the result
     ///
     /// # Errors
     ///
-    /// If the health check fails or the response is not valid JSON, an error is returned.
-    pub async fn check_health(
+    /// If the peer is offline or the request fails, an error is returned.
+    pub async fn send_data_and_update_score<R, A>(
         &self,
-        peer: &CompactPeerListItem,
-    ) -> GossipResult<CompactPeerListItem> {
-        let url = format!("http://{}/gossip/health", peer.address.gossip);
+        peer: (&Address, &PeerListItem),
+        data: &GossipData,
+        peer_list_service: &PeerListFacade<A, R>,
+    ) -> GossipResult<()>
+    where
+        R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+        A: ApiClient + Clone + 'static + Unpin + Default,
+    {
+        let peer_miner_address = peer.0;
+        let peer = peer.1;
 
-        let response = self
-            .client
-            .get(&url)
+        let res = self.send_data(peer, data).await;
+        match res {
+            Ok(()) => {
+                // Successful send, increase score
+                if let Err(e) = peer_list_service
+                    .increase_peer_score(peer_miner_address, ScoreIncreaseReason::Online)
+                    .await
+                {
+                    tracing::error!("Failed to increase peer score: {}", e);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                // Failed to send, decrease score
+                if let Err(e) = peer_list_service
+                    .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline)
+                    .await
+                {
+                    tracing::error!("Failed to decrease peer score: {}", e);
+                };
+                Err(error)
+            }
+        }
+    }
+
+    fn create_request<T>(&self, data: T) -> GossipRequest<T> {
+        GossipRequest {
+            miner_address: self.mining_address,
+            data,
+        }
+    }
+
+    /// Request a specific data to be gossiped. Returns true if the peer has the data,
+    /// and false if it doesn't.
+    pub async fn get_data_request(
+        &self,
+        peer: &PeerListItem,
+        requested_data: GossipDataRequest,
+    ) -> GossipResult<bool> {
+        let url = format!("http://{}/gossip/get_data", peer.address.gossip);
+        let get_data_request = self.create_request(requested_data);
+
+        self.client
+            .post(&url)
             .timeout(self.timeout)
+            .json(&get_data_request)
             .send()
             .await
-            .map_err(|error| GossipError::Network(error.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(GossipError::Network(format!(
-                "Health check failed with status: {}",
-                response.status()
-            )));
-        }
-
-        response
+            .map_err(|error| GossipError::Network(error.to_string()))?
             .json()
             .await
             .map_err(|error| GossipError::Network(error.to_string()))

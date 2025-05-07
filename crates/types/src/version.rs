@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use crate::Arbitrary;
+use crate::{Arbitrary, RethPeerInfo};
 use alloy_primitives::Address;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -105,7 +105,7 @@ pub fn parse_user_agent(user_agent: &str) -> Option<(String, String, String, Str
 /// Example handshake request JSON:
 /// ```json
 /// {
-///   "version": "1.2.0",             // Node version using semver  
+///   "version": "1.2.0",             // Node version using semver
 ///   "protocol_version": "1",        // Supported protocol version (V1, V2, etc)
 ///   "mining_address": "0x11111...", // Mining address as hex
 ///   "chain_id": 1270,               // Network chain identifier
@@ -129,12 +129,12 @@ impl Default for VersionRequest {
     fn default() -> Self {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0
+            mining_address: Address::ZERO,
             protocol_version: ProtocolVersion::default(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
-            mining_address: Address::ZERO,
             chain_id: 0,
             address: PeerAddress::default(),
             user_agent: None,
@@ -142,10 +142,13 @@ impl Default for VersionRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Arbitrary)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialOrd, Ord, Hash, Eq, PartialEq, Arbitrary,
+)]
 pub struct PeerAddress {
     pub gossip: SocketAddr,
     pub api: SocketAddr,
+    pub execution: RethPeerInfo,
 }
 
 impl Default for PeerAddress {
@@ -153,6 +156,7 @@ impl Default for PeerAddress {
         Self {
             gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
             api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8081),
+            execution: RethPeerInfo::default(),
         }
     }
 }

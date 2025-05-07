@@ -3,13 +3,13 @@ use eyre::eyre;
 use irys_database::{
     cached_chunk_by_chunk_offset,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
-    BlockIndex, DataLedger, Initialized,
+    BlockIndex, DataLedger,
 };
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
 use irys_types::{
-    app_state::DatabaseProvider, Base64, DataRoot, DataTransactionLedger, IrysBlockHeader,
-    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, StorageConfig,
-    TxChunkOffset, UnpackedChunk, H256,
+    app_state::DatabaseProvider, Base64, Config, DataRoot, DataTransactionLedger, IrysBlockHeader,
+    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, TxChunkOffset,
+    UnpackedChunk, H256,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
@@ -28,12 +28,12 @@ use crate::{
 /// - Maintains chunk location indices
 /// - Coordinates chunk reads/writes
 /// - Manages storage state transitions
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ChunkMigrationService {
     /// Tracks block boundaries and offsets for locating chunks in ledgers
-    pub block_index: Option<Arc<RwLock<BlockIndex<Initialized>>>>,
+    pub block_index: Option<Arc<RwLock<BlockIndex>>>,
     /// Configuration parameters for storage system
-    pub storage_config: StorageConfig,
+    pub config: Config,
     /// Collection of storage modules for distributing chunk data
     pub storage_modules: Vec<Arc<StorageModule>>,
     /// Persistent database for storing chunk metadata and indices
@@ -42,14 +42,20 @@ pub struct ChunkMigrationService {
     pub service_senders: Option<ServiceSenders>,
 }
 
+impl Default for ChunkMigrationService {
+    fn default() -> Self {
+        unimplemented!("don't rely on `Default` impl");
+    }
+}
+
 impl Actor for ChunkMigrationService {
     type Context = Context<Self>;
 }
 
 impl ChunkMigrationService {
     pub fn new(
-        block_index: Arc<RwLock<BlockIndex<Initialized>>>,
-        storage_config: StorageConfig,
+        block_index: Arc<RwLock<BlockIndex>>,
+        config: Config,
         storage_modules: Vec<Arc<StorageModule>>,
         db: DatabaseProvider,
         service_senders: ServiceSenders,
@@ -57,7 +63,7 @@ impl ChunkMigrationService {
         println!("service started: chunk_migration");
         Self {
             block_index: Some(block_index),
-            storage_config,
+            config,
             storage_modules,
             db: Some(db),
             service_senders: Some(service_senders),
@@ -88,7 +94,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
         let block = msg.block_header;
         let all_txs = msg.all_txs;
         let block_index = self.block_index.clone().unwrap();
-        let chunk_size = self.storage_config.chunk_size as usize;
+        let chunk_size = self.config.consensus.chunk_size as usize;
         let storage_modules = Arc::new(self.storage_modules.clone());
         let db = Arc::new(self.db.clone().unwrap());
         let service_senders = self.service_senders.clone().unwrap();
@@ -146,7 +152,7 @@ fn process_ledger_transactions(
     block: &Arc<IrysBlockHeader>,
     ledger: DataLedger,
     txs: &[IrysTransactionHeader],
-    block_index: &Arc<RwLock<BlockIndex<Initialized>>>,
+    block_index: &Arc<RwLock<BlockIndex>>,
     chunk_size: usize,
     storage_modules: &Arc<Vec<Arc<StorageModule>>>,
     db: &Arc<DatabaseProvider>,
@@ -240,13 +246,13 @@ fn process_transaction_chunks(
 fn get_block_range(
     block: &IrysBlockHeader,
     ledger: DataLedger,
-    block_index: Arc<RwLock<BlockIndex<Initialized>>>,
+    block_index: Arc<RwLock<BlockIndex>>,
 ) -> LedgerChunkRange {
     // Use the block index to get the ledger relative chunk offset of the
     // start of this new block from the previous block.
     let index_reader = block_index.read().unwrap();
     let start_chunk_offset = if block.height > 0 {
-        let prev_item = index_reader.get_item(block.height as usize - 1).unwrap();
+        let prev_item = index_reader.get_item(block.height - 1).unwrap();
         prev_item.ledgers[ledger].max_chunk_offset
     } else {
         0

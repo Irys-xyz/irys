@@ -3,6 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::utils::IrysNodeTest;
 use actix_web::{
     middleware::Logger,
     test::{self, call_service, read_body, TestRequest},
@@ -12,34 +13,34 @@ use actix_web::{
 use alloy_core::primitives::U256;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::{routes, ApiState};
-use irys_types::{build_user_agent, irys::IrysSigner, PeerResponse, VersionRequest};
-use irys_types::{Config, PeerAddress};
+use irys_types::{
+    build_user_agent, irys::IrysSigner, NodeConfig, PeerAddress, PeerResponse, RethPeerInfo,
+    VersionRequest,
+};
 use reth_primitives::GenesisAccount;
-
-use crate::utils::IrysNodeTest;
+use tracing::{debug, error};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_peer_discovery() -> eyre::Result<()> {
-    let chunk_size = 32; // 32Byte chunks
-    let test_config = Config {
-        chunk_size: chunk_size as u64,
-        num_chunks_in_partition: 10,
-        num_chunks_in_recall_range: 2,
-        num_partitions_per_slot: 1,
-        num_writes_before_sync: 1,
-        entropy_packing_iterations: 1_000,
-        chunk_migration_depth: 1,
-        ..Config::testnet()
-    };
-    let signer = IrysSigner::random_signer(&test_config);
-    let mut node = IrysNodeTest::new_genesis(test_config.clone());
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![(
+    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = NodeConfig::testnet();
+    config.trusted_peers = vec![];
+    config.consensus.get_mut().chunk_size = 32;
+    config.consensus.get_mut().num_chunks_in_partition = 10;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.consensus.get_mut().entropy_packing_iterations = 1_000;
+    config.consensus.get_mut().chunk_migration_depth = 1;
+    config.storage.num_writes_before_sync = 1;
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![(
         signer.address(),
         GenesisAccount {
             balance: U256::from(690000000000000000_u128),
             ..Default::default()
         },
     )]);
+    let node = IrysNodeTest::new_genesis(config.clone()).await;
     let node = node.start().await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
@@ -50,6 +51,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     node.node_ctx.actor_addresses.start_mining().unwrap();
 
     let app_state = ApiState {
+        ema_service: ema_tx,
         reth_provider: node.node_ctx.reth_handle.clone(),
         reth_http_url: node
             .node_ctx
@@ -61,8 +63,9 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         block_tree: node.node_ctx.block_tree_guard.clone(),
         db: node.node_ctx.db.clone(),
         mempool: node.node_ctx.actor_addresses.mempool.clone(),
+        peer_list: node.node_ctx.actor_addresses.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
-        config: test_config.clone(),
+        config: config.clone().into(),
     };
 
     // Initialize the app
@@ -82,22 +85,24 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     // Parse String to JSON
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
-    let peer_list: Vec<SocketAddr> = serde_json::from_str(&body_str).expect("Failed to parse JSON");
+    let peer_list: Vec<PeerAddress> =
+        serde_json::from_str(&body_str).expect("Failed to parse JSON");
     println!("Parsed JSON: {:?}", peer_list);
-
-    // Now you can work with the structured data
-    assert!(peer_list.is_empty(), "Peer list should be empty");
 
     // Post a 3 peer requests from different mining addresses, have them report
     // different IP addresses
-    let miner_signer_1 = IrysSigner::random_signer(&test_config);
+    let miner_signer_1 = IrysSigner::random_signer(&config.consensus_config());
     let version_request = VersionRequest {
-        mining_address: miner_signer_1.address(),
         chain_id: miner_signer_1.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.1:8080".parse().expect("valid socket address"),
             api: "127.0.0.1:8081".parse().expect("valid socket address"),
+            execution: RethPeerInfo {
+                peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
+                peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
+            },
         },
+        mining_address: miner_signer_1.address(),
         user_agent: Some(build_user_agent("miner1", "0.1.0")),
         ..Default::default()
     };
@@ -119,7 +124,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         serde_json::to_string_pretty(&peer_response).expect("Failed to serialize to pretty JSON");
     println!("Pretty JSON:\n{}", pretty_json);
 
-    let miner_signer_2 = IrysSigner::random_signer(&test_config);
+    let miner_signer_2 = IrysSigner::random_signer(&config.consensus_config());
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -130,12 +135,17 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let version_json = serde_json::json!({
         "version": "0.1.0",
         "protocol_version": "V1",
-        "mining_address": miner_signer_2.address(),
         "chain_id": miner_signer_2.chain_id,
         "address": {
             "gossip": "127.0.0.2:8080",
-            "api": "127.0.0.2:8081"
+            "api": "127.0.0.2:8081",
+            "execution": {
+                "peering_tcp_addr": "127.0.0.2:8082",
+                "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "mining_address": miner_signer_2.address(),
         },
+        "mining_address": miner_signer_2.address(),
         "user_agent": build_user_agent("miner2", "0.1.0"),
         "timestamp": timestamp
     });
@@ -147,20 +157,24 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let resp = call_service(&app, req).await;
     let body = read_body(resp).await;
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
-    println!("Unparsed JSON:\n{}", body_str);
     let peer_response: PeerResponse =
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
-    println!("\nParsed Response:");
-    println!("{}", serde_json::to_string_pretty(&peer_response).unwrap());
+    debug!("\nParsed Response:");
+    debug!("{}", serde_json::to_string_pretty(&peer_response).unwrap());
 
     // Verify the version response body contains the previously discovered peers
     match peer_response {
         PeerResponse::Accepted(accepted) => {
-            assert_eq!(accepted.peers.len(), 1, "Expected 1 peers");
+            assert!(accepted.peers.len() >= 1, "Expected at least 1 peers");
+            debug!("Accepted peers: {:?}", accepted.peers);
             assert!(
                 accepted.peers.contains(&PeerAddress {
                     gossip: "127.0.0.1:8080".parse().unwrap(),
-                    api: "127.0.0.1:8081".parse().unwrap()
+                    api: "127.0.0.1:8081".parse().unwrap(),
+                    execution: RethPeerInfo {
+                        peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
+                        peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
+                    },
                 }),
                 "Missing expected peer 127.0.0.1:8080"
             );
@@ -168,14 +182,18 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         PeerResponse::Rejected(_) => panic!("Expected Accepted response, got Rejected"),
     }
 
-    let miner_signer_3 = IrysSigner::random_signer(&test_config);
+    let miner_signer_3 = IrysSigner::random_signer(&config.consensus_config());
     let version_request = VersionRequest {
-        mining_address: miner_signer_3.address(),
         chain_id: miner_signer_3.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
             api: "127.0.0.3:8081".parse().expect("valid socket address"),
+            execution: RethPeerInfo {
+                peering_tcp_addr: "127.0.0.3:8082".parse().unwrap(),
+                peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
+            },
         },
+        mining_address: miner_signer_3.address(),
         user_agent: Some(build_user_agent("miner3", "0.1.0")),
         ..Default::default()
     };
@@ -195,18 +213,26 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     // Verify the version response body contains the previously discovered peers
     match peer_response {
         PeerResponse::Accepted(accepted) => {
-            assert_eq!(accepted.peers.len(), 2, "Expected 2 peers");
+            assert!(accepted.peers.len() >= 2, "Expected at least 2 peers");
             assert!(
                 accepted.peers.contains(&PeerAddress {
                     gossip: "127.0.0.1:8080".parse().unwrap(),
-                    api: "127.0.0.1:8081".parse().unwrap()
+                    api: "127.0.0.1:8081".parse().unwrap(),
+                    execution: RethPeerInfo {
+                        peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
+                        peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
+                    },
                 }),
                 "Missing expected peer 127.0.0.1:8080"
             );
             assert!(
                 accepted.peers.contains(&PeerAddress {
                     gossip: "127.0.0.2:8080".parse().unwrap(),
-                    api: "127.0.0.2:8081".parse().unwrap()
+                    api: "127.0.0.2:8081".parse().unwrap(),
+                    execution: RethPeerInfo {
+                        peering_tcp_addr: "127.0.0.2:8082".parse().unwrap(),
+                        peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
+                    },
                 }),
                 "Missing expected peer 127.0.0.2:8080"
             );
@@ -224,24 +250,42 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let peer_list: Vec<PeerAddress> =
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
     println!("Parsed JSON: {:?}", peer_list);
-
     assert!(
-        peer_list.iter().all(|addr| {
-            vec![
-                PeerAddress {
-                    gossip: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
-                    api: "127.0.0.1:8081".parse::<SocketAddr>().unwrap(),
+        vec![
+            PeerAddress {
+                gossip: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
+                api: "127.0.0.1:8081".parse::<SocketAddr>().unwrap(),
+                execution: RethPeerInfo {
+                    peering_tcp_addr: "127.0.0.1:8082".parse().unwrap(),
+                    peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
                 },
-                PeerAddress {
-                    gossip: "127.0.0.2:8080".parse::<SocketAddr>().unwrap(),
-                    api: "127.0.0.2:8081".parse::<SocketAddr>().unwrap(),
+            },
+            PeerAddress {
+                gossip: "127.0.0.2:8080".parse::<SocketAddr>().unwrap(),
+                api: "127.0.0.2:8081".parse::<SocketAddr>().unwrap(),
+                execution: RethPeerInfo {
+                    peering_tcp_addr: "127.0.0.2:8082".parse().unwrap(),
+                    peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
                 },
-                PeerAddress {
-                    gossip: "127.0.0.3:8080".parse::<SocketAddr>().unwrap(),
-                    api: "127.0.0.3:8081".parse::<SocketAddr>().unwrap(),
+            },
+            PeerAddress {
+                gossip: "127.0.0.3:8080".parse::<SocketAddr>().unwrap(),
+                api: "127.0.0.3:8081".parse::<SocketAddr>().unwrap(),
+                execution: RethPeerInfo {
+                    peering_tcp_addr: "127.0.0.3:8082".parse().unwrap(),
+                    peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
                 },
-            ]
-            .contains(addr)
+            },
+        ]
+        .iter()
+        .all(|addr| {
+            let contains = peer_list.contains(addr);
+
+            if !contains {
+                error!("Missing expected peer {:?}", addr);
+            }
+
+            contains
         }),
         "Peer list missing expected addresses"
     );

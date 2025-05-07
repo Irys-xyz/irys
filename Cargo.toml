@@ -17,7 +17,7 @@ members = [
   "crates/debug-utils",
   "xtask",
   "crates/price-oracle",
-  "crates/cli", 
+  "crates/cli",
   "crates/gossip-service",
   "crates/api-client",
 ]
@@ -94,6 +94,7 @@ futures = "0.3"
 bytemuck = "1"
 futures-concurrency = "7"
 test-log = { version = "0.2", features = ["trace"] }
+pretty_assertions = "1"
 
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.11"

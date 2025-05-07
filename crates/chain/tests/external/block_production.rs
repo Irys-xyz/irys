@@ -3,7 +3,7 @@ use std::time::Duration;
 use alloy_core::primitives::{TxHash, U256};
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_reth_node_bridge::adapter::node::RethNodeContext;
-use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, Config};
+use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, transaction_pool::TransactionPool as _};
 use reth_db::Database as _;
@@ -26,29 +26,13 @@ const DEV2_ADDRESS: &str = "Bea4f456A5801cf9Af196a582D6Ec425c970c2C6";
 async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let dev_wallet = hex::decode(DEV_PRIVATE_KEY)?;
     let expected_addr = hex::decode(DEV_ADDRESS)?;
-    let mut node = IrysNodeTest::new_genesis(Config {
-        mining_key: SigningKey::from_slice(&dev_wallet).unwrap(),
-        ..Config::testnet()
-    });
+    let mut config = NodeConfig::testnet();
+    config.mining_key = SigningKey::from_slice(&dev_wallet).unwrap();
 
-    assert_eq!(
-        node.cfg.config.miner_address(),
-        Address::from_slice(expected_addr.as_slice())
-    );
-    let account1_address = hex::decode(DEV2_ADDRESS)?;
-    let account1 = IrysSigner {
-        signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
-        chain_id: node.cfg.config.chain_id,
-        chunk_size: node.cfg.config.chunk_size as usize,
-    };
-    assert_eq!(
-        account1.address(),
-        Address::from_slice(account1_address.as_slice())
-    );
-
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![
+    let account1 = IrysSigner::random_signer(&config.consensus_config());
+    config.consensus.extend_genesis_accounts(vec![
         (
-            node.cfg.config.miner_address(),
+            config.miner_address(),
             GenesisAccount {
                 balance: U256::from(690000000000000000_u128),
                 ..Default::default()
@@ -62,7 +46,23 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = node.start().await;
+
+    let node = IrysNodeTest::new_genesis(config).await.start().await;
+
+    assert_eq!(
+        node.node_ctx.config.node_config.miner_address(),
+        Address::from_slice(expected_addr.as_slice())
+    );
+    let account1_address = hex::decode(DEV2_ADDRESS)?;
+    let account1 = IrysSigner {
+        signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
+        chain_id: node.node_ctx.config.consensus.chain_id,
+        chunk_size: node.node_ctx.config.consensus.chunk_size,
+    };
+    assert_eq!(
+        account1.address(),
+        Address::from_slice(account1_address.as_slice())
+    );
 
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.into()).await?;
 

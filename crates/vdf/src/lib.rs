@@ -2,8 +2,7 @@
 //! including checkpoint validation and seed application.
 
 use eyre::Context;
-use irys_types::{H256List, VDFLimiterInfo, VDFStepsConfig, H256, U256};
-
+use irys_types::{H256List, VDFLimiterInfo, VdfConfig, H256, U256};
 use nodit::interval::ii;
 use openssl::sha;
 use rayon::prelude::*;
@@ -19,7 +18,7 @@ pub mod vdf_state;
 ///
 /// * `step_number` - The step the checkpoint belongs to, add 1 to the salt for
 /// each subsequent checkpoint calculation.
-pub const fn step_number_to_salt_number(config: &VDFStepsConfig, step_number: u64) -> u64 {
+pub const fn step_number_to_salt_number(config: &VdfConfig, step_number: u64) -> u64 {
     match step_number {
         0 => 0,
         _ => (step_number - 1) * config.num_checkpoints_in_vdf_step as u64 + 1,
@@ -132,7 +131,7 @@ pub fn vdf_sha_verification(
 /// Returns Ok(()) if checkpoints are valid, Err otherwise with details of mismatches.
 pub async fn last_step_checkpoints_is_valid(
     vdf_info: &VDFLimiterInfo,
-    config: &VDFStepsConfig,
+    config: &VdfConfig,
 ) -> eyre::Result<()> {
     let mut seed = if vdf_info.steps.len() >= 2 {
         vdf_info.steps[vdf_info.steps.len() - 2]
@@ -168,7 +167,7 @@ pub async fn last_step_checkpoints_is_valid(
         .wrap_err("Should run in a 64 bits architecture!")?;
 
     // If the vdf reset happened on this step, apply the entropy to the seed (special case is step 0 that no reset is applied, then the > 1)
-    if (global_step_number > 1) && ((global_step_number - 1) % config.vdf_reset_frequency == 0) {
+    if (global_step_number > 1) && ((global_step_number - 1) % config.reset_frequency == 0) {
         info!(
             "Applying reset step: {} seed {:?}",
             global_step_number, seed
@@ -196,11 +195,11 @@ pub async fn last_step_checkpoints_is_valid(
     let test = actix_rt::task::spawn_blocking(move || {
         // Limit threads number to avoid overloading the system using configuration limit
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.vdf_parallel_verification_thread_limit)
+            .num_threads(config.parallel_verification_thread_limit)
             .build()
             .unwrap();
 
-        let num_iterations = config.vdf_difficulty;
+        let num_iterations = config.sha_1s_difficulty;
         let test: Vec<H256> = pool.install(|| {
             (0..config.num_checkpoints_in_vdf_step)
                 .into_par_iter()
@@ -249,7 +248,7 @@ pub async fn last_step_checkpoints_is_valid(
 /// - `bool` - `true` if the steps are valid, false otherwise.
 pub fn vdf_steps_are_valid(
     vdf_info: &VDFLimiterInfo,
-    config: &VDFStepsConfig,
+    config: &VdfConfig,
     vdf_steps_guard: VdfStepsReadGuard,
 ) -> eyre::Result<()> {
     info!(
@@ -294,7 +293,7 @@ pub fn vdf_steps_are_valid(
     // can calculate each of the steps in parallel
     // Limit threads number to avoid overloading the system using configuration limit
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(config.vdf_parallel_verification_thread_limit)
+        .num_threads(config.parallel_verification_thread_limit)
         .build()
         .unwrap();
     let test: Vec<(H256, Option<H256List>)> = pool.install(|| {
@@ -310,7 +309,7 @@ pub fn vdf_steps_are_valid(
                 let mut checkpoints: Vec<H256> =
                     vec![H256::default(); config.num_checkpoints_in_vdf_step];
                 if start_step_number + i as u64 > 0
-                    && (start_step_number + i as u64) % config.vdf_reset_frequency as u64 == 0
+                    && (start_step_number + i as u64) % config.reset_frequency as u64 == 0
                 {
                     info!(
                         "Applying reset seed {:?} to step number {}",
@@ -324,7 +323,7 @@ pub fn vdf_steps_are_valid(
                     &mut salt,
                     &mut seed,
                     config.num_checkpoints_in_vdf_step,
-                    config.vdf_difficulty,
+                    config.sha_1s_difficulty,
                     &mut checkpoints,
                 );
                 (
@@ -386,62 +385,14 @@ fn warn_mismatches(a: &H256List, b: &H256List) {
 #[cfg(test)]
 mod tests {
     use base58::{FromBase58, ToBase58};
-    use irys_types::Config;
+    use irys_types::ConsensusConfig;
 
     use super::*;
-    fn _generate_next_vdf_step() {
-        let mut seed = H256(
-            hex::decode("ca4d22678f78b87ee7f1c80229133ecbf57c99533d9a708e6d86d2f51ccfcb41")
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        );
-
-        let testnet_config = Config::testnet();
-        let reset_seed = H256([0; 32]);
-
-        let start_step_number = 0;
-        let mut hasher = Sha256::new();
-
-        let config = VDFStepsConfig::new(&testnet_config);
-        let mut salt = U256::from(step_number_to_salt_number(&config, start_step_number));
-
-        let mut checkpoints: Vec<H256> = vec![H256::default(); 25];
-        vdf_sha(
-            &mut hasher,
-            &mut salt,
-            &mut seed,
-            25,
-            100_000,
-            &mut checkpoints,
-        );
-
-        for (i, checkpoint) in checkpoints.iter().enumerate() {
-            println!("{}: {:?}", i, checkpoint);
-        }
-
-        // why this reset is applied ?
-        seed = apply_reset_seed(seed, reset_seed);
-        println!("seed after reset {:?}", seed);
-
-        vdf_sha(
-            &mut hasher,
-            &mut salt,
-            &mut seed,
-            25,
-            100_000,
-            &mut checkpoints,
-        );
-
-        for (i, checkpoint) in checkpoints.iter().enumerate() {
-            println!("{}: {:?}", i, checkpoint);
-        }
-    }
 
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block() {
         // step: 44398 output: 0x893d
-        let testnet_config = Config::testnet();
+        let testnet_config = ConsensusConfig::testnet();
         let vdf_info = VDFLimiterInfo {
             output: to_hash("AEj76XfsPWoB2CjcDm3RXTwaM5AKs7SbWnkHR8umvgmW"),
             global_step_number: 44398,
@@ -484,8 +435,8 @@ mod tests {
             next_vdf_difficulty: None,
         };
 
-        let mut config = VDFStepsConfig::new(&testnet_config);
-        config.vdf_difficulty = 100_000;
+        let mut config = testnet_config.vdf;
+        config.sha_1s_difficulty = 100_000;
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
@@ -517,7 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block_before_reset() {
-        let testnet_config = Config::testnet();
+        let testnet_config = ConsensusConfig::testnet();
         // step: 44398 output: 0x893d
         let vdf_info = VDFLimiterInfo {
             output: H256(
@@ -707,8 +658,8 @@ mod tests {
             next_vdf_difficulty: None,
         };
 
-        let mut config = VDFStepsConfig::new(&testnet_config);
-        config.vdf_difficulty = 100_000;
+        let mut config = testnet_config.vdf;
+        config.sha_1s_difficulty = 100_000;
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
@@ -736,8 +687,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block_after_reset() {
-        let mut testnet_config = Config::testnet();
-        testnet_config.vdf_sha_1s = 100_000;
+        let mut testnet_config = ConsensusConfig::testnet();
+        testnet_config.vdf.sha_1s_difficulty = 100_000;
 
         // step: 44398 output: 0x893d
         let vdf_info = VDFLimiterInfo {
@@ -928,7 +879,7 @@ mod tests {
             next_vdf_difficulty: None,
         };
 
-        let config = VDFStepsConfig::new(&testnet_config);
+        let config = testnet_config.vdf;
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
@@ -937,8 +888,8 @@ mod tests {
     // one special case that do not apply reset seed
     #[tokio::test]
     async fn test_checkpoints_for_single_step_one() {
-        let mut testnet_config = Config::testnet();
-        testnet_config.vdf_sha_1s = 100_000;
+        let mut testnet_config = ConsensusConfig::testnet();
+        testnet_config.vdf.sha_1s_difficulty = 100_000;
 
         let vdf_info = VDFLimiterInfo {
             output: H256(
@@ -1128,7 +1079,7 @@ mod tests {
             next_vdf_difficulty: None,
         };
 
-        let config = VDFStepsConfig::new(&testnet_config);
+        let config = testnet_config.vdf;
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
 

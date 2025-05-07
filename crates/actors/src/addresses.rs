@@ -1,12 +1,16 @@
 use actix::Addr;
 
+use crate::peer_list_service::PeerListServiceFacade;
 use crate::{
+    block_discovery::BlockDiscoveryActor,
     block_index_service::BlockIndexService,
     block_producer::BlockProducerActor,
-    epoch_service::EpochServiceActor,
     mempool_service::MempoolService,
     mining::{MiningControl, PartitionMiningActor},
     packing::PackingActor,
+    reth_service::RethServiceActor,
+    vdf_service::VdfService,
+    EpochServiceActor,
 };
 
 /// Serves as a kind of app state that can be passed into actix web to allow
@@ -14,11 +18,15 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct ActorAddresses {
     pub partitions: Vec<Addr<PartitionMiningActor>>,
+    pub block_discovery_addr: Addr<BlockDiscoveryActor>,
     pub block_producer: Addr<BlockProducerActor>,
     pub packing: Addr<PackingActor>,
     pub mempool: Addr<MempoolService>,
     pub block_index: Addr<BlockIndexService>,
     pub epoch_service: Addr<EpochServiceActor>,
+    pub peer_list: PeerListServiceFacade,
+    pub reth: Addr<RethServiceActor>,
+    pub vdf: Addr<VdfService>,
 }
 
 impl ActorAddresses {

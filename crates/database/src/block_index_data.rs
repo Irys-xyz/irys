@@ -4,107 +4,47 @@ use crate::data_ledger::DataLedger;
 use actix::dev::MessageResponse;
 use base58::ToBase58;
 use eyre::Result;
-use irys_config::IrysNodeConfig;
-use irys_types::H256;
+use irys_types::{NodeConfig, H256};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, remove_file, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::{Index, IndexMut};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::error;
 
-/// This struct represents the `Uninitialized` `block_index` type state.
 #[derive(Debug)]
-pub struct Uninitialized;
-
-/// This struct represents the `Initialized`  `block_index` type state.
-#[derive(Debug)]
-pub struct Initialized;
-
-/// Stores an index of `{block_hash, ledgers: Vec<LedgerIndexItem>
-/// ]` entries for each of Irys' blocks. Implemented using the type state
-/// pattern which has [`Initialized`] and [`Uninitialized`] states that are
-/// checked at compile time and prevent trying to read block index data from
-/// an uninitialized block index
-#[derive(Debug)]
-pub struct BlockIndex<State = Uninitialized> {
-    #[allow(dead_code)]
-    pub state: State,
+pub struct BlockIndex {
     /// Stored as a fixed size array with an Arc to allow multithreaded access
     pub items: Arc<[BlockIndexItem]>,
-    pub config: Option<Arc<IrysNodeConfig>>,
+    pub block_index_file: PathBuf,
 }
 
 const FILE_NAME: &str = "index.dat";
 
-/// Use a Type State pattern for `BlockIndex` with two states, Uninitialized and Initialized
-impl BlockIndex {
-    /// Constructs a new uninitialized block index.
-    pub fn new() -> Self {
-        Self {
-            items: Arc::new([]),
-            state: Uninitialized,
-            config: None,
-        }
-    }
-}
-
-//==============================================================================
-// Uninitialized State
-//------------------------------------------------------------------------------
-
-impl Default for BlockIndex<Uninitialized> {
+impl Default for BlockIndex {
     fn default() -> Self {
-        Self::new()
+        unreachable!("do not rely on the default implementation")
     }
 }
 
-impl BlockIndex<Uninitialized> {
+impl BlockIndex {
     /// Initializes a block index from disk, if this was a multi node network
     /// it could also read the latest block information from the network.
-    pub async fn init(mut self, config: Arc<IrysNodeConfig>) -> Result<BlockIndex<Initialized>> {
-        let config_ref = config.clone();
-        self.config = Some(config);
-        self.ensure_path_exists()?;
+    pub async fn new(config: &NodeConfig) -> Result<BlockIndex> {
+        let block_index_dir = config.block_index_dir();
+        tokio::fs::create_dir_all(&block_index_dir).await?;
+        let block_index_file = block_index_dir.join(FILE_NAME);
 
         // Try to load the block index from disk
-        match load_index_from_file(&config_ref) {
-            Ok(indexes) => self.items = indexes.into(),
-            Err(err) => error!("Error encountered\n {:?}", err),
-        }
+        let index = load_index_from_file(&block_index_file)?;
 
         // Return the "Initialized" state of the BlockIndex type
         Ok(BlockIndex {
-            items: self.items,
-            state: Initialized,
-            config: self.config,
+            items: index.into(),
+            block_index_file,
         })
     }
 
-    /// Deletes the block index file
-    pub fn reset(&mut self, config: &Arc<IrysNodeConfig>) -> eyre::Result<Self> {
-        let path = config.block_index_dir().join(FILE_NAME);
-        self.config = Some(config.clone());
-        if path.exists() {
-            remove_file(path)?;
-        }
-        self.ensure_path_exists()?;
-        Ok(Self::new())
-    }
-
-    fn ensure_path_exists(&self) -> eyre::Result<()> {
-        // Ensure the path exists
-        let path = self.config.clone().unwrap().block_index_dir();
-        fs::create_dir_all(&path)?;
-        Ok(())
-    }
-}
-
-//==============================================================================
-// Initialized State
-//------------------------------------------------------------------------------
-
-impl BlockIndex<Initialized> {
     /// Retrieves the number of blocks in the index
     pub fn num_blocks(&self) -> u64 {
         self.items.len() as u64
@@ -116,8 +56,15 @@ impl BlockIndex<Initialized> {
     }
 
     /// Retrieves a [`BlockIndexItem`] from the block index by block height
-    pub fn get_item(&self, block_height: usize) -> Option<&BlockIndexItem> {
-        self.items.get(block_height)
+    pub fn get_item(&self, block_height: u64) -> Option<&BlockIndexItem> {
+        // Check if block_height can fit into a usize
+        let index = if block_height <= usize::MAX as u64 {
+            block_height as usize
+        } else {
+            return None; // Block height too large for this platform
+        };
+
+        self.items.get(index)
     }
 
     /// Retrieves the most recent [`BlockIndexItem`] from the block index by block height
@@ -129,13 +76,13 @@ impl BlockIndex<Initialized> {
     }
 
     /// Pushes a new [`BlockIndexItem`] onto the items array
-    pub fn push_item(&mut self, block_index_item: &BlockIndexItem) {
+    pub fn push_item(&mut self, block_index_item: &BlockIndexItem) -> eyre::Result<()> {
         let mut items_vec = self.items.to_vec();
-        let config = self.config.as_ref().unwrap().as_ref();
         // TODO: improve this, storing in file each item
-        append_item(block_index_item, config).unwrap();
+        append_item(block_index_item, &self.block_index_file)?;
         items_vec.push(block_index_item.clone());
         self.items = items_vec.into();
+        Ok(())
     }
 
     /// For a given byte offset in a ledger, what block was responsible for adding
@@ -160,7 +107,7 @@ impl BlockIndex<Initialized> {
         &self,
         ledger: DataLedger,
         chunk_offset: u64,
-    ) -> Result<(usize, &BlockIndexItem)> {
+    ) -> Result<(u64, &BlockIndexItem)> {
         let result = self.items.binary_search_by(|item| {
             if chunk_offset < item.ledgers[ledger as usize].max_chunk_offset {
                 std::cmp::Ordering::Greater
@@ -177,11 +124,11 @@ impl BlockIndex<Initialized> {
             Err(pos) => pos,
         };
 
-        Ok((index, &self.items[index]))
+        Ok((index as u64, &self.items[index]))
     }
 
     pub fn print_items(&self) {
-        for height in 0..self.num_blocks() as usize {
+        for height in 0..self.num_blocks() {
             println!(
                 "height: {} hash: {}",
                 height,
@@ -307,62 +254,27 @@ impl BlockIndexItem {
     }
 }
 
-#[allow(dead_code)]
-pub fn save_block_index(
-    block_index_items: &[BlockIndexItem],
-    config: &IrysNodeConfig,
-) -> io::Result<()> {
-    let path = config.block_index_dir().join(FILE_NAME);
-    let mut file = File::create(path)?;
-    for item in block_index_items {
-        let bytes = item.to_bytes();
-        file.write_all(&bytes)?;
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn ensure_path_exists(config: &IrysNodeConfig) -> eyre::Result<()> {
-    // Ensure the path exists
-    let path = config.block_index_dir();
-    fs::create_dir_all(path)?;
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn append_item(item: &BlockIndexItem, config: &IrysNodeConfig) -> eyre::Result<()> {
-    let path = config.block_index_dir().join(FILE_NAME);
-    match OpenOptions::new().append(true).open(&path) {
+fn append_item(item: &BlockIndexItem, file_path: &Path) -> eyre::Result<()> {
+    match OpenOptions::new().append(true).open(&file_path) {
         Ok(mut file) => {
             file.write_all(&item.to_bytes())?;
             Ok(())
         }
         Err(err) => Err(eyre::eyre!(
             "While trying to open file :{:?} got error: {}",
-            path,
+            file_path,
             err
         )),
     }
 }
 
-#[allow(dead_code)]
-fn append_items_to_file(items: &Vec<BlockIndexItem>, config: &IrysNodeConfig) -> io::Result<()> {
-    let path = config.block_index_dir().join(FILE_NAME);
-    let mut file = OpenOptions::new().append(true).open(path)?;
-
-    for item in items {
-        file.write_all(&item.to_bytes())?;
-    }
-    Ok(())
-}
-
-fn load_index_from_file(config: &IrysNodeConfig) -> io::Result<Vec<BlockIndexItem>> {
-    let path = config.block_index_dir().join(FILE_NAME);
+#[tracing::instrument(skip_all, err)]
+fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .open(path)?;
+        .open(file_path)?;
 
     // Determine the file size
     let file_size = file.seek(SeekFrom::End(0))?;
@@ -397,19 +309,34 @@ fn load_index_from_file(config: &IrysNodeConfig) -> io::Result<Vec<BlockIndexIte
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::BlockIndex;
-    use crate::{
-        block_index_data::{ensure_path_exists, save_block_index},
-        data_ledger::DataLedger,
-        BlockBounds, BlockIndexItem, LedgerIndexItem,
-    };
-    use irys_config::IrysNodeConfig;
+    use super::*;
+    use crate::{data_ledger::DataLedger, BlockBounds, BlockIndexItem, LedgerIndexItem};
+    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::H256;
+    use std::fs::{self, File};
 
-    #[tokio::test]
+    fn save_block_index(
+        block_index_items: &[BlockIndexItem],
+        config: &NodeConfig,
+    ) -> eyre::Result<()> {
+        fs::create_dir_all(&config.block_index_dir())?;
+        let path = config.block_index_dir().join(FILE_NAME);
+        let mut file = File::create(path)?;
+        for item in block_index_items {
+            let bytes = item.to_bytes();
+            file.write_all(&bytes)?;
+        }
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
     async fn read_and_write_block_index() -> eyre::Result<()> {
+        let tmp_dir = setup_tracing_and_temp_dir(Some("read_and_write_block_index"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        let mut node_config = NodeConfig::testnet();
+        node_config.base_directory = base_path;
+
         let block_items = vec![
             BlockIndexItem {
                 block_hash: H256::random(),
@@ -455,18 +382,10 @@ mod tests {
             },
         ];
 
-        let config = IrysNodeConfig::default();
-        let arc_config = Arc::new(config);
-
-        // Make sure the block_index data path exists
-        let _ = ensure_path_exists(&arc_config);
-
-        let save_result = save_block_index(&block_items, &arc_config);
-        assert!(save_result.is_ok());
+        save_block_index(&block_items, &node_config)?;
 
         // Load the items from disk
-        let block_index = BlockIndex::new();
-        let block_index = block_index.init(arc_config).await.unwrap();
+        let block_index = BlockIndex::new(&node_config).await?;
 
         println!("{:?}", block_index.items);
 

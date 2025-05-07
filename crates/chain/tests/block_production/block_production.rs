@@ -7,7 +7,7 @@ use alloy_signer_local::LocalSigner;
 use eyre::eyre;
 use irys_actors::mempool_service::TxIngressError;
 use irys_reth_node_bridge::adapter::{node::RethNodeContext, transaction::TransactionTestContext};
-use irys_types::{irys::IrysSigner, Config, IrysTransaction};
+use irys_types::{irys::IrysSigner, IrysTransaction, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader, rpc::types::TransactionRequest};
 use reth_primitives::{
@@ -21,11 +21,11 @@ use crate::utils::{mine_block, AddTxError, IrysNodeTest};
 
 #[tokio::test]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
-    let mut node = IrysNodeTest::default();
-    let account1 = IrysSigner::random_signer(&node.cfg.config);
-    let account2 = IrysSigner::random_signer(&node.cfg.config);
-    let account3 = IrysSigner::random_signer(&node.cfg.config);
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![
+    let mut node = IrysNodeTest::default_async().await;
+    let account1 = IrysSigner::random_signer(&node.cfg.consensus_config());
+    let account2 = IrysSigner::random_signer(&node.cfg.consensus_config());
+    let account3 = IrysSigner::random_signer(&node.cfg.consensus_config());
+    node.cfg.consensus.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -97,7 +97,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
-    let node = IrysNodeTest::default().start().await;
+    let node = IrysNodeTest::default_async().await.start().await;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
     for i in 1..10 {
@@ -126,7 +126,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 
 #[tokio::test]
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
-    let node = IrysNodeTest::default().start().await;
+    let node = IrysNodeTest::default_async().await.start().await;
 
     node.node_ctx.actor_addresses.start_mining()?;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
@@ -149,7 +149,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
-    let node = IrysNodeTest::default().start().await;
+    let node = IrysNodeTest::default_async().await.start().await;
 
     let (block, _) = mine_block(&node.node_ctx).await?.unwrap();
 
@@ -174,23 +174,21 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
-    let testnet_config = Config {
-        chunk_size: 32,
-        num_chunks_in_partition: 10,
-        num_chunks_in_recall_range: 2,
-        num_partitions_per_slot: 1,
-        num_writes_before_sync: 1,
-        entropy_packing_iterations: 1_000,
-        chunk_migration_depth: 1,
-        ..Config::testnet()
-    };
-    let mut node = IrysNodeTest::new_genesis(testnet_config);
-    let account1 = IrysSigner::random_signer(&node.cfg.config);
-    let account2 = IrysSigner::random_signer(&node.cfg.config);
-    let account3 = IrysSigner::random_signer(&node.cfg.config);
-    let chain_id = node.cfg.config.chain_id;
-    let mining_signer_addr = node.cfg.config.miner_address();
-    node.cfg.irys_node_config.extend_genesis_accounts(vec![
+    let mut config = NodeConfig::testnet();
+    config.consensus.get_mut().chunk_size = 32;
+    config.consensus.get_mut().num_chunks_in_partition = 10;
+    config.consensus.get_mut().num_chunks_in_recall_range = 2;
+    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.storage.num_writes_before_sync = 1;
+    config.consensus.get_mut().entropy_packing_iterations = 1_000;
+    config.consensus.get_mut().chunk_migration_depth = 1;
+
+    let account1 = IrysSigner::random_signer(&config.consensus_config());
+    let account2 = IrysSigner::random_signer(&config.consensus_config());
+    let account3 = IrysSigner::random_signer(&config.consensus_config());
+    let chain_id = config.consensus_config().chain_id;
+    let mining_signer_addr = config.miner_address();
+    config.consensus.extend_genesis_accounts(vec![
         (
             account1.address(),
             GenesisAccount {
@@ -213,7 +211,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
             },
         ),
     ]);
-    let node = node.start().await;
+    let node = IrysNodeTest::new_genesis(config).await.start().await;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
     let miner_init_balance = reth_context
         .rpc

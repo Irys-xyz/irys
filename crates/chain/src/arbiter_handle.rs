@@ -66,7 +66,7 @@ impl<T> CloneableJoinHandle<T> {
         if let Some(handle) = guard.take() {
             handle.join()
         } else {
-            panic!("JoinHandle already consumed");
+            Err(Box::new("Thread handle already consumed!"))
         }
     }
 }

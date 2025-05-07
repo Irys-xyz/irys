@@ -9,27 +9,31 @@ use actix_web::{
     web::{self, JsonConfig},
     App, HttpResponse, HttpServer,
 };
+use irys_actors::ema_service::EmaServiceMessage;
+use irys_actors::peer_list_service::PeerListServiceFacade;
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,
 };
-use irys_database::{tables::PeerListItems, walk_all};
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
-use reth_db::Database;
+use routes::commitment;
 use routes::{
     block, block_index, get_chunk, index, network_config, peer_list, post_chunk, post_version,
     price, proxy::proxy, tx,
 };
 use std::net::TcpListener;
 use std::{net::SocketAddr, sync::Arc};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct ApiState {
     pub mempool: Addr<MempoolService>,
     pub chunk_provider: Arc<ChunkProvider>,
+    pub ema_service: UnboundedSender<EmaServiceMessage>,
+    pub peer_list: PeerListServiceFacade,
     pub db: DatabaseProvider,
     pub config: Config,
     // TODO: slim this down to what we actually use - beware the types!
@@ -40,24 +44,11 @@ pub struct ApiState {
 }
 
 impl ApiState {
-    pub fn get_known_peers(&self) -> eyre::Result<Vec<PeerAddress>> {
-        // Attempt to create a read transaction
-        let read_tx = self
-            .db
-            .tx()
-            .map_err(|e| eyre::eyre!("Database error: {}", e))?;
-
-        // Fetch peer list items
-        let peer_list_items =
-            walk_all::<PeerListItems, _>(&read_tx).map_err(|e| eyre::eyre!("Read error: {}", e))?;
-
-        // Extract IP addresses and Port (SocketAddr) into a Vec<String>
-        let addresses: Vec<PeerAddress> = peer_list_items
-            .iter()
-            .map(|(_miner_addr, entry)| entry.address)
-            .collect();
-
-        Ok(addresses)
+    pub async fn get_known_peers(&self) -> eyre::Result<Vec<PeerAddress>> {
+        self.peer_list
+            .all_known_peers()
+            .await
+            .map_err(|mailbox_err| eyre::eyre!("Failed to get known peers: {}", mailbox_err))
     }
 }
 
@@ -67,6 +58,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route(
             "/block_index",
             web::get().to(block_index::block_index_route),
+        )
+        .route(
+            "/commitment_tx",
+            web::post().to(commitment::post_commitment_tx),
         )
         .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route(
@@ -88,6 +83,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/tx", web::post().to(tx::post_tx))
         .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))
         .route(
+            "/tx/{tx_id}/is_promoted",
+            web::get().to(tx::get_tx_is_promoted),
+        )
+        .route(
             "/tx/{tx_id}/local/data_start_offset",
             web::get().to(tx::get_tx_local_start_offset),
         )
@@ -95,7 +94,7 @@ pub fn routes() -> impl HttpServiceFactory {
 }
 
 pub async fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
-    let port = app_state.config.port;
+    let port = app_state.config.node_config.http.port;
     info!(?port, "Starting API server");
 
     HttpServer::new(move || {

@@ -1,6 +1,6 @@
+pub mod block_pool_service;
 pub mod cache;
 pub mod client;
-pub mod peer_list_provider;
 pub mod server;
 mod server_data_handler;
 pub mod service;
@@ -8,7 +8,6 @@ pub mod types;
 
 pub use cache::GossipCache;
 pub use client::GossipClient;
-pub use peer_list_provider::PeerListProvider;
 pub use server::GossipServer;
 pub use service::GossipService;
 pub use service::ServiceHandleWithShutdownSignal;
