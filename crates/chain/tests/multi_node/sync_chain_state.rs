@@ -332,9 +332,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     //     peer_list_items[0].api.ip()
     // );
 
-    testnet_config_peer1.http.port = 0;
     testnet_config_peer1.trusted_peers = trusted_peers.clone();
-    testnet_config_peer1.mode = NodeMode::PeerSync;
 
     // start additional nodes (after we have mined some blocks on genesis node)
     let (ctx_peer1_node, ctx_peer2_node) = start_peer_nodes(
