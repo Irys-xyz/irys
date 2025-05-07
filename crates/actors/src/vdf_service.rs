@@ -135,14 +135,17 @@ impl Actor for VdfService {
 /// Send the most recent mining step to all the `PartitionMiningActors`
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
-pub struct VdfSeed(pub Seed);
+pub struct VdfSeed(pub Vec<Seed>);
 
 // Handler for SeedMessage
 impl Handler<VdfSeed> for VdfService {
     type Result = ();
 
     fn handle(&mut self, msg: VdfSeed, _ctx: &mut Context<Self>) -> Self::Result {
-        self.vdf_state.write().unwrap().increment_step(msg.0);
+        let mut state = self.vdf_state.write().unwrap();
+        for seed_step in msg.0.iter() {
+            state.increment_step(seed_step.clone());
+        }
     }
 }
 
@@ -185,7 +188,7 @@ mod tests {
 
         // Send 8 seeds 1,2..,8 (capacity is 4)
         for i in 0..8 {
-            addr.send(VdfSeed(Seed(H256([(i + 1) as u8; 32]))))
+            addr.send(VdfSeed(vec![Seed(H256([(i + 1) as u8; 32]))]))
                 .await
                 .unwrap();
         }

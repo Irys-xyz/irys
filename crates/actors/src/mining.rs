@@ -647,14 +647,14 @@ mod tests {
             vdf_service.send(GetVdfStateMessage).await.unwrap();
 
         let hash: H256 = H256::random();
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash))); //5
-                                                  // reset
-        vdf_service.do_send(VdfSeed(Seed(hash))); //6
-        vdf_service.do_send(VdfSeed(Seed(hash))); //7
+        vdf_service.do_send(VdfSeed(vec![Seed(hash)]));
+        vdf_service.do_send(VdfSeed(vec![Seed(hash)]));
+        vdf_service.do_send(VdfSeed(vec![Seed(hash)]));
+        vdf_service.do_send(VdfSeed(vec![Seed(hash)]));
+        vdf_service.do_send(VdfSeed(vec![Seed(hash)])); //5
+                                                        // reset
+        vdf_service.do_send(VdfSeed(vec![Seed(hash)])); //6
+        vdf_service.do_send(VdfSeed(vec![Seed(hash)])); //7
 
         sleep(Duration::from_secs(1)).await;
 

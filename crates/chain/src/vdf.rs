@@ -58,7 +58,7 @@ pub fn run_vdf(
             hash.clone(),
             global_step_number
         );
-        vdf_service.do_send(VdfSeed(Seed(hash)));
+        vdf_service.do_send(VdfSeed(vec![Seed(hash)]));
         broadcast_mining_service.do_send(BroadcastMiningSeed {
             seed: Seed(hash),
             checkpoints: H256List(checkpoints.clone()),
