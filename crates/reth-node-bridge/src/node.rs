@@ -256,7 +256,7 @@ pub async fn run_node(
     }
 
     let builder = NodeBuilder::new(node_config)
-        .with_database(database)
+        .with_database(database.clone())
         .with_launch_context(ctx.task_executor);
 
     // from ext/reth/bin/reth/src/main.rs
@@ -290,6 +290,7 @@ pub async fn run_node(
                 builder.config().datadir(),
                 irys_provider,
                 latest_block,
+                database,
             );
             builder.launch_with(launcher)
         })
