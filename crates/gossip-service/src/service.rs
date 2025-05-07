@@ -470,7 +470,7 @@ fn spawn_main_task(
     )
 }
 
-///
+/// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
 pub async fn fast_forward_vdf_steps_from_block(
     vdf_limiter_info: VDFLimiterInfo,
     vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
