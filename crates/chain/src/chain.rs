@@ -215,10 +215,11 @@ impl IrysNode {
     /// Creates a new node builder instance.
     pub async fn new(mut node_config: NodeConfig) -> eyre::Result<Self> {
         // we create the listener here so we know the port before we start passing around `config`
-        let http_listener = create_listener(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            node_config.http.port,
-        ))?;
+        let http_listener = create_listener(
+            format!("{}:{}", &node_config.http.bind_ip, &node_config.http.port)
+                .parse()
+                .expect("A valid HTTP IP & port"),
+        )?;
         let local_addr = http_listener
             .local_addr()
             .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
