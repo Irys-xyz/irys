@@ -56,30 +56,65 @@ construct_uint! {
 }
 
 impl U256 {
-    /// 32-byte *little-endian* encoding (`0x01 == 1`).
+    /// Convert to 32 little-endian bytes, independent of host endianness.
     #[inline]
     pub fn to_le_bytes(&self) -> [u8; 32] {
         let mut out = [0u8; 32];
-
-        // limbs are already little-endian *order* (0 = least-significant),
-        // we only have to make sure every limb is written as little-endian bytes.
+        // limbs are already little-to-big inside the array, so we iterate forward
         for (i, limb) in self.0.iter().enumerate() {
-            out[i * 8..][..8].copy_from_slice(&limb.to_le_bytes());
+            out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
         }
         out
     }
 
-    /// 32-byte *big-endian* encoding (`0x01 == 2¹⁵⁵…`).
+    /// Convert to 32 big-endian bytes, independent of host endianness.
     #[inline]
     pub fn to_be_bytes(&self) -> [u8; 32] {
         let mut out = [0u8; 32];
-
-        // reverse limb order (MS-limb first) *and*
-        // write each limb itself in big-endian byte order.
+        // we want the most-significant limb first, so iterate in reverse
         for (i, limb) in self.0.iter().rev().enumerate() {
-            out[i * 8..][..8].copy_from_slice(&limb.to_be_bytes());
+            out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_be_bytes());
         }
         out
+    }
+
+    /// Recreate `U256` from 32 little-endian bytes.
+    #[inline]
+    pub fn from_le_bytes(bytes: [u8; 32]) -> Self {
+        let mut limbs = [0u64; 4];
+        for i in 0..4 {
+            let chunk: [u8; 8] = bytes[i * 8..(i + 1) * 8].try_into().unwrap();
+            limbs[i] = u64::from_le_bytes(chunk);
+        }
+        U256(limbs)
+    }
+
+    /// Recreate `U256` from 32 big-endian bytes.
+    #[inline]
+    pub fn from_be_bytes(bytes: [u8; 32]) -> Self {
+        let mut limbs = [0u64; 4];
+        for i in 0..4 {
+            let chunk: [u8; 8] = bytes[i * 8..(i + 1) * 8].try_into().unwrap();
+            limbs[3 - i] = u64::from_be_bytes(chunk);
+        }
+        U256(limbs)
+    }
+}
+
+#[cfg(test)]
+mod u256_le_ble_tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_le() {
+        let x = U256::from(0xdead_beef_cafe_babe_0123_4567_89ab_cdef_u128);
+        assert_eq!(U256::from_le_bytes(x.to_le_bytes()), x);
+    }
+
+    #[test]
+    fn roundtrip_be() {
+        let x = U256::from(0xfeed_face_baad_f00d_dead_beef_cafe_babe_u128);
+        assert_eq!(U256::from_be_bytes(x.to_be_bytes()), x);
     }
 }
 

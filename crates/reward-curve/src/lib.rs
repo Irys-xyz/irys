@@ -1,17 +1,11 @@
 //! Exponential-decay (base-2) emission curve
 //!
-//! R(t) = R_max · ln 2 / T½ · 2^-(t/T½)
+//! R(t) = R_max * ln 2 / T½ * 2^-(t/T½)
 //!
 //! All arithmetic is 18-decimal fixed-point using 256-bit unsigned integers.
 
 use eyre::{eyre, Result};
-use irys_types::storage_pricing::{
-    mul_div,
-    safe_add,
-    safe_div,
-    safe_sub,
-    TOKEN_SCALE, // TOKEN_SCALE = 1 e18
-};
+use irys_types::storage_pricing::{mul_div, safe_add, safe_div, safe_sub, TOKEN_SCALE};
 use irys_types::storage_pricing::{phantoms::Irys, Amount};
 use irys_types::U256;
 
@@ -30,27 +24,6 @@ pub struct HalvingCurve {
 }
 
 impl HalvingCurve {
-    /// Block reward at the given timestamp (seconds since genesis).
-    pub fn block_reward(&self, seconds_since_genesis_block: u128) -> Result<Amount<Irys>> {
-        if self.inflation_cap.amount.is_zero() || self.half_life_secs == 0 {
-            return Ok(Amount::new(U256::zero()));
-        }
-
-        // r_ln2 = R_max · ln 2 / T½  (18-dec)
-        let r_ln2_fp18 = mul_div(
-            self.inflation_cap.amount,
-            LN2_FP18,
-            U256::from(self.half_life_secs),
-        )?;
-
-        // decay = 2^-(t/T½)  (18-dec)
-        let decay_fp18 = decay_factor(seconds_since_genesis_block, self.half_life_secs)?;
-
-        // reward = r_ln2 · decay / 1 e18  ⟶ atomic units
-        let reward = mul_div(r_ln2_fp18, decay_fp18, TOKEN_SCALE)?;
-        Ok(Amount::new(reward))
-    }
-
     /// Reward for the time span *(prev_ts … new_ts]*  (both in seconds since genesis).
     ///
     /// Guarantees `Ok(0)` when the interval is empty and
@@ -77,7 +50,7 @@ impl HalvingCurve {
         // decay = 2^-(t/T½)  (18-dec)
         let decay_fp18 = decay_factor(t, self.half_life_secs)?;
 
-        // emitted = R_max · (1 − decay)
+        // emitted = R_max * (1 − decay)
         let one_minus = safe_sub(TOKEN_SCALE, decay_fp18)?;
         mul_div(self.inflation_cap.amount, one_minus, TOKEN_SCALE)
     }
@@ -86,8 +59,8 @@ impl HalvingCurve {
 /// 2^-(t / half_life) in 18-dec fixed-point.
 ///
 /// Split `t / half_life = q + f` into integer `q` and fractional `f`.
-/// * 2^-q ⇒ divide by 2^q (bit-shift)  
-/// * 2^-f ⇒ e^(-ln 2 · f) via truncated Taylor series
+/// * 2^-q => divide by 2^q (bit-shift)  
+/// * 2^-f => e^(-ln 2 * f) via truncated Taylor series
 fn decay_factor(t_secs: u128, half_life: u128) -> Result<U256> {
     if half_life == 0 {
         return Err(eyre!("half_life cannot be zero"));
@@ -110,7 +83,7 @@ fn decay_factor(t_secs: u128, half_life: u128) -> Result<U256> {
         return Ok(decay_q_fp18);
     }
 
-    // x = ln 2 · f / half_life  (18-dec)
+    // x = ln 2 * f / half_life  (18-dec)
     let x_fp18 = mul_div(LN2_FP18, U256::from(f_secs), U256::from(half_life))?;
     let decay_f_fp18 = exp_neg(x_fp18)?;
 
@@ -154,7 +127,7 @@ mod tests {
     /// Cumulative emitted tokens after `t_years`, computed
     /// **with the same integer math** that `LogCurve::miner_reward` uses:
     ///
-    /// S(t) = R_max · (1 − 2^{-t/T½})
+    /// S(t) = R_max * (1 − 2^{-t/T½})
     fn circulating_supply(curve: &HalvingCurve, t_years: u128) -> Result<u128> {
         use irys_types::storage_pricing::{mul_div, safe_sub, TOKEN_SCALE};
 
@@ -163,7 +136,7 @@ mod tests {
         // decay = 2^{-t/T½} (scaled 1e18)
         let decay_scaled = decay_factor(elapsed_secs, curve.half_life_secs)?;
 
-        // emitted = R_max · (1 − decay)
+        // emitted = R_max * (1 − decay)
         let one_minus = safe_sub(TOKEN_SCALE, decay_scaled)?;
         let emitted = mul_div(curve.inflation_cap.amount, one_minus, TOKEN_SCALE)?;
 

@@ -120,10 +120,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             service_senders,
             reth_provider,
             config,
-            genesis_block_timestamp,
             vdf_steps_guard,
             block_tree_guard,
             price_oracle,
+            ..
         } = self.clone();
         let reward_curve = irys_reward_curve::HalvingCurve {
             inflation_cap: self.config.consensus.block_reward_config.inflation_cap,
@@ -381,9 +381,12 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 last_epoch_hash = prev_block_hash;
             }
 
-            let ms_since_genesis_block = genesis_block_timestamp.abs_diff(current_timestamp);
-            let sec_since_genesis_block = ms_since_genesis_block.saturating_div(1000);
-            let reward_amount = reward_curve.block_reward(sec_since_genesis_block)?;
+
+            let reward_amount = reward_curve.reward_between(
+                // adjust ms -> sec
+                prev_block_header.timestamp.saturating_div(1000),
+                current_timestamp.saturating_div(1000)
+            )?;
        
             // build a new block header
             let mut irys_block = IrysBlockHeader {
