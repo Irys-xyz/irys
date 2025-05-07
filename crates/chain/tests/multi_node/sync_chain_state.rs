@@ -820,7 +820,8 @@ async fn poll_peer_list(
     ctx_node: &IrysNodeTest<IrysNodeCtx>,
 ) -> Vec<PeerAddress> {
     let mut peer_list_items: Vec<PeerAddress> = Vec::new();
-    for _ in 0..200 {
+    let max_attempts = 200;
+    for _ in 0..max_attempts {
         sleep(Duration::from_millis(100)).await;
 
         let mut peer_results_genesis = peer_list_endpoint_request(&local_test_url(
