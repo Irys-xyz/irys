@@ -290,6 +290,7 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 /// 1. spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
 /// 2. check that the blocks are valid, check that peer1, peer2, and genesis are indeed synced
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
+/// TODO: Mine on peer2 and see if those blocks arrive at genesis via gossip
 #[test_log::test(actix_web::test)]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // setup trusted peers connection data and configs for genesis and nodes
@@ -439,7 +440,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     let txn = generate_test_transaction_and_add_to_block(&ctx_peer2_node, &account1).await;
     tracing::debug!("txn we are looking for on genesis: {:?}", txn);
 
-    // sleep(Duration::from_millis(5000)).await;
     // mine block on genesis
     mine_blocks(&ctx_genesis_node.node_ctx, 1)
         .await
@@ -611,6 +611,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     Ok(())
 }
 
+/// setup configs for genesis, peer1 and peer2 for e2e tests
 fn init_configs() -> (
     NodeConfig,
     NodeConfig,
@@ -704,6 +705,7 @@ fn init_configs() -> (
     )
 }
 
+/// add a single account to the supplied node config
 fn add_account_to_config(irys_node_config: &mut NodeConfig, account: &IrysSigner) -> () {
     irys_node_config.consensus.extend_genesis_accounts(vec![(
         account.address(),
@@ -714,6 +716,7 @@ fn add_account_to_config(irys_node_config: &mut NodeConfig, account: &IrysSigner
     )]);
 }
 
+/// start genesis node with an account
 async fn start_genesis_node(
     testnet_config_genesis: &NodeConfig,
     account: &IrysSigner, // account with balance at genesis
@@ -727,6 +730,7 @@ async fn start_genesis_node(
     ctx_genesis_node
 }
 
+/// start peer nodes with an account
 async fn start_peer_nodes(
     testnet_config_peer1: &Config,
     testnet_config_peer2: &Config,
@@ -741,10 +745,12 @@ async fn start_peer_nodes(
     (ctx_peer1_node, ctx_peer2_node)
 }
 
+/// helper function to reduce replication of local ip in codebase
 fn local_test_url(port: &u16) -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
+/// generate a test transaction, submit it to be added to mempool, return txn hashmap
 async fn generate_test_transaction_and_add_to_block(
     node: &IrysNodeTest<IrysNodeCtx>,
     account: &IrysSigner,
@@ -810,7 +816,7 @@ async fn poll_until_fetch_at_block_index_height(
     result_peer
 }
 
-// poll peer_list_endpoint until timeout or we get the expected result
+/// poll peer_list_endpoint until timeout or we get the expected result
 async fn poll_peer_list(
     trusted_peers: Vec<PeerAddress>,
     ctx_node: &IrysNodeTest<IrysNodeCtx>,
@@ -828,7 +834,7 @@ async fn poll_peer_list(
             .json::<Vec<PeerAddress>>()
             .await
             .expect("valid PeerAddress");
-        peer_list_items.sort(); //sort so we have sane comparisons in asserts
+        peer_list_items.sort(); //sort peer list so we have sane comparisons in asserts
         if &trusted_peers == &peer_list_items {
             break;
         }
