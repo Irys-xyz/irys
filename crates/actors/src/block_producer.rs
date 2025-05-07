@@ -27,7 +27,6 @@ use reth::{
 };
 use reth_db::cursor::*;
 use reth_db::Database;
-use rust_decimal_macros::dec;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -356,10 +355,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let oracle_irys_price = price_oracle.current_price().await?;
             // fetch the ema price to use
 
-            // TODO TESTNET: revert once EMA is stable
-            // let (tx, rx) = tokio::sync::oneshot::channel();
-            // ema_service.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
-            // let ema_irys_price = rx.await??;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            ema_service.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
+            let ema_irys_price = rx.await??;
 
             // Update the last_epoch_hash field, which tracks the most recent epoch boundary
             //
@@ -425,18 +423,13 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                     steps,
                     ..Default::default()
                 },
-                // oracle_irys_price: ema_irys_price.range_adjusted_oracle_price,
-                // ema_irys_price: ema_irys_price.ema,
-                // TODO TESTNET: revert once EMA is stable
-                oracle_irys_price: irys_types::storage_pricing::Amount::token(dec!(1.0))
-                .expect("dec!(1.0) must evaluate to a valid token amount"),
-                ema_irys_price: irys_types::storage_pricing::Amount::token(dec!(1.0))
-                .expect("dec!(1.0) must evaluate to a valid token amount"),
+                oracle_irys_price: ema_irys_price.range_adjusted_oracle_price,
+                ema_irys_price: ema_irys_price.ema,
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
             let mut context =  RethNodeContext::new(reth.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
-            let shadows_vec: Vec<ShadowTx> =                 submit_txs
+            let shadows_vec: Vec<ShadowTx> = submit_txs
             .iter()
             .map(|header| ShadowTx {
                 tx_id: IrysTxId::from_slice(header.id.as_bytes()),
