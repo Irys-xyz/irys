@@ -65,7 +65,6 @@ use reth_db::Database as _;
 use std::{
     fs,
     net::TcpListener,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::atomic::AtomicU64,
     sync::{Arc, RwLock},
@@ -76,7 +75,6 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot::{self};
-use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
