@@ -342,6 +342,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
 
+    // TODO: Once we have proper genesis/regular block hash logic (i.e derived from the signature), these H256 values will need to be updated
     let genesis_genesis_block =
         block_header_by_hash(&ctx_genesis_node.node_ctx.db.tx()?, &H256::zero(), false)?.unwrap();
 
