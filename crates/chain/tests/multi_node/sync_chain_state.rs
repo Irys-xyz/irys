@@ -600,9 +600,11 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     tracing::debug!("COMPLETED FINAL PEER2 ASSERTS");
 
     // shut down peer nodes and then genesis node, we have what we need
-    ctx_peer1_node.stop().await;
-    ctx_peer2_node.stop().await;
-    ctx_genesis_node.stop().await;
+    tokio::join!(
+        ctx_peer1_node.stop(),
+        ctx_peer2_node.stop(),
+        ctx_genesis_node.stop(),
+    );
 
     Ok(())
 }
