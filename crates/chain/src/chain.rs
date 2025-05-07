@@ -667,8 +667,15 @@ impl IrysNode {
         let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service();
 
         // start the epoch service
-        let (storage_module_infos, epoch_service_actor) =
-            Self::init_epoch_service(&config, &irys_db, &block_index_guard).await?;
+        let (genesis_block, commitments, epoch_replay_data) =
+            EpochReplayData::query_replay_data(&irys_db, &block_index_guard, &config)?;
+        let (storage_module_infos, epoch_service_actor) = Self::init_epoch_service(
+            &config,
+            genesis_block.clone(),
+            commitments,
+            epoch_replay_data,
+        )
+        .await?;
 
         // Retrieve Partition assignment
         let partition_assignments_guard = epoch_service_actor
@@ -777,6 +784,7 @@ impl IrysNode {
         // set up the block producer
         let (block_producer_addr, block_producer_arbiter) = Self::init_block_producer(
             &config,
+            &genesis_block,
             &irys_db,
             &reth_node,
             &service_senders,
@@ -1051,6 +1059,7 @@ impl IrysNode {
 
     fn init_block_producer(
         config: &Config,
+        genesis_block: &IrysBlockHeader,
         irys_db: &DatabaseProvider,
         reth_node: &RethNodeProvider,
         service_senders: &ServiceSenders,
@@ -1073,6 +1082,7 @@ impl IrysNode {
             block_tree_guard: block_tree_guard.clone(),
             price_oracle,
             service_senders: service_senders.clone(),
+            genesis_block_timestamp: genesis_block.timestamp,
         };
         let block_producer_addr =
             BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {
@@ -1244,15 +1254,13 @@ impl IrysNode {
 
     async fn init_epoch_service(
         config: &Config,
-        irys_db: &DatabaseProvider,
-        block_index_guard: &BlockIndexReadGuard,
+        genesis_block: IrysBlockHeader,
+        commitments: Vec<CommitmentTransaction>,
+        epoch_replay_data: Vec<EpochReplayData>,
     ) -> eyre::Result<(
         Vec<irys_storage::StorageModuleInfo>,
         actix::Addr<EpochServiceActor>,
     )> {
-        let (genesis_block, commitments, epoch_replay_data) =
-            EpochReplayData::query_replay_data(irys_db, block_index_guard, &config)?;
-
         let storage_submodule_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
         let mut epoch_service = EpochServiceActor::new(&config);

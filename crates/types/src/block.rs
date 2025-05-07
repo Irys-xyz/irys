@@ -4,6 +4,7 @@
 //! making them easy to reference and maintain.
 use std::fmt;
 
+use crate::storage_pricing::phantoms::Irys;
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
@@ -127,6 +128,9 @@ pub struct IrysBlockHeader {
 
     /// The address that the block reward should be sent to
     pub reward_address: Address,
+
+    /// The amount of Irys tokens that must be rewarded to the `self.rewrad_address`
+    pub reward_amount: U256,
 
     /// The address of the block producer - used to validate the block hash/signature & the PoA chunk (as the packing key)
     /// We allow for miners to send rewards to a separate address

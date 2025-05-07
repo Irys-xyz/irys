@@ -1,7 +1,7 @@
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
-        phantoms::{CostPerGb, DecayRate, IrysPrice, Percentage, Usd},
+        phantoms::{CostPerGb, DecayRate, Irys, IrysPrice, Percentage, Usd},
         Amount,
     },
     PeerAddress, RethPeerInfo,
@@ -104,6 +104,9 @@ pub struct ConsensusConfig {
     /// Configuration for the Verifiable Delay Function used in consensus
     pub vdf: VdfConfig,
 
+    /// Configuration for block rewards
+    pub block_reward_config: BlockRewradConfig,
+
     /// Size of each data chunk in bytes
     pub chunk_size: u64,
 
@@ -135,6 +138,16 @@ pub struct ConsensusConfig {
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockRewradConfig {
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub inflation_cap: Amount<Irys>,
+    pub half_life_secs: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,6 +454,11 @@ impl ConsensusConfig {
         const DEFAULT_BLOCK_TIME: u64 = 1;
         const IRYS_TESTNET_CHAIN_ID: u64 = 1270;
 
+        // block rewrad params
+        const HALF_LIFE_YEARS: u128 = 4;
+        const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
+        const INFLATION_CAP: u128 = 100_000_000;
+
         Self {
             chain_id: 1270,
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
@@ -516,6 +534,10 @@ impl ConsensusConfig {
                     },
                     ..Default::default()
                 },
+            },
+            block_reward_config: BlockRewradConfig {
+                inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
+                half_life_secs: HALF_LIFE_YEARS * SECS_PER_YEAR,
             },
         }
     }

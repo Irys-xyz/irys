@@ -19,10 +19,6 @@ use irys_types::U256;
 /// 0.693 147 180 559 945 309 × 1 e18 ≈ 693 147 180 559 945 309
 const LN2_FP18: U256 = U256([693_147_180_559_945_309u64, 0, 0, 0]);
 
-/// Number of terms kept in the e^(-x) Taylor series.
-/// 10 → |ε| < 3 × 10⁻¹⁵.
-const TAYLOR_TERMS: u64 = 10;
-
 /// Continuous halving emission curve.
 ///
 /// * **inflation_cap** – asymptotic total emission, atomic units (R_max)  
@@ -30,12 +26,12 @@ const TAYLOR_TERMS: u64 = 10;
 #[derive(Debug, Clone)]
 pub struct HalvingCurve {
     pub inflation_cap: Amount<Irys>,
-    pub half_life_secs: u64,
+    pub half_life_secs: u128,
 }
 
 impl HalvingCurve {
     /// Block reward at the given timestamp (seconds since genesis).
-    pub fn block_reward(&self, seconds_since_genesis_block: u64) -> Result<Amount<Irys>> {
+    pub fn block_reward(&self, seconds_since_genesis_block: u128) -> Result<Amount<Irys>> {
         if self.inflation_cap.amount.is_zero() || self.half_life_secs == 0 {
             return Ok(Amount::new(U256::zero()));
         }
@@ -61,7 +57,7 @@ impl HalvingCurve {
 /// Split `t / half_life = q + f` into integer `q` and fractional `f`.
 /// * 2^-q ⇒ divide by 2^q (bit-shift)  
 /// * 2^-f ⇒ e^(-ln 2 · f) via truncated Taylor series
-fn decay_factor(t_secs: u64, half_life: u64) -> Result<U256> {
+fn decay_factor(t_secs: u128, half_life: u128) -> Result<U256> {
     if half_life == 0 {
         return Err(eyre!("half_life cannot be zero"));
     }
@@ -93,6 +89,10 @@ fn decay_factor(t_secs: u64, half_life: u64) -> Result<U256> {
 
 /// e^(-x) in 18-dec fixed-point using `TAYLOR_TERMS` terms.
 fn exp_neg(x_fp18: U256) -> Result<U256> {
+    /// Number of terms kept in the e^(-x) Taylor series.
+    /// 10 → |ε| < 3 × 10⁻¹⁵.
+    const TAYLOR_TERMS: u128 = 10;
+
     let mut term = TOKEN_SCALE; // current term (= 1)
     let mut sum = TOKEN_SCALE; // running total
 
@@ -117,14 +117,14 @@ mod tests {
     use rstest::rstest;
 
     const INF_SUPPLY: u128 = 100_000_000; // R_max (tokens)
-    const HALF_LIFE_YEARS: u64 = 4; // half-life
-    const SECS_PER_YEAR: u64 = 365 * 24 * 60 * 60; // 31 536 000
+    const HALF_LIFE_YEARS: u128 = 4; // half-life
+    const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60; // 31 536 000
 
     /// Cumulative emitted tokens after `t_years`, computed
     /// **with the same integer math** that `LogCurve::miner_reward` uses:
     ///
     /// S(t) = R_max · (1 − 2^{-t/T½})
-    fn circulating_supply(curve: &HalvingCurve, t_years: u64) -> Result<u128> {
+    fn circulating_supply(curve: &HalvingCurve, t_years: u128) -> Result<u128> {
         use irys_types::storage_pricing::{mul_div, safe_sub, TOKEN_SCALE};
 
         let elapsed_secs = t_years * SECS_PER_YEAR;
@@ -169,7 +169,7 @@ mod tests {
     #[case(17, 94_744_397)]
     #[case(18, 95_580_583)]
     #[case(19, 96_283_728)]
-    fn circulating_supply_matches_table(#[case] year: u64, #[case] expected: u128) -> Result<()> {
+    fn circulating_supply_matches_table(#[case] year: u128, #[case] expected: u128) -> Result<()> {
         let curve = test_curve();
         let actual = circulating_supply(&curve, year)?;
 

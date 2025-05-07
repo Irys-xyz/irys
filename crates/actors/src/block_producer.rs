@@ -51,7 +51,7 @@ pub type BlockProducerMockActor = Mocker<BlockProducerActor>;
 pub struct MockedBlockProducerAddr(pub Recipient<SolutionFoundMessage>);
 
 /// `BlockProducerActor` creates blocks from mining solutions
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlockProducerActor {
     /// Reference to the global database
     pub db: DatabaseProvider,
@@ -67,6 +67,7 @@ pub struct BlockProducerActor {
     pub reth_provider: RethNodeProvider,
     /// Global config
     pub config: Config,
+    pub genesis_block_timestamp: u128,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Get the head of the chain
@@ -106,19 +107,25 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
         let solution = msg.0;
         info!("BlockProducerActor solution received");
 
-        let mempool_addr = self.mempool_addr.clone();
-        let block_discovery_addr = self.block_discovery_addr.clone();
-        let epoch_service_addr = self.epoch_service.clone();
         let mining_broadcaster_addr = BroadcastMiningService::from_registry();
 
-        let reth = self.reth_provider.clone();
-        let db = self.db.clone();
-        let block_tree_guard = self.block_tree_guard.clone();
-        let vdf_steps = self.vdf_steps_guard.clone();
-        let price_oracle = self.price_oracle.clone();
-        let ema_service = self.service_senders.ema.clone();
-        let commitment_cache = self.service_senders.commitment_cache.clone();
-        let config = self.config.clone();
+        let Self {
+            db,
+            mempool_addr,
+            block_discovery_addr,
+            epoch_service,
+            service_senders,
+            reth_provider,
+            config,
+            genesis_block_timestamp,
+            vdf_steps_guard,
+            block_tree_guard,
+            price_oracle
+        } = self.clone();
+        let reward_curve = irys_reward_curve::HalvingCurve {
+            inflation_cap: self.config.consensus.block_reward_config.inflation_cap,
+            half_life_secs: self.config.consensus.block_reward_config.half_life_secs,
+        };
 
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
@@ -231,10 +238,10 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
 
             // Construct commitment ledger based on block type (epoch vs regular)
             let commitment_ledger = if is_epoch_block {
-                // In epoch blocks: collect and reference all previously validated commitments 
+                // In epoch blocks: collect and reference all previously validated commitments
                 // from the current epoch without re-inserting them into the database
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = commitment_cache.send(CommitmentCacheMessage::GetEpochCommitments { response: tx });
+                let _ = service_senders.commitment_cache.send(CommitmentCacheMessage::GetEpochCommitments { response: tx });
 
                 // Get the commitments and create a new H256List with their IDs
                 let commitments = rx.await.expect("to receive epoch commitments");
@@ -281,7 +288,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
             // This exists to prevent block validation errors in the unlikely* case two blocks are produced with the exact same timestamp
-            // This can happen due to EVM blocks using second-precision time, instead of our millisecond precision 
+            // This can happen due to EVM blocks using second-precision time, instead of our millisecond precision
             // this just waits until the next second (timers (afaict) never undersleep, so we don't need an extra buffer here)
             // *dev configs can easily trigger this behaviour
             // as_secs does not take into account/round the underlying nanos at all
@@ -323,7 +330,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let block_hash = hash_sha256(&current_timestamp.to_le_bytes());
 
             // Use the partition hash to figure out what ledger it belongs to
-            let ledger_id = epoch_service_addr
+            let ledger_id = epoch_service
                 .send(GetPartitionAssignmentMessage(solution.partition_hash))
                 .await?
                 .and_then(|pa| pa.ledger_id);
@@ -343,7 +350,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1 > solution.vdf_step - 1 {
                 H256List::new()
             } else {
-                vdf_steps.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await
+                vdf_steps_guard.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1)).await
                 .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))?
             };
             steps.push(solution.seed.0);
@@ -352,7 +359,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let oracle_irys_price = price_oracle.current_price().await?;
             // fetch the ema price to use
             let (tx, rx) = tokio::sync::oneshot::channel();
-            ema_service.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
+            service_senders.ema.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
             let ema_irys_price = rx.await??;
 
             // Update the last_epoch_hash field, which tracks the most recent epoch boundary
@@ -370,6 +377,11 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 // Record the hash of the epoch block (previous block) as our epoch reference
                 last_epoch_hash = prev_block_hash;
             }
+
+            let ms_since_genesis_block = genesis_block_timestamp.abs_diff(current_timestamp);
+            let sec_since_genesis_block = ms_since_genesis_block.saturating_div(1000);
+            let reward_amount = reward_curve.block_reward(sec_since_genesis_block)?;
+
             // build a new block header
             let mut irys_block = IrysBlockHeader {
                 block_hash,
@@ -385,6 +397,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 previous_cumulative_diff: prev_block_header.cumulative_diff,
                 poa,
                 reward_address: Address::ZERO ,
+                reward_amount: reward_amount.amount,
                 miner_address: solution.mining_address,
                 signature: Signature::test_signature().into(),
                 timestamp: current_timestamp,
@@ -424,7 +437,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             };
 
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
-            let mut context =  RethNodeContext::new(reth.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
+            let mut context =  RethNodeContext::new(reth_provider.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
 
             let shadows = Shadows::new(
                 submit_txs
