@@ -256,7 +256,9 @@ impl IrysNode {
 
         // figure out the init mode
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
-        let data_exists = Self::blockchain_data_exists(&self.config.node_config.base_directory);
+        // this is so we can "preload" a .irys_submodules.toml file in the data dir for manual testing
+        let data_exists =
+            Self::blockchain_data_exists(&self.config.node_config.irys_consensus_data_dir());
 
         error!("Data exists: {}", data_exists);
         // note: if you need the genesis header later, you can easily make this match block return it
