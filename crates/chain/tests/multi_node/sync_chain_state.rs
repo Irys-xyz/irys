@@ -296,9 +296,9 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // setup trusted peers connection data and configs for genesis and nodes
     let (
         testnet_config_genesis,
-        mut testnet_config_peer1,
+        testnet_config_peer1,
         testnet_config_peer2,
-        trusted_peers,
+        _trusted_peers,
         genesis_trusted_peers,
     ) = init_configs();
     // setup a funded account at genesis block
@@ -331,8 +331,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     //     genesis_trusted_peers[0].api.ip(),
     //     peer_list_items[0].api.ip()
     // );
-
-    testnet_config_peer1.trusted_peers = trusted_peers.clone();
 
     // start additional nodes (after we have mined some blocks on genesis node)
     let (ctx_peer1_node, ctx_peer2_node) = start_peer_nodes(
