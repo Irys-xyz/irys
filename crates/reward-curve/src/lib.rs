@@ -50,6 +50,37 @@ impl HalvingCurve {
         let reward = mul_div(r_ln2_fp18, decay_fp18, TOKEN_SCALE)?;
         Ok(Amount::new(reward))
     }
+
+    /// Reward for the time span *(prev_ts … new_ts]*  (both in seconds since genesis).
+    ///
+    /// Guarantees `Ok(0)` when the interval is empty and
+    /// `Err(..)` if `new_ts < prev_ts`.
+    pub fn reward_between(&self, prev_ts: u128, new_ts: u128) -> Result<Amount<Irys>> {
+        if new_ts < prev_ts {
+            return Err(eyre!("new_ts ({new_ts}) < prev_ts ({prev_ts})"));
+        }
+        if prev_ts == new_ts || self.inflation_cap.amount.is_zero() {
+            return Ok(Amount::new(U256::zero()));
+        }
+
+        // Cumulative emission up to each endpoint
+        let emitted_prev = self.emitted_until(prev_ts)?;
+        let emitted_new = self.emitted_until(new_ts)?;
+
+        // Δ-emission is the block reward
+        let delta = safe_sub(emitted_new, emitted_prev)?;
+        Ok(Amount::new(delta))
+    }
+
+    /// Tokens emitted from genesis **up to** `t` (seconds).
+    fn emitted_until(&self, t: u128) -> Result<U256> {
+        // decay = 2^-(t/T½)  (18-dec)
+        let decay_fp18 = decay_factor(t, self.half_life_secs)?;
+
+        // emitted = R_max · (1 − decay)
+        let one_minus = safe_sub(TOKEN_SCALE, decay_fp18)?;
+        mul_div(self.inflation_cap.amount, one_minus, TOKEN_SCALE)
+    }
 }
 
 /// 2^-(t / half_life) in 18-dec fixed-point.
@@ -147,6 +178,18 @@ mod tests {
         }
     }
 
+    /// Convenience: convert years -> seconds since genesis.
+    fn secs(years: u128) -> u128 {
+        years * SECS_PER_YEAR
+    }
+
+    /// Δ-supply between two years, via the same integer math.
+    fn expected_reward(curve: &HalvingCurve, from_year: u128, to_year: u128) -> Result<u128> {
+        let s0 = circulating_supply(curve, from_year)?;
+        let s1 = circulating_supply(curve, to_year)?;
+        Ok(s1 - s0)
+    }
+
     // table-driven assertions
     #[rstest]
     #[case(0, 0)]
@@ -181,5 +224,49 @@ mod tests {
             "year {year}: expected {expected}, got {actual}"
         );
         Ok(())
+    }
+
+    /// Golden-path table: reward for each [y, y+1) interval.
+    #[rstest]
+    #[case(0, 1)]
+    #[case(1, 2)]
+    #[case(3, 4)]
+    #[case(7, 8)]
+    #[case(18, 19)]
+    fn reward_between_matches_delta_supply(
+        #[case] from_year: u128,
+        #[case] to_year: u128,
+    ) -> Result<()> {
+        let curve = test_curve();
+
+        // what the curve says
+        let actual = curve.reward_between(secs(from_year), secs(to_year))?.amount;
+
+        // what the integral says
+        let expected = expected_reward(&curve, from_year, to_year)?;
+
+        assert!(
+            (actual.as_u128() as i128 - expected as i128).abs() <= 1,
+            "Δ[{from_year},{to_year}]: expected {expected}, got {actual}"
+        );
+        Ok(())
+    }
+
+    /// Empty interval => zero reward.
+    #[test]
+    fn reward_between_zero_interval_is_zero() -> Result<()> {
+        let curve = test_curve();
+        let ts = secs(5); // arbitrary
+        let reward = curve.reward_between(ts, ts)?;
+        assert!(reward.amount.is_zero());
+        Ok(())
+    }
+
+    /// new_ts < prev_ts => error.
+    #[test]
+    fn reward_between_invalid_interval_errors() {
+        let curve = test_curve();
+        let res = curve.reward_between(secs(10), secs(9)); // reversed
+        assert!(res.is_err(), "expected error for reversed interval");
     }
 }

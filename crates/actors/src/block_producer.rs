@@ -384,7 +384,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let ms_since_genesis_block = genesis_block_timestamp.abs_diff(current_timestamp);
             let sec_since_genesis_block = ms_since_genesis_block.saturating_div(1000);
             let reward_amount = reward_curve.block_reward(sec_since_genesis_block)?;
-
+       
             // build a new block header
             let mut irys_block = IrysBlockHeader {
                 block_hash,
