@@ -1,8 +1,3 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
 use actix::prelude::*;
 use actors::mocker::Mocker;
 use alloy_rpc_types_engine::{
@@ -26,11 +21,14 @@ use irys_types::{
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
 use openssl::sha;
-use reth::{
-    revm::primitives::B256, rpc::eth::EthApiServer as _,
-};
+use reth::{revm::primitives::B256, rpc::eth::EthApiServer as _};
 use reth_db::cursor::*;
 use reth_db::Database;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -290,14 +288,14 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             let now =  if now.as_secs() == Duration::from_millis(prev_block_header.timestamp as u64).as_secs(){
                 let nanos_into_sec = now.subsec_nanos();
                 let nano_to_next_sec = 1_000_000_000 - nanos_into_sec;
-                let time_to_wait = Duration::from_nanos(nano_to_next_sec as u64); 
+                let time_to_wait = Duration::from_nanos(nano_to_next_sec as u64);
                 info!("Waiting {:.2?} to prevent timestamp overlap", &time_to_wait);
                 tokio::time::sleep(time_to_wait).await;
                 SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
             }else {
                 now
             };
-            
+
             // Difficulty adjustment logic
             let current_timestamp = now.as_millis();
             let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
