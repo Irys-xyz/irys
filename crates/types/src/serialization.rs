@@ -55,6 +55,34 @@ construct_uint! {
     pub struct U256(4);
 }
 
+impl U256 {
+    /// 32-byte *little-endian* encoding (`0x01 == 1`).
+    #[inline]
+    pub fn to_le_bytes(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+
+        // limbs are already little-endian *order* (0 = least-significant),
+        // we only have to make sure every limb is written as little-endian bytes.
+        for (i, limb) in self.0.iter().enumerate() {
+            out[i * 8..][..8].copy_from_slice(&limb.to_le_bytes());
+        }
+        out
+    }
+
+    /// 32-byte *big-endian* encoding (`0x01 == 2¹⁵⁵…`).
+    #[inline]
+    pub fn to_be_bytes(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+
+        // reverse limb order (MS-limb first) *and*
+        // write each limb itself in big-endian byte order.
+        for (i, limb) in self.0.iter().rev().enumerate() {
+            out[i * 8..][..8].copy_from_slice(&limb.to_be_bytes());
+        }
+        out
+    }
+}
+
 // Manually implement Arbitrary for U256
 impl<'a> Arbitrary<'a> for U256 {
     fn arbitrary(_u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {

@@ -10,7 +10,7 @@ use irys_database::{
     tables::IngressProofs, tx_header_by_txid, DataLedger, SystemLedger,
 };
 use irys_price_oracle::IrysPriceOracle;
-use irys_primitives::{DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
+use irys_primitives::{BlockRewardShadow, DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
@@ -21,7 +21,10 @@ use irys_types::{
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
 use openssl::sha;
-use reth::{revm::primitives::B256, rpc::eth::EthApiServer as _};
+use reth::{
+    revm::primitives::{alloy_primitives, B256},
+    rpc::eth::EthApiServer as _,
+};
 use reth_db::cursor::*;
 use reth_db::Database;
 use std::{
@@ -120,7 +123,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             genesis_block_timestamp,
             vdf_steps_guard,
             block_tree_guard,
-            price_oracle
+            price_oracle,
         } = self.clone();
         let reward_curve = irys_reward_curve::HalvingCurve {
             inflation_cap: self.config.consensus.block_reward_config.inflation_cap,
@@ -439,9 +442,9 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // RethNodeContext is a type-aware wrapper that lets us interact with the reth node
             let mut context =  RethNodeContext::new(reth_provider.into()).await.map_err(|e| eyre!("Error connecting to Reth: {}", e))?;
 
-            let shadows = Shadows::new(
-                submit_txs
+            let shadows = submit_txs
                     .iter()
+                    // add data transaction shadows
                     .map(|header| ShadowTx {
                         tx_id: IrysTxId::from_slice(header.id.as_bytes()),
                         fee: irys_primitives::U256::from(
@@ -453,9 +456,18 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                                 header.total_fee(),
                             ),
                         }),
-                    })
-                    .collect(),
-            );
+                    }).chain([
+                        // add block rewards shadow
+                        ShadowTx {
+                            tx_id: IrysTxId::from_slice(irys_block.block_hash.as_bytes()),
+                            fee: alloy_primitives::U256::ZERO,
+                            address: irys_block.reward_address,
+                            tx: ShadowTxType::BlockReward(BlockRewardShadow {
+                                reward: alloy_primitives::U256::from_le_bytes(irys_block.reward_amount.to_le_bytes()),
+                            })
+                        },
+                    ]);
+            let shadows = Shadows::new(shadows.collect());
 
             // create a new reth payload
 
