@@ -378,7 +378,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     Ok(())
                 }
                 Err(err) => {
-                    tracing::error!("BLOCK VALIDATION ERROR");
+                    tracing::error!("Block validation error {:?}", err);
                     Err(eyre::eyre!("Block validation error {:?}", err))
                 }
             }
