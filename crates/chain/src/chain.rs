@@ -281,6 +281,7 @@ impl IrysNode {
                     ..irys_genesis
                 };
                 add_genesis_commitments(&mut irys_genesis, &self.config);
+
                 let irys_genesis_block = Arc::new(irys_genesis);
 
                 // write genesis.json to disk
@@ -340,6 +341,7 @@ impl IrysNode {
                     .join()
                     .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
                 }
+
                 // no special handling for if the genesis block exists on disk already
             }
             (true, &NodeMode::PeerSync) => {
@@ -592,7 +594,6 @@ impl IrysNode {
 
                 reth_node.provider.database.db.close();
                 irys_storage::reth_provider::cleanup_provider(&irys_provider);
-
                 info!("Reth thread finished");
             })?;
 

@@ -126,7 +126,12 @@ impl MempoolService {
             .map_err(|_| TxIngressError::DatabaseError)?;
 
         let latest_height = self.get_latest_block_height()?;
-        let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
+        let anchor_expiry_depth = self
+            .config
+            .node_config
+            .consensus_config()
+            .mempool
+            .anchor_expiry_depth as u64;
 
         // Allow transactions to use the txid of a transaction in the mempool
         if self.recent_valid_tx.contains(anchor) {
@@ -394,7 +399,12 @@ impl Handler<TxIngressMessage> for MempoolService {
 
         // Update any associated ingress proofs
         if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
-            let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
+            let anchor_expiry_depth = self
+                .config
+                .node_config
+                .consensus_config()
+                .mempool
+                .anchor_expiry_depth as u64;
             let new_expiry = hdr.height + anchor_expiry_depth;
             debug!(
                 "Updating ingress proof for data root {} expiry from {} -> {}",
@@ -832,7 +842,14 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
 
         // Apply block size constraint and funding checks to storage transactions
         let mut storage_tx = Vec::new();
-        let max_txs = self.config.node_config.mempool.max_data_txs_per_block as usize;
+        let max_txs = self
+            .config
+            .node_config
+            .consensus_config()
+            .mempool
+            .max_data_txs_per_block
+            .try_into()
+            .expect("max_data_txs_per_block to fit into usize");
 
         // Select storage transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block

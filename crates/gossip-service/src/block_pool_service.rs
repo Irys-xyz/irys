@@ -16,7 +16,7 @@ use irys_types::{Address, BlockHash, DatabaseProvider, IrysBlockHeader, RethPeer
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 #[derive(Debug)]
 pub enum BlockPoolError {
@@ -167,14 +167,15 @@ where
 
                 // If the parent block is in the db, process it
                 if let Some(previous_block_header) = maybe_previous_block_header {
-                    warn!(
+                    info!(
                         "Found parent block for block {}",
                         current_block_hash.0.to_base58()
                     );
 
                     // process vdf steps from block
                     fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
-                    warn!(
+
+                    info!(
                         "FF VDF Steps for block for block {}",
                         current_block_hash.0.to_base58()
                     );

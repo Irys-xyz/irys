@@ -63,6 +63,9 @@ pub struct ConsensusConfig {
     /// Reth chain spec for the reth genesis
     pub reth: RethChainSpec,
 
+    /// Settings for the transaction memory pool
+    pub mempool: MempoolConfig,
+
     /// Controls how mining difficulty adjusts over time
     pub difficulty_adjustment: DifficultyAdjustmentConfig,
 
@@ -161,9 +164,6 @@ pub struct NodeConfig {
 
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
-
-    /// Settings for the transaction memory pool
-    pub mempool: MempoolConfig,
 
     /// Settings for the price oracle system
     pub oracle: OracleConfig,
@@ -449,6 +449,10 @@ impl ConsensusConfig {
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
+            mempool: MempoolConfig {
+                max_data_txs_per_block: 100,
+                anchor_expiry_depth: 10,
+            },
             vdf: VdfConfig {
                 reset_frequency: 10 * 120,
                 parallel_verification_thread_limit: 4,
@@ -547,10 +551,7 @@ impl NodeConfig {
             mode: NodeMode::Genesis,
             consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
             base_directory: default_irys_path(),
-            mempool: MempoolConfig {
-                max_data_txs_per_block: 100,
-                anchor_expiry_depth: 10,
-            },
+
             oracle: OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
                 percent_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
@@ -788,6 +789,10 @@ mod tests {
 
         [ema]
         price_adjustment_interval = 10
+
+        [mempool]
+        max_data_txs_per_block = 100
+        anchor_expiry_depth = 10
         "#;
 
         // Create the expected config
@@ -841,9 +846,7 @@ mod tests {
         peering_tcp_addr = "127.0.0.1:30303"
         peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
-        [mempool]
-        max_data_txs_per_block = 100
-        anchor_expiry_depth = 10
+
 
         [oracle]
         type = "mock"
@@ -894,5 +897,13 @@ mod tests {
 
         // Assert the entire struct matches
         assert_eq!(config, expected_config);
+    }
+
+    #[test]
+    fn test_roundtrip_toml_serdes() {
+        let cfg = NodeConfig::testnet();
+        let enc = toml::to_string_pretty(&cfg).unwrap();
+        let dec: NodeConfig = toml::from_str(&enc).unwrap();
+        assert_eq!(cfg, dec);
     }
 }
