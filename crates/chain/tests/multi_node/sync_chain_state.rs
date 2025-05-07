@@ -485,8 +485,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     // mine more blocks on peer2 node, and see if gossip service brings them to genesis
     /*let additional_blocks_for_gossip_test: usize = 2;
-    //wait 10 seconds to ensure vdf has moved forward on peer2, otherwise we get an error: Block validation error Unavailable requested range (16..=20). Stored steps range is (1..=19)
-    sleep(Duration::from_millis(10000)).await;
     mine_blocks(&ctx_peer2_node.node_ctx, additional_blocks_for_gossip_test)
         .await
         .expect("expected many mined blocks");
