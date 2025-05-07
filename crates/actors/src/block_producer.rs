@@ -465,7 +465,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             assert!(parent.header.hash == prev_block_header.evm_block_hash);
 
             // generate payload attributes
-            // TODO: we need previous block metadata to fill in parent & prev_randao
             let payload_attrs = PayloadAttributes {
                 timestamp: now.as_secs(), // tie timestamp together **THIS HAS TO BE SECONDS**
                 prev_randao: parent.header.mix_hash.unwrap_or(B256::ZERO),

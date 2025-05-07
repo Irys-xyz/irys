@@ -847,7 +847,9 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
             .node_config
             .consensus_config()
             .mempool
-            .max_data_txs_per_block as usize;
+            .max_data_txs_per_block
+            .try_into()
+            .expect("max_data_txs_per_block to fit into usize");
 
         // Select storage transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
