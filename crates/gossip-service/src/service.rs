@@ -487,7 +487,7 @@ pub async fn fast_forward_vdf_steps_from_block(
         };
 
         if let Err(e) = vdf_sender.send(mining_seed).await {
-            tracing::error!("Peer Sync: VDF Send Error: {:?}", e);
+            tracing::error!("VDF FF: VDF Send Error: {:?}", e);
         }
     }
 }
