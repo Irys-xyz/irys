@@ -369,8 +369,11 @@ pub async fn wait_for_packing(
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, time::Duration};
+
     use actix::Actor as _;
     use irys_packing::capacity_single::compute_entropy_chunk;
+    use irys_storage::ie;
     use irys_storage::{ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
@@ -379,7 +382,6 @@ mod tests {
         StorageSyncConfig,
     };
     use reth::tasks::TaskManager;
-    use std::{sync::Arc, time::Duration};
 
     use crate::packing::{
         cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingConfig, PackingRequest,
@@ -414,8 +416,6 @@ mod tests {
         };
         let config = Config::new(node_config);
         let packing_config = PackingConfig::new(&config);
-
-        use irys_storage::ie;
 
         let infos = vec![StorageModuleInfo {
             id: 0,
