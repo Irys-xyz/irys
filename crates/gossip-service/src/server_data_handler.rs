@@ -1,7 +1,7 @@
 use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
 use crate::cache::GossipCacheKey;
 use crate::types::{
-    tx_ingress_error_to_gossip_error, InternalGossipError, InvalidDataError, RequestedData,
+    tx_ingress_error_to_gossip_error, GossipDataRequest, InternalGossipError, InvalidDataError,
 };
 use crate::{GossipCache, GossipClient, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
@@ -218,15 +218,13 @@ where
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,
-    ) -> GossipResult<()> where {
+    ) -> GossipResult<()> {
         let source_miner_address = block_header_request.miner_address;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
-        tracing::error!(
-            "Node {}: Gossip block {:?} (height: {}) received from peer {}: {:?}",
+        tracing::debug!(
+            "Node {}: Gossip block received from peer {}: {:?}",
             self.gossip_client.mining_address,
-            block_header.block_hash,
-            block_header.height,
             source_miner_address,
             block_hash.0.to_base58()
         );
@@ -404,7 +402,7 @@ where
     pub async fn handle_get_data(
         &self,
         source_address: SocketAddr,
-        request: GossipRequest<RequestedData>,
+        request: GossipRequest<GossipDataRequest>,
     ) -> GossipResult<bool> {
         let peer_list_item = self
             .peer_list_service
@@ -420,7 +418,7 @@ where
         }
 
         match request.data {
-            RequestedData::Block(block_hash) => {
+            GossipDataRequest::Block(block_hash) => {
                 let block_result = self
                     .block_pool
                     .send(GetBlockByHash { block_hash })
@@ -451,7 +449,7 @@ where
                     None => Ok(false),
                 }
             }
-            RequestedData::Transaction(_tx_hash) => Ok(false),
+            GossipDataRequest::Transaction(_tx_hash) => Ok(false),
         }
     }
 }

@@ -290,6 +290,7 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 /// 1. spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
 /// 2. check that the blocks are valid, check that peer1, peer2, and genesis are indeed synced
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
+/// TODO: Mine on peer2 and see if those blocks arrive at genesis via gossip
 #[test_log::test(actix_web::test)]
 async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // setup trusted peers connection data and configs for genesis and nodes
@@ -331,9 +332,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     //     peer_list_items[0].api.ip()
     // );
 
-    testnet_config_peer1.http.port = 0;
     testnet_config_peer1.trusted_peers = trusted_peers.clone();
-    testnet_config_peer1.mode = NodeMode::PeerSync;
 
     // start additional nodes (after we have mined some blocks on genesis node)
     let (ctx_peer1_node, ctx_peer2_node) = start_peer_nodes(
@@ -343,6 +342,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
 
+    // TODO: Once we have proper genesis/regular block hash logic (i.e derived from the signature), these H256 values will need to be updated
     let genesis_genesis_block =
         block_header_by_hash(&ctx_genesis_node.node_ctx.db.tx()?, &H256::zero(), false)?.unwrap();
 
@@ -374,13 +374,13 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     // wait and retry hitting the peer_list endpoint of peer1 node
     let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer1_node).await;
-    // assert that peer1 node has updated trusted peers
-    assert_eq!(peer_list_items.len(), genesis_trusted_peers.len());
+    // assert that peer1 node has updated trusted peers, - 1 because we shouldn't add ourselves
+    assert_eq!(peer_list_items.len(), genesis_trusted_peers.len() - 1);
 
     // wait and retry hitting the peer_list endpoint of peer2 node
     let peer_list_items = poll_peer_list(genesis_trusted_peers.clone(), &ctx_peer2_node).await;
     // assert that peer2 node has updated trusted peers
-    assert_eq!(peer_list_items.len(), genesis_trusted_peers.len());
+    assert_eq!(peer_list_items.len(), genesis_trusted_peers.len() - 1);
 
     let result_peer2 = poll_until_fetch_at_block_index_height(
         "peer2".to_owned(),
@@ -429,7 +429,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         block_index_peer1, block_index_peer2
     );
 
-    error!("STARTUP SEQUENCE ASSERTS WERE A SUCCESS. TO GET HERE TAKES ~2 MINUTES");
+    tracing::debug!("STARTUP SEQUENCE ASSERTS WERE A SUCCESS. TO GET HERE TAKES ~2 MINUTES");
 
     /*
     // BEGIN TESTING BLOCK GOSSIP FROM PEER2 to GENESIS
@@ -437,9 +437,8 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
 
     //TEST: generate a txn on peer2, and then continue mining on genesis to see if the txn is picked up in the next block via gossip
     let txn = generate_test_transaction_and_add_to_block(&ctx_peer2_node, &account1).await;
-    error!("txn we are looking for on genesis: {:?}", txn);
+    tracing::debug!("txn we are looking for on genesis: {:?}", txn);
 
-    // sleep(Duration::from_millis(5000)).await;
     // mine block on genesis
     mine_blocks(&ctx_genesis_node.node_ctx, 1)
         .await
@@ -475,8 +474,8 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         .await
         .expect("expected a valid json deserialize");
 
-    error!("block_index_genesis: {:?}", block_index_genesis);
-    error!("block_index_peer2: {:?}", block_index_peer2);
+    tracing::debug!("block_index_genesis: {:?}", block_index_genesis);
+    tracing::debug!("block_index_peer2: {:?}", block_index_peer2);
 
     assert_eq!(
         block_index_genesis, block_index_peer2,
@@ -484,10 +483,9 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         block_index_genesis, block_index_peer2
     );
 
+    //FIXME: https://github.com/Irys-xyz/irys/issues/368
     // mine more blocks on peer2 node, and see if gossip service brings them to genesis
     /*let additional_blocks_for_gossip_test: usize = 2;
-    //wait 10 seconds to ensure vdf has moved forward on peer2, otherwise we get an error: Block validation error Unavailable requested range (16..=20). Stored steps range is (1..=19)
-    sleep(Duration::from_millis(10000)).await;
     mine_blocks(&ctx_peer2_node.node_ctx, additional_blocks_for_gossip_test)
         .await
         .expect("expected many mined blocks");
@@ -527,13 +525,11 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     // BEGIN TESTING BLOCK GOSSIP FROM GENESIS to PEER2
      */
 
-    error!("BEGIN TESTING BLOCK GOSSIP FROM GENESIS to PEER2");
+    tracing::debug!("BEGIN TESTING BLOCK GOSSIP FROM GENESIS to PEER2");
 
     // mine more blocks on genesis node, and see if gossip service brings them to peer2
     let additional_blocks_for_gossip_test: usize = 2;
-    error!("MINING BLOCKS ON GENESIS TO BE GOSIPPED");
-    // ISSUE IS HERE. PEER2 NEVER GETS TO HEIGHT 7
-    // CHECK GOSSIP IS BEING RECIEVED?!
+    tracing::debug!("MINING BLOCKS ON GENESIS TO BE GOSIPPED");
     mine_blocks(
         &ctx_genesis_node.node_ctx,
         additional_blocks_for_gossip_test,
@@ -557,7 +553,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         (required_blocks_height + 1 + additional_blocks_for_gossip_test)
             .try_into()
             .expect("expected required_blocks_height to be valid u64"),
-        20,
+        2000,
     )
     .await;
 
@@ -568,11 +564,11 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         (required_blocks_height + 1 + additional_blocks_for_gossip_test)
             .try_into()
             .expect("expected required_blocks_height to be valid u64"),
-        20,
+        2000,
     )
     .await;
 
-    error!("PEER2 should have got the block");
+    tracing::debug!("PEER2 should have got the block");
 
     let block_index_genesis = result_genesis
         .json::<Vec<BlockIndexItem>>()
@@ -580,7 +576,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         .expect("expected a valid json deserialize");
 
     let block_index_peer1 = result_peer1
-        .expect("expected a client response from peer2")
+        .expect("expected a client response from peer1")
         .json::<Vec<BlockIndexItem>>()
         .await
         .expect("expected a valid json deserialize");
@@ -603,7 +599,7 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         block_index_genesis, block_index_peer2
     );
 
-    error!("COMPLETED FINAL PEER2 ASSERTS");
+    tracing::debug!("COMPLETED FINAL PEER2 ASSERTS");
 
     // shut down peer nodes and then genesis node, we have what we need
     ctx_peer1_node.stop().await;
@@ -613,6 +609,8 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     Ok(())
 }
 
+/// setup configs for genesis, peer1 and peer2 for e2e tests
+/// FIXME: hardcoded ports https://github.com/Irys-xyz/irys/issues/367
 fn init_configs() -> (
     NodeConfig,
     NodeConfig,
@@ -706,6 +704,7 @@ fn init_configs() -> (
     )
 }
 
+/// add a single account to the supplied node config
 fn add_account_to_config(irys_node_config: &mut NodeConfig, account: &IrysSigner) -> () {
     irys_node_config.consensus.extend_genesis_accounts(vec![(
         account.address(),
@@ -716,6 +715,7 @@ fn add_account_to_config(irys_node_config: &mut NodeConfig, account: &IrysSigner
     )]);
 }
 
+/// start genesis node with an account
 async fn start_genesis_node(
     testnet_config_genesis: &NodeConfig,
     account: &IrysSigner, // account with balance at genesis
@@ -729,6 +729,7 @@ async fn start_genesis_node(
     ctx_genesis_node
 }
 
+/// start peer nodes with an account
 async fn start_peer_nodes(
     testnet_config_peer1: &Config,
     testnet_config_peer2: &Config,
@@ -743,10 +744,12 @@ async fn start_peer_nodes(
     (ctx_peer1_node, ctx_peer2_node)
 }
 
+/// helper function to reduce replication of local ip in codebase
 fn local_test_url(port: &u16) -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
+/// generate a test transaction, submit it to be added to mempool, return txn hashmap
 async fn generate_test_transaction_and_add_to_block(
     node: &IrysNodeTest<IrysNodeCtx>,
     account: &IrysSigner,
@@ -791,7 +794,7 @@ async fn poll_until_fetch_at_block_index_height(
 
         let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
         if required_blocks_height > json_response.block_index_height {
-            error!(
+            tracing::debug!(
                 "{} attempt {} checking {}. required_blocks_height > json_response.block_index_height {} > {}",
                 node_name, &attempts, &url, required_blocks_height, json_response.block_index_height
             );
@@ -812,13 +815,14 @@ async fn poll_until_fetch_at_block_index_height(
     result_peer
 }
 
-// poll peer_list_endpoint until timeout or we get the expected result
+/// poll peer_list_endpoint until timeout or we get the expected result
 async fn poll_peer_list(
     trusted_peers: Vec<PeerAddress>,
     ctx_node: &IrysNodeTest<IrysNodeCtx>,
 ) -> Vec<PeerAddress> {
     let mut peer_list_items: Vec<PeerAddress> = Vec::new();
-    for _ in 0..200 {
+    let max_attempts = 200;
+    for _ in 0..max_attempts {
         sleep(Duration::from_millis(100)).await;
 
         let mut peer_results_genesis = peer_list_endpoint_request(&local_test_url(
@@ -830,7 +834,7 @@ async fn poll_peer_list(
             .json::<Vec<PeerAddress>>()
             .await
             .expect("valid PeerAddress");
-        peer_list_items.sort(); //sort so we have sane comparisons in asserts
+        peer_list_items.sort(); //sort peer list so we have sane comparisons in asserts
         if &trusted_peers == &peer_list_items {
             break;
         }

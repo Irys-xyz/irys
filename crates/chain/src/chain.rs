@@ -1,7 +1,5 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
-use crate::genesis_utilities::{
-    genesis_block_exists_on_disk, load_genesis_block_from_disk, save_genesis_block_to_disk,
-};
+use crate::genesis_utilities::{genesis_block_exists_on_disk, save_genesis_block_to_disk};
 use crate::peer_utilities::{
     fetch_genesis_block, fetch_genesis_commitments, sync_state_from_peers,
 };
@@ -195,14 +193,12 @@ async fn start_reth_node(
     .expect("expected reth node to have started");
     debug!("Reth node started");
 
-    match sender.send(node_handle.node.clone()) {
-        Ok(()) => {}
-        Err(_full_node) => {
-            return Err(eyre::eyre!(
-                "Failed to send reth node handle to main actor thread"
-            ));
-        }
-    }
+    sender.send(node_handle.node.clone()).map_err(|e| {
+        eyre::eyre!(
+            "Failed to send reth node handle to main actor thread: {:?}",
+            &e
+        )
+    })?;
 
     node_handle.node_exit_future.await
 }

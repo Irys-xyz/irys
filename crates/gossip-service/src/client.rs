@@ -2,8 +2,9 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipError, GossipResult, RequestedData};
+use crate::types::{GossipDataRequest, GossipError, GossipResult};
 use actix::{Actor, Context, Handler};
+use base58::ToBase58;
 use core::time::Duration;
 use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_api_client::ApiClient;
@@ -62,9 +63,9 @@ impl GossipClient {
                 .await?;
             }
             GossipData::Block(irys_block_header) => {
-                tracing::error!(
+                tracing::debug!(
                     "GOSSIP POSTING BLOCK {:?} HEIGHT {:?} DATA to {:?}",
-                    irys_block_header.block_hash,
+                    irys_block_header.block_hash.0.to_base58(),
                     irys_block_header.height,
                     format!("http://{}/gossip/block", peer.address.gossip),
                 );
@@ -156,7 +157,7 @@ impl GossipClient {
     pub async fn get_data_request(
         &self,
         peer: &PeerListItem,
-        requested_data: RequestedData,
+        requested_data: GossipDataRequest,
     ) -> GossipResult<bool> {
         let url = format!("http://{}/gossip/get_data", peer.address.gossip);
         let get_data_request = self.create_request(requested_data);

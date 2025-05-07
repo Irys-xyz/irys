@@ -3,16 +3,17 @@ use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use base58::ToBase58;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
-use eyre::Result;
+use eyre::{eyre, Result};
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_actors::mempool_service::{
-    ChunkIngressError, ChunkIngressMessage, TxExistenceQuery, TxIngressError, TxIngressMessage,
+    ChunkIngressError, ChunkIngressMessage, CommitmentTxIngressMessage, TxExistenceQuery,
+    TxIngressError, TxIngressMessage,
 };
 use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
 use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
-use irys_gossip_service::types::{GossipDataRequest, RequestedData};
+use irys_gossip_service::types::GossipDataRequest;
 use irys_gossip_service::GossipService;
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -21,8 +22,9 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, CombinedBlockHeader, Config, DatabaseProvider, GossipData,
-    IrysBlockHeader, IrysTransaction, IrysTransactionHeader, NodeConfig, PeerAddress, PeerListItem,
-    PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
+    GossipRequest, IrysBlockHeader, IrysTransaction, IrysTransactionHeader,
+    IrysTransactionResponse, NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore,
+    RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
@@ -86,6 +88,18 @@ impl Handler<TxIngressMessage> for MempoolStub {
                 .expect("to send transaction");
         });
 
+        Ok(())
+    }
+}
+
+impl Handler<CommitmentTxIngressMessage> for MempoolStub {
+    type Result = Result<(), TxIngressError>;
+
+    fn handle(
+        &mut self,
+        _msg: CommitmentTxIngressMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
         Ok(())
     }
 }
@@ -181,17 +195,22 @@ impl ApiClient for StubApiClient {
         &self,
         _peer: SocketAddr,
         tx_id: H256,
-    ) -> Result<Option<IrysTransactionHeader>> {
+    ) -> Result<IrysTransactionResponse> {
         println!("Fetching transaction {:?} from stub API client", tx_id);
         println!("{:?}", self.txs.get(&tx_id));
-        Ok(self.txs.get(&tx_id).cloned())
+        Ok(self
+            .txs
+            .get(&tx_id)
+            .ok_or(eyre!("Transaction {} not found in stub API client", tx_id))?
+            .clone()
+            .into())
     }
 
     async fn get_transactions(
         &self,
         peer: SocketAddr,
         tx_ids: &[H256],
-    ) -> Result<Vec<Option<IrysTransactionHeader>>> {
+    ) -> Result<Vec<IrysTransactionResponse>> {
         debug!("Fetching {} transactions from peer {}", tx_ids.len(), peer);
         let mut results = Vec::with_capacity(tx_ids.len());
 
@@ -571,17 +590,14 @@ impl FakeGossipServer {
 
 async fn handle_get_data(
     handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
-    data_request: web::Json<GossipDataRequest>,
+    data_request: web::Json<GossipRequest<GossipDataRequest>>,
     _req: actix_web::HttpRequest,
 ) -> HttpResponse {
-    warn!(
-        "Fake server got request: {:?}",
-        data_request.0.requested_data
-    );
+    warn!("Fake server got request: {:?}", data_request.data);
 
     match handler.read() {
-        Ok(handler) => match data_request.0.requested_data {
-            RequestedData::Block(block_hash) => {
+        Ok(handler) => match data_request.data {
+            GossipDataRequest::Block(block_hash) => {
                 let res = handler.call_on_block_data_request(block_hash);
                 warn!(
                     "Block data request for hash {:?}, response: {}",
@@ -592,7 +608,7 @@ async fn handle_get_data(
                     .content_type("application/json")
                     .json(res)
             }
-            RequestedData::Transaction(transaction_hash) => {
+            GossipDataRequest::Transaction(transaction_hash) => {
                 warn!("Transaction request for hash {:?}", transaction_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")

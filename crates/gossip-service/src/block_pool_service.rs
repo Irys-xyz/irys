@@ -1,9 +1,9 @@
 use crate::service::fast_forward_vdf_steps_from_block;
-use crate::types::RequestedData;
+use crate::types::GossipDataRequest;
 use crate::GossipClient;
 use actix::{
     Actor, Addr, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised,
-    SystemService, WrapFuture, WrapStream,
+    SystemService, WrapFuture,
 };
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
@@ -144,7 +144,7 @@ where
         let db = self.db.clone();
         let vdf_sender = self.vdf_sender.clone().expect("valid vdf sender");
 
-        error!(
+        debug!(
             "GOSSIP process_block() BLOCK HEIGHT: {}",
             block_header.height
         );
@@ -167,28 +167,39 @@ where
 
                 // If the parent block is in the db, process it
                 if let Some(previous_block_header) = maybe_previous_block_header {
-                    debug!(
+                    info!(
                         "Found parent block for block {}",
                         current_block_hash.0.to_base58()
                     );
 
-                    //process vdf steps from block
+                    // process vdf steps from block
                     fast_forward_vdf_steps_from_block(vdf_limiter_info, vdf_sender).await;
+
+                    info!(
+                        "FF VDF Steps for block for block {}",
+                        current_block_hash.0.to_base58()
+                    );
 
                     block_producer_addr
                         .as_ref()
-                        .ok_or(BlockPoolError::OtherInternal(
-                            "Block producer address is not connected".to_string(),
-                        ))?
+                        .ok_or_else(|| {
+                            let error_message =
+                                "Block producer address is not connected".to_string();
+                            error!(error_message);
+                            BlockPoolError::OtherInternal(error_message)
+                        })?
                         .send(BlockDiscoveredMessage(Arc::new(block_header.clone())))
                         .await
                         .map_err(|mailbox_error| {
-                            BlockPoolError::OtherInternal(format!(
-                                "Can't send block to block producer: {:?}",
-                                mailbox_error
-                            ))
+                            let error_message =
+                                format!("Can't send block to block producer: {:?}", mailbox_error);
+                            error!(error_message);
+                            BlockPoolError::OtherInternal(error_message)
                         })?
-                        .map_err(|block_error| BlockPoolError::BlockError(block_error))?;
+                        .map_err(|block_error| {
+                            error!("{:?}", block_error);
+                            BlockPoolError::BlockError(block_error)
+                        })?;
 
                     info!("Block {} processed", current_block_hash.0.to_base58());
                     self_addr.do_send(RemoveBlockFromPool {
@@ -399,7 +410,7 @@ where
                     );
 
                     match gossip_client
-                        .get_data_request(&peer_item, RequestedData::Block(block_hash))
+                        .get_data_request(&peer_item, GossipDataRequest::Block(block_hash))
                         .await
                     {
                         Ok(true) => {
@@ -546,7 +557,7 @@ where
                     let block_hash_string = orphaned_block.block_hash.0.to_base58();
                     info!(
                         "Start processing orphaned ancestor block: {:?}",
-                        orphaned_block.block_hash
+                        block_hash_string
                     );
 
                     address

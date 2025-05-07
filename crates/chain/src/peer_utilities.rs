@@ -91,7 +91,6 @@ pub async fn fetch_genesis_block(
     let fetched_genesis_block = fetch_block(peer, &client, &block_index_genesis.get(0).unwrap())
         .await
         .unwrap();
-    let fetched_genesis_block = fetched_genesis_block;
     Some(fetched_genesis_block)
 }
 

@@ -12,8 +12,8 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, Address, BlockHash, CombinedBlockHeader, Config, DatabaseProvider,
-    IrysBlockHeader, IrysTransactionHeader, NodeConfig, PeerAddress, PeerListItem, PeerResponse,
-    PeerScore, VersionRequest, H256,
+    IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse, NodeConfig, PeerAddress,
+    PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -31,8 +31,8 @@ impl ApiClient for MockApiClient {
         &self,
         _peer: SocketAddr,
         _tx_id: H256,
-    ) -> eyre::Result<Option<IrysTransactionHeader>> {
-        Ok(None)
+    ) -> eyre::Result<IrysTransactionResponse> {
+        Err(eyre::eyre!("not implemented"))
     }
 
     async fn post_transaction(
@@ -47,7 +47,7 @@ impl ApiClient for MockApiClient {
         &self,
         _peer: SocketAddr,
         _tx_ids: &[H256],
-    ) -> eyre::Result<Vec<Option<IrysTransactionHeader>>> {
+    ) -> eyre::Result<Vec<IrysTransactionResponse>> {
         Ok(vec![])
     }
 
@@ -281,7 +281,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Adding a peer so we can send a request to the mock client
     peer_addr
         .send(AddPeer {
-            mining_addr: Default::default(),
+            mining_addr: Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
             peer: PeerListItem {
                 reputation_score: PeerScore::new(100),
                 response_time: 0,

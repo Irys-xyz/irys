@@ -470,13 +470,14 @@ fn spawn_main_task(
     )
 }
 
-///
+/// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
 pub async fn fast_forward_vdf_steps_from_block(
     vdf_limiter_info: VDFLimiterInfo,
     vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
 ) {
     let block_end_step = vdf_limiter_info.global_step_number;
-    let block_start_step = block_end_step - vdf_limiter_info.steps.len() as u64;
+    let len = vdf_limiter_info.steps.len();
+    let block_start_step = block_end_step - len as u64;
     for (i, step) in vdf_limiter_info.steps.iter().enumerate() {
         //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
         let mining_seed = BroadcastMiningSeed {
@@ -486,7 +487,7 @@ pub async fn fast_forward_vdf_steps_from_block(
         };
 
         if let Err(e) = vdf_sender.send(mining_seed).await {
-            tracing::error!("Peer Sync: VDF Send Error: {:?}", e);
+            tracing::error!("VDF FF: VDF Send Error: {:?}", e);
         }
     }
 }

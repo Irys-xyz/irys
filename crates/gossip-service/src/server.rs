@@ -3,8 +3,8 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::server_data_handler::GossipServerDataHandler;
+use crate::types::{GossipDataRequest, InternalGossipError};
 use crate::types::{GossipError, GossipResult};
-use crate::types::{InternalGossipError, RequestedData};
 use actix::{Actor, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{
@@ -12,6 +12,7 @@ use actix_web::{
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
+use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::mempool_service::{
     ChunkIngressMessage, CommitmentTxIngressMessage, TxExistenceQuery, TxIngressMessage,
@@ -22,6 +23,8 @@ use irys_types::{
     Address, GossipRequest, IrysBlockHeader, IrysTransactionHeader, PeerListItem, RethPeerInfo,
     UnpackedChunk,
 };
+use tracing::info;
+use tracing::log::debug;
 
 #[derive(Debug)]
 pub struct GossipServer<M, B, A, R>
@@ -172,16 +175,35 @@ where
         Err(error_response) => return error_response,
     };
 
-    if let Err(error) = server
-        .data_handler
-        .handle_block_header(gossip_request, peer.address.api)
-        .await
-    {
-        handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
-        tracing::error!("Gossip: Failed to process the block: {}", error);
-        return HttpResponse::InternalServerError().finish();
-    }
+    let this_node_id = server.data_handler.gossip_client.mining_address;
 
+    tokio::spawn(async move {
+        let block_hash_string = gossip_request.data.block_hash.0.to_base58();
+        if let Err(error) = server
+            .data_handler
+            .handle_block_header(gossip_request, peer.address.api)
+            .await
+        {
+            handle_invalid_data(&source_miner_address, &error, &server.peer_list).await;
+            tracing::error!(
+                "Node {:?}: Failed to process the block {}: {:?}",
+                this_node_id,
+                block_hash_string,
+                error
+            );
+            // return HttpResponse::InternalServerError().finish();
+        } else {
+            info!(
+                "Node {:?}: Successfully processed block {}",
+                this_node_id, block_hash_string
+            );
+        }
+    });
+
+    debug!(
+        "Node {:?}: Started handling block and returned ok response to the peer",
+        this_node_id
+    );
     HttpResponse::Ok().finish()
 }
 
@@ -297,7 +319,7 @@ async fn handle_invalid_data<R, A>(
 
 async fn handle_get_data<M, B, A, R>(
     server: Data<GossipServer<M, B, A, R>>,
-    data_request: web::Json<GossipRequest<RequestedData>>,
+    data_request: web::Json<GossipRequest<GossipDataRequest>>,
     req: actix_web::HttpRequest,
 ) -> HttpResponse
 where
