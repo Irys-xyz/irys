@@ -8,9 +8,20 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "irys-reward-curve-simulation"
+path = "src/main.rs"
+required-features = ["emission-sim"]
+
+[features]
+default = []
+emission-sim = ["csv", "clap"]
+
 [dependencies]
 irys-types.workspace = true
 eyre.workspace = true
+clap = { workspace = true, optional = true }
+csv = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest.workspace = true

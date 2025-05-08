@@ -218,8 +218,9 @@ mod tests {
         // what the integral says
         let expected = expected_reward(&curve, from_year, to_year)?;
 
-        assert!(
-            (actual.as_u128() as i128 - expected as i128).abs() <= 1,
+        assert_eq!(
+            U256::from(actual),
+            U256::from(expected),
             "Δ[{from_year},{to_year}]: expected {expected}, got {actual}"
         );
         Ok(())

@@ -173,6 +173,7 @@ tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi"] }
 alloy-signer = { path = "./ext/alloy/crates/signer" }
 tempfile = "3"
+csv = "1"
 jsonrpsee = "0.24"
 jsonrpsee-core = "0.24"
 jsonrpsee-http-client = "0.24"
