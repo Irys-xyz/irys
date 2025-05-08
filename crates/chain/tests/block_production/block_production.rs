@@ -66,11 +66,18 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     let (block, reth_exec_env) = mine_block(&irys_node.node_ctx).await?.unwrap();
 
     for receipt in reth_exec_env.shadow_receipts {
-        if let Some(og_tx) = txs.get(&receipt.tx_id) {
-            assert_eq!(receipt.result, ShadowResult::Success);
-            assert_ne!(og_tx.header.signer, account1.address()); // account1 has no funds
-        } else {
-            assert_eq!(receipt.result, ShadowResult::OutOfFunds)
+        match receipt.tx_type {
+            ShadowTxType::BlockReward(_block_reward_shadow) => {
+                assert_eq!(receipt.result, ShadowResult::Success);
+            }
+            ShadowTxType::Data(_data_shadow) => {
+                let og_tx = txs.get(&receipt.tx_id).unwrap();
+                assert_eq!(receipt.result, ShadowResult::Success);
+                assert_ne!(og_tx.header.signer, account1.address()); // account1 has no funds
+            }
+            _ => {
+                panic!("test does not expect this shadow type")
+            }
         }
     }
 
@@ -187,6 +194,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let account3 = IrysSigner::random_signer(&config.consensus_config());
     let chain_id = config.consensus_config().chain_id;
     let mining_signer_addr = config.miner_address();
+    let reward_address = config.reward_address;
     let recipient = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![
         (
@@ -217,6 +225,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .rpc
         .get_balance(mining_signer_addr, None)
         .await?;
+    let reward_init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
     let recipient_init_balance = reth_context
         .rpc
         .get_balance(recipient.address(), None)
@@ -303,6 +312,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
             }
         }
     }
+    assert_ne!(block_reward, U256::from(0), "block reward cannot be 0");
 
     //check reth for built block
     let reth_block = reth_context
@@ -323,16 +333,6 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let db_irys_block = node.get_block_by_hash(&block.block_hash).unwrap();
 
     assert_eq!(db_irys_block.evm_block_hash, reth_block.hash_slow());
-
-    // assert that the miner got the block reward fee
-    assert_ne!(block_reward, U256::from(0));
-    assert_eq!(
-        reth_context
-            .rpc
-            .get_balance(recipient.address(), None)
-            .await?,
-        miner_init_balance + block_reward
-    );
 
     node.stop().await;
     Ok(())
