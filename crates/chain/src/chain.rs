@@ -42,6 +42,7 @@ use irys_gossip_service::ServiceHandleWithShutdownSignal;
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::node::RethNode;
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
+use irys_reward_curve::HalvingCurve;
 use irys_storage::{
     irys_consensus_data_db::open_or_create_irys_consensus_data_db,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
@@ -84,6 +85,7 @@ pub struct IrysNodeCtx {
     pub actor_addresses: ActorAddresses,
     pub db: DatabaseProvider,
     pub config: Config,
+    pub reward_curve: Arc<HalvingCurve>,
     pub chunk_provider: Arc<ChunkProvider>,
     pub block_index_guard: BlockIndexReadGuard,
     pub block_tree_guard: BlockTreeReadGuard,
@@ -104,7 +106,7 @@ impl IrysNodeCtx {
         ApiState {
             mempool: self.actor_addresses.mempool.clone(),
             chunk_provider: self.chunk_provider.clone(),
-            ema_service: ema_service,
+            ema_service,
             peer_list: self.actor_addresses.peer_list.clone(),
             db: self.db.clone(),
             config: self.config.clone(),
@@ -775,8 +777,14 @@ impl IrysNode {
         let price_oracle = Self::init_price_oracle(&config);
 
         // set up the block producer
+        let reward_curve = irys_reward_curve::HalvingCurve {
+            inflation_cap: config.consensus.block_reward_config.inflation_cap,
+            half_life_secs: config.consensus.block_reward_config.half_life_secs,
+        };
+        let reward_curve = Arc::new(reward_curve);
         let (block_producer_addr, block_producer_arbiter) = Self::init_block_producer(
             &config,
+            Arc::clone(&reward_curve),
             &irys_db,
             &reth_node,
             &service_senders,
@@ -838,6 +846,7 @@ impl IrysNode {
                 reth: reth_service_actor,
                 vdf: vdf_service,
             },
+            reward_curve,
             reth_handle: reth_node.clone(),
             db: irys_db.clone(),
             chunk_provider: chunk_provider.clone(),
@@ -1051,6 +1060,7 @@ impl IrysNode {
 
     fn init_block_producer(
         config: &Config,
+        reward_curve: Arc<HalvingCurve>,
         irys_db: &DatabaseProvider,
         reth_node: &RethNodeProvider,
         service_senders: &ServiceSenders,
@@ -1065,6 +1075,7 @@ impl IrysNode {
         let block_producer_actor = BlockProducerActor {
             db: irys_db.clone(),
             config: config.clone(),
+            reward_curve,
             mempool_addr: mempool_service.clone(),
             block_discovery_addr: block_discovery,
             epoch_service: epoch_service_actor.clone(),

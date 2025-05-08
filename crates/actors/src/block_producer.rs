@@ -12,6 +12,7 @@ use irys_database::{
 use irys_price_oracle::IrysPriceOracle;
 use irys_primitives::{BlockRewardShadow, DataShadow, IrysTxId, ShadowTx, ShadowTxType, Shadows};
 use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvider};
+use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Address, Base64, Config, DataTransactionLedger, H256List,
@@ -70,7 +71,8 @@ pub struct BlockProducerActor {
     pub reth_provider: RethNodeProvider,
     /// Global config
     pub config: Config,
-    pub genesis_block_timestamp: u128,
+    /// The block reward curve
+    pub reward_curve: Arc<HalvingCurve>,
     /// Store last VDF Steps
     pub vdf_steps_guard: VdfStepsReadGuard,
     /// Get the head of the chain
@@ -125,10 +127,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             price_oracle,
             ..
         } = self.clone();
-        let reward_curve = irys_reward_curve::HalvingCurve {
-            inflation_cap: self.config.consensus.block_reward_config.inflation_cap,
-            half_life_secs: self.config.consensus.block_reward_config.half_life_secs,
-        };
 
         AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
@@ -402,7 +400,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 previous_block_hash: prev_block_hash,
                 previous_cumulative_diff: prev_block_header.cumulative_diff,
                 poa,
-                reward_address: Address::ZERO ,
+                reward_address: config.node_config.reward_address,
                 reward_amount: reward_amount.amount,
                 miner_address: solution.mining_address,
                 signature: Signature::test_signature().into(),

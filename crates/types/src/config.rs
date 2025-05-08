@@ -189,6 +189,8 @@ pub struct NodeConfig {
     )]
     pub mining_key: k256::ecdsa::SigningKey,
 
+    pub reward_address: Address,
+
     /// Data storage configuration
     pub storage: StorageSyncConfig,
 
@@ -566,9 +568,16 @@ impl NodeConfig {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn testnet() -> Self {
+        use alloy_signer::utils::secret_key_to_address;
         use k256::ecdsa::SigningKey;
         use rust_decimal_macros::dec;
 
+        let mining_key = SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                .expect("valid hex"),
+        )
+        .expect("valid key");
+        let reward_address = secret_key_to_address(&mining_key);
         Self {
             mode: NodeMode::Genesis,
             consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
@@ -579,11 +588,8 @@ impl NodeConfig {
                 percent_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
                 smoothing_interval: 15,
             },
-            mining_key: SigningKey::from_slice(
-                &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
-                    .expect("valid hex"),
-            )
-            .expect("valid key"),
+            mining_key,
+            reward_address,
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
             },
