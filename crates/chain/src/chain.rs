@@ -751,6 +751,13 @@ impl IrysNode {
             &vdf_steps_guard,
         );
 
+        // create the block reward curve
+        let reward_curve = irys_reward_curve::HalvingCurve {
+            inflation_cap: config.consensus.block_reward_config.inflation_cap,
+            half_life_secs: config.consensus.block_reward_config.half_life_secs,
+        };
+        let reward_curve = Arc::new(reward_curve);
+
         // spawn block discovery
         let (block_discovery, block_discovery_arbiter) = Self::init_block_discovery_service(
             &config,
@@ -761,6 +768,7 @@ impl IrysNode {
             partition_assignments_guard,
             &vdf_steps_guard,
             gossip_tx.clone(),
+            Arc::clone(&reward_curve),
         );
 
         let gossip_service_handle = gossip_service.run(
@@ -777,11 +785,7 @@ impl IrysNode {
         let price_oracle = Self::init_price_oracle(&config);
 
         // set up the block producer
-        let reward_curve = irys_reward_curve::HalvingCurve {
-            inflation_cap: config.consensus.block_reward_config.inflation_cap,
-            half_life_secs: config.consensus.block_reward_config.half_life_secs,
-        };
-        let reward_curve = Arc::new(reward_curve);
+
         let (block_producer_addr, block_producer_arbiter) = Self::init_block_producer(
             &config,
             Arc::clone(&reward_curve),
@@ -1118,6 +1122,7 @@ impl IrysNode {
         partition_assignments_guard: irys_actors::epoch_service::PartitionAssignmentsReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
         gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
+        reward_curve: Arc<HalvingCurve>,
     ) -> (actix::Addr<BlockDiscoveryActor>, Arbiter) {
         let block_discovery_actor = BlockDiscoveryActor {
             block_index_guard: block_index_guard.clone(),
@@ -1128,6 +1133,7 @@ impl IrysNode {
             service_senders: service_senders.clone(),
             gossip_sender,
             epoch_service: epoch_service.clone(),
+            reward_curve,
         };
         let block_discovery_arbiter = Arbiter::new();
         let block_discovery =

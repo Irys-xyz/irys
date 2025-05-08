@@ -15,7 +15,7 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, Address, Base64, Config, DataTransactionLedger, H256List,
+    next_cumulative_diff, Base64, Config, DataTransactionLedger, H256List,
     IngressProofsList, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData,
     Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };

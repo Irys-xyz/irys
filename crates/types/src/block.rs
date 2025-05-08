@@ -4,7 +4,6 @@
 //! making them easy to reference and maintain.
 use std::fmt;
 
-use crate::storage_pricing::phantoms::Irys;
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,

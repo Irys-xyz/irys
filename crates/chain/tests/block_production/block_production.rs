@@ -346,7 +346,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
     let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
     let mut init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
-    for iteration in 0..3 {
+    for _ in 0..3 {
         // mine a single block
         let (block, reth_exec_env) = mine_block(&node.node_ctx)
             .await?
