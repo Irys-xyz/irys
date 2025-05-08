@@ -34,6 +34,26 @@ pub fn run_vdf(
     let nonce_limiter_reset_frequency = config.reset_frequency as u64;
 
     loop {
+        // before we try any vdf mining, see if there is a fast forward step waiting
+        if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
+            // if the step number is ahead of local nodes vdf steps
+            if global_step_number < proposed_ff_to_mining_seed.global_step {
+                debug!(
+                    "Fastforward Step {:?} with Seed {:?}",
+                    proposed_ff_to_mining_seed.global_step, proposed_ff_to_mining_seed.seed
+                );
+                hash = proposed_ff_to_mining_seed.seed.0;
+                global_step_number = proposed_ff_to_mining_seed.global_step;
+            } else {
+                debug!(
+                    "Fastforward Step {} is not ahead of {}",
+                    proposed_ff_to_mining_seed.global_step, global_step_number
+                );
+            }
+            //continue so we immediately check again for an additional fast forward
+            continue;
+        }
+
         let now = Instant::now();
 
         let mut salt = U256::from(step_number_to_salt_number(&config, global_step_number));
@@ -78,23 +98,6 @@ pub fn run_vdf(
             // Shutdown signal received
             break;
         };
-
-        if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
-            // if the step number is ahead of local nodes vdf steps
-            if global_step_number < proposed_ff_to_mining_seed.global_step {
-                debug!(
-                    "Fastforward Step {:?} with Seed {:?}",
-                    proposed_ff_to_mining_seed.global_step, proposed_ff_to_mining_seed.seed
-                );
-                hash = proposed_ff_to_mining_seed.seed.0;
-                global_step_number = proposed_ff_to_mining_seed.global_step;
-            } else {
-                debug!(
-                    "Fastforward Step {} is not ahead of {}",
-                    proposed_ff_to_mining_seed.global_step, global_step_number
-                );
-            }
-        }
     }
     debug!(?global_step_number, "VDF thread stopped");
 }
