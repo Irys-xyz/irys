@@ -193,8 +193,6 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let account2 = IrysSigner::random_signer(&config.consensus_config());
     let account3 = IrysSigner::random_signer(&config.consensus_config());
     let chain_id = config.consensus_config().chain_id;
-    let mining_signer_addr = config.miner_address();
-    let reward_address = config.reward_address;
     let recipient = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![
         (
@@ -221,11 +219,6 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     ]);
     let node = IrysNodeTest::new_genesis(config).await.start().await;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
-    let miner_init_balance = reth_context
-        .rpc
-        .get_balance(mining_signer_addr, None)
-        .await?;
-    let reward_init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
     let recipient_init_balance = reth_context
         .rpc
         .get_balance(recipient.address(), None)

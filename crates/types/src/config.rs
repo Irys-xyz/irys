@@ -147,7 +147,7 @@ pub struct BlockRewradConfig {
         serialize_with = "serde_utils::serializes_token_amount"
     )]
     pub inflation_cap: Amount<Irys>,
-    pub half_life_secs: u128,
+    pub half_life_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,7 +539,7 @@ impl ConsensusConfig {
             },
             block_reward_config: BlockRewradConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
-                half_life_secs: HALF_LIFE_YEARS * SECS_PER_YEAR,
+                half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
         }
     }
@@ -762,6 +762,10 @@ mod tests {
     fn test_deserialize_consensus_config_from_toml() {
         let toml_data = r#"
         chain_id = 1270
+        token_price_safe_range = 1.0
+        genesis_price = 1.0
+        annual_cost_per_gb = 0.01
+        decay_rate = 0.01
         chunk_size = 262144
         chunk_migration_depth = 1
         num_chunks_in_partition = 10
@@ -770,10 +774,6 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
-        token_price_safe_range = 1.0
-        genesis_price = 1
-        annual_cost_per_gb = 0.01
-        decay_rate = 0.01
 
         [reth]
         chain = 1270
@@ -798,6 +798,10 @@ mod tests {
         [reth.genesis.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
         balance = "0xd3c21bcecceda1000000"
 
+        [mempool]
+        max_data_txs_per_block = 100
+        anchor_expiry_depth = 10
+
         [difficulty_adjustment]
         block_time = 1
         difficulty_adjustment_interval = 1209600000
@@ -810,6 +814,10 @@ mod tests {
         num_checkpoints_in_vdf_step = 25
         sha_1s_difficulty = 7000
 
+        [block_reward_config]
+        inflation_cap = 100000000
+        half_life_secs = 126144000
+
         [epoch]
         capacity_scalar = 100
         num_blocks_in_epoch = 100
@@ -817,10 +825,6 @@ mod tests {
 
         [ema]
         price_adjustment_interval = 10
-
-        [mempool]
-        max_data_txs_per_block = 100
-        anchor_expiry_depth = 10
         "#;
 
         // Create the expected config
@@ -840,41 +844,19 @@ mod tests {
     #[test]
     fn test_deserialize_config_from_toml() {
         let toml_data = r#"
-        max_data_txs_per_block = 20
-        chunk_size = 262144
-        num_chunks_in_partition = 10
-        num_chunks_in_recall_range = 2
-        num_partitions_per_slot = 1
-        num_writes_before_sync = 5
-        reset_state_on_restart = false
-        chunk_migration_depth = 1
-        num_capacity_partitions = 16
-        anchor_expiry_depth = 10
-        genesis_price_valid_for_n_epochs = 2
-        genesis_token_price = "1.0"
-        token_price_safe_range = "0.25"
-        price_adjustment_interval = 10
-        cpu_packing_concurrency = 4
-        gpu_packing_batch_size = 1024
-        annual_cost_per_gb = "0.01"
-        decay_rate = "0.01"
-        fee_percentage = "0.05"
-        safe_minimum_number_of_years = 200
-        number_of_ingress_proofs = 10
         mode = "Genesis"
         base_directory = "~/.tmp/.irys"
         consensus = "Testnet"
         mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+        reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
 
         [[trusted_peers]]
         gossip = "127.0.0.1:8081"
         api = "127.0.0.1:8080"
-      
+
         [trusted_peers.execution]
         peering_tcp_addr = "127.0.0.1:30303"
         peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-
-
 
         [oracle]
         type = "mock"
@@ -892,10 +874,6 @@ mod tests {
         bind_ip = "127.0.0.1"
         port = 0
 
-        [reth_peer_info]
-        peering_tcp_addr = "0.0.0.0:0"
-        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-
         [packing]
         cpu_packing_concurrency = 4
         gpu_packing_batch_size = 1024
@@ -906,6 +884,10 @@ mod tests {
         [http]
         bind_ip = "127.0.0.1"
         port = 0
+
+        [reth_peer_info]
+        peering_tcp_addr = "0.0.0.0:0"
+        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         "#;
         // Create the expected config
         let mut expected_config = NodeConfig::testnet();

@@ -773,7 +773,7 @@ impl IrysNode {
         // create the block reward curve
         let reward_curve = irys_reward_curve::HalvingCurve {
             inflation_cap: config.consensus.block_reward_config.inflation_cap,
-            half_life_secs: config.consensus.block_reward_config.half_life_secs,
+            half_life_secs: config.consensus.block_reward_config.half_life_secs.into(),
         };
         let reward_curve = Arc::new(reward_curve);
 
