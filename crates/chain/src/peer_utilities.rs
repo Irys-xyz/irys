@@ -5,6 +5,7 @@ use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
+    vdf_service::{GetVdfStateMessage, VdfService},
 };
 use irys_database::{BlockIndexItem, DataLedger};
 use irys_types::block::CombinedBlockHeader;
@@ -240,6 +241,7 @@ pub async fn sync_state_from_peers(
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
     peer_service_addr: PeerListServiceFacade,
+    vdf_service_addr: Addr<VdfService>,
     vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();

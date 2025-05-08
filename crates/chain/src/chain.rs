@@ -430,6 +430,7 @@ impl IrysNode {
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
                 ctx.actor_addresses.peer_list.clone(),
+                ctx.actor_addresses.vdf.clone(),
                 ctx.vdf_sender.clone(),
             )
             .await?;
@@ -754,7 +755,7 @@ impl IrysNode {
             &storage_modules,
         );
 
-        let (vdf_sender, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
+        let (vdf_sender, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(100);
 
         // spawn the vdf service
         let vdf_service = Self::init_vdf_service(&config, &irys_db, &block_index_guard);

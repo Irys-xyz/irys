@@ -35,23 +35,35 @@ pub fn run_vdf(
 
     loop {
         // before we try any vdf mining, see if there is a fast forward step waiting
-        if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
-            // if the step number is ahead of local nodes vdf steps
-            if global_step_number < proposed_ff_to_mining_seed.global_step {
-                debug!(
-                    "Fastforward Step {:?} with Seed {:?}",
-                    proposed_ff_to_mining_seed.global_step, proposed_ff_to_mining_seed.seed
-                );
-                hash = proposed_ff_to_mining_seed.seed.0;
-                global_step_number = proposed_ff_to_mining_seed.global_step;
-            } else {
-                debug!(
-                    "Fastforward Step {} is not ahead of {}",
-                    proposed_ff_to_mining_seed.global_step, global_step_number
-                );
+        match new_seed_listener.try_recv() {
+            Ok(proposed_ff_to_mining_seed) => {
+                // if the step number is ahead of local nodes vdf steps
+                if global_step_number < proposed_ff_to_mining_seed.global_step {
+                    tracing::error!(
+                        "Fastforward Step {:?} with Seed {:?}",
+                        proposed_ff_to_mining_seed.global_step,
+                        proposed_ff_to_mining_seed.seed
+                    );
+                    hash = proposed_ff_to_mining_seed.seed.0;
+                    global_step_number = proposed_ff_to_mining_seed.global_step;
+                } else {
+                    tracing::error!(
+                        "Fastforward Step {} is not ahead of {}",
+                        proposed_ff_to_mining_seed.global_step,
+                        global_step_number
+                    );
+                }
+                //continue so we immediately check again for an additional fast forward
+                tracing::error!("FF: CONTINUE");
+                continue;
             }
-            //continue so we immediately check again for an additional fast forward
-            continue;
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                tracing::error!("FF: EMPTY");
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                tracing::error!("FF: BREAK");
+                break;
+            }
         }
 
         let now = Instant::now();
