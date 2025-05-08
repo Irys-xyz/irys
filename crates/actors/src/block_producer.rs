@@ -15,9 +15,9 @@ use irys_reth_node_bridge::{adapter::node::RethNodeContext, node::RethNodeProvid
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, Base64, Config, DataTransactionLedger, H256List,
-    IngressProofsList, IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData,
-    Signature, SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
+    next_cumulative_diff, Base64, Config, DataTransactionLedger, H256List, IngressProofsList,
+    IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData, Signature,
+    SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use nodit::interval::ii;
@@ -386,7 +386,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 prev_block_header.timestamp.saturating_div(1000),
                 current_timestamp.saturating_div(1000)
             )?;
-       
+
             // build a new block header
             let mut irys_block = IrysBlockHeader {
                 block_hash,
