@@ -1,4 +1,4 @@
-use crate::{api::post_commitment_tx_request, utils::IrysNodeTest};
+use crate::{api::post_commitment_tx_request, utils::*};
 use actix_web::{middleware::Logger, App};
 use alloy_core::primitives::U256;
 use assert_matches::assert_matches;
@@ -335,19 +335,35 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
     validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
 
-    // ===== TODO: Future Test Extension =====
-    // TODO: Waiting for node restart support in master
+    // Waiting a little so the restart will succeed
+    tokio::time::sleep(Duration::from_secs(4)).await;
 
-    // // Restart the node
-    // let node = node.stop().await.start().await;
+    // Restart the node
+    info!("Restarting node");
+    let restarted_node = node.stop().await.start().await;
 
-    // // Verify the partition assignments persist
-    // validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
-    // validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
-    // validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
+    // Get access to commitment and partition services for verification
+    let epoch_service = restarted_node
+        .node_ctx
+        .actor_addresses
+        .epoch_service
+        .clone();
+    let commitment_state_guard = epoch_service
+        .send(GetCommitmentStateGuardMessage)
+        .await
+        .unwrap();
+    let pa_guard = epoch_service
+        .send(GetPartitionAssignmentsGuardMessage)
+        .await
+        .unwrap();
+
+    // Verify the partition assignments persist
+    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
+    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
+    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
 
     // ===== TEST CLEANUP =====
-    node.node_ctx.stop().await;
+    restarted_node.node_ctx.stop().await;
     Ok(())
 }
 
