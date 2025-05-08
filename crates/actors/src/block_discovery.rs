@@ -234,6 +234,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         let ema_service_sender = self.service_senders.ema.clone();
         let commitment_cache_sender = self.service_senders.commitment_cache.clone();
         let block_header: IrysBlockHeader = (*new_block_header).clone();
+        let block_header_clone: IrysBlockHeader = (*new_block_header).clone();
         let epoch_service = self.epoch_service.clone();
         let epoch_config = self.config.consensus.epoch.clone();
 
@@ -378,7 +379,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     Ok(())
                 }
                 Err(err) => {
-                    tracing::error!("Block validation error {:?}", err);
+                    tracing::error!(
+                        "Block (height: {}) validation error {:?}",
+                        block_header_clone.height,
+                        err
+                    );
                     Err(eyre::eyre!("Block validation error {:?}", err))
                 }
             }

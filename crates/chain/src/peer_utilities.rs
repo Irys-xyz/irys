@@ -165,7 +165,7 @@ pub async fn fetch_block(
             if response.status().is_success() {
                 match response.json::<CombinedBlockHeader>().await {
                     Ok(block) => {
-                        info!("Got block from {}", &url);
+                        error!("Got block from {}", &url);
                         let irys_block_header = block.irys.clone();
                         Some(irys_block_header)
                     }
@@ -301,6 +301,27 @@ pub async fn sync_state_from_peers(
             fast_forward_vdf_steps_from_block(block.vdf_limiter_info.clone(), vdf_sender.clone())
                 .await;
 
+            tracing::error!("-----------------------------------------------------");
+            {
+                let vdf_steps_guard = vdf_service_addr.send(GetVdfStateMessage).await.unwrap();
+                tracing::error!(
+                    "CHECKING {} < {}",
+                    block.vdf_limiter_info.global_step_number,
+                    vdf_steps_guard.read().global_step
+                );
+                while block.vdf_limiter_info.global_step_number > vdf_steps_guard.read().global_step
+                {
+                    // wait a second for vdf to process those fast forward steps
+                    // TODO it would be better to check the current global step and wait until it is high enough for the block
+                    tracing::error!(
+                        "WAITING 1 SECOND while {} < {}",
+                        block.vdf_limiter_info.global_step_number,
+                        vdf_steps_guard.read().global_step
+                    );
+                    tokio::time::sleep(Duration::from_millis(1000)).await;
+                }
+            }
+
             // allow block to be discovered by block discovery actor
             if let Err(e) = block_discovery_addr
                 .send(BlockDiscoveredMessage(block.clone()))
@@ -313,6 +334,8 @@ pub async fn sync_state_from_peers(
                     block.clone().evm_block_hash,
                 );
             }
+        } else {
+            error!("Irys block did not fetch during sync process!");
         }
     }
 
