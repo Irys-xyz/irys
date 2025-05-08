@@ -66,7 +66,6 @@ use reth_db::Database as _;
 use std::{
     fs,
     net::TcpListener,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::atomic::AtomicU64,
     sync::{Arc, RwLock},
@@ -183,16 +182,33 @@ async fn start_reth_node(
     latest_block: u64,
     random_ports: bool,
 ) -> eyre::Result<NodeExitReason> {
-    let node_handle = irys_reth_node_bridge::node::run_node(
-        Arc::new(chainspec),
-        task_executor,
+    let node_handle = match irys_reth_node_bridge::node::run_node(
+        Arc::new(chainspec.clone()),
+        task_executor.clone(),
         config.node_config.clone(),
-        irys_provider,
+        irys_provider.clone(),
         latest_block,
         random_ports,
     )
     .await
-    .expect("expected reth node to have started");
+    {
+        Ok(handle) => handle,
+        Err(e) => {
+            error!("Restarting reth thread - reason: {:?}", &e);
+            // One retry attempt
+            irys_reth_node_bridge::node::run_node(
+                Arc::new(chainspec.clone()),
+                task_executor.clone(),
+                config.node_config.clone(),
+                irys_provider.clone(),
+                latest_block,
+                random_ports,
+            )
+            .await
+            .expect("expected reth node to have started")
+        }
+    };
+
     debug!("Reth node started");
 
     sender.send(node_handle.node.clone()).map_err(|e| {
@@ -217,10 +233,11 @@ impl IrysNode {
     /// Creates a new node builder instance.
     pub async fn new(mut node_config: NodeConfig) -> eyre::Result<Self> {
         // we create the listener here so we know the port before we start passing around `config`
-        let http_listener = create_listener(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            node_config.http.port,
-        ))?;
+        let http_listener = create_listener(
+            format!("{}:{}", &node_config.http.bind_ip, &node_config.http.port)
+                .parse()
+                .expect("A valid HTTP IP & port"),
+        )?;
         let local_addr = http_listener
             .local_addr()
             .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
@@ -258,7 +275,9 @@ impl IrysNode {
 
         // figure out the init mode
         let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
-        let data_exists = Self::blockchain_data_exists(&self.config.node_config.base_directory);
+        // this is so we can "preload" a .irys_submodules.toml file in the data dir for manual testing
+        let data_exists =
+            Self::blockchain_data_exists(&self.config.node_config.irys_consensus_data_dir());
 
         error!("Data exists: {}", data_exists);
         // note: if you need the genesis header later, you can easily make this match block return it
