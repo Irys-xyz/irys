@@ -1,5 +1,3 @@
-use std::{collections::HashMap, time::Duration};
-
 use alloy_consensus::TxEnvelope;
 use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind, B256};
 use alloy_eips::eip2718::Encodable2718;
@@ -14,6 +12,7 @@ use reth_primitives::{
     irys_primitives::{IrysTxId, ShadowResult, ShadowTxType},
     GenesisAccount,
 };
+use std::{collections::HashMap, time::Duration};
 use tokio::time::sleep;
 use tracing::info;
 
@@ -218,14 +217,17 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .rpc
         .get_balance(mining_signer_addr, None)
         .await?;
-    let recipient_init_balance = reth_context.rpc.get_balance(recipient, None).await?;
+    let recipient_init_balance = reth_context
+        .rpc
+        .get_balance(recipient.address(), None)
+        .await?;
 
     let mut irys_txs: HashMap<IrysTxId, IrysTransaction> = HashMap::new();
     let mut evm_txs: HashMap<B256, TxEnvelope> = HashMap::new();
     for (i, a) in [(1, &account1), (2, &account2), (3, &account3)] {
         let es: LocalSigner<SigningKey> = a.clone().into();
         let evm_tx_req = TransactionRequest {
-            to: Some(TxKind::Call(recipient)),
+            to: Some(TxKind::Call(recipient.address())),
             max_fee_per_gas: Some(20e9 as u128),
             max_priority_fee_per_gas: Some(20e9 as u128),
             gas: Some(21000),
@@ -291,7 +293,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 assert_eq!(receipt.result, ShadowResult::Success);
                 block_reward = block_reward_shadow.reward;
             }
-            ShadowTxType::Data(data_shadow) => {
+            ShadowTxType::Data(_data_shadow) => {
                 let og_tx = irys_txs.get(&receipt.tx_id).unwrap();
                 assert_eq!(receipt.result, ShadowResult::Success);
                 assert_ne!(og_tx.header.signer, account1.address()); // account1 has no funds
@@ -311,7 +313,10 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     assert!(evm_txs.contains_key(&reth_block.body.transactions.first().unwrap().hash()));
     assert_eq!(
-        reth_context.rpc.get_balance(recipient, None).await?,
+        reth_context
+            .rpc
+            .get_balance(recipient.address(), None)
+            .await?,
         recipient_init_balance + U256::from(1)
     );
     // check irys DB for built block
@@ -322,7 +327,10 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // assert that the miner got the block reward fee
     assert_ne!(block_reward, U256::from(0));
     assert_eq!(
-        reth_context.rpc.get_balance(recipient, None).await?,
+        reth_context
+            .rpc
+            .get_balance(recipient.address(), None)
+            .await?,
         miner_init_balance + block_reward
     );
 
@@ -330,25 +338,71 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     Ok(())
 }
 
-// #[tokio::test]
-async fn heavy_rewrds_get_calculated_correctly() -> eyre::Result<()> {
+#[tokio::test]
+async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().await.start().await;
-
-    node.node_ctx.actor_addresses.start_mining()?;
     let reth_context = RethNodeContext::new(node.node_ctx.reth_handle.clone().into()).await?;
 
-    for i in 0..3 {
-        let (block, _) = mine_block(&node.node_ctx)
+    let mut prev_ts: Option<u128> = None;
+    let reward_address = node.node_ctx.config.node_config.reward_address;
+    let mut init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+    for iteration in 0..3 {
+        // mine a single block
+        let (block, reth_exec_env) = mine_block(&node.node_ctx)
             .await?
             .ok_or_eyre("block was not mined")?;
-        let expected_rewrd = node
-            .node_ctx
-            .reward_curve
-            .reward_between(prev_ts, new_ts)
-            .unwrap();
 
-        // check that the bolck was correctly miened
+        // obtain the EVM timestamp for this block from Reth
+        let reth_block = reth_context
+            .inner
+            .provider
+            .block_by_hash(block.evm_block_hash)?
+            .unwrap();
+        let new_ts = reth_block.header.timestamp as u128;
+
+        // on every block *after* genesis, validate the reward shadow
+        if let Some(old_ts) = prev_ts {
+            // expected reward according to the protocol’s reward curve
+            let expected_reward = node
+                .node_ctx
+                .reward_curve
+                .reward_between(old_ts, new_ts)
+                .unwrap();
+
+            // find the BlockReward shadow receipt and check correctness
+            let mut reward_shadow_found = false;
+            for receipt in reth_exec_env.shadow_receipts {
+                if let ShadowTxType::BlockReward(br_shadow) = receipt.tx_type {
+                    let expected_new_balance = init_balance + br_shadow.reward;
+                    let new_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+                    assert_eq!(new_balance, expected_new_balance);
+                    assert_eq!(
+                        receipt.result,
+                        ShadowResult::Success,
+                        "block-reward shadow must succeed"
+                    );
+                    assert_eq!(
+                        br_shadow.reward,
+                        expected_reward.amount.into(),
+                        "incorrect block-reward amount recorded in shadow"
+                    );
+                    reward_shadow_found = true;
+                    break;
+                }
+            }
+            assert!(
+                reward_shadow_found,
+                "BlockReward shadow transaction not found in receipts"
+            );
+        }
+
+        // update baseline timestamp and ensure the next block gets a later one
+        prev_ts = Some(new_ts);
+        init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+        sleep(Duration::from_millis(1_500)).await;
     }
+
+    assert!(prev_ts.is_some());
     node.stop().await;
     Ok(())
 }

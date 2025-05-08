@@ -125,6 +125,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             vdf_steps_guard,
             block_tree_guard,
             price_oracle,
+            reward_curve,
             ..
         } = self.clone();
 
@@ -464,7 +465,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                             fee: alloy_primitives::U256::ZERO,
                             address: irys_block.reward_address,
                             tx: ShadowTxType::BlockReward(BlockRewardShadow {
-                                reward: alloy_primitives::U256::from_le_bytes(irys_block.reward_amount.to_le_bytes()),
+                                reward: irys_block.reward_amount.into(),
                             })
                         },
                     ]);
