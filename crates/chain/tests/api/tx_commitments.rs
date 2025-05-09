@@ -211,132 +211,136 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         ),
     ]);
 
-    // Start a test node with custom configuration
-    let node = IrysNodeTest::new_genesis(config.clone())
-        .await
-        .start()
+    let genesis_signer = config.miner_address();
+
+    let node = {
+        // Start a test node with custom configuration
+        let node = IrysNodeTest::new_genesis(config.clone())
+            .await
+            .start()
+            .await;
+
+        let uri = format!(
+            "http://127.0.0.1:{}",
+            node.node_ctx.config.node_config.http.port
+        );
+
+        // Initialize blockchain components
+        wait_for_packing(
+            node.node_ctx.actor_addresses.packing.clone(),
+            Some(Duration::from_secs(10)),
+        )
+        .await?;
+        node.node_ctx.actor_addresses.start_mining().unwrap();
+
+        // Initialize API for submitting commitment transactions
+        let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
+        let api_state = node.node_ctx.get_api_state(ema_tx);
+
+        let _app = actix_web::test::init_service(
+            App::new()
+                .wrap(Logger::default())
+                .app_data(actix_web::web::Data::new(api_state))
+                .service(routes()),
+        )
         .await;
 
-    let uri = format!(
-        "http://127.0.0.1:{}",
-        node.node_ctx.config.node_config.http.port
-    );
+        // Get access to commitment and partition services for verification
+        let epoch_service = node.node_ctx.actor_addresses.epoch_service.clone();
+        let commitment_state_guard = epoch_service
+            .send(GetCommitmentStateGuardMessage)
+            .await
+            .unwrap();
+        let pa_guard = epoch_service
+            .send(GetPartitionAssignmentsGuardMessage)
+            .await
+            .unwrap();
 
-    // Initialize blockchain components
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
-    node.node_ctx.actor_addresses.start_mining().unwrap();
+        // ===== PHASE 1: Verify Genesis Block Initialization =====
+        // Check that the genesis block producer has the expected initial pledges
 
-    // Initialize API for submitting commitment transactions
-    let (ema_tx, _ema_rx) = tokio::sync::mpsc::unbounded_channel();
-    let api_state = node.node_ctx.get_api_state(ema_tx);
+        let commitment_state = commitment_state_guard.read();
+        let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
+        if let Some(pledges) = pledges {
+            assert_eq!(
+                pledges.len(),
+                3,
+                "Genesis miner should have exactly 3 pledges"
+            );
+        } else {
+            panic!("Expected genesis miner to have pledges!");
+        }
+        drop(commitment_state); // Release lock to allow node operations
 
-    let _app = actix_web::test::init_service(
-        App::new()
-            .wrap(Logger::default())
-            .app_data(actix_web::web::Data::new(api_state))
-            .service(routes()),
-    )
-    .await;
+        // ===== PHASE 2: First Epoch - Create Commitments =====
+        // Create stake commitment for first test signer
+        post_stake_commitment(&uri, &signer1).await;
 
-    // Get access to commitment and partition services for verification
-    let epoch_service = node.node_ctx.actor_addresses.epoch_service.clone();
-    let commitment_state_guard = epoch_service
-        .send(GetCommitmentStateGuardMessage)
-        .await
-        .unwrap();
-    let pa_guard = epoch_service
-        .send(GetPartitionAssignmentsGuardMessage)
-        .await
-        .unwrap();
+        // Create two pledge commitments for first test signer
+        let anchor = post_pledge_commitment(&uri, &signer1, H256::default())
+            .await
+            .id;
+        post_pledge_commitment(&uri, &signer1, anchor).await;
 
-    // ===== PHASE 1: Verify Genesis Block Initialization =====
-    // Check that the genesis block producer has the expected initial pledges
-    let genesis_signer = node.node_ctx.config.node_config.miner_address();
+        // Create stake commitment for second test signer
+        post_stake_commitment(&uri, &signer2).await;
 
-    let commitment_state = commitment_state_guard.read();
-    let pledges = commitment_state.pledge_commitments.get(&genesis_signer);
-    if let Some(pledges) = pledges {
+        // Mine enough blocks to reach the first epoch boundary
+        info!("MINE FIRST EPOCH BLOCK:");
+        node.mine_blocks(num_blocks_in_epoch).await.unwrap();
+
+        // ===== PHASE 3: Verify First Epoch Assignments =====
+        // Verify that all pledges have been assigned partitions
+        validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
+        validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
+
+        // Verify commitment state contains expected pledges and stakes
+        let commitment_state = commitment_state_guard.read();
+
+        // Check genesis miner pledges
+        let pledges = commitment_state
+            .pledge_commitments
+            .get(&genesis_signer)
+            .expect("Expected genesis miner pledges!");
         assert_eq!(
             pledges.len(),
             3,
-            "Genesis miner should have exactly 3 pledges"
+            "Genesis miner should still have 3 pledges after first epoch"
         );
-    } else {
-        panic!("Expected genesis miner to have pledges!");
-    }
-    drop(commitment_state); // Release lock to allow node operations
 
-    // ===== PHASE 2: First Epoch - Create Commitments =====
-    // Create stake commitment for first test signer
-    post_stake_commitment(&uri, &signer1).await;
+        // Check signer1 pledges and stake
+        let pledges = commitment_state
+            .pledge_commitments
+            .get(&signer1.address())
+            .expect("Expected signer1 miner pledges!");
+        assert_eq!(
+            pledges.len(),
+            2,
+            "Signer1 should have 2 pledges after first epoch"
+        );
 
-    // Create two pledge commitments for first test signer
-    let anchor = post_pledge_commitment(&uri, &signer1, H256::default())
-        .await
-        .id;
-    post_pledge_commitment(&uri, &signer1, anchor).await;
+        let stake = commitment_state.stake_commitments.get(&signer1.address());
+        assert_matches!(stake, Some(_), "Signer1 should have a stake commitment");
+        drop(commitment_state);
 
-    // Create stake commitment for second test signer
-    post_stake_commitment(&uri, &signer2).await;
+        // ===== PHASE 4: Second Epoch - Add More Commitments =====
+        // Create pledge for second test signer
+        post_pledge_commitment(&uri, &signer2, H256::default()).await;
 
-    // Mine enough blocks to reach the first epoch boundary
-    info!("MINE FIRST EPOCH BLOCK:");
-    node.mine_blocks(num_blocks_in_epoch).await.unwrap();
+        // Mine enough blocks to reach the second epoch boundary
+        info!("MINE SECOND EPOCH BLOCK:");
+        node.mine_blocks(num_blocks_in_epoch).await.unwrap();
 
-    // ===== PHASE 3: Verify First Epoch Assignments =====
-    // Verify that all pledges have been assigned partitions
-    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
-    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
+        node.mine_blocks(4).await.unwrap();
 
-    // Verify commitment state contains expected pledges and stakes
-    let commitment_state = commitment_state_guard.read();
+        // ===== PHASE 5: Verify Second Epoch Assignments =====
+        // Verify all signers have proper partition assignments for all pledges
+        validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
+        validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
+        validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
 
-    // Check genesis miner pledges
-    let pledges = commitment_state
-        .pledge_commitments
-        .get(&genesis_signer)
-        .expect("Expected genesis miner pledges!");
-    assert_eq!(
-        pledges.len(),
-        3,
-        "Genesis miner should still have 3 pledges after first epoch"
-    );
-
-    // Check signer1 pledges and stake
-    let pledges = commitment_state
-        .pledge_commitments
-        .get(&signer1.address())
-        .expect("Expected signer1 miner pledges!");
-    assert_eq!(
-        pledges.len(),
-        2,
-        "Signer1 should have 2 pledges after first epoch"
-    );
-
-    let stake = commitment_state.stake_commitments.get(&signer1.address());
-    assert_matches!(stake, Some(_), "Signer1 should have a stake commitment");
-    drop(commitment_state);
-
-    // ===== PHASE 4: Second Epoch - Add More Commitments =====
-    // Create pledge for second test signer
-    post_pledge_commitment(&uri, &signer2, H256::default()).await;
-
-    // Mine enough blocks to reach the second epoch boundary
-    info!("MINE SECOND EPOCH BLOCK:");
-    node.mine_blocks(num_blocks_in_epoch).await.unwrap();
-
-    // ===== PHASE 5: Verify Second Epoch Assignments =====
-    // Verify all signers have proper partition assignments for all pledges
-    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
-    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
-    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
-
-    // Waiting a little so the restart will succeed
-    tokio::time::sleep(Duration::from_secs(4)).await;
+        node
+    };
 
     // Restart the node
     info!("Restarting node");
@@ -366,7 +370,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     restarted_node.node_ctx.stop().await;
     Ok(())
 }
-
 async fn post_stake_commitment(uri: &str, signer: &IrysSigner) {
     let stake_tx = CommitmentTransaction {
         commitment_type: CommitmentType::Stake,
