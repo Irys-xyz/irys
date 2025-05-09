@@ -153,6 +153,7 @@ pub enum AddTxError {
     Mailbox(MailboxError),
 }
 
+// TODO: add an "name" field for debug logging
 pub struct IrysNodeTest<T = ()> {
     pub node_ctx: T,
     pub cfg: NodeConfig,
@@ -171,6 +172,7 @@ impl IrysNodeTest<()> {
         Self::new_inner(config).await
     }
 
+    /// Start a new test node in genesis mode
     pub async fn new_genesis(mut config: NodeConfig) -> Self {
         config.mode = NodeMode::Genesis;
         Self::new_inner(config).await
@@ -409,11 +411,15 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 }
 
-pub async fn mine_blocks(node_ctx: &IrysNodeCtx, blocks: usize) -> eyre::Result<()> {
+pub async fn mine_blocks(
+    node_ctx: &IrysNodeCtx,
+    blocks: usize,
+) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, ExecutionPayloadEnvelopeV1Irys)>> {
+    let mut results = Vec::with_capacity(blocks);
     for _ in 0..blocks {
-        mine_block(node_ctx).await?.unwrap();
+        results.push(mine_block(node_ctx).await?.unwrap());
     }
-    Ok(())
+    Ok(results)
 }
 
 pub async fn mine_block(

@@ -100,7 +100,7 @@ impl PackingActor {
             let next_range = match front {
                 Some(v) => v,
                 None => {
-                    debug!("no packing requests in queue, sleeping...");
+                    // debug!("no packing requests in queue, sleeping...");
                     tokio::time::sleep(self.config.poll_duration).await;
                     continue;
                 }

@@ -7,7 +7,9 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
 use irys_database::{database, DataLedger};
-use irys_types::{u64_stringify, CommitmentTransaction, IrysTransactionHeader, H256};
+use irys_types::{
+    u64_stringify, CommitmentTransaction, IrysTransactionHeader, IrysTransactionResponse, H256,
+};
 use reth_db::Database;
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -48,7 +50,7 @@ pub async fn post_tx(
                     .body(format!("Failed to deliver transaction: {:?}", err)))
             }
             TxIngressError::InvalidAnchor => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                .body(format!("Invalid Signature: {:?}", err))),
+                .body(format!("Invalid Anchor: {:?}", err))),
             TxIngressError::DatabaseError => {
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal database error: {:?}", err)))
@@ -64,20 +66,10 @@ pub async fn post_tx(
     Ok(HttpResponse::Ok().finish())
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum IrysTransaction {
-    #[serde(rename = "commitment")]
-    Commitment(CommitmentTransaction),
-
-    #[serde(rename = "storage")]
-    Storage(IrysTransactionHeader),
-}
-
 pub async fn get_transaction_api(
     state: web::Data<ApiState>,
     path: web::Path<H256>,
-) -> Result<Json<IrysTransaction>, ApiError> {
+) -> Result<Json<IrysTransactionResponse>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx by tx_id: {}", tx_id);
     get_transaction(&state, tx_id).map(web::Json)
@@ -124,12 +116,12 @@ pub fn get_commitment_transaction(
 pub fn get_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
-) -> Result<IrysTransaction, ApiError> {
+) -> Result<IrysTransactionResponse, ApiError> {
     get_storage_transaction(state, tx_id)
-        .map(IrysTransaction::Storage)
+        .map(IrysTransactionResponse::Storage)
         .or_else(|err| match err {
             ApiError::ErrNoId { .. } => {
-                get_commitment_transaction(state, tx_id).map(IrysTransaction::Commitment)
+                get_commitment_transaction(state, tx_id).map(IrysTransactionResponse::Commitment)
             }
             other => Err(other),
         })

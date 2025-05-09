@@ -10,7 +10,7 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::ema_service::EmaServiceMessage;
-use irys_actors::peer_list_service::{KnownPeersRequest, PeerListService};
+use irys_actors::peer_list_service::PeerListServiceFacade;
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,
@@ -18,6 +18,7 @@ use irys_actors::{
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
+use routes::commitment;
 use routes::{
     block, block_index, get_chunk, index, network_config, peer_list, post_chunk, post_version,
     price, proxy::proxy, tx,
@@ -32,7 +33,7 @@ pub struct ApiState {
     pub mempool: Addr<MempoolService>,
     pub chunk_provider: Arc<ChunkProvider>,
     pub ema_service: UnboundedSender<EmaServiceMessage>,
-    pub peer_list: Addr<PeerListService>,
+    pub peer_list: PeerListServiceFacade,
     pub db: DatabaseProvider,
     pub config: Config,
     // TODO: slim this down to what we actually use - beware the types!
@@ -45,7 +46,7 @@ pub struct ApiState {
 impl ApiState {
     pub async fn get_known_peers(&self) -> eyre::Result<Vec<PeerAddress>> {
         self.peer_list
-            .send(KnownPeersRequest)
+            .all_known_peers()
             .await
             .map_err(|mailbox_err| eyre::eyre!("Failed to get known peers: {}", mailbox_err))
     }
@@ -57,6 +58,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route(
             "/block_index",
             web::get().to(block_index::block_index_route),
+        )
+        .route(
+            "/commitment_tx",
+            web::post().to(commitment::post_commitment_tx),
         )
         .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route(

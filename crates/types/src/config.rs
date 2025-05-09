@@ -4,7 +4,7 @@ use crate::{
         phantoms::{CostPerGb, DecayRate, IrysPrice, Percentage, Usd},
         Amount,
     },
-    PeerAddress,
+    PeerAddress, RethPeerInfo,
 };
 use alloy_primitives::Address;
 use reth_chainspec::Chain;
@@ -62,6 +62,9 @@ pub struct ConsensusConfig {
 
     /// Reth chain spec for the reth genesis
     pub reth: RethChainSpec,
+
+    /// Settings for the transaction memory pool
+    pub mempool: MempoolConfig,
 
     /// Controls how mining difficulty adjusts over time
     pub difficulty_adjustment: DifficultyAdjustmentConfig,
@@ -162,9 +165,6 @@ pub struct NodeConfig {
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
 
-    /// Settings for the transaction memory pool
-    pub mempool: MempoolConfig,
-
     /// Settings for the price oracle system
     pub oracle: OracleConfig,
 
@@ -193,6 +193,9 @@ pub struct NodeConfig {
 
     /// HTTP API server configuration
     pub http: HttpConfig,
+
+    /// Reth settings
+    pub reth_peer_info: RethPeerInfo,
 }
 
 impl Into<Config> for NodeConfig {
@@ -236,6 +239,10 @@ impl ConsensusOptions {
     ) {
         let config = self.get_mut();
         config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
+    }
+
+    pub fn set_num_blocks_in_epoch(&mut self, num_blocks: usize) {
+        self.get_mut().epoch.num_blocks_in_epoch = num_blocks as u64;
     }
 
     pub fn get_mut(&mut self) -> &mut ConsensusConfig {
@@ -394,6 +401,8 @@ pub struct CacheConfig {
 /// Settings for the node's HTTP server that provides API access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpConfig {
+    /// The IP address the HTTP service binds to
+    pub bind_ip: String,
     /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
     pub port: u16,
 }
@@ -440,6 +449,10 @@ impl ConsensusConfig {
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
+            mempool: MempoolConfig {
+                max_data_txs_per_block: 100,
+                anchor_expiry_depth: 10,
+            },
             vdf: VdfConfig {
                 reset_frequency: 10 * 120,
                 parallel_verification_thread_limit: 4,
@@ -531,23 +544,14 @@ impl NodeConfig {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn testnet() -> Self {
-        use std::{net::SocketAddr, str::FromStr};
-
         use k256::ecdsa::SigningKey;
         use rust_decimal_macros::dec;
 
         Self {
             mode: NodeMode::Genesis,
-            trusted_peers: vec![PeerAddress {
-                gossip: SocketAddr::from_str("127.0.0.1:8081").unwrap(),
-                api: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
-            }],
             consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
             base_directory: default_irys_path(),
-            mempool: MempoolConfig {
-                max_data_txs_per_block: 100,
-                anchor_expiry_depth: 10,
-            },
+
             oracle: OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
                 percent_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
@@ -561,6 +565,11 @@ impl NodeConfig {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
             },
+            trusted_peers: vec![PeerAddress {
+                api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+                gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+                execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
+            }],
             pricing: PricingConfig {
                 fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
             },
@@ -573,7 +582,11 @@ impl NodeConfig {
                 gpu_packing_batch_size: 1024,
             },
             cache: CacheConfig { cache_clean_lag: 2 },
-            http: HttpConfig { port: 0 },
+            http: HttpConfig {
+                bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                port: 0,
+            },
+            reth_peer_info: RethPeerInfo::default(),
         }
     }
 
@@ -776,6 +789,10 @@ mod tests {
 
         [ema]
         price_adjustment_interval = 10
+
+        [mempool]
+        max_data_txs_per_block = 100
+        anchor_expiry_depth = 10
         "#;
 
         // Create the expected config
@@ -795,6 +812,27 @@ mod tests {
     #[test]
     fn test_deserialize_config_from_toml() {
         let toml_data = r#"
+        max_data_txs_per_block = 20
+        chunk_size = 262144
+        num_chunks_in_partition = 10
+        num_chunks_in_recall_range = 2
+        num_partitions_per_slot = 1
+        num_writes_before_sync = 5
+        reset_state_on_restart = false
+        chunk_migration_depth = 1
+        num_capacity_partitions = 16
+        anchor_expiry_depth = 10
+        genesis_price_valid_for_n_epochs = 2
+        genesis_token_price = "1.0"
+        token_price_safe_range = "0.25"
+        price_adjustment_interval = 10
+        cpu_packing_concurrency = 4
+        gpu_packing_batch_size = 1024
+        annual_cost_per_gb = "0.01"
+        decay_rate = "0.01"
+        fee_percentage = "0.05"
+        safe_minimum_number_of_years = 200
+        number_of_ingress_proofs = 10
         mode = "Genesis"
         base_directory = "~/.tmp/.irys"
         consensus = "Testnet"
@@ -803,10 +841,12 @@ mod tests {
         [[trusted_peers]]
         gossip = "127.0.0.1:8081"
         api = "127.0.0.1:8080"
+      
+        [trusted_peers.execution]
+        peering_tcp_addr = "127.0.0.1:30303"
+        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
-        [mempool]
-        max_data_txs_per_block = 100
-        anchor_expiry_depth = 10
+
 
         [oracle]
         type = "mock"
@@ -824,6 +864,10 @@ mod tests {
         bind_ip = "127.0.0.1"
         port = 0
 
+        [reth_peer_info]
+        peering_tcp_addr = "0.0.0.0:0"
+        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
         [packing]
         cpu_packing_concurrency = 4
         gpu_packing_batch_size = 1024
@@ -832,12 +876,17 @@ mod tests {
         cache_clean_lag = 2
 
         [http]
+        bind_ip = "127.0.0.1"
         port = 0
         "#;
         // Create the expected config
         let mut expected_config = NodeConfig::testnet();
         expected_config.consensus = ConsensusOptions::Testnet;
         expected_config.base_directory = PathBuf::from("~/.tmp/.irys");
+        expected_config.trusted_peers.get_mut(0).unwrap().execution = RethPeerInfo {
+            peering_tcp_addr: "127.0.0.1:30303".parse().unwrap(),
+            peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
+        };
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
         // for debugging purposes
         println!("{}", expected_toml_data);
@@ -848,5 +897,13 @@ mod tests {
 
         // Assert the entire struct matches
         assert_eq!(config, expected_config);
+    }
+
+    #[test]
+    fn test_roundtrip_toml_serdes() {
+        let cfg = NodeConfig::testnet();
+        let enc = toml::to_string_pretty(&cfg).unwrap();
+        let dec: NodeConfig = toml::from_str(&enc).unwrap();
+        assert_eq!(cfg, dec);
     }
 }

@@ -1,3 +1,4 @@
+pub mod block_pool_service;
 pub mod cache;
 pub mod client;
 pub mod server;

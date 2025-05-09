@@ -1,10 +1,15 @@
+use actix_http::StatusCode;
+use base58::ToBase58;
 use irys_database::DataLedger;
+use irys_types::CommitmentTransaction;
+use tracing::info;
 
 mod api;
 mod client;
 mod external_api;
 mod pricing_endpoint;
 mod tx;
+mod tx_commitments;
 
 pub async fn client_request(
     url: &str,
@@ -63,4 +68,34 @@ pub async fn version_endpoint_request(
     address: &str,
 ) -> awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>> {
     client_request(&format!("{}{}", &address, "/v1/version")).await
+}
+
+pub async fn post_commitment_tx_request(address: &str, commitment_tx: &CommitmentTransaction) {
+    info!("Posting Commitment TX: {}", commitment_tx.id.0.to_base58());
+
+    let client = awc::Client::default();
+    let mut response = client
+        .post(format!("{}/v1/commitment_tx", address))
+        .send_json(commitment_tx) // Send the commitment_tx as JSON in the request body
+        .await
+        .expect("client post failed");
+
+    if response.status() != StatusCode::OK {
+        // Read the response body
+        let body_bytes = response.body().await.expect("Failed to read response body");
+        let body_str = String::from_utf8_lossy(&body_bytes);
+
+        panic!(
+            "Response status: {} - {}\nRequest Body: {}",
+            response.status(),
+            body_str,
+            serde_json::to_string_pretty(&commitment_tx).unwrap(),
+        );
+    } else {
+        info!(
+            "Response status: {}\n{}",
+            response.status(),
+            serde_json::to_string_pretty(&commitment_tx).unwrap()
+        );
+    }
 }

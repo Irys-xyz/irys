@@ -120,10 +120,6 @@ impl IrysTransactionHeader {
         self.signature
             .validate_signature(self.signature_hash(), self.signer)
     }
-
-    pub fn total_fee(&self) -> u64 {
-        self.perm_fee.unwrap_or(0) + self.term_fee
-    }
 }
 
 /// Wrapper for the underlying IrysTransactionHeader fields, this wrapper
@@ -212,6 +208,10 @@ pub struct CommitmentTransaction {
     #[serde(with = "string_u64")]
     pub chain_id: u64,
 
+    /// Pay the fee required to mitigate tx spam
+    #[serde(with = "string_u64")]
+    pub fee: u64,
+
     /// Transaction signature bytes
     #[rlp(skip)]
     #[rlp(default)]
@@ -237,6 +237,49 @@ impl CommitmentTransaction {
     pub fn is_signature_valid(&self) -> bool {
         self.signature
             .validate_signature(self.signature_hash(), self.signer)
+    }
+}
+
+// Trait to abstract common behavior
+pub trait IrysTransactionCommon {
+    fn is_signature_valid(&self) -> bool;
+    fn id(&self) -> IrysTransactionId;
+    fn total_fee(&self) -> u64;
+    fn signer(&self) -> Address;
+}
+
+impl IrysTransactionCommon for IrysTransactionHeader {
+    fn is_signature_valid(&self) -> bool {
+        self.is_signature_valid()
+    }
+
+    fn id(&self) -> IrysTransactionId {
+        self.id
+    }
+
+    fn total_fee(&self) -> u64 {
+        self.perm_fee.unwrap_or(0) + self.term_fee
+    }
+
+    fn signer(&self) -> Address {
+        self.signer
+    }
+}
+
+impl IrysTransactionCommon for CommitmentTransaction {
+    fn is_signature_valid(&self) -> bool {
+        self.is_signature_valid()
+    }
+
+    fn id(&self) -> IrysTransactionId {
+        self.id
+    }
+
+    fn total_fee(&self) -> u64 {
+        self.fee
+    }
+    fn signer(&self) -> Address {
+        self.signer
     }
 }
 
@@ -401,9 +444,32 @@ mod tests {
             signer: Address::default(),
             commitment_type: CommitmentType::Stake,
             version: 0,
+            fee: 1,
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
         };
         original_header
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum IrysTransactionResponse {
+    #[serde(rename = "commitment")]
+    Commitment(CommitmentTransaction),
+
+    #[serde(rename = "storage")]
+    Storage(IrysTransactionHeader),
+}
+
+impl From<CommitmentTransaction> for IrysTransactionResponse {
+    fn from(tx: CommitmentTransaction) -> Self {
+        IrysTransactionResponse::Commitment(tx)
+    }
+}
+
+impl From<IrysTransactionHeader> for IrysTransactionResponse {
+    fn from(tx: IrysTransactionHeader) -> Self {
+        IrysTransactionResponse::Storage(tx)
     }
 }

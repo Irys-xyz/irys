@@ -7,7 +7,6 @@ use actix_web::{
     HttpResponse,
 };
 
-use irys_actors::peer_list_service::AddPeer;
 use irys_types::{
     parse_user_agent, AcceptedResponse, PeerListItem, PeerResponse, ProtocolVersion,
     RejectedResponse, RejectionReason, VersionRequest,
@@ -57,10 +56,7 @@ pub async fn post_version(
     if is_new_peer {
         if state
             .peer_list
-            .send(AddPeer {
-                mining_addr,
-                peer: peer_list_entry.clone(),
-            })
+            .add_peer(mining_addr, peer_list_entry)
             .await
             .is_err()
         {

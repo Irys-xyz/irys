@@ -1,24 +1,23 @@
 use actix::prelude::*;
+use irys_types::{block_production::Seed, H256List, H256};
 use nodit::{interval::ii, InclusiveInterval, Interval};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock, RwLockReadGuard},
     time::Duration,
 };
-
+use tokio::time::sleep;
 use tracing::{info, warn};
 
-use irys_types::{block_production::Seed, H256List, H256};
-
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
-
-use tokio::time::sleep;
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
     /// last global step stored
     pub global_step: u64,
-    pub max_seeds_num: usize,
+    /// maximum number of seeds to store in seeds VecDeque
+    pub capacity: usize,
+    /// stored seeds
     pub seeds: VecDeque<Seed>,
 }
 
@@ -27,12 +26,11 @@ impl VdfState {
         (self.global_step, self.seeds.back().cloned())
     }
 
-    /// Push new seed, and removing oldest one if is full
-    pub fn push_step(&mut self, seed: Seed) {
-        if self.seeds.len() >= self.max_seeds_num {
+    /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state
+    pub fn increment_step(&mut self, seed: Seed) {
+        if self.seeds.len() >= self.capacity {
             self.seeds.pop_front();
         }
-
         self.global_step += 1;
         self.seeds.push_back(seed);
         info!(
@@ -47,7 +45,10 @@ impl VdfState {
         let vdf_steps_len = self.seeds.len() as u64;
 
         let last_global_step = self.global_step;
-        let first_global_step = last_global_step - vdf_steps_len + 1;
+
+        // first available global step should be at least one.
+        // TODO: Should this instead panic! as something has gone very wrong?
+        let first_global_step = last_global_step.saturating_sub(vdf_steps_len) + 1;
 
         if first_global_step > last_global_step {
             return Err(eyre::eyre!("No steps stored!"));

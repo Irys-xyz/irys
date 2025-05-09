@@ -4,7 +4,7 @@ use crate::data_ledger::DataLedger;
 use actix::dev::MessageResponse;
 use base58::ToBase58;
 use eyre::Result;
-use irys_types::{NodeConfig, H256};
+use irys_types::{IrysBlockHeader, IrysTransactionHeader, NodeConfig, H256};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -83,6 +83,63 @@ impl BlockIndex {
         items_vec.push(block_index_item.clone());
         self.items = items_vec.into();
         Ok(())
+    }
+
+    pub fn push_block(
+        &mut self,
+        block: &IrysBlockHeader,
+        all_txs: &Vec<IrysTransactionHeader>,
+        chunk_size: u64,
+    ) -> eyre::Result<()> {
+        /// Inner function: Calculates the total number of full chunks needed to store transactions
+        /// Each transaction's data is padded to the next full chunk boundary
+        fn calculate_chunks_added(txs: &[IrysTransactionHeader], chunk_size: u64) -> u64 {
+            let bytes_added = txs.iter().fold(0, |acc, tx| {
+                acc + tx.data_size.div_ceil(chunk_size) * chunk_size
+            });
+
+            bytes_added / chunk_size
+        }
+
+        // Extract just the transactions referenced in the submit ledger
+        let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
+        let submit_txs = &all_txs[..submit_tx_count];
+
+        // Extract just the transactions referenced in the publish ledger
+        let publish_txs = &all_txs[submit_tx_count..];
+
+        // Calculate chunk counts for both ledger types
+        let sub_chunks_added = calculate_chunks_added(submit_txs, chunk_size);
+        let pub_chunks_added = calculate_chunks_added(publish_txs, chunk_size);
+
+        // Get previous ledger sizes or default to 0 for genesis
+        let (max_publish_chunks, max_submit_chunks) = if self.num_blocks() == 0 && block.height == 0
+        {
+            (0, sub_chunks_added)
+        } else {
+            let prev_block = self.get_item(block.height.saturating_sub(1)).unwrap();
+            (
+                prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
+                prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
+            )
+        };
+
+        let block_index_item = BlockIndexItem {
+            block_hash: block.block_hash,
+            num_ledgers: 2,
+            ledgers: vec![
+                LedgerIndexItem {
+                    max_chunk_offset: max_publish_chunks,
+                    tx_root: block.data_ledgers[DataLedger::Publish].tx_root,
+                },
+                LedgerIndexItem {
+                    max_chunk_offset: max_submit_chunks,
+                    tx_root: block.data_ledgers[DataLedger::Submit].tx_root,
+                },
+            ],
+        };
+
+        self.push_item(&block_index_item)
     }
 
     /// For a given byte offset in a ledger, what block was responsible for adding

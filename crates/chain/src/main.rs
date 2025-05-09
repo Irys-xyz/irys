@@ -1,10 +1,11 @@
-use std::path::PathBuf;
-
 use irys_chain::IrysNode;
 use irys_types::{NodeConfig, NodeMode};
-use reth_tracing::tracing_subscriber::util::SubscriberInitExt;
+use std::path::PathBuf;
+use tracing::{debug, info, warn};
 use tracing_error::ErrorLayer;
-use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
+use tracing_subscriber::{
+    layer::SubscriberExt, util::SubscriberInitExt as _, EnvFilter, Layer, Registry,
+};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> eyre::Result<()> {
@@ -14,13 +15,20 @@ async fn main() -> eyre::Result<()> {
 
     // load the config
     let config = std::env::var("CONFIG")
-        .unwrap_or_else(|_| "config.toml".to_owned())
-        .parse::<PathBuf>()
-        .expect("file path to be valid");
-    let mut config = std::fs::read_to_string(config)
-        .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
+        .map(|s| s.parse::<PathBuf>().expect("file path to be valid"))
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .expect("Unable to determine working dir, aborting")
+                .join("config.toml")
+        });
+
+    let mut config = std::fs::read_to_string(&config)
+        .map(|config_file| {
+            debug!("Loading config from {:?}", &config);
+            toml::from_str::<NodeConfig>(&config_file).expect("invalid config file")
+        })
         .unwrap_or_else(|err| {
-            tracing::warn!(
+            warn!(
                 ?err,
                 "config file not provided, defaulting to testnet config"
             );
@@ -34,15 +42,17 @@ async fn main() -> eyre::Result<()> {
     }
 
     // start the node
-    tracing::info!("starting the node");
+    info!("starting the node, mode: {:?}", &config.mode);
     let handle = IrysNode::new(config).await?.start().await?;
     handle.start_mining()?;
-
+    let reth_thread_handle = handle.reth_thread_handle.clone();
     // wait for the node to be shut down
     tokio::task::spawn_blocking(|| {
-        handle.reth_thread_handle.unwrap().join().unwrap();
+        reth_thread_handle.unwrap().join().unwrap();
     })
     .await?;
+
+    handle.stop().await;
 
     Ok(())
 }
