@@ -439,7 +439,6 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     tracing::debug!("txn we are looking for on genesis: {:?}", txn);
 
     // mine block on genesis
-    tracing::error!("MINE 1 BLOCK");
     ctx_genesis_node
         .mine_blocks(1)
         .await
