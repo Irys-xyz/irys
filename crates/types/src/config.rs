@@ -105,7 +105,7 @@ pub struct ConsensusConfig {
     pub vdf: VdfConfig,
 
     /// Configuration for block rewards
-    pub block_reward_config: BlockRewradConfig,
+    pub block_reward_config: BlockRewardConfig,
 
     /// Size of each data chunk in bytes
     pub chunk_size: u64,
@@ -141,7 +141,7 @@ pub struct ConsensusConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BlockRewradConfig {
+pub struct BlockRewardConfig {
     #[serde(
         deserialize_with = "serde_utils::token_amount",
         serialize_with = "serde_utils::serializes_token_amount"
@@ -456,7 +456,7 @@ impl ConsensusConfig {
         const DEFAULT_BLOCK_TIME: u64 = 1;
         const IRYS_TESTNET_CHAIN_ID: u64 = 1270;
 
-        // block rewrad params
+        // block reward params
         const HALF_LIFE_YEARS: u128 = 4;
         const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
         const INFLATION_CAP: u128 = 100_000_000;
@@ -537,7 +537,7 @@ impl ConsensusConfig {
                     ..Default::default()
                 },
             },
-            block_reward_config: BlockRewradConfig {
+            block_reward_config: BlockRewardConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },

@@ -128,7 +128,7 @@ pub struct IrysBlockHeader {
     /// The address that the block reward should be sent to
     pub reward_address: Address,
 
-    /// The amount of Irys tokens that must be rewarded to the `self.rewrad_address`
+    /// The amount of Irys tokens that must be rewarded to the `self.reward_address`
     pub reward_amount: U256,
 
     /// The address of the block producer - used to validate the block hash/signature & the PoA chunk (as the packing key)
