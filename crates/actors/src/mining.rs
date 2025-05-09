@@ -637,6 +637,7 @@ mod tests {
             global_step: 0,
             capacity: 5,
             seeds: VecDeque::new(),
+            mining_state_sender: None,
         };
 
         let vdf_service = VdfService {

@@ -6,7 +6,7 @@ use irys_actors::{
 use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use sha2::{Digest, Sha256};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 use tracing::{debug, info};
 
@@ -16,6 +16,7 @@ pub fn run_vdf(
     seed: H256,
     initial_reset_seed: H256,
     mut new_seed_listener: Receiver<BroadcastMiningSeed>,
+    mut vdf_mininig_state_listener: Receiver<bool>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
     vdf_service: Addr<VdfService>,
@@ -33,7 +34,24 @@ pub fn run_vdf(
     );
     let nonce_limiter_reset_frequency = config.reset_frequency as u64;
 
+    // maintain a state of whether or not this vdf loop should be mining
+    // TODO: better to read the mining value from the mining service
+    let mut vdf_mining: bool = true;
+
     loop {
+        // check if vdf mining state should change
+        if let Ok(new_mining_state) = vdf_mininig_state_listener.try_recv() {
+            tracing::error!("Setting mining state to {}", new_mining_state);
+            vdf_mining = new_mining_state;
+        }
+
+        // if mining disabled, wait 200ms and continue loop i.e. check again
+        if !vdf_mining {
+            tracing::error!("VDF Mining Paused, waiting 200ms");
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+
         let now = Instant::now();
 
         let mut salt = U256::from(step_number_to_salt_number(&config, global_step_number));
@@ -176,6 +194,7 @@ mod tests {
         let broadcast_mining_service = BroadcastMiningService::from_registry();
         let capacity = calc_capacity(&config);
         let (_, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
+        let (_, mining_state_rx) = mpsc::channel::<bool>(1);
         let vdf_service = VdfService::from_capacity(capacity).start();
         SystemRegistry::set(vdf_service.clone());
         let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();
@@ -193,6 +212,7 @@ mod tests {
                     seed,
                     reset_seed,
                     new_seed_rx,
+                    mining_state_rx,
                     shutdown_rx,
                     broadcast_mining_service,
                     vdf_service,
