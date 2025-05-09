@@ -27,7 +27,12 @@ jobs:
     #   github.event_name == 'push') &&
     #   !contains(github.event.head_commit.message, '#disable-ci')
     steps:
-      - name: check-conditions
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Need full history for comparison
+      
+      - name: Check if CI should run
+        id: set-output
         run: |
           # Default to running
           SHOULD_RUN=true
@@ -62,10 +67,10 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             SHOULD_RUN=true
           fi
-          
-          echo $GITHUB_OUTPUT
+
+          cat $GITHUB_OUTPUT
           echo "should-run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
-          echo $GITHUB_OUTPUT
+          cat $GITHUB_OUTPUT
 
   cargo-test:
     name: cargo test
