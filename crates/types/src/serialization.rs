@@ -51,8 +51,121 @@ pub mod u64_stringify {
 // U256 Type
 //------------------------------------------------------------------------------
 construct_uint! {
-    /// 256-bit unsigned integer.
+    /// 256-bit unsigned integer built from four little-endian `u64` limbs.
     pub struct U256(4);
+}
+
+impl U256 {
+    /// Convert to 32 little-endian bytes, independent of host endianness.
+    #[inline]
+    pub fn to_le_bytes(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, limb) in self.0.iter().enumerate() {
+            out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+        }
+        out
+    }
+
+    /// Convert to 32 big-endian bytes, independent of host endianness.
+    #[inline]
+    pub fn to_be_bytes(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, limb) in self.0.iter().rev().enumerate() {
+            out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_be_bytes());
+        }
+        out
+    }
+
+    /// Recreate `U256` from 32 little-endian bytes.
+    #[inline]
+    pub fn from_le_bytes(bytes: [u8; 32]) -> Self {
+        let mut limbs = [0u64; 4];
+        for i in 0..4 {
+            let chunk: [u8; 8] = bytes[i * 8..(i + 1) * 8].try_into().unwrap();
+            limbs[i] = u64::from_le_bytes(chunk);
+        }
+        U256(limbs)
+    }
+
+    /// Recreate `U256` from 32 big-endian bytes.
+    #[inline]
+    pub fn from_be_bytes(bytes: [u8; 32]) -> Self {
+        let mut limbs = [0u64; 4];
+        for i in 0..4 {
+            let chunk: [u8; 8] = bytes[i * 8..(i + 1) * 8].try_into().unwrap();
+            limbs[3 - i] = u64::from_be_bytes(chunk);
+        }
+        U256(limbs)
+    }
+}
+
+impl From<alloy_primitives::U256> for U256 {
+    #[inline]
+    fn from(value: alloy_primitives::U256) -> Self {
+        Self::from_le_bytes(value.to_le_bytes())
+    }
+}
+
+impl From<U256> for alloy_primitives::U256 {
+    #[inline]
+    fn from(value: U256) -> Self {
+        Self::from_le_bytes(value.to_le_bytes())
+    }
+}
+
+#[cfg(test)]
+mod u256_le_be_to_from_tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_le() {
+        let x = U256::from(0xdead_beef_cafe_babe_0123_4567_89ab_cdef_u128);
+        assert_eq!(U256::from_le_bytes(x.to_le_bytes()), x);
+    }
+
+    #[test]
+    fn roundtrip_be() {
+        let x = U256::from(0xfeed_face_baad_f00d_dead_beef_cafe_babe_u128);
+        assert_eq!(U256::from_be_bytes(x.to_be_bytes()), x);
+    }
+
+    #[test]
+    fn alloy_to_custom_and_back() {
+        // Pick a value exercising all limbs: 0x010203…1F
+        let mut raw = [0u8; 32];
+        for i in 0..32 {
+            raw[i] = i as u8 + 1;
+        }
+
+        let alloy_original = alloy_primitives::U256::from_le_bytes(raw);
+
+        // alloy -> custom
+        let custom: U256 = alloy_original.into();
+        assert_eq!(custom.to_le_bytes(), raw);
+
+        // custom -> alloy
+        let alloy_roundtrip: alloy_primitives::U256 = custom.into();
+        assert_eq!(alloy_original, alloy_roundtrip);
+    }
+
+    #[test]
+    fn custom_to_alloy_and_back() {
+        // Same bytes but reverse order to ensure coverage.
+        let mut raw = [0u8; 32];
+        for i in 0..32 {
+            raw[i] = 255 - i as u8;
+        }
+
+        let custom_original = U256::from_le_bytes(raw);
+
+        // custom -> alloy
+        let alloy_val: alloy_primitives::U256 = custom_original.into();
+        assert_eq!(alloy_val.to_le_bytes(), raw);
+
+        // alloy -> custom
+        let custom_roundtrip: U256 = alloy_val.into();
+        assert_eq!(custom_original, custom_roundtrip);
+    }
 }
 
 // Manually implement Arbitrary for U256
