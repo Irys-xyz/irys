@@ -26,6 +26,8 @@ jobs:
     #   github.event_name == 'workflow_dispatch' ||
     #   github.event_name == 'push') &&
     #   !contains(github.event.head_commit.message, '#disable-ci')
+    outputs:
+      should-run: ${{ steps.set-output.outputs.should-run }}  # Add this outputs section
     steps:
       - uses: actions/checkout@v3
         with:
