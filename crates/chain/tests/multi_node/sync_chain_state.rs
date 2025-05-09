@@ -622,11 +622,11 @@ fn init_configs() -> (
 ) {
     let mut testnet_config_genesis = NodeConfig {
         http: HttpConfig {
-            port: 8080,
+            port: 8078,
             bind_ip: "127.0.0.1".to_string(),
         },
         gossip: GossipConfig {
-            port: 8081,
+            port: 8079,
             bind_ip: "127.0.0.1".to_string(),
         },
         mining_key: SigningKey::from_slice(
@@ -673,14 +673,14 @@ fn init_configs() -> (
         ..NodeConfig::testnet()
     };
     let trusted_peers = vec![PeerAddress {
-        api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
-        gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+        api: "127.0.0.1:8078".parse().expect("valid SocketAddr expected"),
+        gossip: "127.0.0.1:8079".parse().expect("valid SocketAddr expected"),
         execution: RethPeerInfo::default(),
     }];
     let genesis_trusted_peers = vec![
         PeerAddress {
-            api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
-            gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+            api: "127.0.0.1:8078".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.1:8079".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo::default(),
         },
         PeerAddress {
