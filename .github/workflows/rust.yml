@@ -27,7 +27,7 @@ jobs:
     #   github.event_name == 'push') &&
     #   !contains(github.event.head_commit.message, '#disable-ci')
     steps:
-      - name: gate
+      - name: check-conditions
         run: |
           # Default to running
           SHOULD_RUN=true
@@ -63,7 +63,9 @@ jobs:
             SHOULD_RUN=true
           fi
           
+          echo $GITHUB_OUTPUT
           echo "should-run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
+          echo $GITHUB_OUTPUT
 
   cargo-test:
     name: cargo test
