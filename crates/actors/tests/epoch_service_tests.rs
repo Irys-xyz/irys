@@ -388,12 +388,15 @@ async fn partition_expiration_and_repacking_test() {
         capacity: 10,
         global_step: 0,
         seeds: VecDeque::new(),
+        mining_state_sender: None,
     })));
 
     let packing_addr = packing.start();
     let mut part_actors = Vec::new();
 
     let atomic_global_step_number = Arc::new(AtomicU64::new(0));
+
+    let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
 
     for sm in &storage_modules {
         let partition_mining_actor = PartitionMiningActor::new(

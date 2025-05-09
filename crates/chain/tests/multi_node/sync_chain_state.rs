@@ -316,7 +316,8 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     generate_test_transaction_and_add_to_block(&ctx_genesis_node, &account1).await;
 
     // mine x blocks on genesis
-    mine_blocks(&ctx_genesis_node.node_ctx, required_genesis_node_height)
+    ctx_genesis_node
+        .mine_blocks(required_genesis_node_height)
         .await
         .expect("expected many mined blocks");
 
@@ -438,7 +439,9 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     tracing::debug!("txn we are looking for on genesis: {:?}", txn);
 
     // mine block on genesis
-    mine_blocks(&ctx_genesis_node.node_ctx, 1)
+    tracing::error!("MINE 1 BLOCK");
+    ctx_genesis_node
+        .mine_blocks(1)
         .await
         .expect("expected one mined block on genesis node");
 

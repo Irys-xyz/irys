@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use crate::block_producer::SolutionFoundMessage;
 use crate::broadcast_mining_service::{
@@ -637,6 +637,7 @@ mod tests {
             global_step: 0,
             capacity: 5,
             seeds: VecDeque::new(),
+            mining_state_sender: None,
         };
 
         let vdf_service = VdfService {

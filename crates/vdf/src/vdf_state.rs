@@ -19,6 +19,8 @@ pub struct VdfState {
     pub capacity: usize,
     /// stored seeds
     pub seeds: VecDeque<Seed>,
+    /// whether the VDF thread is mined or paused
+    pub mining_state_sender: Option<tokio::sync::mpsc::Sender<bool>>,
 }
 
 impl VdfState {

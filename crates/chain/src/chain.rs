@@ -755,9 +755,15 @@ impl IrysNode {
         );
 
         let (vdf_sender, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
+        let (vdf_mining_state_sender, vdf_mining_state_rx) = mpsc::channel::<bool>(1);
 
         // spawn the vdf service
-        let vdf_service = Self::init_vdf_service(&config, &irys_db, &block_index_guard);
+        let vdf_service = Self::init_vdf_service(
+            &config,
+            &irys_db,
+            &block_index_guard,
+            vdf_mining_state_sender,
+        );
         let vdf_steps_guard = vdf_service.send(GetVdfStateMessage).await?;
 
         // spawn the validation service
@@ -832,6 +838,7 @@ impl IrysNode {
             &config,
             vdf_shutdown_receiver,
             new_seed_rx,
+            vdf_mining_state_rx,
             latest_block,
             seed,
             global_step_number,
@@ -959,6 +966,7 @@ impl IrysNode {
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
         new_seed_rx: mpsc::Receiver<BroadcastMiningSeed>,
+        vdf_mining_state_rx: mpsc::Receiver<bool>,
         latest_block: Arc<IrysBlockHeader>,
         seed: H256,
         global_step_number: u64,
@@ -996,6 +1004,7 @@ impl IrysNode {
                     seed,
                     vdf_reset_seed,
                     new_seed_rx,
+                    vdf_mining_state_rx,
                     vdf_shutdown_receiver,
                     broadcast_mining_actor.clone(),
                     vdf_service.clone(),
@@ -1170,9 +1179,14 @@ impl IrysNode {
         config: &Config,
         irys_db: &DatabaseProvider,
         block_index_guard: &BlockIndexReadGuard,
+        vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
     ) -> actix::Addr<VdfService> {
-        let vdf_service_actor =
-            VdfService::new(block_index_guard.clone(), irys_db.clone(), &config);
+        let vdf_service_actor = VdfService::new(
+            block_index_guard.clone(),
+            irys_db.clone(),
+            vdf_mining_state_sender.clone(),
+            &config,
+        );
         let vdf_service = vdf_service_actor.start();
         SystemRegistry::set(vdf_service.clone());
         vdf_service
