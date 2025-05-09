@@ -399,10 +399,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
-        let cfg = NodeConfig {
-            mode: NodeMode::PeerSync,
-            ..self.cfg
-        };
+        let cfg = NodeConfig { ..self.cfg };
         IrysNodeTest {
             node_ctx: (),
             cfg,

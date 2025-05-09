@@ -20,6 +20,7 @@ members = [
   "crates/cli",
   "crates/gossip-service",
   "crates/api-client",
+  "crates/reward-curve",
 ]
 resolver = "2"
 
@@ -48,6 +49,7 @@ irys-testing-utils = { path = "./crates/testing-utils" }
 irys-packing = { path = "./crates/packing" }
 irys-chain = { path = "./crates/chain" }
 irys-vdf = { path = "./crates/vdf" }
+irys-reward-curve = { path = "./crates/reward-curve" }
 irys-efficient-sampling = { path = "./crates/efficient-sampling" }
 irys-price-oracle = { path = "./crates/price-oracle" }
 irys-gossip-service = { path = "./crates/gossip-service" }
@@ -171,6 +173,7 @@ tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi"] }
 alloy-signer = { path = "./ext/alloy/crates/signer" }
 tempfile = "3"
+csv = "1"
 jsonrpsee = "0.24"
 jsonrpsee-core = "0.24"
 jsonrpsee-http-client = "0.24"
