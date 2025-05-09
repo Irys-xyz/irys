@@ -77,7 +77,8 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     post_commitment_tx_request(&uri, &stake_tx).await;
 
     // Mine a block to include the commitment
-    node.mine_block().await.unwrap();
+    IrysNodeTest::mine_blocks(&node, 1).await?;
+    // node.mine_block().await.unwrap();
 
     // Verify stake commitment is now 'Accepted'
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
@@ -105,7 +106,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentStatus::Unknown);
 
     // Mine a block to include the pledge
-    node.mine_block().await.unwrap();
+    IrysNodeTest::mine_blocks(&node, 1).await?;
 
     // Verify pledge is now 'Accepted' after mining
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
@@ -118,7 +119,8 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Re-submit the same stake commitment
     post_commitment_tx_request(&uri, &stake_tx).await;
-    node.mine_block().await.unwrap();
+    IrysNodeTest::mine_blocks(&node, 1).await?;
+    //node.mine_block().await?;
 
     // Verify stake is still 'Accepted' (idempotent operation)
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
@@ -143,7 +145,8 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Submit pledge via API
     post_commitment_tx_request(&uri, &pledge_tx).await;
-    node.mine_block().await.unwrap();
+    IrysNodeTest::mine_blocks(&node, 1).await?;
+    //node.mine_block().await?;
 
     // Verify pledge remains 'Unstaked' (invalid without stake)
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
@@ -212,6 +215,10 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     ]);
 
     let genesis_signer = config.miner_address();
+
+    let genesis_parts_before;
+    let signer1_parts_before;
+    let signer2_parts_before;
 
     let node = {
         // Start a test node with custom configuration
@@ -287,6 +294,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // Mine enough blocks to reach the first epoch boundary
         info!("MINE FIRST EPOCH BLOCK:");
+        IrysNodeTest::mine_blocks(&node, num_blocks_in_epoch).await?;
         node.mine_blocks(num_blocks_in_epoch).await.unwrap();
 
         // ===== PHASE 3: Verify First Epoch Assignments =====
@@ -329,15 +337,18 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // Mine enough blocks to reach the second epoch boundary
         info!("MINE SECOND EPOCH BLOCK:");
-        node.mine_blocks(num_blocks_in_epoch).await.unwrap();
 
-        node.mine_blocks(4).await.unwrap();
+        // node.mine_blocks(num_blocks_in_epoch).await?;
+        IrysNodeTest::mine_blocks(&node, num_blocks_in_epoch + 2).await?;
 
         // ===== PHASE 5: Verify Second Epoch Assignments =====
         // Verify all signers have proper partition assignments for all pledges
-        validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
-        validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
-        validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
+        genesis_parts_before =
+            validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
+        signer1_parts_before =
+            validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
+        signer2_parts_before =
+            validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
 
         node
     };
@@ -361,10 +372,50 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    // Verify the partition assignments persist
-    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
-    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
-    validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
+    // Make sure genesis has 3 commitments (1 stake, 2 pledge)
+    assert_eq!(
+        commitment_state_guard
+            .read()
+            .pledge_commitments
+            .get(&genesis_signer)
+            .expect("commitments for genesis miner")
+            .len(),
+        3
+    );
+
+    // Make sure signer1 has 2 commitments (1 stake, 1 pledge)
+    assert_eq!(
+        commitment_state_guard
+            .read()
+            .pledge_commitments
+            .get(&signer1.address())
+            .expect("commitments for genesis miner")
+            .len(),
+        2
+    );
+
+    // Make sure signer2 has 1 commitments (1 stake, 0 pledge)
+    assert_eq!(
+        commitment_state_guard
+            .read()
+            .pledge_commitments
+            .get(&signer2.address())
+            .expect("commitments for genesis miner")
+            .len(),
+        1
+    );
+
+    // Verify the partition assignments persist (and the map to the same pledges)
+    let genesis_parts_after =
+        validate_pledge_assignments(&commitment_state_guard, &pa_guard, &genesis_signer);
+    let signer1_parts_after =
+        validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer1.address());
+    let signer2_parts_after =
+        validate_pledge_assignments(&commitment_state_guard, &pa_guard, &signer2.address());
+
+    assert_eq!(genesis_parts_after, genesis_parts_before);
+    assert_eq!(signer1_parts_after, signer1_parts_before);
+    assert_eq!(signer2_parts_after, signer2_parts_before);
 
     // ===== TEST CLEANUP =====
     restarted_node.node_ctx.stop().await;
@@ -407,7 +458,7 @@ fn validate_pledge_assignments(
     commitment_state_guard: &CommitmentStateReadGuard,
     pa_guard: &PartitionAssignmentsReadGuard,
     address: &Address,
-) {
+) -> Vec<H256> {
     // Extract partition hashes from pledges
     let partition_hashes: Vec<Option<H256>> = commitment_state_guard
         .read()
@@ -429,9 +480,9 @@ fn validate_pledge_assignments(
     );
 
     // Look up their partition assignments
-    for partition_hash in partition_hashes {
+    for partition_hash in partition_hashes.iter() {
         if let Some(partition_hash) = partition_hash {
-            let pa = pa_guard.read().get_assignment(partition_hash);
+            let pa = pa_guard.read().get_assignment(*partition_hash);
             match pa {
                 Some(pa) => {
                     // Verify the partition assignments in the partition assignment state
@@ -443,4 +494,10 @@ fn validate_pledge_assignments(
             panic!("expected partition hash for pledge")
         }
     }
+
+    // Return a vec of partition hashes
+    direct
+        .iter()
+        .filter_map(|entry| entry.partition_hash)
+        .collect()
 }
