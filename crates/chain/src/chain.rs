@@ -1,5 +1,4 @@
 use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
-use crate::genesis_utilities::{genesis_block_exists_on_disk, save_genesis_block_to_disk};
 use crate::peer_utilities::{
     fetch_genesis_block, fetch_genesis_commitments, sync_state_from_peers,
 };
@@ -29,14 +28,14 @@ use irys_actors::{
     vdf_service::{GetVdfStateMessage, VdfService},
 };
 use irys_actors::{
-    ActorAddresses, BlockFinalizedMessage, CommitmentCache, CommitmentStateReadGuard,
-    EpochReplayData, GetCommitmentStateGuardMessage,
+    ActorAddresses, CommitmentCache, CommitmentStateReadGuard, EpochReplayData,
+    GetCommitmentStateGuardMessage,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
-    add_genesis_commitments, database, get_genesis_commitments, insert_commitment_tx, BlockIndex,
+    add_genesis_commitments, database, get_genesis_commitments, BlockIndex, SystemLedger,
 };
 use irys_gossip_service::ServiceHandleWithShutdownSignal;
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
@@ -48,7 +47,6 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
-
 use irys_types::U256;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, CommitmentTransaction, Config,
@@ -64,9 +62,7 @@ use reth::{
 use reth_cli_runner::{run_to_completion_or_panic, run_until_ctrl_c_or_channel_message};
 use reth_db::Database as _;
 use std::{
-    fs,
     net::TcpListener,
-    path::PathBuf,
     sync::atomic::AtomicU64,
     sync::{Arc, RwLock},
     thread::{self, JoinHandle},
@@ -258,117 +254,204 @@ impl IrysNode {
         })
     }
 
-    /// Checks if local blockchain data exists.
-    fn blockchain_data_exists(base_dir: &PathBuf) -> bool {
-        match fs::read_dir(base_dir) {
-            // Are there any entries?
-            Ok(mut entries) => entries.next().is_some(),
-            // no entries in the directory
-            Err(_) => false,
+    async fn get_or_create_genesis_info(
+        &self,
+        node_mode: &NodeMode,
+        genesis_block: IrysBlockHeader,
+        irys_db: &DatabaseProvider,
+        block_index: &BlockIndex,
+    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+        info!(miner_address = ?self.config.node_config.miner_address(), "Starting Irys Node: {:?}", node_mode);
+
+        // Check if blockchain data already exists
+        let has_existing_data = block_index.num_blocks() > 0;
+
+        if has_existing_data {
+            // CASE 1: Load existing genesis block and commitments from database
+            return self.load_existing_genesis(irys_db, block_index).await;
+        }
+
+        // CASE 2: No existing data - handle based on node mode
+        match node_mode {
+            NodeMode::Genesis => {
+                // Create a new genesis block for network initialization
+                return self.create_new_genesis_block(genesis_block.clone()).await;
+            }
+            NodeMode::PeerSync => {
+                // Fetch genesis data from trusted peer when joining network
+                return self.fetch_genesis_from_trusted_peer().await;
+            }
         }
     }
 
-    /// Initializes the node (genesis or non-genesis).
+    // Helper methods to flatten the main function
+    async fn load_existing_genesis(
+        &self,
+        irys_db: &DatabaseProvider,
+        block_index: &BlockIndex,
+    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+        // Get the genesis block hash from index
+        let block_item = block_index
+            .get_item(0)
+            .expect("a block index item at index 0 in the block_index");
+
+        // Retrieve genesis block header from database
+        let tx = irys_db.tx().unwrap();
+        let genesis_block = database::block_header_by_hash(&tx, &block_item.block_hash, false)
+            .unwrap()
+            .expect("Expect to find genesis block header in irys_db");
+
+        // Find commitment ledger in system ledgers
+        let commitment_ledger = genesis_block
+            .system_ledgers
+            .iter()
+            .find(|e| e.ledger_id == SystemLedger::Commitment)
+            .expect("Commitment ledger should exist in the genesis block");
+
+        // Load all commitment transactions referenced in the ledger
+        let mut commitments = Vec::new();
+        for commitment_txid in commitment_ledger.tx_ids.iter() {
+            let commitment_tx = database::commitment_tx_by_txid(&tx, commitment_txid)
+                .expect("Expect to be able to read tx_header from db")
+                .expect("Expect commitment transaction to be present in irys_db");
+
+            commitments.push(commitment_tx);
+        }
+
+        drop(tx);
+
+        (genesis_block, commitments)
+    }
+
+    async fn create_new_genesis_block(
+        &self,
+        mut genesis_block: IrysBlockHeader,
+    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+        // Generate genesis commitments from configuration
+        let commitments = get_genesis_commitments(&self.config);
+
+        // Calculate initial difficulty based on number of storage modules
+        let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
+        let difficulty = calculate_initial_difficulty(&self.config.consensus, storage_module_count)
+            .expect("valid calculated initial difficulty");
+
+        // Create timestamp for genesis block
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let timestamp = now.as_millis();
+        genesis_block.diff = difficulty;
+        genesis_block.timestamp = timestamp;
+        genesis_block.last_diff_timestamp = timestamp;
+
+        // Add commitment transactions to genesis block
+        add_genesis_commitments(&mut genesis_block, &self.config);
+
+        (genesis_block, commitments)
+    }
+
+    async fn fetch_genesis_from_trusted_peer(
+        &self,
+    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+        // Get trusted peer from config
+        let trusted_peer = &self
+            .config
+            .node_config
+            .trusted_peers
+            .first()
+            .expect("expected at least one trusted peer in config")
+            .api;
+
+        info!("Fetching genesis block from trusted peer: {}", trusted_peer);
+
+        // Create HTTP client and fetch genesis block
+        let awc_client = awc::Client::new();
+        let genesis_block = fetch_genesis_block(trusted_peer, &awc_client)
+            .await
+            .expect("expected genesis block from http api");
+
+        // Fetch associated commitment transactions
+        let commitments = fetch_genesis_commitments(trusted_peer, &genesis_block)
+            .await
+            .expect("Must be able to read genesis commitment tx from trusted peer");
+
+        (genesis_block, commitments)
+    }
+
+    /// Persists the genesis block and its associated commitment transactions to the database
+    ///
+    /// This function is called only during initial blockchain setup
+    ///
+    /// # Arguments
+    /// * `genesis_block` - The genesis block header to persist
+    /// * `genesis_commitments` - The commitment transactions associated with the genesis block
+    ///
+    /// # Returns
+    /// * `eyre::Result<()>` - Success or error result of the database operations
+    async fn persist_genesis_block_and_commitments(
+        &self,
+        genesis_block: &IrysBlockHeader,
+        genesis_commitments: &[CommitmentTransaction],
+        irys_db: &DatabaseProvider,
+        block_index: &mut BlockIndex,
+    ) -> eyre::Result<()> {
+        info!("Initializing database with genesis block and commitments");
+
+        // Open a database transaction
+        let write_tx = irys_db.tx_mut()?;
+
+        // Insert the genesis block header
+        database::insert_block_header(&write_tx, genesis_block)?;
+
+        // Insert all commitment transactions
+        for commitment_tx in genesis_commitments {
+            debug!("Persisting genesis commitment: {}", commitment_tx.id);
+            database::insert_commitment_tx(&write_tx, commitment_tx)?;
+        }
+
+        // Commit the database transaction
+        write_tx.inner.commit()?;
+
+        block_index.push_block(
+            &genesis_block,
+            &Vec::new(), // Assuming no data transactions in genesis block
+            self.config.consensus.chunk_size,
+        )?;
+
+        info!("Genesis block and commitments successfully persisted");
+        Ok(())
+    }
+
+    /// Initializes the node (genesis or non-genesis)
     pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
-        info!(miner_address = ?self.config.node_config.miner_address(), "Starting Irys Node");
-        let (chain_spec, irys_genesis) = IrysChainSpecBuilder::from_config(&self.config).build();
+        // Determine node startup mode
+        let config = &self.config;
+        let node_mode = &config.node_config.mode;
+        // Start with base genesis and update fields
+        let (chain_spec, genesis_block) = IrysChainSpecBuilder::from_config(&self.config).build();
 
-        // figure out the init mode
-        let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
-        // this is so we can "preload" a .irys_submodules.toml file in the data dir for manual testing
-        let data_exists =
-            Self::blockchain_data_exists(&self.config.node_config.irys_consensus_data_dir());
+        // Log startup information
+        debug!("NODE STARTUP: {:?}", node_mode);
 
-        error!("Data exists: {}", data_exists);
-        // note: if you need the genesis header later, you can easily make this match block return it
-        match (data_exists, &self.config.node_config.mode) {
-            (true, NodeMode::Genesis { .. }) => {
-                eyre::bail!("You cannot start a genesis chain with existing data")
-            }
-            (false, &NodeMode::Genesis { .. }) => {
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                // special handling for genesis node
-                let commitments = get_genesis_commitments(&self.config);
+        // In all startup modes, irys_db and block_index are prerequisites
+        let irys_db = init_irys_db(&config).expect("could not open irys db");
+        let mut block_index = BlockIndex::new(&config.node_config)
+            .await
+            .expect("initializing a new block index should be doable");
 
-                let mut irys_genesis = IrysBlockHeader {
-                    diff: calculate_initial_difficulty(
-                        &self.config.consensus,
-                        // TODO: where does this magic constant come from?
-                        3,
-                    )
-                    .expect("valid calculated initial difficulty"),
-                    timestamp: now.as_millis(),
-                    last_diff_timestamp: now.as_millis(),
-                    ..irys_genesis
-                };
-                add_genesis_commitments(&mut irys_genesis, &self.config);
+        // Gets or creates the genesis block and commitments regardless of node mode
+        let (genesis_block, genesis_commitments) = self
+            .get_or_create_genesis_info(node_mode, genesis_block, &irys_db, &block_index)
+            .await;
 
-                let irys_genesis_block = Arc::new(irys_genesis);
-
-                // write genesis.json to disk
-                if let Err(e) = save_genesis_block_to_disk(
-                    irys_genesis_block.clone(),
-                    &self.config.node_config.base_directory,
-                ) {
-                    panic!("unable to save genesis block to disk: {:?}", e);
-                }
-
-                // special handilng for genesis node
-                Self::init_genesis_thread(
-                    self.config.clone(),
-                    irys_genesis_block.clone(),
-                    commitments,
-                )?
-                .join()
-                .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
-            }
-            (false, &NodeMode::PeerSync) => {
-                let genesis_file_exists =
-                    genesis_block_exists_on_disk(&self.config.node_config.base_directory);
-
-                error!("genesis file exists: {}", genesis_file_exists);
-                if !genesis_file_exists {
-                    let trusted_peer = &self
-                        .config
-                        .node_config
-                        .trusted_peers
-                        .first()
-                        .expect("expected at least one trusted peer in config")
-                        .api;
-                    info!("fetching genesis block from trusted peer because genesis file does not exist on disk");
-                    let awc_client = awc::Client::new();
-                    let irys_genesis_block = fetch_genesis_block(trusted_peer, &awc_client)
-                        .await
-                        .expect("expected genesis block from http api");
-
-                    let irys_genesis_block = Arc::new(irys_genesis_block);
-
-                    // write genesis.json to disk
-                    if let Err(e) = save_genesis_block_to_disk(
-                        irys_genesis_block.clone(),
-                        &self.config.node_config.base_directory,
-                    ) {
-                        panic!("unable to save genesis block to disk: {:?}", e);
-                    }
-
-                    let commitments =
-                        fetch_genesis_commitments(trusted_peer, &irys_genesis_block).await?;
-
-                    Self::init_genesis_thread(
-                        self.config.clone(),
-                        irys_genesis_block.clone(),
-                        commitments,
-                    )?
-                    .join()
-                    .map_err(|_| eyre::eyre!("genesis init thread panicked"))?;
-                }
-
-                // no special handling for if the genesis block exists on disk already
-            }
-            (true, &NodeMode::PeerSync) => {
-                // no special handling for initialized PeerSync nodes
-            }
-        };
+        // Persist the genesis block to the block_index and db if it's not there already
+        if block_index.num_blocks() == 0 {
+            self.persist_genesis_block_and_commitments(
+                &genesis_block,
+                &genesis_commitments,
+                &irys_db,
+                &mut block_index,
+            )
+            .await?;
+        }
 
         // all async tasks will be run on a new tokio runtime
         let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -376,7 +459,7 @@ impl IrysNode {
             .build()?;
         let task_manager = TaskManager::new(tokio_runtime.handle().clone());
 
-        // Common node startup logic (common for genesis and peer mode nodes)
+        // Common node startup logic
         // There are a lot of cross dependencies between reth and irys components, the channels mediate the comms
         let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
         let (main_actor_thread_shutdown_tx, main_actor_thread_shutdown_rx) =
@@ -389,6 +472,8 @@ impl IrysNode {
         let irys_provider = irys_storage::reth_provider::create_provider();
 
         // init the services
+        let (latest_block_height_tx, latest_block_height_rx) = oneshot::channel::<u64>();
+
         // vdf gets started here...
         let actor_main_thread_handle = Self::init_services_thread(
             self.config.clone(),
@@ -402,6 +487,8 @@ impl IrysNode {
             &irys_provider,
             task_manager.executor(),
             self.http_listener,
+            irys_db,
+            block_index,
         )?;
 
         // await the latest height to be reported
@@ -426,7 +513,7 @@ impl IrysNode {
         ctx.reth_thread_handle = Some(reth_thread.into());
 
         // if we are an empty node joining an existing network
-        if !data_exists && !matches!(self.config.node_config.mode, NodeMode::Genesis) {
+        if *node_mode == NodeMode::PeerSync {
             sync_state_from_peers(
                 ctx.config.node_config.trusted_peers.clone(),
                 ctx.actor_addresses.block_discovery_addr.clone(),
@@ -438,37 +525,6 @@ impl IrysNode {
         }
 
         Ok(ctx)
-    }
-
-    fn init_genesis_thread(
-        config: Config,
-        irys_genesis: Arc<IrysBlockHeader>,
-        commitments: Vec<CommitmentTransaction>,
-    ) -> Result<JoinHandle<()>, eyre::Error> {
-        let handle = std::thread::Builder::new()
-            .name("genesis init system".to_string())
-            .stack_size(32 * 1024 * 1024)
-            .spawn({
-                let irys_genesis = irys_genesis.clone();
-                move || {
-                    System::new().block_on(async move {
-                        // bootstrap genesis
-                        let block_index = BlockIndex::new(&config.node_config)
-                            .await
-                            .expect("initializing a new block index should be doable");
-                        let block_index = Arc::new(RwLock::new(block_index));
-                        let _block_index_service_actor = genesis_initialization(
-                            &irys_genesis,
-                            commitments,
-                            &block_index,
-                            config,
-                        )
-                        .await;
-                        // optionally spawn other services to set up the base state
-                    });
-                }
-            })?;
-        Ok(handle)
     }
 
     fn init_services_thread(
@@ -483,6 +539,8 @@ impl IrysNode {
         irys_provider: &Arc<RwLock<Option<IrysRethProviderInner>>>,
         task_exec: TaskExecutor,
         http_listener: TcpListener,
+        irys_db: DatabaseProvider,
+        block_index: BlockIndex,
     ) -> Result<JoinHandle<RethNodeProvider>, eyre::Error> {
         let actor_main_thread_handle = std::thread::Builder::new()
             .name("actor-main-thread".to_string())
@@ -492,11 +550,12 @@ impl IrysNode {
                 move || {
                     System::new().block_on(async move {
                         // read the latest block info
-                        let (latest_block_height, block_index, latest_block) =
-                            read_latest_block_data(&config).await;
+                        let (latest_block_height, latest_block) =
+                            read_latest_block_data(&block_index, &irys_db).await;
                         latest_block_height_tx
                             .send(latest_block_height)
                             .expect("to be able to send the latest block height");
+                        let block_index = Arc::new(RwLock::new(block_index));
                         let block_index_service_actor = Self::init_block_index_service(&config, &block_index);
 
                         // start the rest of the services
@@ -510,7 +569,8 @@ impl IrysNode {
                                 irys_provider.clone(),
                                 block_index_service_actor,
                                 &task_exec,
-                                http_listener
+                                http_listener,
+                                irys_db
                             )
                             .await
                             .expect("initializng services should not fail");
@@ -632,6 +692,7 @@ impl IrysNode {
         block_index_service_actor: Addr<BlockIndexService>,
         task_exec: &TaskExecutor,
         http_listener: TcpListener,
+        irys_db: DatabaseProvider,
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
@@ -640,9 +701,6 @@ impl IrysNode {
         RethNodeProvider,
         ServiceHandleWithShutdownSignal,
     )> {
-        // init Irys DB
-        let irys_db = init_irys_db(&config)?;
-
         // initialize the databases
         let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initiailsed");
@@ -1316,18 +1374,14 @@ impl IrysNode {
 }
 
 async fn read_latest_block_data(
-    config: &Config,
-) -> (u64, Arc<RwLock<BlockIndex>>, Arc<IrysBlockHeader>) {
-    let block_index = BlockIndex::new(&config.node_config)
-        .await
-        .expect("to init block index");
+    block_index: &BlockIndex,
+    irys_db: &DatabaseProvider,
+) -> (u64, Arc<IrysBlockHeader>) {
     let latest_block_index = block_index
         .get_latest_item()
         .cloned()
         .expect("the block index must have at least one entry");
     let latest_block_height = block_index.latest_height();
-    let block_index = Arc::new(RwLock::new(block_index));
-    let irys_db = init_irys_db(&config).expect("could not open irys db");
     let latest_block = Arc::new(
         database::block_header_by_hash(
             &irys_db.tx().unwrap(),
@@ -1337,48 +1391,7 @@ async fn read_latest_block_data(
         .unwrap()
         .unwrap(),
     );
-    drop(irys_db);
-    (latest_block_height, block_index, latest_block)
-}
-
-async fn genesis_initialization(
-    irys_genesis: &Arc<IrysBlockHeader>,
-    commitments: Vec<CommitmentTransaction>,
-    block_index: &Arc<RwLock<BlockIndex>>,
-    config: Config,
-) -> Addr<BlockIndexService> {
-    // write the genesis block to the irys db
-    let irys_db = init_irys_db(&config).expect("could not open irys db");
-    irys_db
-        .update_eyre(|tx| irys_database::insert_block_header(tx, irys_genesis))
-        .expect("genesis db data could not be written");
-
-    // Add the commitments to the db
-    let tx = irys_db
-        .tx_mut()
-        .expect("to create a mutable mdbx transaction");
-    for commitment in &commitments {
-        insert_commitment_tx(&tx, commitment).expect("inserting commitment tx should succeed");
-    }
-    // Make sure the database transaction completes before dropping the db reference
-    tx.inner
-        .commit()
-        .expect("to commit the mdbx transaction to the db");
-
-    drop(irys_db);
-
-    // start block index service, we need to preconfigure the initial finalized block
-    let block_index_service_actor = IrysNode::init_block_index_service(&config, block_index);
-    let msg = BlockFinalizedMessage {
-        block_header: irys_genesis.clone(),
-        all_txs: Arc::new(vec![]),
-    };
-    block_index_service_actor
-        .send(msg)
-        .await
-        .expect("to send the genesis finalization msg")
-        .expect("block index to accept the genesis finalization block");
-    block_index_service_actor
+    (latest_block_height, latest_block)
 }
 
 fn init_peer_list_service(
