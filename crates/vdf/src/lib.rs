@@ -3,7 +3,6 @@
 
 use eyre::Context;
 use irys_types::{H256List, VDFLimiterInfo, VdfConfig, H256, U256};
-
 use nodit::interval::ii;
 use openssl::sha;
 use rayon::prelude::*;

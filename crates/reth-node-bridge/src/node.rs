@@ -1,13 +1,8 @@
-use core::fmt;
-use std::{fs::canonicalize, future::Future, ops::Deref, sync::Arc};
-
-use crate::{
-    launcher::CustomEngineNodeLauncher,
-    precompile::irys_executor::{
-        IrysEvmConfig, IrysExecutorBuilder, IrysPayloadBuilder, PrecompileStateProvider,
-    },
+use crate::precompile::irys_executor::{
+    IrysEvmConfig, IrysExecutorBuilder, IrysPayloadBuilder, PrecompileStateProvider,
 };
 use clap::{command, Args, Parser};
+use core::fmt;
 use irys_database::db::RethDbWrapper;
 use irys_storage::reth_provider::IrysRethProvider;
 use reth::{
@@ -21,8 +16,7 @@ use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_commands::NodeCommand;
 use reth_consensus::Consensus;
-use reth_db::{init_db, HasName, HasTableType};
-use reth_engine_tree::tree::TreeConfig;
+use reth_db::init_db;
 use reth_ethereum_engine_primitives::EthereumEngineValidator;
 use reth_node_api::{FullNodeTypesAdapter, NodeTypesWithDBAdapter};
 use reth_node_builder::{
@@ -32,15 +26,15 @@ use reth_node_builder::{
 };
 use reth_node_builder::{NodeAdapter, NodeHandle};
 use reth_node_ethereum::{node::EthereumAddOns, EthEvmConfig, EthExecutorProvider, EthereumNode};
-use reth_provider::providers::BlockchainProvider2;
+use reth_provider::providers::{BlockchainProvider, BlockchainProvider2};
 use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
     blobstore::DiskFileBlobStore, CoinbaseTipOrdering, EthPooledTransaction,
     EthTransactionValidator, Pool, TransactionValidationTaskExecutor,
 };
+use std::fmt::{Debug, Formatter};
+use std::{fs::canonicalize, future::Future, ops::Deref, sync::Arc};
 use tracing::{info, warn};
-
-// use crate::node_launcher::CustomNodeLauncher;
 
 #[macro_export]
 macro_rules! vec_of_strings {
@@ -50,21 +44,20 @@ macro_rules! vec_of_strings {
 // #[global_allocator]
 // static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
-// reth node with custom IrysExecutor
 pub type RethNode = NodeAdapter<
     FullNodeTypesAdapter<
         NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
-        BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+        BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
     >,
-    Components<
+    reth_node_builder::components::Components<
         FullNodeTypesAdapter<
             NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
-            BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+            BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
         >,
-        Pool<
+        reth_transaction_pool::Pool<
             TransactionValidationTaskExecutor<
                 EthTransactionValidator<
-                    BlockchainProvider2<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
+                    BlockchainProvider<NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>>,
                     EthPooledTransaction,
                 >,
             >,
@@ -73,7 +66,7 @@ pub type RethNode = NodeAdapter<
         >,
         IrysEvmConfig,
         EthExecutorProvider<IrysEvmConfig>,
-        Arc<dyn Consensus>,
+        Arc<(dyn reth_consensus::Consensus + 'static)>,
         EthereumEngineValidator,
     >,
 >;
@@ -107,12 +100,19 @@ pub type RethNodeStandard = NodeAdapter<
 >;
 
 pub type RethNodeAddOns = EthereumAddOns;
+
 pub type RethNodeExitHandle = NodeHandle<RethNode, RethNodeAddOns>;
 
 pub type RethNodeHandle = FullNode<RethNode, RethNodeAddOns>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RethNodeProvider(pub Arc<RethNodeHandle>);
+
+impl Debug for RethNodeProvider {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RethNodeProvider")
+    }
+}
 
 impl Deref for RethNodeProvider {
     type Target = Arc<RethNodeHandle>;
@@ -128,11 +128,10 @@ impl From<RethNodeProvider> for RethNodeHandle {
     }
 }
 
-pub async fn run_node<T: HasName + HasTableType>(
+pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
     node_config: irys_types::NodeConfig,
-    tables: &[T],
     provider: IrysRethProvider,
     latest_block: u64,
     random_ports: bool,
@@ -186,13 +185,6 @@ pub async fn run_node<T: HasName + HasTableType>(
     let cli = Cli::<EthereumChainSpecParser, EngineArgs>::parse_from(args.clone());
     let _guard = cli.logs.init_tracing()?;
 
-    // loop {
-
-    // this loop allows us to 'reload' the reth node with a new config very quickly, without having to actually restart the entire process
-    // mainly used to provide and then restart with a new genesis block.
-    // TODO: extract run_command_until_exit to re-use async context to prevent global thread pool error on reload
-
-    // let exit_reason = runner.run_command_until_exit(|ctx| {
     let ctx = CliContext { task_executor };
 
     let matched_cmd = match cli.command {
@@ -255,9 +247,7 @@ pub async fn run_node<T: HasName + HasTableType>(
     let db_path = data_dir.db();
 
     tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
-    let database = RethDbWrapper::new(
-        init_db(db_path.clone(), db.database_args())?.with_metrics_and_tables(tables),
-    );
+    let database = RethDbWrapper::new(init_db(db_path.clone(), db.database_args())?.with_metrics());
 
     let irys_provider = provider;
 
@@ -266,81 +256,47 @@ pub async fn run_node<T: HasName + HasTableType>(
     }
 
     let builder = NodeBuilder::new(node_config)
-        .with_database(database)
+        .with_database(database.clone())
         .with_launch_context(ctx.task_executor);
 
-    // launcher(builder, ext).await?;
-
-    // run_custom_node(ctx, cli.clone(), |builder, engine_args| async move {
     // from ext/reth/bin/reth/src/main.rs
 
-    let engine_tree_config = TreeConfig::default()
-        .with_persistence_threshold(0 /* engine_args.persistence_threshold */) // always persist to disk
-        .with_memory_block_buffer_target(0 /* engine_args.memory_block_buffer_target */);
-
-    let handle =
-        builder
-            .with_types_and_provider::<EthereumNode, BlockchainProvider2<
-                NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
-            >>()
-            .with_components(
-                EthereumNode::components()
-                .executor(IrysExecutorBuilder{ precompile_state_provider: PrecompileStateProvider { provider: irys_provider.clone()}})
-                .payload(IrysPayloadBuilder::default())
-            )
-            // .with_components(EthereumNode::components())
-            .with_add_ons(EthereumAddOns::default())
-            // .extend_rpc_modules(move |ctx| {
-            //     let provider = ctx.provider().clone();
-            //     let irys_ext = ctx.node().components.irys_ext.clone();
-            //     let network = ctx.network().clone();
-            //     let ext = AccountStateExt { provider, irys_ext, network };
-            //     let rpc = ext.into_rpc();
-            //     ctx.modules.merge_configured(rpc)?;
-            //     Ok(())
-            // })
-            .launch_with_fn(|builder| {
-                let launcher = CustomEngineNodeLauncher::new(
-                    builder.task_executor().clone(),
-                    builder.config().datadir(),
-                    engine_tree_config,
-                    irys_provider,
-                    latest_block,
-                );
-                builder.launch_with(launcher)
-            })
-            .await?;
+    let handle = builder
+        .with_types_and_provider::<EthereumNode, reth_provider::providers::BlockchainProvider<
+            NodeTypesWithDBAdapter<EthereumNode, RethDbWrapper>,
+        >>()
+        .with_components(
+            EthereumNode::components()
+                .executor(IrysExecutorBuilder {
+                    precompile_state_provider: PrecompileStateProvider {
+                        provider: irys_provider.clone(),
+                    },
+                })
+                .payload(IrysPayloadBuilder::default()),
+        )
+        .with_add_ons(EthereumAddOns::default())
+        // .extend_rpc_modules(move |ctx| {
+        //     let provider = ctx.provider().clone();
+        //     let irys_ext = ctx.node().components.irys_ext.clone();
+        //     let network = ctx.network().clone();
+        //     let ext = AccountStateExt { provider, irys_ext, network };
+        //     let rpc = ext.into_rpc();
+        //     ctx.modules.merge_configured(rpc)?;
+        //     Ok(())
+        // })
+        .launch_with_fn(|builder| {
+            let launcher = crate::launcher::CustomNodeLauncher::new(
+                builder.task_executor().clone(),
+                builder.config().datadir(),
+                irys_provider,
+                latest_block,
+                database,
+            );
+            builder.launch_with(launcher)
+        })
+        .await?;
 
     Ok(handle)
-    // let exit_reason = handle.node_exit_future.await?;
-
-    // if true
-    // /* launched.node.config.dev.dev */
-    // {
-    //     match exit_reason.clone() {
-    //         NodeExitReason::Normal => (),
-    //         NodeExitReason::Reload(payload) => match payload {
-    //             ReloadPayload::ReloadConfig(chain_spec) => {
-    //                 // delay here so the genesis submission RPC response is able to make it back before the server dies
-    //                 let ser = serde_json::to_string_pretty(&chain_spec.genesis)?;
-    //                 let pb =
-    //                     PathBuf::from(handle.node.data_dir.data_dir().join("dev_genesis.json"));
-    //                 // remove_file(&pb)?;
-    //                 let mut f = File::create(&pb)?;
-    //                 f.write_all(ser.as_bytes())?;
-    //                 info!("Written dev_genesis.json");
-    //                 sleep(Duration::from_millis(500)).await;
-    //             }
-    //         },
-    //     }
-    // }
-
-    // Ok(NodeExitReason::Normal)
-
-    // })
-    //     })?;
-    // }
-    // Ok(())
 }
 
 pub async fn run_custom_node<Ext, C, L, Fut>(

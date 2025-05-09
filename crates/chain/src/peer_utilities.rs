@@ -1,21 +1,22 @@
 use actix::Addr;
 use base58::ToBase58;
+use irys_actors::peer_list_service::PeerListServiceFacade;
 use irys_actors::{
     block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
     broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
-    peer_list_service::{AddPeer, PeerListService},
 };
 use irys_database::{BlockIndexItem, DataLedger};
-use irys_types::{block_production::Seed, Address};
+use irys_types::block::CombinedBlockHeader;
 
+use irys_gossip_service::service::fast_forward_vdf_steps_from_block;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };
 
+use irys_api_client::{ApiClient, IrysApiClient};
 use irys_types::{
-    block::CombinedBlockHeader, H256List, IrysBlockHeader, IrysTransactionHeader, PeerAddress,
-    PeerListItem, H256,
+    CommitmentTransaction, IrysBlockHeader, IrysTransactionResponse, PeerAddress, H256,
 };
 use std::{
     collections::{HashSet, VecDeque},
@@ -78,7 +79,7 @@ pub async fn version_endpoint_request(
 pub async fn fetch_genesis_block(
     peer: &SocketAddr,
     client: &awc::Client,
-) -> Option<Arc<IrysBlockHeader>> {
+) -> Option<IrysBlockHeader> {
     let url = format!("http://{}", peer);
     let mut result_genesis = block_index_endpoint_request(&url, 0, 1).await;
 
@@ -90,26 +91,43 @@ pub async fn fetch_genesis_block(
     let fetched_genesis_block = fetch_block(peer, &client, &block_index_genesis.get(0).unwrap())
         .await
         .unwrap();
-    let fetched_genesis_block = Arc::new(fetched_genesis_block);
     Some(fetched_genesis_block)
+}
+
+pub async fn fetch_genesis_commitments(
+    peer: &SocketAddr,
+    irys_block_header: &IrysBlockHeader,
+) -> eyre::Result<Vec<CommitmentTransaction>> {
+    let api_client = IrysApiClient::new();
+    let system_txs: Vec<H256> = irys_block_header
+        .system_ledgers
+        .iter()
+        .flat_map(|ledger| ledger.tx_ids.0.clone())
+        .collect();
+
+    Ok(api_client
+        .get_transactions(*peer, &system_txs)
+        .await?
+        .into_iter()
+        .filter_map(|tx| match tx {
+            IrysTransactionResponse::Commitment(commitment_tx) => Some(commitment_tx),
+            IrysTransactionResponse::Storage(_) => None,
+        })
+        .collect())
 }
 
 pub async fn fetch_txn(
     peer: &SocketAddr,
     client: &awc::Client,
     txn_id: H256,
-) -> Option<IrysTransactionHeader> {
-    let url = format!("http://{}/v1/tx/{}", peer, txn_id);
+) -> Option<IrysTransactionResponse> {
+    let url = format!("http://{}/v1/tx/{}", peer, txn_id.0.to_base58());
 
     match client.get(url.clone()).send().await {
         Ok(mut response) => {
             if response.status().is_success() {
-                match response.json::<Vec<IrysTransactionHeader>>().await {
-                    Ok(txn) => {
-                        //info!("Synced txn {} from {}", txn_id, &url);
-                        let txn_header = txn.first().expect("valid txnid").clone();
-                        Some(txn_header)
-                    }
+                match response.json::<IrysTransactionResponse>().await {
+                    Ok(txn) => Some(txn),
                     Err(e) => {
                         let msg = format!("Error reading body from {}: {}", &url, e);
                         warn!(msg);
@@ -221,7 +239,7 @@ pub async fn sync_state_from_peers(
     trusted_peers: Vec<PeerAddress>,
     block_discovery_addr: Addr<BlockDiscoveryActor>,
     mempool_addr: Addr<MempoolService>,
-    peer_list_service_addr: Addr<PeerListService>,
+    peer_service_addr: PeerListServiceFacade,
     vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
 ) -> eyre::Result<()> {
     let client = awc::Client::default();
@@ -235,16 +253,7 @@ pub async fn sync_state_from_peers(
         Arc::new(Mutex::new(VecDeque::new()));
 
     info!("Discovering peers...");
-    if let Some(new_peers_found) = fetch_and_update_peers(
-        peers.clone(),
-        &client,
-        trusted_peers,
-        peer_list_service_addr.clone(),
-    )
-    .await
-    {
-        info!("Discovered {new_peers_found} new peers");
-    }
+    peer_service_addr.wait_for_active_peers().await?;
 
     info!("Downloading block index...");
     let peers_guard = peers.lock().await;
@@ -272,29 +281,23 @@ pub async fn sync_state_from_peers(
             //add txns from block to txn db
             for tx in block.data_ledgers[DataLedger::Submit].tx_ids.iter() {
                 let tx_ingress_msg = TxIngressMessage(
-                    fetch_txn(&peer.api, &client, *tx)
+                    match fetch_txn(&peer.api, &client, *tx)
                         .await
-                        .expect("valid txn from http GET"),
+                        .expect("valid txn from http GET")
+                    {
+                        IrysTransactionResponse::Commitment(_c) => {
+                            panic!("not implemented commitment txns")
+                        }
+                        IrysTransactionResponse::Storage(s) => s,
+                    },
                 );
                 if let Err(e) = mempool_addr.send(tx_ingress_msg).await {
                     error!("Error sending txn {:?} to mempool: {}", tx, e);
                 }
             }
 
-            let block_end_step = block.vdf_limiter_info.global_step_number;
-            let block_start_step = block_end_step - block.vdf_limiter_info.steps.len() as u64;
-            for (i, step) in block.vdf_limiter_info.steps.iter().enumerate() {
-                //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
-                let mining_seed = BroadcastMiningSeed {
-                    seed: Seed { 0: *step },
-                    global_step: block_start_step + i as u64,
-                    checkpoints: H256List::new(),
-                };
-
-                if let Err(e) = vdf_sender.send(mining_seed).await {
-                    error!("Peer Sync: VDF Send Error: {:?}", e);
-                }
-            }
+            fast_forward_vdf_steps_from_block(block.vdf_limiter_info.clone(), vdf_sender.clone())
+                .await;
 
             // allow block to be discovered by block discovery actor
             if let Err(e) = block_discovery_addr
@@ -320,13 +323,11 @@ pub async fn fetch_and_update_peers(
     peers: Arc<tokio::sync::Mutex<Vec<PeerAddress>>>,
     client: &awc::Client,
     peers_to_ask: Vec<PeerAddress>,
-    peer_list_service_addr: Addr<PeerListService>,
 ) -> Option<u64> {
     let futures = peers_to_ask.into_iter().map(|peer| {
         let client = client.clone();
         let peers = peers.clone();
         let url = format!("http://{}/v1/peer_list", peer.api);
-        let peer_list_service_addr = peer_list_service_addr.clone();
 
         async move {
             match client.get(url.clone()).send().await {
@@ -346,19 +347,6 @@ pub async fn fetch_and_update_peers(
                             continue;
                         }
                         peers_guard.push(p);
-                        let peer_list_entry = PeerListItem {
-                            address: p,
-                            ..Default::default()
-                        };
-                        if let Err(e) = peer_list_service_addr
-                            .send(AddPeer {
-                                mining_addr: Address::random(),
-                                peer: peer_list_entry,
-                            })
-                            .await
-                        {
-                            error!("Unable to send AddPeerMessage message {e}");
-                        };
                         added += 1;
                     }
                     error!("Got {} peers from {}", &added, peer.api);

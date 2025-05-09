@@ -438,26 +438,26 @@ fn basis_pow(mut base_bps: U256, mut exp: u64) -> Result<U256> {
 
 /// safe addition that errors on overflow.
 #[tracing::instrument(err)]
-fn safe_add(lhs: U256, rhs: U256) -> Result<U256> {
+pub fn safe_add(lhs: U256, rhs: U256) -> Result<U256> {
     lhs.checked_add(rhs).ok_or_else(|| eyre!("overflow in add"))
 }
 
 /// safe subtraction that errors on underflow.
 #[tracing::instrument(err)]
-fn safe_sub(lhs: U256, rhs: U256) -> Result<U256> {
+pub fn safe_sub(lhs: U256, rhs: U256) -> Result<U256> {
     lhs.checked_sub(rhs)
         .ok_or_else(|| eyre!("underflow in sub"))
 }
 
 /// safe multiplication that errors on overflow.
 #[tracing::instrument(err)]
-fn safe_mul(lhs: U256, rhs: U256) -> Result<U256> {
+pub fn safe_mul(lhs: U256, rhs: U256) -> Result<U256> {
     lhs.checked_mul(rhs).ok_or_else(|| eyre!("overflow in mul"))
 }
 
 /// safe division that errors on division-by-zero.
 #[tracing::instrument(err)]
-fn safe_div(lhs: U256, rhs: U256) -> Result<U256> {
+pub fn safe_div(lhs: U256, rhs: U256) -> Result<U256> {
     if rhs.is_zero() {
         Err(eyre!("division by zero"))
     } else {
@@ -466,7 +466,7 @@ fn safe_div(lhs: U256, rhs: U256) -> Result<U256> {
 }
 
 #[tracing::instrument(err)]
-fn safe_mod(lhs: U256, rhs: U256) -> Result<U256> {
+pub fn safe_mod(lhs: U256, rhs: U256) -> Result<U256> {
     if rhs.is_zero() {
         Err(eyre!("module by zero"))
     } else {
@@ -476,7 +476,7 @@ fn safe_mod(lhs: U256, rhs: U256) -> Result<U256> {
 
 /// computes (a * b) / c in 256-bit arithmetic with checks.
 #[tracing::instrument]
-fn mul_div(mul_lhs: U256, mul_rhs: U256, div: U256) -> Result<U256> {
+pub fn mul_div(mul_lhs: U256, mul_rhs: U256, div: U256) -> Result<U256> {
     let prod = safe_mul(mul_lhs, mul_rhs)?;
     safe_div(prod, div)
 }

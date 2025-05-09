@@ -68,12 +68,13 @@ pub static IRYS_TESTNET: LazyLock<Arc<ChainSpec>> = LazyLock::new(|| {
             (
                 Paris,
                 ForkCondition::TTD {
-                    fork_block: Some(0),
+                    fork_block: None,
                     total_difficulty: U256::ZERO,
                 },
             ),
-            (Shanghai, ForkCondition::Block(0)),
-            (Cancun, ForkCondition::Block(0)),
+            // make sure we use the same fork condition types as EthereumHardfork! if you use Block for a timestamp fork, things will go sideways
+            (Shanghai, ForkCondition::Timestamp(0)),
+            (Cancun, ForkCondition::Timestamp(0)),
         ]
         .into(),
         deposit_contract: None,

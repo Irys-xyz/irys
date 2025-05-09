@@ -7,9 +7,11 @@ use crate::{
     CommitmentCacheInner, CommitmentCacheMessage, CommitmentStatus, GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
+use base58::ToBase58;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
+use irys_reward_curve::HalvingCurve;
 use irys_types::{
     CommitmentTransaction, Config, DatabaseProvider, GossipData, H256List, IrysBlockHeader,
     IrysTransactionHeader,
@@ -30,6 +32,8 @@ pub struct BlockDiscoveryActor {
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Reference to the global config
     pub config: Config,
+    /// The block reward curve
+    pub reward_curve: Arc<HalvingCurve>,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
     /// Store last VDF Steps
@@ -58,31 +62,6 @@ impl Actor for BlockDiscoveryActor {
     type Context = Context<Self>;
 }
 
-impl BlockDiscoveryActor {
-    /// Initializes a new `BlockDiscoveryActor`
-    pub const fn new(
-        block_index_guard: BlockIndexReadGuard,
-        partition_assignments_guard: PartitionAssignmentsReadGuard,
-        config: Config,
-        db: DatabaseProvider,
-        vdf_steps_guard: VdfStepsReadGuard,
-        service_senders: ServiceSenders,
-        epoch_service: Addr<EpochServiceActor>,
-        gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
-    ) -> Self {
-        Self {
-            block_index_guard,
-            partition_assignments_guard,
-            db,
-            vdf_steps_guard,
-            service_senders,
-            gossip_sender,
-            config,
-            epoch_service,
-        }
-    }
-}
-
 impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
     type Result = ResponseFuture<eyre::Result<()>>;
 
@@ -100,7 +79,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 return Box::pin(async move {
                     Err(eyre::eyre!(
                         // the previous blocks header was not found in the database
-                        "Failed to get block header for hash {}: {:?}",
+                        "Failed to get previous block header. Previous block hash: {}: {:?}",
                         prev_block_hash,
                         other
                     ))
@@ -124,7 +103,9 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                 self.db
                     .view_eyre(|tx| tx_header_by_txid(tx, txid))
                     .and_then(|opt| {
-                        opt.ok_or_else(|| eyre::eyre!("No tx header found for txid {:?}", txid))
+                        opt.ok_or_else(|| {
+                            eyre::eyre!("No tx header found for txid {:?}", txid.0.to_base58())
+                        })
                     })
             })
             .collect::<Result<Vec<_>, _>>()
@@ -242,6 +223,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         );
 
         let gossip_sender = self.gossip_sender.clone();
+        let reward_curve = Arc::clone(&self.reward_curve);
         Box::pin(async move {
             info!("Pre-validating block");
             let validation_future = tokio::task::spawn_blocking(move || {
@@ -250,6 +232,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     previous_block_header,
                     partitions_guard,
                     config,
+                    reward_curve,
                     vdf_steps_guard,
                     ema_service_sender,
                 )
@@ -361,6 +344,10 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     }
 
                     // Send the block to the gossip bus
+                    tracing::trace!(
+                        "sending block to bus: block height {:?}",
+                        &new_block_header.height
+                    );
                     if let Err(error) = gossip_sender
                         .send(GossipData::Block(new_block_header.as_ref().clone()))
                         .await
@@ -370,7 +357,10 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
 
                     Ok(())
                 }
-                Err(err) => Err(eyre::eyre!("Block validation error {:?}", err)),
+                Err(err) => {
+                    tracing::error!("Block validation error {:?}", err);
+                    Err(eyre::eyre!("Block validation error {:?}", err))
+                }
             }
         })
     }

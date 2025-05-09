@@ -3,10 +3,13 @@
 use crate::utils::{mine_block, IrysNodeTest};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_chain::IrysNodeCtx;
-use irys_types::{AcceptedResponse, PeerAddress, PeerResponse, ProtocolVersion, VersionRequest};
+use irys_types::{
+    AcceptedResponse, IrysTransactionResponse, PeerResponse, ProtocolVersion, VersionRequest,
+};
 use semver::Version;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+use tracing::debug;
 
 async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: SocketAddr) {
     let version_request = VersionRequest::default();
@@ -20,10 +23,7 @@ async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: So
             build: Default::default(),
         },
         protocol_version: ProtocolVersion::V1,
-        peers: vec![PeerAddress {
-            gossip: SocketAddr::from_str("127.0.0.1:8081").unwrap(),
-            api: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
-        }],
+        peers: vec![],
         timestamp: 1744920031378,
         message: Some("Welcome to the network ".to_string()),
     };
@@ -82,10 +82,12 @@ async fn check_transaction_endpoints(
     let retrieved_tx = api_client
         .get_transaction(api_address, tx_id)
         .await
-        .expect("valid get transaction response")
-        .expect("transaction not found");
+        .expect("valid get transaction response");
 
-    assert_eq!(retrieved_tx, tx.header);
+    assert_eq!(
+        retrieved_tx,
+        IrysTransactionResponse::Storage(tx.header.clone())
+    );
 
     let txs = api_client
         .get_transactions(api_address, &[tx_id, tx_2_id])
@@ -93,8 +95,28 @@ async fn check_transaction_endpoints(
         .expect("valid get transactions response");
 
     assert_eq!(txs.len(), 2);
-    assert!(txs.contains(&Some(tx.header)));
-    assert!(txs.contains(&Some(tx_2.header)));
+    assert!(txs.contains(&IrysTransactionResponse::Storage(tx.header)));
+    assert!(txs.contains(&IrysTransactionResponse::Storage(tx_2.header)));
+}
+
+async fn check_get_block_endpoint(
+    api_client: &IrysApiClient,
+    api_address: SocketAddr,
+    ctx: &IrysNodeTest<IrysNodeCtx>,
+) {
+    // advance one block
+    let (previous_header, _payload) = mine_block(&ctx.node_ctx).await.unwrap().unwrap();
+    // advance one block, finalizing the previous block
+    let (_header, _payload) = mine_block(&ctx.node_ctx).await.unwrap().unwrap();
+
+    let previous_block_hash = previous_header.block_hash;
+    let block = api_client
+        .get_block_by_hash(api_address, previous_block_hash)
+        .await
+        .expect("valid get block response");
+
+    assert!(block.is_some());
+    debug!("block: {:?}", block);
 }
 
 #[actix_rt::test]
@@ -109,6 +131,7 @@ async fn heavy_api_client_all_endpoints_should_work() {
 
     check_post_version_endpoint(&api_client, api_address).await;
     check_transaction_endpoints(&api_client, api_address, &ctx).await;
+    check_get_block_endpoint(&api_client, api_address, &ctx).await;
 
     ctx.node_ctx.stop().await;
 }

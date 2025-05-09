@@ -1,6 +1,9 @@
 use base58::ToBase58;
 use eyre::Result;
-use irys_types::{IrysTransactionHeader, PeerResponse, VersionRequest, H256};
+use irys_types::{
+    CombinedBlockHeader, IrysTransactionHeader, IrysTransactionResponse, PeerResponse,
+    VersionRequest, H256,
+};
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
@@ -14,7 +17,7 @@ pub trait ApiClient: Send + Sync + Clone {
         &self,
         peer: SocketAddr,
         tx_id: H256,
-    ) -> Result<Option<IrysTransactionHeader>>;
+    ) -> Result<IrysTransactionResponse>;
 
     /// Post a transaction header to a node
     async fn post_transaction(
@@ -28,12 +31,19 @@ pub trait ApiClient: Send + Sync + Clone {
         &self,
         peer: SocketAddr,
         tx_ids: &[H256],
-    ) -> Result<Vec<Option<IrysTransactionHeader>>>;
+    ) -> Result<Vec<IrysTransactionResponse>>;
 
     /// Post a version request to a peer. Version request contains protocol version and peer
     /// information.
     async fn post_version(&self, peer: SocketAddr, version: VersionRequest)
         -> Result<PeerResponse>;
+
+    /// Gets block by hash
+    async fn get_block_by_hash(
+        &self,
+        peer: SocketAddr,
+        block_hash: H256,
+    ) -> Result<Option<CombinedBlockHeader>>;
 }
 
 /// Real implementation of the API client that makes actual HTTP requests
@@ -102,11 +112,13 @@ impl ApiClient for IrysApiClient {
         &self,
         peer: SocketAddr,
         tx_id: H256,
-    ) -> Result<Option<IrysTransactionHeader>> {
+    ) -> Result<IrysTransactionResponse> {
         // IMPORTANT: You have to keep the debug format here, since normal to_string of H256
         //  encodes just first 4 and last 4 bytes with a placeholder in the middle
         let path = format!("/tx/{}", tx_id.0.to_base58());
-        self.make_request(peer, "GET", &path, None::<&()>).await
+        self.make_request(peer, "GET", &path, None::<&()>)
+            .await?
+            .ok_or_else(|| eyre::eyre!("Expected transaction response to have a body: {}", tx_id))
     }
 
     async fn post_transaction(
@@ -132,7 +144,7 @@ impl ApiClient for IrysApiClient {
         &self,
         peer: SocketAddr,
         tx_ids: &[H256],
-    ) -> Result<Vec<Option<IrysTransactionHeader>>> {
+    ) -> Result<Vec<IrysTransactionResponse>> {
         let mut results = Vec::with_capacity(tx_ids.len());
 
         for &tx_id in tx_ids {
@@ -161,12 +173,32 @@ impl ApiClient for IrysApiClient {
             }
         }
     }
+
+    async fn get_block_by_hash(
+        &self,
+        peer: SocketAddr,
+        block_hash: H256,
+    ) -> Result<Option<CombinedBlockHeader>> {
+        let path = format!("/block/{}", block_hash.0.to_base58());
+        let response = self
+            .make_request::<CombinedBlockHeader, _>(peer, "GET", &path, None::<&()>)
+            .await;
+        match response {
+            Ok(Some(block)) => Ok(Some(block)),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                error!("Failed to get block: {}", e);
+                Err(e)
+            }
+        }
+    }
 }
 
 #[cfg(feature = "test-utils")]
 pub mod test_utils {
     use super::*;
     use async_trait::async_trait;
+    use eyre::eyre;
     use irys_types::AcceptedResponse;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -182,14 +214,14 @@ pub mod test_utils {
             &self,
             _peer: std::net::SocketAddr,
             _tx_id: H256,
-        ) -> eyre::Result<Option<IrysTransactionHeader>> {
-            Ok(None)
+        ) -> eyre::Result<IrysTransactionResponse> {
+            Err(eyre!("No transactions found"))
         }
         async fn get_transactions(
             &self,
             _peer: std::net::SocketAddr,
             _tx_ids: &[H256],
-        ) -> eyre::Result<Vec<Option<IrysTransactionHeader>>> {
+        ) -> eyre::Result<Vec<IrysTransactionResponse>> {
             Ok(vec![])
         }
         async fn post_version(
@@ -209,6 +241,14 @@ pub mod test_utils {
         ) -> eyre::Result<()> {
             Ok(())
         }
+
+        async fn get_block_by_hash(
+            &self,
+            _peer: std::net::SocketAddr,
+            _block_hash: H256,
+        ) -> eyre::Result<Option<CombinedBlockHeader>> {
+            Ok(None)
+        }
     }
 }
 
@@ -220,7 +260,7 @@ mod tests {
     /// Mock implementation of the API client for testing
     #[derive(Default, Clone)]
     pub struct MockApiClient {
-        pub expected_transactions: std::collections::HashMap<H256, Option<IrysTransactionHeader>>,
+        pub expected_transactions: std::collections::HashMap<H256, IrysTransactionResponse>,
     }
 
     #[async_trait::async_trait]
@@ -229,15 +269,19 @@ mod tests {
             &self,
             _peer: SocketAddr,
             tx_id: H256,
-        ) -> Result<Option<IrysTransactionHeader>> {
-            Ok(self.expected_transactions.get(&tx_id).cloned().flatten())
+        ) -> Result<IrysTransactionResponse> {
+            Ok(self
+                .expected_transactions
+                .get(&tx_id)
+                .ok_or(eyre::eyre!("Transaction isn't found: {}", tx_id))?
+                .clone())
         }
 
         async fn get_transactions(
             &self,
             peer: SocketAddr,
             tx_ids: &[H256],
-        ) -> Result<Vec<Option<IrysTransactionHeader>>> {
+        ) -> Result<Vec<IrysTransactionResponse>> {
             let mut results = Vec::with_capacity(tx_ids.len());
 
             for &tx_id in tx_ids {
@@ -263,6 +307,14 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+
+        async fn get_block_by_hash(
+            &self,
+            _peer: SocketAddr,
+            _block_hash: H256,
+        ) -> Result<Option<CombinedBlockHeader>> {
+            Ok(None)
+        }
     }
 
     #[tokio::test]
@@ -271,12 +323,12 @@ mod tests {
         let tx_id = H256::random();
         let tx_header = IrysTransactionHeader::default();
         mock.expected_transactions
-            .insert(tx_id, Some(tx_header.clone()));
+            .insert(tx_id, IrysTransactionResponse::Storage(tx_header.clone()));
 
         let result = mock
             .get_transaction("127.0.0.1:8080".parse().unwrap(), tx_id)
             .await
             .unwrap();
-        assert_eq!(result, Some(tx_header));
+        assert_eq!(result, IrysTransactionResponse::Storage(tx_header));
     }
 }

@@ -6,6 +6,8 @@
     clippy::module_name_repetitions,
     reason = "I don't know how to name it"
 )]
+use crate::block_pool_service::BlockPoolService;
+use crate::cache::GossipCacheKey;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
@@ -16,20 +18,26 @@ use crate::{
 };
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
-use core::net::SocketAddr;
 use core::time::Duration;
-use irys_actors::block_discovery::BlockDiscoveredMessage;
-use irys_actors::mempool_service::TxExistenceQuery;
-use irys_actors::mempool_service::{ChunkIngressMessage, TxIngressMessage};
-use irys_actors::peer_list_service::{ActivePeersRequest, PeerListService};
+use irys_actors::mempool_service::CommitmentTxIngressMessage;
+use irys_actors::{
+    block_discovery::BlockDiscoveredMessage,
+    broadcast_mining_service::BroadcastMiningSeed,
+    mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngressMessage},
+    peer_list_service::PeerListFacade,
+};
 use irys_api_client::ApiClient;
-use irys_types::{GossipData, PeerListItem};
+use irys_types::{
+    block_production::Seed, Address, DatabaseProvider, GossipData, H256List, PeerListItem,
+    RethPeerInfo, VDFLimiterInfo,
+};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc::error::SendError;
 use tokio::{sync::mpsc, time};
+use tracing::debug;
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -115,12 +123,13 @@ impl GossipService {
     pub fn new<T: Into<String>>(
         server_address: T,
         server_port: u16,
+        mining_address: Address,
     ) -> (Self, mpsc::Sender<GossipData>) {
         let cache = Arc::new(GossipCache::new());
         let (trusted_data_tx, trusted_data_rx) = mpsc::channel(1000);
 
         let client_timeout = Duration::from_secs(5);
-        let client = GossipClient::new(client_timeout);
+        let client = GossipClient::new(client_timeout, mining_address);
 
         (
             Self {
@@ -141,29 +150,48 @@ impl GossipService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<M, B, A>(
+    pub fn run<M, B, A, R>(
         mut self,
         mempool: Addr<M>,
         block_discovery: Addr<B>,
         api_client: A,
         task_executor: &TaskExecutor,
-        peer_list: Addr<PeerListService>,
+        peer_list: PeerListFacade<A, R>,
+        db: DatabaseProvider,
+        vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         M: Handler<TxIngressMessage>
+            + Handler<CommitmentTxIngressMessage>
             + Handler<ChunkIngressMessage>
             + Handler<TxExistenceQuery>
             + Actor<Context = Context<M>>,
         B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-        A: ApiClient + Clone + 'static,
+        A: ApiClient + Clone + 'static + Unpin + Default,
+        R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     {
         tracing::debug!("Staring gossip service");
 
+        // TODO: get the db
+        let block_pool_service = BlockPoolService::new_with_client(
+            db,
+            api_client.clone(),
+            peer_list.clone(),
+            block_discovery.clone(),
+            self.client.clone(),
+            Some(vdf_sender),
+        );
+        let arbiter = actix::Arbiter::new();
+        let block_pool_addr =
+            BlockPoolService::start_in_arbiter(&arbiter.handle(), |_| block_pool_service);
+
         let server_data_handler = GossipServerDataHandler {
             mempool,
-            block_discovery,
-            api_client,
+            block_pool: block_pool_addr,
+            api_client: api_client.clone(),
             cache: Arc::clone(&self.cache),
+            gossip_client: self.client.clone(),
+            peer_list_service: peer_list.clone(),
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 
@@ -186,7 +214,7 @@ impl GossipService {
             mempool_data_receiver,
             Arc::clone(&service),
             task_executor,
-            peer_list,
+            peer_list.clone(),
         );
 
         let gossip_service_handle = spawn_main_task(
@@ -195,70 +223,90 @@ impl GossipService {
             cache_pruning_task_handle,
             broadcast_task_handle,
             task_executor,
+            arbiter,
         );
 
         Ok(gossip_service_handle)
     }
 
-    async fn broadcast_data(
+    async fn broadcast_data<A, R>(
         &self,
         original_source: GossipSource,
         data: &GossipData,
-        peer_list_service: &Addr<PeerListService>,
-    ) -> GossipResult<()> {
+        peer_list_service: &PeerListFacade<A, R>,
+    ) -> GossipResult<()>
+    where
+        R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+        A: ApiClient + Clone + 'static + Unpin + Default,
+    {
+        debug!("Broadcasting data to peers: {}", data.data_type_and_id());
+
         let exclude_peers = match original_source {
             GossipSource::Internal => HashSet::new(),
-            GossipSource::External(addr) => {
+            GossipSource::External(miner_address) => {
                 let mut exclude_peers = HashSet::new();
-                exclude_peers.insert(addr);
+                exclude_peers.insert(miner_address);
                 exclude_peers
             }
         };
 
         // Get all active peers except the source
-        let mut peers: Vec<PeerListItem> = peer_list_service
-            .send(ActivePeersRequest {
-                truncate: None,
-                exclude_peers,
-            })
+        let mut peers: Vec<(Address, PeerListItem)> = peer_list_service
+            .top_active_peers(None, Some(exclude_peers))
             .await
             .map_err(|err| GossipError::Internal(InternalGossipError::Unknown(err.to_string())))?;
+
+        tracing::debug!("Peers selected for broadcast: {:?}", peers);
 
         peers.shuffle(&mut rand::thread_rng());
 
         while !peers.is_empty() {
             // Remove peers that seen the data since the last iteration
             let peers_that_seen_data = self.cache.peers_that_have_seen(data)?;
-            peers.retain(|peer| !peers_that_seen_data.contains(&peer.address.gossip));
+            peers.retain(|(peer_miner_address, _peer)| {
+                !peers_that_seen_data.contains(peer_miner_address)
+            });
 
             let n = std::cmp::min(MAX_PEERS_PER_BROADCAST, peers.len());
             let maybe_selected_peers = peers.get(0..n);
 
             if let Some(selected_peers) = maybe_selected_peers {
+                debug!(
+                    "Peers selected for the current broadcast step: {:?}",
+                    selected_peers
+                );
                 // Send data to selected peers
-                for peer in selected_peers {
+                for (peer_miner_address, peer_entry) in selected_peers {
                     if let Err(error) = self
                         .client
-                        .send_data_and_update_score(peer, data, peer_list_service)
+                        .send_data_and_update_score(
+                            (peer_miner_address, peer_entry),
+                            data,
+                            peer_list_service,
+                        )
                         .await
                     {
                         tracing::warn!(
                             "Failed to send data to peer {}: {}",
-                            peer.address.gossip,
+                            peer_miner_address,
                             error
                         );
                     }
 
                     // Record as seen anyway, so we don't rebroadcast to them
-                    if let Err(error) = self.cache.record_seen(peer.address.gossip, data) {
+                    if let Err(error) = self
+                        .cache
+                        .record_seen(*peer_miner_address, GossipCacheKey::from(data))
+                    {
                         tracing::error!(
                             "Failed to record data in cache for peer {}: {}",
-                            peer.address.gossip,
+                            peer_miner_address,
                             error
                         );
                     }
                 }
             } else {
+                debug!("No peers selected for the current broadcast step");
                 break;
             }
 
@@ -299,12 +347,16 @@ fn spawn_cache_pruning_task(
     )
 }
 
-fn spawn_broadcast_task(
+fn spawn_broadcast_task<R, A>(
     mut mempool_data_receiver: mpsc::Receiver<GossipData>,
     service: Arc<GossipService>,
     task_executor: &TaskExecutor,
-    peer_list_service: Addr<PeerListService>,
-) -> ServiceHandleWithShutdownSignal {
+    peer_list_service: PeerListFacade<A, R>,
+) -> ServiceHandleWithShutdownSignal
+where
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+    A: ApiClient + Clone + 'static + Unpin + Default,
+{
     ServiceHandleWithShutdownSignal::spawn(
         "gossip broadcast",
         move |mut shutdown_rx| async move {
@@ -343,6 +395,7 @@ fn spawn_main_task(
     mut cache_pruning_task_handle: ServiceHandleWithShutdownSignal,
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,
     task_executor: &TaskExecutor,
+    block_pool_arbiter: actix::Arbiter,
 ) -> ServiceHandleWithShutdownSignal {
     ServiceHandleWithShutdownSignal::spawn(
         "gossip main",
@@ -411,21 +464,44 @@ fn spawn_main_task(
                     tracing::warn!("Gossip service shutdown error: {}", error);
                 }
             };
+            block_pool_arbiter.stop();
         },
         task_executor,
     )
 }
 
+/// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
+pub async fn fast_forward_vdf_steps_from_block(
+    vdf_limiter_info: VDFLimiterInfo,
+    vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
+) {
+    let block_end_step = vdf_limiter_info.global_step_number;
+    let len = vdf_limiter_info.steps.len();
+    let block_start_step = block_end_step - len as u64;
+    for (i, step) in vdf_limiter_info.steps.iter().enumerate() {
+        //fast forward VDF step and seed before adding the new block...or we wont be at a new enough vdf step to "discover" block
+        let mining_seed = BroadcastMiningSeed {
+            seed: Seed { 0: *step },
+            global_step: block_start_step + i as u64,
+            checkpoints: H256List::new(),
+        };
+
+        if let Err(e) = vdf_sender.send(mining_seed).await {
+            tracing::error!("VDF FF: VDF Send Error: {:?}", e);
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum GossipSource {
     Internal,
-    External(SocketAddr),
+    External(Address),
 }
 
 impl GossipSource {
     #[must_use]
-    pub const fn from_ip(ip: SocketAddr) -> Self {
-        Self::External(ip)
+    pub const fn from_miner_address(address: Address) -> Self {
+        Self::External(address)
     }
 
     #[must_use]

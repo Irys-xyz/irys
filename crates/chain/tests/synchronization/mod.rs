@@ -54,6 +54,9 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     // check with request to `/v1/info`
     let client = awc::Client::default();
 
+    // Wait a little for the server to get ready
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
     let response = client
         .get(format!("{}/v1/info", http_url))
         .send()

@@ -44,6 +44,7 @@ enum Commands {
     },
     Typos,
     UnusedDeps,
+    EmissionSimulation,
 }
 
 fn main() -> eyre::Result<()> {
@@ -151,6 +152,14 @@ fn main() -> eyre::Result<()> {
             println!("unused deps");
             cmd!(sh, "cargo install --locked cargo-machete").run()?;
             cmd!(sh, "cargo-machete").run()?;
+        }
+        Commands::EmissionSimulation => {
+            println!("block reward emission simulation");
+            cmd!(
+                sh,
+                "cargo run --bin irys-reward-curve-simulation --features=emission-sim"
+            )
+            .run()?;
         }
     }
 

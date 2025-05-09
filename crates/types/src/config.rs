@@ -1,10 +1,10 @@
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
-        phantoms::{CostPerGb, DecayRate, IrysPrice, Percentage, Usd},
+        phantoms::{CostPerGb, DecayRate, Irys, IrysPrice, Percentage, Usd},
         Amount,
     },
-    PeerAddress,
+    PeerAddress, RethPeerInfo,
 };
 use alloy_primitives::Address;
 use reth_chainspec::Chain;
@@ -63,6 +63,9 @@ pub struct ConsensusConfig {
     /// Reth chain spec for the reth genesis
     pub reth: RethChainSpec,
 
+    /// Settings for the transaction memory pool
+    pub mempool: MempoolConfig,
+
     /// Controls how mining difficulty adjusts over time
     pub difficulty_adjustment: DifficultyAdjustmentConfig,
 
@@ -101,6 +104,9 @@ pub struct ConsensusConfig {
     /// Configuration for the Verifiable Delay Function used in consensus
     pub vdf: VdfConfig,
 
+    /// Configuration for block rewards
+    pub block_reward_config: BlockRewardConfig,
+
     /// Size of each data chunk in bytes
     pub chunk_size: u64,
 
@@ -135,6 +141,16 @@ pub struct ConsensusConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockRewardConfig {
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub inflation_cap: Amount<Irys>,
+    pub half_life_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RethChainSpec {
     /// The type of chain.
     pub chain: Chain,
@@ -162,9 +178,6 @@ pub struct NodeConfig {
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
 
-    /// Settings for the transaction memory pool
-    pub mempool: MempoolConfig,
-
     /// Settings for the price oracle system
     pub oracle: OracleConfig,
 
@@ -175,6 +188,8 @@ pub struct NodeConfig {
         serialize_with = "serde_utils::serializes_signing_key"
     )]
     pub mining_key: k256::ecdsa::SigningKey,
+
+    pub reward_address: Address,
 
     /// Data storage configuration
     pub storage: StorageSyncConfig,
@@ -193,6 +208,9 @@ pub struct NodeConfig {
 
     /// HTTP API server configuration
     pub http: HttpConfig,
+
+    /// Reth settings
+    pub reth_peer_info: RethPeerInfo,
 }
 
 impl Into<Config> for NodeConfig {
@@ -398,6 +416,8 @@ pub struct CacheConfig {
 /// Settings for the node's HTTP server that provides API access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpConfig {
+    /// The IP address the HTTP service binds to
+    pub bind_ip: String,
     /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
     pub port: u16,
 }
@@ -436,6 +456,11 @@ impl ConsensusConfig {
         const DEFAULT_BLOCK_TIME: u64 = 1;
         const IRYS_TESTNET_CHAIN_ID: u64 = 1270;
 
+        // block reward params
+        const HALF_LIFE_YEARS: u128 = 4;
+        const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
+        const INFLATION_CAP: u128 = 100_000_000;
+
         Self {
             chain_id: 1270,
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
@@ -444,6 +469,10 @@ impl ConsensusConfig {
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
+            mempool: MempoolConfig {
+                max_data_txs_per_block: 100,
+                anchor_expiry_depth: 10,
+            },
             vdf: VdfConfig {
                 reset_frequency: 10 * 120,
                 parallel_verification_thread_limit: 4,
@@ -508,6 +537,10 @@ impl ConsensusConfig {
                     ..Default::default()
                 },
             },
+            block_reward_config: BlockRewardConfig {
+                inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
+                half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
+            },
         }
     }
 }
@@ -535,36 +568,36 @@ impl NodeConfig {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn testnet() -> Self {
-        use std::{net::SocketAddr, str::FromStr};
-
+        use alloy_signer::utils::secret_key_to_address;
         use k256::ecdsa::SigningKey;
         use rust_decimal_macros::dec;
 
+        let mining_key = SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                .expect("valid hex"),
+        )
+        .expect("valid key");
+        let reward_address = secret_key_to_address(&mining_key);
         Self {
             mode: NodeMode::Genesis,
-            trusted_peers: vec![PeerAddress {
-                gossip: SocketAddr::from_str("127.0.0.1:8081").unwrap(),
-                api: SocketAddr::from_str("127.0.0.1:8080").unwrap(),
-            }],
             consensus: ConsensusOptions::Custom(ConsensusConfig::testnet()),
             base_directory: default_irys_path(),
-            mempool: MempoolConfig {
-                max_data_txs_per_block: 100,
-                anchor_expiry_depth: 10,
-            },
+
             oracle: OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
                 percent_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
                 smoothing_interval: 15,
             },
-            mining_key: SigningKey::from_slice(
-                &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
-                    .expect("valid hex"),
-            )
-            .expect("valid key"),
+            mining_key,
+            reward_address,
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
             },
+            trusted_peers: vec![PeerAddress {
+                api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+                gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+                execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
+            }],
             pricing: PricingConfig {
                 fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
             },
@@ -577,7 +610,11 @@ impl NodeConfig {
                 gpu_packing_batch_size: 1024,
             },
             cache: CacheConfig { cache_clean_lag: 2 },
-            http: HttpConfig { port: 0 },
+            http: HttpConfig {
+                bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                port: 0,
+            },
+            reth_peer_info: RethPeerInfo::default(),
         }
     }
 
@@ -725,6 +762,10 @@ mod tests {
     fn test_deserialize_consensus_config_from_toml() {
         let toml_data = r#"
         chain_id = 1270
+        token_price_safe_range = 1.0
+        genesis_price = 1.0
+        annual_cost_per_gb = 0.01
+        decay_rate = 0.01
         chunk_size = 262144
         chunk_migration_depth = 1
         num_chunks_in_partition = 10
@@ -733,10 +774,6 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
-        token_price_safe_range = 1.0
-        genesis_price = 1
-        annual_cost_per_gb = 0.01
-        decay_rate = 0.01
 
         [reth]
         chain = 1270
@@ -761,6 +798,10 @@ mod tests {
         [reth.genesis.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
         balance = "0xd3c21bcecceda1000000"
 
+        [mempool]
+        max_data_txs_per_block = 100
+        anchor_expiry_depth = 10
+
         [difficulty_adjustment]
         block_time = 1
         difficulty_adjustment_interval = 1209600000
@@ -772,6 +813,10 @@ mod tests {
         parallel_verification_thread_limit = 4
         num_checkpoints_in_vdf_step = 25
         sha_1s_difficulty = 7000
+
+        [block_reward_config]
+        inflation_cap = 100000000
+        half_life_secs = 126144000
 
         [epoch]
         capacity_scalar = 100
@@ -803,14 +848,15 @@ mod tests {
         base_directory = "~/.tmp/.irys"
         consensus = "Testnet"
         mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+        reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
 
         [[trusted_peers]]
         gossip = "127.0.0.1:8081"
         api = "127.0.0.1:8080"
 
-        [mempool]
-        max_data_txs_per_block = 100
-        anchor_expiry_depth = 10
+        [trusted_peers.execution]
+        peering_tcp_addr = "127.0.0.1:30303"
+        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
         [oracle]
         type = "mock"
@@ -836,12 +882,21 @@ mod tests {
         cache_clean_lag = 2
 
         [http]
+        bind_ip = "127.0.0.1"
         port = 0
+
+        [reth_peer_info]
+        peering_tcp_addr = "0.0.0.0:0"
+        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         "#;
         // Create the expected config
         let mut expected_config = NodeConfig::testnet();
         expected_config.consensus = ConsensusOptions::Testnet;
         expected_config.base_directory = PathBuf::from("~/.tmp/.irys");
+        expected_config.trusted_peers.get_mut(0).unwrap().execution = RethPeerInfo {
+            peering_tcp_addr: "127.0.0.1:30303".parse().unwrap(),
+            peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
+        };
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
         // for debugging purposes
         println!("{}", expected_toml_data);
@@ -852,5 +907,13 @@ mod tests {
 
         // Assert the entire struct matches
         assert_eq!(config, expected_config);
+    }
+
+    #[test]
+    fn test_roundtrip_toml_serdes() {
+        let cfg = NodeConfig::testnet();
+        let enc = toml::to_string_pretty(&cfg).unwrap();
+        let dec: NodeConfig = toml::from_str(&enc).unwrap();
+        assert_eq!(cfg, dec);
     }
 }

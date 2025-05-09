@@ -13,6 +13,7 @@ alloy-signer-local.workspace = true
 irys-primitives.workspace = true
 reth-chainspec.workspace = true
 reth-cli-commands.workspace = true
+reth-auto-seal-consensus.workspace = true
 reth-cli.workspace = true
 reth-db.workspace = true
 reth-node-builder.workspace = true

@@ -1,5 +1,6 @@
 use actix::Addr;
 
+use crate::peer_list_service::PeerListServiceFacade;
 use crate::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::BlockIndexService,
@@ -7,7 +8,6 @@ use crate::{
     mempool_service::MempoolService,
     mining::{MiningControl, PartitionMiningActor},
     packing::PackingActor,
-    peer_list_service::PeerListService,
     reth_service::RethServiceActor,
     vdf_service::VdfService,
     EpochServiceActor,
@@ -24,7 +24,7 @@ pub struct ActorAddresses {
     pub mempool: Addr<MempoolService>,
     pub block_index: Addr<BlockIndexService>,
     pub epoch_service: Addr<EpochServiceActor>,
-    pub peer_list: Addr<PeerListService>,
+    pub peer_list: PeerListServiceFacade,
     pub reth: Addr<RethServiceActor>,
     pub vdf: Addr<VdfService>,
 }

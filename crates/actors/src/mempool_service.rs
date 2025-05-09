@@ -126,7 +126,12 @@ impl MempoolService {
             .map_err(|_| TxIngressError::DatabaseError)?;
 
         let latest_height = self.get_latest_block_height()?;
-        let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
+        let anchor_expiry_depth = self
+            .config
+            .node_config
+            .consensus_config()
+            .mempool
+            .anchor_expiry_depth as u64;
 
         // Allow transactions to use the txid of a transaction in the mempool
         if self.recent_valid_tx.contains(anchor) {
@@ -380,7 +385,6 @@ impl Handler<TxIngressMessage> for MempoolService {
         if self.invalid_tx.contains(&tx.id) || self.recent_valid_tx.contains(&tx.id) {
             return Err(TxIngressError::Skipped);
         }
-
         // Validate anchor
         let hdr = self.validate_anchor(&tx.id, &tx.anchor)?;
 
@@ -395,7 +399,12 @@ impl Handler<TxIngressMessage> for MempoolService {
 
         // Update any associated ingress proofs
         if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
-            let anchor_expiry_depth = self.config.node_config.mempool.anchor_expiry_depth as u64;
+            let anchor_expiry_depth = self
+                .config
+                .node_config
+                .consensus_config()
+                .mempool
+                .anchor_expiry_depth as u64;
             let new_expiry = hdr.height + anchor_expiry_depth;
             debug!(
                 "Updating ingress proof for data root {} expiry from {} -> {}",
@@ -424,6 +433,10 @@ impl Handler<TxIngressMessage> for MempoolService {
             .map_err(|_| TxIngressError::DatabaseError)?
             < U256::from(tx_msg.0.total_fee())
         {
+            error!(
+                "unfunded balance from irys_database::get_account_balance({:?})",
+                tx_msg.0.signer
+            );
             return Err(TxIngressError::Unfunded);
         }
 
@@ -433,7 +446,7 @@ impl Handler<TxIngressMessage> for MempoolService {
         self.recent_valid_tx.insert(tx.id);
 
         // Cache the data_root in the database
-        let _ = self.irys_db.update_eyre(|db_tx| {
+        match self.irys_db.update_eyre(|db_tx| {
             irys_database::cache_data_root(db_tx, tx)?;
             // TODO: tx headers should not immediately be added to the database
             // this is a work around until the mempool can persist its state
@@ -442,7 +455,23 @@ impl Handler<TxIngressMessage> for MempoolService {
             // not linked to any blocks.
             irys_database::insert_tx_header(db_tx, tx)?;
             Ok(())
-        });
+        }) {
+            Ok(()) => {
+                info!(
+                    "Successfully cached data_root {:?} for tx {:?}",
+                    tx.data_root,
+                    tx.id.0.to_base58()
+                );
+            }
+            Err(db_error) => {
+                error!(
+                    "Failed to cache data_root {:?} for tx {:?}: {:?}",
+                    tx.data_root,
+                    tx.id.0.to_base58(),
+                    db_error
+                );
+            }
+        };
 
         // Gossip transaction
         let gossip_sender = self.gossip_tx.clone();
@@ -813,7 +842,14 @@ impl Handler<GetBestMempoolTxs> for MempoolService {
 
         // Apply block size constraint and funding checks to storage transactions
         let mut storage_tx = Vec::new();
-        let max_txs = self.config.node_config.mempool.max_data_txs_per_block as usize;
+        let max_txs = self
+            .config
+            .node_config
+            .consensus_config()
+            .mempool
+            .max_data_txs_per_block
+            .try_into()
+            .expect("max_data_txs_per_block to fit into usize");
 
         // Select storage transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
@@ -976,6 +1012,40 @@ impl Handler<TxExistenceQuery> for MempoolService {
             tx_header_by_txid(&read_tx, &txid).map_err(|_| TxIngressError::DatabaseError)?;
 
         Ok(tx_header.is_some())
+    }
+}
+
+/// Message to check whether a transaction exists in the mempool or on disk
+#[derive(Message, Debug)]
+#[rtype(result = "Result<Option<IrysTransactionHeader>, TxIngressError>")]
+pub struct GetTransaction(pub H256);
+
+impl GetTransaction {
+    #[must_use]
+    pub fn into_inner(self) -> H256 {
+        self.0
+    }
+}
+
+impl Handler<GetTransaction> for MempoolService {
+    type Result = Result<Option<IrysTransactionHeader>, TxIngressError>;
+
+    fn handle(&mut self, tx_msg: GetTransaction, _ctx: &mut Context<Self>) -> Self::Result {
+        if let Some(tx_header) = self.valid_tx.get(&tx_msg.0) {
+            return Ok(Some(tx_header.clone()));
+        }
+
+        let read_tx = self
+            .irys_db
+            .as_ref()
+            .tx()
+            .map_err(|_| TxIngressError::DatabaseError)?;
+
+        let txid = tx_msg.0;
+        let tx_header =
+            tx_header_by_txid(&read_tx, &txid).map_err(|_| TxIngressError::DatabaseError)?;
+
+        Ok(tx_header)
     }
 }
 
