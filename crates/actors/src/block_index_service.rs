@@ -1,9 +1,7 @@
-use crate::{calculate_chunks_added, BlockFinalizedMessage};
+use crate::BlockFinalizedMessage;
 use actix::prelude::*;
 use base58::ToBase58;
-use irys_database::{
-    block_header_by_hash, BlockIndex, BlockIndexItem, DataLedger, LedgerIndexItem,
-};
+use irys_database::{block_header_by_hash, BlockIndex, BlockIndexItem};
 use irys_types::{
     ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, H256, U256,
 };
