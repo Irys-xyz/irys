@@ -16,11 +16,16 @@ async function* walk(dir: string): AsyncGenerator<string, void, any> {
   for await (const toml of walk("../../ext/alloy-core/crates")) {
     console.log(toml);
     const contents = (await readFile(toml)).toString();
-    const name = contents
+    const nameLine = contents
       .split("\n")
-      .find((l) => l.startsWith('name = "'))
-      .split('name = "')[1]
-      .slice(0, -1);
+      .find((l) => l.trim().startsWith('name = "'));
+    if (!nameLine) {
+      throw new Error(`No name found in ${toml}`);
+    }
+    const name = nameLine.match(/name\s*=\s*"([^"]+)"/)?.[1];
+    if (!name) {
+      throw new Error(`Invalid name format in ${toml}`);
+    }
     console.log(contents, name);
     const overrideString = `${name} = { path = "./${relative(base, dirname(toml))}" }`;
     overrides.push(overrideString);
