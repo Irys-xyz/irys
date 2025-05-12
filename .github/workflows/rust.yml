@@ -24,7 +24,7 @@ jobs:
     outputs:
       should-run: ${{ steps.set-output.outputs.should-run }}  # register we have some output other actions should reference
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Need full history for comparison
         # this script checks whether we should run on the current commit, based on:
