@@ -3,6 +3,7 @@ use reth_db::DatabaseEnv;
 use reth_db_api::database_metrics::{DatabaseMetadata, DatabaseMetadataValue, DatabaseMetrics};
 use std::sync::RwLock;
 use std::sync::{Arc, PoisonError, RwLockReadGuard};
+use tracing::info;
 
 /// In the reth library, there's a nested circular Arc reference. This circular dependency prevents
 /// the DB connection from being dropped even when external references are removed, thereby making
@@ -32,9 +33,11 @@ impl RethDbWrapper {
 
     /// Close underlying DB connection
     pub fn close(&self) {
+        info!("Closing underlying DB connection");
         if let Ok(mut db) = self.db.write() {
             db.take();
         }
+        info!("Connection Closed");
     }
 }
 

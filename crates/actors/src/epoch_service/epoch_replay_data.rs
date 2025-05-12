@@ -41,7 +41,7 @@ impl EpochReplayData {
         // Calculate how many epoch blocks should exist in the chain
         let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
         let num_blocks = block_index.num_blocks();
-        let num_epoch_blocks = (num_blocks / num_blocks_in_epoch) as u64 + 1;
+        let num_epoch_blocks = (num_blocks / num_blocks_in_epoch).max(1) as u64;
         let mut replay_data: VecDeque<EpochReplayData> = VecDeque::new();
 
         // Process each epoch block from genesis to the latest
@@ -49,9 +49,10 @@ impl EpochReplayData {
             let block_height = i * num_blocks_in_epoch;
 
             // Get the block hash from the block index
-            let block_item = block_index
-                .get_item(block_height)
-                .expect("Expected block index to contain an item at the epoch block height");
+            let block_item = block_index.get_item(block_height).expect(&format!(
+                "Expected block index to contain an item at the epoch block height: {}",
+                block_height
+            ));
 
             // Retrieve the block header from the database
             let block = db
