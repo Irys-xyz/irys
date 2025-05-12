@@ -6,6 +6,7 @@ use crate::peer_utilities::{
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
+use base58::ToBase58;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -412,6 +413,17 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
+        let node_config = &ctx.config.node_config;
+        info!(
+            "Started node!\nMining address: {}\nReth Peer ID: {}\nHTTP: {}:{},\nGossip: {}:{}\nReth peering: {}",
+            &ctx.config.node_config.miner_address().to_base58(),
+            ctx.reth_handle.network.peer_id(),
+            &node_config.http.bind_ip,
+            &node_config.http.port,
+            &node_config.gossip.bind_ip,
+            &node_config.gossip.port,
+            &node_config.reth_peer_info.peering_tcp_addr
+        );
 
         // if we are an empty node joining an existing network
         if !data_exists && !matches!(self.config.node_config.mode, NodeMode::Genesis) {
