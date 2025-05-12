@@ -292,7 +292,7 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
 /// TODO: Mine on peer2 and see if those blocks arrive at genesis via gossip
 #[test_log::test(actix_web::test)]
-async fn heavy_sync_chain_state() -> eyre::Result<()> {
+async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     // setup trusted peers connection data and configs for genesis and nodes
     let (
         testnet_config_genesis,
@@ -316,7 +316,8 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     generate_test_transaction_and_add_to_block(&ctx_genesis_node, &account1).await;
 
     // mine x blocks on genesis
-    mine_blocks(&ctx_genesis_node.node_ctx, required_genesis_node_height)
+    ctx_genesis_node
+        .mine_blocks(required_genesis_node_height)
         .await
         .expect("expected many mined blocks");
 
@@ -339,6 +340,19 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
         &account1,
     )
     .await;
+
+    // disable vdf mining on the peers, as they can instead use VDF fast forward as blocks arrive
+    // this does not directly contribute to the test but does reduce resource usage during test run
+    ctx_peer1_node
+        .node_ctx
+        .actor_addresses
+        .set_mining(false)
+        .expect("expect setting mining false on peer1");
+    ctx_peer2_node
+        .node_ctx
+        .actor_addresses
+        .set_mining(false)
+        .expect("expect setting mining false on peer2");
 
     // TODO: Once we have proper genesis/regular block hash logic (i.e derived from the signature), these H256 values will need to be updated
     let genesis_genesis_block =
@@ -438,7 +452,8 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     tracing::debug!("txn we are looking for on genesis: {:?}", txn);
 
     // mine block on genesis
-    mine_blocks(&ctx_genesis_node.node_ctx, 1)
+    ctx_genesis_node
+        .mine_blocks(1)
         .await
         .expect("expected one mined block on genesis node");
 

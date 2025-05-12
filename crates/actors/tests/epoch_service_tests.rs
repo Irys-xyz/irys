@@ -388,6 +388,7 @@ async fn partition_expiration_and_repacking_test() {
         capacity: 10,
         global_step: 0,
         seeds: VecDeque::new(),
+        mining_state_sender: None,
     })));
 
     let packing_addr = packing.start();

@@ -98,8 +98,8 @@ fn backup_accounts() -> eyre::Result<()> {
     let mut read_cursor = read_tx.cursor_read::<PlainAccountState>()?;
 
     let mut walker = read_cursor.walk(None)?;
-
-    let file = File::create(format!("accounts-{}.json", &latest_reth_block))?;
+    let file_name = format!("accounts-{}.json", &latest_reth_block);
+    let file = File::create(&file_name)?;
     let mut writer = BufWriter::new(file);
 
     writer.write_all(b"[\n")?;
@@ -128,7 +128,7 @@ fn backup_accounts() -> eyre::Result<()> {
 
     read_tx.commit()?;
 
-    info!("Accounts saved!");
+    info!("Accounts saved to {}", &file_name);
 
     Ok(())
 }
