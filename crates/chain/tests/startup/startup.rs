@@ -68,7 +68,7 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
 
     // start a new instance to take over from the old one that has been completely stopped
     // i.e. it's important this test runs stop() run start() on a new instance with no context transferred via self.
-    let mut node = IrysNodeTest::new(config.clone()).await;
+    let mut node = IrysNodeTest::new_genesis(config.clone()).await;
     node.cfg.base_directory = test_dir;
     let ctx = node.start().await;
 
