@@ -13,8 +13,8 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use base58::ToBase58;
-use irys_actors::block_discovery::BlockDiscoveredMessage;
-use irys_actors::mempool_service::MempoolServiceFacade;
+use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::mempool_service::MempoolFacade;
 use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason};
 use irys_api_client::ApiClient;
 use irys_types::{
@@ -27,8 +27,8 @@ use tracing::log::debug;
 #[derive(Debug)]
 pub struct GossipServer<M, B, A, R>
 where
-    M: MempoolServiceFacade,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    M: MempoolFacade,
+    B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
@@ -38,8 +38,8 @@ where
 
 impl<M, B, A, R> Clone for GossipServer<M, B, A, R>
 where
-    M: MempoolServiceFacade,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    M: MempoolFacade,
+    B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
@@ -53,8 +53,8 @@ where
 
 impl<M, B, A, R> GossipServer<M, B, A, R>
 where
-    M: MempoolServiceFacade,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    M: MempoolFacade,
+    B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {

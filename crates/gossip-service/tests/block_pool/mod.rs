@@ -68,16 +68,16 @@ impl ApiClient for MockApiClient {
     }
 }
 
-struct BlockDiscoveryMockActor {
+struct BlockDiscoveryStub {
     messages: Vec<BlockDiscoveredMessage>,
     db: DatabaseProvider,
 }
 
-impl Actor for BlockDiscoveryMockActor {
+impl Actor for BlockDiscoveryStub {
     type Context = actix::Context<Self>;
 }
 
-impl Handler<BlockDiscoveredMessage> for BlockDiscoveryMockActor {
+impl Handler<BlockDiscoveredMessage> for BlockDiscoveryStub {
     type Result = eyre::Result<()>;
 
     fn handle(&mut self, msg: BlockDiscoveredMessage, _ctx: &mut Self::Context) -> Self::Result {
@@ -91,7 +91,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryMockActor {
 #[rtype(result = "Vec<BlockDiscoveredMessage>")]
 struct GetBlockDiscoveryMessages;
 
-impl Handler<GetBlockDiscoveryMessages> for BlockDiscoveryMockActor {
+impl Handler<GetBlockDiscoveryMessages> for BlockDiscoveryStub {
     type Result = Vec<BlockDiscoveredMessage>;
 
     fn handle(
@@ -118,7 +118,7 @@ async fn should_process_block() {
     let mock_client = MockApiClient {
         block_response: None,
     };
-    let mock_block_discovery_actor = BlockDiscoveryMockActor {
+    let mock_block_discovery_actor = BlockDiscoveryStub {
         messages: vec![],
         db: db.clone(),
     };
@@ -264,7 +264,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Setup MockApiClient to return block2 when queried
     let mock_client = MockApiClient::default();
 
-    let mock_block_discovery_actor = BlockDiscoveryMockActor {
+    let mock_block_discovery_actor = BlockDiscoveryStub {
         messages: vec![],
         db: db.clone(),
     };

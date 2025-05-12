@@ -7,7 +7,9 @@ use crate::{
     CommitmentCacheInner, CommitmentCacheMessage, CommitmentStatus, GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
+use async_trait::async_trait;
 use base58::ToBase58;
+use eyre::eyre;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
@@ -42,6 +44,32 @@ pub struct BlockDiscoveryActor {
     pub service_senders: ServiceSenders,
     /// Gossip message bus
     pub gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
+}
+
+#[async_trait::async_trait]
+pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
+    async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()>;
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockDiscoveryFacadeImpl {
+    addr: Addr<BlockDiscoveryActor>,
+}
+
+impl BlockDiscoveryFacadeImpl {
+    pub fn new(addr: Addr<BlockDiscoveryActor>) -> Self {
+        Self { addr }
+    }
+}
+
+#[async_trait]
+impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
+    async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()> {
+        self.addr
+            .send(BlockDiscoveredMessage(Arc::new(block)))
+            .await
+            .map_err(|mailbox_error: MailboxError| eyre!("MailboxError: {:?}", mailbox_error))?
+    }
 }
 
 /// When a block is discovered, either produced locally or received from

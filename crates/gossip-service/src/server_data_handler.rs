@@ -5,8 +5,8 @@ use crate::{GossipCache, GossipClient, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
 use base58::ToBase58;
 use core::net::SocketAddr;
-use irys_actors::block_discovery::BlockDiscoveredMessage;
-use irys_actors::mempool_service::{ChunkIngressError, MempoolServiceFacade};
+use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade};
 use irys_actors::peer_list_service::PeerListFacade;
 use irys_api_client::ApiClient;
 use irys_types::{
@@ -18,15 +18,15 @@ use tracing::{debug, error};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub struct GossipServerDataHandler<TMempoolFacade, B, TApiClient, R>
+pub struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient, R>
 where
-    TMempoolFacade: MempoolServiceFacade,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    TMempoolFacade: MempoolFacade,
+    TBlockDiscovery: BlockDiscoveryFacade,
     TApiClient: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     pub mempool: TMempoolFacade,
-    pub block_pool: Addr<BlockPoolService<TApiClient, R, B>>,
+    pub block_pool: Addr<BlockPoolService<TApiClient, R, TBlockDiscovery>>,
     pub cache: Arc<GossipCache>,
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
@@ -35,8 +35,8 @@ where
 
 impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
 where
-    M: MempoolServiceFacade,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    M: MempoolFacade,
+    B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
@@ -54,8 +54,8 @@ where
 
 impl<M, B, A, R> GossipServerDataHandler<M, B, A, R>
 where
-    M: MempoolServiceFacade,
-    B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
+    M: MempoolFacade,
+    B: BlockDiscoveryFacade,
     A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {

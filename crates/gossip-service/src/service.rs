@@ -16,13 +16,13 @@ use crate::{
     server::GossipServer,
     types::{GossipError, GossipResult},
 };
-use actix::{Actor, Addr, Context, Handler};
+use actix::{Actor, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
-use irys_actors::mempool_service::MempoolServiceFacade;
+use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::mempool_service::MempoolFacade;
 use irys_actors::{
-    block_discovery::BlockDiscoveredMessage, broadcast_mining_service::BroadcastMiningSeed,
-    peer_list_service::PeerListFacade,
+    broadcast_mining_service::BroadcastMiningSeed, peer_list_service::PeerListFacade,
 };
 use irys_api_client::ApiClient;
 use irys_types::{
@@ -148,10 +148,10 @@ impl GossipService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<B, A, R>(
+    pub fn run<A, R>(
         mut self,
-        mempool: impl MempoolServiceFacade,
-        block_discovery: Addr<B>,
+        mempool: impl MempoolFacade,
+        block_discovery: impl BlockDiscoveryFacade,
         api_client: A,
         task_executor: &TaskExecutor,
         peer_list: PeerListFacade<A, R>,
@@ -159,7 +159,6 @@ impl GossipService {
         vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
-        B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
         A: ApiClient,
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     {

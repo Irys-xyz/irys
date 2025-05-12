@@ -39,7 +39,7 @@ use std::future::Future;
 use tracing::{debug, error, info, warn};
 
 #[async_trait::async_trait]
-pub trait MempoolServiceFacade: Clone + Send + Sync + 'static {
+pub trait MempoolFacade: Clone + Send + Sync + 'static {
     async fn handle_data_transaction(
         &self,
         tx_header: IrysTransactionHeader,
@@ -82,7 +82,7 @@ impl From<MailboxError> for ChunkIngressError {
 }
 
 #[async_trait]
-impl MempoolServiceFacade for MempoolServiceFacadeImpl {
+impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn handle_data_transaction(
         &self,
         tx_header: IrysTransactionHeader,

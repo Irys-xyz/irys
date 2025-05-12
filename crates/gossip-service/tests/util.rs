@@ -7,7 +7,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::mempool_service::{ChunkIngressError, MempoolServiceFacade, TxIngressError};
+use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError};
 use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
 use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
@@ -51,7 +51,7 @@ impl MempoolStub {
 }
 
 #[async_trait]
-impl MempoolServiceFacade for MempoolStub {
+impl MempoolFacade for MempoolStub {
     async fn handle_data_transaction(
         &self,
         tx_header: IrysTransactionHeader,
