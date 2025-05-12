@@ -342,7 +342,7 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     .await;
 
     // disable vdf mining on the peers, as they can instead use VDF fast forward as blocks arrive
-    // this does not directly controbute to the test but does reduce resource usage during test run
+    // this does not directly contribute to the test but does reduce resource usage during test run
     ctx_peer1_node
         .node_ctx
         .actor_addresses

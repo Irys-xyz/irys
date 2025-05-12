@@ -35,7 +35,6 @@ pub fn run_vdf(
     let nonce_limiter_reset_frequency = config.reset_frequency as u64;
 
     // maintain a state of whether or not this vdf loop should be mining
-    // TODO: better to read the mining value from the mining service
     let mut vdf_mining: bool = true;
 
     loop {
