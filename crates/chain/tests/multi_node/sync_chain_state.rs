@@ -341,6 +341,19 @@ async fn heavy_sync_chain_state() -> eyre::Result<()> {
     )
     .await;
 
+    // disable vdf mining on the peers, as they can instead use VDF fast forward as blocks arrive
+    // this does not directly controbute to the test but does reduce resource usage during test run
+    ctx_peer1_node
+        .node_ctx
+        .actor_addresses
+        .set_mining(false)
+        .expect("expect setting mining false on peer1");
+    ctx_peer2_node
+        .node_ctx
+        .actor_addresses
+        .set_mining(false)
+        .expect("expect setting mining false on peer2");
+
     // TODO: Once we have proper genesis/regular block hash logic (i.e derived from the signature), these H256 values will need to be updated
     let genesis_genesis_block =
         block_header_by_hash(&ctx_genesis_node.node_ctx.db.tx()?, &H256::zero(), false)?.unwrap();
