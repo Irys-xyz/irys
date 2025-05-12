@@ -16,7 +16,7 @@ pub fn run_vdf(
     seed: H256,
     initial_reset_seed: H256,
     mut new_seed_listener: Receiver<BroadcastMiningSeed>,
-    mut vdf_mininig_state_listener: Receiver<bool>,
+    mut vdf_mining_state_listener: Receiver<bool>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
     vdf_service: Addr<VdfService>,
@@ -44,7 +44,7 @@ pub fn run_vdf(
         };
 
         // check if vdf mining state should change
-        if let Ok(new_mining_state) = vdf_mininig_state_listener.try_recv() {
+        if let Ok(new_mining_state) = vdf_mining_state_listener.try_recv() {
             tracing::info!("Setting mining state to {}", new_mining_state);
             vdf_mining = new_mining_state;
         }
