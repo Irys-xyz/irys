@@ -21,8 +21,7 @@ use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::mempool_service::MempoolServiceFacade;
 use irys_actors::{
-    block_discovery::BlockDiscoveredMessage,
-    broadcast_mining_service::BroadcastMiningSeed,
+    block_discovery::BlockDiscoveredMessage, broadcast_mining_service::BroadcastMiningSeed,
     peer_list_service::PeerListFacade,
 };
 use irys_api_client::ApiClient;

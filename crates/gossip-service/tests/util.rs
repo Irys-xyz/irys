@@ -1,12 +1,13 @@
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
+use async_trait::async_trait;
 use base58::ToBase58;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::block_discovery::BlockDiscoveredMessage;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::mempool_service::{ChunkIngressError, ChunkIngressMessage, CommitmentTxIngressMessage, MempoolServiceFacade, TxExistenceQuery, TxIngressError, TxIngressMessage};
+use irys_actors::mempool_service::{ChunkIngressError, MempoolServiceFacade, TxIngressError};
 use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
 use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
@@ -17,13 +18,17 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
-use irys_types::{AcceptedResponse, Base64, BlockHash, CombinedBlockHeader, CommitmentTransaction, Config, DatabaseProvider, GossipData, GossipRequest, IrysBlockHeader, IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256};
+use irys_types::{
+    AcceptedResponse, Base64, BlockHash, CombinedBlockHeader, CommitmentTransaction, Config,
+    DatabaseProvider, GossipData, GossipRequest, IrysBlockHeader, IrysTransaction,
+    IrysTransactionHeader, IrysTransactionResponse, NodeConfig, PeerAddress, PeerListItem,
+    PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
+};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -47,7 +52,10 @@ impl MempoolStub {
 
 #[async_trait]
 impl MempoolServiceFacade for MempoolStub {
-    async fn handle_data_transaction(&self, tx_header: IrysTransactionHeader) -> std::result::Result<(), TxIngressError> {
+    async fn handle_data_transaction(
+        &self,
+        tx_header: IrysTransactionHeader,
+    ) -> std::result::Result<(), TxIngressError> {
         let already_exists = self
             .txs
             .read()
@@ -75,11 +83,17 @@ impl MempoolServiceFacade for MempoolStub {
         Ok(())
     }
 
-    async fn handle_commitment_transaction(&self, tx_header: CommitmentTransaction) -> std::result::Result<(), TxIngressError> {
+    async fn handle_commitment_transaction(
+        &self,
+        _tx_header: CommitmentTransaction,
+    ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
 
-    async fn handle_chunk(&self, chunk: UnpackedChunk) -> std::result::Result<(), ChunkIngressError> {
+    async fn handle_chunk(
+        &self,
+        chunk: UnpackedChunk,
+    ) -> std::result::Result<(), ChunkIngressError> {
         self.chunks
             .write()
             .expect("to unlock mempool chunks")

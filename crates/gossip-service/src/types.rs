@@ -20,7 +20,7 @@ pub enum GossipError {
     #[error("Block pool error: {0:?}")]
     BlockPool(BlockPoolError),
     #[error("Transaction has already been handled")]
-    TransactionIsAlreadyHandled
+    TransactionIsAlreadyHandled,
 }
 
 impl From<PeerListFacadeError> for GossipError {
@@ -44,29 +44,21 @@ impl From<TxIngressError> for GossipError {
             // ==== External errors
             TxIngressError::InvalidSignature => {
                 // Invalid signature, decrease source reputation
-                GossipError::InvalidData(
-                    InvalidDataError::TransactionSignature,
-                )
+                GossipError::InvalidData(InvalidDataError::TransactionSignature)
             }
             TxIngressError::Unfunded => {
                 // Unfunded transaction, decrease source reputation
-                GossipError::InvalidData(
-                    InvalidDataError::TransactionUnfunded,
-                )
+                GossipError::InvalidData(InvalidDataError::TransactionUnfunded)
             }
             TxIngressError::InvalidAnchor => {
                 // Invalid anchor, decrease source reputation
-                GossipError::InvalidData(
-                    InvalidDataError::TransactionAnchor,
-                )
+                GossipError::InvalidData(InvalidDataError::TransactionAnchor)
             }
             // ==== Internal errors - shouldn't be communicated to outside
-            TxIngressError::DatabaseError => {
-                GossipError::Internal(InternalGossipError::Database)
+            TxIngressError::DatabaseError => GossipError::Internal(InternalGossipError::Database),
+            TxIngressError::ServiceUninitialized => {
+                GossipError::Internal(InternalGossipError::ServiceUninitialized)
             }
-            TxIngressError::ServiceUninitialized => GossipError::Internal(
-                InternalGossipError::ServiceUninitialized,
-            ),
             TxIngressError::Other(error) => {
                 GossipError::Internal(InternalGossipError::Unknown(error))
             }

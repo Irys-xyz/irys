@@ -133,9 +133,9 @@ impl IrysNodeCtx {
     }
 }
 
+use irys_actors::mempool_service::MempoolServiceFacadeImpl;
 use irys_actors::peer_list_service::PeerListServiceFacade;
 use std::sync::atomic::{AtomicBool, Ordering};
-use irys_actors::mempool_service::MempoolServiceFacadeImpl;
 
 // Shared stop guard that can be cloned
 #[derive(Debug)]
