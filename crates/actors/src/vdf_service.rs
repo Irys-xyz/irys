@@ -24,8 +24,13 @@ impl Default for VdfService {
 
 impl VdfService {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
-    pub fn new(block_index: BlockIndexReadGuard, db: DatabaseProvider, config: &Config) -> Self {
-        let vdf_state = create_state(block_index, db, &config);
+    pub fn new(
+        block_index: BlockIndexReadGuard,
+        db: DatabaseProvider,
+        vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
+        config: &Config,
+    ) -> Self {
+        let vdf_state = create_state(block_index, db, vdf_mining_state_sender, &config);
         Self {
             vdf_state: Arc::new(RwLock::new(vdf_state)),
         }
@@ -38,6 +43,7 @@ impl VdfService {
                 global_step: 0,
                 capacity,
                 seeds: VecDeque::with_capacity(capacity),
+                mining_state_sender: None,
             })),
         }
     }
@@ -47,6 +53,7 @@ impl VdfService {
 fn create_state(
     block_index: BlockIndexReadGuard,
     db: DatabaseProvider,
+    vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
     config: &Config,
 ) -> VdfState {
     let capacity = calc_capacity(config);
@@ -87,6 +94,7 @@ fn create_state(
             global_step: global_step_number,
             seeds,
             capacity,
+            mining_state_sender: Some(vdf_mining_state_sender),
         };
     };
 
@@ -95,6 +103,7 @@ fn create_state(
         global_step: 0,
         seeds: VecDeque::with_capacity(capacity),
         capacity,
+        mining_state_sender: Some(vdf_mining_state_sender),
     }
 }
 
@@ -159,6 +168,52 @@ impl Handler<GetVdfStateMessage> for VdfService {
 
     fn handle(&mut self, _msg: GetVdfStateMessage, _ctx: &mut Self::Context) -> Self::Result {
         VdfStepsReadGuard::new(self.vdf_state.clone())
+    }
+}
+
+/// pause the VDF thread via mpsc
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct StopMiningMessage;
+
+impl Handler<StopMiningMessage> for VdfService {
+    type Result = ();
+
+    fn handle(&mut self, _msg: StopMiningMessage, _ctx: &mut Self::Context) -> Self::Result {
+        let sender = self
+            .vdf_state
+            .read()
+            .expect("expected to get read lock on vdf state")
+            .mining_state_sender
+            .clone()
+            .expect("expected valid mining_state_sender");
+
+        tokio::spawn(async move {
+            let _ = sender.send(false).await;
+        });
+    }
+}
+
+/// start/resume the VDF thread via mpsc
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct StartMiningMessage;
+
+impl Handler<StartMiningMessage> for VdfService {
+    type Result = ();
+
+    fn handle(&mut self, _msg: StartMiningMessage, _ctx: &mut Self::Context) -> Self::Result {
+        let sender = self
+            .vdf_state
+            .read()
+            .expect("expected to get read lock on vdf state")
+            .mining_state_sender
+            .clone()
+            .expect("expected valid mining_state_sender");
+
+        tokio::spawn(async move {
+            let _ = sender.send(true).await;
+        });
     }
 }
 
