@@ -32,13 +32,13 @@ pub struct ActorAddresses {
 impl ActorAddresses {
     /// Send a message to all known partition actors to ignore any received VDF steps
     pub fn stop_mining(&self) -> eyre::Result<()> {
-        // pause VDF thread from mining
+        // pause VDF thread mining
         self.vdf.do_send(StopMiningMessage);
         self.set_mining(false)
     }
     /// Send a message to all known partition actors to begin mining when they receive a VDF step
     pub fn start_mining(&self) -> eyre::Result<()> {
-        // start VDF thread from mining
+        // start VDF thread mining
         self.vdf.do_send(StartMiningMessage);
         self.set_mining(true)
     }
