@@ -9,3 +9,4 @@
 .vscode/settings.json
 ext/
 config.toml
+emission_simulation.csv

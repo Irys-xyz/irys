@@ -25,6 +25,7 @@ irys-vdf.workspace = true
 irys-price-oracle.workspace = true
 irys-gossip-service.workspace = true
 irys-api-client.workspace = true
+irys-reward-curve.workspace = true
 
 base58.workspace = true
 color-eyre.workspace = true
@@ -59,10 +60,7 @@ futures.workspace = true
 reth-tracing.workspace = true
 hex.workspace = true
 test-fuzz.workspace = true
-k256 = { version = "0.13", default-features = false, features = [
-    "ecdsa",
-    "serde",
-] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "serde"] }
 alloy-sol-macro = { workspace = true, features = ["json"] }
 alloy-provider.workspace = true
 core_affinity = "0.8.1"

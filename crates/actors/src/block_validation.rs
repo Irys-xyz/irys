@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     block_index_service::BlockIndexReadGuard,
     ema_service::{EmaServiceMessage, PriceStatus},
@@ -8,6 +10,7 @@ use base58::ToBase58;
 use eyre::ensure;
 use irys_database::DataLedger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
+use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
     calculate_difficulty, next_cumulative_diff, validate_path, Address, Config, ConsensusConfig,
@@ -24,6 +27,7 @@ pub async fn prevalidate_block(
     previous_block: IrysBlockHeader,
     partitions_guard: PartitionAssignmentsReadGuard,
     config: Config,
+    reward_curve: Arc<HalvingCurve>,
     steps_guard: VdfStepsReadGuard,
     ema_serviece_sendr: tokio::sync::mpsc::UnboundedSender<EmaServiceMessage>,
 ) -> eyre::Result<()> {
@@ -97,27 +101,47 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
-    debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
-        ?block.height,
-        "last_step_checkpoints_is_valid",
-    );
-
+    let vdf_checkpoint_valid = async {
+        last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
+        debug!(
+            block_hash = ?block.block_hash.0.to_base58(),
+            ?block.height,
+            "last_step_checkpoints_is_valid",
+        );
+        Result::<_, eyre::Report>::Ok(())
+    };
     // Check that the oracle price does not exceed the EMA pricing parameters
-    check_valid_oracle_price(&block, &ema_serviece_sendr).await?;
-    debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
-        ?block.height,
-        "check_valid_oracle_price",
-    );
-
+    let oracle_price_valid = async {
+        check_valid_oracle_price(&block, &ema_serviece_sendr).await?;
+        debug!(
+            block_hash = ?block.block_hash.0.to_base58(),
+            ?block.height,
+            "check_valid_oracle_price",
+        );
+        Result::<_, eyre::Report>::Ok(())
+    };
     // Check that the EMA has been correctly calculated
-    check_valid_ema_calculation(&block, &ema_serviece_sendr).await?;
-    debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
-        ?block.height,
-        "check_valid_ema_calculation",
+    let ema_valid = async {
+        check_valid_ema_calculation(&block, &ema_serviece_sendr).await?;
+        debug!(
+            block_hash = ?block.block_hash.0.to_base58(),
+            ?block.height,
+            "check_valid_ema_calculation",
+        );
+        Result::<_, eyre::Report>::Ok(())
+    };
+    futures::try_join!(vdf_checkpoint_valid, oracle_price_valid, ema_valid)?;
+
+    // Check valid curve price
+    let reward = reward_curve.reward_between(
+        // adjust ms to sec
+        previous_block.timestamp.saturating_div(1000),
+        block.timestamp.saturating_div(1000),
+    )?;
+    let encoded_reward = block.reward_amount;
+    ensure!(
+        reward.amount == block.reward_amount,
+        "reward amount mismatch, expected {reward:}, got {encoded_reward:}"
     );
 
     Ok(())
