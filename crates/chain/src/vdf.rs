@@ -39,6 +39,11 @@ pub fn run_vdf(
     let mut vdf_mining: bool = true;
 
     loop {
+        if shutdown_listener.try_recv().is_ok() {
+            // Shutdown signal received
+            break;
+        };
+
         // check if vdf mining state should change
         if let Ok(new_mining_state) = vdf_mininig_state_listener.try_recv() {
             tracing::info!("Setting mining state to {}", new_mining_state);
@@ -91,11 +96,6 @@ pub fn run_vdf(
             );
             hash = apply_reset_seed(hash, reset_seed);
         }
-
-        if shutdown_listener.try_recv().is_ok() {
-            // Shutdown signal received
-            break;
-        };
 
         if let Ok(proposed_ff_to_mining_seed) = new_seed_listener.try_recv() {
             // if the step number is ahead of local nodes vdf steps
