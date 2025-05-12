@@ -19,11 +19,10 @@ use crate::{
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
-use irys_actors::mempool_service::CommitmentTxIngressMessage;
+use irys_actors::mempool_service::MempoolServiceFacade;
 use irys_actors::{
     block_discovery::BlockDiscoveredMessage,
     broadcast_mining_service::BroadcastMiningSeed,
-    mempool_service::{ChunkIngressMessage, TxExistenceQuery, TxIngressMessage},
     peer_list_service::PeerListFacade,
 };
 use irys_api_client::ApiClient;
@@ -152,7 +151,7 @@ impl GossipService {
     /// bind to the address or if any of the tasks fails to spawn.
     pub fn run<M, B, A, R>(
         mut self,
-        mempool: Addr<M>,
+        mempool: M,
         block_discovery: Addr<B>,
         api_client: A,
         task_executor: &TaskExecutor,
@@ -161,11 +160,7 @@ impl GossipService {
         vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
-        M: Handler<TxIngressMessage>
-            + Handler<CommitmentTxIngressMessage>
-            + Handler<ChunkIngressMessage>
-            + Handler<TxExistenceQuery>
-            + Actor<Context = Context<M>>,
+        M: MempoolServiceFacade,
         B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
         A: ApiClient + Clone + 'static + Unpin + Default,
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,

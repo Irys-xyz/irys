@@ -14,9 +14,7 @@ use actix_web::{
 };
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveredMessage;
-use irys_actors::mempool_service::{
-    ChunkIngressMessage, CommitmentTxIngressMessage, TxExistenceQuery, TxIngressMessage,
-};
+use irys_actors::mempool_service::MempoolServiceFacade;
 use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason};
 use irys_api_client::ApiClient;
 use irys_types::{
@@ -29,11 +27,7 @@ use tracing::log::debug;
 #[derive(Debug)]
 pub struct GossipServer<M, B, A, R>
 where
-    M: Handler<TxIngressMessage>
-        + Handler<CommitmentTxIngressMessage>
-        + Handler<ChunkIngressMessage>
-        + Handler<TxExistenceQuery>
-        + Actor<Context = Context<M>>,
+    M: MempoolServiceFacade,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -44,11 +38,7 @@ where
 
 impl<M, B, A, R> Clone for GossipServer<M, B, A, R>
 where
-    M: Handler<TxIngressMessage>
-        + Handler<CommitmentTxIngressMessage>
-        + Handler<ChunkIngressMessage>
-        + Handler<TxExistenceQuery>
-        + Actor<Context = Context<M>>,
+    M: MempoolServiceFacade,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -63,11 +53,7 @@ where
 
 impl<M, B, A, R> GossipServer<M, B, A, R>
 where
-    M: Handler<TxIngressMessage>
-        + Handler<CommitmentTxIngressMessage>
-        + Handler<ChunkIngressMessage>
-        + Handler<TxExistenceQuery>
-        + Actor<Context = Context<M>>,
+    M: MempoolServiceFacade,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -159,11 +145,7 @@ async fn handle_block<M, B, A, R>(
     req: actix_web::HttpRequest,
 ) -> HttpResponse
 where
-    M: Handler<TxIngressMessage>
-        + Handler<CommitmentTxIngressMessage>
-        + Handler<ChunkIngressMessage>
-        + Handler<TxExistenceQuery>
-        + Actor<Context = Context<M>>,
+    M: MempoolServiceFacade,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -213,11 +195,7 @@ async fn handle_transaction<M, B, A, R>(
     req: actix_web::HttpRequest,
 ) -> HttpResponse
 where
-    M: Handler<TxIngressMessage>
-        + Handler<CommitmentTxIngressMessage>
-        + Handler<ChunkIngressMessage>
-        + Handler<TxExistenceQuery>
-        + Actor<Context = Context<M>>,
+    M: MempoolServiceFacade,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -246,11 +224,7 @@ async fn handle_chunk<M, B, A, R>(
     req: actix_web::HttpRequest,
 ) -> HttpResponse
 where
-    M: Handler<TxIngressMessage>
-        + Handler<CommitmentTxIngressMessage>
-        + Handler<ChunkIngressMessage>
-        + Handler<TxExistenceQuery>
-        + Actor<Context = Context<M>>,
+    M: MempoolServiceFacade,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -277,11 +251,7 @@ async fn handle_health_check<M, B, A, R>(
     req: actix_web::HttpRequest,
 ) -> HttpResponse
 where
-    M: Handler<TxIngressMessage>
-        + Handler<CommitmentTxIngressMessage>
-        + Handler<ChunkIngressMessage>
-        + Handler<TxExistenceQuery>
-        + Actor<Context = Context<M>>,
+    M: MempoolServiceFacade,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
@@ -323,11 +293,7 @@ async fn handle_get_data<M, B, A, R>(
     req: actix_web::HttpRequest,
 ) -> HttpResponse
 where
-    M: Handler<TxIngressMessage>
-        + Handler<CommitmentTxIngressMessage>
-        + Handler<ChunkIngressMessage>
-        + Handler<TxExistenceQuery>
-        + Actor<Context = Context<M>>,
+    M: MempoolServiceFacade,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
     A: ApiClient + Clone + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,

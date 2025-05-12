@@ -19,6 +19,8 @@ pub enum GossipError {
     InvalidData(InvalidDataError),
     #[error("Block pool error: {0:?}")]
     BlockPool(BlockPoolError),
+    #[error("Transaction has already been handled")]
+    TransactionIsAlreadyHandled
 }
 
 impl From<PeerListFacadeError> for GossipError {
@@ -26,6 +28,47 @@ impl From<PeerListFacadeError> for GossipError {
         match error {
             PeerListFacadeError::InternalError(err) => {
                 Self::Internal(InternalGossipError::Unknown(err))
+            }
+        }
+    }
+}
+
+impl From<TxIngressError> for GossipError {
+    fn from(value: TxIngressError) -> Self {
+        match value {
+            // ==== Not really errors
+            TxIngressError::Skipped => {
+                // Not an invalid transaction - just skipped
+                GossipError::TransactionIsAlreadyHandled
+            }
+            // ==== External errors
+            TxIngressError::InvalidSignature => {
+                // Invalid signature, decrease source reputation
+                GossipError::InvalidData(
+                    InvalidDataError::TransactionSignature,
+                )
+            }
+            TxIngressError::Unfunded => {
+                // Unfunded transaction, decrease source reputation
+                GossipError::InvalidData(
+                    InvalidDataError::TransactionUnfunded,
+                )
+            }
+            TxIngressError::InvalidAnchor => {
+                // Invalid anchor, decrease source reputation
+                GossipError::InvalidData(
+                    InvalidDataError::TransactionAnchor,
+                )
+            }
+            // ==== Internal errors - shouldn't be communicated to outside
+            TxIngressError::DatabaseError => {
+                GossipError::Internal(InternalGossipError::Database)
+            }
+            TxIngressError::ServiceUninitialized => GossipError::Internal(
+                InternalGossipError::ServiceUninitialized,
+            ),
+            TxIngressError::Other(error) => {
+                GossipError::Internal(InternalGossipError::Unknown(error))
             }
         }
     }
@@ -73,28 +116,6 @@ pub enum InternalGossipError {
     BroadcastReceiverShutdown,
     #[error("Trying to shutdown a server that is already shutdown: {0}")]
     AlreadyShutdown(String),
-}
-
-pub(crate) fn tx_ingress_error_to_gossip_error(error: TxIngressError) -> Option<GossipError> {
-    match error {
-        TxIngressError::Skipped => None,
-        TxIngressError::InvalidSignature => Some(GossipError::InvalidData(
-            InvalidDataError::TransactionSignature,
-        )),
-        TxIngressError::Unfunded => Some(GossipError::InvalidData(
-            InvalidDataError::TransactionUnfunded,
-        )),
-        TxIngressError::InvalidAnchor => Some(GossipError::InvalidData(
-            InvalidDataError::TransactionAnchor,
-        )),
-        TxIngressError::DatabaseError => Some(GossipError::Internal(InternalGossipError::Database)),
-        TxIngressError::ServiceUninitialized => Some(GossipError::Internal(
-            InternalGossipError::ServiceUninitialized,
-        )),
-        TxIngressError::Other(error) => {
-            Some(GossipError::Internal(InternalGossipError::Unknown(error)))
-        }
-    }
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;

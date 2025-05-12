@@ -4068,6 +4068,7 @@ dependencies = [
  "actix-rt",
  "alloy-rpc-types-engine",
  "assert_matches",
+ "async-trait",
  "base58",
  "eyre",
  "futures",
