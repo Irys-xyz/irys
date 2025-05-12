@@ -292,7 +292,7 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
 /// TODO: Mine on peer2 and see if those blocks arrive at genesis via gossip
 #[test_log::test(actix_web::test)]
-async fn heavy_sync_chain_state() -> eyre::Result<()> {
+async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     // setup trusted peers connection data and configs for genesis and nodes
     let (
         testnet_config_genesis,
