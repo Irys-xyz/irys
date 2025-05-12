@@ -41,13 +41,13 @@ pub fn run_vdf(
     loop {
         // check if vdf mining state should change
         if let Ok(new_mining_state) = vdf_mininig_state_listener.try_recv() {
-            tracing::error!("Setting mining state to {}", new_mining_state);
+            tracing::info!("Setting mining state to {}", new_mining_state);
             vdf_mining = new_mining_state;
         }
 
         // if mining disabled, wait 200ms and continue loop i.e. check again
         if !vdf_mining {
-            tracing::error!("VDF Mining Paused, waiting 200ms");
+            tracing::trace!("VDF Mining Paused, waiting 200ms");
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
