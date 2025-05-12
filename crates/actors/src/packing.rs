@@ -15,7 +15,7 @@ use {irys_packing::capacity_pack_range_cuda_c, irys_types::split_interval};
 use irys_storage::{ChunkType, StorageModule};
 use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange};
 use reth::tasks::TaskExecutor;
-use tokio::{sync::Semaphore, time::sleep};
+use tokio::{sync::Semaphore, task::yield_now, time::sleep};
 use tracing::{debug, warn};
 
 #[derive(Debug, Message, Clone)]
@@ -148,6 +148,7 @@ impl PackingActor {
                         if i % short_writes_before_sync == 0 {
                             debug!("triggering sync");
                             let _ = storage_module.sync_pending_chunks();
+                            yield_now().await // so the shutdown can stop us
                         }
 
                         // wait for the permit before spawning the thread
@@ -239,6 +240,7 @@ impl PackingActor {
                                     );
                                     if i % short_writes_before_sync == 0 {
                                         debug!("triggering sync");
+                                        yield_now().await; // so the shutdown can stop us
                                         let _ = storage_module.sync_pending_chunks();
                                     }
                                 }
