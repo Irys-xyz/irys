@@ -148,9 +148,9 @@ impl GossipService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<M, B, A, R>(
+    pub fn run<B, A, R>(
         mut self,
-        mempool: M,
+        mempool: impl MempoolServiceFacade,
         block_discovery: Addr<B>,
         api_client: A,
         task_executor: &TaskExecutor,
@@ -159,9 +159,8 @@ impl GossipService {
         vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
-        M: MempoolServiceFacade,
         B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-        A: ApiClient + Clone + 'static + Unpin + Default,
+        A: ApiClient,
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     {
         tracing::debug!("Staring gossip service");

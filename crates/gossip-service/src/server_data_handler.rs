@@ -18,26 +18,26 @@ use tracing::{debug, error};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub struct GossipServerDataHandler<TMempoolFacade, B, A, R>
+pub struct GossipServerDataHandler<TMempoolFacade, B, TApiClient, R>
 where
     TMempoolFacade: MempoolServiceFacade,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Unpin + Default + 'static,
+    TApiClient: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     pub mempool: TMempoolFacade,
-    pub block_pool: Addr<BlockPoolService<A, R, B>>,
+    pub block_pool: Addr<BlockPoolService<TApiClient, R, B>>,
     pub cache: Arc<GossipCache>,
-    pub api_client: A,
+    pub api_client: TApiClient,
     pub gossip_client: GossipClient,
-    pub peer_list_service: PeerListFacade<A, R>,
+    pub peer_list_service: PeerListFacade<TApiClient, R>,
 }
 
 impl<M, B, A, R> Clone for GossipServerDataHandler<M, B, A, R>
 where
     M: MempoolServiceFacade,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Unpin + Default + 'static,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     fn clone(&self) -> Self {
@@ -56,7 +56,7 @@ impl<M, B, A, R> GossipServerDataHandler<M, B, A, R>
 where
     M: MempoolServiceFacade,
     B: Handler<BlockDiscoveredMessage> + Actor<Context = Context<B>>,
-    A: ApiClient + Unpin + Default + 'static,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     pub(crate) async fn handle_chunk(
