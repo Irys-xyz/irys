@@ -1,15 +1,13 @@
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
+use async_trait::async_trait;
 use base58::ToBase58;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
-use irys_actors::block_discovery::BlockDiscoveredMessage;
+use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::mempool_service::{
-    ChunkIngressError, ChunkIngressMessage, CommitmentTxIngressMessage, TxExistenceQuery,
-    TxIngressError, TxIngressMessage,
-};
+use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError};
 use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
 use irys_api_client::ApiClient;
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
@@ -21,10 +19,10 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    AcceptedResponse, Base64, BlockHash, CombinedBlockHeader, Config, DatabaseProvider, GossipData,
-    GossipRequest, IrysBlockHeader, IrysTransaction, IrysTransactionHeader,
-    IrysTransactionResponse, NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore,
-    RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
+    AcceptedResponse, Base64, BlockHash, CombinedBlockHeader, CommitmentTransaction, Config,
+    DatabaseProvider, GossipData, GossipRequest, IrysBlockHeader, IrysTransaction,
+    IrysTransactionHeader, IrysTransactionResponse, NodeConfig, PeerAddress, PeerListItem,
+    PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
@@ -34,10 +32,10 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MempoolStub {
-    pub txs: Arc<RwLock<Vec<TxIngressMessage>>>,
-    pub chunks: Arc<RwLock<Vec<ChunkIngressMessage>>>,
+    pub txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
+    pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub internal_message_bus: mpsc::Sender<GossipData>,
 }
 
@@ -52,24 +50,18 @@ impl MempoolStub {
     }
 }
 
-impl Actor for MempoolStub {
-    type Context = Context<Self>;
-}
-
-impl Handler<TxIngressMessage> for MempoolStub {
-    type Result = Result<(), TxIngressError>;
-
-    /// # Panics
-    /// Can panic
-    fn handle(&mut self, msg: TxIngressMessage, _: &mut Self::Context) -> Self::Result {
-        let tx = msg.0.clone();
-
+#[async_trait]
+impl MempoolFacade for MempoolStub {
+    async fn handle_data_transaction(
+        &self,
+        tx_header: IrysTransactionHeader,
+    ) -> std::result::Result<(), TxIngressError> {
         let already_exists = self
             .txs
             .read()
             .expect("to unlock mempool txs")
             .iter()
-            .any(|message| message.0 == msg.0);
+            .any(|tx| tx == &tx_header);
 
         if already_exists {
             return Err(TxIngressError::Skipped);
@@ -78,44 +70,34 @@ impl Handler<TxIngressMessage> for MempoolStub {
         self.txs
             .write()
             .expect("to unlock txs in the mempool stub")
-            .push(msg);
+            .push(tx_header.clone());
         // Pretend that we've validated the tx and we're ready to gossip it
         let message_bus = self.internal_message_bus.clone();
         tokio::runtime::Handle::current().spawn(async move {
             message_bus
-                .send(GossipData::Transaction(tx))
+                .send(GossipData::Transaction(tx_header))
                 .await
                 .expect("to send transaction");
         });
 
         Ok(())
     }
-}
 
-impl Handler<CommitmentTxIngressMessage> for MempoolStub {
-    type Result = Result<(), TxIngressError>;
-
-    fn handle(
-        &mut self,
-        _msg: CommitmentTxIngressMessage,
-        _ctx: &mut Self::Context,
-    ) -> Self::Result {
+    async fn handle_commitment_transaction(
+        &self,
+        _tx_header: CommitmentTransaction,
+    ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
-}
 
-impl Handler<ChunkIngressMessage> for MempoolStub {
-    type Result = Result<(), ChunkIngressError>;
-
-    /// # Panics
-    /// Can panic
-    fn handle(&mut self, msg: ChunkIngressMessage, _: &mut Self::Context) -> Self::Result {
-        let chunk = msg.0.clone();
-
+    async fn handle_chunk(
+        &self,
+        chunk: UnpackedChunk,
+    ) -> std::result::Result<(), ChunkIngressError> {
         self.chunks
             .write()
             .expect("to unlock mempool chunks")
-            .push(msg);
+            .push(chunk.clone());
 
         // Pretend that we've validated the chunk and we're ready to gossip it
         let message_bus = self.internal_message_bus.clone();
@@ -128,21 +110,14 @@ impl Handler<ChunkIngressMessage> for MempoolStub {
 
         Ok(())
     }
-}
 
-impl Handler<TxExistenceQuery> for MempoolStub {
-    type Result = Result<bool, TxIngressError>;
-
-    /// # Panics
-    /// Can panic
-    fn handle(&mut self, msg: TxExistenceQuery, _: &mut Self::Context) -> Self::Result {
-        let tx_id = msg.0;
+    async fn is_known_tx(&self, tx_id: H256) -> std::result::Result<bool, TxIngressError> {
         let exists = self
             .txs
             .read()
             .expect("to read txs")
             .iter()
-            .any(|message| message.0.id == tx_id);
+            .any(|message| message.id == tx_id);
         Ok(exists)
     }
 }
@@ -153,29 +128,20 @@ pub struct BlockDiscoveryStub {
     pub internal_message_bus: mpsc::Sender<GossipData>,
 }
 
-impl Actor for BlockDiscoveryStub {
-    type Context = Context<Self>;
-}
-
-impl Handler<BlockDiscoveredMessage> for BlockDiscoveryStub {
-    type Result = Result<(), eyre::Report>;
-
-    /// # Panics
-    /// Can panic
-    fn handle(&mut self, msg: BlockDiscoveredMessage, _: &mut Self::Context) -> Self::Result {
-        let block = msg.0;
+#[async_trait]
+impl BlockDiscoveryFacade for BlockDiscoveryStub {
+    async fn handle_block(&self, block: IrysBlockHeader) -> Result<()> {
         self.blocks
             .write()
             .expect("to unlock blocks")
-            .push(block.as_ref().clone());
+            .push(block.clone());
 
         let sender = self.internal_message_bus.clone();
-        let arc_block = Arc::clone(&block);
 
         // Pretend that we've validated the block and we're ready to gossip it
         tokio::runtime::Handle::current().spawn(async move {
             sender
-                .send(GossipData::Block(arc_block.as_ref().clone()))
+                .send(GossipData::Block(block))
                 .await
                 .expect("to send block");
         });
@@ -274,11 +240,11 @@ pub struct GossipServiceTestFixture {
     pub execution: RethPeerInfo,
     pub db: DatabaseProvider,
     pub mining_address: Address,
-    pub mempool: Addr<MempoolStub>,
+    pub mempool: MempoolStub,
     pub peer_list: Addr<PeerListServiceWithClient<StubApiClient, MockRethServiceActor>>,
-    pub block_discovery: Addr<BlockDiscoveryStub>,
-    pub mempool_txs: Arc<RwLock<Vec<TxIngressMessage>>>,
-    pub mempool_chunks: Arc<RwLock<Vec<ChunkIngressMessage>>>,
+    pub block_discovery: BlockDiscoveryStub,
+    pub mempool_txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
+    pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
     pub api_client: StubApiClient,
     pub task_manager: TaskManager,
@@ -342,9 +308,6 @@ impl GossipServiceTestFixture {
         };
         let discovery_blocks = Arc::clone(&block_discovery_stub.blocks);
 
-        let mempool_stub_addr = mempool_stub.start();
-        let block_discovery_addr = block_discovery_stub.start();
-
         let tokio_runtime = tokio::runtime::Handle::current();
 
         let task_manager = TaskManager::new(tokio_runtime);
@@ -357,9 +320,9 @@ impl GossipServiceTestFixture {
             execution: RethPeerInfo::default(),
             db,
             mining_address: Address::random(),
-            mempool: mempool_stub_addr,
+            mempool: mempool_stub,
             peer_list,
-            block_discovery: block_discovery_addr,
+            block_discovery: block_discovery_stub,
             mempool_txs,
             mempool_chunks,
             discovery_blocks,
@@ -384,21 +347,19 @@ impl GossipServiceTestFixture {
         self.mempool_txs = Arc::clone(&mempool_stub.txs);
         self.mempool_chunks = Arc::clone(&mempool_stub.chunks);
 
-        let mempool_stub_addr = mempool_stub.start();
-        self.mempool = mempool_stub_addr.clone();
+        self.mempool = mempool_stub.clone();
 
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::clone(&self.discovery_blocks),
             internal_message_bus: internal_message_bus.clone(),
         };
-        let block_discovery_stub_addr = block_discovery_stub.start();
 
         let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
 
         let service_handle = gossip_service
             .run(
-                mempool_stub_addr,
-                block_discovery_stub_addr,
+                mempool_stub,
+                block_discovery_stub,
                 self.api_client.clone(),
                 &self.task_executor,
                 self.peer_list.clone().into(),

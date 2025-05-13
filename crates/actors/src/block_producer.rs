@@ -79,6 +79,13 @@ pub struct BlockProducerActor {
     pub block_tree_guard: BlockTreeReadGuard,
     /// The Irys price oracle
     pub price_oracle: Arc<IrysPriceOracle>,
+    /// Enforces block production limits during testing
+    ///
+    /// Controls the exact number of blocks produced to ensure test determinism.
+    /// Since mining is probabilistic, solutions can be found nearly simultaneously
+    /// before mining can be stopped after the first solution. This guard prevents
+    /// producing extra blocks that would cause non-deterministic test behavior.
+    pub blocks_remaining_for_test: Option<u64>,
 }
 
 /// Actors can handle this message to learn about the `block_producer` actor at startup
@@ -88,6 +95,22 @@ pub struct RegisterBlockProducerMessage(pub Addr<BlockProducerActor>);
 
 impl Actor for BlockProducerActor {
     type Context = Context<Self>;
+}
+
+#[derive(Message, Debug, Clone)]
+#[rtype(result = "()")]
+pub struct SetTestBlocksRemainingMessage(pub Option<u64>);
+
+impl Handler<SetTestBlocksRemainingMessage> for BlockProducerActor {
+    type Result = ();
+
+    fn handle(
+        &mut self,
+        msg: SetTestBlocksRemainingMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
+        self.blocks_remaining_for_test = msg.0;
+    }
 }
 
 #[derive(Message, Debug)]
@@ -110,7 +133,20 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
     ))]
     fn handle(&mut self, msg: SolutionFoundMessage, _ctx: &mut Self::Context) -> Self::Result {
         let solution = msg.0;
-        info!("BlockProducerActor solution received");
+        info!(
+            "BlockProducerActor solution received: solution_hash={}",
+            solution.solution_hash.0.to_base58()
+        );
+
+        if let Some(blocks_remaining) = self.blocks_remaining_for_test {
+            if blocks_remaining == 0 {
+                info!(
+                    "No more blocks needed for this test, skipping block production for solution_hash={}"
+                    , solution.solution_hash.0.to_base58()
+                );
+                return AtomicResponse::new(Box::pin(fut::ready(Ok(None))));
+            }
+        }
 
         let mining_broadcaster_addr = BroadcastMiningService::from_registry();
 
@@ -563,6 +599,16 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             Ok(Some((block.clone(), exec_payload)))
         }
         .into_actor(self)
+        .map(|result, actor, _ctx| {
+            // Only decrement blocks_remaining_for_test when a block is successfully produced
+            if let Ok(Some(_)) = &result {
+                // If blocks_remaining_for_test is Some, decrement it by 1
+                if let Some(remaining) = actor.blocks_remaining_for_test {
+                    actor.blocks_remaining_for_test = Some(remaining.saturating_sub(1));
+                }
+            }
+            result
+        })
         .map_err(|e: eyre::Error, _, _| {
             error!("Error producing a block: {}", &e);
             std::process::abort();

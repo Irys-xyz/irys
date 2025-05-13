@@ -7,7 +7,9 @@ use crate::{
     CommitmentCacheInner, CommitmentCacheMessage, CommitmentStatus, GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
+use async_trait::async_trait;
 use base58::ToBase58;
+use eyre::eyre;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
 };
@@ -42,6 +44,32 @@ pub struct BlockDiscoveryActor {
     pub service_senders: ServiceSenders,
     /// Gossip message bus
     pub gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
+}
+
+#[async_trait::async_trait]
+pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
+    async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()>;
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockDiscoveryFacadeImpl {
+    addr: Addr<BlockDiscoveryActor>,
+}
+
+impl BlockDiscoveryFacadeImpl {
+    pub fn new(addr: Addr<BlockDiscoveryActor>) -> Self {
+        Self { addr }
+    }
+}
+
+#[async_trait]
+impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
+    async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()> {
+        self.addr
+            .send(BlockDiscoveredMessage(Arc::new(block)))
+            .await
+            .map_err(|mailbox_error: MailboxError| eyre!("MailboxError: {:?}", mailbox_error))?
+    }
 }
 
 /// When a block is discovered, either produced locally or received from
@@ -270,19 +298,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         }
                     }
 
-                    info!("Block is valid, sending to block tree");
-
                     db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
                         .unwrap();
 
                     let mut all_txs = submit_txs;
                     all_txs.extend_from_slice(&publish_txs);
-                    block_tree_addr
-                        .send(BlockPreValidatedMessage(
-                            new_block_header.clone(),
-                            Arc::new(all_txs),
-                        ))
-                        .await??;
 
                     // Check if we've reached the end of an epoch and should finalize commitments
                     let block_height = new_block_header.height;
@@ -342,6 +362,16 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             .await
                             .expect("to receive a response from ClearCache message");
                     }
+
+                    // WARNING: All block pre-validation needs to be completed before
+                    // sending this message.
+                    info!("Block is valid, sending to block tree");
+                    block_tree_addr
+                        .send(BlockPreValidatedMessage(
+                            new_block_header.clone(),
+                            Arc::new(all_txs),
+                        ))
+                        .await??;
 
                     // Send the block to the gossip bus
                     tracing::trace!(
