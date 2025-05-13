@@ -11,7 +11,6 @@ irys-database.workspace = true
 irys-packing.workspace = true
 irys-storage.workspace = true
 irys-config.workspace = true
-irys-vdf.workspace = true
 irys-price-oracle.workspace = true
 irys-efficient-sampling.workspace = true
 irys-api-client.workspace = true

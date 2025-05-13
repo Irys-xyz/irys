@@ -9,7 +9,6 @@ use crate::{
     mining::{MiningControl, PartitionMiningActor},
     packing::PackingActor,
     reth_service::RethServiceActor,
-    vdf_service::{StartMiningMessage, StopMiningMessage, VdfService},
     EpochServiceActor,
 };
 
@@ -26,20 +25,31 @@ pub struct ActorAddresses {
     pub epoch_service: Addr<EpochServiceActor>,
     pub peer_list: PeerListServiceFacade,
     pub reth: Addr<RethServiceActor>,
-    pub vdf: Addr<VdfService>,
 }
 
 impl ActorAddresses {
     /// Send a message to all known partition actors to ignore any received VDF steps
-    pub fn stop_mining(&self) -> eyre::Result<()> {
+    pub fn stop_mining(
+        &self,
+        vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
+    ) -> eyre::Result<()> {
         // pause VDF thread mining
-        self.vdf.do_send(StopMiningMessage);
+        // TODO: switch fn to async?
+        tokio::spawn(async move {
+            let _ = vdf_mining_state_sender.send(false).await;
+        });
         self.set_mining(false)
     }
     /// Send a message to all known partition actors to begin mining when they receive a VDF step
-    pub fn start_mining(&self) -> eyre::Result<()> {
+    pub fn start_mining(
+        &self,
+        vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
+    ) -> eyre::Result<()> {
         // start VDF thread mining
-        self.vdf.do_send(StartMiningMessage);
+        // TODO: switch fn to async?
+        tokio::spawn(async move {
+            let _ = vdf_mining_state_sender.send(true).await;
+        });
         self.set_mining(true)
     }
     /// Send a custom control message to all known partition actors

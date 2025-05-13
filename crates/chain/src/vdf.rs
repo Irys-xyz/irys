@@ -1,12 +1,20 @@
 use actix::Addr;
 use irys_actors::{
+    block_index_service::BlockIndexReadGuard,
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
     vdf_service::{VdfSeed, VdfService},
 };
-use irys_types::{block_production::Seed, AtomicVdfStepNumber, H256List, H256, U256};
+use irys_database::block_header_by_hash;
+use irys_types::{
+    block_production::Seed, AtomicVdfStepNumber, Config, DatabaseProvider, H256List, H256, U256,
+};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
+use reth_db::Database;
 use sha2::{Digest, Sha256};
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 use tokio::sync::mpsc::Receiver;
 use tracing::{debug, info};
 
