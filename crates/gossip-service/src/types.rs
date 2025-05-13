@@ -1,6 +1,6 @@
 use crate::block_pool_service::BlockPoolError;
+use crate::peer_list_service::PeerListFacadeError;
 use irys_actors::mempool_service::TxIngressError;
-use irys_actors::peer_list_service::PeerListFacadeError;
 use irys_types::{BlockHash, H256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

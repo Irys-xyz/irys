@@ -8,6 +8,7 @@
 )]
 use crate::block_pool_service::BlockPoolService;
 use crate::cache::GossipCacheKey;
+use crate::peer_list_service::PeerListFacade;
 use crate::server_data_handler::GossipServerDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
@@ -20,13 +21,14 @@ use actix::{Actor, Context, Handler};
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_actors::mempool_service::MempoolFacade;
-use irys_actors::{
-    broadcast_mining_service::BroadcastMiningSeed, peer_list_service::PeerListFacade,
-};
 use irys_api_client::ApiClient;
 use irys_database::BlockIndex;
-use irys_types::{block_production::Seed, Address, BlockIndexQuery, DatabaseProvider, GossipData, H256List, PeerListItem, RethPeerInfo, VDFLimiterInfo};
+use irys_types::{
+    block_production::Seed, Address, BlockIndexQuery, DatabaseProvider, GossipData, H256List,
+    PeerListItem, RethPeerInfo, VDFLimiterInfo,
+};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashSet;
@@ -209,7 +211,9 @@ impl GossipService {
 
         if needs_catching_up {
             task_executor.spawn(async move {
-                if let Err(error) = catch_up_task(service, block_index, api_client.clone(), peer_list).await {
+                if let Err(error) =
+                    catch_up_task(service, block_index, api_client.clone(), peer_list).await
+                {
                     error!("Failed to catch up: {}", error);
                 }
             });
@@ -480,26 +484,41 @@ async fn catch_up_task<
     service: Arc<RwLock<GossipService>>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
     api_client: A,
-    peer_list_service: PeerListFacade<
-        A,
-        R,
-    >,
+    peer_list_service: PeerListFacade<A, R>,
 ) -> Result<(), GossipError> {
     peer_list_service.wait_for_active_peers().await?;
 
     let mut latest_known_height = match block_index.read() {
         Ok(guard) => guard.latest_height(),
         Err(err) => {
-            return Err(GossipError::Internal(InternalGossipError::Unknown(format!("Can't perform block sync: Failed to read block index: {}", err))));
+            return Err(GossipError::Internal(InternalGossipError::Unknown(
+                format!(
+                    "Can't perform block sync: Failed to read block index: {}",
+                    err
+                ),
+            )));
         }
     };
 
     let limit = 10;
-    let (_, top_peer) = peer_list_service.top_active_peers(Some(10), None).await?.get(0).ok_or(GossipError::Internal(InternalGossipError::Unknown("Can't perform block sync: Failed to get top active peers".to_string())))?;
-    let index = api_client.get_block_index(top_peer.address.api, BlockIndexQuery {
-        height: latest_known_height as usize,
-        limit,
-    }).await.map_err(|network_error| GossipError::Network(network_error.to_string()))?;
+    let (_, top_peer) = peer_list_service
+        .top_active_peers(Some(10), None)
+        .await?
+        .get(0)
+        .cloned()
+        .ok_or(GossipError::Internal(InternalGossipError::Unknown(
+            "Can't perform block sync: Failed to get top active peers".to_string(),
+        )))?;
+    let index = api_client
+        .get_block_index(
+            top_peer.address.api,
+            BlockIndexQuery {
+                height: latest_known_height as usize,
+                limit,
+            },
+        )
+        .await
+        .map_err(|network_error| GossipError::Network(network_error.to_string()))?;
 
     let gossip_client = service.read().await.client.clone();
 

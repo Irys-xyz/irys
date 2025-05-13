@@ -20,7 +20,6 @@ use irys_actors::{
     mempool_service::MempoolService,
     mining::PartitionMiningActor,
     packing::{PackingActor, PackingConfig, PackingRequest},
-    peer_list_service::PeerListService,
     reth_service::{
         BlockHashType, ForkChoiceUpdateMessage, GetPeeringInfoMessage, RethServiceActor,
     },
@@ -95,6 +94,7 @@ pub struct IrysNodeCtx {
     // Thread handles spawned by the start function
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
     stop_guard: StopGuard,
+    pub peer_list: PeerListServiceFacade,
 }
 
 impl IrysNodeCtx {
@@ -103,7 +103,7 @@ impl IrysNodeCtx {
             mempool: self.actor_addresses.mempool.clone(),
             chunk_provider: self.chunk_provider.clone(),
             ema_service,
-            peer_list: self.actor_addresses.peer_list.clone(),
+            peer_list: self.peer_list.clone(),
             db: self.db.clone(),
             config: self.config.clone(),
             reth_provider: self.reth_handle.clone(),
@@ -136,7 +136,8 @@ impl IrysNodeCtx {
 
 use irys_actors::block_discovery::BlockDiscoveryFacadeImpl;
 use irys_actors::mempool_service::MempoolServiceFacadeImpl;
-use irys_actors::peer_list_service::PeerListServiceFacade;
+use irys_gossip_service::peer_list_service::PeerListService;
+use irys_gossip_service::peer_list_service::PeerListServiceFacade;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Shared stop guard that can be cloned
@@ -562,7 +563,7 @@ impl IrysNode {
                 ctx.config.node_config.trusted_peers.clone(),
                 ctx.actor_addresses.block_discovery_addr.clone(),
                 ctx.actor_addresses.mempool.clone(),
-                ctx.actor_addresses.peer_list.clone(),
+                ctx.peer_list.clone(),
                 ctx.vdf_sender.clone(),
             )
             .await?;
@@ -979,7 +980,6 @@ impl IrysNode {
                 mempool: mempool_service.clone(),
                 block_index: block_index_service_actor,
                 epoch_service: epoch_service_actor,
-                peer_list: peer_list_service.clone(),
                 reth: reth_service_actor,
                 vdf: vdf_service,
             },
@@ -996,6 +996,7 @@ impl IrysNode {
             block_tree_guard: block_tree_guard.clone(),
             config: config.clone(),
             stop_guard: StopGuard::new(),
+            peer_list: peer_list_service.clone(),
         };
 
         let mut service_arbiters = Vec::new();

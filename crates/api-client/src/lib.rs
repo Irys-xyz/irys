@@ -203,11 +203,20 @@ impl ApiClient for IrysApiClient {
         }
     }
 
-    async fn get_block_index(&self, peer: SocketAddr, block_index_query: BlockIndexQuery) -> Result<Vec<BlockIndexItem>> {
+    async fn get_block_index(
+        &self,
+        peer: SocketAddr,
+        block_index_query: BlockIndexQuery,
+    ) -> Result<Vec<BlockIndexItem>> {
         let path = "/block_index";
 
         let response = self
-            .make_request::<Vec<BlockIndexItem>, _>(peer, Method::GET, &path, Some(&block_index_query))
+            .make_request::<Vec<BlockIndexItem>, _>(
+                peer,
+                Method::GET,
+                &path,
+                Some(&block_index_query),
+            )
             .await;
         match response {
             Ok(Some(block_index)) => Ok(block_index),
@@ -342,7 +351,11 @@ mod tests {
             Ok(None)
         }
 
-        async fn get_block_index(&self, _peer: SocketAddr, _block_index_query: BlockIndexQuery) -> Result<Vec<BlockIndexItem>> {
+        async fn get_block_index(
+            &self,
+            _peer: SocketAddr,
+            _block_index_query: BlockIndexQuery,
+        ) -> Result<Vec<BlockIndexItem>> {
             Ok(vec![])
         }
     }

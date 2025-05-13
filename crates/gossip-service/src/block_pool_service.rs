@@ -1,3 +1,4 @@
+use crate::peer_list_service::{PeerListFacade, PeerListFacadeError};
 use crate::service::fast_forward_vdf_steps_from_block;
 use crate::types::GossipDataRequest;
 use crate::GossipClient;
@@ -8,7 +9,6 @@ use actix::{
 use base58::ToBase58;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
-use irys_actors::peer_list_service::{PeerListFacade, PeerListFacadeError};
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::reth_db::Database;

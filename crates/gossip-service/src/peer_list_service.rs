@@ -14,7 +14,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, error, warn};
 
-use crate::reth_service::RethServiceActor;
+use irys_actors::reth_service::RethServiceActor;
 
 async fn send_message_and_print_error<T, A, R>(message: T, address: Addr<A>)
 where
@@ -1137,7 +1137,6 @@ where
     }
 }
 
-
 /// Flush the peer list to the database
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(), PeerListServiceError>")]
@@ -1151,7 +1150,8 @@ where
     type Result = Result<(), PeerListServiceError>;
 
     fn handle(&mut self, _msg: RequestBlockToBeGossiped, _ctx: &mut Self::Context) -> Self::Result {
-        self.gossip_client
+        // self.gossip_client
+        Ok(())
     }
 }
 

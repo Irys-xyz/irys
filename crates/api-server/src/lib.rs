@@ -10,11 +10,11 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::ema_service::EmaServiceMessage;
-use irys_actors::peer_list_service::PeerListServiceFacade;
 use irys_actors::{
     block_index_service::BlockIndexReadGuard, block_tree_service::BlockTreeReadGuard,
     mempool_service::MempoolService,
 };
+use irys_gossip_service::peer_list_service::PeerListServiceFacade;
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};

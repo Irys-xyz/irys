@@ -1,6 +1,7 @@
 pub mod block_pool_service;
 pub mod cache;
 pub mod client;
+pub mod peer_list_service;
 pub mod server;
 mod server_data_handler;
 pub mod service;

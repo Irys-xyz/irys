@@ -2,11 +2,11 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
+use crate::peer_list_service::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
 use crate::types::{GossipDataRequest, GossipError, GossipResult};
 use actix::{Actor, Context, Handler};
 use base58::ToBase58;
 use core::time::Duration;
-use irys_actors::peer_list_service::{PeerListFacade, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_api_client::ApiClient;
 use irys_types::{Address, GossipData, GossipRequest, PeerListItem, RethPeerInfo};
 use reqwest::Response;
@@ -48,7 +48,7 @@ impl GossipClient {
                     format!("http://{}/gossip/chunk", peer.address.gossip),
                     unpacked_chunk,
                 )
-                    .await?;
+                .await?;
             }
             GossipData::Transaction(irys_transaction_header) => {
                 tracing::trace!(
@@ -60,7 +60,7 @@ impl GossipClient {
                     format!("http://{}/gossip/transaction", peer.address.gossip),
                     irys_transaction_header,
                 )
-                    .await?;
+                .await?;
             }
             GossipData::Block(irys_block_header) => {
                 tracing::debug!(
@@ -73,7 +73,7 @@ impl GossipClient {
                     format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,
                 )
-                    .await?;
+                .await?;
             }
         };
 
