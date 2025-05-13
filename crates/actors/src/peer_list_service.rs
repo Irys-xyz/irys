@@ -266,13 +266,13 @@ where
             peer_address: PeerAddress {
                 gossip: format!(
                     "{}:{}",
-                    config.node_config.gossip.bind_ip, config.node_config.gossip.port
+                    config.node_config.gossip.public_ip, config.node_config.gossip.public_port
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),
                 api: format!(
                     "{}:{}",
-                    config.node_config.http.bind_ip, config.node_config.http.port
+                    config.node_config.http.public_ip, config.node_config.http.public_port
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),

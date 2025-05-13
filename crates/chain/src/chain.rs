@@ -5,6 +5,7 @@ use crate::peer_utilities::{
 use crate::vdf::run_vdf;
 use actix::{Actor, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
+use base58::ToBase58;
 use irys_actors::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::{BlockIndexReadGuard, BlockIndexService, GetBlockIndexGuardMessage},
@@ -129,7 +130,7 @@ impl IrysNodeCtx {
     }
 
     pub fn get_http_port(&self) -> u16 {
-        self.config.node_config.http.port
+        self.config.node_config.http.bind_port
     }
 }
 
@@ -225,6 +226,7 @@ pub struct IrysNode {
     // pub data_exists: bool,
     pub random_ports: bool,
     pub http_listener: TcpListener,
+    pub gossip_listener: TcpListener,
 }
 
 impl IrysNode {
@@ -232,27 +234,55 @@ impl IrysNode {
     pub async fn new(mut node_config: NodeConfig) -> eyre::Result<Self> {
         // we create the listener here so we know the port before we start passing around `config`
         let http_listener = create_listener(
-            format!("{}:{}", &node_config.http.bind_ip, &node_config.http.port)
-                .parse()
-                .expect("A valid HTTP IP & port"),
+            format!(
+                "{}:{}",
+                &node_config.http.bind_ip, &node_config.http.bind_port
+            )
+            .parse()
+            .expect("A valid HTTP IP & port"),
+        )?;
+        let gossip_listener = create_listener(
+            format!(
+                "{}:{}",
+                &node_config.gossip.bind_ip, &node_config.gossip.bind_port
+            )
+            .parse()
+            .expect("A valid HTTP IP & port"),
         )?;
         let local_addr = http_listener
+            .local_addr()
+            .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
+        let local_gossip = gossip_listener
             .local_addr()
             .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
 
         // if `config.port` == 0, the assigned port will be random (decided by the OS)
         // we re-assign the configuration with the actual port here.
-        let random_ports = if node_config.http.port == 0 {
-            node_config.http.port = local_addr.port();
+        let random_ports = if node_config.http.bind_port == 0 {
+            node_config.http.bind_port = local_addr.port();
             true
         } else {
             false
         };
+        // If the public port is not specified, use the same as the private one
+        if node_config.http.public_port == 0 {
+            node_config.http.public_port = node_config.http.bind_port;
+        }
+
+        if node_config.gossip.bind_port == 0 {
+            node_config.gossip.bind_port = local_gossip.port();
+        }
+
+        if node_config.gossip.public_port == 0 {
+            node_config.gossip.public_port = node_config.gossip.bind_port;
+        }
+
         let config = Config::new(node_config);
         Ok(IrysNode {
             config,
             random_ports,
             http_listener,
+            gossip_listener,
         })
     }
 
@@ -491,6 +521,7 @@ impl IrysNode {
             self.http_listener,
             irys_db,
             block_index,
+            self.gossip_listener,
         )?;
 
         // await the latest height to be reported
@@ -513,6 +544,17 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
+        let node_config = &ctx.config.node_config;
+        info!(
+            "Started node!\nMining address: {}\nReth Peer ID: {}\nHTTP: {}:{},\nGossip: {}:{}\nReth peering: {}",
+            &ctx.config.node_config.miner_address().to_base58(),
+            ctx.reth_handle.network.peer_id(),
+            &node_config.http.bind_ip,
+            &node_config.http.bind_port,
+            &node_config.gossip.bind_ip,
+            &node_config.gossip.bind_port,
+            &node_config.reth_peer_info.peering_tcp_addr
+        );
 
         // if we are an empty node joining an existing network
         if *node_mode == NodeMode::PeerSync {
@@ -543,6 +585,7 @@ impl IrysNode {
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
         block_index: BlockIndex,
+        gossip_listener: TcpListener,
     ) -> Result<JoinHandle<RethNodeProvider>, eyre::Error> {
         let actor_main_thread_handle = std::thread::Builder::new()
             .name("actor-main-thread".to_string())
@@ -572,7 +615,8 @@ impl IrysNode {
                                 block_index_service_actor,
                                 &task_exec,
                                 http_listener,
-                                irys_db
+                                irys_db,
+                                gossip_listener
                             )
                             .await
                             .expect("initializng services should not fail");
@@ -695,6 +739,7 @@ impl IrysNode {
         task_exec: &TaskExecutor,
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
+        gossip_listener: TcpListener,
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
@@ -762,11 +807,8 @@ impl IrysNode {
             .send(GetCommitmentStateGuardMessage)
             .await?;
 
-        let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
-            &config.node_config.gossip.bind_ip,
-            config.node_config.gossip.port,
-            config.node_config.miner_address(),
-        );
+        let (gossip_service, gossip_tx) =
+            irys_gossip_service::GossipService::new(config.node_config.miner_address());
 
         // start the block tree service
         let (block_tree_service, block_tree_arbiter) = Self::init_block_tree_service(
@@ -866,6 +908,7 @@ impl IrysNode {
             peer_list_service.clone(),
             irys_db.clone(),
             vdf_sender.clone(),
+            gossip_listener,
         )?;
 
         // set up the price oracle
