@@ -1,5 +1,5 @@
-use irys_types::{Compact, ConsensusConfig, DataLedger, DataTransactionLedger, H256};
-use serde::{Deserialize, Serialize};
+use irys_types::{ConsensusConfig, DataLedger, H256};
+use serde::Serialize;
 use std::ops::{Index, IndexMut};
 /// Manages the global ledger state within the epoch service, tracking:
 /// - All ledger types (Publish, Submit, etc.)

@@ -7,10 +7,8 @@ use irys_types::{
     BlockIndexItem, DataLedger, IrysBlockHeader, IrysTransactionHeader, LedgerIndexItem,
     NodeConfig, H256,
 };
-use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::ops::{Index, IndexMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

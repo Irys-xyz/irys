@@ -12,7 +12,7 @@ use irys_types::{Address, GossipData, GossipRequest, PeerListItem, RethPeerInfo}
 use reqwest::Response;
 use serde::Serialize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GossipClient {
     pub mining_address: Address,
     client: reqwest::Client,
@@ -27,6 +27,10 @@ impl GossipClient {
             client: reqwest::Client::new(),
             timeout,
         }
+    }
+
+    pub fn internal_client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     /// Send data to a peer

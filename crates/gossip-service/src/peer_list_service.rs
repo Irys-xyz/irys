@@ -3,10 +3,8 @@ use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
-use irys_types::{
-    build_user_agent, Address, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse,
-    RejectedResponse, RethPeerInfo, VersionRequest,
-};
+use irys_types::{build_user_agent, Address, BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse, RejectedResponse, RethPeerInfo, VersionRequest};
+use rand::prelude::SliceRandom;
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -14,6 +12,9 @@ use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, error, warn};
 
+use crate::block_pool_service::BlockPoolError;
+use crate::types::GossipDataRequest;
+use crate::GossipClient;
 use irys_actors::reth_service::RethServiceActor;
 
 async fn send_message_and_print_error<T, A, R>(message: T, address: Addr<A>)
@@ -129,6 +130,7 @@ where
             .await?)
     }
 
+    /// Returns n most active peers
     pub async fn top_active_peers(
         &self,
         limit: Option<usize>,
@@ -143,6 +145,7 @@ where
             .await?)
     }
 
+    /// Waits for at least one active connection to appear
     pub async fn wait_for_active_peers(&self) -> Result<(), PeerListFacadeError> {
         Ok(self.addr.send(WaitForActivePeer).await?)
     }
@@ -165,12 +168,40 @@ where
             })
             .await?)
     }
+
+    /// Requests the data to be gossiped over the network. Returns when the data is successfully
+    /// requested, not when it is received.
+    pub async fn request_data_from_the_network(
+        &self,
+        gossip_data_request: GossipDataRequest,
+    ) -> Result<(), PeerListFacadeError> {
+        Ok(self
+            .addr
+            .send(RequestDataFromTheNetwork {
+                data_request: gossip_data_request,
+            })
+            .await??)
+    }
+
+    /// Requests the block to be gossiped over the network. Returns when the block is successfully
+    /// requested, not when it is received.
+    pub async fn request_block_from_the_network(&self, block_hash: BlockHash) -> Result<(), PeerListFacadeError> {
+        self.request_data_from_the_network(GossipDataRequest::Block(block_hash)).await
+    }
 }
 
 #[derive(Debug, Error, Clone)]
 pub enum PeerListFacadeError {
     #[error("Internal peer list service error: {0:?}")]
     InternalError(String),
+    #[error("{0:?}")]
+    ServiceError(PeerListServiceError),
+}
+
+impl From<PeerListServiceError> for PeerListFacadeError {
+    fn from(err: PeerListServiceError) -> Self {
+        Self::ServiceError(err)
+    }
 }
 
 impl From<MailboxError> for PeerListFacadeError {
@@ -198,7 +229,7 @@ where
     successful_announcements: HashMap<SocketAddr, AnnounceFinished>,
     failed_announcements: HashMap<SocketAddr, AnnounceFinished>,
 
-    gossip_client: Client,
+    gossip_client: GossipClient,
     irys_api_client: A,
 
     chain_id: u64,
@@ -259,7 +290,10 @@ where
             currently_running_announcements: HashSet::new(),
             successful_announcements: HashMap::new(),
             failed_announcements: HashMap::new(),
-            gossip_client: Client::new(),
+            gossip_client: GossipClient::new(
+                Duration::from_secs(5),
+                config.node_config.miner_address(),
+            ),
             irys_api_client,
             chain_id: config.consensus.chain_id,
             mining_address: config.node_config.miner_address(),
@@ -395,6 +429,15 @@ pub enum PeerListServiceError {
     HealthCheckFailed(String),
     PostVersionError(String),
     PeerHandshakeRejected(RejectedResponse),
+    NoPeersAvailable,
+    InternalSendError(MailboxError),
+    FailedToRequestData(String)
+}
+
+impl From<MailboxError> for PeerListServiceError {
+    fn from(value: MailboxError) -> Self {
+        Self::InternalSendError(value)
+    }
 }
 
 impl From<DatabaseError> for PeerListServiceError {
@@ -710,10 +753,14 @@ where
     }
 }
 
-async fn check_health(peer: PeerAddress, client: Client) -> Result<bool, PeerListServiceError> {
+async fn check_health(
+    peer: PeerAddress,
+    client: GossipClient,
+) -> Result<bool, PeerListServiceError> {
     let url = format!("http://{}/gossip/health", peer.gossip);
 
     let response = client
+        .internal_client()
         .get(&url)
         .timeout(HEALTH_CHECK_TIMEOUT)
         .send()
@@ -1140,18 +1187,95 @@ where
 /// Flush the peer list to the database
 #[derive(Message, Debug)]
 #[rtype(result = "Result<(), PeerListServiceError>")]
-pub struct RequestBlockToBeGossiped;
+pub struct RequestDataFromTheNetwork {
+    data_request: GossipDataRequest,
+}
 
-impl<A, R> Handler<RequestBlockToBeGossiped> for PeerListServiceWithClient<A, R>
+impl<A, R> Handler<RequestDataFromTheNetwork> for PeerListServiceWithClient<A, R>
 where
     A: ApiClient + 'static + Unpin + Default,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
-    type Result = Result<(), PeerListServiceError>;
+    type Result = ResponseActFuture<Self, Result<(), PeerListServiceError>>;
 
-    fn handle(&mut self, _msg: RequestBlockToBeGossiped, _ctx: &mut Self::Context) -> Self::Result {
-        // self.gossip_client
-        Ok(())
+    fn handle(&mut self, msg: RequestDataFromTheNetwork, ctx: &mut Self::Context) -> Self::Result {
+        let data_request = msg.data_request;
+        let gossip_client = self.gossip_client.clone();
+        let self_addr = ctx.address();
+
+        Box::pin(
+            async move {
+                // Get top 10 most active peers
+                let mut peers = self_addr
+                    .send(TopActivePeersRequest {
+                        truncate: Some(10),
+                        exclude_peers: None,
+                    })
+                    .await?;
+                // Shuffle them
+                peers.shuffle(&mut rand::thread_rng());
+                // Take 5, as we're going to do 5 attempts
+                peers.truncate(5);
+
+                if peers.is_empty() {
+                    return Err(PeerListServiceError::NoPeersAvailable);
+                }
+
+                // Try up to 5 peers to get the block
+                let mut last_error = None;
+
+                for (address, peer_item) in peers {
+                    for attempt in 1..=5 {
+                        debug!(
+                            "Attempting to fetch {:?} from peer {} (attempt {}/5)",
+                            data_request, address, attempt
+                        );
+
+                        match gossip_client
+                            .get_data_request(&peer_item, data_request.clone())
+                            .await
+                        {
+                            Ok(true) => {
+                                tracing::info!(
+                                    "Successfully requested {:?} from peer {}",
+                                    data_request,
+                                    address
+                                );
+
+                                return Ok(());
+                            }
+                            Ok(false) => {
+                                // Peer doesn't have this block, try another peer
+                                debug!("Peer {} doesn't have {:?}", address, data_request);
+                                continue;
+                            }
+                            Err(err) => {
+                                last_error = Some(err);
+                                tracing::warn!(
+                                    "Failed to fetch {:?} from peer {} (attempt {}/5): {}",
+                                    data_request,
+                                    address,
+                                    attempt,
+                                    last_error.as_ref().unwrap()
+                                );
+
+                                // Continue trying with the same peer if not the last attempt
+                                if attempt < 5 {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Err(PeerListServiceError::FailedToRequestData(format!(
+                    "Failed to fetch {:?} after trying 5 peers: {:?}",
+                    data_request,
+                    last_error
+                )))
+            }
+            .into_actor(self),
+        )
     }
 }
 
