@@ -104,7 +104,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentStatus::Unknown);
 
     // Mine a block to include the pledge
-    debug!("DMAC MINE BLOCK - Height should become 2");
+    debug!("MINE BLOCK - Height should become 2");
     node.mine_blocks(1).await?;
 
     // Verify pledge is now 'Accepted' after mining

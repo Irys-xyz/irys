@@ -165,7 +165,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             ..
         } = self.clone();
 
-        let ar = AtomicResponse::new(Box::pin( async move {
+        AtomicResponse::new(Box::pin( async move {
             // Get the current head of the longest chain, from the block_tree, to build off of
             let (canonical_blocks, _not_onchain_count) = block_tree_guard.read().get_canonical_chain();
             let (latest_block_hash, prev_block_height, _publish_tx, _submit_tx) = canonical_blocks.last().unwrap();
@@ -594,7 +594,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
                 mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(block.clone()));
             }
 
-            info!("DMAC Finished producing block {}, ({})", &block_hash.0.to_base58(),&block_height);
+            info!("Finished producing block {}, ({})", &block_hash.0.to_base58(),&block_height);
 
             Ok(Some((block.clone(), exec_payload)))
         }
@@ -613,9 +613,7 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             error!("Error producing a block: {}", &e);
             std::process::abort();
         })
-        ));
-
-        ar
+        ))
     }
 }
 

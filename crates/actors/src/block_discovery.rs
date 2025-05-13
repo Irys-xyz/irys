@@ -335,6 +335,8 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             .expect("to receive a response from ClearCache message");
                     }
 
+                    // WARNING: All block pre-validation needs to be completed before
+                    // sending this message.
                     info!("Block is valid, sending to block tree");
                     block_tree_addr
                         .send(BlockPreValidatedMessage(
