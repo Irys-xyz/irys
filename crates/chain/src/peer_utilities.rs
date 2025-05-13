@@ -14,7 +14,10 @@ pub use irys_reth_node_bridge::node::{
 };
 
 use irys_api_client::{ApiClient, IrysApiClient};
-use irys_types::{BlockIndexItem, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionResponse, PeerAddress, H256};
+use irys_types::{
+    BlockIndexItem, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionResponse,
+    PeerAddress, H256,
+};
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,

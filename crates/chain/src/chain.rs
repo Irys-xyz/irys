@@ -906,7 +906,7 @@ impl IrysNode {
             vdf_sender.clone(),
             gossip_listener,
             true,
-            block_index.clone()
+            block_index.clone(),
         )?;
 
         // set up the price oracle

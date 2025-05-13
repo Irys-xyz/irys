@@ -27,6 +27,7 @@ use irys_actors::{
     peer_list_service::PeerListFacade,
 };
 use irys_api_client::ApiClient;
+use irys_database::BlockIndex;
 use irys_types::{
     block_production::Seed, Address, DatabaseProvider, GossipData, H256List, PeerListItem,
     RethPeerInfo, VDFLimiterInfo,
@@ -35,12 +36,11 @@ use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashSet;
 use std::net::TcpListener;
-use std::sync::{Arc};
+use std::sync::Arc;
 use tokio::sync::mpsc::error::SendError;
-use tokio::{sync::mpsc, time};
 use tokio::sync::RwLock;
+use tokio::{sync::mpsc, time};
 use tracing::{debug, error};
-use irys_database::BlockIndex;
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -134,7 +134,7 @@ impl GossipService {
                 client,
                 cache,
                 mempool_data_receiver: Some(trusted_data_rx),
-                is_syncing: true
+                is_syncing: true,
             },
             trusted_data_tx,
         )
@@ -158,7 +158,7 @@ impl GossipService {
         vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
         listener: TcpListener,
         needs_catching_up: bool,
-        block_index: Arc<std::sync::RwLock<BlockIndex>>
+        block_index: Arc<std::sync::RwLock<BlockIndex>>,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         M: Handler<TxIngressMessage>
@@ -209,8 +209,7 @@ impl GossipService {
         let cache = Arc::clone(&self.cache);
         let service = Arc::new(RwLock::new(self));
 
-        let cache_pruning_task_handle =
-            spawn_cache_pruning_task(cache, task_executor);
+        let cache_pruning_task_handle = spawn_cache_pruning_task(cache, task_executor);
 
         let broadcast_task_handle = spawn_broadcast_task(
             mempool_data_receiver,
@@ -481,13 +480,18 @@ fn spawn_watcher_task(
     )
 }
 
-async fn catch_up_task(service: Arc<RwLock<GossipService>>, block_index: Arc<std::sync::RwLock<BlockIndex>>, api_client: impl ApiClient) {
+async fn catch_up_task(
+    service: Arc<RwLock<GossipService>>,
+    block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    api_client: impl ApiClient,
+) {
     let latest_known_height = match block_index.read() {
-        Ok(guard) => {
-            guard.latest_height()
-        }
+        Ok(guard) => guard.latest_height(),
         Err(err) => {
-            error!("Can't perform block sync: Failed to read block index: {}", err);
+            error!(
+                "Can't perform block sync: Failed to read block index: {}",
+                err
+            );
             return;
         }
     };

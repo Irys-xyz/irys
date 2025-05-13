@@ -2,9 +2,6 @@
 //!
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
-use std::fmt;
-use std::ops::{Index, IndexMut};
-use actix::MessageResponse;
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
@@ -12,11 +9,14 @@ use crate::{
     Compact, DataRootLeave, H256List, IngressProofsList, IrysSignature, IrysTransactionHeader,
     Proof, H256, U256,
 };
+use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::{Index, IndexMut};
 
 pub type BlockHash = H256;
 
@@ -368,7 +368,6 @@ impl IndexMut<DataLedger> for Vec<DataTransactionLedger> {
             .expect("No transaction ledger found for given ledger type")
     }
 }
-
 
 #[derive(
     Default,

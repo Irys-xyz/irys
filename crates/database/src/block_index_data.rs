@@ -3,7 +3,10 @@
 use actix::dev::MessageResponse;
 use base58::ToBase58;
 use eyre::Result;
-use irys_types::{BlockIndexItem, DataLedger, IrysBlockHeader, IrysTransactionHeader, LedgerIndexItem, NodeConfig, H256};
+use irys_types::{
+    BlockIndexItem, DataLedger, IrysBlockHeader, IrysTransactionHeader, LedgerIndexItem,
+    NodeConfig, H256,
+};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};

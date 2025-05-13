@@ -16,7 +16,10 @@ use irys_database::{insert_tx_header, tx_header_by_txid, SystemLedger};
 use irys_primitives::CommitmentType;
 use irys_storage::StorageModuleVec;
 use irys_types::irys::IrysSigner;
-use irys_types::{app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, DataLedger, GossipData, IrysTransactionHeader, H256};
+use irys_types::{
+    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, DataLedger,
+    GossipData, IrysTransactionHeader, H256,
+};
 use irys_types::{
     Address, CommitmentTransaction, Config, DataRoot, IrysBlockHeader, IrysTransactionCommon,
     IrysTransactionId, U256,

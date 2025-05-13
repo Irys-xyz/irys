@@ -1,5 +1,7 @@
 use eyre::OptionExt;
-use irys_types::{ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset};
+use irys_types::{
+    ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
+};
 use std::sync::Arc;
 
 use tracing::debug;

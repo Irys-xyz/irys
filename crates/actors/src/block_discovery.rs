@@ -8,11 +8,12 @@ use crate::{
 };
 use actix::prelude::*;
 use base58::ToBase58;
-use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, SystemLedger,
-};
+use irys_database::{block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, SystemLedger};
 use irys_reward_curve::HalvingCurve;
-use irys_types::{CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List, IrysBlockHeader, IrysTransactionHeader};
+use irys_types::{
+    CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List,
+    IrysBlockHeader, IrysTransactionHeader,
+};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
 use std::sync::Arc;
