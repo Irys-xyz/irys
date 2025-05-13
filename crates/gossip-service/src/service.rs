@@ -34,6 +34,7 @@ use irys_types::{
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashSet;
+use std::net::TcpListener;
 use std::sync::Arc;
 use tokio::sync::mpsc::error::SendError;
 use tokio::{sync::mpsc, time};
@@ -109,8 +110,6 @@ impl ServiceHandleWithShutdownSignal {
 
 #[derive(Debug)]
 pub struct GossipService {
-    server_address: String,
-    server_port: u16,
     cache: Arc<GossipCache>,
     mempool_data_receiver: Option<mpsc::Receiver<GossipData>>,
     client: GossipClient,
@@ -120,11 +119,7 @@ impl GossipService {
     /// Create a new gossip service. To run the service, use the [`GossipService::run`] method.
     /// Also returns a channel to send trusted gossip data to the service. Trusted data should
     /// be sent by the internal components of the system only after complete validation.
-    pub fn new<T: Into<String>>(
-        server_address: T,
-        server_port: u16,
-        mining_address: Address,
-    ) -> (Self, mpsc::Sender<GossipData>) {
+    pub fn new(mining_address: Address) -> (Self, mpsc::Sender<GossipData>) {
         let cache = Arc::new(GossipCache::new());
         let (trusted_data_tx, trusted_data_rx) = mpsc::channel(1000);
 
@@ -133,8 +128,6 @@ impl GossipService {
 
         (
             Self {
-                server_address: server_address.into(),
-                server_port,
                 client,
                 cache,
                 mempool_data_receiver: Some(trusted_data_rx),
@@ -159,6 +152,7 @@ impl GossipService {
         peer_list: PeerListFacade<A, R>,
         db: DatabaseProvider,
         vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
+        listener: TcpListener,
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         M: Handler<TxIngressMessage>
@@ -195,7 +189,7 @@ impl GossipService {
         };
         let server = GossipServer::new(server_data_handler, peer_list.clone());
 
-        let server = server.run(&self.server_address, self.server_port)?;
+        let server = server.run(listener)?;
         let server_handle = server.handle();
 
         let mempool_data_receiver =

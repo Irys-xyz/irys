@@ -36,7 +36,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     let uri = format!(
         "http://127.0.0.1:{}",
-        node.node_ctx.config.node_config.http.port
+        node.node_ctx.config.node_config.http.bind_port
     );
 
     // Initialize packing and mining
@@ -229,7 +229,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         let uri = format!(
             "http://127.0.0.1:{}",
-            node.node_ctx.config.node_config.http.port
+            node.node_ctx.config.node_config.http.bind_port
         );
 
         // Initialize blockchain components
