@@ -134,6 +134,8 @@ impl IrysNodeCtx {
     }
 }
 
+use irys_actors::block_discovery::BlockDiscoveryFacadeImpl;
+use irys_actors::mempool_service::MempoolServiceFacadeImpl;
 use irys_actors::peer_list_service::PeerListServiceFacade;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -846,6 +848,7 @@ impl IrysNode {
             &service_senders,
             gossip_tx.clone(),
         );
+        let mempool_facade = MempoolServiceFacadeImpl::from(mempool_service.clone());
 
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
@@ -895,10 +898,11 @@ impl IrysNode {
             gossip_tx.clone(),
             Arc::clone(&reward_curve),
         );
+        let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
         let gossip_service_handle = gossip_service.run(
-            mempool_service.clone(),
-            block_discovery.clone(),
+            mempool_facade,
+            block_discovery_facade,
             irys_api_client::IrysApiClient::new(),
             task_exec,
             peer_list_service.clone(),
