@@ -270,19 +270,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         }
                     }
 
-                    info!("Block is valid, sending to block tree");
-
                     db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
                         .unwrap();
 
                     let mut all_txs = submit_txs;
                     all_txs.extend_from_slice(&publish_txs);
-                    block_tree_addr
-                        .send(BlockPreValidatedMessage(
-                            new_block_header.clone(),
-                            Arc::new(all_txs),
-                        ))
-                        .await??;
 
                     // Check if we've reached the end of an epoch and should finalize commitments
                     let block_height = new_block_header.height;
@@ -342,6 +334,14 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             .await
                             .expect("to receive a response from ClearCache message");
                     }
+
+                    info!("Block is valid, sending to block tree");
+                    block_tree_addr
+                        .send(BlockPreValidatedMessage(
+                            new_block_header.clone(),
+                            Arc::new(all_txs),
+                        ))
+                        .await??;
 
                     // Send the block to the gossip bus
                     tracing::trace!(
