@@ -48,7 +48,7 @@ impl GossipClient {
                     format!("http://{}/gossip/chunk", peer.address.gossip),
                     unpacked_chunk,
                 )
-                .await?;
+                    .await?;
             }
             GossipData::Transaction(irys_transaction_header) => {
                 tracing::trace!(
@@ -60,7 +60,7 @@ impl GossipClient {
                     format!("http://{}/gossip/transaction", peer.address.gossip),
                     irys_transaction_header,
                 )
-                .await?;
+                    .await?;
             }
             GossipData::Block(irys_block_header) => {
                 tracing::debug!(
@@ -73,7 +73,7 @@ impl GossipClient {
                     format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,
                 )
-                .await?;
+                    .await?;
             }
         };
 

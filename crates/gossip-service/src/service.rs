@@ -28,10 +28,7 @@ use irys_actors::{
 };
 use irys_api_client::ApiClient;
 use irys_database::BlockIndex;
-use irys_types::{
-    block_production::Seed, Address, DatabaseProvider, GossipData, H256List, PeerListItem,
-    RethPeerInfo, VDFLimiterInfo,
-};
+use irys_types::{block_production::Seed, Address, BlockIndexQuery, DatabaseProvider, GossipData, H256List, PeerListItem, RethPeerInfo, VDFLimiterInfo};
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashSet;
@@ -219,7 +216,11 @@ impl GossipService {
         );
 
         if needs_catching_up {
-            task_executor.spawn(catch_up_task(service, block_index, api_client.clone()));
+            task_executor.spawn(async move {
+                if let Err(error) = catch_up_task(service, block_index, api_client.clone(), peer_list).await {
+                    error!("Failed to catch up: {}", error);
+                }
+            });
         }
 
         let gossip_service_handle = spawn_watcher_task(
@@ -480,25 +481,38 @@ fn spawn_watcher_task(
     )
 }
 
-async fn catch_up_task(
+async fn catch_up_task<
+    A: ApiClient + Clone + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+>(
     service: Arc<RwLock<GossipService>>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
-    api_client: impl ApiClient,
-) {
-    let latest_known_height = match block_index.read() {
+    api_client: A,
+    peer_list_service: PeerListFacade<
+        A,
+        R,
+    >,
+) -> Result<(), GossipError> {
+    peer_list_service.wait_for_active_peers().await?;
+
+    let mut latest_known_height = match block_index.read() {
         Ok(guard) => guard.latest_height(),
         Err(err) => {
-            error!(
-                "Can't perform block sync: Failed to read block index: {}",
-                err
-            );
-            return;
+            return Err(GossipError::Internal(InternalGossipError::Unknown(format!("Can't perform block sync: Failed to read block index: {}", err))));
         }
     };
+
+    let limit = 10;
+    let (_, top_peer) = peer_list_service.top_active_peers(Some(10), None).await?.get(0).ok_or(GossipError::Internal(InternalGossipError::Unknown("Can't perform block sync: Failed to get top active peers".to_string())))?;
+    let index = api_client.get_block_index(top_peer.address.api, BlockIndexQuery {
+        height: latest_known_height as usize,
+        limit,
+    }).await.map_err(|network_error| GossipError::Network(network_error.to_string()))?;
 
     let gossip_client = service.read().await.client.clone();
 
     service.write().await.is_syncing = false;
+    Ok(())
 }
 
 /// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo

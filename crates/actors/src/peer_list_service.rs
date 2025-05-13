@@ -1137,6 +1137,24 @@ where
     }
 }
 
+
+/// Flush the peer list to the database
+#[derive(Message, Debug)]
+#[rtype(result = "Result<(), PeerListServiceError>")]
+pub struct RequestBlockToBeGossiped;
+
+impl<A, R> Handler<RequestBlockToBeGossiped> for PeerListServiceWithClient<A, R>
+where
+    A: ApiClient + 'static + Unpin + Default,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+    type Result = Result<(), PeerListServiceError>;
+
+    fn handle(&mut self, _msg: RequestBlockToBeGossiped, _ctx: &mut Self::Context) -> Self::Result {
+        self.gossip_client
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
