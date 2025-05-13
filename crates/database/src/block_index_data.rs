@@ -268,7 +268,7 @@ fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
 mod tests {
     use super::BlockIndex;
     use super::*;
-    use crate::{data_ledger::DataLedger, BlockBounds, BlockIndexItem, LedgerIndexItem};
+    use crate::BlockBounds;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::H256;
     use std::fs::{self, File};

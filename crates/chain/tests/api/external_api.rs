@@ -11,8 +11,7 @@ use crate::{
 use actix_web::{http::header::ContentType, HttpMessage};
 use irys_actors::BlockFinalizedMessage;
 use irys_api_server::routes::index::NodeInfo;
-use irys_database::BlockIndexItem;
-use irys_types::{Address, IrysTransactionHeader, Signature, H256};
+use irys_types::{Address, BlockIndexItem, IrysTransactionHeader, Signature, H256};
 use tokio::time::{sleep, Duration};
 use tracing::info;
 

@@ -1,6 +1,5 @@
 use crate::peer_list_service::{PeerListFacade, PeerListFacadeError};
 use crate::service::fast_forward_vdf_steps_from_block;
-use crate::types::GossipDataRequest;
 use crate::GossipClient;
 use actix::{
     Actor, AsyncContext, Context, Handler, Message, ResponseActFuture, Supervised, SystemService,
@@ -376,7 +375,9 @@ where
                 "Peer list address not set".to_string(),
             ))?;
 
-            Ok(peer_list_addr.request_block_from_the_network(block_hash).await?)
+            Ok(peer_list_addr
+                .request_block_from_the_network(block_hash)
+                .await?)
         };
 
         Box::pin(fut.into_actor(self))

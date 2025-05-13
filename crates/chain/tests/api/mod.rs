@@ -1,7 +1,6 @@
 use actix_http::StatusCode;
 use base58::ToBase58;
-use irys_database::DataLedger;
-use irys_types::CommitmentTransaction;
+use irys_types::{CommitmentTransaction, DataLedger};
 use tracing::info;
 
 mod api;

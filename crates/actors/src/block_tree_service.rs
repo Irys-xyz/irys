@@ -1299,7 +1299,6 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use eyre::ensure;
-    use irys_database::DataLedger;
 
     #[actix::test]
     async fn test_block_cache() {

@@ -8,10 +8,10 @@ use irys_chain::{
     },
     IrysNodeCtx,
 };
-use irys_database::{block_header_by_hash, BlockIndexItem};
+use irys_database::block_header_by_hash;
 use irys_types::{
-    irys::IrysSigner, Address, Config, GossipConfig, HttpConfig, IrysTransaction, NodeConfig,
-    NodeMode, PeerAddress, RethPeerInfo, H256,
+    irys::IrysSigner, Address, BlockIndexItem, Config, GossipConfig, HttpConfig, IrysTransaction,
+    NodeConfig, NodeMode, PeerAddress, RethPeerInfo, H256,
 };
 use k256::ecdsa::SigningKey;
 use reth::rpc::{eth::EthApiServer as _, types::engine::PayloadStatusEnum};

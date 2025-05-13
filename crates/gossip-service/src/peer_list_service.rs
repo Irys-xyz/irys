@@ -1,21 +1,22 @@
+use crate::block_pool_service::BlockPoolError;
+use crate::types::GossipDataRequest;
+use crate::GossipClient;
 use actix::prelude::*;
+use irys_actors::reth_service::RethServiceActor;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::reth_db::{Database, DatabaseError};
 use irys_database::tables::PeerListItems;
 use irys_database::{insert_peer_list_item, walk_all};
-use irys_types::{build_user_agent, Address, BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerResponse, RejectedResponse, RethPeerInfo, VersionRequest};
+use irys_types::{
+    build_user_agent, Address, BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem,
+    PeerResponse, RejectedResponse, RethPeerInfo, VersionRequest,
+};
 use rand::prelude::SliceRandom;
-use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, error, warn};
-
-use crate::block_pool_service::BlockPoolError;
-use crate::types::GossipDataRequest;
-use crate::GossipClient;
-use irys_actors::reth_service::RethServiceActor;
 
 async fn send_message_and_print_error<T, A, R>(message: T, address: Addr<A>)
 where
@@ -185,8 +186,12 @@ where
 
     /// Requests the block to be gossiped over the network. Returns when the block is successfully
     /// requested, not when it is received.
-    pub async fn request_block_from_the_network(&self, block_hash: BlockHash) -> Result<(), PeerListFacadeError> {
-        self.request_data_from_the_network(GossipDataRequest::Block(block_hash)).await
+    pub async fn request_block_from_the_network(
+        &self,
+        block_hash: BlockHash,
+    ) -> Result<(), PeerListFacadeError> {
+        self.request_data_from_the_network(GossipDataRequest::Block(block_hash))
+            .await
     }
 }
 
@@ -431,7 +436,7 @@ pub enum PeerListServiceError {
     PeerHandshakeRejected(RejectedResponse),
     NoPeersAvailable,
     InternalSendError(MailboxError),
-    FailedToRequestData(String)
+    FailedToRequestData(String),
 }
 
 impl From<MailboxError> for PeerListServiceError {
@@ -1270,8 +1275,7 @@ where
 
                 Err(PeerListServiceError::FailedToRequestData(format!(
                     "Failed to fetch {:?} after trying 5 peers: {:?}",
-                    data_request,
-                    last_error
+                    data_request, last_error
                 )))
             }
             .into_actor(self),

@@ -3,8 +3,7 @@
 use crate::{api::price_endpoint_request, utils::IrysNodeTest};
 use actix_web::{http::header::ContentType, HttpMessage};
 use irys_api_server::routes::price::PriceInfo;
-use irys_database::DataLedger;
-use irys_types::U256;
+use irys_types::{DataLedger, U256};
 
 #[test_log::test(actix::test)]
 async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {

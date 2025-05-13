@@ -9,6 +9,7 @@ use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError};
 use irys_api_client::ApiClient;
+use irys_database::BlockIndex;
 use irys_gossip_service::peer_list_service::{AddPeer, PeerListServiceWithClient};
 use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
 use irys_gossip_service::types::GossipDataRequest;
@@ -19,10 +20,11 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    AcceptedResponse, Base64, BlockHash, CombinedBlockHeader, CommitmentTransaction, Config,
-    DatabaseProvider, GossipData, GossipRequest, IrysBlockHeader, IrysTransaction,
-    IrysTransactionHeader, IrysTransactionResponse, NodeConfig, PeerAddress, PeerListItem,
-    PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
+    AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
+    CommitmentTransaction, Config, DatabaseProvider, GossipData, GossipRequest, IrysBlockHeader,
+    IrysTransaction, IrysTransactionHeader, IrysTransactionResponse, NodeConfig, PeerAddress,
+    PeerListItem, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    VersionRequest, H256,
 };
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashMap;
@@ -211,6 +213,14 @@ impl ApiClient for StubApiClient {
     ) -> Result<Option<CombinedBlockHeader>> {
         Ok(None)
     }
+
+    async fn get_block_index(
+        &self,
+        _peer: SocketAddr,
+        _block_index_query: BlockIndexQuery,
+    ) -> Result<Vec<BlockIndexItem>> {
+        Ok(vec![])
+    }
 }
 
 impl Default for StubApiClient {
@@ -366,6 +376,8 @@ impl GossipServiceTestFixture {
                 self.db.clone(),
                 vdf_tx,
                 gossip_listener,
+                false,
+                Arc::new(RwLock::new(BlockIndex::default())),
             )
             .expect("failed to run gossip service");
 

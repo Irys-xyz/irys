@@ -284,6 +284,14 @@ pub mod test_utils {
         ) -> eyre::Result<Option<CombinedBlockHeader>> {
             Ok(None)
         }
+
+        async fn get_block_index(
+            &self,
+            _peer: SocketAddr,
+            _block_index_query: BlockIndexQuery,
+        ) -> eyre::Result<Vec<BlockIndexItem>> {
+            Ok(vec![])
+        }
     }
 }
 

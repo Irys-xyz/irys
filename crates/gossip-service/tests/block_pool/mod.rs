@@ -12,9 +12,9 @@ use irys_gossip_service::GossipClient;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    AcceptedResponse, Address, BlockHash, CombinedBlockHeader, Config, DatabaseProvider,
-    IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse, NodeConfig, PeerAddress,
-    PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
+    AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
+    Config, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, IrysTransactionResponse,
+    NodeConfig, PeerAddress, PeerListItem, PeerResponse, PeerScore, VersionRequest, H256,
 };
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -66,6 +66,14 @@ impl ApiClient for MockApiClient {
         _block_hash: BlockHash,
     ) -> Result<Option<CombinedBlockHeader>, eyre::Error> {
         Ok(self.block_response.clone())
+    }
+
+    async fn get_block_index(
+        &self,
+        _peer: SocketAddr,
+        _block_index_query: BlockIndexQuery,
+    ) -> eyre::Result<Vec<BlockIndexItem>> {
+        Ok(vec![])
     }
 }
 
