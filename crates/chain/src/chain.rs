@@ -242,7 +242,7 @@ impl IrysNode {
         let gossip_listener = create_listener(
             format!(
                 "{}:{}",
-                &node_config.http.bind_ip, &node_config.http.bind_port
+                &node_config.gossip.bind_ip, &node_config.gossip.bind_port
             )
             .parse()
             .expect("A valid HTTP IP & port"),
