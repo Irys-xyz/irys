@@ -441,7 +441,7 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         block_index_peer1, block_index_peer2
     );
 
-    tracing::debug!("STARTUP SEQUENCE ASSERTS WERE A SUCCESS. TO GET HERE TAKES ~2 MINUTES");
+    tracing::error!("STARTUP SEQUENCE ASSERTS WERE A SUCCESS. TO GET HERE TAKES ~2 MINUTES");
 
     /*
     // BEGIN TESTING BLOCK GOSSIP FROM PEER2 to GENESIS
@@ -452,10 +452,12 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     tracing::debug!("txn we are looking for on genesis: {:?}", txn);
 
     // mine block on genesis
+    tracing::error!("MINE SINGLE BLOCK");
     ctx_genesis_node
         .mine_blocks(1)
         .await
         .expect("expected one mined block on genesis node");
+    tracing::error!("MINED SINGLE BLOCK");
 
     let result_genesis = poll_until_fetch_at_block_index_height(
         "genesis".to_owned(),
@@ -487,8 +489,8 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .await
         .expect("expected a valid json deserialize");
 
-    tracing::debug!("block_index_genesis: {:?}", block_index_genesis);
-    tracing::debug!("block_index_peer2: {:?}", block_index_peer2);
+    tracing::error!("block_index_genesis: {:?}", block_index_genesis);
+    tracing::error!("block_index_peer2: {:?}", block_index_peer2);
 
     assert_eq!(
         block_index_genesis, block_index_peer2,
@@ -538,11 +540,11 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     // BEGIN TESTING BLOCK GOSSIP FROM GENESIS to PEER2
      */
 
-    tracing::debug!("BEGIN TESTING BLOCK GOSSIP FROM GENESIS to PEER2");
+    tracing::error!("BEGIN TESTING BLOCK GOSSIP FROM GENESIS to PEER2");
 
     // mine more blocks on genesis node, and see if gossip service brings them to peer2
     let additional_blocks_for_gossip_test: usize = 2;
-    tracing::debug!("MINING BLOCKS ON GENESIS TO BE GOSIPPED");
+    tracing::error!("MINING BLOCKS ON GENESIS TO BE GOSIPPED");
     mine_blocks(
         &ctx_genesis_node.node_ctx,
         additional_blocks_for_gossip_test,
@@ -581,7 +583,7 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     )
     .await;
 
-    tracing::debug!("PEER2 should have got the block");
+    tracing::error!("PEER2 should have got the block");
 
     let block_index_genesis = result_genesis
         .json::<Vec<BlockIndexItem>>()
@@ -612,7 +614,7 @@ async fn heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         block_index_genesis, block_index_peer2
     );
 
-    tracing::debug!("COMPLETED FINAL PEER2 ASSERTS");
+    tracing::error!("COMPLETED FINAL PEER2 ASSERTS");
 
     // shut down peer nodes and then genesis node, we have what we need
     tokio::join!(
