@@ -125,7 +125,7 @@ async fn heavy_api_client_all_endpoints_should_work() {
 
     let api_address = SocketAddr::new(
         IpAddr::from_str("127.0.0.1").unwrap(),
-        ctx.node_ctx.config.node_config.http.port,
+        ctx.node_ctx.config.node_config.http.bind_port,
     );
     let api_client = IrysApiClient::new();
 

@@ -130,7 +130,7 @@ impl IrysNodeCtx {
     }
 
     pub fn get_http_port(&self) -> u16 {
-        self.config.node_config.http.port
+        self.config.node_config.http.bind_port
     }
 }
 
@@ -231,22 +231,49 @@ impl IrysNode {
     pub async fn new(mut node_config: NodeConfig) -> eyre::Result<Self> {
         // we create the listener here so we know the port before we start passing around `config`
         let http_listener = create_listener(
-            format!("{}:{}", &node_config.http.bind_ip, &node_config.http.port)
-                .parse()
-                .expect("A valid HTTP IP & port"),
+            format!(
+                "{}:{}",
+                &node_config.http.bind_ip, &node_config.http.bind_port
+            )
+            .parse()
+            .expect("A valid HTTP IP & port"),
+        )?;
+        let gossip_listener = create_listener(
+            format!(
+                "{}:{}",
+                &node_config.http.bind_ip, &node_config.http.bind_port
+            )
+            .parse()
+            .expect("A valid HTTP IP & port"),
         )?;
         let local_addr = http_listener
+            .local_addr()
+            .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
+        let local_gossip = gossip_listener
             .local_addr()
             .map_err(|e| eyre::eyre!("Error getting local address: {:?}", &e))?;
 
         // if `config.port` == 0, the assigned port will be random (decided by the OS)
         // we re-assign the configuration with the actual port here.
-        let random_ports = if node_config.http.port == 0 {
-            node_config.http.port = local_addr.port();
+        let random_ports = if node_config.http.bind_port == 0 {
+            node_config.http.bind_port = local_addr.port();
             true
         } else {
             false
         };
+        // If the public port is not specified, use the same as the private one
+        if node_config.http.public_port == 0 {
+            node_config.http.public_port = node_config.http.bind_port;
+        }
+
+        if node_config.gossip.bind_port == 0 {
+            node_config.gossip.bind_port = local_gossip.port();
+        }
+
+        if node_config.gossip.public_port == 0 {
+            node_config.gossip.public_port = node_config.gossip.bind_port;
+        }
+
         let config = Config::new(node_config);
         Ok(IrysNode {
             config,
@@ -518,9 +545,9 @@ impl IrysNode {
             &ctx.config.node_config.miner_address().to_base58(),
             ctx.reth_handle.network.peer_id(),
             &node_config.http.bind_ip,
-            &node_config.http.port,
+            &node_config.http.bind_port,
             &node_config.gossip.bind_ip,
-            &node_config.gossip.port,
+            &node_config.gossip.bind_port,
             &node_config.reth_peer_info.peering_tcp_addr
         );
 
@@ -774,7 +801,7 @@ impl IrysNode {
 
         let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
             &config.node_config.gossip.bind_ip,
-            config.node_config.gossip.port,
+            config.node_config.gossip.bind_port,
             config.node_config.miner_address(),
         );
 
