@@ -367,11 +367,14 @@ pub struct MempoolConfig {
 /// Settings for peer-to-peer communication between nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GossipConfig {
+    /// The IP address that's going to be announced to other peers
+    pub public_ip: String,
+    /// The port to accept connections from other peers
+    pub public_port: u16,
     /// The IP address the gossip service binds to
     pub bind_ip: String,
-
     /// The port number the gossip service listens on
-    pub port: u16,
+    pub bind_port: u16,
 }
 
 /// # Data Packing Configuration
@@ -401,10 +404,14 @@ pub struct CacheConfig {
 /// Settings for the node's HTTP server that provides API access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpConfig {
+    /// The IP address visible to the outside world
+    pub public_ip: String,
+    /// The port that is visible to the outside world
+    pub public_port: u16,
     /// The IP address the HTTP service binds to
     pub bind_ip: String,
     /// The port that the Node's HTTP server should listen on. Set to 0 for randomisation.
-    pub port: u16,
+    pub bind_port: u16,
 }
 
 /// # Difficulty Adjustment Configuration
@@ -574,8 +581,10 @@ impl NodeConfig {
                 fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
             },
             gossip: GossipConfig {
+                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_port: 0,
                 bind_ip: "127.0.0.1".parse().expect("valid IP address"),
-                port: 0,
+                bind_port: 0,
             },
             packing: PackingConfig {
                 cpu_packing_concurrency: 4,
@@ -583,8 +592,10 @@ impl NodeConfig {
             },
             cache: CacheConfig { cache_clean_lag: 2 },
             http: HttpConfig {
+                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_port: 0,
                 bind_ip: "127.0.0.1".parse().expect("valid IP address"),
-                port: 0,
+                bind_port: 0,
             },
             reth_peer_info: RethPeerInfo::default(),
         }
@@ -862,7 +873,9 @@ mod tests {
 
         [gossip]
         bind_ip = "127.0.0.1"
-        port = 0
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
 
         [reth_peer_info]
         peering_tcp_addr = "0.0.0.0:0"
@@ -877,7 +890,13 @@ mod tests {
 
         [http]
         bind_ip = "127.0.0.1"
-        port = 0
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
+
+        [reth_peer_info]
+        peering_tcp_addr = "0.0.0.0:0"
+        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         "#;
         // Create the expected config
         let mut expected_config = NodeConfig::testnet();
