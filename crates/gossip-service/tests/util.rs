@@ -377,7 +377,7 @@ impl GossipServiceTestFixture {
                 vdf_tx,
                 gossip_listener,
                 false,
-                Arc::new(RwLock::new(BlockIndex::default())),
+                Arc::new(RwLock::new(BlockIndex::new(&NodeConfig::testnet()))),
             )
             .expect("failed to run gossip service");
 
