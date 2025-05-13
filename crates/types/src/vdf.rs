@@ -1,8 +1,9 @@
 use crate::{block_production::Seed, H256List};
+use nodit::Interval;
 use std::{collections::VecDeque, sync::Arc};
 use tokio::{
     sync::{RwLock, RwLockReadGuard},
-    time::{sleep, Duration, Interval},
+    time::{sleep, Duration},
 };
 
 #[derive(Debug, Clone, Default)]
