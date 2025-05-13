@@ -224,6 +224,7 @@ pub struct IrysNode {
     // pub data_exists: bool,
     pub random_ports: bool,
     pub http_listener: TcpListener,
+    pub gossip_listener: TcpListener,
 }
 
 impl IrysNode {
@@ -279,6 +280,7 @@ impl IrysNode {
             config,
             random_ports,
             http_listener,
+            gossip_listener,
         })
     }
 
@@ -517,6 +519,7 @@ impl IrysNode {
             self.http_listener,
             irys_db,
             block_index,
+            self.gossip_listener,
         )?;
 
         // await the latest height to be reported
@@ -580,6 +583,7 @@ impl IrysNode {
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
         block_index: BlockIndex,
+        gossip_listener: TcpListener,
     ) -> Result<JoinHandle<RethNodeProvider>, eyre::Error> {
         let actor_main_thread_handle = std::thread::Builder::new()
             .name("actor-main-thread".to_string())
@@ -609,7 +613,8 @@ impl IrysNode {
                                 block_index_service_actor,
                                 &task_exec,
                                 http_listener,
-                                irys_db
+                                irys_db,
+                                gossip_listener
                             )
                             .await
                             .expect("initializng services should not fail");
@@ -732,6 +737,7 @@ impl IrysNode {
         task_exec: &TaskExecutor,
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
+        gossip_listener: TcpListener,
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
@@ -799,11 +805,8 @@ impl IrysNode {
             .send(GetCommitmentStateGuardMessage)
             .await?;
 
-        let (gossip_service, gossip_tx) = irys_gossip_service::GossipService::new(
-            &config.node_config.gossip.bind_ip,
-            config.node_config.gossip.bind_port,
-            config.node_config.miner_address(),
-        );
+        let (gossip_service, gossip_tx) =
+            irys_gossip_service::GossipService::new(config.node_config.miner_address());
 
         // start the block tree service
         let (block_tree_service, block_tree_arbiter) = Self::init_block_tree_service(
@@ -901,6 +904,7 @@ impl IrysNode {
             peer_list_service.clone(),
             irys_db.clone(),
             vdf_sender.clone(),
+            gossip_listener,
         )?;
 
         // set up the price oracle

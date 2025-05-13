@@ -23,6 +23,7 @@ use irys_types::{
     Address, GossipRequest, IrysBlockHeader, IrysTransactionHeader, PeerListItem, RethPeerInfo,
     UnpackedChunk,
 };
+use std::net::TcpListener;
 use tracing::info;
 use tracing::log::debug;
 
@@ -87,7 +88,7 @@ where
     /// # Errors
     ///
     /// If the server fails to bind to the specified address and port, an error is returned.
-    pub fn run(self, bind_address: &str, port: u16) -> GossipResult<Server> {
+    pub fn run(self, listener: TcpListener) -> GossipResult<Server> {
         let server = self;
 
         Ok(HttpServer::new(move || {
@@ -108,7 +109,7 @@ where
         })
         .shutdown_timeout(5)
         .keep_alive(actix_web::http::KeepAlive::Disabled)
-        .bind((bind_address, port))
+        .listen(listener)
         .map_err(|error| GossipError::Internal(InternalGossipError::Unknown(error.to_string())))?
         .run())
     }

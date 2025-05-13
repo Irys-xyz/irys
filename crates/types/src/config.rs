@@ -883,7 +883,9 @@ mod tests {
 
         [gossip]
         bind_ip = "127.0.0.1"
-        port = 0
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
 
         [packing]
         cpu_packing_concurrency = 4
@@ -894,7 +896,9 @@ mod tests {
 
         [http]
         bind_ip = "127.0.0.1"
-        port = 0
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
 
         [reth_peer_info]
         peering_tcp_addr = "0.0.0.0:0"
