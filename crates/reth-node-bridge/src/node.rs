@@ -138,7 +138,10 @@ pub async fn run_node(
 ) -> eyre::Result<RethNodeExitHandle> {
     let mut os_args: Vec<String> = std::env::args().collect();
     let bp = os_args.remove(0);
-
+    let reth_addr = match &node_config.reth_peer_info.peering_tcp_addr {
+        std::net::SocketAddr::V4(socket_addr_v4) => socket_addr_v4,
+        std::net::SocketAddr::V6(_) => unimplemented!(),
+    };
     let mut args = vec_of_strings![
         "node",
         "-vvvvv",
@@ -147,8 +150,12 @@ pub async fn run_node(
         "--http.api",
         // "debug,rpc,reth,eth,trace",
         "eth",
-        "--http.addr",
-        "0.0.0.0",
+        "--http.addr", // TODO: separate this into it's own config
+        &reth_addr.ip(),
+        "--addr",
+        &reth_addr.ip(),
+        "--port",
+        &reth_addr.port(),
         "--datadir",
         format!("{}", node_config.reth_data_dir().to_str().unwrap()),
         "--log.file.directory",
