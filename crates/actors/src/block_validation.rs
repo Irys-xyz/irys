@@ -13,11 +13,10 @@ use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
-    calculate_difficulty, next_cumulative_diff, validate_path, Address, Config, ConsensusConfig,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
+    calculate_difficulty, last_step_checkpoints_is_valid, next_cumulative_diff, validate_path,
+    Address, Config, ConsensusConfig, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData,
+    VdfStepsReadGuard, H256,
 };
-use irys_vdf::last_step_checkpoints_is_valid;
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
 use tracing::{debug, info};
 
@@ -93,7 +92,7 @@ pub async fn prevalidate_block(
     );
 
     // Recall range check
-    recall_recall_range_is_valid(&block, &config.consensus, &steps_guard)?;
+    recall_recall_range_is_valid(&block, &config.consensus, &steps_guard).await?;
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -297,7 +296,7 @@ pub fn solution_hash_is_valid(
 
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
 /// Check recall range is valid
-pub fn recall_recall_range_is_valid(
+pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
     steps_guard: &VdfStepsReadGuard,
@@ -312,7 +311,7 @@ pub fn recall_recall_range_is_valid(
         "Validating recall ranges steps from: {} to: {}",
         reset_step_number, block.vdf_limiter_info.global_step_number
     );
-    let steps = steps_guard.read().get_steps(ii(
+    let steps = steps_guard.read().await.get_steps(ii(
         reset_step_number,
         block.vdf_limiter_info.global_step_number,
     ))?;
@@ -324,7 +323,7 @@ pub fn recall_recall_range_is_valid(
     )
 }
 
-pub fn get_recall_range(
+pub async fn get_recall_range(
     step_num: u64,
     config: &ConsensusConfig,
     steps_guard: &VdfStepsReadGuard,

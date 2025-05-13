@@ -47,12 +47,12 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
-use irys_types::U256;
+use irys_types::VdfState;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, CommitmentTransaction, Config,
-    GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, H256,
+    GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange,
+    VdfStepsReadGuard, H256, U256,
 };
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
     builder::FullNode,
     chainspec::ChainSpec,
@@ -834,8 +834,8 @@ impl IrysNode {
         let (vdf_mining_state_sender, vdf_mining_state_rx) = mpsc::channel::<bool>(1);
 
         // vdf steps state guard
-        let vdf_state =
-        let vdf_steps_guard:VdfStepsReadGuard = Arc::new(RwLock::new(vdf_state));
+        let vdf_state = VdfState::new(block_index, db, vdf_mining_state_sender, &config);
+        let vdf_steps_guard: VdfStepsReadGuard = Arc::new(RwLock::new(vdf_state));
 
         // spawn the validation service
         let validation_arbiter = Self::init_validation_service(

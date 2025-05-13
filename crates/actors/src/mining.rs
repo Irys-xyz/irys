@@ -15,9 +15,8 @@ use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{
     partition_chunk_offset_ie, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
-    PartitionChunkOffset, PartitionChunkRange,
+    PartitionChunkOffset, PartitionChunkRange, VdfStepsReadGuard,
 };
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;
 use tracing::{debug, error, info, warn};
 
@@ -373,7 +372,6 @@ mod tests {
     use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
     use crate::mining::{PartitionMiningActor, Seed};
     use crate::packing::PackingActor;
-    use crate::vdf_service::{GetVdfStateMessage, VdfSeed, VdfService};
     use actix::actors::mocker::Mocker;
     use actix::{Actor, Addr, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
@@ -386,9 +384,8 @@ mod tests {
     };
     use irys_types::{
         ledger_chunk_offset_ie, ConsensusConfig, H256List, IrysBlockHeader, LedgerChunkOffset,
-        NodeConfig,
+        NodeConfig, VdfState, VdfStepsReadGuard,
     };
-    use irys_vdf::vdf_state::{VdfState, VdfStepsReadGuard};
     use std::any::Any;
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicU64;

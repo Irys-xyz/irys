@@ -14,9 +14,8 @@ use irys_database::{
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     CommitmentTransaction, Config, DatabaseProvider, GossipData, H256List, IrysBlockHeader,
-    IrysTransactionHeader,
+    IrysTransactionHeader, VdfStepsReadGuard,
 };
-use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
 use std::sync::Arc;
 use tracing::{debug, error, info};
