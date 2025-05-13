@@ -44,7 +44,7 @@ pub type PeerListServiceFacade = PeerListFacade<IrysApiClient, RethServiceActor>
 #[derive(Debug)]
 pub struct PeerListFacade<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     addr: Addr<PeerListServiceWithClient<A, R>>,
@@ -52,7 +52,7 @@ where
 
 impl<A, R> Clone for PeerListFacade<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     fn clone(&self) -> Self {
@@ -64,7 +64,7 @@ where
 
 impl<A, R> From<Addr<PeerListServiceWithClient<A, R>>> for PeerListFacade<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     fn from(value: Addr<PeerListServiceWithClient<A, R>>) -> Self {
@@ -74,7 +74,7 @@ where
 
 impl<A, R> PeerListFacade<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     pub fn new(addr: Addr<PeerListServiceWithClient<A, R>>) -> Self {
@@ -182,7 +182,7 @@ impl From<MailboxError> for PeerListFacadeError {
 #[derive(Debug, Default)]
 pub struct PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     /// Reference to the node database
@@ -239,7 +239,7 @@ where
 
 impl<A, R> PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     /// Create a new instance of the peer_list_service actor passing in a reference-counted
@@ -292,7 +292,7 @@ where
 
 impl<A, R> Actor for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Context = Context<Self>;
@@ -373,14 +373,14 @@ where
 /// Allows this actor to live in the the service registry
 impl<A, R> Supervised for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
 }
 
 impl<A, R> SystemService for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>> + Default,
 {
     fn service_started(&mut self, _ctx: &mut Context<Self>) {
@@ -417,7 +417,7 @@ pub enum ScoreIncreaseReason {
 
 impl<A, R> PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     /// Initialize the peer list service
@@ -748,7 +748,7 @@ pub enum PeerListEntryRequest {
 
 impl<T, R> Handler<PeerListEntryRequest> for PeerListServiceWithClient<T, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    T: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Option<PeerListItem>;
@@ -772,7 +772,7 @@ pub struct DecreasePeerScore {
 
 impl<T, R> Handler<DecreasePeerScore> for PeerListServiceWithClient<T, R>
 where
-    T: ApiClient + 'static + Unpin + Default,
+    T: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
@@ -792,7 +792,7 @@ pub struct IncreasePeerScore {
 
 impl<A, R> Handler<IncreasePeerScore> for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
@@ -821,7 +821,7 @@ pub struct TopActivePeersRequest {
 
 impl<A, R> Handler<TopActivePeersRequest> for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Vec<(Address, PeerListItem)>;
@@ -862,7 +862,7 @@ pub struct GetPeerByMiningAddress {
 
 impl<A, R> Handler<GetPeerByMiningAddress> for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Option<PeerListItem>;
@@ -879,7 +879,7 @@ pub struct FlushRequest;
 
 impl<A, R> Handler<FlushRequest> for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Result<(), PeerListServiceError>;
@@ -899,7 +899,7 @@ pub struct AddPeer {
 
 impl<A, R> Handler<AddPeer> for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
@@ -956,7 +956,7 @@ pub struct KnownPeersRequest;
 
 impl<A, R> Handler<KnownPeersRequest> for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = Vec<PeerAddress>;
@@ -992,7 +992,7 @@ impl NewPotentialPeer {
 
 impl<A, R> Handler<NewPotentialPeer> for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
@@ -1068,7 +1068,7 @@ impl AnnounceFinished {
 
 impl<A, R> Handler<AnnounceFinished> for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ();
@@ -1100,7 +1100,7 @@ pub struct WaitForActivePeer;
 
 impl<A, R> Handler<WaitForActivePeer> for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ResponseActFuture<Self, ()>;

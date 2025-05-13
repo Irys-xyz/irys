@@ -16,7 +16,7 @@ enum Method {
 
 /// Trait defining the interface for the API client
 #[async_trait::async_trait]
-pub trait ApiClient: Send + Sync + Clone {
+pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
     /// Fetch a transaction header by its ID from a peer
     async fn get_transaction(
         &self,

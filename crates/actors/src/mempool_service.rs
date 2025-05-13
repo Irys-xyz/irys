@@ -2,7 +2,11 @@ use crate::block_producer::BlockConfirmedMessage;
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::services::ServiceSenders;
 use crate::{CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentStatus};
-use actix::{Actor, Context, Handler, Message, MessageResponse, Supervised, SystemService};
+use actix::{
+    Actor, Addr, Context, Handler, MailboxError, Message, MessageResponse, Supervised,
+    SystemService,
+};
+use async_trait::async_trait;
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
@@ -33,6 +37,76 @@ use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use tracing::{debug, error, info, warn};
+
+#[async_trait::async_trait]
+pub trait MempoolFacade: Clone + Send + Sync + 'static {
+    async fn handle_data_transaction(
+        &self,
+        tx_header: IrysTransactionHeader,
+    ) -> Result<(), TxIngressError>;
+    async fn handle_commitment_transaction(
+        &self,
+        tx_header: CommitmentTransaction,
+    ) -> Result<(), TxIngressError>;
+    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
+    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError>;
+}
+
+#[derive(Clone, Debug)]
+pub struct MempoolServiceFacadeImpl {
+    service: Addr<MempoolService>,
+}
+
+impl From<Addr<MempoolService>> for MempoolServiceFacadeImpl {
+    fn from(value: Addr<MempoolService>) -> Self {
+        Self { service: value }
+    }
+}
+
+impl From<MailboxError> for TxIngressError {
+    fn from(value: MailboxError) -> Self {
+        TxIngressError::Other(format!(
+            "Failed to send a message to MempoolService: {:?}",
+            value
+        ))
+    }
+}
+
+impl From<MailboxError> for ChunkIngressError {
+    fn from(value: MailboxError) -> Self {
+        ChunkIngressError::Other(format!(
+            "Failed to send a message to MempoolService: {:?}",
+            value
+        ))
+    }
+}
+
+#[async_trait]
+impl MempoolFacade for MempoolServiceFacadeImpl {
+    async fn handle_data_transaction(
+        &self,
+        tx_header: IrysTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        self.service.send(TxIngressMessage(tx_header)).await?
+    }
+
+    async fn handle_commitment_transaction(
+        &self,
+        tx_header: CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        self.service
+            .send(CommitmentTxIngressMessage(tx_header))
+            .await?
+    }
+
+    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
+        self.service.send(ChunkIngressMessage(chunk)).await?
+    }
+
+    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError> {
+        self.service.send(TxExistenceQuery(tx_id)).await?
+    }
+}
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]
