@@ -791,6 +791,7 @@ async fn generate_test_transaction_and_add_to_block(
         Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
             panic!("unfunded account error")
         }
+        Err(AddTxError::TxIngress(TxIngressError::Skipped)) => {}
         Err(e) => panic!("unexpected error {:?}", e),
     }
     irys_txs
