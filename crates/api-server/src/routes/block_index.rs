@@ -1,12 +1,6 @@
 use crate::ApiState;
 use actix_web::{http::header::ContentType, web, HttpResponse};
-use irys_database::BlockIndexItem;
-
-#[derive(serde::Deserialize)]
-pub struct BlockIndexQuery {
-    height: usize,
-    limit: usize,
-}
+use irys_types::{BlockIndexItem, BlockIndexQuery};
 
 pub async fn block_index_route(
     state: web::Data<ApiState>,

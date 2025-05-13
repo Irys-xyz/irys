@@ -1,11 +1,7 @@
 use std::collections::BTreeMap;
 
 use base58::ToBase58;
-use irys_database::DataLedger;
-use irys_types::{
-    partition::{PartitionAssignment, PartitionHash},
-    H256,
-};
+use irys_types::{partition::{PartitionAssignment, PartitionHash}, DataLedger, H256};
 use tracing::debug;
 
 /// A state struct that can be wrapped with Arc<`RwLock`<>> to provide parallel read access

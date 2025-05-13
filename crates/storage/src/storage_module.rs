@@ -48,18 +48,9 @@ use irys_database::{
         get_data_size_by_data_root, get_start_offsets_by_data_root, get_tx_path_by_offset,
         set_data_size_for_data_root, tables::RelativeStartOffsets,
     },
-    DataLedger,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
-use irys_types::{
-    app_state::DatabaseProvider,
-    get_leaf_proof, ledger_chunk_offset_ie,
-    partition::{PartitionAssignment, PartitionHash},
-    partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config,
-    DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset,
-    PartitionChunkRange, ProofDeserialize, RelativeChunkOffset, TxChunkOffset, TxPath,
-    UnpackedChunk, H256,
-};
+use irys_types::{app_state::DatabaseProvider, get_leaf_proof, ledger_chunk_offset_ie, partition::{PartitionAssignment, PartitionHash}, partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config, DataLedger, DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize, RelativeChunkOffset, TxChunkOffset, TxPath, UnpackedChunk, H256};
 use nodit::{interval::ii, InclusiveInterval, Interval, NoditMap, NoditSet};
 use openssl::sha;
 use reth_db::Database;

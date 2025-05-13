@@ -8,14 +8,10 @@ use crate::{
 };
 use base58::ToBase58;
 use eyre::ensure;
-use irys_database::DataLedger;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
-use irys_types::{
-    calculate_difficulty, next_cumulative_diff, validate_path, Address, Config, ConsensusConfig,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
-};
+use irys_types::{calculate_difficulty, next_cumulative_diff, validate_path, Address, Config, ConsensusConfig, DataLedger, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use openssl::sha;

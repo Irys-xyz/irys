@@ -19,11 +19,8 @@ use crate::{
 use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::ensure;
-use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex, DataLedger};
-use irys_types::{
-    Address, BlockHash, ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
-    IrysTransactionId, H256, U256,
-};
+use irys_database::{block_header_by_hash, tx_header_by_txid, BlockIndex};
+use irys_types::{Address, BlockHash, ConsensusConfig, DataLedger, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, IrysTransactionId, H256, U256};
 use reth_db::{transaction::DbTx, Database as _};
 use tracing::{debug, error, info};
 

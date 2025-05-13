@@ -1,10 +1,8 @@
 use crate::BlockFinalizedMessage;
 use actix::prelude::*;
 use base58::ToBase58;
-use irys_database::{block_header_by_hash, BlockIndex, BlockIndexItem};
-use irys_types::{
-    ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, H256, U256,
-};
+use irys_database::{block_header_by_hash, BlockIndex};
+use irys_types::{BlockIndexItem, ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, H256, U256};
 use reth_db::Database;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error};

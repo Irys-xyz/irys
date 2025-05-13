@@ -1,9 +1,6 @@
 use base58::ToBase58;
 use eyre::Result;
-use irys_types::{
-    CombinedBlockHeader, IrysTransactionHeader, IrysTransactionResponse, PeerResponse,
-    VersionRequest, H256,
-};
+use irys_types::{BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, IrysTransactionHeader, IrysTransactionResponse, PeerResponse, VersionRequest, H256};
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
@@ -44,6 +41,10 @@ pub trait ApiClient: Send + Sync + Clone {
         peer: SocketAddr,
         block_hash: H256,
     ) -> Result<Option<CombinedBlockHeader>>;
+
+    async fn get_block_index(&self, peer: SocketAddr, block_index_query: BlockIndexQuery) -> Result<Vec<BlockIndexItem>> {
+        unimplemented!()
+    }
 }
 
 /// Real implementation of the API client that makes actual HTTP requests

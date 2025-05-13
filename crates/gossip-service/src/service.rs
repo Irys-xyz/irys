@@ -35,10 +35,12 @@ use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::HashSet;
 use std::net::TcpListener;
-use std::sync::Arc;
+use std::sync::{Arc};
 use tokio::sync::mpsc::error::SendError;
 use tokio::{sync::mpsc, time};
-use tracing::debug;
+use tokio::sync::RwLock;
+use tracing::{debug, error};
+use irys_database::BlockIndex;
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -113,6 +115,7 @@ pub struct GossipService {
     cache: Arc<GossipCache>,
     mempool_data_receiver: Option<mpsc::Receiver<GossipData>>,
     client: GossipClient,
+    is_syncing: bool,
 }
 
 impl GossipService {
@@ -131,6 +134,7 @@ impl GossipService {
                 client,
                 cache,
                 mempool_data_receiver: Some(trusted_data_rx),
+                is_syncing: true
             },
             trusted_data_tx,
         )
@@ -153,6 +157,8 @@ impl GossipService {
         db: DatabaseProvider,
         vdf_sender: tokio::sync::mpsc::Sender<BroadcastMiningSeed>,
         listener: TcpListener,
+        needs_catching_up: bool,
+        block_index: Arc<std::sync::RwLock<BlockIndex>>
     ) -> GossipResult<ServiceHandleWithShutdownSignal>
     where
         M: Handler<TxIngressMessage>
@@ -165,6 +171,7 @@ impl GossipService {
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
     {
         tracing::debug!("Staring gossip service");
+        self.is_syncing = needs_catching_up;
 
         // TODO: get the db
         let block_pool_service = BlockPoolService::new_with_client(
@@ -199,10 +206,11 @@ impl GossipService {
                     InternalGossipError::BroadcastReceiverShutdown,
                 ))?;
 
-        let service = Arc::new(self);
+        let cache = Arc::clone(&self.cache);
+        let service = Arc::new(RwLock::new(self));
 
         let cache_pruning_task_handle =
-            spawn_cache_pruning_task(Arc::clone(&service.cache), task_executor);
+            spawn_cache_pruning_task(cache, task_executor);
 
         let broadcast_task_handle = spawn_broadcast_task(
             mempool_data_receiver,
@@ -211,7 +219,11 @@ impl GossipService {
             peer_list.clone(),
         );
 
-        let gossip_service_handle = spawn_main_task(
+        if needs_catching_up {
+            task_executor.spawn(catch_up_task(service, block_index, api_client.clone()));
+        }
+
+        let gossip_service_handle = spawn_watcher_task(
             server,
             server_handle,
             cache_pruning_task_handle,
@@ -233,6 +245,11 @@ impl GossipService {
         R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
         A: ApiClient + Clone + 'static + Unpin + Default,
     {
+        if self.is_syncing {
+            // If we are syncing, we don't want to broadcast data
+            return Ok(());
+        }
+
         debug!("Broadcasting data to peers: {}", data.data_type_and_id());
 
         let exclude_peers = match original_source {
@@ -343,7 +360,7 @@ fn spawn_cache_pruning_task(
 
 fn spawn_broadcast_task<R, A>(
     mut mempool_data_receiver: mpsc::Receiver<GossipData>,
-    service: Arc<GossipService>,
+    service: Arc<RwLock<GossipService>>,
     task_executor: &TaskExecutor,
     peer_list_service: PeerListFacade<A, R>,
 ) -> ServiceHandleWithShutdownSignal
@@ -361,7 +378,7 @@ where
                     maybe_data = mempool_data_receiver.recv() => {
                         match maybe_data {
                             Some(data) => {
-                                match service.broadcast_data(GossipSource::Internal, &data, &peer_list_service).await {
+                                match service.read().await.broadcast_data(GossipSource::Internal, &data, &peer_list_service).await {
                                     Ok(()) => {}
                                     Err(error) => {
                                         tracing::warn!("Failed to broadcast data: {}", error);
@@ -383,7 +400,7 @@ where
     )
 }
 
-fn spawn_main_task(
+fn spawn_watcher_task(
     server: Server,
     server_handle: ServerHandle,
     mut cache_pruning_task_handle: ServiceHandleWithShutdownSignal,
@@ -462,6 +479,22 @@ fn spawn_main_task(
         },
         task_executor,
     )
+}
+
+async fn catch_up_task(service: Arc<RwLock<GossipService>>, block_index: Arc<std::sync::RwLock<BlockIndex>>, api_client: impl ApiClient) {
+    let latest_known_height = match block_index.read() {
+        Ok(guard) => {
+            guard.latest_height()
+        }
+        Err(err) => {
+            error!("Can't perform block sync: Failed to read block index: {}", err);
+            return;
+        }
+    };
+
+    let gossip_client = service.read().await.client.clone();
+
+    service.write().await.is_syncing = false;
 }
 
 /// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo

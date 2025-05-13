@@ -5,7 +5,7 @@ use irys_storage::reth_provider::IrysRethProviderInner;
 use revm_primitives::{
     Bytes, Env, PrecompileError, PrecompileErrors, PrecompileOutput, PrecompileResult,
 };
-
+use irys_types::DataLedger;
 use super::utils::ParsedAccessLists;
 
 const PD_CHUNK_READ_COST: u64 = 500;
@@ -168,7 +168,7 @@ pub fn read_bytes_range(
     for i in translated_chunks_start_offset..translated_chunks_end_offset {
         let chunk = state_provider
             .chunk_provider
-            .get_chunk_by_ledger_offset(irys_database::DataLedger::Publish, i.into())
+            .get_chunk_by_ledger_offset(DataLedger::Publish, i.into())
             .map_err(|e| {
                 PrecompileErrors::Error(PrecompileError::Other(format!(
                     "Error reading chunk with part offset {} - {}",

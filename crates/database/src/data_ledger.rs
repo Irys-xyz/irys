@@ -1,4 +1,4 @@
-use irys_types::{Compact, ConsensusConfig, DataTransactionLedger, H256};
+use irys_types::{Compact, ConsensusConfig, DataLedger, DataTransactionLedger, H256};
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 /// Manages the global ledger state within the epoch service, tracking:
@@ -208,68 +208,6 @@ impl LedgerCore for TermLedger {
     }
 }
 
-/// Names for each of the ledgers as well as their `ledger_id` discriminant
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum DataLedger {
-    /// The permanent publish ledger
-    Publish = 0,
-    /// An expiring term ledger used for submitting to the publish ledger
-    Submit = 1,
-    // Add more term ledgers as they exist
-}
-
-impl Default for DataLedger {
-    fn default() -> Self {
-        Self::Publish
-    }
-}
-
-impl DataLedger {
-    /// An array of all the Ledger numbers in order
-    pub const ALL: [Self; 2] = [Self::Publish, Self::Submit];
-
-    /// Make it possible to iterate over all the data ledgers in order
-    pub fn iter() -> impl Iterator<Item = Self> {
-        Self::ALL.iter().copied()
-    }
-    /// get the associated numeric ID
-    pub const fn get_id(&self) -> u32 {
-        *self as u32
-    }
-
-    fn from_u32(value: u32) -> Option<Self> {
-        match value {
-            0 => Some(Self::Publish),
-            1 => Some(Self::Submit),
-            _ => None,
-        }
-    }
-}
-
-impl From<DataLedger> for u32 {
-    fn from(ledger: DataLedger) -> Self {
-        ledger as Self
-    }
-}
-
-impl TryFrom<u32> for DataLedger {
-    type Error = eyre::Report;
-
-    fn try_from(value: u32) -> eyre::Result<Self> {
-        Self::from_u32(value).ok_or_else(|| eyre::eyre!("Invalid ledger number"))
-    }
-}
-
-impl TryFrom<&str> for DataLedger {
-    type Error = eyre::Report;
-
-    fn try_from(value: &str) -> eyre::Result<Self> {
-        let x = value.parse()?;
-        Self::from_u32(x).ok_or_else(|| eyre::eyre!("Invalid ledger number"))
-    }
-}
-
 /// A container for managing permanent and term ledgers with type-safe access
 /// through the [Ledger] enum.
 ///
@@ -408,23 +346,5 @@ impl IndexMut<DataLedger> for Ledgers {
             DataLedger::Publish => &mut self.perm,
             DataLedger::Submit => &mut self.term[0],
         }
-    }
-}
-
-impl Index<DataLedger> for Vec<DataTransactionLedger> {
-    type Output = DataTransactionLedger;
-
-    fn index(&self, ledger: DataLedger) -> &Self::Output {
-        self.iter()
-            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
-            .expect("No transaction ledger found for given ledger type")
-    }
-}
-
-impl IndexMut<DataLedger> for Vec<DataTransactionLedger> {
-    fn index_mut(&mut self, ledger: DataLedger) -> &mut Self::Output {
-        self.iter_mut()
-            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
-            .expect("No transaction ledger found for given ledger type")
     }
 }

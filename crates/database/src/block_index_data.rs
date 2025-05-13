@@ -1,10 +1,9 @@
 //! Manages a list of `{block_hash, weave_size, tx_root}`entries, indexed by
 //! block height.
-use crate::data_ledger::DataLedger;
 use actix::dev::MessageResponse;
 use base58::ToBase58;
 use eyre::Result;
-use irys_types::{IrysBlockHeader, IrysTransactionHeader, NodeConfig, H256};
+use irys_types::{BlockIndexItem, DataLedger, IrysBlockHeader, IrysTransactionHeader, LedgerIndexItem, NodeConfig, H256};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -209,106 +208,6 @@ pub struct BlockBounds {
     pub end_chunk_offset: u64,
     /// Merkle root (`tx_root`) of all transactions this block applied to the ledger
     pub tx_root: H256,
-}
-
-/// A [`BlockIndexItem`] contains a vec of [`LedgerIndexItem`]s which store the size
-/// and and the `tx_root` of the ledger in that block.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct LedgerIndexItem {
-    /// Size in bytes of the ledger
-    pub max_chunk_offset: u64, // 8 bytes
-    /// The merkle root of the TX that apply to this ledger in the current block
-    pub tx_root: H256, // 32 bytes
-}
-
-impl LedgerIndexItem {
-    fn to_bytes(&self) -> [u8; 40] {
-        // Fixed size of 40 bytes
-        let mut bytes = [0u8; 40];
-        bytes[0..8].copy_from_slice(&self.max_chunk_offset.to_le_bytes()); // First 8 bytes
-        bytes[8..40].copy_from_slice(self.tx_root.as_bytes()); // Next 32 bytes
-        bytes
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let mut item = Self::default();
-
-        // Read ledger size (first 8 bytes)
-        let mut size_bytes = [0u8; 8];
-        size_bytes.copy_from_slice(&bytes[0..8]);
-        item.max_chunk_offset = u64::from_le_bytes(size_bytes);
-
-        // Read tx root (next 32 bytes)
-        item.tx_root = H256::from_slice(&bytes[8..40]);
-
-        item
-    }
-}
-
-impl Index<DataLedger> for Vec<LedgerIndexItem> {
-    type Output = LedgerIndexItem;
-
-    fn index(&self, ledger: DataLedger) -> &Self::Output {
-        &self[ledger as usize]
-    }
-}
-
-impl IndexMut<DataLedger> for Vec<LedgerIndexItem> {
-    fn index_mut(&mut self, ledger: DataLedger) -> &mut Self::Output {
-        &mut self[ledger as usize]
-    }
-}
-
-/// Core metadata of the [`BlockIndex`] this struct tracks the ledger size and
-/// tx root for each ledger per block. Enabling lookups to that find the `tx_root`
-/// for a ledger at a particular byte offset in the ledger.
-#[derive(Debug, Clone, Default, PartialEq, Eq, MessageResponse, Serialize, Deserialize)]
-pub struct BlockIndexItem {
-    /// The hash of the block
-    pub block_hash: H256, // 32 bytes
-    /// The number of ledgers this block tracks
-    pub num_ledgers: u8, // 1 byte
-    /// The metadata about each of the blocks ledgers
-    pub ledgers: Vec<LedgerIndexItem>, // Vec of 40 byte items
-}
-
-impl BlockIndexItem {
-    // Serialize the BlockIndexItem to bytes
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(33 + self.ledgers.len() * 40);
-
-        // Write fixed fields
-        bytes.extend_from_slice(self.block_hash.as_bytes()); // 32 bytes
-        bytes.push(self.num_ledgers); // 1 byte
-
-        // Write each ledger item
-        for ledger_index_item in &self.ledgers {
-            bytes.extend_from_slice(&ledger_index_item.to_bytes()); // 40 bytes each
-        }
-
-        bytes
-    }
-
-    // Deserialize bytes to BlockIndexItem
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let mut item = Self::default();
-
-        // Read fixed fields
-        item.block_hash = H256::from_slice(&bytes[0..32]);
-        item.num_ledgers = bytes[32];
-
-        // Read ledger items
-        let num_ledgers = item.num_ledgers as usize;
-        item.ledgers = Vec::with_capacity(num_ledgers);
-
-        for i in 0..num_ledgers {
-            let start = 33 + (i * 40);
-            let ledger_bytes = &bytes[start..start + 40];
-            item.ledgers.push(LedgerIndexItem::from_bytes(ledger_bytes));
-        }
-
-        item
-    }
 }
 
 fn append_item(item: &BlockIndexItem, file_path: &Path) -> eyre::Result<()> {

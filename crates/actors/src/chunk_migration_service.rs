@@ -3,14 +3,10 @@ use eyre::eyre;
 use irys_database::{
     cached_chunk_by_chunk_offset,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
-    BlockIndex, DataLedger,
+    BlockIndex,
 };
 use irys_storage::{get_overlapped_storage_modules, ie, ii, InclusiveInterval, StorageModule};
-use irys_types::{
-    app_state::DatabaseProvider, Base64, Config, DataRoot, DataTransactionLedger, IrysBlockHeader,
-    IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, TxChunkOffset,
-    UnpackedChunk, H256,
-};
+use irys_types::{app_state::DatabaseProvider, Base64, Config, DataLedger, DataRoot, DataTransactionLedger, IrysBlockHeader, IrysTransactionHeader, LedgerChunkOffset, LedgerChunkRange, Proof, TxChunkOffset, UnpackedChunk, H256};
 use reth_db::Database;
 use std::sync::{Arc, RwLock};
 use tracing::error;

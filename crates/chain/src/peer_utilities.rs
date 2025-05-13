@@ -6,7 +6,6 @@ use irys_actors::{
     broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
 };
-use irys_database::{BlockIndexItem, DataLedger};
 use irys_types::block::CombinedBlockHeader;
 
 use irys_gossip_service::service::fast_forward_vdf_steps_from_block;
@@ -15,9 +14,7 @@ pub use irys_reth_node_bridge::node::{
 };
 
 use irys_api_client::{ApiClient, IrysApiClient};
-use irys_types::{
-    CommitmentTransaction, IrysBlockHeader, IrysTransactionResponse, PeerAddress, H256,
-};
+use irys_types::{BlockIndexItem, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionResponse, PeerAddress, H256};
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,

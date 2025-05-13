@@ -850,7 +850,7 @@ impl IrysNode {
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
             &config,
-            block_index,
+            block_index.clone(),
             &irys_db,
             &service_senders,
             &storage_modules,
@@ -905,6 +905,8 @@ impl IrysNode {
             irys_db.clone(),
             vdf_sender.clone(),
             gossip_listener,
+            true,
+            block_index.clone()
         )?;
 
         // set up the price oracle
