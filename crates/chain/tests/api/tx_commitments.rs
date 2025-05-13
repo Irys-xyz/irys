@@ -76,7 +76,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     post_commitment_tx_request(&uri, &stake_tx).await;
 
     // Mine a block to include the commitment
-    node.mine_blocks_exact(1).await?;
+    node.mine_blocks(1).await?;
 
     // Verify stake commitment is now 'Accepted'
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
@@ -105,7 +105,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Mine a block to include the pledge
     debug!("DMAC MINE BLOCK - Height should become 2");
-    node.mine_blocks_exact(1).await?;
+    node.mine_blocks(1).await?;
 
     // Verify pledge is now 'Accepted' after mining
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
@@ -118,7 +118,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Re-submit the same stake commitment
     post_commitment_tx_request(&uri, &stake_tx).await;
-    node.mine_blocks_exact(1).await?;
+    node.mine_blocks(1).await?;
 
     // Verify stake is still 'Accepted' (idempotent operation)
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
@@ -143,7 +143,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Submit pledge via API
     post_commitment_tx_request(&uri, &pledge_tx).await;
-    node.mine_blocks_exact(1).await?;
+    node.mine_blocks(1).await?;
 
     // Verify pledge remains 'Unstaked' (invalid without stake)
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
@@ -292,7 +292,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         // Mine enough blocks to reach the first epoch boundary
         info!("MINE FIRST EPOCH BLOCK:");
         // IrysNodeTest::mine_blocks(&node, num_blocks_in_epoch).await?;
-        node.mine_blocks_exact(num_blocks_in_epoch).await?;
+        node.mine_blocks(num_blocks_in_epoch).await?;
 
         // ===== PHASE 3: Verify First Epoch Assignments =====
         // Verify that all pledges have been assigned partitions
@@ -334,7 +334,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // Mine enough blocks to reach the second epoch boundary
         info!("MINE SECOND EPOCH BLOCK:");
-        node.mine_blocks_exact(num_blocks_in_epoch + 2).await?;
+        node.mine_blocks(num_blocks_in_epoch + 2).await?;
 
         // ===== PHASE 5: Verify Second Epoch Assignments =====
         // Verify all signers have proper partition assignments for all pledges

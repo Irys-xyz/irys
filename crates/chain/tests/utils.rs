@@ -282,14 +282,6 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
-        let height = self.get_height().await;
-        self.node_ctx.actor_addresses.set_mining(true)?;
-        self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
-            .await?;
-        self.node_ctx.actor_addresses.set_mining(false)
-    }
-
-    pub async fn mine_blocks_exact(&self, num_blocks: usize) -> eyre::Result<()> {
         self.node_ctx
             .actor_addresses
             .block_producer
