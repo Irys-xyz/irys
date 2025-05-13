@@ -291,7 +291,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // Mine enough blocks to reach the first epoch boundary
         info!("MINE FIRST EPOCH BLOCK:");
-        // IrysNodeTest::mine_blocks(&node, num_blocks_in_epoch).await?;
         node.mine_blocks(num_blocks_in_epoch).await?;
 
         // ===== PHASE 3: Verify First Epoch Assignments =====
