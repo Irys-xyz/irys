@@ -1,6 +1,6 @@
 use crate::{
     block_production::Seed, BlockIndexReadGuard, Config, DatabaseProvider, H256List,
-    VDFLimiterInfo, VdfConfig, H256, U256,
+    IrysBlockHeader, IrysBlockHeaderFlags, VDFLimiterInfo, VdfConfig, H256, U256,
 };
 use eyre::WrapErr;
 use nodit::{interval::ii, InclusiveInterval, Interval};
@@ -31,9 +31,11 @@ impl VdfState {
         block_index: BlockIndexReadGuard,
         db: DatabaseProvider,
         vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
+        // block to base the VDF state from
+        block: IrysBlockHeader,
         config: &Config,
     ) -> Self {
-        create_state(block_index, db, vdf_mining_state_sender, &config)
+        create_state(block_index, db, vdf_mining_state_sender, block, &config)
     }
 
     pub fn from_capacity(capacity: usize) -> Self {
@@ -326,4 +328,61 @@ pub fn calc_capacity(config: &Config) -> usize {
     };
 
     capacity.try_into().expect("expected u64 to cast to u32")
+}
+
+/// create VDF state using the latest block in db
+fn create_state(
+    block_index: BlockIndexReadGuard,
+    db: DatabaseProvider,
+    vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
+    // block to get VDF state for (usually the latest block)
+    block: IrysBlockHeader,
+    config: &Config,
+) -> VdfState {
+    let capacity = calc_capacity(config);
+
+    if let Some(block_hash) = block_index
+        .read()
+        .get_latest_item()
+        .map(|item| item.block_hash)
+    {
+        let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
+        let tx = db.tx().unwrap();
+
+        let global_step_number = block.vdf_limiter_info.global_step_number;
+        let mut steps_remaining = capacity;
+
+        while steps_remaining > 0 && block.height > 0 {
+            // get all the steps out of the block
+            for step in block.vdf_limiter_info.steps.0.iter().rev() {
+                seeds.push_front(Seed(*step));
+                steps_remaining -= 1;
+                if steps_remaining == 0 {
+                    break;
+                }
+            }
+            // get the previous block
+            block = block_header_by_hash(&tx, &block.previous_block_hash, false)
+                .unwrap()
+                .unwrap();
+        }
+        tracing::info!(
+            "Initializing vdf service from block's info in step number {}",
+            global_step_number
+        );
+        return VdfState {
+            global_step: global_step_number,
+            seeds,
+            capacity,
+            mining_state_sender: Some(vdf_mining_state_sender),
+        };
+    };
+
+    tracing::info!("No block index found, initializing VdfState from zero");
+    VdfState {
+        global_step: 0,
+        seeds: VecDeque::with_capacity(capacity),
+        capacity,
+        mining_state_sender: Some(vdf_mining_state_sender),
+    }
 }
