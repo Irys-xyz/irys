@@ -344,7 +344,9 @@ impl GossipServiceTestFixture {
 
     /// # Panics
     /// Can panic
-    pub fn run_service(&mut self) -> (ServiceHandleWithShutdownSignal, mpsc::Sender<GossipData>) {
+    pub async fn run_service(
+        &mut self,
+    ) -> (ServiceHandleWithShutdownSignal, mpsc::Sender<GossipData>) {
         let (gossip_service, internal_message_bus) = GossipService::new(self.mining_address);
         let gossip_listener = TcpListener::bind(
             format!("127.0.0.1:{}", self.gossip_port)
@@ -377,7 +379,11 @@ impl GossipServiceTestFixture {
                 vdf_tx,
                 gossip_listener,
                 false,
-                Arc::new(RwLock::new(BlockIndex::new(&NodeConfig::testnet()))),
+                Arc::new(RwLock::new(
+                    BlockIndex::new(&NodeConfig::testnet())
+                        .await
+                        .expect("to create block index"),
+                )),
             )
             .expect("failed to run gossip service");
 
