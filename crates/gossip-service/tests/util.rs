@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
-use irys_actors::block_discovery::BlockDiscoveredMessage;
+use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError};
 use irys_actors::peer_list_service::{AddPeer, PeerListServiceWithClient};
@@ -128,29 +128,20 @@ pub struct BlockDiscoveryStub {
     pub internal_message_bus: mpsc::Sender<GossipData>,
 }
 
-impl Actor for BlockDiscoveryStub {
-    type Context = Context<Self>;
-}
-
-impl Handler<BlockDiscoveredMessage> for BlockDiscoveryStub {
-    type Result = Result<(), eyre::Report>;
-
-    /// # Panics
-    /// Can panic
-    fn handle(&mut self, msg: BlockDiscoveredMessage, _: &mut Self::Context) -> Self::Result {
-        let block = msg.0;
+#[async_trait]
+impl BlockDiscoveryFacade for BlockDiscoveryStub {
+    async fn handle_block(&self, block: IrysBlockHeader) -> Result<()> {
         self.blocks
             .write()
             .expect("to unlock blocks")
-            .push(block.as_ref().clone());
+            .push(block.clone());
 
         let sender = self.internal_message_bus.clone();
-        let arc_block = Arc::clone(&block);
 
         // Pretend that we've validated the block and we're ready to gossip it
         tokio::runtime::Handle::current().spawn(async move {
             sender
-                .send(GossipData::Block(arc_block.as_ref().clone()))
+                .send(GossipData::Block(block))
                 .await
                 .expect("to send block");
         });
@@ -251,7 +242,7 @@ pub struct GossipServiceTestFixture {
     pub mining_address: Address,
     pub mempool: MempoolStub,
     pub peer_list: Addr<PeerListServiceWithClient<StubApiClient, MockRethServiceActor>>,
-    pub block_discovery: Addr<BlockDiscoveryStub>,
+    pub block_discovery: BlockDiscoveryStub,
     pub mempool_txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
@@ -317,8 +308,6 @@ impl GossipServiceTestFixture {
         };
         let discovery_blocks = Arc::clone(&block_discovery_stub.blocks);
 
-        let block_discovery_addr = block_discovery_stub.start();
-
         let tokio_runtime = tokio::runtime::Handle::current();
 
         let task_manager = TaskManager::new(tokio_runtime);
@@ -333,7 +322,7 @@ impl GossipServiceTestFixture {
             mining_address: Address::random(),
             mempool: mempool_stub,
             peer_list,
-            block_discovery: block_discovery_addr,
+            block_discovery: block_discovery_stub,
             mempool_txs,
             mempool_chunks,
             discovery_blocks,
@@ -364,14 +353,13 @@ impl GossipServiceTestFixture {
             blocks: Arc::clone(&self.discovery_blocks),
             internal_message_bus: internal_message_bus.clone(),
         };
-        let block_discovery_stub_addr = block_discovery_stub.start();
 
         let (vdf_tx, _vdf_rx) = tokio::sync::mpsc::channel::<BroadcastMiningSeed>(1);
 
         let service_handle = gossip_service
             .run(
                 mempool_stub,
-                block_discovery_stub_addr,
+                block_discovery_stub,
                 self.api_client.clone(),
                 &self.task_executor,
                 self.peer_list.clone().into(),
