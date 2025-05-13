@@ -1217,6 +1217,7 @@ impl IrysNode {
             block_tree_guard: block_tree_guard.clone(),
             price_oracle,
             service_senders: service_senders.clone(),
+            blocks_remaining_for_test: None,
         };
         let block_producer_addr =
             BlockProducerActor::start_in_arbiter(&block_producer_arbiter.handle(), |_| {

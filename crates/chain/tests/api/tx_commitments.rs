@@ -46,7 +46,6 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     )
     .await?;
 
-    node.node_ctx.actor_addresses.start_mining().unwrap();
     let api_state = node.node_ctx.get_api_state(ema_tx);
     let _db = api_state.db.clone();
 
@@ -77,8 +76,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     post_commitment_tx_request(&uri, &stake_tx).await;
 
     // Mine a block to include the commitment
-    IrysNodeTest::mine_blocks(&node, 1).await?;
-    // node.mine_block().await.unwrap();
+    node.mine_blocks_exact(1).await?;
 
     // Verify stake commitment is now 'Accepted'
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
@@ -106,7 +104,8 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentStatus::Unknown);
 
     // Mine a block to include the pledge
-    IrysNodeTest::mine_blocks(&node, 1).await?;
+    debug!("DMAC MINE BLOCK - Height should become 2");
+    node.mine_blocks_exact(1).await?;
 
     // Verify pledge is now 'Accepted' after mining
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
@@ -119,8 +118,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Re-submit the same stake commitment
     post_commitment_tx_request(&uri, &stake_tx).await;
-    IrysNodeTest::mine_blocks(&node, 1).await?;
-    //node.mine_block().await?;
+    node.mine_blocks_exact(1).await?;
 
     // Verify stake is still 'Accepted' (idempotent operation)
     let status = get_commitment_status(&stake_tx, &node.node_ctx).await;
@@ -145,8 +143,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Submit pledge via API
     post_commitment_tx_request(&uri, &pledge_tx).await;
-    IrysNodeTest::mine_blocks(&node, 1).await?;
-    //node.mine_block().await?;
+    node.mine_blocks_exact(1).await?;
 
     // Verify pledge remains 'Unstaked' (invalid without stake)
     let status = get_commitment_status(&pledge_tx, &node.node_ctx).await;
@@ -179,7 +176,7 @@ async fn get_commitment_status(
 async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
     // Configure logging to reduce noise while keeping relevant commitment outputs
-    std::env::set_var("RUST_LOG", "debug,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_actors::block_validation=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::block_producer=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    std::env::set_var("RUST_LOG", "debug,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_actors::block_validation=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::block_producer=info,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
 
     // ===== TEST PURPOSE: Multiple Epochs with Commitments =====
     // This test verifies that:
@@ -294,8 +291,8 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // Mine enough blocks to reach the first epoch boundary
         info!("MINE FIRST EPOCH BLOCK:");
-        IrysNodeTest::mine_blocks(&node, num_blocks_in_epoch).await?;
-        node.mine_blocks(num_blocks_in_epoch).await.unwrap();
+        // IrysNodeTest::mine_blocks(&node, num_blocks_in_epoch).await?;
+        node.mine_blocks_exact(num_blocks_in_epoch).await?;
 
         // ===== PHASE 3: Verify First Epoch Assignments =====
         // Verify that all pledges have been assigned partitions
@@ -337,9 +334,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // Mine enough blocks to reach the second epoch boundary
         info!("MINE SECOND EPOCH BLOCK:");
-
-        // node.mine_blocks(num_blocks_in_epoch).await?;
-        IrysNodeTest::mine_blocks(&node, num_blocks_in_epoch + 2).await?;
+        node.mine_blocks_exact(num_blocks_in_epoch + 2).await?;
 
         // ===== PHASE 5: Verify Second Epoch Assignments =====
         // Verify all signers have proper partition assignments for all pledges
