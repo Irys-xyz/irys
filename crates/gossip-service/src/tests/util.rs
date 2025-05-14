@@ -263,6 +263,9 @@ pub(crate) struct GossipServiceTestFixture {
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
     pub api_client_stub: ApiClientStub,
+    // Tets need the task manager to be stored somewhere
+    #[allow(dead_code)]
+    pub task_manager: TaskManager,
     pub task_executor: TaskExecutor,
 }
 
@@ -342,7 +345,7 @@ impl GossipServiceTestFixture {
             mempool_chunks,
             discovery_blocks,
             api_client_stub: ApiClientStub::new(),
-            // task_manager,
+            task_manager,
             task_executor,
         }
     }
