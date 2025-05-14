@@ -183,8 +183,6 @@ impl ApiClient for ApiClientStub {
         _peer: SocketAddr,
         tx_id: H256,
     ) -> Result<IrysTransactionResponse> {
-        println!("Fetching transaction {:?} from stub API client", tx_id);
-        println!("{:?}", self.txs.get(&tx_id));
         Ok(self
             .txs
             .get(&tx_id)
