@@ -14,6 +14,7 @@ irys-config.workspace = true
 irys-price-oracle.workspace = true
 irys-efficient-sampling.workspace = true
 irys-api-client.workspace = true
+irys-vdf.workspace = true
 
 actix.workspace = true
 nodit.workspace = true

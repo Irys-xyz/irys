@@ -17,6 +17,7 @@ pub mod peer_list_service;
 pub mod reth_service;
 pub mod services;
 pub mod validation_service;
+pub mod vdf_service;
 
 pub use addresses::*;
 pub use block_producer::*;

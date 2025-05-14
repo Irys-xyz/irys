@@ -6,6 +6,7 @@ use crate::broadcast_mining_service::{
     BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
 };
 use crate::packing::PackingRequest;
+use crate::vdf_service::{VdfService, VdfServiceMessage};
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr;
@@ -511,8 +512,10 @@ mod tests {
         let _mining_broadcaster_addr = mining_broadcaster.start();
 
         let vdf_service = VdfService::from_capacity(100).start();
-        let vdf_steps_guard: VdfStepsReadGuard =
-            vdf_service.send(GetVdfStateMessage).await.unwrap();
+        let vdf_steps_guard: VdfStepsReadGuard = vdf_service
+            .send(VdfServiceMessage::GetVdfStateMessage)
+            .await
+            .unwrap();
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
@@ -641,18 +644,20 @@ mod tests {
             vdf_state: Arc::new(RwLock::new(vdf_state)),
         }
         .start();
-        let vdf_steps_guard: VdfStepsReadGuard =
-            vdf_service.send(GetVdfStateMessage).await.unwrap();
+        let vdf_steps_guard: VdfStepsReadGuard = vdf_service
+            .send(VdfServiceMessage::GetVdfStateMessage)
+            .await
+            .unwrap();
 
         let hash: H256 = H256::random();
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfSeed(Seed(hash))); //5
-                                                  // reset
-        vdf_service.do_send(VdfSeed(Seed(hash))); //6
-        vdf_service.do_send(VdfSeed(Seed(hash))); //7
+        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash)));
+        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash)));
+        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash)));
+        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash)));
+        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash))); //5
+                                                                     // reset
+        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash))); //6
+        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash))); //7
 
         sleep(Duration::from_secs(1)).await;
 

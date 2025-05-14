@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use actix::{Actor, Context, Handler, Message, Supervised, WrapFuture};
 use actix::{AsyncContext, SystemService};
-use irys_types::{vdf_steps_are_valid, Config, IrysBlockHeader, VdfStepsReadGuard};
+use irys_types::{Config, IrysBlockHeader, VdfStepsReadGuard};
+use irys_vdf::vdf_steps_are_valid;
 use tracing::error;
 
 use crate::{

@@ -13,10 +13,10 @@ use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
-    calculate_difficulty, last_step_checkpoints_is_valid, next_cumulative_diff, validate_path,
-    Address, Config, ConsensusConfig, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData,
-    VdfStepsReadGuard, H256,
+    calculate_difficulty, next_cumulative_diff, validate_path, Address, Config, ConsensusConfig,
+    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, VdfStepsReadGuard, H256,
 };
+use irys_vdf::last_step_checkpoints_is_valid;
 use openssl::sha;
 use tracing::{debug, info};
 
@@ -311,7 +311,7 @@ pub async fn recall_recall_range_is_valid(
         "Validating recall ranges steps from: {} to: {}",
         reset_step_number, block.vdf_limiter_info.global_step_number
     );
-    let steps = steps_guard.read().await.get_steps(ii(
+    let steps = steps_guard.read().get_steps(ii(
         reset_step_number,
         block.vdf_limiter_info.global_step_number,
     ))?;

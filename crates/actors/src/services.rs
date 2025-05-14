@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::{
-    cache_service::CacheServiceAction, ema_service::EmaServiceMessage, CommitmentCacheMessage,
+    cache_service::CacheServiceAction, ema_service::EmaServiceMessage,
+    vdf_service::VdfServiceMessage, CommitmentCacheMessage,
 };
 
 // Only contains senders, thread-safe to clone and share
@@ -33,6 +34,7 @@ pub struct ServiceReceivers {
     pub chunk_cache: UnboundedReceiver<CacheServiceAction>,
     pub ema: UnboundedReceiver<EmaServiceMessage>,
     pub commitments_cache: UnboundedReceiver<CommitmentCacheMessage>,
+    pub vdf: UnboundedReceiver<VdfServiceMessage>,
 }
 
 #[derive(Debug)]
@@ -40,6 +42,7 @@ pub struct ServiceSendersInner {
     pub chunk_cache: UnboundedSender<CacheServiceAction>,
     pub ema: UnboundedSender<EmaServiceMessage>,
     pub commitment_cache: UnboundedSender<CommitmentCacheMessage>,
+    pub vdf: UnboundedSender<VdfServiceMessage>,
 }
 
 impl ServiceSendersInner {
@@ -49,16 +52,19 @@ impl ServiceSendersInner {
         let (ema_sender, ema_receiver) = unbounded_channel::<EmaServiceMessage>();
         let (commitments_cache_sender, commitments_cached_receiver) =
             unbounded_channel::<CommitmentCacheMessage>();
+        let (vdf_sender, vdf_receiver) = unbounded_channel::<VdfServiceMessage>();
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
             ema: ema_sender,
             commitment_cache: commitments_cache_sender,
+            vdf: vdf_sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
             ema: ema_receiver,
             commitments_cache: commitments_cached_receiver,
+            vdf: vdf_receiver,
         };
         (senders, receivers)
     }
