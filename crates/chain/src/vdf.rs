@@ -2,11 +2,12 @@ use actix::Addr;
 use irys_actors::{
     block_index_service::BlockIndexReadGuard,
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
-    vdf_service::{VdfSeed, VdfService},
+    vdf_service::{VdfService, VdfServiceMessage, VdfServiceMessage::VdfSeed, VdfState},
 };
 use irys_database::block_header_by_hash;
 use irys_types::{
-    block_production::Seed, AtomicVdfStepNumber, Config, DatabaseProvider, H256List, H256, U256,
+    block_production::Seed, AtomicVdfStepNumber, Config, DatabaseProvider, H256List,
+    IrysBlockHeader, H256, U256,
 };
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use reth_db::Database;
@@ -27,7 +28,7 @@ pub fn run_vdf(
     mut vdf_mining_state_listener: Receiver<bool>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: Addr<BroadcastMiningService>,
-    vdf_service: Addr<VdfService>,
+    vdf_service: tokio::sync::mpsc::UnboundedSender<VdfServiceMessage>,
     atomic_vdf_global_step: AtomicVdfStepNumber,
 ) {
     let mut hasher = Sha256::new();
@@ -88,7 +89,7 @@ pub fn run_vdf(
             hash.clone(),
             global_step_number
         );
-        vdf_service.do_send(VdfSeed(Seed(hash)));
+        vdf_service.send(VdfServiceMessage::VdfSeed(Seed(hash)));
         broadcast_mining_service.do_send(BroadcastMiningSeed {
             seed: Seed(hash),
             checkpoints: H256List(checkpoints.clone()),
@@ -150,7 +151,7 @@ fn create_state(
     db: DatabaseProvider,
     vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
     // block to get VDF state for (usually the latest block)
-    block: IrysBlockHeader,
+    mut block: IrysBlockHeader,
     config: &Config,
 ) -> VdfState {
     let capacity = calc_capacity(config);
@@ -205,9 +206,12 @@ fn create_state(
 mod tests {
     use super::*;
     use actix::*;
-    use irys_actors::vdf_service::{calc_capacity, GetVdfStateMessage};
+    use irys_actors::vdf_service::{
+        calc_capacity, vdf_steps_are_valid, VdfServiceMessage::GetVdfStateMessage,
+        VdfStepsReadGuard,
+    };
     use irys_types::*;
-    use irys_vdf::{vdf_sha_verification, vdf_state::VdfStepsReadGuard, vdf_steps_are_valid};
+    use irys_vdf::vdf_sha_verification;
     use nodit::interval::ii;
     use std::{
         sync::{atomic::AtomicU64, Arc},
@@ -299,7 +303,7 @@ mod tests {
                     mining_state_rx,
                     shutdown_rx,
                     broadcast_mining_service,
-                    vdf_service,
+                    vdf_service_tx,
                     atomic_global_step_number,
                 )
             }

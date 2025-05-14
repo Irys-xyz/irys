@@ -26,6 +26,7 @@ use irys_actors::{
     },
     services::ServiceSenders,
     validation_service::ValidationService,
+    vdf_service::{VdfService, VdfServiceMessage, VdfServiceResponse, VdfState, VdfStepsReadGuard},
 };
 use irys_actors::{
     ActorAddresses, CommitmentCache, CommitmentStateReadGuard, EpochReplayData,
@@ -47,11 +48,10 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
-use irys_types::VdfState;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, CommitmentTransaction, Config,
-    GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange,
-    VdfStepsReadGuard, H256, U256,
+    GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, H256,
+    U256,
 };
 use reth::{
     builder::FullNode,
@@ -838,8 +838,13 @@ impl IrysNode {
         let vdf_steps_guard: VdfStepsReadGuard = Arc::new(RwLock::new(vdf_state));
 
         // Spawn VDF service
-        let _handle =
-            VdfService::spawn_service(&task_exec, block_tree_guard.clone(), receivers.vdf, &config);
+        let _handle = VdfService::spawn_service(
+            &task_exec,
+            block_tree_guard.clone(),
+            receivers.vdf,
+            vdf_mining_state_sender,
+            &config,
+        );
 
         // spawn the validation service
         let validation_arbiter = Self::init_validation_service(
@@ -928,7 +933,7 @@ impl IrysNode {
             seed,
             global_step_number,
             broadcast_mining_actor,
-            vdf_service.clone(),
+            receivers.vdf,
             atomic_global_step_number,
         );
 
@@ -1057,7 +1062,7 @@ impl IrysNode {
         seed: H256,
         global_step_number: u64,
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
-        vdf_service: actix::Addr<VdfService>,
+        vdf_service: tokio::sync::mpsc::UnboundedReceiver<VdfServiceMessage>,
         atomic_global_step_number: Arc<AtomicU64>,
     ) -> JoinHandle<()> {
         let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
