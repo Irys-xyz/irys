@@ -26,7 +26,7 @@ use irys_actors::{
     },
     services::ServiceSenders,
     validation_service::ValidationService,
-    vdf_service::{VdfService, VdfServiceMessage, VdfState, VdfStepsReadGuard},
+    vdf_service::{VdfService, VdfServiceMessage, VdfStepsReadGuard},
 };
 use irys_actors::{
     ActorAddresses, CommitmentCache, CommitmentStateReadGuard, EpochReplayData,
@@ -833,10 +833,6 @@ impl IrysNode {
         let (vdf_sender, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
         let (vdf_mining_state_sender, vdf_mining_state_rx) = mpsc::channel::<bool>(1);
 
-        // vdf steps state guard
-        let vdf_state = VdfState::new(block_index, db, vdf_mining_state_sender, &config);
-        let vdf_steps_guard: VdfStepsReadGuard = Arc::new(RwLock::new(vdf_state));
-
         // Spawn VDF service
         let _handle = VdfService::spawn_service(
             &task_exec,
@@ -853,7 +849,7 @@ impl IrysNode {
         });
         let vdf_steps_guard = oneshot_rx
             .await
-            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
+            .expect("to receive VdfStepsReadGuard response from GetVdfStateMessage");
 
         // spawn the validation service
         let validation_arbiter = Self::init_validation_service(

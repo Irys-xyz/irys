@@ -1,21 +1,12 @@
 use actix::Addr;
 use irys_actors::{
-    block_index_service::BlockIndexReadGuard,
     broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
-    vdf_service::{VdfService, VdfServiceMessage, VdfServiceMessage::VdfSeed, VdfState},
+    vdf_service::VdfServiceMessage,
 };
-use irys_database::block_header_by_hash;
-use irys_types::{
-    block_production::Seed, AtomicVdfStepNumber, Config, DatabaseProvider, H256List,
-    IrysBlockHeader, H256, U256,
-};
+use irys_types::{block_production::Seed, AtomicVdfStepNumber, Config, H256List, H256, U256};
 use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
-use reth_db::Database;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 use tracing::{debug, info};
 
@@ -89,7 +80,9 @@ pub fn run_vdf(
             hash.clone(),
             global_step_number
         );
-        vdf_service.send(VdfServiceMessage::VdfSeed(Seed(hash)));
+        if let Err(e) = vdf_service.send(VdfServiceMessage::VdfSeed(Seed(hash))) {
+            panic!("Unable to send new Seed to VDF service: {:?}", e);
+        }
         broadcast_mining_service.do_send(BroadcastMiningSeed {
             seed: Seed(hash),
             checkpoints: H256List(checkpoints.clone()),
@@ -145,71 +138,11 @@ pub fn calc_capacity(config: &Config) -> usize {
     capacity.try_into().expect("expected u64 to cast to u32")
 }
 
-/// create VDF state using the latest block in db
-fn create_state(
-    block_index: BlockIndexReadGuard,
-    db: DatabaseProvider,
-    vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
-    // block to get VDF state for (usually the latest block)
-    mut block: IrysBlockHeader,
-    config: &Config,
-) -> VdfState {
-    let capacity = calc_capacity(config);
-
-    if let Some(block_hash) = block_index
-        .read()
-        .get_latest_item()
-        .map(|item| item.block_hash)
-    {
-        let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
-        let tx = db.tx().unwrap();
-
-        let global_step_number = block.vdf_limiter_info.global_step_number;
-        let mut steps_remaining = capacity;
-
-        while steps_remaining > 0 && block.height > 0 {
-            // get all the steps out of the block
-            for step in block.vdf_limiter_info.steps.0.iter().rev() {
-                seeds.push_front(Seed(*step));
-                steps_remaining -= 1;
-                if steps_remaining == 0 {
-                    break;
-                }
-            }
-            // get the previous block
-            block = block_header_by_hash(&tx, &block.previous_block_hash, false)
-                .unwrap()
-                .unwrap();
-        }
-        tracing::info!(
-            "Initializing vdf service from block's info in step number {}",
-            global_step_number
-        );
-        return VdfState {
-            global_step: global_step_number,
-            seeds,
-            capacity,
-            mining_state_sender: Some(vdf_mining_state_sender),
-        };
-    };
-
-    tracing::info!("No block index found, initializing VdfState from zero");
-    VdfState {
-        global_step: 0,
-        seeds: VecDeque::with_capacity(capacity),
-        capacity,
-        mining_state_sender: Some(vdf_mining_state_sender),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use actix::*;
-    use irys_actors::vdf_service::{
-        calc_capacity, vdf_steps_are_valid, VdfServiceMessage::GetVdfStateMessage,
-        VdfStepsReadGuard,
-    };
+    use irys_actors::{services::ServiceSenders, vdf_service::vdf_steps_are_valid};
     use irys_types::*;
     use irys_vdf::vdf_sha_verification;
     use nodit::interval::ii;
@@ -279,13 +212,22 @@ mod tests {
 
         init_tracing();
 
+        // start service senders/receivers
+        let (service_senders, _) = ServiceSenders::new();
+
         let broadcast_mining_service = BroadcastMiningService::from_registry();
-        let capacity = calc_capacity(&config);
         let (_, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
         let (_, mining_state_rx) = mpsc::channel::<bool>(1);
-        let vdf_service = VdfService::from_capacity(capacity).start();
-        SystemRegistry::set(vdf_service.clone());
-        let vdf_steps: VdfStepsReadGuard = vdf_service.send(GetVdfStateMessage).await.unwrap();
+
+        //TODO this should be spawning the vdf service?
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let vdf_service_sender = service_senders.vdf.clone();
+        let _ = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
+            response: oneshot_tx,
+        });
+        let vdf_steps = oneshot_rx
+            .await
+            .expect("to receive VdfStepsReadGuard response from GetVdfStateMessage");
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -303,7 +245,7 @@ mod tests {
                     mining_state_rx,
                     shutdown_rx,
                     broadcast_mining_service,
-                    vdf_service_tx,
+                    vdf_service_sender,
                     atomic_global_step_number,
                 )
             }
