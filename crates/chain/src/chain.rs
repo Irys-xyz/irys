@@ -933,7 +933,7 @@ impl IrysNode {
             seed,
             global_step_number,
             broadcast_mining_actor,
-            receivers.vdf,
+            service_senders.vdf,
             atomic_global_step_number,
         );
 
@@ -1062,7 +1062,7 @@ impl IrysNode {
         seed: H256,
         global_step_number: u64,
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
-        vdf_service: tokio::sync::mpsc::UnboundedReceiver<VdfServiceMessage>,
+        vdf_service: tokio::sync::mpsc::UnboundedSender<VdfServiceMessage>,
         atomic_global_step_number: Arc<AtomicU64>,
     ) -> JoinHandle<()> {
         let vdf_reset_seed = latest_block.vdf_limiter_info.seed;
