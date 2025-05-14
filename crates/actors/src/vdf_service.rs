@@ -17,7 +17,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tokio::{
-    sync::mpsc::{error::SendError, UnboundedReceiver},
+    sync::mpsc::UnboundedReceiver,
     task::JoinHandle,
     time::{sleep, Duration},
 };
@@ -42,23 +42,24 @@ pub struct VdfState {
 
 impl VdfState {
     /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
-    pub fn new(
+    pub fn new_vdf_state(
         block_index: BlockIndexReadGuard,
         db: DatabaseProvider,
         vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
         config: &Config,
-    ) -> Self {
+    ) -> VdfState {
         create_state(block_index, db, vdf_mining_state_sender, &config)
     }
 
-    pub fn from_capacity(capacity: usize) -> Self {
-        Self {
+    pub fn new_vdf_state_from_capacity(capacity: usize) -> VdfState {
+        VdfState {
             global_step: 0,
             capacity,
             seeds: VecDeque::with_capacity(capacity),
             mining_state_sender: None,
         }
     }
+
     pub fn get_last_step_and_seed(&self) -> (u64, Option<Seed>) {
         (self.global_step, self.seeds.back().cloned())
     }
@@ -159,20 +160,13 @@ pub enum VdfServiceMessage {
     /// Send the most recent mining step to all the `PartitionMiningActors`
     VdfSeed(Seed),
     /// Retrieve a read only reference to the ledger partition assignments
-    GetVdfStateMessage,
+    GetVdfStateMessage {
+        response: tokio::sync::oneshot::Sender<VdfStepsReadGuard>,
+    },
     /// pause the VDF thread via mpsc
     StopMiningMessage,
     /// start/resume the VDF thread via mpsc
     StartMiningMessage,
-}
-
-/// Possible responses whe nsending a message to VDF service
-#[derive(Debug)]
-pub enum VdfServiceResponse {
-    Ok,
-    Result(Result<(), SendError<bool>>),
-    VdfState(VdfState),
-    VdfStepsReadGuard(VdfStepsReadGuard),
 }
 
 #[derive(Debug)]
@@ -262,15 +256,15 @@ impl VdfService {
 
 impl Inner {
     #[tracing::instrument(skip_all, err)]
-    async fn handle_message(&mut self, msg: VdfServiceMessage) -> eyre::Result<VdfServiceResponse> {
-        let response = match msg {
+    async fn handle_message(&mut self, msg: VdfServiceMessage) -> eyre::Result<()> {
+        match msg {
             VdfServiceMessage::VdfSeed(seed) => {
                 self.vdf_state.write().unwrap().increment_step(seed);
-                VdfServiceResponse::Ok
             }
-            VdfServiceMessage::GetVdfStateMessage => VdfServiceResponse::VdfStepsReadGuard(
-                VdfStepsReadGuard::new(self.vdf_state.clone()),
-            ),
+            VdfServiceMessage::GetVdfStateMessage { response } => {
+                let guard = VdfStepsReadGuard::new(self.vdf_state.clone());
+                let _ = response.send(guard);
+            }
             VdfServiceMessage::StopMiningMessage => {
                 let sender = self
                     .vdf_state
@@ -280,8 +274,7 @@ impl Inner {
                     .clone()
                     .expect("expected valid mining_state_sender");
 
-                let res = sender.send(false).await;
-                VdfServiceResponse::Result(res)
+                let _ = sender.send(false).await;
             }
             VdfServiceMessage::StartMiningMessage => {
                 let sender = self
@@ -292,11 +285,10 @@ impl Inner {
                     .clone()
                     .expect("expected valid mining_state_sender");
 
-                let res = sender.send(true).await;
-                VdfServiceResponse::Result(res)
+                let _ = sender.send(true).await;
             }
         };
-        Ok(response)
+        Ok(())
     }
 }
 
@@ -510,6 +502,7 @@ pub fn vdf_steps_are_valid(
 // Tests
 #[cfg(test)]
 mod tests {
+    use crate::services::ServiceSenders;
     use irys_storage::ii;
     use irys_types::{H256List, NodeConfig, H256};
 
@@ -518,9 +511,13 @@ mod tests {
     #[actix_rt::test]
     async fn test_vdf() {
         let testnet_config = NodeConfig::testnet().into();
-        let service = VdfService::from_capacity(calc_capacity(&testnet_config));
-        service.vdf_state.write().unwrap().seeds = VecDeque::with_capacity(4);
-        service.vdf_state.write().unwrap().capacity = 4;
+        // start service senders/receivers
+        let (service_senders, receivers) = ServiceSenders::new();
+
+        let vdf_state = VdfState::new_vdf_state_from_capacity(calc_capacity(&testnet_config));
+        vdf_state.seeds = VecDeque::with_capacity(4);
+        vdf_state.capacity = 4;
+
         let addr = service.start();
 
         // Send 8 seeds 1,2..,8 (capacity is 4)
@@ -530,10 +527,15 @@ mod tests {
                 .unwrap();
         }
 
-        let state = addr
-            .send(VdfServiceMessage::GetVdfStateMessage)
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let _ = service_senders
+            .vdf
+            .send(VdfServiceMessage::GetVdfStateMessage {
+                response: oneshot_tx,
+            });
+        let state = oneshot_rx
             .await
-            .unwrap();
+            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
 
         let steps = state.read().seeds.iter().cloned().collect::<Vec<_>>();
 

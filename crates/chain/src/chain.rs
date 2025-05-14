@@ -26,7 +26,7 @@ use irys_actors::{
     },
     services::ServiceSenders,
     validation_service::ValidationService,
-    vdf_service::{VdfService, VdfServiceMessage, VdfServiceResponse, VdfState, VdfStepsReadGuard},
+    vdf_service::{VdfService, VdfServiceMessage, VdfState, VdfStepsReadGuard},
 };
 use irys_actors::{
     ActorAddresses, CommitmentCache, CommitmentStateReadGuard, EpochReplayData,
@@ -721,7 +721,7 @@ impl IrysNode {
         let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initiailsed");
 
-        // start services
+        // start service senders/receivers
         let (service_senders, receivers) = ServiceSenders::new();
 
         // start reth service
@@ -842,9 +842,18 @@ impl IrysNode {
             &task_exec,
             block_tree_guard.clone(),
             receivers.vdf,
-            vdf_mining_state_sender,
+            vdf_mining_state_sender.clone(),
             &config,
         );
+
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let vdf_service_sender = service_senders.vdf.clone();
+        let _ = vdf_service_sender.send(VdfServiceMessage::GetVdfStateMessage {
+            response: oneshot_tx,
+        });
+        let vdf_steps_guard = oneshot_rx
+            .await
+            .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
 
         // spawn the validation service
         let validation_arbiter = Self::init_validation_service(
@@ -933,7 +942,7 @@ impl IrysNode {
             seed,
             global_step_number,
             broadcast_mining_actor,
-            service_senders.vdf,
+            service_senders.vdf.clone(),
             atomic_global_step_number,
         );
 
@@ -960,8 +969,8 @@ impl IrysNode {
             block_index_guard: block_index_guard.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
-            vdf_sender,
-            vdf_mining_state_sender,
+            vdf_sender: vdf_sender.clone(),
+            vdf_mining_state_sender: vdf_mining_state_sender.clone(),
             reth_shutdown_sender,
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),

@@ -6,7 +6,7 @@ use crate::broadcast_mining_service::{
     BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
 };
 use crate::packing::PackingRequest;
-use crate::vdf_service::VdfStepsReadGuard;
+use crate::vdf_service::{VdfServiceMessage, VdfStepsReadGuard};
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr;
