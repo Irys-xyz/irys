@@ -3,11 +3,9 @@
 
 use eyre::Context;
 use irys_types::{H256List, VDFLimiterInfo, VdfConfig, H256, U256};
-use nodit::interval::ii;
 use openssl::sha;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
-use tracing::{debug, error, info};
 
 #[inline]
 pub fn vdf_sha(

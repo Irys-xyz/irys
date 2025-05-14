@@ -8,10 +8,7 @@ use irys_vdf::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_misma
 use nodit::{interval::ii, InclusiveInterval, Interval};
 
 use rayon::prelude::*;
-use reth::{
-    network::metered_poll_nested_stream_with_budget,
-    tasks::{shutdown::GracefulShutdown, TaskExecutor},
-};
+use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use reth_db::Database;
 use sha2::{Digest, Sha256};
 use std::{
@@ -20,7 +17,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tokio::{
-    sync::mpsc::{error::SendError, UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{error::SendError, UnboundedReceiver},
     task::JoinHandle,
     time::{sleep, Duration},
 };
