@@ -4,6 +4,7 @@ use crate::{
     block_validation::prevalidate_block,
     epoch_service::{EpochServiceActor, NewEpochMessage, PartitionAssignmentsReadGuard},
     services::ServiceSenders,
+    vdf_service::VdfStepsReadGuard,
     CommitmentCacheInner, CommitmentCacheMessage, CommitmentStatus, GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
@@ -14,7 +15,7 @@ use irys_database::{
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     CommitmentTransaction, Config, DatabaseProvider, GossipData, H256List, IrysBlockHeader,
-    IrysTransactionHeader, VdfStepsReadGuard,
+    IrysTransactionHeader,
 };
 use reth_db::Database;
 use std::sync::Arc;

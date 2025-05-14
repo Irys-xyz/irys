@@ -6,7 +6,7 @@ use crate::broadcast_mining_service::{
     BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
 };
 use crate::packing::PackingRequest;
-use crate::vdf_service::{VdfService, VdfServiceMessage};
+use crate::vdf_service::{VdfService, VdfServiceMessage, VdfStepsReadGuard};
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr;
@@ -16,7 +16,7 @@ use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{
     partition_chunk_offset_ie, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
-    PartitionChunkOffset, PartitionChunkRange, VdfStepsReadGuard,
+    PartitionChunkOffset, PartitionChunkRange,
 };
 use openssl::sha;
 use tracing::{debug, error, info, warn};
@@ -367,12 +367,13 @@ pub fn hash_to_number(hash: &[u8]) -> U256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_producer::{
-        BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage,
+    use crate::{
+        block_producer::{BlockProducerMockActor, MockedBlockProducerAddr, SolutionFoundMessage},
+        broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
+        mining::{PartitionMiningActor, Seed},
+        packing::PackingActor,
+        vdf_service::{VdfState, VdfStepsReadGuard},
     };
-    use crate::broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService};
-    use crate::mining::{PartitionMiningActor, Seed};
-    use crate::packing::PackingActor;
     use actix::actors::mocker::Mocker;
     use actix::{Actor, Addr, Recipient};
     use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV1Irys;
@@ -385,7 +386,7 @@ mod tests {
     };
     use irys_types::{
         ledger_chunk_offset_ie, ConsensusConfig, H256List, IrysBlockHeader, LedgerChunkOffset,
-        NodeConfig, VdfState, VdfStepsReadGuard,
+        NodeConfig,
     };
     use std::any::Any;
     use std::collections::VecDeque;

@@ -17,7 +17,7 @@ use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, Base64, Config, DataTransactionLedger, H256List, IngressProofsList,
     IrysBlockHeader, IrysTransactionCommon, IrysTransactionHeader, PoaData, Signature,
-    SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, VdfStepsReadGuard, H256, U256,
+    SystemTransactionLedger, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use nodit::interval::ii;
 use openssl::sha;
@@ -43,6 +43,7 @@ use crate::{
     mempool_service::{GetBestMempoolTxs, MempoolService},
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
+    vdf_service::VdfStepsReadGuard,
     CommitmentCacheMessage,
 };
 

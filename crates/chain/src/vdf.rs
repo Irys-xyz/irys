@@ -144,46 +144,6 @@ pub fn calc_capacity(config: &Config) -> usize {
     capacity.try_into().expect("expected u64 to cast to u32")
 }
 
-impl VdfState {
-    /// Creates a new `VdfService` setting up how many steps are stored in memory, and loads state from path if available
-    pub fn new(
-        block_index: BlockIndexReadGuard,
-        db: DatabaseProvider,
-        vdf_mining_state_sender: tokio::sync::mpsc::Sender<bool>,
-        // block to base the VDF state from
-        block: IrysBlockHeader,
-        config: &Config,
-    ) -> Self {
-        create_state(block_index, db, vdf_mining_state_sender, block, &config)
-    }
-
-    pub fn from_capacity(capacity: usize) -> Self {
-        Self {
-            global_step: 0,
-            capacity,
-            seeds: VecDeque::with_capacity(capacity),
-            mining_state_sender: None,
-        }
-    }
-    pub fn get_last_step_and_seed(&self) -> (u64, Option<Seed>) {
-        (self.global_step, self.seeds.back().cloned())
-    }
-
-    /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state
-    pub fn increment_step(&mut self, seed: Seed) {
-        if self.seeds.len() >= self.capacity {
-            self.seeds.pop_front();
-        }
-        self.global_step += 1;
-        self.seeds.push_back(seed);
-        tracing::info!(
-            "Received seed: {:?} global step: {}",
-            self.seeds.back().unwrap(),
-            self.global_step
-        );
-    }
-}
-
 /// create VDF state using the latest block in db
 fn create_state(
     block_index: BlockIndexReadGuard,

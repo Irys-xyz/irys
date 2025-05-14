@@ -5,6 +5,7 @@ use crate::{
     ema_service::{EmaServiceMessage, PriceStatus},
     epoch_service::PartitionAssignmentsReadGuard,
     mining::hash_to_number,
+    vdf_service::VdfStepsReadGuard,
 };
 use base58::ToBase58;
 use eyre::ensure;
@@ -14,7 +15,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::{
     calculate_difficulty, next_cumulative_diff, validate_path, Address, Config, ConsensusConfig,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, VdfStepsReadGuard, H256,
+    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use openssl::sha;

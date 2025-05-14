@@ -2,7 +2,7 @@
 //! including checkpoint validation and seed application.
 
 use eyre::Context;
-use irys_types::{H256List, VDFLimiterInfo, VdfConfig, VdfStepsReadGuard, H256, U256};
+use irys_types::{H256List, VDFLimiterInfo, VdfConfig, H256, U256};
 use nodit::interval::ii;
 use openssl::sha;
 use rayon::prelude::*;
@@ -81,136 +81,6 @@ pub fn vdf_sha_verification(
         local_salt = local_salt + 1;
     }
     checkpoints
-}
-
-/// Validate the steps from the `nonce_info` to see if they are valid.
-/// Verifies each step in parallel across as many cores as are available.
-///
-/// # Arguments
-///
-/// * `vdf_info` - The Vdf limiter info from the block header to validate.
-///
-/// # Returns
-///
-/// - `bool` - `true` if the steps are valid, false otherwise.
-pub fn vdf_steps_are_valid(
-    vdf_info: &VDFLimiterInfo,
-    config: &VdfConfig,
-    vdf_steps_guard: VdfStepsReadGuard,
-) -> eyre::Result<()> {
-    info!(
-        "Checking seed {:?} reset_seed {:?}",
-        vdf_info.prev_output, vdf_info.seed
-    );
-
-    let start = vdf_info.global_step_number - vdf_info.steps.len() as u64 + 1 as u64;
-    let end: u64 = vdf_info.global_step_number;
-
-    match vdf_steps_guard.read().get_steps(ii(start, end)) {
-        Ok(steps) => {
-            debug!("Validating VDF steps from VdfStepsReadGuard!");
-            if steps != vdf_info.steps {
-                warn_mismatches(&steps, &vdf_info.steps);
-                return Err(eyre::eyre!("VDF steps are invalid!"));
-            } else {
-                // Do not need to check last step checkpoints here, were checked in pre validation
-                return Ok(())
-            }
-        },
-        Err(err) =>
-            debug!("Error getting steps from VdfStepsReadGuard: {:?} so calculating vdf steps for validation", err)
-    };
-
-    let reset_seed = vdf_info.seed;
-
-    let mut step_hashes = vdf_info.steps.clone();
-
-    // Add the seed from the previous nonce info to the steps
-    let previous_seed = vdf_info.prev_output;
-    step_hashes.0.insert(0, previous_seed);
-
-    // Make a read only copy for parallel iterating
-    let steps = step_hashes.clone();
-
-    // Calculate the step number of the first step in the blocks sequence
-    let start_step_number: u64 = vdf_info.global_step_number - vdf_info.steps.len() as u64;
-
-    // We must calculate the checkpoint iterations for each step sequentially
-    // because we only have the first and last checkpoint of each step, but we
-    // can calculate each of the steps in parallel
-    // Limit threads number to avoid overloading the system using configuration limit
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(config.parallel_verification_thread_limit)
-        .build()
-        .unwrap();
-    let test: Vec<(H256, Option<H256List>)> = pool.install(|| {
-        (0..steps.len() - 1)
-            .into_par_iter()
-            .map(|i| {
-                let mut hasher = Sha256::new();
-                let mut salt = U256::from(step_number_to_salt_number(
-                    config,
-                    start_step_number + i as u64,
-                ));
-                let mut seed = steps[i];
-                let mut checkpoints: Vec<H256> =
-                    vec![H256::default(); config.num_checkpoints_in_vdf_step];
-                if start_step_number + i as u64 > 0
-                    && (start_step_number + i as u64) % config.reset_frequency as u64 == 0
-                {
-                    info!(
-                        "Applying reset seed {:?} to step number {}",
-                        reset_seed,
-                        start_step_number + i as u64
-                    );
-                    seed = apply_reset_seed(seed, reset_seed);
-                }
-                vdf_sha(
-                    &mut hasher,
-                    &mut salt,
-                    &mut seed,
-                    config.num_checkpoints_in_vdf_step,
-                    config.sha_1s_difficulty,
-                    &mut checkpoints,
-                );
-                (
-                    *checkpoints.last().unwrap(),
-                    if i == steps.len() - 2 {
-                        // If this is the last step, return the last checkpoint
-                        Some(H256List(checkpoints))
-                    } else {
-                        // Otherwise, return just the seed for the next step
-                        None
-                    },
-                )
-            })
-            .collect()
-    });
-
-    let last_step_checkpoints = test.last().unwrap().1.clone();
-    let test: H256List = H256List(test.into_iter().map(|par| par.0).collect());
-
-    let steps_are_valid = test == vdf_info.steps;
-
-    if !steps_are_valid {
-        // Compare the original list with the calculated one
-        warn_mismatches(&test, &vdf_info.steps);
-        return Err(eyre::eyre!("VDF steps are invalid!"));
-    }
-
-    let last_step_checkpoints_are_valid = last_step_checkpoints
-        .as_ref()
-        .is_some_and(|cks| *cks == vdf_info.last_step_checkpoints);
-
-    if !last_step_checkpoints_are_valid {
-        // Compare the original list with the calculated one
-        if let Some(cks) = last_step_checkpoints {
-            warn_mismatches(&cks, &vdf_info.last_step_checkpoints)
-        }
-        return Err(eyre::eyre!("VDF last step checkpoints are invalid!"));
-    }
-
-    Ok(())
 }
 
 pub fn warn_mismatches(a: &H256List, b: &H256List) {

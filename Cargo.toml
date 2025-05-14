@@ -102,6 +102,7 @@ sha2 = "0.10"
 color-eyre = "0.6"
 itertools = "0.13"
 futures = "0.3"
+rayon = "1.8.0"
 bytemuck = "1"
 futures-concurrency = "7"
 test-log = { version = "0.2", features = ["trace"] }
