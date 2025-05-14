@@ -21,7 +21,6 @@ pub mod simple_rng;
 pub mod storage;
 pub mod storage_pricing;
 pub mod transaction;
-pub mod vdf;
 pub mod version;
 
 use std::sync::{atomic::AtomicU64, Arc};
@@ -44,7 +43,6 @@ pub use nodit::Interval;
 pub use peer_list::*;
 pub use reth_codecs::Compact;
 pub use simple_rng::*;
-pub use vdf::*;
 pub use version::*;
 
 pub type AtomicVdfStepNumber = Arc<AtomicU64>;
