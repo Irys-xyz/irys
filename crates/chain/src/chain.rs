@@ -837,6 +837,10 @@ impl IrysNode {
         let vdf_state = VdfState::new(block_index, db, vdf_mining_state_sender, &config);
         let vdf_steps_guard: VdfStepsReadGuard = Arc::new(RwLock::new(vdf_state));
 
+        // Spawn VDF service
+        let _handle =
+            VdfService::spawn_service(&task_exec, block_tree_guard.clone(), receivers.vdf, &config);
+
         // spawn the validation service
         let validation_arbiter = Self::init_validation_service(
             &config,

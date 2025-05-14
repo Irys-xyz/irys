@@ -388,12 +388,16 @@ mod tests {
         ledger_chunk_offset_ie, ConsensusConfig, H256List, IrysBlockHeader, LedgerChunkOffset,
         NodeConfig,
     };
+    use reth::tasks::{TaskExecutor, TaskManager};
     use std::any::Any;
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
-    use tokio::time::sleep;
+    use tokio::{
+        sync::mpsc::{unbounded_channel, UnboundedSender},
+        time::sleep,
+    };
 
     fn get_mocked_block_producer(
         closure_arc: Arc<RwLock<Option<SolutionContext>>>,
@@ -641,24 +645,33 @@ mod tests {
             mining_state_sender: None,
         };
 
-        let vdf_service = VdfService {
-            vdf_state: Arc::new(RwLock::new(vdf_state)),
-        }
-        .start();
-        let vdf_steps_guard: VdfStepsReadGuard = vdf_service
-            .send(VdfServiceMessage::GetVdfStateMessage)
-            .await
-            .unwrap();
+        // Spawn VDF service
+        // this is so we can send it new VDF steps as part of this test
+        let task_manager = TaskManager::new(tokio::runtime::Handle::current());
+        let task_executor = task_manager.executor();
+        let (tx, rx) = unbounded_channel();
+        let _handle = VdfService::spawn_service(
+            &task_executor,
+            block_tree_guard.clone(),
+            rx,
+            vdf_mining_state_sender,
+            &config,
+        )
+        .await;
+
+        //todo GetVdfStateMessage needs to return the actual vdf state read guard ... which is that match problem
+        let vdf_steps_guard: VdfStepsReadGuard =
+            tx.send(VdfServiceMessage::GetVdfStateMessage).unwrap();
 
         let hash: H256 = H256::random();
-        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash)));
-        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash))); //5
-                                                                     // reset
-        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash))); //6
-        vdf_service.do_send(VdfServiceMessage::VdfSeed(Seed(hash))); //7
+        tx.send(VdfServiceMessage::VdfSeed(Seed(hash)));
+        tx.send(VdfServiceMessage::VdfSeed(Seed(hash)));
+        tx.send(VdfServiceMessage::VdfSeed(Seed(hash)));
+        tx.send(VdfServiceMessage::VdfSeed(Seed(hash)));
+        tx.send(VdfServiceMessage::VdfSeed(Seed(hash))); //5
+                                                         // reset
+        tx.send(VdfServiceMessage::VdfSeed(Seed(hash))); //6
+        tx.send(VdfServiceMessage::VdfSeed(Seed(hash))); //7
 
         sleep(Duration::from_secs(1)).await;
 

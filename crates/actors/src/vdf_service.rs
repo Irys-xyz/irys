@@ -17,10 +17,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     pin::pin,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tokio::{
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{error::SendError, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
     time::{sleep, Duration},
 };
@@ -169,10 +169,19 @@ pub enum VdfServiceMessage {
     StartMiningMessage,
 }
 
+/// Possible responses whe nsending a message to VDF service
+#[derive(Debug)]
+pub enum VdfServiceResponse {
+    Ok,
+    Result(Result<(), SendError<bool>>),
+    VdfState(VdfState),
+    VdfStepsReadGuard(VdfStepsReadGuard),
+}
+
 #[derive(Debug)]
 struct Inner {
     block_tree_read_guard: BlockTreeReadGuard,
-    vdf_state: VdfState,
+    vdf_state: AtomicVdfState,
 }
 
 #[derive(Debug)]
@@ -198,18 +207,19 @@ impl VdfService {
         config: &Config,
     ) -> JoinHandle<()> {
         let capacity = calc_capacity(config);
+        let vdf_state = VdfState {
+            global_step: 0,
+            seeds: VecDeque::with_capacity(capacity),
+            capacity,
+            mining_state_sender: Some(vdf_mining_state_sender),
+        };
         exec.spawn_critical_with_graceful_shutdown_signal("EMA Service", |shutdown| async move {
             let vdf_service = Self {
                 shutdown,
                 msg_rx: rx,
                 inner: Inner {
                     block_tree_read_guard,
-                    vdf_state: VdfState {
-                        global_step: 0,
-                        seeds: VecDeque::with_capacity(capacity),
-                        capacity,
-                        mining_state_sender: Some(vdf_mining_state_sender),
-                    },
+                    vdf_state: Arc::new(RwLock::new(vdf_state)),
                 },
             };
             vdf_service
@@ -255,18 +265,16 @@ impl VdfService {
 
 impl Inner {
     #[tracing::instrument(skip_all, err)]
-    async fn handle_message(&mut self, msg: VdfServiceMessage) -> eyre::Result<()> {
-        match msg {
+    async fn handle_message(&mut self, msg: VdfServiceMessage) -> eyre::Result<VdfServiceResponse> {
+        let response = match msg {
             VdfServiceMessage::VdfSeed(seed) => {
-                //TODO: do something
-                //self.vdf_state.write().unwrap().increment_step(seed.0);
+                self.vdf_state.write().unwrap().increment_step(seed);
+                VdfServiceResponse::Ok
             }
-            VdfServiceMessage::GetVdfStateMessage => {
-                //TODO: do something
-                //VdfStepsReadGuard::new(self.vdf_state.clone())
-            }
+            VdfServiceMessage::GetVdfStateMessage => VdfServiceResponse::VdfStepsReadGuard(
+                VdfStepsReadGuard::new(self.vdf_state.clone()),
+            ),
             VdfServiceMessage::StopMiningMessage => {
-                //TODO: do something
                 let sender = self
                     .vdf_state
                     .read()
@@ -275,10 +283,10 @@ impl Inner {
                     .clone()
                     .expect("expected valid mining_state_sender");
 
-                sender.send(false).await;
+                let res = sender.send(false).await;
+                VdfServiceResponse::Result(res)
             }
             VdfServiceMessage::StartMiningMessage => {
-                //TODO: do something
                 let sender = self
                     .vdf_state
                     .read()
@@ -287,10 +295,11 @@ impl Inner {
                     .clone()
                     .expect("expected valid mining_state_sender");
 
-                sender.send(true).await;
+                let res = sender.send(true).await;
+                VdfServiceResponse::Result(res)
             }
         };
-        Ok(())
+        Ok(response)
     }
 }
 
