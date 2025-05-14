@@ -4521,7 +4521,6 @@ dependencies = [
  "openssl",
  "pretty_assertions",
  "rand",
- "rayon",
  "reth-chainspec",
  "reth-codecs",
  "reth-db",
@@ -4534,7 +4533,6 @@ dependencies = [
  "semver 1.0.24",
  "serde",
  "serde_json",
- "sha2 0.10.8",
  "test-fuzz",
  "tokio",
  "toml",
@@ -4547,13 +4545,10 @@ dependencies = [
 name = "irys-vdf"
 version = "0.1.0"
 dependencies = [
- "actix",
- "actix-rt",
  "base58",
  "eyre",
  "hex",
  "irys-types",
- "nodit",
  "openssl",
  "rayon",
  "sha2 0.10.8",
