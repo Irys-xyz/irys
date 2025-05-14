@@ -43,6 +43,7 @@ use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::node::RethNode;
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reward_curve::HalvingCurve;
+use irys_storage::StorageModulesReadGuard;
 use irys_storage::{
     irys_consensus_data_db::open_or_create_irys_consensus_data_db,
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
@@ -619,7 +620,7 @@ impl IrysNode {
                                 gossip_listener
                             )
                             .await
-                            .expect("initializng services should not fail");
+                            .expect("initializing services should not fail");
                         irys_node_ctx_tx
                             .send(irys_node)
                             .expect("irys node ctx sender should not be dropped. Is the reth node thread down?");
@@ -750,14 +751,14 @@ impl IrysNode {
     )> {
         // initialize the databases
         let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
-        debug!("Reth DB initiailsed");
+        debug!("Reth DB initialized");
 
         // start services
         let (service_senders, receivers) = ServiceSenders::new();
 
         // start reth service
         let (reth_service_actor, reth_arbiter) = init_reth_service(&irys_db, &reth_node);
-        debug!("Reth Service Actor initiailsed");
+        debug!("Reth Service Actor initialized");
         // Get the correct Reth peer info
         let reth_peering = reth_service_actor.send(GetPeeringInfoMessage {}).await??;
 
@@ -783,13 +784,13 @@ impl IrysNode {
             receivers.chunk_cache,
             config.clone(),
         );
-        debug!("Chunk cache initiailsed");
+        debug!("Chunk cache initialized");
 
         let block_index_guard = block_index_service_actor
             .send(GetBlockIndexGuardMessage)
             .await?;
 
-        // start the broadcast mimning service
+        // start the broadcast mining service
         let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service();
 
         // start the epoch service
@@ -801,6 +802,7 @@ impl IrysNode {
             .send(GetPartitionAssignmentsGuardMessage)
             .await?;
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
+        let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
 
         // Retrieve Commitment State
         let commitment_state_guard = epoch_service_actor
@@ -829,7 +831,6 @@ impl IrysNode {
             &task_exec,
             receivers.commitments_cache,
             commitment_state_guard.clone(),
-            &config,
         );
 
         // Spawn peer list service
@@ -842,7 +843,7 @@ impl IrysNode {
             &irys_db,
             &reth_node,
             reth_db,
-            &storage_modules,
+            &storage_modules_guard,
             &block_tree_guard,
             &commitment_state_guard,
             &service_senders,
@@ -856,7 +857,7 @@ impl IrysNode {
             block_index,
             &irys_db,
             &service_senders,
-            &storage_modules,
+            &storage_modules_guard,
         );
 
         let (vdf_sender, new_seed_rx) = mpsc::channel::<BroadcastMiningSeed>(1);
@@ -936,13 +937,17 @@ impl IrysNode {
             .unwrap_or(latest_block.vdf_limiter_info.seed);
 
         // set up packing actor
-        let (atomic_global_step_number, packing_actor_addr) =
-            Self::init_packing_actor(&config, global_step_number, &reth_node, &storage_modules);
+        let (atomic_global_step_number, packing_actor_addr) = Self::init_packing_actor(
+            &config,
+            global_step_number,
+            &reth_node,
+            &storage_modules_guard,
+        );
 
         // set up storage modules
         let (part_actors, part_arbiters) = Self::init_partition_mining_actor(
             &config,
-            &storage_modules,
+            &storage_modules_guard,
             &vdf_steps_guard,
             &block_producer_addr,
             &atomic_global_step_number,
@@ -965,7 +970,7 @@ impl IrysNode {
         );
 
         // set up chunk provider
-        let chunk_provider = Self::init_chunk_provider(&config, storage_modules);
+        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard);
 
         // set up IrysNodeCtx
         let irys_node_ctx = IrysNodeCtx {
@@ -1073,9 +1078,9 @@ impl IrysNode {
 
     fn init_chunk_provider(
         config: &Config,
-        storage_modules: Vec<Arc<StorageModule>>,
+        storage_modules_guard: StorageModulesReadGuard,
     ) -> Arc<ChunkProvider> {
-        let chunk_provider = ChunkProvider::new(config.clone(), storage_modules.clone());
+        let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard.clone());
         let chunk_provider = Arc::new(chunk_provider);
         chunk_provider
     }
@@ -1135,7 +1140,7 @@ impl IrysNode {
 
     fn init_partition_mining_actor(
         config: &Config,
-        storage_modules: &Vec<Arc<StorageModule>>,
+        storage_modules_guard: &StorageModulesReadGuard,
         vdf_steps_guard: &VdfStepsReadGuard,
         block_producer_addr: &actix::Addr<BlockProducerActor>,
         atomic_global_step_number: &Arc<AtomicU64>,
@@ -1144,7 +1149,7 @@ impl IrysNode {
     ) -> (Vec<actix::Addr<PartitionMiningActor>>, Vec<Arbiter>) {
         let mut part_actors = Vec::new();
         let mut arbiters = Vec::new();
-        for sm in storage_modules {
+        for sm in storage_modules_guard.read().iter() {
             let partition_mining_actor = PartitionMiningActor::new(
                 &config,
                 block_producer_addr.clone().recipient(),
@@ -1165,7 +1170,7 @@ impl IrysNode {
         }
 
         // request packing for uninitialized ranges
-        for sm in storage_modules {
+        for sm in storage_modules_guard.read().iter() {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
                 packing_actor_addr.do_send(PackingRequest {
@@ -1181,10 +1186,14 @@ impl IrysNode {
         config: &Config,
         global_step_number: u64,
         reth_node: &RethNodeProvider,
-        storage_modules: &Vec<Arc<StorageModule>>,
+        storage_modules_guard: &StorageModulesReadGuard,
     ) -> (Arc<AtomicU64>, actix::Addr<PackingActor>) {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
-        let sm_ids = storage_modules.iter().map(|s| (*s).id).collect();
+        let sm_ids = storage_modules_guard
+            .read()
+            .iter()
+            .map(|s| (*s).id)
+            .collect();
         let packing_config = PackingConfig::new(&config);
         let packing_actor_addr = PackingActor::new(
             reth_node.task_executor.clone(),
@@ -1320,12 +1329,12 @@ impl IrysNode {
         block_index: Arc<RwLock<BlockIndex>>,
         irys_db: &DatabaseProvider,
         service_senders: &ServiceSenders,
-        storage_modules: &Vec<Arc<StorageModule>>,
+        storage_modules_guard: &StorageModulesReadGuard,
     ) {
         let chunk_migration_service = ChunkMigrationService::new(
             block_index.clone(),
             config.clone(),
-            storage_modules.clone(),
+            storage_modules_guard,
             irys_db.clone(),
             service_senders.clone(),
         );
@@ -1337,7 +1346,7 @@ impl IrysNode {
         irys_db: &DatabaseProvider,
         reth_node: &RethNodeProvider,
         reth_db: irys_database::db::RethDbWrapper,
-        storage_modules: &Vec<Arc<StorageModule>>,
+        storage_modules_guard: &StorageModulesReadGuard,
         block_tree_guard: &BlockTreeReadGuard,
         commitment_state_guard: &CommitmentStateReadGuard,
         service_senders: &ServiceSenders,
@@ -1347,7 +1356,7 @@ impl IrysNode {
             irys_db.clone(),
             reth_db.clone(),
             reth_node.task_executor.clone(),
-            storage_modules.clone(),
+            storage_modules_guard.clone(),
             block_tree_guard.clone(),
             commitment_state_guard.clone(),
             &config,
@@ -1388,14 +1397,14 @@ impl IrysNode {
     fn init_storage_modules(
         config: &Config,
         storage_module_infos: Vec<irys_storage::StorageModuleInfo>,
-    ) -> eyre::Result<Vec<Arc<StorageModule>>> {
+    ) -> eyre::Result<Arc<RwLock<Vec<Arc<StorageModule>>>>> {
         let mut storage_modules = Vec::new();
         for info in storage_module_infos {
             let arc_module = Arc::new(StorageModule::new(&info, &config)?);
             storage_modules.push(arc_module.clone());
         }
 
-        Ok(storage_modules)
+        Ok(Arc::new(RwLock::new(storage_modules)))
     }
 
     async fn init_epoch_service(
