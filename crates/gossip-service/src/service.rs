@@ -112,7 +112,7 @@ pub struct GossipService {
     cache: Arc<GossipCache>,
     mempool_data_receiver: Option<mpsc::Receiver<GossipData>>,
     client: GossipClient,
-    sync_state: SyncState,
+    pub sync_state: SyncState,
 }
 
 #[derive(Clone, Debug)]

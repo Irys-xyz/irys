@@ -95,6 +95,7 @@ pub struct IrysNodeCtx {
     pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
     stop_guard: StopGuard,
     pub peer_list: PeerListServiceFacade,
+    pub sync_state: SyncState,
 }
 
 impl IrysNodeCtx {
@@ -110,6 +111,7 @@ impl IrysNodeCtx {
             reth_http_url: self.reth_handle.rpc_server_handle().http_url().unwrap(),
             block_tree: self.block_tree_guard.clone(),
             block_index: self.block_index_guard.clone(),
+            sync_state: self.sync_state.clone(),
         }
     }
 
@@ -138,6 +140,7 @@ use irys_actors::block_discovery::BlockDiscoveryFacadeImpl;
 use irys_actors::mempool_service::MempoolServiceFacadeImpl;
 use irys_gossip_service::peer_list_service::PeerListService;
 use irys_gossip_service::peer_list_service::PeerListServiceFacade;
+use irys_gossip_service::service::SyncState;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Shared stop guard that can be cloned
@@ -810,6 +813,7 @@ impl IrysNode {
 
         let (gossip_service, gossip_tx) =
             irys_gossip_service::GossipService::new(config.node_config.miner_address());
+        let sync_state = gossip_service.sync_state.clone();
 
         // start the block tree service
         let (block_tree_service, block_tree_arbiter) = Self::init_block_tree_service(
@@ -1002,6 +1006,7 @@ impl IrysNode {
             config: config.clone(),
             stop_guard: StopGuard::new(),
             peer_list: peer_list_service.clone(),
+            sync_state: sync_state.clone(),
         };
 
         let mut service_arbiters = Vec::new();
@@ -1055,6 +1060,7 @@ impl IrysNode {
                     .rpc_server_handle()
                     .http_url()
                     .expect("Missing reth rpc url!"),
+                sync_state,
             },
             http_listener,
         )

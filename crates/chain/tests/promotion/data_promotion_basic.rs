@@ -69,6 +69,7 @@ async fn heavy_data_promotion_test() {
         peer_list: node.node_ctx.peer_list.clone(),
         chunk_provider: node.node_ctx.chunk_provider.clone(),
         config: config.into(),
+        sync_state: node.node_ctx.sync_state.clone(),
     };
 
     // Initialize the app

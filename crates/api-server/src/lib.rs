@@ -15,6 +15,7 @@ use irys_actors::{
     mempool_service::MempoolService,
 };
 use irys_gossip_service::peer_list_service::PeerListServiceFacade;
+use irys_gossip_service::service::SyncState;
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_storage::ChunkProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
@@ -41,6 +42,7 @@ pub struct ApiState {
     pub reth_http_url: String,
     pub block_tree: BlockTreeReadGuard,
     pub block_index: BlockIndexReadGuard,
+    pub sync_state: SyncState,
 }
 
 impl ApiState {

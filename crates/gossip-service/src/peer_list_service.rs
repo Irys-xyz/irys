@@ -154,6 +154,10 @@ where
         Ok(self.addr.send(KnownPeersRequest).await?)
     }
 
+    pub async fn peer_count(&self) -> Result<usize, PeerListFacadeError> {
+        Ok(self.addr.send(ActivePeersCountRequest).await?)
+    }
+
     /// IMPORTANT! DO NOT USE THIS METHOD DIRECTLY; IT'S MEANT TO BE USED ONLY BY THE API SERVER.
     pub async fn add_peer(
         &self,
@@ -1142,6 +1146,22 @@ where
             self.currently_running_announcements
                 .remove(&msg.peer_api_address);
         }
+    }
+}
+
+/// Handle potential new peer
+#[derive(Message, Debug, Clone)]
+#[rtype(result = "usize")]
+pub struct ActivePeersCountRequest;
+impl<A, R> Handler<ActivePeersCountRequest> for PeerListServiceWithClient<A, R>
+where
+    A: ApiClient,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+{
+    type Result = usize;
+
+    fn handle(&mut self, _msg: ActivePeersCountRequest, _ctx: &mut Self::Context) -> Self::Result {
+        self.peer_list_cache.len()
     }
 }
 
