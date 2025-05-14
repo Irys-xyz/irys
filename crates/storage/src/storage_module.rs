@@ -190,14 +190,14 @@ pub struct StorageModulesReadGuard {
 }
 
 impl StorageModulesReadGuard {
-    /// Creates a new `ReadGuard` for Ledgers
+    /// Creates a new `ReadGuard` for StorageModules list
     pub const fn new(storage_module_data: Arc<RwLock<Vec<Arc<StorageModule>>>>) -> Self {
         Self {
             storage_module_data,
         }
     }
 
-    /// Accessor method to get a read guard for Ledgers
+    /// Accessor method to get a read guard for the StorageModules list
     pub fn read(&self) -> RwLockReadGuard<'_, Vec<Arc<StorageModule>>> {
         self.storage_module_data.read().unwrap()
     }
