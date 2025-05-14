@@ -1,5 +1,6 @@
 use super::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
 use core::time::Duration;
+use irys_actors::mempool_service::MempoolFacade;
 use irys_types::{DataTransactionLedger, GossipData, H256List, IrysBlockHeader, PeerScore};
 
 #[actix_web::test]
@@ -85,14 +86,14 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Send data from first peer
-    let data = GossipData::Transaction(generate_test_tx().header);
-    message_buses
+    // Send data from the first peer
+    fixtures
         .first()
-        .expect("to get the first message bus")
-        .send(data)
+        .expect("to have a fixture")
+        .mempool_stub
+        .handle_data_transaction(generate_test_tx().header)
         .await
-        .expect("Failed to send transaction from first peer");
+        .expect("To handle tx");
 
     tokio::time::sleep(Duration::from_millis(3000)).await;
 

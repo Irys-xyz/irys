@@ -314,7 +314,10 @@ impl GossipService {
             .await
             .map_err(|err| GossipError::Internal(InternalGossipError::Unknown(err.to_string())))?;
 
-        tracing::debug!("Peers selected for broadcast: {:?}", peers);
+        debug!(
+            "Node {:?}: Peers selected for broadcast: {:?}",
+            self.client.mining_address, peers
+        );
 
         peers.shuffle(&mut rand::thread_rng());
 
@@ -325,13 +328,21 @@ impl GossipService {
                 !peers_that_seen_data.contains(peer_miner_address)
             });
 
+            if peers.is_empty() {
+                debug!(
+                    "Node {:?}: No peers left to broadcast to",
+                    self.client.mining_address
+                );
+                break;
+            }
+
             let n = std::cmp::min(MAX_PEERS_PER_BROADCAST, peers.len());
             let maybe_selected_peers = peers.get(0..n);
 
             if let Some(selected_peers) = maybe_selected_peers {
                 debug!(
-                    "Peers selected for the current broadcast step: {:?}",
-                    selected_peers
+                    "Node {:?}: Peers selected for the current broadcast step: {:?}",
+                    self.client.mining_address, selected_peers
                 );
                 // Send data to selected peers
                 for (peer_miner_address, peer_entry) in selected_peers {
@@ -345,7 +356,8 @@ impl GossipService {
                         .await
                     {
                         tracing::warn!(
-                            "Failed to send data to peer {}: {}",
+                            "Node {:?}: Failed to send data to peer {}: {}",
+                            self.client.mining_address,
                             peer_miner_address,
                             error
                         );
@@ -364,13 +376,17 @@ impl GossipService {
                     }
                 }
             } else {
-                debug!("No peers selected for the current broadcast step");
+                debug!(
+                    "Node {:?}, No peers selected for the current broadcast step",
+                    self.client.mining_address
+                );
                 break;
             }
 
             tokio::time::sleep(BROADCAST_INTERVAL).await;
         }
 
+        debug!("Node {:?}: Broadcast finished", self.client.mining_address);
         Ok(())
     }
 }
