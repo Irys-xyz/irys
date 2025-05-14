@@ -55,7 +55,6 @@ impl MempoolFacade for MempoolStub {
         &self,
         tx_header: IrysTransactionHeader,
     ) -> std::result::Result<(), TxIngressError> {
-        debug!("Boba: {}", tx_header.id.0.to_base58());
         let already_exists = self
             .txs
             .read()
