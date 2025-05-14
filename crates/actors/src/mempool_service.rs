@@ -18,7 +18,7 @@ use irys_database::tables::DataRootLRU;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
 use irys_database::{insert_tx_header, tx_header_by_txid, SystemLedger};
 use irys_primitives::CommitmentType;
-use irys_storage::StorageModuleVec;
+use irys_storage::StorageModulesReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, DataLedger,
@@ -124,7 +124,7 @@ pub struct MempoolService {
     /// Tracks recent valid txids from either storage or commitment
     recent_valid_tx: HashSet<H256>,
     config: Config,
-    storage_modules: StorageModuleVec,
+    storage_modules_guard: StorageModulesReadGuard,
     block_tree_read_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
     /// Reference to all the services we can send messages to
@@ -154,8 +154,8 @@ impl MempoolService {
         irys_db: DatabaseProvider,
         reth_db: RethDbWrapper,
         task_exec: TaskExecutor,
-        storage_modules: StorageModuleVec,
-        block_tree_read_guard: BlockTreeReadGuard,
+        storage_modules_guard: StorageModulesReadGuard,
+        block_tree_guard: BlockTreeReadGuard,
         commitment_state_guard: CommitmentStateReadGuard,
         config: &Config,
         service_senders: ServiceSenders,
@@ -170,8 +170,8 @@ impl MempoolService {
             invalid_tx: Vec::new(),
             task_exec,
             config: config.clone(),
-            storage_modules,
-            block_tree_read_guard,
+            storage_modules_guard,
+            block_tree_read_guard: block_tree_guard,
             commitment_state_guard,
             service_senders,
             gossip_tx,
@@ -631,8 +631,8 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             .tx()
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
-        let candidate_sms = self
-            .storage_modules
+        let binding = self.storage_modules_guard.read();
+        let candidate_sms = binding
             .iter()
             .filter_map(|sm| {
                 sm.get_writeable_offsets(&chunk)
@@ -729,7 +729,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
-        for sm in &self.storage_modules {
+        for sm in self.storage_modules_guard.read().iter() {
             if !sm
                 .get_writeable_offsets(&chunk)
                 .unwrap_or_default()

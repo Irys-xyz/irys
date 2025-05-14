@@ -1,27 +1,25 @@
+use crate::{checked_add_i32_u64, get_storage_module_at_offset, StorageModulesReadGuard};
+use base58::ToBase58;
 use eyre::OptionExt;
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
 };
 use std::sync::Arc;
-
 use tracing::debug;
-
-use crate::{checked_add_i32_u64, get_storage_module_at_offset, StorageModule};
-use base58::ToBase58;
 
 /// Provides chunks to `actix::web` front end (mostly)
 #[derive(Debug, Clone)]
 pub struct ChunkProvider {
     /// Collection of storage modules for distributing chunk data
-    pub storage_modules: Vec<Arc<StorageModule>>,
+    pub storage_modules_guard: StorageModulesReadGuard,
     pub config: Config,
 }
 
 impl ChunkProvider {
-    pub fn new(config: Config, storage_modules: Vec<Arc<StorageModule>>) -> Self {
+    pub fn new(config: Config, storage_modules_guard: StorageModulesReadGuard) -> Self {
         Self {
             config,
-            storage_modules,
+            storage_modules_guard,
         }
     }
 
@@ -32,8 +30,9 @@ impl ChunkProvider {
         ledger_offset: LedgerChunkOffset,
     ) -> eyre::Result<Option<PackedChunk>> {
         // Get basic chunk info
-        let module = get_storage_module_at_offset(&self.storage_modules, ledger, ledger_offset)
-            .ok_or_eyre("No storage module contains this chunk")?;
+        let module =
+            get_storage_module_at_offset(&self.storage_modules_guard, ledger, ledger_offset)
+                .ok_or_eyre("No storage module contains this chunk")?;
         module.generate_full_chunk_ledger_offset(ledger_offset)
     }
 
@@ -53,8 +52,8 @@ impl ChunkProvider {
             &data_tx_offset
         );
         // map hashes to SMs
-        let sms = self
-            .storage_modules
+        let binding = self.storage_modules_guard.read();
+        let sms = binding
             .iter()
             .filter(|sm| {
                 sm.partition_assignment
@@ -94,8 +93,8 @@ impl ChunkProvider {
         );
 
         // get all SMs for this ledger
-        let sms = self
-            .storage_modules
+        let binding = self.storage_modules_guard.read();
+        let sms = binding
             .iter()
             .filter(|sm| {
                 sm.partition_assignment
@@ -126,7 +125,9 @@ impl ChunkProvider {
 
 #[cfg(test)]
 mod tests {
-    use crate::StorageModuleInfo;
+    use std::sync::{Arc, RwLock};
+
+    use crate::{StorageModule, StorageModuleInfo};
 
     use super::*;
     use irys_packing::unpack_with_entropy;
@@ -216,7 +217,10 @@ mod tests {
         }
         storage_module.sync_pending_chunks()?;
 
-        let chunk_provider = ChunkProvider::new(config.clone(), vec![Arc::new(storage_module)]);
+        let storage_modules_guard =
+            StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![Arc::new(storage_module)])));
+
+        let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard);
 
         for original_chunk in unpacked_chunks {
             let chunk = chunk_provider
