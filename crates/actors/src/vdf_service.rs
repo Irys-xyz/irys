@@ -195,7 +195,7 @@ impl Default for VdfService {
 }
 
 impl VdfService {
-    /// Spawn a new EMA service
+    /// Spawn a new VDF service
     pub fn spawn_service(
         exec: &TaskExecutor,
         block_tree_read_guard: BlockTreeReadGuard,
@@ -210,7 +210,7 @@ impl VdfService {
             capacity,
             mining_state_sender: Some(vdf_mining_state_sender),
         };
-        exec.spawn_critical_with_graceful_shutdown_signal("EMA Service", |shutdown| async move {
+        exec.spawn_critical_with_graceful_shutdown_signal("VDF Service", |shutdown| async move {
             let vdf_service = Self {
                 shutdown,
                 msg_rx: rx,
