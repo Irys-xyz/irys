@@ -26,18 +26,18 @@ use irys_actors::mempool_service::MempoolFacade;
 use irys_api_client::ApiClient;
 use irys_database::BlockIndex;
 use irys_types::{
-    block_production::Seed, Address, BlockIndexQuery, DatabaseProvider, GossipData, H256List,
-    PeerListItem, RethPeerInfo, VDFLimiterInfo,
+    block_production::Seed, Address, BlockIndexItem, BlockIndexQuery, DatabaseProvider, GossipData,
+    H256List, PeerListItem, RethPeerInfo, VDFLimiterInfo,
 };
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::net::TcpListener;
 use std::sync::Arc;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::RwLock;
 use tokio::{sync::mpsc, time};
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 const TWO_HOURS: Duration = Duration::from_secs(7200);
@@ -478,7 +478,7 @@ fn spawn_watcher_task(
 }
 
 async fn catch_up_task<
-    A: ApiClient + Clone + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 >(
     service: Arc<RwLock<GossipService>>,
@@ -501,29 +501,110 @@ async fn catch_up_task<
     };
 
     let limit = 10;
-    let (_, top_peer) = peer_list_service
-        .top_active_peers(Some(10), None)
-        .await?
-        .get(0)
-        .cloned()
-        .ok_or(GossipError::Internal(InternalGossipError::Unknown(
-            "Can't perform block sync: Failed to get top active peers".to_string(),
-        )))?;
-    let index = api_client
-        .get_block_index(
-            top_peer.address.api,
-            BlockIndexQuery {
-                height: latest_known_height as usize,
-                limit,
-            },
-        )
-        .await
-        .map_err(|network_error| GossipError::Network(network_error.to_string()))?;
 
-    let gossip_client = service.read().await.client.clone();
+    let mut block_queue = VecDeque::new();
+    let block_index = get_block_index(
+        &peer_list_service,
+        &api_client,
+        latest_known_height as usize,
+        limit,
+        5,
+    )
+    .await?;
+
+    let mut blocks_left_to_process = block_index.len();
+    block_queue.extend(block_index);
+
+    while let Some(block) = block_queue.pop_front() {
+        match peer_list_service
+            .request_block_from_the_network(block.block_hash)
+            .await
+        {
+            Ok(()) => {
+                latest_known_height += 1;
+                info!(
+                    "Successfully requested block {} (height {}) from the network",
+                    block.block_hash, latest_known_height
+                );
+            }
+            Err(err) => {
+                error!(
+                    "Failed to request block {} (height {}) from the network: {}",
+                    block.block_hash, latest_known_height, err
+                );
+            }
+        }
+
+        blocks_left_to_process -= 1;
+        if blocks_left_to_process == 0 {
+            block_queue.extend(
+                get_block_index(
+                    &peer_list_service,
+                    &api_client,
+                    latest_known_height as usize,
+                    limit,
+                    5,
+                )
+                .await?,
+            );
+            blocks_left_to_process = block_queue.len();
+            if blocks_left_to_process == 0 {
+                break;
+            }
+        }
+    }
 
     service.write().await.is_syncing = false;
     Ok(())
+}
+
+pub async fn get_block_index<
+    A: ApiClient,
+    R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
+>(
+    peer_list_service: &PeerListFacade<A, R>,
+    api_client: &A,
+    start: usize,
+    limit: usize,
+    retries: usize,
+) -> GossipResult<Vec<BlockIndexItem>> {
+    let top_peers = peer_list_service.top_active_peers(Some(5), None).await?;
+
+    if top_peers.is_empty() {
+        return Err(GossipError::Network("No peers available".to_string()));
+    }
+
+    for _ in 0..retries {
+        let (miner_address, top_peer) = top_peers
+            .choose(&mut rand::thread_rng())
+            .ok_or(GossipError::Network("No peers available".to_string()))?;
+        match api_client
+            .get_block_index(
+                top_peer.address.api,
+                BlockIndexQuery {
+                    height: start,
+                    limit,
+                },
+            )
+            .await
+            .map_err(|network_error| GossipError::Network(network_error.to_string()))
+        {
+            Ok(index) => {
+                return Ok(index);
+            }
+            Err(error) => {
+                error!(
+                    "Failed to fetch block index from peer {:?}: {:?}",
+                    miner_address, error
+                );
+                continue;
+            }
+        }
+    }
+
+    Err(GossipError::Network(
+        "Failed to fetch block index from peer".to_string(),
+    ))
 }
 
 /// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo

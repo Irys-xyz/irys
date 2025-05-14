@@ -1,4 +1,3 @@
-use crate::block_pool_service::BlockPoolError;
 use crate::types::GossipDataRequest;
 use crate::GossipClient;
 use actix::prelude::*;
@@ -1219,7 +1218,7 @@ where
                     .await?;
                 // Shuffle them
                 peers.shuffle(&mut rand::thread_rng());
-                // Take 5, as we're going to do 5 attempts
+                // Take random 5 out of top 10
                 peers.truncate(5);
 
                 if peers.is_empty() {
