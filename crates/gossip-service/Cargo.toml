@@ -6,8 +6,8 @@ edition = "2021"
 [dependencies]
 # Internal dependencies
 irys-actors.workspace = true
-irys-types = { path = "../types", features = ["test-utils"] }
-irys-primitives = { path = "../primitives" }
+irys-types.workspace = true
+irys-primitives.workspace = true
 irys-api-client.workspace = true
 # Other dependencies
 actix-web = { workspace = true }
@@ -28,6 +28,8 @@ actix-rt.workspace = true
 irys-testing-utils.workspace = true
 irys-storage.workspace = true
 async-trait = "0.1"
+irys-types = { workspace = true, features = ["test-utils"] }
+irys-api-client = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true

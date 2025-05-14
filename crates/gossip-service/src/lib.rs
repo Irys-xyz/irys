@@ -14,3 +14,6 @@ pub use service::GossipService;
 pub use service::ServiceHandleWithShutdownSignal;
 
 pub use types::{GossipError, GossipResult};
+
+#[cfg(test)]
+mod tests;

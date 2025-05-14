@@ -1,4 +1,7 @@
-use crate::util::{FakeGossipServer, MockRethServiceActor};
+use crate::block_pool_service::{BlockPoolService, ProcessBlock};
+use crate::peer_list_service::{AddPeer, PeerListServiceWithClient};
+use crate::tests::util::{FakeGossipServer, MockRethServiceActor};
+use crate::GossipClient;
 use actix::Actor;
 use async_trait::async_trait;
 use base58::ToBase58;
@@ -6,9 +9,6 @@ use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_api_client::ApiClient;
 use irys_database::reth_db::Database;
 use irys_database::{block_header_by_hash, insert_block_header};
-use irys_gossip_service::block_pool_service::{BlockPoolService, ProcessBlock};
-use irys_gossip_service::peer_list_service::{AddPeer, PeerListServiceWithClient};
-use irys_gossip_service::GossipClient;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
@@ -301,7 +301,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Set the fake server to mimic get_data -> gossip_service sends message to block pool
     let block_for_server = block2.clone();
     let addr_for_server = addr.clone();
-    gossip_server.set_on_block_data_request(Box::new(move |block_hash| {
+    gossip_server.set_on_block_data_request(move |block_hash| {
         let block = block_for_server.clone();
         let addr = addr_for_server.clone();
         debug!("Receive get block: {:?}", block_hash.0.to_base58());
@@ -313,7 +313,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
                 .expect("to process block");
         });
         true
-    }));
+    });
 
     // Insert block1 into the database
     {

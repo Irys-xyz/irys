@@ -901,6 +901,11 @@ impl IrysNode {
         );
         let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
 
+        let latest_known_block_height = block_index
+            .read()
+            .expect("to have an access to the block index")
+            .latest_height() as usize;
+
         let gossip_service_handle = gossip_service.run(
             mempool_facade,
             block_discovery_facade,
@@ -911,7 +916,7 @@ impl IrysNode {
             vdf_sender.clone(),
             gossip_listener,
             true,
-            block_index.clone(),
+            latest_known_block_height,
         )?;
 
         // set up the price oracle

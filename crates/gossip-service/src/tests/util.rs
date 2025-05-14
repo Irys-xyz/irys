@@ -1,3 +1,6 @@
+use crate::peer_list_service::{AddPeer, PeerListServiceWithClient};
+use crate::types::GossipDataRequest;
+use crate::{GossipService, ServiceHandleWithShutdownSignal};
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
@@ -9,15 +12,9 @@ use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::broadcast_mining_service::BroadcastMiningSeed;
 use irys_actors::mempool_service::{ChunkIngressError, MempoolFacade, TxIngressError};
 use irys_api_client::ApiClient;
-use irys_database::BlockIndex;
-use irys_gossip_service::peer_list_service::{AddPeer, PeerListServiceWithClient};
-use irys_gossip_service::service::ServiceHandleWithShutdownSignal;
-use irys_gossip_service::types::GossipDataRequest;
-use irys_gossip_service::GossipService;
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_testing_utils::utils::tempfile::TempDir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
@@ -35,7 +32,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 #[derive(Clone, Debug)]
-pub struct MempoolStub {
+pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub internal_message_bus: mpsc::Sender<GossipData>,
@@ -43,7 +40,7 @@ pub struct MempoolStub {
 
 impl MempoolStub {
     #[must_use]
-    pub fn new(internal_message_bus: mpsc::Sender<GossipData>) -> Self {
+    pub(crate) fn new(internal_message_bus: mpsc::Sender<GossipData>) -> Self {
         Self {
             txs: Arc::default(),
             chunks: Arc::default(),
@@ -125,7 +122,7 @@ impl MempoolFacade for MempoolStub {
 }
 
 #[derive(Debug, Clone)]
-pub struct BlockDiscoveryStub {
+pub(crate) struct BlockDiscoveryStub {
     pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
     pub internal_message_bus: mpsc::Sender<GossipData>,
 }
@@ -152,13 +149,35 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct StubApiClient {
+#[derive(Clone)]
+pub(crate) struct ApiClientStub {
     pub txs: HashMap<H256, IrysTransactionHeader>,
+    pub block_index_handler: Arc<
+        RwLock<Box<dyn Fn(BlockIndexQuery) -> Result<Vec<BlockIndexItem>> + Send + Sync + 'static>>,
+    >,
+    pub block_index_calls: Arc<RwLock<Vec<BlockIndexQuery>>>,
+}
+
+impl ApiClientStub {
+    pub(crate) fn new() -> Self {
+        Self {
+            txs: HashMap::new(),
+            block_index_handler: Arc::new(RwLock::new(Box::new(|_| Ok(Vec::new())))),
+            block_index_calls: Arc::new(Default::default()),
+        }
+    }
+
+    pub(crate) fn set_block_index_handler(
+        &self,
+        handler: impl Fn(BlockIndexQuery) -> Result<Vec<BlockIndexItem>> + Send + Sync + 'static,
+    ) {
+        let mut guard = self.block_index_handler.write().expect("to unlock handler");
+        *guard = Box::new(handler);
+    }
 }
 
 #[async_trait::async_trait]
-impl ApiClient for StubApiClient {
+impl ApiClient for ApiClientStub {
     async fn get_transaction(
         &self,
         _peer: SocketAddr,
@@ -172,6 +191,14 @@ impl ApiClient for StubApiClient {
             .ok_or(eyre!("Transaction {} not found in stub API client", tx_id))?
             .clone()
             .into())
+    }
+
+    async fn post_transaction(
+        &self,
+        _api_address: SocketAddr,
+        _transaction: IrysTransactionHeader,
+    ) -> Result<()> {
+        Ok(())
     }
 
     async fn get_transactions(
@@ -198,14 +225,6 @@ impl ApiClient for StubApiClient {
         Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock re sponse
     }
 
-    async fn post_transaction(
-        &self,
-        _api_address: SocketAddr,
-        _transaction: IrysTransactionHeader,
-    ) -> Result<()> {
-        Ok(())
-    }
-
     async fn get_block_by_hash(
         &self,
         _peer: SocketAddr,
@@ -217,47 +236,35 @@ impl ApiClient for StubApiClient {
     async fn get_block_index(
         &self,
         _peer: SocketAddr,
-        _block_index_query: BlockIndexQuery,
+        block_index_query: BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>> {
-        Ok(vec![])
+        self.block_index_calls
+            .write()
+            .expect("To unlock calls")
+            .push(block_index_query.clone());
+        let handler = self.block_index_handler.read().expect("to unlock response");
+        handler(block_index_query)
     }
 }
 
-impl Default for StubApiClient {
+impl Default for ApiClientStub {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl StubApiClient {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            txs: HashMap::new(),
-        }
-    }
-
-    pub fn add_transaction(&mut self, tx_id: H256, tx_header: IrysTransactionHeader) {
-        self.txs.insert(tx_id, tx_header);
-    }
-}
-
-#[derive(Debug)]
-pub struct GossipServiceTestFixture {
-    pub temp_dir: TempDir,
+pub(crate) struct GossipServiceTestFixture {
     pub gossip_port: u16,
     pub api_port: u16,
     pub execution: RethPeerInfo,
     pub db: DatabaseProvider,
     pub mining_address: Address,
-    pub mempool: MempoolStub,
-    pub peer_list: Addr<PeerListServiceWithClient<StubApiClient, MockRethServiceActor>>,
-    pub block_discovery: BlockDiscoveryStub,
+    pub mempool_stub: MempoolStub,
+    pub peer_list: Addr<PeerListServiceWithClient<ApiClientStub, MockRethServiceActor>>,
     pub mempool_txs: Arc<RwLock<Vec<IrysTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub discovery_blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
-    pub api_client: StubApiClient,
-    pub task_manager: TaskManager,
+    pub api_client_stub: ApiClientStub,
     pub task_executor: TaskExecutor,
 }
 
@@ -268,7 +275,7 @@ impl Default for GossipServiceTestFixture {
 }
 
 #[derive(Debug, Clone)]
-pub struct MockRethServiceActor {}
+pub(crate) struct MockRethServiceActor {}
 
 impl Actor for MockRethServiceActor {
     type Context = Context<Self>;
@@ -286,7 +293,7 @@ impl GossipServiceTestFixture {
     /// # Panics
     /// Can panic
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
         let config = NodeConfig::testnet().into();
@@ -301,7 +308,7 @@ impl GossipServiceTestFixture {
         let peer_service = PeerListServiceWithClient::new_with_custom_api_client(
             db.clone(),
             &config,
-            StubApiClient::new(),
+            ApiClientStub::new(),
             reth_service_addr,
         );
         let peer_list = peer_service.start();
@@ -324,28 +331,29 @@ impl GossipServiceTestFixture {
         let task_executor = task_manager.executor();
 
         Self {
-            temp_dir,
+            // temp_dir,
             gossip_port,
             api_port,
             execution: RethPeerInfo::default(),
             db,
             mining_address: Address::random(),
-            mempool: mempool_stub,
+            mempool_stub,
             peer_list,
-            block_discovery: block_discovery_stub,
+            // block_discovery_stub,
             mempool_txs,
             mempool_chunks,
             discovery_blocks,
-            api_client: StubApiClient::new(),
-            task_manager,
+            api_client_stub: ApiClientStub::new(),
+            // task_manager,
             task_executor,
         }
     }
 
     /// # Panics
     /// Can panic
-    pub async fn run_service(
+    pub(crate) async fn run_service(
         &mut self,
+        catch_up: bool,
     ) -> (ServiceHandleWithShutdownSignal, mpsc::Sender<GossipData>) {
         let (gossip_service, internal_message_bus) = GossipService::new(self.mining_address);
         let gossip_listener = TcpListener::bind(
@@ -359,7 +367,7 @@ impl GossipServiceTestFixture {
         self.mempool_txs = Arc::clone(&mempool_stub.txs);
         self.mempool_chunks = Arc::clone(&mempool_stub.chunks);
 
-        self.mempool = mempool_stub.clone();
+        self.mempool_stub = mempool_stub.clone();
 
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::clone(&self.discovery_blocks),
@@ -372,18 +380,14 @@ impl GossipServiceTestFixture {
             .run(
                 mempool_stub,
                 block_discovery_stub,
-                self.api_client.clone(),
+                self.api_client_stub.clone(),
                 &self.task_executor,
                 self.peer_list.clone().into(),
                 self.db.clone(),
                 vdf_tx,
                 gossip_listener,
-                false,
-                Arc::new(RwLock::new(
-                    BlockIndex::new(&NodeConfig::testnet())
-                        .await
-                        .expect("to create block index"),
-                )),
+                catch_up,
+                0,
             )
             .expect("failed to run gossip service");
 
@@ -391,7 +395,7 @@ impl GossipServiceTestFixture {
     }
 
     #[must_use]
-    pub fn create_default_peer_entry(&self) -> PeerListItem {
+    pub(crate) fn create_default_peer_entry(&self) -> PeerListItem {
         PeerListItem {
             reputation_score: PeerScore::new(50),
             response_time: 0,
@@ -407,7 +411,7 @@ impl GossipServiceTestFixture {
 
     /// # Panics
     /// Can panic
-    pub async fn add_peer(&self, other: &Self) {
+    pub(crate) async fn add_peer(&self, other: &Self) {
         let peer = other.create_default_peer_entry();
 
         tracing::debug!(
@@ -427,7 +431,7 @@ impl GossipServiceTestFixture {
 
     /// # Panics
     /// Can panic
-    pub async fn add_peer_with_reputation(&self, other: &Self, score: PeerScore) {
+    pub(crate) async fn add_peer_with_reputation(&self, other: &Self, score: PeerScore) {
         let peer = PeerListItem {
             address: PeerAddress {
                 gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.gossip_port),
@@ -457,7 +461,7 @@ fn random_free_port() -> u16 {
 /// # Panics
 /// Can panic
 #[must_use]
-pub fn generate_test_tx() -> IrysTransaction {
+pub(crate) fn generate_test_tx() -> IrysTransaction {
     let testnet_config = NodeConfig::testnet();
     let config = Config::new(testnet_config);
     let account1 = IrysSigner::random_signer(&config.consensus);
@@ -473,7 +477,7 @@ pub fn generate_test_tx() -> IrysTransaction {
 }
 
 #[must_use]
-pub fn create_test_chunks(tx: &IrysTransaction) -> Vec<UnpackedChunk> {
+pub(crate) fn create_test_chunks(tx: &IrysTransaction) -> Vec<UnpackedChunk> {
     let mut chunks = Vec::new();
     for _chunk_node in &tx.chunks {
         let data_root = tx.header.data_root;
@@ -517,7 +521,7 @@ impl FakeGossipDataHandler {
     }
 }
 
-pub struct FakeGossipServer {
+pub(crate) struct FakeGossipServer {
     handler: Arc<RwLock<FakeGossipDataHandler>>,
 }
 
@@ -528,25 +532,32 @@ impl Debug for FakeGossipServer {
 }
 
 impl FakeGossipServer {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             handler: Arc::new(RwLock::new(FakeGossipDataHandler::new())),
         }
     }
 
-    pub fn set_on_block_data_request(
+    pub(crate) fn spawn(self) -> SocketAddr {
+        let (server_handle, fake_peer_gossip_addr) =
+            self.run(SocketAddr::from(([127, 0, 0, 1], 0)));
+        tokio::spawn(server_handle);
+        fake_peer_gossip_addr
+    }
+
+    pub(crate) fn set_on_block_data_request(
         &self,
-        on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
+        on_block_data_request: impl Fn(BlockHash) -> bool + Send + Sync + 'static,
     ) {
         self.handler
             .write()
             .expect("to unlock handler")
-            .set_on_block_data_request(on_block_data_request);
+            .set_on_block_data_request(Box::new(on_block_data_request));
     }
 
     /// Runs the fake server, returns the address on which the server has started, as well
     /// as the server handle
-    pub fn run(&self, address: SocketAddr) -> (Server, SocketAddr) {
+    pub(crate) fn run(&self, address: SocketAddr) -> (Server, SocketAddr) {
         let handler = self.handler.clone();
         let server = HttpServer::new(move || {
             let handler = handler.clone();
