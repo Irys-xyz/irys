@@ -204,10 +204,10 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_vdf_service() {
-        let mut config = NodeConfig::testnet();
-        config.consensus.get_mut().vdf.reset_frequency = 2;
-        config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
-        let config = Config::new(config);
+        let mut node_config = NodeConfig::testnet();
+        node_config.consensus.get_mut().vdf.reset_frequency = 2;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new(node_config);
 
         let seed = H256::random();
         let reset_seed = H256::random();
