@@ -4,7 +4,7 @@ use irys_actors::epoch_service::{
     EpochReplayData, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
 };
 
-use irys_config::StorageSubmodulesConfig;
+use irys_config::submodules::StorageSubmodulesConfig;
 use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
 use irys_types::{
     partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
