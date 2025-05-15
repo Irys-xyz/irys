@@ -44,6 +44,53 @@ async fn main() -> eyre::Result<()> {
         config.mode = NodeMode::PeerSync;
     }
 
+    // !!!TESTNET ONLY!!!
+    {
+        debug!("Loading accounts file");
+        let file = std::fs::File::open("genesis-accounts.json")?;
+        let reader = std::io::BufReader::with_capacity(10 * 1024 * 1024, file);
+        let accounts: Vec<(irys_types::Address, reth_primitives::Account)> =
+            serde_json::from_reader(reader)?;
+        debug!("extending accounts");
+        config
+            .consensus
+            .extend_genesis_accounts(accounts.iter().map(|(addr, acc)| {
+                let mapped_acc = reth_primitives::GenesisAccount {
+                    balance: acc.balance,
+                    nonce: None,
+                    ..Default::default()
+                };
+                (*addr, mapped_acc)
+            }));
+        debug!("Finished loading accounts");
+        config.consensus.extend_genesis_accounts([
+            (
+                irys_types::Address::from_slice(
+                    hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
+                        .unwrap()
+                        .as_slice(),
+                ),
+                reth_primitives::GenesisAccount {
+                    balance: alloy_core::primitives::U256::from(690000000000000000_u128),
+                    ..Default::default()
+                },
+            ),
+            (
+                irys_types::Address::from_slice(
+                    hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
+                        .unwrap()
+                        .as_slice(),
+                ),
+                reth_primitives::GenesisAccount {
+                    balance: alloy_core::primitives::U256::from(
+                        1_000_000_000_000_000_000_000_000_000_000_000_000_u128,
+                    ),
+                    ..Default::default()
+                },
+            ),
+        ]);
+    }
+
     // start the node
     info!("starting the node, mode: {:?}", &config.mode);
     let handle = IrysNode::new(config).await?.start().await?;
@@ -73,11 +120,12 @@ fn init_tracing() -> eyre::Result<()> {
 
     // use json logging for release builds
     let subscriber = subscriber.with(filter).with(ErrorLayer::default());
-    let subscriber = if cfg!(debug_assertions) {
-        subscriber.with(output_layer.boxed())
-    } else {
-        subscriber.with(output_layer.json().with_current_span(true).boxed())
-    };
+    // let subscriber = if cfg!(debug_assertions) {
+    //     subscriber.with(output_layer.boxed())
+    // } else {
+    //     subscriber.with(output_layer.json().with_current_span(true).boxed())
+    // };
+    let subscriber = subscriber.with(output_layer.boxed());
 
     subscriber.init();
 

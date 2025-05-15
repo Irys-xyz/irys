@@ -396,7 +396,6 @@ impl Handler<SolutionFoundMessage> for BlockProducerActor {
             // fetch the irys price from the oracle
             let oracle_irys_price = price_oracle.current_price().await?;
             // fetch the ema price to use
-
             let (tx, rx) = tokio::sync::oneshot::channel();
             service_senders.ema.send(EmaServiceMessage::GetPriceDataForNewBlock { response: tx, height_of_new_block: block_height, oracle_price: oracle_irys_price })?;
             let ema_irys_price = rx.await??;

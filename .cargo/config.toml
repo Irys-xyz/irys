@@ -5,3 +5,6 @@ rustflags = ["-C", "target-cpu=native"]
 
 [alias]
 xtask = "run --package xtask --"
+
+[profile.release]
+debug = true
