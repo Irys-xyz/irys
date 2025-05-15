@@ -586,12 +586,17 @@ mod tests {
     use crate::vdf_service::test_helpers::mocked_vdf_service;
     use irys_storage::ii;
     use irys_types::{H256List, NodeConfig, H256};
+    use reth::core::node_config;
 
     use super::*;
 
     #[actix_rt::test]
     async fn test_vdf() {
-        let testnet_config = NodeConfig::testnet().into();
+        let node_config = NodeConfig::testnet();
+        // set queue to length 4 with 40/4 occuring within the vdf spawn
+        //node_config.consensus.num_chunks_in_partition = 40;
+        //node_config.consensus.num_chunks_in_recall_range = 10;
+        let testnet_config: Config = node_config.into();
         // start service senders/receivers
         let tx = mocked_vdf_service(&testnet_config).await;
 
@@ -618,6 +623,7 @@ mod tests {
         let steps = state.read().seeds.iter().cloned().collect::<Vec<_>>();
 
         // Should only contain last 4 seeds
+        // FIXME - this will never be the case because of the calc_capacity() always overwriting with 10k
         assert_eq!(steps.len(), 4);
 
         // Check last 4 seeds are stored
