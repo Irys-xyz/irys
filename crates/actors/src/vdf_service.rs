@@ -496,10 +496,93 @@ pub fn vdf_steps_are_valid(
     Ok(())
 }
 
+#[cfg(test)]
+pub mod test_helpers {
+    use super::*;
+    use crate::{
+        block_tree_service::{BlockState, BlockTreeCache, BlockTreeReadGuard, ChainState},
+        vdf_service::{VdfService, VdfServiceMessage},
+    };
+
+    use irys_types::IrysBlockHeader;
+    use irys_types::H256;
+    use reth::tasks::TaskManager;
+    use std::sync::RwLock;
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+
+    //FIXME: this is duplicated from ema service and should be somewhere central that does not duplicate code!
+    pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
+        let mut block_hash = H256::random();
+        let mut iter = blocks.iter_mut();
+        let genesis_block = &mut (iter.next().unwrap()).0;
+        genesis_block.block_hash = block_hash;
+        genesis_block.cumulative_diff = 0.into();
+
+        let mut block_tree_cache = BlockTreeCache::new(&genesis_block);
+        block_tree_cache.mark_tip(&block_hash).unwrap();
+        for (block, state) in iter {
+            block.previous_block_hash = block_hash;
+            block.cumulative_diff = block.height.into();
+            block_hash = H256::random();
+            block.block_hash = block_hash;
+            block_tree_cache
+                .add_common(
+                    block.block_hash.clone(),
+                    block,
+                    Arc::new(Vec::new()),
+                    state.clone(),
+                )
+                .unwrap();
+        }
+        let block_tree_cache = Arc::new(RwLock::new(block_tree_cache));
+        BlockTreeReadGuard::new(block_tree_cache)
+    }
+
+    pub async fn mocked_vdf_service(config: &Config) -> UnboundedSender<VdfServiceMessage> {
+        //setup mock blocks and tree
+        let height_chain_max = 15;
+        let max_confirmed_height = height_chain_max / 2;
+        let mut blocks = (0..=height_chain_max)
+            .map(|height| {
+                let block = IrysBlockHeader {
+                    height,
+                    ..IrysBlockHeader::new_mock_header()
+                };
+
+                // Determine chain state based on block height
+                let state = if block.height <= max_confirmed_height {
+                    ChainState::Onchain
+                } else {
+                    ChainState::NotOnchain(BlockState::ValidationScheduled)
+                };
+
+                (block, state)
+            })
+            .collect::<Vec<_>>();
+        let block_tree_guard = genesis_tree(&mut blocks);
+        // Spawn VDF service
+        // this is so we can send it new VDF steps as part of this test
+        let task_manager = TaskManager::new(tokio::runtime::Handle::current());
+        let task_executor = task_manager.executor();
+        let (tx, rx) = unbounded_channel();
+        let (vdf_mining_state_sender, _) = tokio::sync::mpsc::channel::<bool>(1);
+
+        let _handle = VdfService::spawn_service(
+            &task_executor,
+            block_tree_guard.clone(),
+            rx,
+            vdf_mining_state_sender,
+            &config,
+        )
+        .await;
+        tx
+    }
+}
+
 // Tests
 #[cfg(test)]
 mod tests {
-    use crate::services::ServiceSenders;
+    use crate::vdf_service::test_helpers::mocked_vdf_service;
     use irys_storage::ii;
     use irys_types::{H256List, NodeConfig, H256};
 
@@ -509,27 +592,24 @@ mod tests {
     async fn test_vdf() {
         let testnet_config = NodeConfig::testnet().into();
         // start service senders/receivers
-        let (service_senders, receivers) = ServiceSenders::new();
-
-        let vdf_state = VdfState::new_vdf_state_from_capacity(calc_capacity(&testnet_config));
-        vdf_state.seeds = VecDeque::with_capacity(4);
-        vdf_state.capacity = 4;
-
-        let addr = service.start();
+        let tx = mocked_vdf_service(&testnet_config).await;
 
         // Send 8 seeds 1,2..,8 (capacity is 4)
         for i in 0..8 {
-            addr.send(VdfServiceMessage::VdfSeed(Seed(H256([(i + 1) as u8; 32]))))
-                .await
-                .unwrap();
+            if let Err(e) = tx.send(VdfServiceMessage::VdfSeed(Seed(H256([(i + 1) as u8; 32])))) {
+                panic!("error sending VdfServiceMessage::VdfSeed: {:?}", e);
+            }
         }
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let _ = service_senders
-            .vdf
-            .send(VdfServiceMessage::GetVdfStateMessage {
-                response: oneshot_tx,
-            });
+        if let Err(e) = tx.send(VdfServiceMessage::GetVdfStateMessage {
+            response: oneshot_tx,
+        }) {
+            panic!(
+                "error sending VdfServiceMessage::GetVdfStateMessage: {:?}",
+                e
+            );
+        }
         let state = oneshot_rx
             .await
             .expect("to receive VdfStepsReadGuard from GetVdfStateMessage message");
