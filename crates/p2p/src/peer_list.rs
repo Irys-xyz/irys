@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use thiserror::Error;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 async fn send_message_and_print_error<T, A, R>(message: T, address: Addr<A>)
 where
@@ -257,7 +257,7 @@ impl PeerListServiceWithClient<IrysApiClient, RethServiceActor> {
         config: &Config,
         reth_service_addr: Addr<RethServiceActor>,
     ) -> Self {
-        tracing::info!("service started: peer_list");
+        info!("service started: peer_list");
         Self::new_with_custom_api_client(db, config, IrysApiClient::new(), reth_service_addr)
     }
 }
@@ -271,7 +271,7 @@ where
         config: &Config,
         reth_service_addr: Addr<R>,
     ) -> Self {
-        tracing::info!("service started: peer_list");
+        info!("service started: peer_list");
         Self::new_with_custom_api_client(db, config, IrysApiClient::new(), reth_service_addr)
     }
 }
@@ -1217,7 +1217,7 @@ pub struct RequestDataFromTheNetwork {
 
 impl<A, R> Handler<RequestDataFromTheNetwork> for PeerListServiceWithClient<A, R>
 where
-    A: ApiClient + 'static + Unpin + Default,
+    A: ApiClient,
     R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Context<R>>,
 {
     type Result = ResponseActFuture<Self, Result<(), PeerListServiceError>>;
@@ -1260,10 +1260,9 @@ where
                             .await
                         {
                             Ok(true) => {
-                                tracing::info!(
+                                info!(
                                     "Successfully requested {:?} from peer {}",
-                                    data_request,
-                                    address
+                                    data_request, address
                                 );
 
                                 return Ok(());
@@ -1275,7 +1274,7 @@ where
                             }
                             Err(err) => {
                                 last_error = Some(err);
-                                tracing::warn!(
+                                warn!(
                                     "Failed to fetch {:?} from peer {} (attempt {}/5): {}",
                                     data_request,
                                     address,

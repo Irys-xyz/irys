@@ -1,8 +1,8 @@
 use crate::block_pool_service::{BlockExists, BlockPoolService, GetBlockByHash, ProcessBlock};
 use crate::cache::GossipCacheKey;
-use crate::peer_list_service::PeerListFacade;
+use crate::peer_list::PeerListFacade;
 use crate::types::{GossipDataRequest, InternalGossipError, InvalidDataError};
-use crate::{GossipCache, GossipClient, GossipError, GossipResult};
+use crate::{cache::GossipCache, GossipClient, GossipError, GossipResult};
 use actix::{Actor, Addr, Context, Handler};
 use base58::ToBase58;
 use core::net::SocketAddr;
@@ -18,7 +18,7 @@ use tracing::{debug, error};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient, R>
+pub(crate) struct GossipServerDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient, R>
 where
     TMempoolFacade: MempoolFacade,
     TBlockDiscovery: BlockDiscoveryFacade,
@@ -169,7 +169,7 @@ where
         let source_miner_address = block_header_request.miner_address;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
-        tracing::debug!(
+        debug!(
             "Node {}: Gossip block received from peer {}: {:?}",
             self.gossip_client.mining_address,
             source_miner_address,
@@ -240,7 +240,7 @@ where
         }
 
         if !missing_tx_ids.is_empty() {
-            tracing::debug!("Missing transactions to fetch: {:?}", missing_tx_ids);
+            debug!("Missing transactions to fetch: {:?}", missing_tx_ids);
         }
 
         // Fetch missing transactions from the source peer
@@ -249,10 +249,9 @@ where
             .get_transactions(source_api_address, &missing_tx_ids)
             .await
             .map_err(|error| {
-                tracing::error!(
+                error!(
                     "Failed to fetch transactions from peer {}: {}",
-                    source_api_address,
-                    error
+                    source_api_address, error
                 );
                 GossipError::unknown(&error)
             })?;
@@ -304,7 +303,7 @@ where
         Ok(self.mempool.is_known_tx(tx_id).await?)
     }
 
-    pub async fn handle_get_data(
+    pub(crate) async fn handle_get_data(
         &self,
         source_address: SocketAddr,
         request: GossipRequest<GossipDataRequest>,
@@ -346,7 +345,7 @@ where
                         {
                             Ok(()) => {}
                             Err(error) => {
-                                tracing::error!("Failed to send block to peer: {}", error);
+                                error!("Failed to send block to peer: {}", error);
                             }
                         }
                         Ok(true)

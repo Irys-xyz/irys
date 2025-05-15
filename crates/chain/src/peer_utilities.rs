@@ -5,10 +5,10 @@ use irys_actors::{
     broadcast_mining_service::BroadcastMiningSeed,
     mempool_service::{MempoolService, TxIngressMessage},
 };
-use irys_gossip_service::peer_list_service::PeerListServiceFacade;
+use irys_p2p::PeerListServiceFacade;
 use irys_types::block::CombinedBlockHeader;
 
-use irys_gossip_service::service::fast_forward_vdf_steps_from_block;
+use irys_p2p::fast_forward_vdf_steps_from_block;
 pub use irys_reth_node_bridge::node::{
     RethNode, RethNodeAddOns, RethNodeExitHandle, RethNodeProvider,
 };

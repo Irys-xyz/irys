@@ -23,7 +23,7 @@ irys-actors.workspace = true
 irys-packing.workspace = true
 irys-vdf.workspace = true
 irys-price-oracle.workspace = true
-irys-gossip-service.workspace = true
+irys-p2p.workspace = true
 irys-api-client.workspace = true
 irys-reward-curve.workspace = true
 
