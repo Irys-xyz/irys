@@ -1,4 +1,3 @@
-use crate::arbiter_handle::{ArbiterHandle, CloneableJoinHandle};
 use crate::peer_utilities::{
     fetch_genesis_block, fetch_genesis_commitments, sync_state_from_peers,
 };
@@ -29,7 +28,7 @@ use irys_actors::{
 };
 use irys_actors::{
     ActorAddresses, CommitmentCache, CommitmentStateReadGuard, EpochReplayData,
-    GetCommitmentStateGuardMessage,
+    GetCommitmentStateGuardMessage, StorageModuleService,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
@@ -48,11 +47,11 @@ use irys_storage::{
     reth_provider::{IrysRethProvider, IrysRethProviderInner},
     ChunkProvider, ChunkType, StorageModule,
 };
-use irys_types::U256;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, CommitmentTransaction, Config,
     GossipData, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, H256,
 };
+use irys_types::{ArbiterHandle, CloneableJoinHandle, U256};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth::{
     builder::FullNode,
@@ -79,6 +78,7 @@ use tracing::{debug, error, info, warn};
 pub struct IrysNodeCtx {
     pub reth_handle: RethNodeProvider,
     pub actor_addresses: ActorAddresses,
+    pub arbiters: Arc<RwLock<Vec<ArbiterHandle>>>,
     pub db: DatabaseProvider,
     pub config: Config,
     pub reward_curve: Arc<HalvingCurve>,
@@ -799,7 +799,8 @@ impl IrysNode {
 
         // start the epoch service
         let (storage_module_infos, epoch_service_actor) =
-            Self::init_epoch_service(&config, &irys_db, &block_index_guard).await?;
+            Self::init_epoch_service(&config, &service_senders, &irys_db, &block_index_guard)
+                .await?;
 
         // Retrieve Partition assignment
         let partition_assignments_guard = epoch_service_actor
@@ -997,6 +998,7 @@ impl IrysNode {
                 reth: reth_service_actor,
                 vdf: vdf_service,
             },
+            arbiters: Arc::new(RwLock::new(Vec::new())),
             reward_curve,
             reth_handle: reth_node.clone(),
             db: irys_db.clone(),
@@ -1013,6 +1015,23 @@ impl IrysNode {
             peer_list: peer_list_service.clone(),
             sync_state: sync_state.clone(),
         };
+
+        // Spawn the StorageModuleService to manage the lifecycle of storage modules
+        // This service:
+        // - Monitors partition assignments from the network
+        // - Initializes storage modules when they receive partition assignments
+        // - Handles the dynamic addition/removal of storage modules
+        // - Coordinates with the epoch service for runtime updates
+        let _handle = StorageModuleService::spawn_service(
+            &task_exec,
+            receivers.storage_modules,
+            storage_modules,
+            &irys_node_ctx.actor_addresses,
+            irys_node_ctx.arbiters.clone(),
+            block_tree_guard.clone(),
+            vdf_steps_guard.clone(),
+            &config,
+        );
 
         let mut service_arbiters = Vec::new();
         service_arbiters.push(ArbiterHandle::new(
@@ -1423,6 +1442,7 @@ impl IrysNode {
 
     async fn init_epoch_service(
         config: &Config,
+        service_senders: &ServiceSenders,
         irys_db: &DatabaseProvider,
         block_index_guard: &BlockIndexReadGuard,
     ) -> eyre::Result<(
@@ -1432,17 +1452,13 @@ impl IrysNode {
         let (genesis_block, commitments, epoch_replay_data) =
             EpochReplayData::query_replay_data(irys_db, block_index_guard, &config)?;
 
-        let storage_submodule_config =
+        let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
-        let mut epoch_service = EpochServiceActor::new(&config);
-        let _storage_module_infos = epoch_service.initialize(
-            genesis_block,
-            commitments,
-            storage_submodule_config.clone(),
-        )?;
+        let mut epoch_service =
+            EpochServiceActor::new(service_senders, &storage_submodules_config, &config);
 
-        let storage_module_infos =
-            epoch_service.replay_epoch_data(epoch_replay_data, storage_submodule_config)?;
+        let _ = epoch_service.initialize(genesis_block, commitments)?;
+        let storage_module_infos = epoch_service.replay_epoch_data(epoch_replay_data)?;
         let epoch_service_actor = epoch_service.start();
         Ok((storage_module_infos, epoch_service_actor))
     }

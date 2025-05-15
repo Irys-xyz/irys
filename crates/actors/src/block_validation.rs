@@ -476,10 +476,12 @@ mod tests {
             EpochServiceActor, GetLedgersGuardMessage, GetPartitionAssignmentsGuardMessage,
             NewEpochMessage,
         },
+        services::ServiceSenders,
         BlockFinalizedMessage,
     };
     use actix::{prelude::*, SystemRegistry};
 
+    use irys_config::StorageSubmodulesConfig;
     use irys_database::{add_genesis_commitments, BlockIndex};
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::{
@@ -546,7 +548,11 @@ mod tests {
             BlockIndexService::new(block_index.clone(), &consensus_config).start();
         SystemRegistry::set(block_index_actor.clone());
 
-        let epoch_service = EpochServiceActor::new(&config);
+        let storage_submodules_config =
+            StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+        let service_senders = ServiceSenders::new().0;
+        let epoch_service =
+            EpochServiceActor::new(&service_senders, &storage_submodules_config, &config);
         let epoch_service_addr = epoch_service.start();
 
         // Tell the epoch service to initialize the ledgers
