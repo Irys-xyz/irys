@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    env::{self},
     fs,
     path::{Path, PathBuf},
 };
+use tracing::{debug, info};
 
 /// Subsystem allowing for the configuration of storage submodules via a handy TOML file
 ///
-/// Storage submodule path mappings are now governed by a `~/.irys_storage_modules.toml` file.
+/// Storage submodule path mappings are governed by a `.irys_storage_modules.toml` file.
 /// This file is automatically created if it does not exist when the node starts, and is
 /// populated with `submodule_paths` set to an empty array by default.
 ///
@@ -50,11 +50,7 @@ impl StorageSubmodulesConfig {
     }
 
     pub fn load(instance_dir: PathBuf) -> eyre::Result<Self> {
-        let home_dir = env::var("HOME").expect("Failed to get home directory");
-
-        let is_deployed = env::var("IRYS_ENV").is_ok();
         let config_path_local = Path::new(&instance_dir).join(FILENAME);
-        let config_path_home = Path::new(&home_dir).join(FILENAME);
 
         // Create base `storage_modules` directory if it doesn't exist
         let base_path = instance_dir.join("storage_modules");
@@ -66,50 +62,43 @@ impl StorageSubmodulesConfig {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_symlink()).unwrap_or(false))
             .for_each(|e| {
-                println!("{:?}", e.path());
+                debug!("removing symlink {:?}", e.path());
                 fs::remove_dir_all(e.path()).unwrap()
             });
 
-        // Try HOME directory config in deployed environments
-        if is_deployed {
-            if config_path_home.exists() {
-                // Remove the .irys directory config so there's no confusion
-                if config_path_local.exists() {
-                    fs::remove_file(config_path_local).expect("able to delete file");
-                }
-                tracing::info!("Loading config from {:?}", config_path_home);
-                let config = StorageSubmodulesConfig::from_toml(config_path_home).unwrap();
-
-                // Create symlinks for each submodule if user provides paths
-                let submodule_paths = &config.submodule_paths;
-                for idx in 0..submodule_paths.len() {
-                    let dest = submodule_paths.get(idx).unwrap();
-                    if let Some(filename) = dest.components().last() {
-                        let sm_path = base_path.join(filename.as_os_str());
-
-                        // Check if path exists and is a directory (not a symlink)
-                        if sm_path.exists() && sm_path.is_dir() && !sm_path.is_symlink() {
-                            fs::remove_dir_all(&sm_path).expect("to remove existing directory");
-                        }
-
-                        tracing::info!("Creating symlink from {:?} to {:?}", sm_path, dest);
-                        debug_assert!(dest.exists());
-
-                        #[cfg(unix)]
-                        std::os::unix::fs::symlink(&dest, &sm_path).expect("to create symlink");
-                        #[cfg(windows)]
-                        std::os::windows::fs::symlink_dir(&dest, &sm_path)
-                            .expect("to create symlink");
-                    }
-                }
-
-                return Ok(config);
-            }
-        }
-
-        // Try .irys directory config in dev/local environment
+        // Try to read the config
         if config_path_local.exists() {
-            return StorageSubmodulesConfig::from_toml(config_path_local);
+            let config = StorageSubmodulesConfig::from_toml(config_path_local)
+                .expect("To load the submodule config");
+            if config.is_using_hardcoded_paths {
+                return Ok(config); // don't create symlinks
+            };
+            // Create symlinks for each submodule
+            let submodule_paths = &config.submodule_paths;
+            for idx in 0..submodule_paths.len() {
+                let dest = submodule_paths.get(idx).unwrap();
+                if let Some(filename) = dest.components().last() {
+                    let sm_path = base_path.join(filename.as_os_str());
+
+                    // Check if path exists and is a directory (not a symlink)
+                    if sm_path.exists() && sm_path.is_dir() && !sm_path.is_symlink() {
+                        panic!(
+                            "Found unexpected folder {:?} in storage submodule path {:?} - please remove this folder, or set `is_using_hardcoded_paths` to `true`",
+                            &sm_path, &base_path
+                        )
+                    }
+
+                    info!("Creating symlink from {:?} to {:?}", sm_path, dest);
+                    debug_assert!(dest.exists());
+
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&dest, &sm_path).expect("to create symlink");
+                    #[cfg(windows)]
+                    std::os::windows::fs::symlink_dir(&dest, &sm_path).expect("to create symlink");
+                }
+            }
+
+            Ok(config)
         } else {
             // Create default config with hardcoded paths in dev if none exists
             tracing::info!("Creating default config at {:?}", config_path_local);
