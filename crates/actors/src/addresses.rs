@@ -1,6 +1,5 @@
 use actix::Addr;
 
-use crate::peer_list_service::PeerListServiceFacade;
 use crate::{
     block_discovery::BlockDiscoveryActor,
     block_index_service::BlockIndexService,
@@ -9,7 +8,7 @@ use crate::{
     mining::{MiningControl, PartitionMiningActor},
     packing::PackingActor,
     reth_service::RethServiceActor,
-    vdf_service::VdfService,
+    vdf_service::{StartMiningMessage, StopMiningMessage, VdfService},
     EpochServiceActor,
 };
 
@@ -24,7 +23,6 @@ pub struct ActorAddresses {
     pub mempool: Addr<MempoolService>,
     pub block_index: Addr<BlockIndexService>,
     pub epoch_service: Addr<EpochServiceActor>,
-    pub peer_list: PeerListServiceFacade,
     pub reth: Addr<RethServiceActor>,
     pub vdf: Addr<VdfService>,
 }
@@ -32,10 +30,14 @@ pub struct ActorAddresses {
 impl ActorAddresses {
     /// Send a message to all known partition actors to ignore any received VDF steps
     pub fn stop_mining(&self) -> eyre::Result<()> {
+        // pause VDF thread mining
+        self.vdf.do_send(StopMiningMessage);
         self.set_mining(false)
     }
     /// Send a message to all known partition actors to begin mining when they receive a VDF step
     pub fn start_mining(&self) -> eyre::Result<()> {
+        // start VDF thread mining
+        self.vdf.do_send(StartMiningMessage);
         self.set_mining(true)
     }
     /// Send a custom control message to all known partition actors

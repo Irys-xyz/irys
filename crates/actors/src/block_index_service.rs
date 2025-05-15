@@ -1,11 +1,10 @@
-use crate::{calculate_chunks_added, BlockFinalizedMessage};
+use crate::BlockFinalizedMessage;
 use actix::prelude::*;
 use base58::ToBase58;
-use irys_database::{
-    block_header_by_hash, BlockIndex, BlockIndexItem, DataLedger, LedgerIndexItem,
-};
+use irys_database::{block_header_by_hash, BlockIndex};
 use irys_types::{
-    ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader, H256, U256,
+    BlockIndexItem, ConsensusConfig, DatabaseProvider, IrysBlockHeader, IrysTransactionHeader,
+    H256, U256,
 };
 use reth_db::Database;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
@@ -163,50 +162,13 @@ impl BlockIndexService {
 
         let chunk_size = self.chunk_size;
 
-        // Extract just the transactions referenced in the submit ledger
-        let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
-        let submit_txs = &all_txs[..submit_tx_count];
-
-        // Extract just the transactions referenced in the publish ledger
-        let publish_txs = &all_txs[submit_tx_count..];
-
-        // TODO: abstract this in the future to work for an arbitrary number of ledgers
-        let sub_chunks_added = calculate_chunks_added(submit_txs, chunk_size);
-        let pub_chunks_added = calculate_chunks_added(publish_txs, chunk_size);
-
-        let binding = self.block_index.clone().unwrap();
-        let mut index = binding.write().unwrap();
-
-        // Get previous ledger sizes or default to 0 for genesis
-        let (max_publish_chunks, max_submit_chunks) =
-            if index.num_blocks() == 0 && block.height == 0 {
-                (0, sub_chunks_added)
-            } else {
-                let prev_block = index.get_item(block.height.saturating_sub(1)).unwrap();
-                (
-                    prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
-                    prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
-                )
-            };
-
-        let block_index_item = BlockIndexItem {
-            block_hash: block.block_hash,
-            num_ledgers: 2,
-            ledgers: vec![
-                LedgerIndexItem {
-                    max_chunk_offset: max_publish_chunks,
-                    tx_root: block.data_ledgers[DataLedger::Publish].tx_root,
-                },
-                LedgerIndexItem {
-                    max_chunk_offset: max_submit_chunks,
-                    tx_root: block.data_ledgers[DataLedger::Submit].tx_root,
-                },
-            ],
-        };
-
-        index
-            .push_item(&block_index_item)
-            .expect("to be able to push a new block to the block index");
+        self.block_index
+            .clone()
+            .unwrap()
+            .write()
+            .unwrap()
+            .push_block(block, all_txs, chunk_size)
+            .expect("expect to add the block to the index");
 
         // Block log tracking
         self.block_log.push(BlockLogEntry {

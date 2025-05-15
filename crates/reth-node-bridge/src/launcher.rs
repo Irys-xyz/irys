@@ -5,6 +5,7 @@ use alloy_primitives::utils::format_ether;
 use alloy_primitives::BlockNumber;
 use alloy_rpc_types::engine::ClientVersionV1;
 use futures::{future::Either, stream, stream_select, StreamExt};
+use irys_database::db::RethDbWrapper;
 use irys_storage::reth_provider::IrysRethProvider;
 use reth_beacon_consensus::hooks::{EngineHooks, StaticFileHook};
 use reth_blockchain_tree::BlockchainTreeConfig;
@@ -51,6 +52,8 @@ pub struct CustomNodeLauncher {
     pub irys_provider: IrysRethProvider,
 
     pub latest_irys_block_height: u64,
+
+    pub reth_db: RethDbWrapper,
 }
 
 impl CustomNodeLauncher {
@@ -60,11 +63,13 @@ impl CustomNodeLauncher {
         data_dir: ChainPath<DataDirPath>,
         irys_provider: IrysRethProvider,
         latest_block: u64,
+        reth_db: RethDbWrapper,
     ) -> Self {
         Self {
             ctx: LaunchContext::new(task_executor, data_dir),
             irys_provider,
             latest_irys_block_height: latest_block,
+            reth_db,
         }
     }
 }
@@ -94,6 +99,7 @@ where
             ctx,
             irys_provider,
             latest_irys_block_height,
+            reth_db,
         } = self;
         let NodeBuilderWithComponents {
             adapter: NodeTypesAdapter { database },
@@ -132,7 +138,7 @@ where
                 canon_state_notification_sender.clone(),
             ),
         );
-
+        let mut unwound = false;
         // setup the launch context
         let ctx = ctx
             .with_configured_globals()
@@ -235,11 +241,10 @@ where
                 {
                     Err(e) => {
                         error!("Error pruning: {}", &e);
+                        unwound = true // shouldn't error
                     }
                     Ok(true) => {
-                        warn!("\x1b[1;31mBlocks have been pruned, restarting...\x1b[0m");
-                        // we exit so that we make 100% sure no component is expecting the old state
-                        std::process::exit(0);
+                        unwound = true
                     }
                     Ok(false) => {
                       ()
@@ -247,6 +252,14 @@ where
                 };
             })
             .with_components(components_builder, on_component_initialized, Some(irys_ext.clone())).await?;
+
+        if unwound {
+            warn!("\x1b[1;31mBlocks have been pruned\x1b[0m");
+            // we exit so that we make 100% sure no component is expecting the old state
+            // std::process::exit(1);
+            reth_db.close(); // close the DB so we don't get errors
+            return Err(eyre::eyre!("Need to restart"));
+        }
 
         // spawn exexs
         let exex_manager_handle = ExExLauncher::new(

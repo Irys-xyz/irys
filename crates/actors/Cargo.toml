@@ -14,13 +14,10 @@ irys-config.workspace = true
 irys-vdf.workspace = true
 irys-price-oracle.workspace = true
 irys-efficient-sampling.workspace = true
-irys-api-client.workspace = true
 
 actix.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true
-
-thiserror = { workspace = true }
 
 tokio.workspace = true
 reth-db.workspace = true
@@ -37,7 +34,8 @@ base58.workspace = true
 futures.workspace = true
 rust_decimal.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
-reqwest = { version = "0.11", features = ["json"] }
+irys-reward-curve.workspace = true
+async-trait = "0.1.83"
 # serde.workspace = true
 
 [dev-dependencies]

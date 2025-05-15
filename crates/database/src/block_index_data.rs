@@ -1,14 +1,14 @@
 //! Manages a list of `{block_hash, weave_size, tx_root}`entries, indexed by
 //! block height.
-use crate::data_ledger::DataLedger;
 use actix::dev::MessageResponse;
 use base58::ToBase58;
 use eyre::Result;
-use irys_types::{NodeConfig, H256};
-use serde::{Deserialize, Serialize};
+use irys_types::{
+    BlockIndexItem, DataLedger, IrysBlockHeader, IrysTransactionHeader, LedgerIndexItem,
+    NodeConfig, H256,
+};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::ops::{Index, IndexMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -85,6 +85,63 @@ impl BlockIndex {
         Ok(())
     }
 
+    pub fn push_block(
+        &mut self,
+        block: &IrysBlockHeader,
+        all_txs: &Vec<IrysTransactionHeader>,
+        chunk_size: u64,
+    ) -> eyre::Result<()> {
+        /// Inner function: Calculates the total number of full chunks needed to store transactions
+        /// Each transaction's data is padded to the next full chunk boundary
+        fn calculate_chunks_added(txs: &[IrysTransactionHeader], chunk_size: u64) -> u64 {
+            let bytes_added = txs.iter().fold(0, |acc, tx| {
+                acc + tx.data_size.div_ceil(chunk_size) * chunk_size
+            });
+
+            bytes_added / chunk_size
+        }
+
+        // Extract just the transactions referenced in the submit ledger
+        let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
+        let submit_txs = &all_txs[..submit_tx_count];
+
+        // Extract just the transactions referenced in the publish ledger
+        let publish_txs = &all_txs[submit_tx_count..];
+
+        // Calculate chunk counts for both ledger types
+        let sub_chunks_added = calculate_chunks_added(submit_txs, chunk_size);
+        let pub_chunks_added = calculate_chunks_added(publish_txs, chunk_size);
+
+        // Get previous ledger sizes or default to 0 for genesis
+        let (max_publish_chunks, max_submit_chunks) = if self.num_blocks() == 0 && block.height == 0
+        {
+            (0, sub_chunks_added)
+        } else {
+            let prev_block = self.get_item(block.height.saturating_sub(1)).unwrap();
+            (
+                prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
+                prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
+            )
+        };
+
+        let block_index_item = BlockIndexItem {
+            block_hash: block.block_hash,
+            num_ledgers: 2,
+            ledgers: vec![
+                LedgerIndexItem {
+                    max_chunk_offset: max_publish_chunks,
+                    tx_root: block.data_ledgers[DataLedger::Publish].tx_root,
+                },
+                LedgerIndexItem {
+                    max_chunk_offset: max_submit_chunks,
+                    tx_root: block.data_ledgers[DataLedger::Submit].tx_root,
+                },
+            ],
+        };
+
+        self.push_item(&block_index_item)
+    }
+
     /// For a given byte offset in a ledger, what block was responsible for adding
     /// that byte to the data ledger?
     pub fn get_block_bounds(&self, ledger: DataLedger, chunk_offset: u64) -> BlockBounds {
@@ -154,106 +211,6 @@ pub struct BlockBounds {
     pub tx_root: H256,
 }
 
-/// A [`BlockIndexItem`] contains a vec of [`LedgerIndexItem`]s which store the size
-/// and and the `tx_root` of the ledger in that block.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct LedgerIndexItem {
-    /// Size in bytes of the ledger
-    pub max_chunk_offset: u64, // 8 bytes
-    /// The merkle root of the TX that apply to this ledger in the current block
-    pub tx_root: H256, // 32 bytes
-}
-
-impl LedgerIndexItem {
-    fn to_bytes(&self) -> [u8; 40] {
-        // Fixed size of 40 bytes
-        let mut bytes = [0u8; 40];
-        bytes[0..8].copy_from_slice(&self.max_chunk_offset.to_le_bytes()); // First 8 bytes
-        bytes[8..40].copy_from_slice(self.tx_root.as_bytes()); // Next 32 bytes
-        bytes
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let mut item = Self::default();
-
-        // Read ledger size (first 8 bytes)
-        let mut size_bytes = [0u8; 8];
-        size_bytes.copy_from_slice(&bytes[0..8]);
-        item.max_chunk_offset = u64::from_le_bytes(size_bytes);
-
-        // Read tx root (next 32 bytes)
-        item.tx_root = H256::from_slice(&bytes[8..40]);
-
-        item
-    }
-}
-
-impl Index<DataLedger> for Vec<LedgerIndexItem> {
-    type Output = LedgerIndexItem;
-
-    fn index(&self, ledger: DataLedger) -> &Self::Output {
-        &self[ledger as usize]
-    }
-}
-
-impl IndexMut<DataLedger> for Vec<LedgerIndexItem> {
-    fn index_mut(&mut self, ledger: DataLedger) -> &mut Self::Output {
-        &mut self[ledger as usize]
-    }
-}
-
-/// Core metadata of the [`BlockIndex`] this struct tracks the ledger size and
-/// tx root for each ledger per block. Enabling lookups to that find the `tx_root`
-/// for a ledger at a particular byte offset in the ledger.
-#[derive(Debug, Clone, Default, PartialEq, Eq, MessageResponse, Serialize, Deserialize)]
-pub struct BlockIndexItem {
-    /// The hash of the block
-    pub block_hash: H256, // 32 bytes
-    /// The number of ledgers this block tracks
-    pub num_ledgers: u8, // 1 byte
-    /// The metadata about each of the blocks ledgers
-    pub ledgers: Vec<LedgerIndexItem>, // Vec of 40 byte items
-}
-
-impl BlockIndexItem {
-    // Serialize the BlockIndexItem to bytes
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(33 + self.ledgers.len() * 40);
-
-        // Write fixed fields
-        bytes.extend_from_slice(self.block_hash.as_bytes()); // 32 bytes
-        bytes.push(self.num_ledgers); // 1 byte
-
-        // Write each ledger item
-        for ledger_index_item in &self.ledgers {
-            bytes.extend_from_slice(&ledger_index_item.to_bytes()); // 40 bytes each
-        }
-
-        bytes
-    }
-
-    // Deserialize bytes to BlockIndexItem
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let mut item = Self::default();
-
-        // Read fixed fields
-        item.block_hash = H256::from_slice(&bytes[0..32]);
-        item.num_ledgers = bytes[32];
-
-        // Read ledger items
-        let num_ledgers = item.num_ledgers as usize;
-        item.ledgers = Vec::with_capacity(num_ledgers);
-
-        for i in 0..num_ledgers {
-            let start = 33 + (i * 40);
-            let ledger_bytes = &bytes[start..start + 40];
-            item.ledgers.push(LedgerIndexItem::from_bytes(ledger_bytes));
-        }
-
-        item
-    }
-}
-
 fn append_item(item: &BlockIndexItem, file_path: &Path) -> eyre::Result<()> {
     match OpenOptions::new().append(true).open(&file_path) {
         Ok(mut file) => {
@@ -311,7 +268,7 @@ fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
 mod tests {
     use super::BlockIndex;
     use super::*;
-    use crate::{data_ledger::DataLedger, BlockBounds, BlockIndexItem, LedgerIndexItem};
+    use crate::BlockBounds;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::H256;
     use std::fs::{self, File};

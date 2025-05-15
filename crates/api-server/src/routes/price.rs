@@ -4,13 +4,12 @@ use actix_web::{
     HttpResponse, Result as ActixResult,
 };
 use irys_actors::ema_service::EmaServiceMessage;
-use irys_database::DataLedger;
 use irys_types::{
     storage_pricing::{
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    U256,
+    DataLedger, U256,
 };
 use serde::{Deserialize, Serialize};
 

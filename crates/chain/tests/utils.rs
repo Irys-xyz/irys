@@ -2,8 +2,8 @@ use actix::MailboxError;
 use futures::future::select;
 use irys_actors::block_producer::SolutionFoundMessage;
 use irys_actors::block_tree_service::get_canonical_chain;
-use irys_actors::block_validation;
 use irys_actors::mempool_service::{TxIngressError, TxIngressMessage};
+use irys_actors::{block_validation, SetTestBlocksRemainingMessage};
 use irys_api_server::create_listener;
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::tx_header_by_txid;
@@ -14,7 +14,7 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    block_production::Seed, block_production::SolutionContext, Address, H256List, H256,
+    block_production::Seed, block_production::SolutionContext, Address, DataLedger, H256List, H256,
 };
 use irys_types::{Config, IrysTransactionHeader, NodeConfig, NodeMode, TxChunkOffset};
 use irys_vdf::vdf_state::VdfStepsReadGuard;
@@ -35,7 +35,7 @@ use actix_web::{
     test,
 };
 use awc::{body::MessageBody, http::StatusCode};
-use irys_database::{tables::IrysBlockHeaders, DataLedger};
+use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
     Base64, DatabaseProvider, IrysBlockHeader, IrysTransaction, LedgerChunkOffset, PackedChunk,
     UnpackedChunk,
@@ -282,10 +282,18 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn mine_blocks(&self, num_blocks: usize) -> eyre::Result<()> {
+        self.node_ctx
+            .actor_addresses
+            .block_producer
+            .do_send(SetTestBlocksRemainingMessage(Some(num_blocks as u64)));
         let height = self.get_height().await;
         self.node_ctx.actor_addresses.set_mining(true)?;
         self.wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
+        self.node_ctx
+            .actor_addresses
+            .block_producer
+            .do_send(SetTestBlocksRemainingMessage(None));
         self.node_ctx.actor_addresses.set_mining(false)
     }
 
@@ -399,10 +407,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
-        let cfg = NodeConfig {
-            mode: NodeMode::PeerSync,
-            ..self.cfg
-        };
+        let cfg = NodeConfig { ..self.cfg };
         IrysNodeTest {
             node_ctx: (),
             cfg,

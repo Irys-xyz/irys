@@ -2,7 +2,11 @@ use crate::block_producer::BlockConfirmedMessage;
 use crate::block_tree_service::BlockTreeReadGuard;
 use crate::services::ServiceSenders;
 use crate::{CommitmentCacheMessage, CommitmentStateReadGuard, CommitmentStatus};
-use actix::{Actor, Context, Handler, Message, MessageResponse, Supervised, SystemService};
+use actix::{
+    Actor, Addr, Context, Handler, MailboxError, Message, MessageResponse, Supervised,
+    SystemService,
+};
+use async_trait::async_trait;
 use base58::ToBase58 as _;
 use core::fmt::Display;
 use eyre::eyre;
@@ -12,13 +16,13 @@ use irys_database::db_cache::DataRootLRUEntry;
 use irys_database::submodule::get_data_size_by_data_root;
 use irys_database::tables::DataRootLRU;
 use irys_database::tables::{CachedChunks, CachedChunksIndex, IngressProofs};
-use irys_database::{insert_tx_header, tx_header_by_txid, DataLedger, SystemLedger};
+use irys_database::{insert_tx_header, tx_header_by_txid, SystemLedger};
 use irys_primitives::CommitmentType;
-use irys_storage::StorageModuleVec;
+use irys_storage::StorageModulesReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, GossipData,
-    IrysTransactionHeader, H256,
+    app_state::DatabaseProvider, chunk::UnpackedChunk, hash_sha256, validate_path, DataLedger,
+    GossipData, IrysTransactionHeader, H256,
 };
 use irys_types::{
     Address, CommitmentTransaction, Config, DataRoot, IrysBlockHeader, IrysTransactionCommon,
@@ -33,6 +37,76 @@ use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use tracing::{debug, error, info, warn};
+
+#[async_trait::async_trait]
+pub trait MempoolFacade: Clone + Send + Sync + 'static {
+    async fn handle_data_transaction(
+        &self,
+        tx_header: IrysTransactionHeader,
+    ) -> Result<(), TxIngressError>;
+    async fn handle_commitment_transaction(
+        &self,
+        tx_header: CommitmentTransaction,
+    ) -> Result<(), TxIngressError>;
+    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
+    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError>;
+}
+
+#[derive(Clone, Debug)]
+pub struct MempoolServiceFacadeImpl {
+    service: Addr<MempoolService>,
+}
+
+impl From<Addr<MempoolService>> for MempoolServiceFacadeImpl {
+    fn from(value: Addr<MempoolService>) -> Self {
+        Self { service: value }
+    }
+}
+
+impl From<MailboxError> for TxIngressError {
+    fn from(value: MailboxError) -> Self {
+        TxIngressError::Other(format!(
+            "Failed to send a message to MempoolService: {:?}",
+            value
+        ))
+    }
+}
+
+impl From<MailboxError> for ChunkIngressError {
+    fn from(value: MailboxError) -> Self {
+        ChunkIngressError::Other(format!(
+            "Failed to send a message to MempoolService: {:?}",
+            value
+        ))
+    }
+}
+
+#[async_trait]
+impl MempoolFacade for MempoolServiceFacadeImpl {
+    async fn handle_data_transaction(
+        &self,
+        tx_header: IrysTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        self.service.send(TxIngressMessage(tx_header)).await?
+    }
+
+    async fn handle_commitment_transaction(
+        &self,
+        tx_header: CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        self.service
+            .send(CommitmentTxIngressMessage(tx_header))
+            .await?
+    }
+
+    async fn handle_chunk(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
+        self.service.send(ChunkIngressMessage(chunk)).await?
+    }
+
+    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, TxIngressError> {
+        self.service.send(TxExistenceQuery(tx_id)).await?
+    }
+}
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]
@@ -50,7 +124,7 @@ pub struct MempoolService {
     /// Tracks recent valid txids from either storage or commitment
     recent_valid_tx: HashSet<H256>,
     config: Config,
-    storage_modules: StorageModuleVec,
+    storage_modules_guard: StorageModulesReadGuard,
     block_tree_read_guard: BlockTreeReadGuard,
     commitment_state_guard: CommitmentStateReadGuard,
     /// Reference to all the services we can send messages to
@@ -80,8 +154,8 @@ impl MempoolService {
         irys_db: DatabaseProvider,
         reth_db: RethDbWrapper,
         task_exec: TaskExecutor,
-        storage_modules: StorageModuleVec,
-        block_tree_read_guard: BlockTreeReadGuard,
+        storage_modules_guard: StorageModulesReadGuard,
+        block_tree_guard: BlockTreeReadGuard,
         commitment_state_guard: CommitmentStateReadGuard,
         config: &Config,
         service_senders: ServiceSenders,
@@ -96,8 +170,8 @@ impl MempoolService {
             invalid_tx: Vec::new(),
             task_exec,
             config: config.clone(),
-            storage_modules,
-            block_tree_read_guard,
+            storage_modules_guard,
+            block_tree_read_guard: block_tree_guard,
             commitment_state_guard,
             service_senders,
             gossip_tx,
@@ -557,8 +631,8 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             .tx()
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
-        let candidate_sms = self
-            .storage_modules
+        let binding = self.storage_modules_guard.read();
+        let candidate_sms = binding
             .iter()
             .filter_map(|sm| {
                 sm.get_writeable_offsets(&chunk)
@@ -655,7 +729,7 @@ impl Handler<ChunkIngressMessage> for MempoolService {
             .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
-        for sm in &self.storage_modules {
+        for sm in self.storage_modules_guard.read().iter() {
             if !sm
                 .get_writeable_offsets(&chunk)
                 .unwrap_or_default()

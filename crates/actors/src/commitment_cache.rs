@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use futures::future::Either;
 use irys_primitives::CommitmentType;
-use irys_types::{Address, CommitmentTransaction, Config, H256List, H256};
+use irys_types::{Address, CommitmentTransaction, H256List, H256};
 use reth::tasks::{shutdown::GracefulShutdown, TaskExecutor};
 use std::pin::pin;
 use tokio::{
@@ -322,7 +322,6 @@ impl CommitmentCache {
         exec: &TaskExecutor,
         rx: UnboundedReceiver<CommitmentCacheMessage>,
         commitment_state_guard: CommitmentStateReadGuard,
-        _config: &Config,
     ) -> JoinHandle<()> {
         exec.spawn_critical_with_graceful_shutdown_signal(
             "CommitmentCache Service",

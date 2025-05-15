@@ -7,13 +7,14 @@ use crate::{
     CommitmentCacheInner, CommitmentCacheMessage, CommitmentStatus, GetCommitmentStateGuardMessage,
 };
 use actix::prelude::*;
+use async_trait::async_trait;
 use base58::ToBase58;
-use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, DataLedger, SystemLedger,
-};
+use eyre::eyre;
+use irys_database::{block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid, SystemLedger};
+use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    CommitmentTransaction, Config, DatabaseProvider, GossipData, H256List, IrysBlockHeader,
-    IrysTransactionHeader,
+    CommitmentTransaction, Config, DataLedger, DatabaseProvider, GossipData, H256List,
+    IrysBlockHeader, IrysTransactionHeader,
 };
 use irys_vdf::vdf_state::VdfStepsReadGuard;
 use reth_db::Database;
@@ -31,6 +32,8 @@ pub struct BlockDiscoveryActor {
     pub partition_assignments_guard: PartitionAssignmentsReadGuard,
     /// Reference to the global config
     pub config: Config,
+    /// The block reward curve
+    pub reward_curve: Arc<HalvingCurve>,
     /// Database provider for accessing transaction headers and related data.
     pub db: DatabaseProvider,
     /// Store last VDF Steps
@@ -39,6 +42,32 @@ pub struct BlockDiscoveryActor {
     pub service_senders: ServiceSenders,
     /// Gossip message bus
     pub gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
+}
+
+#[async_trait::async_trait]
+pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
+    async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()>;
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockDiscoveryFacadeImpl {
+    addr: Addr<BlockDiscoveryActor>,
+}
+
+impl BlockDiscoveryFacadeImpl {
+    pub fn new(addr: Addr<BlockDiscoveryActor>) -> Self {
+        Self { addr }
+    }
+}
+
+#[async_trait]
+impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
+    async fn handle_block(&self, block: IrysBlockHeader) -> eyre::Result<()> {
+        self.addr
+            .send(BlockDiscoveredMessage(Arc::new(block)))
+            .await
+            .map_err(|mailbox_error: MailboxError| eyre!("MailboxError: {:?}", mailbox_error))?
+    }
 }
 
 /// When a block is discovered, either produced locally or received from
@@ -57,31 +86,6 @@ pub struct BlockPreValidatedMessage(
 
 impl Actor for BlockDiscoveryActor {
     type Context = Context<Self>;
-}
-
-impl BlockDiscoveryActor {
-    /// Initializes a new `BlockDiscoveryActor`
-    pub const fn new(
-        block_index_guard: BlockIndexReadGuard,
-        partition_assignments_guard: PartitionAssignmentsReadGuard,
-        config: Config,
-        db: DatabaseProvider,
-        vdf_steps_guard: VdfStepsReadGuard,
-        service_senders: ServiceSenders,
-        epoch_service: Addr<EpochServiceActor>,
-        gossip_sender: tokio::sync::mpsc::Sender<GossipData>,
-    ) -> Self {
-        Self {
-            block_index_guard,
-            partition_assignments_guard,
-            db,
-            vdf_steps_guard,
-            service_senders,
-            gossip_sender,
-            config,
-            epoch_service,
-        }
-    }
 }
 
 impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
@@ -245,6 +249,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
         );
 
         let gossip_sender = self.gossip_sender.clone();
+        let reward_curve = Arc::clone(&self.reward_curve);
         Box::pin(async move {
             info!("Pre-validating block");
             let validation_future = tokio::task::spawn_blocking(move || {
@@ -253,6 +258,7 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                     previous_block_header,
                     partitions_guard,
                     config,
+                    reward_curve,
                     vdf_steps_guard,
                     ema_service_sender,
                 )
@@ -290,19 +296,11 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                         }
                     }
 
-                    info!("Block is valid, sending to block tree");
-
                     db.update_eyre(|tx| irys_database::insert_block_header(tx, &new_block_header))
                         .unwrap();
 
                     let mut all_txs = submit_txs;
                     all_txs.extend_from_slice(&publish_txs);
-                    block_tree_addr
-                        .send(BlockPreValidatedMessage(
-                            new_block_header.clone(),
-                            Arc::new(all_txs),
-                        ))
-                        .await??;
 
                     // Check if we've reached the end of an epoch and should finalize commitments
                     let block_height = new_block_header.height;
@@ -362,6 +360,16 @@ impl Handler<BlockDiscoveredMessage> for BlockDiscoveryActor {
                             .await
                             .expect("to receive a response from ClearCache message");
                     }
+
+                    // WARNING: All block pre-validation needs to be completed before
+                    // sending this message.
+                    info!("Block is valid, sending to block tree");
+                    block_tree_addr
+                        .send(BlockPreValidatedMessage(
+                            new_block_header.clone(),
+                            Arc::new(all_txs),
+                        ))
+                        .await??;
 
                     // Send the block to the gossip bus
                     tracing::trace!(
