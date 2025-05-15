@@ -510,7 +510,7 @@ pub mod test_helpers {
     use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
     //FIXME: this is duplicated from ema service and should be somewhere central that does not duplicate code!
-    pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
+    fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
         let mut block_hash = H256::random();
         let mut iter = blocks.iter_mut();
         let genesis_block = &mut (iter.next().unwrap()).0;
