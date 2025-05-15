@@ -7,19 +7,20 @@ use tracing::{debug, info};
 
 /// Subsystem allowing for the configuration of storage submodules via a handy TOML file
 ///
-/// Storage submodule path mappings are governed by a `.irys_storage_modules.toml` file.
+/// Storage submodule path mappings are governed by a [`SUBMODULES_CONFIG_FILE_NAME`] file,
+/// within the instance/base directory (typically `./.irys`).
+///
 /// This file is automatically created if it does not exist when the node starts, and is
-/// populated with `submodule_paths` set to an empty array by default.
+/// populated with `submodule_paths` set to a default configuration of 3 storage modules
+/// (This should be the same as the minimum required configuration to initiate a network genesis)
 ///
-/// If `submodule_paths` is empty, everything works the way it normally would with submodules
-/// stored inline within the `.irys` `storage_modules` directory.
-///
-/// If `submodule_paths` has items, they are expected to be paths to directories that can be
-/// mounted as submodules. If these are specified, the number of paths in `submodule_paths`
-/// must exactly match the number of expected submodules based on the current storage config,
-/// or an error will be thrown and the process will abort. During storage initialization,
-/// symlinks will be created within the `storage_modules` directory mapping the regular storage
-/// location for each submodule to the `submodule_paths` in the order they are specified.
+/// The `submodule_paths` items are expected to be paths to directories that can be
+/// mounted as submodules. The number of paths in `submodule_paths` must exactly
+/// match the number of expected submodules based on the current storage config,
+/// or an error will be thrown and the process will abort.
+/// During storage initialization - if `is_using_hardcoded_paths` is false -
+/// symlinks will be created within the `storage_modules` directory,
+/// linking the folder to each path in the config sequentially.
 ///
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct StorageSubmodulesConfig {
@@ -28,7 +29,7 @@ pub struct StorageSubmodulesConfig {
     pub submodule_paths: Vec<PathBuf>,
 }
 
-const FILENAME: &str = ".irys_submodules.toml";
+const SUBMODULES_CONFIG_FILE_NAME: &str = ".irys_submodules.toml";
 
 impl StorageSubmodulesConfig {
     /// Loads the [`StorageSubmodulesConfig`] from a TOML file at the given path
@@ -50,7 +51,7 @@ impl StorageSubmodulesConfig {
     }
 
     pub fn load(instance_dir: PathBuf) -> eyre::Result<Self> {
-        let config_path_local = Path::new(&instance_dir).join(FILENAME);
+        let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
 
         // Create base `storage_modules` directory if it doesn't exist
         let base_path = instance_dir.join("storage_modules");
